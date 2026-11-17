@@ -225,3 +225,70 @@ duplicate-key JSON or foreign fixture/version claims also remain UNREADABLE.
 An attacker who rewrites every pin and matching claim can still pass this
 offline comparison. Origin authentication and the admitted live grade remain
 separate controls.
+
+## Stdin-only audited replay CLI
+
+Invoke `python -P -B tools/xbench/benches/x05_bundle.py --replay` from the
+checkout, passing the replay envelope as UTF-8 bytes on stdin. Omitting
+`--replay` selects the same mode. No positional input paths are accepted. The
+trusted peer comparator is loaded relative to the script, so invocation also
+works from another directory without setting an import path or reading an
+operator environment.
+
+Successful delivery emits exactly one newline-terminated ASCII JSON result.
+Exits are `0` offline semantic PASS, `1` semantic FAIL, `4` UNREADABLE, `2`
+usage error, and `5` output write/flush failure. Delivery failure overrides every
+semantic exit; a partially written result is not restarted or reported through
+another traceback. `--help` returns text with exit 0. Help and usage errors
+consume no stdin and invoke no replay. The CLI's wire limit is 16.25 MiB; it
+reads at most 8192 bytes per call, joins short reads before strict UTF-8 decoding,
+and rejects over-limit data before replay. Read failures and invalid UTF-8 emit
+sanitized `CLI_INPUT_UNREADABLE`, while overflow uses `CLI_INPUT_TOO_LARGE`.
+
+Fixture identifiers keep the existing ASCII policy. Synthetic Unicode IDs
+therefore produce named UNREADABLE results, byte-identically under the tested
+hash seeds, UTF-8 modes and stdout encodings. No credentials or operator
+environment are copied into those test subprocess profiles. This does not
+authenticate origin or grant live-pass admission.
+
+This executable example reuses the same pytest-backed synthetic builders as
+the preceding recipe, without running a test suite. Save it outside git and
+execute with `python -P -B`. Every evidence byte goes through stdin; only the
+trusted program path is passed as a command argument.
+
+```python
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import cli_payload
+
+command = [sys.executable, '-P', '-B',
+    str(repo / 'tools/xbench/benches/x05_bundle.py'), '--replay']
+observed = {}
+for kind, expected_exit in [('PASS', 0), ('FAIL', 1), ('UNREADABLE', 4), ('malformed', 4)]:
+    raw = cli_payload(kind)
+    completed = subprocess.run(command, input=raw, capture_output=True, timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1 and all(b < 128 for b in completed.stdout)
+    expected = bundle.replay_bundle_json(raw.decode('utf-8'))
+    assert completed.stdout == (bundle.reconciliation.serialize_result(expected) + '\n').encode('ascii')
+    result = json.loads(completed.stdout)
+    assert result['origin_authenticated'] is False
+    if kind == 'UNREADABLE':
+        assert result['integrity']['diagnostic_counts'] == {
+            'PAYLOAD_LENGTH_MISMATCH': 1, 'PAYLOAD_SHA256_MISMATCH': 1}
+    if kind == 'malformed':
+        assert result['integrity']['diagnostic_counts'] == {'JSON_INVALID': 1}
+    observed[kind] = dict(exit=completed.returncode, semantic=result['semantic']['verdict'])
+print(json.dumps(dict(cases=observed, origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. Each subprocess has a 15-second deadline; the standard
+runner terminates and waits for an expired child. No child, browser, service,
+extraction or product mutation is retained. The live grader and its source-bound
+admission remain separate from these offline CLI verdicts.

@@ -512,3 +512,188 @@ def test_replay_json_is_strict_and_never_reaches_semantics(text, code, monkeypat
     result = bundle.replay_bundle_json(text)
     assert codes(result['integrity']) == {code: 1}
     assert result['semantic']['verdict'] == 'UNREADABLE' and not result['origin_authenticated']
+
+
+def cli_payload(kind='PASS', *, unicode_fixture=False):
+    source = reconciliation_bundle(failed=('alpha',) if kind == 'FAIL' else ())
+    if kind == 'UNREADABLE': source['payloads']['alpha/seven.json'] += b' '
+    envelope = replay_envelope(source)
+    if unicode_fixture:
+        # The bundle's explicit ASCII identifier policy is preserved. Unicode
+        # IDs must be rejected identically under every interpreter encoding.
+        envelope['inventory']['expected_fixture_ids'] = ['\u00e5\u2600']
+        envelope['inventory']['members'][0]['fixture'] = '\u00e5\u2600'
+        envelope['expected_fixture_versions'] = {'\u00e5\u2600': 'design-alpha'}
+        envelope['references'][0]['fixture'] = '\u00e5\u2600'
+    return json.dumps(envelope, ensure_ascii=False).encode('utf-8') if kind != 'malformed' else b'{'
+
+
+def cli_command(*args):
+    import sys
+    return [sys.executable, '-P', '-B', str(__import__('pathlib').Path(bundle.__file__).resolve()), *args]
+
+
+@pytest.mark.parametrize('kind,exit_code', [('PASS', 0), ('FAIL', 1), ('UNREADABLE', 4), ('malformed', 4)])
+@pytest.mark.parametrize('args', [[], ['--replay']])
+def test_stdin_cli_subprocess_verdicts_are_single_ascii_json(tmp_path, kind, exit_code, args):
+    import subprocess
+    raw = cli_payload(kind)
+    expected = bundle.reconciliation.serialize_result(bundle.replay_bundle_json(raw.decode('utf-8'))).encode('ascii') + b'\n'
+    result = subprocess.run(cli_command(*args), input=raw, capture_output=True, cwd=tmp_path, timeout=15)
+    assert result.returncode == exit_code and result.stderr == b''
+    assert result.stdout == expected and len(result.stdout.splitlines()) == 1
+    assert not json.loads(result.stdout)['origin_authenticated']
+
+
+class ShortInput:
+    def __init__(self, data, width=7, failure=None):
+        self.data, self.width, self.failure, self.pos, self.requests = data, width, failure, 0, []
+    def read(self, count):
+        self.requests.append(count)
+        if self.pos == len(self.data) and self.failure is not None:
+            raise self.failure('synthetic private read failure')
+        result = self.data[self.pos:self.pos + min(count, self.width)]
+        self.pos += len(result)
+        return result
+
+
+def in_process_cli(monkeypatch, reader, stdout=None):
+    import io
+    import sys
+    from types import SimpleNamespace
+    output = io.BytesIO()
+    errors = io.StringIO()
+    monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=reader))
+    monkeypatch.setattr(sys, 'stdout', stdout if stdout is not None else SimpleNamespace(buffer=output))
+    monkeypatch.setattr(sys, 'stderr', errors)
+    code = bundle.main(['--replay'])
+    return code, output.getvalue(), errors.getvalue()
+
+
+@pytest.mark.parametrize('width', [1, 2, 7, 8192])
+@pytest.mark.parametrize('unicode_fixture', [False, True])
+def test_cli_short_reads_preserve_utf8_and_json_boundaries(monkeypatch, width, unicode_fixture):
+    raw = cli_payload(unicode_fixture=unicode_fixture)
+    reader = ShortInput(raw, width)
+    original, calls = bundle.replay_bundle_json, []
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    expected = bundle.reconciliation.serialize_result(original(raw.decode('utf-8'))).encode('ascii') + b'\n'
+    code, output, errors = in_process_cli(monkeypatch, reader)
+    assert code == (4 if unicode_fixture else 0) and output == expected and not errors
+    assert calls == [raw.decode('utf-8')] and reader.pos == len(raw)
+    assert all(0 < count <= 8192 for count in reader.requests)
+
+
+@pytest.mark.parametrize('failure', [OSError, ValueError])
+@pytest.mark.parametrize('prefix', [False, True])
+def test_cli_read_failures_never_replay_a_valid_prefix(monkeypatch, failure, prefix):
+    reader = ShortInput(cli_payload() if prefix else b'', failure=failure)
+    def forbidden(*args): raise AssertionError('read failure reached replay')
+    monkeypatch.setattr(bundle, 'replay_bundle_json', forbidden)
+    code, output, errors = in_process_cli(monkeypatch, reader)
+    assert code == 4 and not errors
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+    assert b'synthetic private' not in output and len(output.splitlines()) == 1
+
+
+def test_cli_enforces_exact_wire_limit_before_replay(monkeypatch):
+    raw = cli_payload()
+    monkeypatch.setattr(bundle, 'MAX_STDIN_BYTES', len(raw))
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and json.loads(output)['semantic']['verdict'] == 'PASS' and not errors
+    def forbidden(*args): raise AssertionError('over-limit bytes reached replay')
+    monkeypatch.setattr(bundle, 'replay_bundle_json', forbidden)
+    reader = ShortInput(raw + b' ')
+    code, output, errors = in_process_cli(monkeypatch, reader)
+    assert code == 4 and not errors and reader.pos == len(raw) + 1
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_TOO_LARGE': 1}
+
+
+@pytest.mark.parametrize('raw', [b'\xff', b'\xf0\x9f\x99', b'{"x":"\xff"}'])
+def test_cli_invalid_utf8_is_sanitized(monkeypatch, raw):
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw, 1))
+    assert code == 4 and not errors and codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+
+
+@pytest.mark.parametrize('kind', ['PASS', 'FAIL', 'UNREADABLE'])
+@pytest.mark.parametrize('stage', ['write', 'flush'])
+def test_cli_delivery_failure_overrides_every_semantic_exit(monkeypatch, kind, stage):
+    class FailedOutput:
+        def write(self, data):
+            if stage == 'write': raise OSError('synthetic private output failure')
+            return len(data)
+        def flush(self):
+            raise ValueError('synthetic private flush failure')
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(cli_payload(kind)), FailedOutput())
+    assert code == 5 and not output and not errors
+
+
+@pytest.mark.parametrize('binary', [False, True])
+def test_cli_positive_short_writes_deliver_one_complete_result(monkeypatch, binary):
+    from types import SimpleNamespace
+    class Partial:
+        def __init__(self): self.parts, self.flushes = [], 0
+        def write(self, value): self.parts.append(value[:7]); return len(value[:7])
+        def flush(self): self.flushes += 1
+    sink = Partial()
+    code, _, errors = in_process_cli(monkeypatch, ShortInput(cli_payload()), SimpleNamespace(buffer=sink) if binary else sink)
+    output = (b''.join(sink.parts) if binary else ''.join(sink.parts).encode('ascii'))
+    assert code == 0 and not errors and sink.flushes == 1
+    assert len(output.splitlines()) == 1 and json.loads(output)['semantic']['verdict'] == 'PASS'
+
+
+def test_real_closed_stdout_pipe_returns_five_without_traceback(tmp_path):
+    import subprocess
+    process = subprocess.Popen(cli_command('--replay'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_path)
+    try:
+        process.stdout.close(); process.stdout = None
+        _, errors = process.communicate(input=cli_payload(), timeout=15)
+        assert process.returncode == 5 and errors == b''
+    finally:
+        if process.poll() is None:
+            process.kill(); process.communicate(timeout=5)
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is not None: pipe.close()
+
+
+@pytest.mark.parametrize('args,expected', [(['--help'], 0), (['--unknown'], 2), (['payload.json'], 2),
+    (['--replay', 'payload.json'], 2), (['--replay=path.json'], 2)])
+def test_cli_usage_never_reads_stdin_or_replays(monkeypatch, args, expected):
+    import io
+    import sys
+    class ForbiddenInput:
+        @property
+        def buffer(self): raise AssertionError('usage consumed stdin')
+    output, errors = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(sys, 'stdin', ForbiddenInput())
+    monkeypatch.setattr(sys, 'stdout', output); monkeypatch.setattr(sys, 'stderr', errors)
+    def forbidden(*args): raise AssertionError('usage reached replay')
+    monkeypatch.setattr(bundle, 'replay_bundle_json', forbidden)
+    with pytest.raises(SystemExit) as stopped: bundle.main(args)
+    assert stopped.value.code == expected
+    if expected == 0:
+        assert '0 PASS; 1 FAIL; 2 usage; 4 UNREADABLE; 5 output failure.' in output.getvalue()
+        assert errors.getvalue() == ''
+    else:
+        assert output.getvalue() == '' and 'usage:' in errors.getvalue()
+
+
+@pytest.mark.parametrize('unicode_fixture,expected_exit', [(False, 0), (True, 4)])
+def test_cli_is_byte_identical_across_explicit_encoding_and_hash_profiles(tmp_path, unicode_fixture, expected_exit):
+    import os
+    import subprocess
+    outputs = []
+    for seed in ('0', '19'):
+        for utf8 in ('0', '1'):
+            for encoding in ('ascii:strict', 'utf-8'):
+                # Do not read or copy the operator environment or credentials.
+                env = dict(PYTHONHASHSEED=seed, PYTHONUTF8=utf8, PYTHONIOENCODING=encoding)
+                if os.name == 'nt': env['SystemRoot'] = 'C:\\Windows'
+                result = subprocess.run(cli_command('--replay'), input=cli_payload(unicode_fixture=unicode_fixture),
+                                        capture_output=True, cwd=tmp_path, env=env, timeout=15)
+                assert result.returncode == expected_exit and result.stderr == b''
+                assert all(value < 128 for value in result.stdout)
+                assert not json.loads(result.stdout)['origin_authenticated']
+                outputs.append(result.stdout)
+    assert len(set(outputs)) == 1
