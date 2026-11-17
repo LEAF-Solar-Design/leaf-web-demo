@@ -7,6 +7,7 @@ import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 import DrawingRoleProposal from './DrawingRoleProposal.jsx'
+import ProjectReconciliationPanel from './ProjectReconciliationPanel.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
@@ -410,6 +411,8 @@ export default function ProjectSolarWorkspace(props) {
     {(!owner.reason || owner.reason === 'catalog_unavailable') && <DrawingRoleProposal
       projectClient={owner.projectClient} solarBinding={owner.binding}
       authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
+    {!owner.reason && <ProjectReconciliationPanel projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} busy={busy} />}
     {writeAccessDenied && <p role="status">{projectSolarWorkspaceReason('write_access_required')}</p>}
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}

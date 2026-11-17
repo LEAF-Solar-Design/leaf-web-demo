@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { TOUR_STEPS } from './tourScript.js'
+import { summarizeTourResult } from './tourResult.js'
 import './demo.css'
 
 // M5 — the ?demo=tour coach-mark overlay.
@@ -143,6 +144,10 @@ export default function DemoTour({
   onExit,
   landed = false,
   busy = false,
+  // The job controller's latest result envelope. The card reads the numbers
+  // the engine computed for THIS beat out of it (summarizeTourResult refuses
+  // an envelope from another tool), so the audience sees the answer itself.
+  result = null,
   bannerTitle = 'Guided demo: sample rooftop',
   bannerSubtitle = 'Real drawing, real tools. Every number below is computed live.',
 }) {
@@ -253,6 +258,9 @@ export default function DemoTour({
 
   const needsEffect = !!(step && (step.prompt || step.action === 'author' || step.action === 'version'))
   const canAdvance = !busy && (!needsEffect || landed)
+  const readout = landed && !busy ? summarizeTourResult(step, result) : null
+  // A stable key, so the card re-measures when the readout changes and not on every render.
+  const readoutKey = readout ? readout.map((row) => `${row.label}=${row.value}`).join('|') : ''
   const isLast = index >= steps.length - 1
   const titleRef = useRef(null)
 
@@ -286,7 +294,7 @@ export default function DemoTour({
     if (!el) return
     const h = Math.round(Math.max(el.scrollHeight, el.getBoundingClientRect().height))
     if (h) setCardH((prev) => (prev === h ? prev : h))
-  }, [step, landed, typed, needsEffect, narrow, coachOpen])
+  }, [step, landed, typed, needsEffect, narrow, coachOpen, readoutKey])
 
   // NOTE: the tour deliberately does NOT own Escape. A capture-phase Esc listener
   // here terminated the whole walkthrough when the user only meant to dismiss the
@@ -408,6 +416,20 @@ export default function DemoTour({
             ? 'Staging the tool. Next unlocks when the staged card or an error appears.'
             : 'Running it for real. Next unlocks when the result lands.') : ''}
         </div>
+
+        {readout && (!narrow || coachOpen) && (
+          <div className="tour-card-result" role="group" aria-label="Result computed live">
+            <div className="tour-card-result-head">Computed live on this drawing</div>
+            <dl>
+              {readout.map((row) => (
+                <div key={row.label} className="tour-card-result-row">
+                  <dt>{row.label}</dt>
+                  <dd>{row.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
 
         <div className="tour-dots" aria-hidden="true">
           {steps.map((s, i) => <span key={s.id} className={`tour-dot${i <= index ? ' on' : ''}`} />)}
