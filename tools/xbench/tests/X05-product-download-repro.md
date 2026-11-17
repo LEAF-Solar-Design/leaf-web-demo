@@ -988,3 +988,31 @@ and authority. The shared file API and saved-design reads are mocked. The
 Stop on stale drafts, a false saved cue, an incorrect CAS baseline or a row
 mismatch. Browser, context, server and thread close in `finally`. The retained
 replay and `REPLAY.md` are offline proof, without database or staging acceptance.
+
+## Late-subscriber replay
+
+Parent: X05 shared-client report isolation. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-late-subscriber-rvof4393/replay.py`.
+Use the local React/esbuild and Python Playwright setup above. The two actual
+panels share one actual persistence client and a synthetic file API. Saved-design
+reads are mocked. The 1920 by 2200 forced-colors viewport fits both full panels.
+
+1. Mount only A and Read saved design. Enter `001,0,01,1,0.4`, Save, and hold
+   the response after the file commits revision 1. Edit A's Panels to `009`.
+2. Mount B on the same client. Require blank inputs, a Read prompt and disabled
+   Save. Mounting must issue no report GET. Read saved design explicitly in B.
+   Require loaded values `001,0,01,1,0.4` from revision 1.
+3. Deliver A's held receipt. Require its submitted-values-saved cue with newer
+   edits unsaved. A keeps `009`; B keeps `001` without inheriting A's dirty state.
+4. Download both actual CSVs and compare every cell with each panel's five DOM
+   rows. Capture `late-subscriber-independent.png`.
+5. Change B's Panels to `003` and Save. Require expected revision 1 and stored
+   revision 2. A stays `009`. Export B again and compare all five rows. Three
+   exports equal 15 rows, including the ten rows from the paired download.
+6. Unmount both panels and require zero subscriptions. Browser, context, server
+   and thread close in `finally`. `proof.json` records source hashes, traffic,
+   observer counts and cleanup; the executable replay and `REPLAY.md` are retained.
+
+Stop on an implicit GET, inherited draft, wrong CAS revision, row mismatch or
+uncaught error. This is offline browser evidence, without staging or PostgreSQL
+acceptance. No video or private engineering inputs are used.
