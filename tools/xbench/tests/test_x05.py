@@ -3,6 +3,7 @@
 from copy import deepcopy
 from contextlib import contextmanager
 from itertools import permutations, product
+import hashlib
 import json
 import sys
 from types import SimpleNamespace
@@ -328,11 +329,16 @@ def test_null_policy_missing_counts_and_non_object_results_are_unreadable():
 
 
 def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None,
-                 installation_design="Roof"):
+                 installation_design="Roof", saved_strings=None, unresolved=False,
+                 report_artifact="e" * 64):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
     project, result = observation()
+    if unresolved:
+        result["report"]["matches"][1].update(status="unmatched", pdf_grid=None,
+            pdf_matrix=None, pdf_sub_grid=None, candidates=[], candidate_count=0)
+        result["report"]["counts"]["matched_frames"] = 1
     project["installation_design"] = installation_design
     events, requests, receipts = [], [], []
     mutation_keys = set()
@@ -404,7 +410,8 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
                     "intake": {"solar_design_graph": {"rev": self.stage,
                         "panels": [{}] * (4 if self.stage >= 2 else 0),
                         "frames": [{"id": ref} for ref in ["frame-a", "frame-b"]]
-                                  if self.stage >= 3 else []}}}
+                                  if self.stage >= 3 else [],
+                        "strings": saved_strings if self.stage >= 4 else []}}}
 
         def checkout(self, project_id, drawing_id, ttl_s=900):
             assert (project_id, drawing_id, ttl_s) == ("new-project", "adopted-drawing", 900)
@@ -435,6 +442,16 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
                 assert params["geometry_only"] is True
                 assert params["discover"] == {"BranchMaxOffset": 1, "AlignmentTolerance": 0.1,
                                                "InstallationDesign": installation_design}
+            elif tool == "solar-solaredge-accept":
+                assert params == {"drawing_id": "adopted-drawing", "expected_rev": 3,
+                    "report_artifact_id": "e" * 64,
+                    **({"accept_matched_only": True} if unresolved else {})}
+                if failure == "accept":
+                    return 422, {"error": {"code": "synthetic-private-canary"}}
+                if failure == "accept-unknown":
+                    return 200, {"unexpected": "synthetic-private-canary"}
+                if failure in ("accept-async", "accept-job-failed"):
+                    return 202, {"job_id": "accept-job"}
             else:
                 assert tool == "solar-panels-from-drawing"
                 return 202, {"job_id": "panels-job"}
@@ -442,9 +459,9 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
             return 200, {"output": {}}
 
         def wait_job(self, job_id, timeout_s=300):
-            assert job_id == "panels-job" and timeout_s == 300
+            assert job_id in ("panels-job", "accept-job") and timeout_s == 300
             events.append("wait-job")
-            if failure == "mutation":
+            if failure == "mutation" or (job_id == "accept-job" and failure == "accept-job-failed"):
                 return {"status": "failed"}
             self.stage += 1
             return {"status": "complete"}
@@ -479,7 +496,7 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
             if failure == "report-refusal":
                 return 422, {"content-type": "application/json"}, json.dumps({
                     "error": {"code": server_code if server_code is not None else "REPORT_GRID_UNMATCHED"}}).encode()
-            payload = {"report": {"download": "/api/report-artifact"}}
+            payload = {"report": {"download": "/api/report-artifact", "artifact_id": report_artifact}}
         elif path == "/api/report-artifact":
             assert method == "GET"
             payload = {"schema": "leaf.solar-project-solaredge-report.v1", **result["report"]}
@@ -518,6 +535,7 @@ def test_live_client_contract_and_current_version_routes(monkeypatch, installati
     assert events[-4:] == ["release", "delete", "close", "health"]
     assert events.count("wait-job") == 1
     assert events.count("solar-panel-groups") == 1
+    assert "solar-solaredge-accept" not in events
     assert ("GET", "/api/report-artifact", None) in requests
     assert "private-capability" not in json.dumps(receipts)
 
@@ -831,3 +849,197 @@ def test_project_result_frame_and_match_permutations_preserve_verdicts(broken):
                 result["report"]["matches"] = [result["report"]["matches"][i] for i in match_order]
         steps = score([projects[i] for i in project_order], [changed[i] for i in result_order])
         assert [step.verdict for step in steps] == expected
+
+
+def pinned_harness(monkeypatch, tmp_path, *, change=None, raw=None, **kwargs):
+    fixture_reader = x05._fixture
+    ctx, events, requests, receipts = live_harness(monkeypatch, **kwargs)
+    oracle = {"status": "READABLE", "source": {
+        "bytes": 6, "sha256": hashlib.sha256(b"report").hexdigest()},
+        "totals": {"modules": 4, "optimizers": 2, "strings": 2, "inverters": 1},
+        "strings": [{"identifier": "1.1", "optimizers": 1, "modules": 2,
+                     "model": "synthetic-private-canary"},
+                    {"identifier": "1.2", "optimizers": 1, "modules": 2}]}
+    if change:
+        change(oracle)
+    payload = json.dumps(oracle).encode() if raw is None else raw
+    ctx.manifest["projects"][0]["oracle_fixture"] = "oracle"
+    ctx.manifest["fixtures"] = []
+    for identifier, data in (("drawing", b"drawing"), ("report", b"report"),
+                             ("oracle", payload)):
+        path = tmp_path / (identifier + ".fixture")
+        path.write_bytes(data)
+        ctx.manifest["fixtures"].append({"id": identifier, "path": str(path),
+            "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    ctx.fixtures = [{"id": identifier, "ok": True} for identifier in
+                    ("drawing", "report", "oracle")]
+    monkeypatch.setattr(x05, "_fixture", fixture_reader)
+    return ctx, events, requests, receipts
+
+
+def electrical_strings():
+    return [{"id": f"leaf:string:00000000-0000-4000-8000-{i:012d}"} for i in (1, 2)]
+
+
+@pytest.mark.parametrize("saved,verdict,reason", [
+    ([], "FAIL", "product_saved_string_count_mismatch"),
+    (electrical_strings(), "UNREADABLE", "saved_optimizer_measurements_unavailable"),
+])
+def test_pinned_oracle_normal_accept_reads_saved_electrical_count(monkeypatch, tmp_path,
+                                                               saved, verdict, reason):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, saved_strings=saved)
+    steps = x05.run(ctx)
+    assert [s.verdict for s in steps] == ["PASS", "PASS", verdict] + ["UNREADABLE"] * 4
+    assert reason in steps[2].evidence
+    assert steps[2].observed == [{"report_string_rows": 2, "expected_strings": 2}]
+    observed = receipts[0]["results"][0]
+    assert observed["saved_string_count"] == len(saved)
+    assert observed["accepted"] is observed["saved_head_read"] is True
+    accepted = events.index("solar-solaredge-accept")
+    assert events[accepted + 1:accepted + 3] == [("context", "v3", 4), ("context", "v4", 4)]
+    assert events.count("release") == events.count("delete") == 1
+    text = json.dumps(receipts)
+    assert "leaf:string:" not in text and "synthetic-private-canary" not in text
+
+
+@pytest.mark.parametrize("change", [
+    lambda o: o.update(status="UNREADABLE"),
+    lambda o: o["source"].update(bytes=7),
+    lambda o: o["source"].update(sha256="f" * 64),
+    lambda o: o["totals"].update(strings=3),
+    lambda o: o["totals"].update(modules=6),
+    lambda o: o["totals"].update(optimizers=3),
+    lambda o: o["totals"].update(inverters=2),
+    lambda o: o["strings"][0].update(identifier="01.1"),
+    lambda o: o["strings"][0].update(identifier="1.2"),
+    lambda o: o["strings"][0].update(identifier="١.1"),
+    lambda o: o["strings"][0].update(modules=True),
+    lambda o: o["strings"][0].update(optimizers=0),
+    lambda o: o["strings"][0].update(modules=2**53),
+    lambda o: o["strings"].extend([o["strings"][0]] * 20000),
+])
+def test_invalid_oracle_is_named_sanitized_and_never_mutates(monkeypatch, tmp_path, change):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, change=change)
+    assert all(s.verdict == "UNREADABLE" for s in x05.run(ctx))
+    assert receipts[0]["results"][0]["reason_code"] == "ORACLE_UNREADABLE"
+    assert "create" not in events and not any(e == "solar-settings" for e in events)
+    assert "canary" not in json.dumps(receipts)
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"status":"READABLE","status":"READABLE"}',
+    b'{"source":{"bytes":6,"bytes":6}}',
+    b'{"value":NaN}', b'{"value":Infinity}', b'{"value":1e999}',
+    b'\xffsynthetic-private-canary', b'[' + b' ' * (5 * 1024 * 1024) + b']',
+])
+def test_bad_oracle_json_is_sanitized_before_mutation(monkeypatch, tmp_path, raw):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, raw=raw)
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert receipts[0]["results"][0]["reason_code"] == "ORACLE_UNREADABLE"
+    assert "create" not in events and "canary" not in json.dumps(receipts)
+
+
+@pytest.mark.parametrize("binding", ["missing", "report", "foreign", "bad-pin"])
+def test_oracle_fixture_pin_and_project_binding_required(monkeypatch, tmp_path, binding):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path)
+    if binding == "foreign":
+        ctx.fixtures = [f for f in ctx.fixtures if f["id"] != "oracle"]
+    elif binding == "bad-pin":
+        ctx.manifest["fixtures"][-1]["sha256"] = "0" * 64
+    else:
+        ctx.manifest["projects"][0]["oracle_fixture"] = binding
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert receipts[0]["results"][0]["reason_code"] == "ORACLE_UNREADABLE"
+    assert "create" not in events
+
+
+@pytest.mark.parametrize("saved", [None, {}, [None], ["leaf:string:bad"],
+                                   [{"id": "bad"}], electrical_strings() * 2])
+def test_malformed_saved_strings_never_establish_failure(monkeypatch, tmp_path, saved):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, saved_strings=saved)
+    steps = x05.run(ctx)
+    assert steps[2].verdict == "UNREADABLE"
+    assert "saved_string_count" not in receipts[0]["results"][0]
+    assert events.count("release") == events.count("delete") == 1
+
+
+@pytest.mark.parametrize("failure", ["accept", "accept-unknown", "accept-job-failed"])
+def test_acceptance_failure_preserves_uncertainty_and_cleanup(monkeypatch, tmp_path, failure):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, failure=failure)
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert "saved_string_count" not in receipts[0]["results"][0]
+    assert events.count("release") == events.count("delete") == 1
+    assert "canary" not in json.dumps(receipts)
+
+
+@pytest.mark.parametrize("artifact", [None, "e" * 63, "E" * 64, {"secret": "canary"}])
+def test_accept_requires_report_envelope_artifact_pin(monkeypatch, tmp_path, artifact):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, report_artifact=artifact)
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert "solar-solaredge-accept" not in events
+    assert events.count("release") == events.count("delete") == 1
+
+
+@pytest.mark.parametrize("unresolved", [False, True])
+def test_explicit_null_grid_uses_matched_only_for_valid_unresolved_rows(monkeypatch, tmp_path,
+                                                                     unresolved):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path,
+                                                   unresolved=unresolved, saved_strings=[])
+    ctx.manifest["projects"][0].update(expected_grids=None, grid_count_policy="match_or_named")
+    assert [s.verdict for s in x05.run(ctx)][:3] == ["PASS", "PASS", "FAIL"]
+    assert events.count("solar-solaredge-accept") == 1
+
+
+def test_step3_unreadable_sibling_takes_precedence_over_count_failure():
+    project, result = observation()
+    project["oracle_fixture"] = "oracle"
+    result.update(oracle_readable=True, accepted=True, saved_head_read=True, saved_string_count=0)
+    assert score([project], [result])[2].verdict == "FAIL"
+    sibling = dict(project, id="other")
+    missing = dict(result, id="other", accepted=False)
+    for projects, results in (([project, sibling], [result, missing]),
+                              ([sibling, project], [missing, result])):
+        assert score(projects, results)[2].verdict == "UNREADABLE"
+
+
+def test_self_consistent_oracle_still_requires_frozen_project_counts(monkeypatch, tmp_path):
+    def change(oracle):
+        oracle["totals"]["modules"] = 6
+        oracle["strings"][0]["modules"] = 4
+
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, change=change)
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert "create" not in events
+
+
+def test_invalid_null_grid_rows_never_enable_matched_only(monkeypatch, tmp_path):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, unresolved=True)
+    ctx.manifest["projects"][0].update(expected_grids=None, grid_count_policy="match_or_named")
+    # Corrupt only the mocked report download; the independent oracle stays valid.
+    import xbench_session
+
+    original = xbench_session.api
+
+    def malformed(*args, **kwargs):
+        status, headers, body = original(*args, **kwargs)
+        if args[2] == "/api/report-artifact":
+            report = json.loads(body)
+            report["matches"][1]["candidates"] = [0]
+            body = json.dumps(report).encode()
+        return status, headers, body
+
+    monkeypatch.setattr(xbench_session, "api", malformed)
+    assert x05.run(ctx)[2].verdict == "UNREADABLE"
+    assert "solar-solaredge-accept" not in events
+    assert events.count("release") == events.count("delete") == 1
+
+
+def test_async_normal_accept_counts_fresh_head_only_after_completion(monkeypatch, tmp_path):
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path,
+                                                   failure="accept-async", saved_strings=[])
+    assert x05.run(ctx)[2].verdict == "FAIL"
+    accepted = events.index("solar-solaredge-accept")
+    assert events[accepted + 1:accepted + 4] == [
+        "wait-job", ("context", "v3", 4), ("context", "v4", 4)]
+    assert receipts[0]["results"][0]["saved_string_count"] == 0
+    assert events.count("release") == events.count("delete") == 1

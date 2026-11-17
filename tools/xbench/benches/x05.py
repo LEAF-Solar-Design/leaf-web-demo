@@ -19,8 +19,11 @@ LIMITS = ("Steps 1-2 cover source import and grid correspondence only. "
           "This slice supports Roof and Ground geometry setups. "
           "Module counts must equal independent manifest oracles; grid counts are exact "
           "unless explicitly bound to null-grid match_or_named coverage. "
-          "Step 3 report string counts are diagnostic: strings are not accepted "
-          "or independently saved. Steps 4-7 are unimplemented. Unknown wire "
+          "Step 3 requires an independently pinned legend oracle and normal acceptance "
+          "followed by canonical saved electrical string counts; report rows are diagnostic only. "
+          "Count mismatches can FAIL, but matching counts remain UNREADABLE because "
+          "per-string saved optimizer measurements are unavailable. Without an explicit "
+          "oracle no acceptance is attempted. Steps 4-7 are unimplemented. Unknown wire "
           "formats, missing fixtures, auth, drift and nonterminal jobs are UNREADABLE.")
 REQUIRED = {"id", "drawing_fixture", "report_fixture", "panel_layer_contains",
             "drawing_units", "installation_design", "branch_max_offset",
@@ -37,6 +40,7 @@ SAFE_REASON_CODES = PRODUCT_REFUSAL_CODES | frozenset({
     "MANIFEST_UNREADABLE", "SETUP_UNREADABLE", "SOURCE_DRIFT",
     "SOURCE_WIRE_UNREADABLE", "REPORT_WIRE_UNREADABLE", "JOB_NOT_COMPLETE",
     "MUTATION_UNREADABLE", "SERVER_REASON_UNRECOGNISED",
+    "ORACLE_UNREADABLE", "SAVED_STRINGS_UNREADABLE",
 })
 
 
@@ -243,7 +247,7 @@ def score(projects, results):
     Results are internal observations, keyed by manifest project id. Only explicit
     validated source success and complete report mappings can establish a PASS.
     """
-    buckets = {1: [], 2: []}
+    buckets = {1: [], 2: [], 3: []}
     diagnostics = []
     projects = projects if isinstance(projects, list) else []
     results = results if isinstance(results, list) else []
@@ -261,12 +265,22 @@ def score(projects, results):
                 or result.get("status") in (401, 403)):
             buckets[1].append(("UNREADABLE", "setup_or_session_unreadable"))
             buckets[2].append(("UNREADABLE", "setup_or_session_unreadable"))
+            buckets[3].append(("UNREADABLE", "setup_or_session_unreadable"))
             continue
         imported = result.get("import_verdict")
         buckets[1].append((imported if imported in ("PASS", "FAIL") else "UNREADABLE",
                            "source_import"))
         buckets[2].append(_grid_score(project, result) if imported == "PASS"
                           else ("UNREADABLE", "source_import_unavailable"))
+        if "oracle_fixture" not in project or result.get("oracle_readable") is not True:
+            buckets[3].append(("UNREADABLE", "independent_oracle_unreadable"))
+        elif (result.get("accepted") is not True or result.get("saved_head_read") is not True
+              or not _integer(result.get("saved_string_count"))):
+            buckets[3].append(("UNREADABLE", "saved_string_observation_unreadable"))
+        elif result["saved_string_count"] != project["expected_strings"]:
+            buckets[3].append(("FAIL", "product_saved_string_count_mismatch"))
+        else:
+            buckets[3].append(("UNREADABLE", "saved_optimizer_measurements_unavailable"))
         report = result.get("report")
         if isinstance(report, dict) and isinstance(report.get("strings"), list):
             diagnostics.append({"report_string_rows": len(report["strings"]),
@@ -279,8 +293,10 @@ def score(projects, results):
         steps.append(Step(n, verdict, "x05-evidence.json; " +
                           ", ".join(sorted({reason for _, reason in rows})),
                           observed={"projects": len(rows)}))
-    steps.append(Step(3, "UNREADABLE", "Strings not accepted and independently saved; "
-                      "report counts are diagnostic only. x05-evidence.json", observed=diagnostics))
+    rows = buckets[3]
+    verdict = ("FAIL" if rows and all(v == "FAIL" for v, _ in rows) else "UNREADABLE")
+    steps.append(Step(3, verdict, "x05-evidence.json; " +
+                      ", ".join(sorted({reason for _, reason in rows})), observed=diagnostics))
     steps.extend(Step(n, "UNREADABLE", "Unimplemented in this slice. " + LIMITS)
                  for n in range(4, 8))
     return steps
@@ -307,9 +323,70 @@ def _fixture(ctx, identifier):
     return data
 
 
+def _oracle(ctx, project, pdf):
+    """Consume only a separately pinned, source-bound independent legend result."""
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise ValueError
+            value[key] = item
+        return value
+
+    def finite(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError
+        return value
+
+    try:
+        if project["oracle_fixture"] in (project["drawing_fixture"], project["report_fixture"]):
+            raise ValueError
+        data = _fixture(ctx, project["oracle_fixture"])
+        if len(data) > 5 * 1024 * 1024:
+            raise ValueError
+        oracle = json.loads(data, object_pairs_hook=pairs, parse_float=finite,
+                            parse_constant=lambda raw: finite(raw))
+        source = {"bytes": len(pdf), "sha256": hashlib.sha256(pdf).hexdigest()}
+        if (not isinstance(oracle, dict) or oracle.get("status") != "READABLE"
+                or oracle.get("source") != source
+                or not isinstance(oracle["source"], dict)
+                or not _integer(oracle["source"].get("bytes"), 1)):
+            raise ValueError
+        totals, rows = oracle.get("totals"), oracle.get("strings")
+        if (not isinstance(totals, dict) or not isinstance(rows, list)
+                or not 1 <= len(rows) <= 20000
+                or any(not _integer(totals.get(k), 1) for k in
+                       ("modules", "optimizers", "inverters", "strings"))):
+            raise ValueError
+        identifiers = set()
+        modules = optimizers = 0
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("identifier")) is not str
+                    or re.fullmatch(r"[1-9][0-9]{0,8}\.[1-9][0-9]{0,8}", row["identifier"]) is None
+                    or row["identifier"] in identifiers
+                    or not _integer(row.get("optimizers"), 1)
+                    or not _integer(row.get("modules"), 1)):
+                raise ValueError
+            identifiers.add(row["identifier"])
+            modules += row["modules"]
+            optimizers += row["optimizers"]
+        if (totals["modules"] != modules or totals["optimizers"] != optimizers
+                or totals["strings"] != len(rows)
+                or totals["inverters"] != len({i.split(".")[0] for i in identifiers})
+                or modules != project["expected_modules"]
+                or len(rows) != project["expected_strings"]):
+            raise ValueError
+    except Exception:
+        raise ObservationError(code="ORACLE_UNREADABLE") from None
+
+
 def _project(ctx, client, request, project, result):
     drawing = _fixture(ctx, project["drawing_fixture"])
     pdf = _fixture(ctx, project["report_fixture"])
+    if "oracle_fixture" in project:
+        _oracle(ctx, project, pdf)
+        result["oracle_readable"] = True
     created = client.create_project(name="xbench-x05-" + uuid4().hex)
     project_id = created["project_id"]
     capability = None
@@ -333,10 +410,16 @@ def _project(ctx, client, request, project, result):
                                   idempotency_key="xbench-x05-" + uuid4().hex)
         if status == 202 and isinstance(body, dict) and isinstance(body.get("job_id"), str):
             terminal = client.wait_job(body["job_id"], timeout_s=300)
-            if terminal.get("status") != "complete":
+            if not isinstance(terminal, dict) or terminal.get("status") != "complete":
                 raise ObservationError(code="JOB_NOT_COMPLETE")
+            if tool == "solar-solaredge-accept" and "error" in terminal:
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
         elif status != 200:
             raise ObservationError(status, "MUTATION_UNREADABLE")
+        if tool == "solar-solaredge-accept" and (
+                not isinstance(body, dict) or "error" in body
+                or (status == 200 and not isinstance(body.get("output"), dict))):
+            raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
         return context()
 
     try:
@@ -410,6 +493,35 @@ def _project(ctx, client, request, project, result):
         if not isinstance(downloaded, dict) or downloaded.get("schema") != "leaf.solar-project-solaredge-report.v1":
             raise ObservationError(code="REPORT_WIRE_UNREADABLE")
         result["report"] = downloaded
+        if result.get("oracle_readable") is True:
+            result["phase"] = "accept"
+            if _grid_score(project, result)[0] != "PASS":
+                raise ObservationError(code="REPORT_WIRE_UNREADABLE")
+            report_id = report["report"].get("artifact_id")
+            if type(report_id) is not str or re.fullmatch(r"[0-9a-f]{64}", report_id) is None:
+                raise ObservationError(code="REPORT_WIRE_UNREADABLE")
+            current = context()
+            rev = current["intake"]["solar_design_graph"]["rev"]
+            if not _integer(rev):
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+            params = {"expected_rev": rev, "report_artifact_id": report_id}
+            if (project["expected_grids"] is None
+                    and project.get("grid_count_policy") == "match_or_named"
+                    and any("status" in row for row in downloaded["matches"])):
+                params["accept_matched_only"] = True
+            current = mutate("solar-solaredge-accept", params)
+            graph = current["intake"]["solar_design_graph"]
+            if not _integer(graph.get("rev")) or graph["rev"] <= rev:
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+            result["accepted"] = True
+            strings = graph.get("strings")
+            if (not isinstance(strings, list) or any(
+                    not isinstance(row, dict) or type(row.get("id")) is not str
+                    or re.fullmatch(r"leaf:string:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+                                    row["id"]) is None for row in strings)
+                    or len({row["id"] for row in strings}) != len(strings)):
+                raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
+            result.update(saved_head_read=True, saved_string_count=len(strings))
     finally:
         if capability is not None:
             try:
@@ -518,7 +630,9 @@ def run(ctx):
     write_json_atomic(Path(ctx.out_dir) / "x05-evidence.json", {
         "limits": LIMITS, "projects_expected": len(projects) if isinstance(projects, list) else 0,
         "results": [{k: r[k] for k in ("status", "reason_code", "reason", "panel_count", "frame_count",
-                                       "import_verdict", "report_product_failure", "cleanup_errors") if k in r} for r in results],
+                                       "import_verdict", "report_product_failure", "cleanup_errors",
+                                       "oracle_readable", "accepted", "saved_head_read",
+                                       "saved_string_count") if k in r} for r in results],
         "steps": [{"n": s.n, "verdict": s.verdict, "evidence": s.evidence,
                    "observed": s.observed} for s in steps]})
     return steps
