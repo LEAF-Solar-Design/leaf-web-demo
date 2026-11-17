@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import { createRunSubmissionRequest } from '../runIntent.js'
+import { webcrypto } from 'node:crypto'
+import { engineeringTotalsPath, createEngineeringTotalsRecord } from './projectReconciliation.js'
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
@@ -33,6 +35,176 @@ function setup(data = contextData, status = 200, options = {}) {
 }
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers() })
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
+
+describe('scope-bound engineering project files', () => {
+  const graphSha256 = 'a'.repeat(64), drafts = ['002', '0', '01', '1', '00.8000']
+  const record = () => createEngineeringTotalsRecord(binding, graphSha256, drafts)
+  const content = () => JSON.stringify(record())
+  const path = engineeringTotalsPath(binding)
+  const save = { graphSha256, drafts, expectedRevision: 2, idempotencyKey: 'engineering-1' }
+  const sha = async (text) => Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const file = async (changes = {}) => ({ file_id: J, path, media_type: 'application/json',
+    content: content(), revision: 3, content_sha256: await sha(content()), ...changes })
+  const loaded = async (changes = {}) => ({ organization_id: O, project_id: P, can_write: true, file: await file(), ...changes })
+  const saved = async (changes = {}) => ({ file: await file(), receipt: { project_id: P, action: 'file_put' }, replayed: false, ...changes })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('loads only the targeted file and hashes its exact UTF-8 content', async () => {
+    const digest = vi.fn((...args) => webcrypto.subtle.digest(...args))
+    vi.stubGlobal('crypto', { subtle: { digest } })
+    const { client, fetchImpl } = setup(await loaded({ can_write: false }))
+    expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: true, status: 200,
+      data: { record: record(), revision: 3, canWrite: false } })
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/files/by-path?path=${encodeURIComponent(path)}`)
+    expect(init(fetchImpl).method).toBe('GET')
+    expect(init(fetchImpl).headers).toMatchObject({ 'X-Org-Id': O, 'X-Project-Id': P })
+    expect(init(fetchImpl)).not.toHaveProperty('body')
+    expect(digest).toHaveBeenCalledWith('SHA-256', new TextEncoder().encode(content()))
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
+  it('loads absence and read-only access without requiring hashing', async () => {
+    vi.stubGlobal('crypto', undefined)
+    for (const can_write of [true, false]) {
+      const { client } = setup(await loaded({ file: null, can_write }))
+      expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: true, status: 200,
+        data: { record: null, revision: 0, canWrite: can_write } })
+    }
+  })
+
+  it('PUTs canonical content, CAS revision and caller idempotency key and accepts replay', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const replayed of [false, true]) {
+      const data = await saved({ replayed }); delete data.file.content
+      const { client, fetchImpl } = setup(data)
+      expect(await client.saveEngineeringTotals(save)).toEqual({ ok: true, status: 200,
+        data: { record: record(), revision: 3, canWrite: true } })
+      expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/files`)
+      expect(init(fetchImpl).method).toBe('PUT')
+      expect(init(fetchImpl).headers).toMatchObject({ 'Idempotency-Key': 'engineering-1', 'Content-Type': 'application/json' })
+      expect(JSON.parse(init(fetchImpl).body)).toEqual({ path, media_type: 'application/json', content: content(), expected_revision: 2 })
+    }
+  })
+
+  it('round-trips blank and zero DC and accepts the boundary CAS revisions', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const [expectedRevision, dc] of [[0, ''], [2147483646, '0']]) {
+      const values = [...drafts.slice(0, 4), dc]
+      const boundRecord = createEngineeringTotalsRecord(binding, graphSha256, values)
+      const text = JSON.stringify(boundRecord)
+      const stored = await file({ content: text, content_sha256: await sha(text), revision: expectedRevision + 1 })
+      const { client, fetchImpl } = setup(await saved({ file: stored }))
+      expect((await client.saveEngineeringTotals({ ...save, drafts: values, expectedRevision })).data)
+        .toEqual({ record: boundRecord, revision: expectedRevision + 1, canWrite: true })
+      fetchImpl.mockResolvedValueOnce(response(await loaded({ file: stored })))
+      expect((await client.loadEngineeringTotals({ graphSha256 })).data.record.values[4]).toBe(dc)
+    }
+  })
+
+  it('rejects malformed outer scopes, files, records and integrity hashes without leaking content', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup()
+    const wrongBinding = { ...binding, project_id: J }
+    const foreignContent = JSON.stringify(createEngineeringTotalsRecord(wrongBinding, graphSha256, drafts))
+    const noncanonical = content() + '\n'
+    const invalid = [await loaded({ organization_id: J }), await loaded({ project_id: J }),
+      await loaded({ can_write: 1 }), await loaded({ file: undefined })]
+    for (const changes of [{ file_id: 'bad' }, { path: 'other.json' }, { media_type: 'text/plain' },
+      { revision: 0 }, { revision: true }, { revision: 2147483648 }, { content_sha256: 'b'.repeat(64) },
+      { content: foreignContent, content_sha256: await sha(foreignContent) },
+      { content: noncanonical, content_sha256: await sha(noncanonical) }]) invalid.push(await loaded({ file: await file(changes) }))
+    for (const data of invalid) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: false, status: null,
+        reason: 'SIP_R7_RESPONSE_INVALID', envelope: null })
+    }
+  })
+
+  it('requires strict CAS receipts with matching file metadata, hash and next revision', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup()
+    const invalid = [await saved({ receipt: { project_id: J, action: 'file_put' } }),
+      await saved({ receipt: { project_id: P, action: 'file_delete' } }), await saved({ replayed: 0 })]
+    for (const changes of [{ path: 'other' }, { media_type: 'text/plain' }, { file_id: 'bad' },
+      { revision: 2 }, { revision: 4 }, { content_sha256: 'b'.repeat(64) }]) invalid.push(await saved({ file: await file(changes) }))
+    for (const data of invalid) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.saveEngineeringTotals(save)).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+    const envelope = refusal('revision_conflict')
+    fetchImpl.mockResolvedValueOnce(response(envelope, 409))
+    expect(await client.saveEngineeringTotals(save)).toEqual({ ok: false, status: 409, reason: 'revision_conflict', envelope })
+  })
+
+  it('validates inputs locally and derives ownership from the captured scope', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup(await saved())
+    for (const expectedRevision of [-1, true, '2', 2.5, NaN, 2147483647]) {
+      expect((await client.saveEngineeringTotals({ ...save, expectedRevision })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    for (const idempotencyKey of ['', ' ', 'é'.repeat(129), token()]) {
+      expect((await client.saveEngineeringTotals({ ...save, idempotencyKey })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect((await client.loadEngineeringTotals({ graphSha256: 'bad' })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect((await client.saveEngineeringTotals({ ...save, drafts: [] })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect((await client.saveEngineeringTotals({ ...save, binding: { ...binding, project_id: J } })).ok).toBe(true)
+    expect(JSON.parse(JSON.parse(init(fetchImpl).body).content).binding.project_id).toBe(P)
+  })
+
+  it('never bypasses missing or failed SubtleCrypto for an existing record or PUT', async () => {
+    const readData = await loaded(), writeData = await saved()
+    for (const crypto of [undefined, { subtle: { digest: async () => { throw Error('unavailable') } } }]) {
+      vi.stubGlobal('crypto', crypto)
+      const { client, fetchImpl } = setup(readData)
+      expect((await client.loadEngineeringTotals({ graphSha256 })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+      fetchImpl.mockResolvedValueOnce(response(writeData))
+      expect((await client.saveEngineeringTotals(save)).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+  })
+
+  it('discards late GET and PUT responses across authority and binding ABA changes', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const write of [false, true]) for (const authority of [false, true]) {
+      const { client, fetchImpl } = setup()
+      const old = deferred(); fetchImpl.mockReturnValueOnce(old.promise)
+      const pending = write ? client.saveEngineeringTotals(save) : client.loadEngineeringTotals({ graphSha256 })
+      const signal = init(fetchImpl).signal
+      client.setScope(authority ? binding : { ...binding, input_version_id: J }, authority ? 'session-2' : 'session-1')
+      client.setScope(binding, 'session-1')
+      expect(signal.aborted).toBe(true)
+      old.resolve(response(write ? await saved() : await loaded()))
+      expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    }
+  })
+
+  it('aborts pending responses and hashing and discards late digest results after scope revocation', async () => {
+    for (const write of [false, true]) {
+      const data = write ? await saved() : await loaded()
+      for (const changeScope of [false, true]) {
+        const hashing = deferred(), started = deferred()
+        vi.stubGlobal('crypto', { subtle: { digest: vi.fn(() => { started.resolve(); return hashing.promise }) } })
+        const { client } = setup(data), controller = new AbortController()
+        const pending = write ? client.saveEngineeringTotals({ ...save, signal: controller.signal })
+          : client.loadEngineeringTotals({ graphSha256, signal: controller.signal })
+        await started.promise
+        if (changeScope) {
+          client.setScope(binding, 'session-2'); client.setScope(binding, 'session-1')
+        } else controller.abort()
+        expect((await pending).reason).toBe(changeScope ? 'SIP_R7_SCOPE_STALE' : 'SIP_R7_ABORTED')
+        hashing.resolve(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(content())))
+      }
+      const { client, fetchImpl } = setup(data), controller = new AbortController(), old = deferred()
+      fetchImpl.mockReturnValueOnce(old.promise)
+      const pending = write ? client.saveEngineeringTotals({ ...save, signal: controller.signal })
+        : client.loadEngineeringTotals({ graphSha256, signal: controller.signal })
+      controller.abort()
+      expect((await pending).reason).toBe('SIP_R7_ABORTED')
+      old.resolve(response(data))
+    }
+  })
+})
 
 it('requests opt-in frame preparation and rejects mismatched frame/revision metadata', async () => {
   const prepared = { ...contextData, intake: { solar_design_graph: { rev: 4 }, solar_design_graph_sha256: 'a'.repeat(64) },

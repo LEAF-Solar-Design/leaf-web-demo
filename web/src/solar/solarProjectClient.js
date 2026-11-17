@@ -1,5 +1,6 @@
 import { createRunSubmissionRequest, projectSolarIntentExtras, projectSolarRequestExtras } from '../runIntent.js'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, sameSolarCheckoutBinding } from './solarDrawingBinding.js'
+import { engineeringTotalsPath, createEngineeringTotalsRecord, parseEngineeringTotalsRecord } from './projectReconciliation.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const HEX = /^[0-9a-f]{64}$/
@@ -22,6 +23,20 @@ const local = (reason) => ({ ok: false, status: null, reason, envelope: null })
 const utf8 = (value) => new TextEncoder().encode(value).byteLength
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const assert = (condition) => { if (!condition) throw new TypeError('Invalid Solar request') }
+
+async function engineeringContentHash(content) {
+  // Integrity is mandatory, including on browsers without SubtleCrypto.
+  assert(typeof globalThis.crypto?.subtle?.digest === 'function')
+  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))
+  assert(Object.prototype.toString.call(bytes) === '[object ArrayBuffer]' && bytes.byteLength === 32)
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function engineeringFile(file, path) {
+  return plain(file) && typeof file.file_id === 'string' && UUID.test(file.file_id) &&
+    file.path === path && file.media_type === 'application/json' && edgeHash(file.content_sha256) &&
+    Number.isInteger(file.revision) && file.revision >= 1 && file.revision <= 2147483647
+}
 
 function copyJson(value, seen = new Set()) {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
@@ -367,6 +382,46 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     },
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
+    loadEngineeringTotals: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { graphSha256, signal } = options
+      assert(edgeHash(graphSha256))
+      const path = engineeringTotalsPath(scope.binding)
+      return request(`/api/projects/${scope.binding.project_id}/files/by-path?path=${encodeURIComponent(path)}`, {
+        scope, signal,
+        consume: async (response) => {
+          const data = responseSnapshot(await response.json())
+          assert(data?.organization_id === scope.binding.organization_id && data?.project_id === scope.binding.project_id &&
+            typeof data.can_write === 'boolean')
+          if (data.file === null) return { record: null, revision: 0, canWrite: data.can_write }
+          assert(engineeringFile(data.file, path))
+          const record = parseEngineeringTotalsRecord(data.file.content, scope.binding, graphSha256)
+          assert(record !== null && await engineeringContentHash(data.file.content) === data.file.content_sha256)
+          return { record, revision: data.file.revision, canWrite: data.can_write }
+        },
+      })
+    }),
+    saveEngineeringTotals: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { graphSha256, drafts, expectedRevision, idempotencyKey, signal } = options
+      const record = createEngineeringTotalsRecord(scope.binding, graphSha256, drafts)
+      assert(record !== null && Number.isInteger(expectedRevision) && expectedRevision >= 0 && expectedRevision <= 2147483646 &&
+        typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0 && utf8(idempotencyKey) <= 256 &&
+        !CONTAINS_CAPABILITY.test(idempotencyKey))
+      const path = engineeringTotalsPath(scope.binding), content = JSON.stringify(record)
+      return request(`/api/projects/${scope.binding.project_id}/files`, {
+        scope, signal, method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({ path, media_type: 'application/json', content, expected_revision: expectedRevision }),
+        consume: async (response) => {
+          const data = responseSnapshot(await response.json())
+          assert(engineeringFile(data?.file, path) && data.file.revision === expectedRevision + 1 &&
+            data.receipt?.project_id === scope.binding.project_id && data.receipt?.action === 'file_put' &&
+            typeof data.replayed === 'boolean')
+          assert(await engineeringContentHash(content) === data.file.content_sha256)
+          return { record, revision: data.file.revision, canWrite: true }
+        },
+      })
+    }),
     readContext: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { signal, prepareSolve = false, solveFrame } = options
