@@ -41,6 +41,72 @@ const blobText = blob => new Promise(resolve => {
   reader.readAsText(blob)
 })
 
+it('contains a synchronous read throw and releases the request for a clean retry', async () => {
+  const h = fixture()
+  h.client.readContext.mockImplementationOnce(() => { throw new Error('private synchronous failure') })
+  read()
+  expect((await screen.findByRole('alert')).textContent).toMatch(/could not be read.*Try reading/)
+  expect(screen.queryByText(/private synchronous/)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  read(); await loaded()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it('does not steal an entered report field focus when export fails', async () => {
+  fixture(); read(); await loaded(); fill()
+  const input = screen.getAllByRole('textbox')[0]
+  input.focus()
+  fireEvent.change(input, { target: { value: '012' } })
+  vi.stubGlobal('URL', { createObjectURL: () => { throw new Error('private export') } })
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(screen.getByRole('alert').textContent).toMatch(/Try Download CSV again/)
+  expect(document.activeElement).toBe(input)
+  expect(input.value).toBe('012')
+})
+
+it('exports UTF-8 CSV with the exact safe filename, MIME and accepted five rows', async () => {
+  fixture(); read(); await loaded(); fill(['01', '00', '01', '01', '0.400'])
+  const createObjectURL = vi.fn(() => 'blob:metadata')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  let anchor
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () { anchor = this })
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const blob = createObjectURL.mock.calls[0][0]
+  expect(blob.type).toBe('text/csv;charset=utf-8')
+  expect(anchor.download).toBe('engineering-reconciliation.csv')
+  expect(anchor.href).toBe('blob:metadata')
+  expect(await blobText(blob)).toBe('metric,studio,oracle,delta,verdict\r\n' +
+    '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS"\r\n')
+})
+
+it.each(['valid', 'invalid', 'pending'])('Enter in every report input does not start read or download (%s)', async state => {
+  const h = fixture()
+  read(); await loaded(); fill()
+  if (state === 'invalid') fill(['bad', 'bad', 'bad', 'bad', 'bad'])
+  if (state === 'pending') {
+    h.client.readContext.mockImplementationOnce(() => new Promise(() => {}))
+    read()
+  }
+  const calls = h.client.readContext.mock.calls.length
+  const createObjectURL = vi.fn(() => 'blob:explicit')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  for (const input of screen.getAllByRole('textbox')) {
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+    fireEvent.keyUp(input, { key: 'Enter', code: 'Enter' })
+  }
+  expect(h.client.readContext).toHaveBeenCalledTimes(calls)
+  expect(createObjectURL).not.toHaveBeenCalled()
+  expect(click).not.toHaveBeenCalled()
+  if (state === 'valid') {
+    fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+    expect(click).toHaveBeenCalledOnce()
+  }
+})
+
 const reportValues = ['01', '00', '01', '01', '0.400']
 const totalsResponse = (revision = 0, values = null, canWrite = true) => ({ ok: true, status: 200,
   data: { revision, canWrite, record: values === null ? null :

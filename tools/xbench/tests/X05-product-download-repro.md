@@ -723,7 +723,9 @@ try:
                      fresh_without_reports=fresh_without_reports, old_drafts=old_drafts,
                      new_drafts=new_drafts, new_read_count=1, downloads=downloads_after_switch,
                      comparison=isolated)
-    # Return to the original synthetic scope in a fresh page, with a file-backed mock API.
+    # Return to the original synthetic scope in forced colors, with a file-backed mock API.
+    page.emulate_media(forced_colors='active')
+    assert page.evaluate("matchMedia('(forced-colors: active)').matches")
     page.reload(wait_until='networkidle')
     page.evaluate('window.enableReportPersistence()')
     read.click()
@@ -766,6 +768,7 @@ try:
     final_document = json.loads(newer_bytes)
     assert final_document['intake'] == first_document['intake'] and final_document['version'] == 7
     report_persistence = dict(restored=restored, exact_values=persisted_values, blank_dc=True,
+        forced_colors_active=True, textual_verdicts_and_five_csv_rows=True,
         stale_save_rejected=True, stale_save_file_bytes_unchanged=True,
         explicit_reload_values=newer_values, graph_and_version_unchanged=True,
         canonical_file_sha256=hashlib.sha256(newer_bytes).hexdigest())
