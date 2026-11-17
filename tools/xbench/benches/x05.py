@@ -16,7 +16,7 @@ from xbench_core import Step, read_health, write_json_atomic
 
 
 LIMITS = ("Steps 1-2 cover source import and exact grid correspondence only. "
-          "This slice supports the Roof geometry setup only; Ground is ungraded. "
+          "This slice supports Roof and Ground geometry setups. "
           "Geometry discovery counts must equal independent manifest oracles. "
           "Step 3 report string counts are diagnostic: strings are not accepted "
           "or independently saved. Steps 4-7 are unimplemented. Unknown wire "
@@ -93,7 +93,8 @@ def _setup(project):
             and all(isinstance(project[k], str) and project[k].strip() for k in
                     ("id", "drawing_fixture", "report_fixture", "panel_layer_contains"))
             and project["drawing_units"] in ("m", "mm", "cm", "km", "in", "ft", "yd")
-            and project["installation_design"] == "Roof"
+            and type(project["installation_design"]) is str
+            and project["installation_design"] in ("Roof", "Ground")
             and all(_positive_number(project[k]) for k in ("branch_max_offset", "alignment_tolerance"))
             and all(_integer(project[k], 1) for k in
                     ("expected_modules", "expected_grids", "expected_strings")))

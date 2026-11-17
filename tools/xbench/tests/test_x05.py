@@ -177,11 +177,13 @@ def test_invalid_selected_candidates_are_unreadable(candidates, count):
     assert score([project], [result])[1].verdict == "UNREADABLE"
 
 
-def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None):
+def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None,
+                 installation_design="Roof"):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
     project, result = observation()
+    project["installation_design"] = installation_design
     events, requests, receipts = [], [], []
     mutation_keys = set()
     source_sha = "a" * 40
@@ -282,7 +284,7 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
             elif tool == "solar-panel-groups":
                 assert params["geometry_only"] is True
                 assert params["discover"] == {"BranchMaxOffset": 1, "AlignmentTolerance": 0.1,
-                                               "InstallationDesign": "Roof"}
+                                               "InstallationDesign": installation_design}
             else:
                 assert tool == "solar-panels-from-drawing"
                 return 202, {"job_id": "panels-job"}
@@ -350,8 +352,11 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
     return ctx, events, requests, receipts
 
 
-def test_live_client_contract_and_current_version_routes(monkeypatch):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
+@pytest.mark.parametrize("installation_design", ["Roof", "Ground"])
+def test_live_client_contract_and_current_version_routes(monkeypatch, installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
+    assert x05._setup(ctx.manifest["projects"][0])
     assert [s.verdict for s in x05.run(ctx)] == ["PASS", "PASS"] + ["UNREADABLE"] * 5
     base = "/api/projects/new-project/drawings/adopted-drawing/versions/"
     source_routes = [path for method, path, _ in requests if path.endswith("/solaredge-pdf")]
@@ -362,6 +367,8 @@ def test_live_client_contract_and_current_version_routes(monkeypatch):
     assert events[0] == "health"
     assert events[-4:] == ["release", "delete", "close", "health"]
     assert events.count("wait-job") == 1
+    assert events.count("solar-panel-groups") == 1
+    assert ("GET", "/api/report-artifact", None) in requests
     assert "private-capability" not in json.dumps(receipts)
 
 
@@ -441,20 +448,46 @@ def test_invalid_sibling_does_not_suppress_configured_drawing(monkeypatch):
     assert len(receipts[0]["results"]) == 2
 
 
-def test_ground_setup_is_explicitly_unreadable_in_roof_slice(monkeypatch):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
-    ctx.manifest["projects"][0]["installation_design"] = "Ground"
+@pytest.mark.parametrize("expected_grids", [1, 3])
+def test_ground_discovery_requires_exact_grid_count_and_cleans_up(monkeypatch, expected_grids):
+    ctx, events, requests, receipts = live_harness(monkeypatch, installation_design="Ground")
+    ctx.manifest["projects"][0]["expected_grids"] = expected_grids
+    steps = x05.run(ctx)
+    assert [step.verdict for step in steps] == ["PASS"] + ["UNREADABLE"] * 6
+    assert "discovery_count_blocker" in steps[1].evidence
+    assert events.count("solar-panel-groups") == 1
+    assert events[-4:] == ["release", "delete", "close", "health"]
+    assert events.count("release") == events.count("delete") == 1
+    source_routes = [path for method, path, _ in requests if path.endswith("/solaredge-pdf")]
+    assert source_routes == [
+        "/api/projects/new-project/drawings/adopted-drawing/versions/v1/imports/solaredge-pdf"]
+    assert not any(path.endswith("/report") or path == "/api/report-artifact"
+                   for _, path, _ in requests)
+    assert receipts[0]["results"][0]["frame_count"] == 2
+
+
+@pytest.mark.parametrize("installation_design", [
+    "ground", "GROUND", "roof", "Roof ", " Ground", "", "Wall", None, True, 1,
+    [], {}, ["Ground"],
+])
+def test_unsupported_installation_design_is_unreadable_without_io(monkeypatch, installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
     assert not x05._setup(ctx.manifest["projects"][0])
     assert all(step.verdict == "UNREADABLE" for step in x05.run(ctx))
     assert events == [] and requests == []
+    assert receipts[0]["results"] == []
 
 
 @pytest.mark.parametrize("field", ["expected_modules", "expected_grids", "expected_strings",
                                    "branch_max_offset", "alignment_tolerance"])
-@pytest.mark.parametrize("value", [True, False, float("nan"), float("inf"),
+@pytest.mark.parametrize("value", [None, 0, True, False, float("nan"), float("inf"),
                                    float("-inf"), -1, 10**400])
-def test_numeric_setup_boundaries_are_unreadable_without_io(monkeypatch, field, value):
-    ctx, events, requests, receipts = live_harness(monkeypatch)
+@pytest.mark.parametrize("installation_design", ["Roof", "Ground"])
+def test_numeric_setup_boundaries_are_unreadable_without_io(monkeypatch, field, value,
+                                                           installation_design):
+    ctx, events, requests, receipts = live_harness(
+        monkeypatch, installation_design=installation_design)
     ctx.manifest["projects"][0][field] = value
     steps = x05.run(ctx)
     assert all(step.verdict == "UNREADABLE" for step in steps)
