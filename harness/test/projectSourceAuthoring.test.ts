@@ -128,6 +128,49 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(coordination.recordStaged).not.toHaveBeenCalled();
     expect(coordination.authorizePublish).not.toHaveBeenCalled();
   }
+  const attempt = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const correlation = { "x-source-author-attempt": attempt, "x-source-author-wire-sha256": "a".repeat(64) };
+  it.each(["disabled", "dependencies"])("captures dependency refusal correlation before the handler: %s", async kind => {
+    if (kind === "disabled") vi.stubEnv("LEAF_AUTHORED_EXECUTION", "0");
+    const unavailable = createHarness(ports, { auth: { enabled: false, secret } }).listen(0);
+    try {
+      const target = kind === "disabled" ? url : `http://127.0.0.1:${(unavailable.address() as AddressInfo).port}`;
+      // The gate echoes correlation without reading or validating these bytes.
+      const response = await post({ arbitrary: "not an author request" }, "author", correlation, target);
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({ error: { code: "source_unavailable", message: "source is unavailable" },
+        disposition: { schema: "leaf.project-source-author-disposition.v1", attempt_id: attempt,
+          wire_sha256: "a".repeat(64), outcome: "not_started", stage: "author_dependency_gate" } });
+      expect(edit).not.toHaveBeenCalled();
+      expect(oauth.acquireGrant).not.toHaveBeenCalled();
+      unchanged();
+    } finally { await new Promise<void>(resolve => unavailable.close(() => resolve())); }
+  });
+  it.each([{}, { ...correlation, "x-source-author-attempt": "foreign" },
+    { ...correlation, "x-source-author-wire-sha256": "bad" }])("keeps legacy refusal for invalid correlation %j", async headers => {
+    vi.stubEnv("LEAF_AUTHORED_EXECUTION", "0");
+    const response = await post(body(), "author", headers);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: { code: "source_unavailable", message: "source is unavailable" } });
+    expect(edit).not.toHaveBeenCalled();
+    expect(oauth.acquireGrant).not.toHaveBeenCalled();
+  });
+  it("does not disclose correlation to an unauthenticated caller", async () => {
+    vi.stubEnv("LEAF_AUTHORED_EXECUTION", "0");
+    const response = await post(body(), "author", { ...correlation, "x-harness-secret": "wrong" });
+    expect(response.status).toBe(401);
+    expect(JSON.stringify(await response.json())).not.toContain("disposition");
+    expect(edit).not.toHaveBeenCalled();
+  });
+  it("does not turn an editor exception into a dependency refusal", async () => {
+    edit.mockRejectedValue(new Error("private provider error"));
+    const response = await post(body(), "author", correlation);
+    expect(response.status).toBe(409);
+    expect(JSON.stringify(await response.json())).not.toContain("disposition");
+    expect(edit).toHaveBeenCalledTimes(1);
+    unchanged();
+  });
   function seed(files: Record<string, string>) {
     const work = join(root, "work");
     for (const [path, content] of Object.entries(files)) {

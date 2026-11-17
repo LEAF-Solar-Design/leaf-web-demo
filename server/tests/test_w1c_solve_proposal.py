@@ -1155,13 +1155,13 @@ def test_assembly_attribution_valid_completed_children_rederive_without_mutation
 
 
 def test_assembly_attribution_real_assembly_refusal_is_sanitized_current_source_attribution(assembly_world):
-    # The producer echo/path remain valid, but the native sequence numbers omit
-    # every panel from final cut coverage. Recompute genuine stored custody.
+    # Positive but repeated sequence numbers pass the piece echo/path checks,
+    # then lose members in final cut coverage. Recompute genuine stored custody.
     for i, child in enumerate(assembly_world.children):
         response = json.loads(child["response_bytes"])
         for row in response["data"]["final_grid"]["Rows"]:
             for cell in row["Panels"]:
-                cell["Seq"] = 0
+                cell["Seq"] = 1 if cell["Code"] == 1 else 0
         child["response_bytes"] = cloud.canonical_bytes(response)
         child["response_sha256"] = solve._sha(child["response_bytes"])
         _, child["candidate_bytes"], child["proof_bytes"] = solve._piece_evidence(
@@ -1176,14 +1176,15 @@ def test_assembly_attribution_real_assembly_refusal_is_sanitized_current_source_
         "status": "attributed", "reason": "INVALID_FINAL_GRID_ORDER", "validation_stage": "split.coverage",
         "completed_pieces": len(assembly_world.children), "total_pieces": len(assembly_world.children),
         "piece_order": list(range(len(assembly_world.children))), "piece_order_truncated": False,
-        "coverage": {"empty_extraction": True, "unknown_identity": False,
+        "coverage": {"empty_extraction": False, "unknown_identity": False,
             "repeated_identity": False, "missing_members": True,
-            "expected_members": 201, "extracted_members": 0, "unknown_members": 0,
-            "repeated_members": 0, "missing_member_count": 201,
-            "before_restitch": {"identified_cells": 201, "positive_sequences": 0,
-                "nonpositive_sequences": 201, "repeated_positive_sequences": 0},
-            "after_restitch": {"identified_cells": 201, "positive_sequences": 0,
-                "nonpositive_sequences": 201, "repeated_positive_sequences": 0}}}
+            "expected_members": 201, "extracted_members": len(assembly_world.children), "unknown_members": 0,
+            "repeated_members": 0, "missing_member_count": 201 - len(assembly_world.children),
+            "before_restitch": {"identified_cells": 201, "positive_sequences": 201,
+                "nonpositive_sequences": 0, "repeated_positive_sequences": 200},
+            "after_restitch": {"identified_cells": 201, "positive_sequences": 201,
+                "nonpositive_sequences": 0,
+                "repeated_positive_sequences": 201 - len(assembly_world.children)}}}
     assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
 
 
