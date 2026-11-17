@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseReconciliationNumber, reconciliationRows, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
+import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv } from './projectReconciliation.js'
 
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 function graph() {
@@ -19,6 +19,47 @@ function graph() {
 }
 
 describe('saved engineering reconciliation', () => {
+  it.each([1, 2])('rejects cross-string ownership of panel %s and recovers after repair', (panel) => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '0.8']
+    const baseline = reconciliationRows(saved, drafts)
+    saved.strings.push({ id: id('string', 2), module_count: 1, ordered_panel_refs: [id('panel', panel)] })
+    const before = structuredClone(saved)
+    const rows = reconciliationRows(saved, drafts)
+    expect(rows[3]).toMatchObject({ studio: '', oracle: '1', delta: '', verdict: 'UNREADABLE' })
+    expect(rows[3].reason).toMatch(/belongs to more than one string/)
+    for (const index of [0, 1, 2, 4]) expect(rows[index]).toEqual(baseline[index])
+    expect(saved).toEqual(before)
+    saved.strings.pop()
+    expect(reconciliationRows(saved, drafts)).toEqual(baseline)
+    expect(drafts).toEqual(['2', '0', '2', '1', '0.8'])
+  })
+  it('keeps exact rows and canonical CSV across mixed Roof/Ground row permutations without mutation', () => {
+    const saved = graph()
+    saved.panels.push({ id: id('panel', 3) })
+    saved.frames[0].panel_refs.push(id('panel', 3))
+    saved.strings = [1, 2, 3].map(n => ({ id: id('string', n), module_count: 1, ordered_panel_refs: [id('panel', n)] }))
+    const drafts = ['03', '0', '2', '3', '1.2001']
+    const expected = reconciliationRows(saved, drafts), csv = reconciliationCsv(expected)
+    const permutations = rows => rows.length ? rows.flatMap((row, index) =>
+      permutations(rows.filter((_, i) => i !== index)).map(rest => [row, ...rest])) : [[]]
+    const original = structuredClone(saved)
+    for (const frames of permutations(saved.frames)) for (const panels of permutations(saved.panels)) {
+      for (const strings of permutations(saved.strings)) for (const inverters of permutations(saved.inverters)) {
+        const candidate = { ...saved, frames, panels, strings, inverters }, before = structuredClone(candidate)
+        const rows = reconciliationRows(candidate, drafts)
+        expect(rows).toEqual(expected)
+        expect(reconciliationCsv(rows)).toBe(csv)
+        expect(candidate).toEqual(before)
+      }
+    }
+    expect(saved).toEqual(original)
+    expect(expected.map(row => row.studio)).toEqual(['3', '', '2', '3', '1.2001'])
+  })
+  it('reuses derived totals with the same exact row semantics and optional blank DC', () => {
+    const saved = graph(), drafts = ['2', '0', '2', '1', '']
+    expect(reconciliationRowsFromValues(savedReconciliationValues(saved), drafts)).toEqual(reconciliationRows(saved, drafts))
+    expect(reconciliationRows(saved, drafts)[4]).toMatchObject({ studio: '0.8', oracle: '', delta: '', verdict: 'UNREADABLE' })
+  })
   it('unions ordinary and decoded Ground panels, counts saved strings and actual inverter devices', () => {
     const rows = reconciliationRows(graph(), ['2', '2', '2', '1', '0.8'])
     expect(rows.map(({ metric, studio, delta, verdict }) => [metric, studio, delta, verdict])).toEqual([

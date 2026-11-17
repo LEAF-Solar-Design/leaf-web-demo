@@ -78,12 +78,20 @@ export function savedReconciliationValues(graph) {
   values[0] = panelValid ? available(BigInt(panels.size) * SCALE)
     : unavailable('Panel IDs or compact Ground slots are invalid or duplicated.')
   const strings = uniqueIds(graph.strings)
+  const assigned = new Set()
+  let overlap = false
   const stringsValid = panelValid && strings && graph.strings.every((item) => Array.isArray(item.ordered_panel_refs) &&
     Number.isSafeInteger(item.module_count) && item.module_count >= 0 && item.module_count === item.ordered_panel_refs.length &&
     new Set(item.ordered_panel_refs).size === item.ordered_panel_refs.length &&
-    item.ordered_panel_refs.every((id) => validId(id) && panels.has(id)))
+    item.ordered_panel_refs.every((id) => {
+      if (!validId(id) || !panels.has(id)) return false
+      if (assigned.has(id)) { overlap = true; return false }
+      assigned.add(id)
+      return true
+    }))
   values[3] = stringsValid ? available(BigInt(strings.size) * SCALE)
-    : unavailable('Saved panel union is invalid, or string IDs, module counts and ordered panel references disagree.')
+    : unavailable(overlap ? 'A saved panel reference belongs to more than one string.'
+      : 'Saved panel union is invalid, or string IDs, module counts and ordered panel references disagree.')
   const devices = uniqueIds(graph.inverters)
   const types = ['string_inverter', 'central_inverter', 'combiner_box']
   values[2] = devices && graph.inverters.every((item) => types.includes(item.equipment_type))
@@ -109,7 +117,10 @@ export function savedReconciliationValues(graph) {
 }
 
 export function reconciliationRows(graph, drafts = []) {
-  const studio = savedReconciliationValues(graph)
+  return reconciliationRowsFromValues(savedReconciliationValues(graph), drafts)
+}
+
+export function reconciliationRowsFromValues(studio, drafts = []) {
   return RECONCILIATION_METRICS.map((metric, index) => {
     const oracle = parseReconciliationNumber(drafts[index], index !== 4)
     const value = studio[index].value
