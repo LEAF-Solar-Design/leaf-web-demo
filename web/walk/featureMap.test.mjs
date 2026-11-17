@@ -1021,6 +1021,7 @@ test('state viewports remove desktop overlay cases while preserving phone and ot
 
 // Shrink this list in the PR that adds a missing tool to the catalog snapshot.
 const KNOWN_SNAPSHOT_GAP = {
+  'tool:solar-add-all-inverters': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-central-inverter-add': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-feeders': 'absent from the catalog snapshot; validateOverrides rejects it',
   'tool:solar-physical-export': 'absent from the catalog snapshot; validateOverrides rejects it',
@@ -1032,11 +1033,11 @@ const KNOWN_SNAPSHOT_GAP = {
   'tool:solar-terrain-read': 'absent from the catalog snapshot; validateOverrides rejects it',
 }
 
-test('Solar descriptor census pins 54 tools, each mapped, exempted or a known snapshot gap', () => {
+test('Solar descriptor census pins 55 tools, each mapped, exempted or a known snapshot gap', () => {
   const directory = new URL('../../server/solar_tools/', import.meta.url)
   const descriptors = readdirSync(directory).filter((name) => name.endsWith('.json')).sort()
   // Move this pin only in a PR that adds or removes a descriptor file.
-  assert.equal(descriptors.length, 54, 'Solar descriptor count changed; review the census pin')
+  assert.equal(descriptors.length, 55, 'Solar descriptor count changed; review the census pin')
   const covered = new Set(map.entries.map((entry) => entry.id))
   const exempted = new Set(map.exemptions.filter((entry) =>
     typeof entry.reason === 'string' && entry.reason.trim().length > 0).map((entry) => entry.id))

@@ -74,6 +74,27 @@ function detailedEnvelope() {
 }
 
 describe('ARLO review in the existing workspace result panel', () => {
+  it.each([
+    { routes: [null] }, { routes: {} }, { routes: [{ points: {} }] },
+    { quantities: [null] }, { quantities: {} }, { quantities: [{ kind: {} }] },
+  ])('refuses unrenderable routes/quantities but keeps raw export: %j', async patch => {
+    const captured = captureDownload(), stored = structuredClone(envelope())
+    Object.assign(stored.result.solver_result.proposals[0], patch)
+    const raw = JSON.stringify(stored.result)
+    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    expect(screen.getByRole('alert').textContent).toContain('routes or quantities could not be displayed')
+    expect(screen.getByText('Feeder design incomplete')).toBeTruthy()
+    expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Accept proposal' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reject proposal' })).toBeNull()
+    expect(JSON.parse(screen.getByLabelText('Export JSON preview').textContent).envelope).toEqual(stored.result)
+    fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
+    const downloaded = await readJson(captured.createObjectURL.mock.calls[0][0])
+    expect(downloaded.envelope).toEqual(stored.result)
+    expect(JSON.stringify(stored.result)).toBe(raw)
+    expect(saveArloReview).not.toHaveBeenCalled()
+  })
+
   it.each([null, 7, [], {}, { proposal_id: ' ' }, { ...proposal }])('refuses a malformed or duplicate member without losing stored bytes: %j', async member => {
     const stored = envelope()
     stored.result.solver_result.proposals = [proposal, member]
@@ -164,6 +185,62 @@ describe('ARLO review in the existing workspace result panel', () => {
     await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledTimes(2))
     expect(captured.revokeObjectURL).toHaveBeenCalledWith('blob:arlo-result')
     expect(saveArloReview).not.toHaveBeenCalled()
+  })
+
+  it.each([1, 3])('disposes all pending URLs and timers on unmount after %i exports', async count => {
+    vi.useFakeTimers()
+    try {
+      const captured = captureDownload()
+      const urls = Array.from({ length: count }, (_, index) => `blob:arlo-result-${index}`)
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = render(<ArloProposalReview envelope={envelope().result} context={context} currentProject={currentProject} />)
+      await act(async () => {})
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      for (let index = 0; index < count; index++) fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(count)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(count)
+      expect(document.querySelector('a[download]')).toBeNull()
+
+      unmount()
+      expect(vi.getTimerCount()).toBe(0)
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
+  it('revokes completed exports while mounted without revoking them again on unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const captured = captureDownload()
+      const urls = ['blob:arlo-result-first', 'blob:arlo-result-second']
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = render(<ArloProposalReview envelope={envelope().result} context={context} currentProject={currentProject} />)
+      await act(async () => {})
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      fireEvent.click(download)
+      fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(2)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(2)
+
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+      unmount()
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
   })
 
   it('disables export with a visible reason when the stored result is absent', () => {

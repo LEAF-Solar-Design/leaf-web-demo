@@ -1,0 +1,880 @@
+import React from 'react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+import ProjectReconciliationPanel, { RECONCILIATION_READ_TIMEOUT_MS } from './ProjectReconciliationPanel.jsx'
+import * as reconciliation from './projectReconciliation.js'
+
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+const binding = { kind: 'project', organization_id: '11111111-1111-4111-8111-111111111111',
+  project_id: '22222222-2222-4222-8222-222222222222', drawing_id: '33333333-3333-4333-8333-333333333333',
+  input_version_id: '44444444-4444-4444-8444-444444444444' }
+const id = (kind) => `leaf:${kind}:00000000-0000-4000-8000-000000000001`
+const response = () => ({ ok: true, data: { context: { ...binding }, intake: {
+  solar_design_graph_sha256: 'a'.repeat(64), solar_design_graph: { rev: 9,
+    frames: [{ id: id('frame'), panel_refs: [id('panel')], module_power_watts: 400 }],
+    panels: [{ id: id('panel') }], strings: [{ id: id('string'), module_count: 1, ordered_panel_refs: [id('panel')] }],
+    inverters: [{ id: id('inverter'), equipment_type: 'string_inverter' }],
+  },
+} } })
+function fixture({ strict = false, subscribe } = {}) {
+  const h = { snapshot: { binding, authorityKey: 'a' }, current: true, listeners: new Set() }
+  h.client = { readContext: vi.fn(async () => response()), getSnapshot: () => h.snapshot,
+    subscribe: (listener) => { h.listeners.add(listener); return () => h.listeners.delete(listener) },
+    uploadSolarEdgePdf: vi.fn(), submitRun: vi.fn() }
+  if (subscribe) h.client.subscribe = subscribe
+  h.props = { solarBinding: binding, authorityKey: 'a', projectClient: h.client, isCurrent: () => h.current }
+  const element = () => strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
+    : <ProjectReconciliationPanel {...h.props} />
+  h.view = render(element())
+  h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(element()) }
+  h.emit = () => act(() => { for (const listener of h.listeners) listener() })
+  return h
+}
+const read = () => fireEvent.click(screen.getByRole('button', { name: 'Read saved design' }))
+const fill = (values = ['1', '0', '1', '1', '0.4']) => screen.getAllByRole('textbox').forEach((input, index) => {
+  fireEvent.change(input, { target: { value: values[index] } })
+})
+const loaded = () => screen.findByText('Saved design revision 9.')
+const blobText = blob => new Promise(resolve => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(reader.result)
+  reader.readAsText(blob)
+})
+
+it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cached rows and lexemes', async index => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
+  const drafts = ['01', '00', '01', '01', '0.400']
+  const createObjectURL = vi.fn(() => 'blob:report'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  read(); await loaded(); fill(drafts)
+  expect(derive).toHaveBeenCalledOnce()
+  const table = screen.getByRole('table').textContent
+  const inputs = screen.getAllByRole('textbox')
+  const guidance = inputs.map(input => input.getAttribute('aria-describedby'))
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  fireEvent.click(download)
+  const baseline = await blobText(createObjectURL.mock.calls[0][0])
+  expect(baseline).toBe('metric,studio,oracle,delta,verdict\r\n' +
+    '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
+    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS"\r\n')
+  fireEvent.change(inputs[index], { target: { value: '' } })
+  expect(download.disabled).toBe(index !== 4)
+  fireEvent.click(download)
+  expect(createObjectURL).toHaveBeenCalledTimes(index === 4 ? 2 : 1)
+  if (index === 4) {
+    const fresh = await blobText(createObjectURL.mock.calls[1][0])
+    expect(fresh).toBe(baseline.replace('"kw_dc","0.4","0.400","0","PASS"',
+      '"kw_dc","0.4","","","UNREADABLE"'))
+  }
+  expect(inputs.map(input => input.value)).toEqual(drafts.map((value, i) => i === index ? '' : value))
+  expect(inputs.map(input => input.getAttribute('aria-describedby'))).toEqual(guidance)
+  fireEvent.change(inputs[index], { target: { value: drafts[index] } })
+  expect(screen.getByRole('table').textContent).toBe(table)
+  expect(inputs.map(input => input.value)).toEqual(drafts)
+  fireEvent.click(download)
+  expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(baseline)
+  expect(revokeObjectURL).toHaveBeenCalledTimes(createObjectURL.mock.calls.length)
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  expect(derive).toHaveBeenCalledOnce()
+})
+
+it.each(['completion-first', 'timeout-first'])('settles an equal-deadline race coherently: %s', async order => {
+  vi.useFakeTimers()
+  const h = fixture()
+  let resolveOld
+  const old = new Promise(resolve => { resolveOld = resolve })
+  const late = response(); late.data.intake.solar_design_graph.rev = 77
+  const complete = () => resolveOld(late)
+  // The product installs its timeout before calling the client. Register the
+  // completion on either side of read(), at the exact same clock deadline.
+  if (order === 'completion-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  h.client.readContext.mockReturnValueOnce(old)
+  act(() => { read(); read() })
+  if (order === 'timeout-first') setTimeout(complete, RECONCILIATION_READ_TIMEOUT_MS)
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  await act(async () => { await vi.advanceTimersByTimeAsync(RECONCILIATION_READ_TIMEOUT_MS) })
+  if (order === 'completion-first') {
+    expect(screen.getByText('Saved design revision 77.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(signal.aborted).toBe(false)
+  } else {
+    expect(screen.getByRole('alert').textContent).toBe('Saved design read timed out. Try reading it again.')
+    expect(screen.queryByText(/Saved design revision/)).toBeNull()
+    expect(signal.aborted).toBe(true)
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  }
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { read(); read() })
+  expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(vi.getTimerCount()).toBe(0)
+  h.view.unmount()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each(['binding', 'client'].flatMap(change => ['before', 'after'].map(phase => [change, phase])))(
+  'rejects the first A read after A-to-B-to-A reuses %s scope inputs and settles %s the fresh read', async (change, phase) => {
+  const h = fixture(), original = { ...h.props }
+  let settleOld
+  h.client.readContext.mockImplementationOnce(() => new Promise(resolve => { settleOld = resolve }))
+  fill(['77', '77', '77', '77', '77'])
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const bBinding = change === 'binding' ? { ...binding, drawing_id: '55555555-5555-4555-8555-555555555555' } : binding
+  const bResponse = response()
+  bResponse.data.context = { ...bBinding }
+  bResponse.data.intake.solar_design_graph.rev = 20
+  const bClient = change === 'client' ? { ...h.client, readContext: vi.fn(async () => bResponse) } : h.client
+  if (change === 'binding') h.client.readContext.mockResolvedValueOnce(bResponse)
+  h.snapshot = { binding: bBinding, authorityKey: 'a' }
+  h.update({ solarBinding: bBinding, projectClient: bClient })
+  expect(oldSignal.aborted).toBe(true)
+  read(); await screen.findByText('Saved design revision 20.')
+  fill(['20', '20', '20', '20', '20'])
+  h.snapshot = { binding, authorityKey: 'a' }
+  h.update(original)
+  expect(screen.queryByText(/Saved design revision/)).toBeNull()
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 2 : 1)
+  const createObjectURL = vi.fn(() => 'blob:returned-a'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const download = () => fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  download(); expect(createObjectURL).not.toHaveBeenCalled()
+  const settleFirstA = async () => act(async () => {
+    const old = response(); old.data.intake.solar_design_graph.rev = 77
+    settleOld(old)
+  })
+  if (phase === 'before') {
+    await settleFirstA()
+    expect(screen.queryByText(/Saved design revision|PASS/)).toBeNull()
+    expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 2 : 1)
+    download(); expect(createObjectURL).not.toHaveBeenCalled()
+  }
+  const fresh = response()
+  fresh.data.intake.solar_design_graph.rev = 10
+  fresh.data.intake.solar_design_graph.frames[0].module_power_watts = 800
+  h.client.readContext.mockResolvedValueOnce(fresh)
+  act(() => { read(); read() })
+  await screen.findByText('Saved design revision 10.')
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fill(['1', '0', '1', '1', '0.8'])
+  const accepted = screen.getByRole('table').textContent
+  if (phase === 'after') await settleFirstA()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  expect(screen.getByText('Saved design revision 10.')).toBeTruthy()
+  expect(screen.getByRole('table').textContent).toBe(accepted)
+  expect(h.client.readContext).toHaveBeenCalledTimes(change === 'binding' ? 3 : 2)
+  if (change === 'client') expect(bClient.readContext).toHaveBeenCalledOnce()
+  expect(oldSignal.aborted).toBe(true)
+  download()
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(
+    'metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
+    '"optimizers","","0","","UNREADABLE"\r\n"inverters","1","1","0","PASS"\r\n' +
+    '"strings","1","1","0","PASS"\r\n"kw_dc","0.8","0.8","0","PASS"\r\n')
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:returned-a']])
+})
+
+it.each(['silent', 'observer', 'throw'])('rejects synchronous authority revocation during cloning (%s) and recovers', async mode => {
+  const h = fixture(), clone = globalThis.structuredClone
+  const createObjectURL = vi.fn(() => 'blob:authorized'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  vi.stubGlobal('structuredClone', vi.fn(value => {
+    h.current = false
+    if (mode !== 'silent') for (const listener of h.listeners) listener()
+    if (mode === 'throw') throw new Error('private clone exception token=synthetic-secret')
+    return clone(value)
+  }))
+  fill(); read()
+  await act(async () => {})
+  expect(h.client.readContext.mock.calls[0][0].signal.aborted).toBe(mode !== 'silent')
+  expect(screen.queryByText(/Saved design revision|private clone|synthetic-secret/)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).not.toHaveBeenCalled()
+  vi.stubGlobal('structuredClone', clone)
+  h.current = true
+  h.snapshot = { binding, authorityKey: 'fresh' }
+  h.update({ authorityKey: 'fresh' })
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  read(); await loaded()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"kw_dc","0.4","0.4","0","PASS"')
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+})
+
+it('alternates export success and failure from one cached snapshot with exactly-once URL cleanup', async () => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues'), h = fixture()
+  read(); await loaded(); fill()
+  const derivations = derive.mock.calls.length
+  const createObjectURL = vi.fn(() => `blob:attempt-${createObjectURL.mock.calls.length}`), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const anchors = [], successful = []
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    anchors.push(this)
+    if (anchors.length % 2 === 0) throw new Error('private export failure')
+    successful.push(createObjectURL.mock.calls.at(-1)[0])
+  })
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+    expect(revokeObjectURL.mock.calls).toEqual(Array.from({ length: attempt }, (_, i) => [`blob:attempt-${i + 1}`]))
+    if (attempt % 2 === 0) expect(screen.getByRole('alert').textContent).toBe('CSV could not be downloaded. Try Download CSV again.')
+    else expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  }
+  expect(new Set(anchors).size).toBe(5)
+  const bytes = await Promise.all(successful.map(blobText))
+  expect(bytes).toHaveLength(3)
+  expect(bytes.every(value => value === bytes[0])).toBe(true)
+  expect(bytes[0]).toContain('"kw_dc","0.4","0.4","0","PASS"')
+  expect(h.client.readContext).toHaveBeenCalledOnce()
+  expect(derive).toHaveBeenCalledTimes(derivations)
+  expect(screen.queryByText(/private export failure/)).toBeNull()
+})
+
+const metadataCases = [
+  ...['organization_id', 'project_id', 'drawing_id', 'input_version_id'].flatMap(key =>
+    ['mismatch', 'missing', 'number', 'null', 'object'].map(type => [`${key} ${type}`, value => {
+      if (type === 'missing') delete value.data.context[key]
+      else value.data.context[key] = { mismatch: '99999999-9999-4999-8999-999999999999', number: 1,
+        null: null, object: { injected: 'private metadata' } }[type]
+    }])),
+  ...[undefined, null, '9', -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity].map(rev =>
+    [`revision ${String(rev)}`, value => { value.data.intake.solar_design_graph.rev = rev }]),
+  ...[undefined, null, 123, {}, '', 'a'.repeat(63), 'a'.repeat(65), 'g'.repeat(64), 'private metadata'].map(sha =>
+    [`digest ${String(sha)}`, value => { value.data.intake.solar_design_graph_sha256 = sha }]),
+]
+it.each(metadataCases)('rejects %s metadata and recovers exact rows and drafts on a clean retry', async (_name, mutate) => {
+  const h = fixture(), drafts = ['01', '00', '01', '01', '0.400']
+  read(); await loaded(); fill(drafts)
+  const baseline = screen.getByRole('table').textContent
+  const bad = response(); mutate(bad)
+  h.client.readContext.mockResolvedValueOnce(bad)
+  read()
+  expect((await screen.findByRole('alert')).textContent).toBe(
+    'Saved design unavailable: the response, drawing identity or graph is invalid. Try reading it again.')
+  expect(screen.queryByText(/Saved design revision/)).toBeNull()
+  expect(screen.queryByText(/private metadata/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  read(); await loaded()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getByRole('table').textContent).toBe(baseline)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+})
+
+it('isolates throwing disposers during StrictMode replacement and final pending unmount', async () => {
+  const callbacks = [], live = new Set(), disposers = []
+  const subscribe = listener => {
+    callbacks.push(listener); live.add(listener)
+    const dispose = vi.fn(() => { live.delete(listener); throw new Error('private disposer injection') })
+    disposers.push(dispose)
+    return dispose
+  }
+  const h = fixture({ strict: true, subscribe })
+  expect(live.size).toBe(1)
+  let resolveOld, resolveNew, resolveFinal
+  h.client.readContext.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const oldCallbacks = [...callbacks]
+  const replacement = { ...h.client, subscribe,
+    readContext: vi.fn(() => new Promise(resolve => { resolveNew = resolve })) }
+  h.update({ projectClient: replacement })
+  expect(oldSignal.aborted).toBe(true)
+  expect(live.size).toBe(1)
+  read()
+  const newSignal = replacement.readContext.mock.calls[0][0].signal
+  await act(async () => {
+    oldCallbacks.forEach(callback => callback())
+    const old = response(); old.data.intake.solar_design_graph.rev = 77
+    resolveOld(old)
+  })
+  expect(newSignal.aborted).toBe(false)
+  expect(screen.getByText('Reading saved design.')).toBeTruthy()
+  expect(screen.queryByText('Saved design revision 77.')).toBeNull()
+  read(); expect(replacement.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => resolveNew(response()))
+  fill()
+  const createObjectURL = vi.fn(() => 'blob:replacement'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:replacement')
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.queryByText(/private disposer injection/)).toBeNull()
+  replacement.readContext.mockImplementationOnce(() => new Promise(resolve => { resolveFinal = resolve }))
+  read()
+  const finalSignal = replacement.readContext.mock.calls[1][0].signal
+  expect(() => h.view.unmount()).not.toThrow()
+  expect(finalSignal.aborted).toBe(true)
+  expect(live.size).toBe(0)
+  disposers.forEach(dispose => expect(dispose).toHaveBeenCalledOnce())
+  await act(async () => { callbacks.forEach(callback => callback()); resolveFinal(response()) })
+  expect(screen.queryByRole('table')).toBeNull()
+  expect(createObjectURL).toHaveBeenCalledOnce()
+})
+
+it.each(['resolve', 'reject'])('preserves drafts when a deferred read settles by %s while busy', async outcome => {
+  const h = fixture(), drafts = ['01', '0', '1', '1', '0.400']
+  fill(drafts)
+  let resolve, reject
+  h.client.readContext.mockImplementationOnce(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+  const createObjectURL = vi.fn(() => 'blob:busy'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const download = () => fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const assertDisabled = () => {
+    expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(screen.getAllByRole('textbox').every(input => input.disabled)).toBe(true)
+    fill(['9', '9', '9', '9', '9']); read(); download()
+    expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(createObjectURL).not.toHaveBeenCalled()
+  }
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  h.update({ busy: true })
+  assertDisabled()
+  await act(async () => {
+    if (outcome === 'resolve') resolve(response())
+    else reject(new Error('private busy failure: token=synthetic-secret'))
+  })
+  assertDisabled()
+  expect(signal.aborted).toBe(false)
+  expect(screen.queryByText(/private busy failure|synthetic-secret/)).toBeNull()
+  h.update({ busy: false })
+  expect(screen.getAllByRole('textbox').every(input => !input.disabled)).toBe(true)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  if (outcome === 'reject') {
+    expect(screen.getByRole('alert').textContent).toBe('Saved design could not be read. Try reading it again.')
+    expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+    expect(screen.queryByText('PASS')).toBeNull()
+    read(); await loaded()
+    expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  } else expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  download()
+  expect(createObjectURL).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:busy')
+  const csv = await new Promise(resolveCsv => {
+    const reader = new FileReader(); reader.onload = () => resolveCsv(reader.result)
+    reader.readAsText(createObjectURL.mock.calls[0][0])
+  })
+  expect(csv).toContain('"panels","1","01","0","PASS"')
+  expect(csv).toContain('"kw_dc","0.4","0.400","0","PASS"')
+})
+
+it('guards reentrant reads before React commits and releases ownership after success', async () => {
+  const h = fixture()
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => {
+    read()
+    return new Promise(yes => { resolve = yes })
+  })
+  act(() => { read(); read() })
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => resolve(response()))
+  read(); await loaded()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+})
+
+it.each(['timeout', 'failure'])('retries after %s and protects the new request from late old completion', async (failure) => {
+  vi.useFakeTimers()
+  const h = fixture(); fill()
+  let resolveOld, rejectOld, resolveNew
+  h.client.readContext.mockImplementationOnce(() => new Promise((yes, no) => { resolveOld = yes; rejectOld = no }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  if (failure === 'timeout') act(() => vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS))
+  else await act(async () => rejectOld(new Error('private failure')))
+  expect(screen.getByRole('alert').textContent).toMatch(/Try reading it again/)
+  expect(oldSignal.aborted).toBe(failure === 'timeout')
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolveNew = yes }))
+  read()
+  await act(async () => resolveOld(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  read()
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await act(async () => resolveNew(response()))
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['1', '0', '1', '1', '0.4'])
+})
+
+it('keeps one live StrictMode observer and aborts the final pending read on unmount', async () => {
+  const h = fixture({ strict: true })
+  expect(h.listeners.size).toBe(1)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  read(); await loaded(); fill()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
+  read()
+  const signal = h.client.readContext.mock.calls[1][0].signal
+  h.view.unmount()
+  expect(signal.aborted).toBe(true)
+  expect(h.listeners.size).toBe(0)
+  await act(async () => resolve(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+})
+
+it.each(['throw', 'nonfunction'])('renders subscription %s failure closed and recovers with a replacement client', async (failure) => {
+  const invalid = { dispose: vi.fn() }
+  const subscribe = () => {
+    if (failure === 'throw') throw new Error('private observer details')
+    return invalid
+  }
+  const h = fixture({ subscribe })
+  expect(screen.getByText(/saved design changes could not be observed/)).toBeTruthy()
+  expect(screen.queryByText(/private observer details/)).toBeNull()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getAllByRole('textbox').every(input => input.disabled)).toBe(true)
+  read()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  const replacement = { ...h.client, subscribe: listener => {
+    h.listeners.add(listener)
+    return () => h.listeners.delete(listener)
+  } }
+  h.update({ projectClient: replacement })
+  expect(h.listeners.size).toBe(1)
+  read(); await loaded(); fill()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  expect(invalid.dispose).not.toHaveBeenCalled()
+})
+
+it('fails closed when a replacement subscription fails after an accepted read', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  h.update({ projectClient: { ...h.client, subscribe: () => { throw new Error('private replacement') } } })
+  expect(h.listeners.size).toBe(0)
+  expect(screen.getByText(/saved design changes could not be observed/)).toBeTruthy()
+  expect(screen.queryByText(/private replacement/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+})
+
+it('ignores an old observer and pending completion after a new scope starts reading', async () => {
+  const h = fixture({ strict: true })
+  const oldObserver = [...h.listeners][0]
+  let resolveOld, resolveNew
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolveOld = yes }))
+  read()
+  const oldSignal = h.client.readContext.mock.calls[0][0].signal
+  const replacement = { ...h.client, readContext: vi.fn(() => new Promise(yes => { resolveNew = yes })) }
+  h.update({ projectClient: replacement })
+  expect(oldSignal.aborted).toBe(true)
+  expect(h.listeners.size).toBe(1)
+  read()
+  const newSignal = replacement.readContext.mock.calls[0][0].signal
+  act(() => oldObserver())
+  await act(async () => resolveOld(response()))
+  expect(newSignal.aborted).toBe(false)
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  await act(async () => resolveNew(response()))
+  fill()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  h.view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
+
+it.each(['blob', 'url', 'anchor', 'click'])('recovers from %s download failure without losing evidence or drafts', async (failure) => {
+  fixture(); read(); await loaded(); fill()
+  const before = screen.getByRole('table').textContent
+  const createObjectURL = vi.fn(() => 'blob:retry'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const secret = () => { throw new Error('private download details') }
+  const NativeBlob = globalThis.Blob
+  if (failure === 'blob') vi.stubGlobal('Blob', vi.fn(secret))
+  if (failure === 'url') createObjectURL.mockImplementationOnce(secret)
+  if (failure === 'click') click.mockImplementationOnce(secret)
+  const createElement = document.createElement.bind(document)
+  if (failure === 'anchor') vi.spyOn(document, 'createElement').mockImplementation((tag, ...args) => {
+    if (tag === 'a') return secret()
+    return createElement(tag, ...args)
+  })
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(screen.getByRole('alert').textContent).toMatch(/Try Download CSV again/)
+  expect(screen.queryByText(/private download details/)).toBeNull()
+  expect(screen.getByRole('table').textContent).toBe(before)
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['1', '0', '1', '1', '0.4'])
+  expect(revokeObjectURL).toHaveBeenCalledTimes(['anchor', 'click'].includes(failure) ? 1 : 0)
+  vi.stubGlobal('Blob', NativeBlob)
+  if (failure === 'anchor') document.createElement.mockRestore()
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(revokeObjectURL).toHaveBeenLastCalledWith('blob:retry')
+  expect(click).toHaveBeenCalled()
+})
+
+it('isolates URL cleanup errors and releases allocations even when scope changes during export', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  const revokeObjectURL = vi.fn(() => { throw new Error('private cleanup') })
+  const createObjectURL = vi.fn(() => 'blob:cleanup')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  createObjectURL.mockImplementationOnce(() => { h.current = false; return 'blob:stale' })
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenLastCalledWith('blob:stale')
+})
+
+it.each(['resolve', 'reject'])('times out and ignores a late %s after a successful retry', async (outcome) => {
+  vi.useFakeTimers()
+  const h = fixture(); fill()
+  let resolve, reject
+  h.client.readContext.mockImplementationOnce(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  await act(async () => { vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS) })
+  expect(signal.aborted).toBe(true)
+  expect(screen.getByRole('alert').textContent).toMatch(/timed out.*Try reading/)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(false)
+  await act(async () => { read() })
+  expect(screen.getByText('Saved design revision 9.')).toBeTruthy()
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { outcome === 'resolve' ? resolve(response()) : reject(new Error('private late rejection')) })
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+})
+
+it.each(['invalidation', 'unmount'])('clears stalled timers on %s', async (action) => {
+  vi.useFakeTimers()
+  const h = fixture()
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
+  read()
+  if (action === 'unmount') h.view.unmount()
+  else { h.current = false; h.emit() }
+  expect(vi.getTimerCount()).toBe(0)
+  await act(async () => { resolve(response()); vi.advanceTimersByTime(RECONCILIATION_READ_TIMEOUT_MS) })
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+})
+
+it('keeps stable unique input guidance for invalid nonblank values', () => {
+  fixture()
+  const inputs = screen.getAllByRole('textbox')
+  const identities = inputs.map(input => [input.id, input.getAttribute('aria-describedby')])
+  expect(new Set(inputs.map(input => input.id)).size).toBe(5)
+  fill(['1e0', '-1', '1.1', 'NaN', 'Infinity'])
+  inputs.forEach((input, index) => {
+    expect(input.getAttribute('aria-invalid')).toBe('true')
+    expect([input.id, input.getAttribute('aria-describedby')]).toEqual(identities[index])
+    input.getAttribute('aria-describedby').split(' ').forEach(id => expect(document.getElementById(id)?.textContent).toBeTruthy())
+  })
+})
+
+it('keeps focused retry controls and announces read and download errors assertively', async () => {
+  const h = fixture()
+  h.client.readContext.mockRejectedValueOnce(new Error('private read'))
+  const button = screen.getByRole('button', { name: 'Read saved design' })
+  button.focus()
+  fireEvent.click(button, { detail: 0 })
+  expect((await screen.findByRole('alert')).textContent).toMatch(/Try reading it again/)
+  expect(document.activeElement).toBe(button)
+  fireEvent.click(button, { detail: 0 }); await loaded(); fill()
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  download.focus()
+  const createObjectURL = vi.fn(() => 'blob:keyboard')
+  createObjectURL.mockImplementationOnce(() => { throw new Error('private export') })
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(download, { detail: 0 })
+  expect(screen.getByRole('alert').textContent).toMatch(/Try Download CSV again/)
+  expect(document.activeElement).toBe(download)
+  fireEvent.click(download, { detail: 0 })
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(document.activeElement).toBe(download)
+})
+
+it.each(['\u0661', '\uff11', '1,0', '1\u200b', '=1+1', '+SUM(1)', '@SUM(1)', '-1+2'])(
+  'rejects pasted lexeme %s in every report field and repairs only that field', async token => {
+    fixture(); read(); await loaded()
+    const drafts = ['01', '00', '001', '01', '0.400']
+    fill(drafts)
+    const inputs = screen.getAllByRole('textbox')
+    const guidance = inputs.map(input => [input.id, input.getAttribute('aria-describedby')])
+    const download = screen.getByRole('button', { name: 'Download CSV' })
+    const createObjectURL = vi.fn(() => 'blob:lexemes')
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    for (const [index, input] of inputs.entries()) {
+      // A paste delivers the whole lexeme in one input change, without key filtering.
+      fireEvent.paste(input, { clipboardData: { getData: () => token } })
+      fireEvent.change(input, { target: { value: token } })
+      expect(download.disabled).toBe(true)
+      fireEvent.click(download)
+      expect(createObjectURL).not.toHaveBeenCalled()
+      inputs.forEach((field, sibling) => {
+        expect(field.value).toBe(sibling === index ? token : drafts[sibling])
+        expect(field.getAttribute('aria-invalid')).toBe(sibling === index ? 'true' : 'false')
+        expect([field.id, field.getAttribute('aria-describedby')]).toEqual(guidance[sibling])
+        field.getAttribute('aria-describedby').split(' ').forEach(id => expect(document.getElementById(id)?.textContent).toBeTruthy())
+      })
+      fireEvent.change(input, { target: { value: drafts[index] } })
+      expect(input.getAttribute('aria-invalid')).toBe('false')
+      expect(download.disabled).toBe(false)
+      expect(inputs.map(field => field.value)).toEqual(drafts)
+    }
+    fireEvent.click(download)
+    const csv = await new Promise(resolve => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[0][0])
+    })
+    expect(csv).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","01","0","PASS"\r\n' +
+      '"optimizers","","00","","UNREADABLE"\r\n"inverters","1","001","0","PASS"\r\n' +
+      '"strings","1","01","0","PASS"\r\n"kw_dc","0.4","0.400","0","PASS"\r\n')
+  })
+
+it('revokes authority during URL allocation and requires fresh evidence and drafts in the replacement scope', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  const revokeObjectURL = vi.fn(() => { throw new Error('private authority cleanup token=synthetic-secret') })
+  const createObjectURL = vi.fn(() => {
+    h.snapshot = { binding, authorityKey: 'b' }
+    return 'blob:revoked'
+  })
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(click).not.toHaveBeenCalled()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:revoked']])
+  h.emit()
+  expect(screen.queryByText(/private authority|synthetic-secret/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  const replacement = { ...h.client, readContext: vi.fn(async () => response()) }
+  h.update({ authorityKey: 'b', projectClient: replacement })
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  expect(replacement.readContext).not.toHaveBeenCalled()
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  expect(download.disabled).toBe(true)
+  read(); await loaded()
+  expect(download.disabled).toBe(true)
+  expect(screen.queryByText('PASS')).toBeNull()
+  fill(['01', '0', '1', '1', '0.400'])
+  createObjectURL.mockImplementationOnce(() => 'blob:fresh')
+  revokeObjectURL.mockImplementation(() => {})
+  fireEvent.click(download)
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL.mock.calls).toEqual([['blob:revoked'], ['blob:fresh']])
+  const csv = await new Promise(resolve => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[1][0])
+  })
+  expect(csv).toContain('"panels","1","01","0","PASS"')
+  expect(csv).toContain('"kw_dc","0.4","0.400","0","PASS"')
+})
+
+it('exports blank unknown DC as unreadable while requiring all four count reports', async () => {
+  fixture(); read(); await loaded(); fill(['1', '0', '1', '1', ''])
+  const createObjectURL = vi.fn(() => 'blob:blank')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const download = screen.getByRole('button', { name: 'Download CSV' })
+  expect(download.disabled).toBe(false)
+  fireEvent.click(download)
+  const csv = await new Promise(resolve => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[0][0])
+  })
+  expect(csv).toContain('"kw_dc","0.4","","","UNREADABLE"')
+  fill(['1', '0', '1', '1', 'invalid']); expect(download.disabled).toBe(true)
+  for (let index = 0; index < 4; index++) {
+    const values = ['1', '0', '1', '1', '']; values[index] = ''; fill(values)
+    expect(download.disabled).toBe(true)
+  }
+})
+
+it('owns nested evidence and derives once per accepted read, never on edits or export', async () => {
+  const derive = vi.spyOn(reconciliation, 'savedReconciliationValues')
+  const h = fixture(), original = response()
+  h.client.readContext.mockResolvedValue(original)
+  read(); await loaded(); fill()
+  expect(derive).toHaveBeenCalledTimes(1)
+  const before = screen.getByRole('table').textContent
+  const graph = original.data.intake.solar_design_graph
+  graph.panels[0].id = 'mutated'
+  graph.frames[0].module_power_watts = 999
+  graph.frames[0].panel_refs[0] = 'mutated'
+  graph.strings[0].ordered_panel_refs[0] = 'mutated'
+  graph.strings[0].module_count = 2
+  graph.inverters[0].equipment_type = 'combiner_box'
+  fill(['2', '0', '1', '1', '0.4']); fill()
+  expect(screen.getByRole('table').textContent).toBe(before)
+  const createObjectURL = vi.fn(() => 'blob:owned')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const csv = await new Promise(resolve => {
+    const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[0][0])
+  })
+  expect(csv).toContain('"kw_dc","0.4","0.4","0","PASS"')
+  expect(derive).toHaveBeenCalledTimes(1)
+  await act(async () => { read() })
+  expect(derive).toHaveBeenCalledTimes(2)
+  expect(screen.getByRole('table').textContent).not.toBe(before)
+  h.current = false; h.emit()
+  expect(derive).toHaveBeenCalledTimes(2)
+  expect(screen.queryByText('PASS')).toBeNull()
+})
+
+it('treats snapshot failure as a retryable read failure', async () => {
+  const clone = globalThis.structuredClone
+  vi.stubGlobal('structuredClone', vi.fn(() => { throw new Error('private snapshot') }))
+  fixture(); fill(); read()
+  expect((await screen.findByRole('alert')).textContent).toBe('Saved design could not be read. Try reading it again.')
+  expect(screen.queryByText(/private snapshot/)).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  vi.stubGlobal('structuredClone', clone)
+  read(); await loaded()
+  expect(screen.getAllByText('PASS')).toHaveLength(4)
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+})
+
+it('reads only on demand, shows five editable rows and exports precisely the current comparison', async () => {
+  const h = fixture()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(['', '', '', '', ''])
+  expect(screen.getAllByRole('row').slice(1).map(row => within(row).getByRole('rowheader').textContent))
+    .toEqual(['Panels', 'Optimizers', 'Inverters', 'Strings', 'kW DC'])
+  read(); await loaded()
+  expect(h.client.readContext).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  fill(['1', '0', '2', '1', '0.400000000000000001'])
+  expect(screen.getAllByText('PASS')).toHaveLength(2)
+  expect(screen.getAllByText('FAIL')).toHaveLength(2)
+  expect(screen.getByText(/no explicit measured optimizer/)).toBeTruthy()
+  const createObjectURL = vi.fn(() => 'blob:comparison'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const blob = createObjectURL.mock.calls[0][0]
+  const csv = await new Promise((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob) })
+  expect(csv).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
+    '"optimizers","","0","","UNREADABLE"\r\n"inverters","1","2","-1","FAIL"\r\n' +
+    '"strings","1","1","0","PASS"\r\n"kw_dc","0.4","0.400000000000000001","-0.000000000000000001","FAIL"\r\n')
+  expect(click).toHaveBeenCalledOnce()
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:comparison')
+  expect(h.client.uploadSolarEdgePdf).not.toHaveBeenCalled()
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+})
+
+it('clears saved values during reread and catches read failures without fake zeros', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  let reject
+  h.client.readContext.mockImplementationOnce(() => new Promise((resolve, no) => { reject = no }))
+  read()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+  await act(async () => reject(new Error('private details')))
+  expect(screen.getByText(/Saved design could not be read/)).toBeTruthy()
+  expect(screen.queryByText(/private details/)).toBeNull()
+})
+
+it.each(['authority', 'binding', 'predicate'])('invalidates %s immediately and aborts/ignores late reads', async (change) => {
+  const h = fixture(); fill()
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  if (change === 'authority') h.snapshot = { ...h.snapshot, authorityKey: 'b' }
+  if (change === 'binding') h.snapshot = { ...h.snapshot, binding: { ...binding, input_version_id: binding.project_id } }
+  if (change === 'predicate') h.current = false
+  h.emit()
+  expect(signal.aborted).toBe(true)
+  await act(async () => resolve(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  expect(screen.getAllByRole('textbox').every(input => input.value === '')).toBe(true)
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+})
+
+it('hides saved values and resets drafts when the scope key changes', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  h.snapshot = { binding, authorityKey: 'b' }
+  h.update({ authorityKey: 'b' })
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  expect(screen.queryByText('PASS')).toBeNull()
+  expect(screen.getAllByRole('textbox').every(input => input.value === '')).toBe(true)
+})
+
+it('disables an untouched panel when its subscription reports invalidation', () => {
+  const h = fixture()
+  h.current = false
+  h.emit()
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+})
+
+it('aborts a pending read on binding replacement and never shows its late result', async () => {
+  const h = fixture()
+  let resolve
+  h.client.readContext.mockImplementationOnce(() => new Promise(yes => { resolve = yes }))
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  const next = { ...binding, input_version_id: binding.project_id }
+  h.snapshot = { binding: next, authorityKey: 'a' }
+  h.update({ solarBinding: next })
+  expect(signal.aborted).toBe(true)
+  await act(async () => resolve(response()))
+  expect(screen.queryByText('Saved design revision 9.')).toBeNull()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+})
+
+it('checks current snapshot again at export even without a notification', async () => {
+  const h = fixture(); read(); await loaded(); fill()
+  const createObjectURL = vi.fn()
+  vi.stubGlobal('URL', { createObjectURL })
+  h.snapshot = { binding, authorityKey: 'other' }
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(createObjectURL).not.toHaveBeenCalled()
+})
+
+it('aborts on unmount and removes its subscription', async () => {
+  const h = fixture()
+  h.client.readContext.mockImplementationOnce(() => new Promise(() => {}))
+  read()
+  const signal = h.client.readContext.mock.calls[0][0].signal
+  h.view.unmount()
+  expect(signal.aborted).toBe(true)
+  expect(h.listeners.size).toBe(0)
+})
+
+it('rejects mismatched identity and malformed graphs and disables export for invalid reports or busy state', async () => {
+  const h = fixture()
+  const wrong = response(); wrong.data.context.project_id = binding.drawing_id
+  h.client.readContext.mockResolvedValueOnce(wrong)
+  read(); await screen.findByText(/response, drawing identity or graph is invalid/)
+  const malformed = response(); delete malformed.data.intake.solar_design_graph.panels
+  h.client.readContext.mockResolvedValueOnce(malformed)
+  read(); await waitFor(() => expect(h.client.readContext).toHaveBeenCalledTimes(2))
+  await screen.findByText(/response, drawing identity or graph is invalid/)
+  read(); await loaded(); fill()
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(false)
+  fireEvent.change(screen.getByLabelText('Panels engineering report/BOM'), { target: { value: '1e0' } })
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  fill(); h.update({ busy: true })
+  expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
+  expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
+})

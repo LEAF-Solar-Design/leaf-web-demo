@@ -1,5 +1,5 @@
 import React from 'react'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ResultPanel from './ResultPanel.jsx'
@@ -31,6 +31,21 @@ const envelope = {
 }
 
 describe('ResultPanel generic table results', () => {
+  it('hides geometry and structured cells and keeps short ids on one line', () => {
+    const jump = vi.fn()
+    render(<ResultPanel navigation={{ jump }} result={{ ok: true, result: { table: {
+      columns: ['id', 'Modules', 'pts', 'geometry', 'metadata'],
+      rows: [['S001', 17, [[1, 2], [3, 4]], { type: 'Polygon' }, ['hidden-value']]],
+    } } }} />)
+    expect(screen.queryByRole('columnheader', { name: 'pts' })).toBeNull()
+    expect(screen.queryByRole('columnheader', { name: 'geometry' })).toBeNull()
+    expect(screen.queryByText('hidden-value')).toBeNull()
+    expect(screen.queryByText('[object Object]')).toBeNull()
+    expect(screen.getByRole('cell', { name: 'S001' })).toHaveStyle({ whiteSpace: 'nowrap', minWidth: '64px' })
+    expect(screen.getByRole('cell', { name: '17' })).toHaveStyle({ textAlign: 'right', fontVariantNumeric: 'tabular-nums' })
+    fireEvent.click(screen.getByRole('button', { name: 'View S001 on canvas' }))
+    expect(jump).toHaveBeenCalledWith('S001')
+  })
   it('renders result.table rows, warnings, scalars and file downloads', () => {
     const createObjectURL = vi.fn(() => 'blob:result')
     vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL: vi.fn() })
@@ -51,5 +66,39 @@ describe('ResultPanel generic table results', () => {
       result={{ ok: true, tool: 'count-by-layer', version: '1.0.0', timing_ms: 1, cost: null, error: null,
         result: { counts: { Panels: 3 }, total: 3 } }} />)
     expect(screen.getByText('Panels')).toBeInTheDocument()
+  })
+})
+
+describe('String result presentation', () => {
+  const stringResult = { ok: true, tool: 'string-panels', result: {
+    strings: [{ id: 'S001', modules: 2, pts: [[0, 0], [1, 0]], voc_at_tmin: 100, inverter: 'INV1' },
+      { id: 'S002', modules: 1, pts: [[2, 0]], voc_at_tmin: 50, inverter: 'INV1' }],
+    stats: { string_count: 2, modules_stringed: 3 },
+    electrical: { worst_string_voc: 100, pass: true }, module: { max_system_voltage: 600 },
+  } }
+  it('renders the four requested columns, bold total and reachable locate control', () => {
+    const jump = vi.fn()
+    const { container } = render(<ResultPanel result={stringResult} navigation={{ jump }} />)
+    expect(screen.getAllByRole('columnheader').map(e => e.textContent)).toEqual(['String', 'Modules', 'Voc at Tmin', 'Inverter', 'Locate'])
+    expect(screen.getByText('Total').closest('tfoot')).toHaveStyle({ fontWeight: '700' })
+    expect(within(screen.getByText('Total').closest('tr')).getByText('3')).toBeInTheDocument()
+    expect(container.textContent).not.toContain('pts')
+    fireEvent.click(screen.getByRole('button', { name: 'View S001 on canvas' }))
+    expect(jump).toHaveBeenCalledWith('S001')
+    expect(screen.getByLabelText('Updated result')).toHaveTextContent('Updated')
+  })
+  it('omits missing tiles and controls, follows check outcome, and dims stale values', () => {
+    const { container, rerender } = render(<ResultPanel result={stringResult} stale />)
+    const summary = screen.getByLabelText('String result summary')
+    expect(within(summary).getByText('STRINGS')).toBeInTheDocument()
+    expect(within(summary).getByText('LIMIT 600 V')).toBeInTheDocument()
+    expect(within(summary).queryByText('PANELS')).toBeNull()
+    expect(within(summary).getByText('Pass')).toHaveStyle({ color: 'var(--status-success)' })
+    expect(screen.getByLabelText('Stale result')).toHaveTextContent('Stale')
+    expect([...container.querySelectorAll('.string-stat-value')].every(e => e.style.opacity === '0.5')).toBe(true)
+    expect(screen.queryByRole('button', { name: /on canvas/ })).toBeNull()
+    rerender(<ResultPanel result={{ ok: true, result: { electrical: { pass: false } } }} />)
+    expect(screen.getByText('Fail')).toHaveStyle({ color: 'var(--status-danger)' })
+    expect(container.querySelectorAll('.string-stat-value')).toHaveLength(0)
   })
 })

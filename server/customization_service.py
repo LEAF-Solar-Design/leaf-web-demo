@@ -1459,8 +1459,19 @@ class CustomizationService:
         ChangeState.ROLLED_BACK: frozenset({"staged"}),
     }
 
-    def recover_stage(self, *, tenant: Any, idempotency_key: str) -> dict[str, Any]:
+    def recover_stage(
+        self, *, tenant: Any, idempotency_key: str | None = None,
+        change_set_id: str | None = None,
+    ) -> dict[str, Any]:
         """Read an author's reserved stage request without current turn authority."""
+        if (bool(idempotency_key) == bool(change_set_id)
+                or (idempotency_key is not None and (
+                    not isinstance(idempotency_key, str) or not idempotency_key.strip()
+                    or len(idempotency_key) > 200))
+                or (change_set_id is not None and (
+                    not isinstance(change_set_id, str) or not re.fullmatch(
+                        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", change_set_id)))):
+            raise CustomizationServiceError("invalid_recovery_request", 422)
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
@@ -1475,12 +1486,17 @@ class CustomizationService:
             "contract": "leaf.customization-stage-recovery.v1", "status": "not_found",
         }
         try:
-            idempotency_key = self._author_stage_key(
-                tenant_id, idempotency_key, binding.subject
-            )
-            change = self.store.get_change_set_by_idempotency(
-                tenant_id=tenant_id, idempotency_key=idempotency_key
-            )
+            if change_set_id is not None:
+                change = self.store.get_change_set(
+                    tenant_id=tenant_id, change_set_id=change_set_id
+                )
+            else:
+                idempotency_key = self._author_stage_key(
+                    tenant_id, idempotency_key, binding.subject
+                )
+                change = self.store.get_change_set_by_idempotency(
+                    tenant_id=tenant_id, idempotency_key=idempotency_key
+                )
         except ChangeSetNotFoundError:
             return not_found
         except CustomizationServiceError as exc:
@@ -1513,10 +1529,72 @@ class CustomizationService:
             raise CustomizationServiceError("customization_stage_failed", 503) from exc
         if job.get("status") not in self._RECOVERY_JOB_STATUSES.get(change.state, frozenset()):
             raise CustomizationServiceError("customization_stage_failed", 503)
+        if change_set_id is not None:
+            job = {**job, "version": change.version}
         return {
             "contract": "leaf.customization-stage-recovery.v1",
             "status": "found", "job": job,
         }
+
+    def retry_author_stage(
+        self, *, tenant: Any, change_set_id: str, expected_version: int,
+        expected_attempt: int, authority_session_id: str | None,
+        authority_turn_id: str | None,
+    ) -> dict[str, Any]:
+        # Lookup checks rollout, role, entitlement, original author and stored
+        # request fingerprint before any admission charge or mutation.
+        recovered = self.recover_stage(tenant=tenant, change_set_id=change_set_id)
+        if recovered["status"] != "found":
+            return recovered
+        if (type(expected_version) is not int or expected_version < 0
+                or type(expected_attempt) is not int or expected_attempt < 0):
+            raise CustomizationServiceError("invalid_recovery_request", 422)
+        if not all(isinstance(value, str) and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", value)
+                for value in (authority_session_id, authority_turn_id)):
+            raise CustomizationServiceError("stage_authority_invalid", 409)
+        if deps.stage_author_identity(tenant, authority_session_id, authority_turn_id) is None:
+            raise CustomizationServiceError("stage_authority_invalid", 409)
+        binding = _binding(tenant)
+        tenant_id = _tenant_id(tenant)
+        keep_authority = False
+        try:
+            self._authority().authorize_stage(
+                binding=binding,
+                builder_entitlement=BuilderEntitlement(tenant_id, binding.subject, True, True),
+            )
+            if _harness_misconfigured():
+                raise CustomizationServiceError("customization_harness_unavailable", 503)
+            change = self.store.retry_stage(
+                tenant_id=tenant_id, change_set_id=change_set_id,
+                author_subject=binding.subject, expected_version=expected_version,
+                expected_attempt=expected_attempt, authority_session_id=authority_session_id,
+                authority_turn_id=authority_turn_id,
+                admit=lambda: author_quota.enforce(
+                    tenant_id, entitlements.resolve_tier(tenant),
+                    idempotency_key=f"stage-retry:{change_set_id}:{expected_version}:{expected_attempt}",
+                ),
+            )
+            keep_authority = (change.authority_session_id, change.authority_turn_id) == (
+                authority_session_id, authority_turn_id)
+            return {"contract": "leaf.customization-stage-recovery.v1", "status": "found",
+                    "job": {**self.stage_status_change(change), "version": change.version}}
+        except ChangeSetNotFoundError:
+            return {"contract": "leaf.customization-stage-recovery.v1", "status": "not_found"}
+        except ChangeSetConflictError as exc:
+            raise CustomizationServiceError("stage_retry_conflict", 409) from exc
+        finally:
+            if not keep_authority:
+                # A concurrent retry can join another turn's winning job. Only
+                # this unused, verified dedicated turn may then be released.
+                try:
+                    import turn_runner
+                    turn_runner.finish_stage_authority(
+                        tenant_id, authority_session_id, authority_turn_id,
+                        binding.subject, stop_reason="stage_retry_not_admitted",
+                    )
+                except Exception as exc:
+                    _LOG.warning("stage_retry_authority_cleanup_failed: exception=%s", type(exc).__name__)
 
     def stage_status(self, *, tenant: Any, change_set_id: str) -> dict[str, Any]:
         try:

@@ -939,7 +939,7 @@ describe('CommandLineArmer (W4f slice B)', () => {
     else { click(5, 5); point('10,0') }
     expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(1)
     expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 5, y1: 5, x2: 10, y2: 0 } })
-    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[5, 5], [10, 0]] }], entityCount: 2 })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[5, 5], [10, 0]] }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
     point('20,0')
     expect(workers[0].posted.filter((m) => m.type === 'applyEdit')).toHaveLength(2)
     expect(workers[0].posted.at(-1)).toMatchObject({ payload: { x1: 10, y1: 0, x2: 20, y2: 0 } })
@@ -1019,7 +1019,7 @@ describe('CommandLineArmer (W4f slice B)', () => {
     expect(screen.getByLabelText('ribbon x2').value).toBe('10')
     expect(screen.getByLabelText('ribbon y2').value).toBe('0')
     expect(workers[0].posted.at(-1)).toMatchObject({ type: 'applyEdit', op: 'createLine', payload: { x1: 0, y1: 0, x2: 10, y2: 0 } })
-    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[0, 0], [10, 0]] }], entityCount: 2 })
+    workers[0].emit({ type: 'editApplied', op: 'createLine', ok: true, createdId: 'e2', entities: [LINE, { ...LINE, id: 'e2', vertices: [[0, 0], [10, 0]] }], entityCount: 2, bytes: new Uint8Array([48, 10]), byteLength: 2 })
     expect(screen.getByTestId('cockpit-active-ask').textContent).toBe('LINE  Specify next point:')
     expect(point('10<90')).toBe(true)
     expect(screen.getByLabelText('ribbon x2').value).toBe('10')

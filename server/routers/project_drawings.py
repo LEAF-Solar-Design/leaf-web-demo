@@ -19,7 +19,7 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -131,7 +131,9 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
         identity.update(input_version_id=str(binding.input_version_id),
                         head_version_id=str(binding.head_version_id), is_head=binding.is_head,
                         intake_sha256=context.intake_sha256)
-        result = {"context": identity, "intake": context.intake}
+        from solar_drawing_roles import discover_roles
+        result = {"context": identity, "intake": context.intake,
+                  "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
             result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
@@ -408,6 +410,7 @@ _OUTPUT_FAILURES = {
     "REPORT_BUSY": (503, "The PDF parser is busy. Try again shortly."),
     "REPORT_PARSE_TIMEOUT": (503, "The PDF could not be parsed within the time limit."),
     "REPORT_PARSE_UNAVAILABLE": (503, "The PDF parser is unavailable."),
+    "REPORT_RESOURCE_LIMIT": (422, "The PDF exceeds an inspection resource limit."),
     "project_execution_disabled": (409, "Project Solar outputs are not enabled on this server."),
     "SIP_R6_INVALID_REQUEST": (400, "Project Solar read request is invalid."),
     "SIP_R6_REQUEST_TOO_LARGE": (413, "Project Solar read request is too large."),
@@ -447,6 +450,8 @@ def _output_failure(reason):
         "IMPORT_STORE_UNAVAILABLE", "IMPORT_WRITES_DRAINED", "REPORT_WRITES_DRAINED",
         "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE")
     body = err_envelope(code, message, retry)
+    if reason == "REPORT_RESOURCE_LIMIT":
+        body["error"]["next_action"] = "Use a smaller report. Your saved tracking is unchanged."
     body["error"]["reason_code"] = reason
     return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
 

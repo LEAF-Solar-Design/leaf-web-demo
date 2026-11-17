@@ -81,6 +81,8 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import { requiresReconciliation } from './errorPresentation.js'
+import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
@@ -778,6 +780,21 @@ function LocalCadEngineHold({ active }) {
 function appSurfaceFromLocation(location, labStatus) {
   return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
+export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runElapsedMs, onStop }) {
+  return (
+    <div className="strip-running enter" data-job-id={jobId || undefined}>
+      <span className="dot live pulse" aria-hidden="true" />
+      <span className="verb">
+        {(runProgress || runStatus || 'running')}
+        {toolName ? `: ${toolName}` : ''}
+        {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
+      </span>
+      <span className="key hot">Esc</span>
+      <button type="button" className="chip-act" onClick={onStop}>Stop</button>
+    </div>
+  )
 }
 
 export default function App() {
@@ -3341,10 +3358,11 @@ export default function App() {
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
+    if (requiresReconciliation(runErr) || requiresReconciliation(result?.error)) return
     const last = lastRunRef.current
     if (refuseProjectSolar(last?.tool?.name)) return
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
-  }, [onRequestCatalogRun, refuseProjectSolar])
+  }, [onRequestCatalogRun, refuseProjectSolar, runErr, result])
 
   // S20: a failed job row's Retry in the rail re-dispatches that job's tool
   // through the same confirm path as onRetry (never a silent run). The row
@@ -3802,8 +3820,16 @@ export default function App() {
     // in-flight beat rather than interleave two typing loops.
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
+    // The version beat lands when a NEWER head is seated. The demo opens the
+    // sample drawing with no version head (drawingState.head stays null until
+    // the first write seats one), and a null baseline used to keep Next locked
+    // forever after the delete committed. In mock the in-memory chain is the
+    // version authority, and an unseeded chain starts at v1.
+    const versionBaseHead = drawingState?.head ?? (mock
+      ? (mockVersions.isSeeded() ? mockVersions.view('head').head : 1)
+      : null)
     tourVersionStartRef.current = step?.action === 'version'
-      ? { seq, drawingId: drawingState?.drawing_id, head: drawingState?.head }
+      ? { seq, drawingId: drawingState?.drawing_id ?? (mock ? mockVersions.DRAWING_ID : null), head: versionBaseHead }
       : null
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -3841,7 +3867,7 @@ export default function App() {
       // AuthorPanel reports staging only after its card or failure is rendered.
       if (cannedSeq.current === seq && step?.action !== 'version' && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState, mock])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
@@ -4032,7 +4058,7 @@ export default function App() {
     [catalog, openFamilies],
   )
   // Mirrors ResultPanel's own canRetryKey condition (its listener is authoritative).
-  const resultOwnsR = !running && (!!runErr ||
+  const resultOwnsR = !running && !requiresReconciliation(runErr) && !requiresReconciliation(result?.error) && (!!runErr ||
     !!(result && result.error && !result.entitlement_required && result.error.retryable))
   const rTarget = useMemo(() => {
     if (running) return null
@@ -6499,11 +6525,17 @@ export default function App() {
                   onSelectEntity={(handle, gesture) => {
                     if (!projectMode && workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     if (!projectMode && canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
+                    if (projectMode && !gesture?.additive) viewerRef.current?.setHighlight?.([], { nativeHandles: true })
                     setSelectedHandle(handle)
                   }}
-                  marqueeGate={() => !projectMode && typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
+                  marqueeGate={() => (projectMode || typeof canvasMarqueeRef.current === 'function') && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
                   onMarqueeSelect={(handles, gesture) => {
-                    if (projectMode || workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (projectMode) {
+                      if (!gesture?.additive) setSelectedHandle(null)
+                      viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, additive: !!gesture?.additive })
+                      return
+                    }
                     canvasMarqueeRef.current?.(handles, { additive: !!gesture?.additive })
                   }}
                   pendingEdit={projectMode ? null : pendingEdit || writeGhost}
@@ -6606,6 +6638,8 @@ export default function App() {
         <div className="environment-activity-fallback" ref={setActivityFallback} />
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
+          <DrawingDependencyReport key={resultDrawingKey}
+            report={(projectMode ? projectDrawing.intake : intake)?.dependency_report} />
           <ResultPanel
             navigation={viewNavigation}
             running={running}
@@ -6615,6 +6649,10 @@ export default function App() {
             error={runErr}
             result={shownResult}
             tool={selectedTool}
+            onSelectModuleSet={selectedTool?.name === 'count-modules' &&
+              result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
+              ? (setIds) => onRequestCatalogRun(selectedTool, { set_ids: setIds }, null, 'catalog', { complete: true })
+              : undefined}
             onRetry={onRetry}
             notices={
               /* NR banners dock UNDER the header of the affected pane (the
@@ -6769,16 +6807,8 @@ export default function App() {
           {/* SB3 state strips ride above the well: running / failed. Decisions
               (the route) attach as resolver rows / decision strips below. */}
           {running && (
-            <div className="strip-running enter">
-              <span className="dot live pulse" aria-hidden="true" />
-              <span className="verb">
-                {(runProgress || runStatus || 'running')}
-                {selectedTool?.name ? `: ${selectedTool.name}` : ''}
-                {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
-              </span>
-              <span className="key hot">Esc</span>
-              <button type="button" className="chip-act" onClick={onStopRun}>Stop</button>
-            </div>
+            <RunningJobStrip jobId={currentJobId} runProgress={runProgress} runStatus={runStatus}
+              toolName={selectedTool?.name} runElapsedMs={runElapsedMs} onStop={onStopRun} />
           )}
           {(runErr || routeErr) && (
             <div className="strip-failed enter" role="alert">
@@ -6789,14 +6819,16 @@ export default function App() {
                   : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
-              <button
-                type="button"
-                className="chip-act"
-                onClick={routeErr ? onDispatch : onRetry}
-              >
-                Retry
-              </button>
-              <span className="key">R</span>
+              {(routeErr || !requiresReconciliation(runErr)) && <>
+                <button
+                  type="button"
+                  className="chip-act"
+                  onClick={routeErr ? onDispatch : onRetry}
+                >
+                  Retry
+                </button>
+                <span className="key">R</span>
+              </>}
             </div>
           )}
           {/* Calm agent-tier advisory (degraded fallback / quota / grant):
@@ -6998,6 +7030,7 @@ export default function App() {
           onExit={onTourExit}
           landed={tourLanded && !running && !routing}
           busy={running || routing}
+          result={result}
         />
       )}
       {/* Lane E operator console entry: renders nothing unless a single

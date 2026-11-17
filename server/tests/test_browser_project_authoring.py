@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import browser_project_authoring as authoring
+import project_author_diagnostics as diagnostics
 import project_reference_materials as originals
 from project_repository_edit_contract import parse_staged_receipt, staged_receipt_digest
 
@@ -116,6 +117,53 @@ def lane(monkeypatch):
 
 def call(lane):
     return authoring.author(lane.tenant, PROJECT, lane.request, cancelled=lambda: lane.cancelled)
+
+
+@pytest.mark.parametrize('profile', [authoring.WEB_PROFILE, authoring.NATIVE_PROFILE])
+@pytest.mark.parametrize('status', [401, 503, True, '503'])
+def test_refused_author_records_only_closed_http_status(lane, monkeypatch, profile, status):
+    lane.response_status = status
+    closed = []
+    original_post = authoring.requests.post
+    def post(*args, **kwargs):
+        response = original_post(*args, **kwargs)
+        def private_body(**kwargs):
+            raise AssertionError('Refused response bodies must not be read for diagnostics')
+        response.json = private_body
+        response.close = lambda: closed.append(True)
+        return response
+    monkeypatch.setattr(authoring.requests, 'post', post)
+    token = diagnostics.begin()
+    try:
+        with pytest.raises(authoring.AuthoringError) as caught:
+            authoring.author(lane.tenant, PROJECT, lane.request, source_profile=profile)
+        assert caught.value.code == 'author_unavailable' and caught.value.status == 503
+        assert str(caught.value) == 'Project author service is unavailable.'
+        expected = {'author_subphase': 'author_http'}
+        if type(status) is int:
+            expected['author_http_status'] = status
+        assert diagnostics.snapshot() == expected
+        assert set(vars(caught.value)) == {'code', 'status', 'author_subphase'}
+        assert closed == [True]
+    finally:
+        diagnostics.end(token)
+    assert diagnostics.snapshot() == {}
+
+
+@pytest.mark.parametrize('status', [200, 409])
+def test_success_and_conflict_do_not_record_unavailable_status(lane, status):
+    lane.response_status = status
+    token = diagnostics.begin()
+    try:
+        if status == 200:
+            assert call(lane)['receipt']['staged_head_commit'] == HEAD
+        else:
+            with pytest.raises(authoring.AuthoringError) as caught:
+                call(lane)
+            assert caught.value.code == 'source_changed' and caught.value.status == 409
+        assert diagnostics.snapshot() == {}
+    finally:
+        diagnostics.end(token)
 
 
 @pytest.mark.parametrize('kind, expected', [

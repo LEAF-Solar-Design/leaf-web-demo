@@ -42,6 +42,11 @@ class DxfParseError(ValueError):
     """The file is not something this minimal parser can honestly read."""
 
 
+def _layout_block_name(name: str) -> bool:
+    """Layout records are containers, unlike renderable anonymous definitions."""
+    return re.fullmatch(r"\*(?:Model_Space|Paper_Space[0-9]*)", name, re.IGNORECASE) is not None
+
+
 def _mleader_number(value, integer=False):
     try:
         number = float(value)
@@ -63,7 +68,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             "binary DXF is not supported; re-save this drawing as ASCII DXF "
             "or upload the DWG instead")
     try:
-        text = raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8-sig", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
         raise DxfParseError(f"undecodable DXF: {exc}") from exc
 
@@ -160,7 +165,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
             name, block, i = _parse_block(pairs, i + 1, parse_errors)
-            if name and not name.startswith("*"):
+            if name and not _layout_block_name(name):
                 block_count += 1
                 if block_count <= 200:
                     blocks[name] = block
@@ -456,6 +461,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 entity["dimensionRef"] = True
     if parse_errors:
         out["parseErrors"] = parse_errors
+    from drawing_dependency_report import from_pairs
+    out["dependency_report"] = from_pairs(pairs)
     return out
 
 
@@ -594,6 +601,11 @@ def _parse_insert(pairs, i, dropped=None):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
+    array = {}
+    if any(code in groups for code in (70, 71, 44, 45)):
+        array = {"columns": _int(groups.get(70, "1")), "rows": _int(groups.get(71, "1")),
+                 "column_spacing": _float(groups.get(44, "0")),
+                 "row_spacing": _float(groups.get(45, "0"))}
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
     return {"name": groups.get(2, ""), "layer": groups.get(8, "0") or "0",
             "x": round(point[0], 3), "y": round(point[1], 3), "z": round(point[2], 3),
@@ -601,6 +613,7 @@ def _parse_insert(pairs, i, dropped=None):
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
+            **array,
             "_properties": _entity_properties(
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 
@@ -663,14 +676,13 @@ def _parse_block_child(pairs, i, kind):
 def _parse_block(pairs, i, parse_errors):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
-    flags = _int(groups.get(70, "0"))
     block = {"base": [round(v, 3) for v in _group_point(groups)],
              "count": 0, "complete": True, "children": []}
     while i < len(pairs):
         code, kind = pairs[i]
         if code == 0 and kind == "ENDBLK":
             _, i = _entity_groups(pairs, i + 1)
-            return ("" if flags & 1 else name), block, i
+            return name, block, i
         if code == 0 and kind in ("ENDSEC", "BLOCK", "EOF"):
             break
         if code != 0:
@@ -690,7 +702,7 @@ def _parse_block(pairs, i, parse_errors):
         if block["count"] <= 60:
             block["children"].append(child)
     block["complete"] = False  # unterminated definition
-    return ("" if flags & 1 else name), block, i
+    return name, block, i
 
 
 def _ocs_to_wcs(point: List[float], normal: List[float]) -> List[float]:

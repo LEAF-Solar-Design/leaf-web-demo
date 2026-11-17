@@ -197,8 +197,11 @@ def test_read_audit_unset_preserves_every_catalog_command_and_environment(tmp_pa
     monkeypatch.delenv("LEAF_READSET_DIR", raising=False)
     monkeypatch.setenv("PYTHONPATH", "existing-python-path")
     for suite in g.build_suites():
-        command = g.reporting_command(suite, list(suite.argv),
-                                      g.suite_trace_env(suite, tmp_path, 1))
+        # Panels now always gets a reporting wrapper (covered separately).
+        # This drill isolates the unchanged read-audit command/environment seam.
+        command = (list(suite.argv) if suite.id == "web-studio-panels-proof" else
+                   g.reporting_command(suite, list(suite.argv),
+                                       g.suite_trace_env(suite, tmp_path, 1)))
         trace_env = g.suite_trace_env(suite, tmp_path, 1)
         before = {**g.clean_env(), **trace_env}
         assert suite.read_audit_dir is None
@@ -488,6 +491,367 @@ def test_file_timing_parser_failure_cannot_change_verdict(tmp_path, monkeypatch,
     assert "LEAF_FILE_TIMING" not in capsys.readouterr().out
 
 
+def _public_phase_row(g, **changes):
+    return {"schema": "leaf.ci.playwright-phase.v1",
+            "file": "web/e2e/campaign-panel.spec.mjs", "line": 3, "column": 1,
+            "worker_index": 0, "retry": 0, "repeat_index": 0, "status": "passed",
+            "duration_ms": 100, "setup_ms": 10, "teardown_ms": 20, "api_ms": 40,
+            "reported_navigation_api_ms": 25, "unattributed_ms": 30,
+            "truncated": False, "basis": g.PW_PHASE_BASIS, **changes}
+
+
+def _phase_text(row):
+    return "LEAF_PW_PHASE " + json.dumps(row) + "\n"
+
+
+def test_panels_phase_parser_sanitizes_and_bounds():
+    g = _load_runner()
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", REPO / "web", [], None)
+    row = _public_phase_row(g)
+    secret = {**row, "title": "SECRET_SENTINEL", "error": {"url": "SECRET_SENTINEL"}}
+    assert g.parse_pw_phases(suite, _phase_text(secret)) == [row]
+    for file in g.PW_PHASE_FILES:
+        valid = {**row, "file": file}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    for status in ("passed", "failed", "timedOut", "skipped", "interrupted", "unknown"):
+        valid = {**row, "status": status, "truncated": True}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad = [{"schema": "other"}, {"basis": "other"}, {"status": "SECRET_SENTINEL"},
+           {"file": "web/e2e/../campaign-panel.spec.mjs"}, {"file": []},
+           {"truncated": 1}, {"duration_ms": 100.006},
+           {"reported_navigation_api_ms": 40.001}]
+    for key in g.PW_PHASE_IDENTITIES:
+        bad.extend({key: value} for value in (True, -1, 0.5, float("inf"), "0"))
+    for key in g.PW_PHASE_DURATIONS:
+        bad.extend({key: value} for value in (True, -1, float("nan"), float("inf"), "0"))
+    for changes in bad:
+        assert g.parse_pw_phases(suite, _phase_text({**row, **changes})) == []
+    for key in row:
+        missing = dict(row)
+        del missing[key]
+        assert g.parse_pw_phases(suite, _phase_text(missing)) == []
+    assert g.parse_pw_phases(suite, "LEAF_PW_PHASE {broken}\nLEAF_PW_PHASE []\n") == []
+    nested = "LEAF_PW_PHASE " + "[" * 1500 + "0" + "]" * 1500 + "\n"
+    assert g.parse_pw_phases(suite, nested + _phase_text(row)) == [row]
+    assert g.parse_pw_phases(suite, _phase_text({**row, "extra": "x" * g.PW_PHASE_MAX_LINE})) == []
+    assert len(g.parse_pw_phases(suite, _phase_text(row) * (g.PW_PHASE_MAX_ROWS + 10))) == g.PW_PHASE_MAX_ROWS
+    other = g.Suite("other", "other", "script", suite.cwd, [], None)
+    assert g.parse_pw_phases(other, _phase_text(row)) == []
+    assert g.parse_pw_phases(suite, _phase_text({**row, "duration_ms": 100.004}))
+    # Line timings are inclusive; their sum may exceed the aggregate API time.
+    with_lines = {**row, "api_lines": [{"line": 7, "api_ms": 40},
+                                      {"line": 8, "api_ms": 30}], "api_lines_omitted": 2}
+    private_lines = {**with_lines, "api_lines": [
+        {**item, "title": "SECRET_SENTINEL", "url": "SECRET_SENTINEL",
+         "location": {"file": "SECRET_SENTINEL"}} for item in with_lines["api_lines"]]}
+    assert g.parse_pw_phases(suite, _phase_text(private_lines)) == [with_lines]
+    for lines in ([], [{"line": i + 1, "api_ms": 0} for i in range(16)],
+                  [{"line": 9007199254740991, "api_ms": 40.004}]):
+        valid = {**row, "api_lines": lines, "api_lines_omitted": 0}
+        assert g.parse_pw_phases(suite, _phase_text(valid)) == [valid]
+    bad_lines = [None, {}, "SECRET_SENTINEL", [None], [[]],
+                 [{"line": 1}], [{"api_ms": 1}],
+                 [{"line": 1, "api_ms": 1}] * 2,
+                 [{"line": i + 1, "api_ms": 1} for i in range(17)]]
+    bad_lines.extend([{"line": value, "api_ms": 1}] for value in
+                     (True, 0, -1, 1.5, "1", float("inf"), 9007199254740992))
+    bad_lines.extend([{"line": 1, "api_ms": value}] for value in
+                     (True, -1, "1", float("nan"), float("inf"), 40.006))
+    for lines in bad_lines:
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines": lines})) == []
+    for omitted in (True, -1, 0.5, "0", None, float("nan"), float("inf"), 10 ** 400):
+        assert g.parse_pw_phases(suite, _phase_text({**with_lines, "api_lines_omitted": omitted})) == []
+
+
+@pytest.mark.parametrize("failure", [None, "parser", "stdout"])
+@pytest.mark.parametrize("rc,status", [(0, "PASS"), (1, "FAIL")])
+def test_panels_phase_run_suite_stdout_and_failures(tmp_path, monkeypatch, capsys, failure, rc, status):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path,
+                    ["npx", "playwright", "test", "--workers=3"], None)
+    row = _public_phase_row(g)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
+        returncode=rc, stdout=_phase_text({**row, "title": "SECRET_SENTINEL"}) + "1 passed (1s)\n",
+        stderr=""))
+    def broken(*_a, **_k):
+        raise ValueError("SECRET_SENTINEL")
+    if failure == "parser":
+        monkeypatch.setattr(g, "parse_pw_phases", broken)
+    elif failure == "stdout":
+        def print_row(text, **_kwargs):
+            if text.startswith("LEAF_PW_PHASE "):
+                raise OSError("SECRET_SENTINEL")
+        monkeypatch.setattr(g, "print", print_row, raising=False)
+    result = g.run_suite(suite, tmp_path, attempt=2, reporting_disabled=True)
+    assert result.status == status
+    output = capsys.readouterr().out
+    assert "SECRET_SENTINEL" not in output
+    rows = [json.loads(line[len("LEAF_PW_PHASE "):]) for line in output.splitlines()
+            if line.startswith("LEAF_PW_PHASE ")]
+    assert rows == ([{**row, "suite_id": suite.id, "attempt": 2}] if failure is None else [])
+
+
+@pytest.mark.parametrize("trusted", [False, True])
+def test_panels_phase_wrapper_preserves_config_and_other_suites(tmp_path, monkeypatch, trusted):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_TRUSTED_CI_DIR", raising=False)
+    monkeypatch.setattr(g, "process_capture_enabled", lambda: False)
+    if trusted:
+        monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(tmp_path / "trusted"))
+    phase = str((g.WEB / "e2e/panelsTimingReporter.mjs").resolve())
+    config = tmp_path / "fixture.mjs"
+    config.write_text("export default {testDir: './e2e', outputDir: './results', "
+                      "reporter: [['list'], ['html', {outputFolder: './report'}], ["
+                      + json.dumps(phase) + "]], webServer: {command: 'serve'}, "
+                      "projects: [{testDir: './project'}]};", encoding="utf-8")
+    argv = ["npx", "--no-install", "playwright", "test", "--config", config.name,
+            "e2e/campaign-panel.spec.mjs", "--workers=3"]
+    suite = g.Suite("web-studio-panels-proof", "panels", "script", tmp_path, argv, None)
+    command = g.reporting_command(suite, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "out")})
+    assert suite.argv == argv
+    index = argv.index("--config") + 1
+    assert command[:index] == argv[:index] and command[index + 1:] == argv[index + 1:]
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    script = ("import assert from 'node:assert/strict'; import config from "
+              + json.dumps(Path(command[index]).as_uri()) + ";\n"
+              + "assert.deepEqual(config.reporter.slice(0, 2), [['list'], ['html', {outputFolder: "
+              + json.dumps(str(tmp_path / "report")) + "}]]);\n"
+              + "assert.equal(config.reporter.filter(r => r[0] === " + json.dumps(phase) + ").length, 1);\n"
+              + "assert.equal(config.reporter.length, " + str(4 if trusted else 3) + ");\n"
+              + ("assert.equal(config.reporter[3][0], "
+                 + json.dumps(str(tmp_path / "trusted/playwright-leaf.mjs")) + ");\n" if trusted else "")
+              + "assert.equal(config.webServer.cwd, " + json.dumps(str(tmp_path)) + ");\n"
+              + "assert.equal(config.testDir, " + json.dumps(str(tmp_path / "e2e")) + ");\n"
+              + "assert.equal(config.outputDir, " + json.dumps(str(tmp_path / "results")) + ");\n"
+              + "assert.equal(config.projects[0].testDir, " + json.dumps(str(tmp_path / "project")) + ");\n")
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    for option in (["--reporter=list," + phase], ["--reporter", "list," + phase]):
+        cli = g.reporting_command(suite, ["npx", "playwright", "test", *option],
+                                  {"LEAF_TEST_REPORT_DIR": str(tmp_path / "cli")})
+        assert cli[-1].split("=", 1)[1].split(",").count(phase) == 1
+    other = g.Suite("other", "other", "script", tmp_path, argv, None)
+    other_command = g.reporting_command(other, argv, {"LEAF_TEST_REPORT_DIR": str(tmp_path / "other")})
+    if trusted:
+        text = Path(other_command[index]).read_text(encoding="utf-8")
+        assert "panelsTimingReporter" not in text
+        assert "playwright-leaf.mjs" in text
+    else:
+        assert other_command == argv
+        assert not (tmp_path / "other").exists()
+
+
+def test_panels_next_strict_mode_suite_and_phase_matrix():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels Next config drill"
+    config = (REPO / "web/next.config.mjs").as_uri()
+    script = "import nextConfig from " + json.dumps(config) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const keys = ['LEAF_READSET_SUITE', 'LEAF_NEXT_DEV_INSTANCE'];
+const saved = keys.map(key => process.env[key]);
+const setEnv = (key, value) => {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+};
+try {
+  const panels = 'web-studio-panels-proof';
+  const suites = [undefined, '', panels, 'web-studio-editor-proof',
+    'web-studio-panels', panels + '-extra', 'prefix-' + panels,
+    panels.toUpperCase(), panels + ' ', ' ' + panels];
+  const phases = [undefined, 'phase-development-server', 'phase-production-build',
+    'phase-production-server', 'phase-export', 'phase-export-outdir',
+    'phase-test', 'phase-info', 'phase-development-server-extra'];
+  for (const instance of [undefined, 'panels-proof']) {
+    setEnv('LEAF_NEXT_DEV_INSTANCE', instance);
+    for (const suite of suites) {
+      setEnv('LEAF_READSET_SUITE', suite);
+      for (const phase of phases) {
+        const config = nextConfig(phase);
+        const development = phase === 'phase-development-server';
+        const label = JSON.stringify({suite, phase, instance});
+        assert.equal(config.reactStrictMode, !(development && suite === panels), label);
+        assert.equal(Object.hasOwn(config, 'output'), !development, label);
+        assert.equal(config.output, development ? undefined : 'export', label);
+        assert.equal(Object.hasOwn(config, 'distDir'), development && !!instance, label);
+        assert.equal(config.distDir,
+          development && instance ? `.next-dev-${instance}` : undefined, label);
+        assert.equal(typeof config.rewrites, development ? 'function' : 'undefined', label);
+        assert.deepEqual(config.images, {unoptimized: true}, label);
+        assert.equal(config.poweredByHeader, false, label);
+        assert.equal(typeof config.webpack, 'function', label);
+      }
+    }
+  }
+} finally {
+  keys.forEach((key, index) => setEnv(key, saved[index]));
+}
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_panels_phase_reporter_public_event_drill():
+    node = shutil.which("node")
+    assert node is not None, "Node is required for the panels phase drill"
+    reporter = (REPO / "web/e2e/panelsTimingReporter.mjs").as_uri()
+    script = "import Reporter from " + json.dumps(reporter) + ";\n" + r"""
+import assert from 'node:assert/strict';
+const secret = 'SECRET_SENTINEL';
+let output = '';
+const write = process.stdout.write;
+process.stdout.write = text => { output += text; return true; };
+try {
+  const reporter = new Reporter();
+  const test = {location: {file: '/repo/web/e2e/campaign-panel.spec.mjs', line: 4, column: 2},
+    repeatEachIndex: 1, title: secret};
+  const result = (extra = {}) => ({startTime: new Date(1000), duration: 100,
+    workerIndex: 2, retry: 0, status: 'passed', errors: [secret], ...extra});
+  const a = result(), b = result({retry: 1});
+  reporter.onTestBegin(test, a);
+  reporter.onTestBegin(test, b);
+  const step = (r, start, duration, title = secret, category = 'pw:api', parent, location) => {
+    const s = {startTime: new Date(start), duration, title, category, parent, location};
+    reporter.onStepEnd(test, r, s);
+    return s;
+  };
+  const before = {title: 'Before Hooks', category: 'hook', startTime: new Date(990), duration: 30};
+  const nested = {title: 'Before Hooks', category: 'hook', parent: before};
+  step(a, 1000, 90, secret, 'pw:api', nested);
+  reporter.onStepEnd(test, a, nested);
+  reporter.onStepEnd(test, a, before);
+  step(a, 1080, 50, 'After Hooks', 'hook');
+  step(a, 1010, 30, 'page.goto(' + secret + ')');
+  step(a, 1030, 40);
+  step(a, 1060, 30, 'frame.reload ' + secret);
+  step(b, 1000, 10, 'page.goto ' + secret);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, a); // Duplicate finish must not emit or recreate state.
+  reporter.onTestBegin(test, a);
+  step(a, 1000, 100);
+  reporter.onTestEnd(test, a);
+  reporter.onTestEnd(test, b);
+  const missing = result({startTime: undefined});
+  reporter.onTestBegin(test, missing);
+  step(missing, 1000, 100);
+  reporter.onTestEnd(test, missing);
+  const invalid = result();
+  reporter.onTestBegin(test, invalid);
+  reporter.onStepEnd(test, invalid, {category: 'pw:api', title: secret, duration: 50});
+  step(invalid, NaN, 100);
+  step(invalid, 1000, NaN);
+  step(invalid, 1000, -1);
+  reporter.onTestEnd(test, invalid);
+  const invalidResult = result({startTime: new Date(NaN), duration: NaN});
+  reporter.onTestEnd(test, invalidResult);
+  const unsupported = {...test, location: {...test.location, file: '/repo/other.spec.mjs'}};
+  const ignored = result();
+  reporter.onTestBegin(unsupported, ignored);
+  step(ignored, 1000, 100);
+  reporter.onTestEnd(unsupported, ignored);
+  const bounded = result();
+  reporter.onTestBegin(test, bounded);
+  for (let i = 0; i < 10001; i++) step(bounded, 1000, 1, secret, 'pw:api', undefined,
+    {file: test.location.file, line: i + 1});
+  reporter.onTestEnd(test, bounded);
+  assert.ok(!output.includes(secret));
+  const rows = output.trim().split('\n').map(line => {
+    assert.ok(line.startsWith('LEAF_PW_PHASE '));
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(rows.map(r => [r.setup_ms, r.teardown_ms, r.api_ms,
+    r.reported_navigation_api_ms, r.unattributed_ms]), [
+      [20, 20, 60, 40, 0], [0, 0, 10, 10, 90], [0, 0, 0, 0, 100],
+      [0, 0, 0, 0, 100], [0, 0, 0, 0, 0], [0, 0, 1, 0, 99]]);
+  assert.equal(rows[0].retry, 0);
+  assert.equal(rows[1].retry, 1);
+  assert.equal(rows[0].repeat_index, 1);
+  assert.equal(rows[5].truncated, true);
+  assert.deepEqual(rows[5].api_lines, Array.from({length: 16}, (_, i) => ({line: i + 1, api_ms: 1})));
+  assert.equal(rows[5].api_lines_omitted, 9984);
+  for (const row of rows.slice(0, 5)) {
+    assert.deepEqual(row.api_lines, []); // Absent locations cannot be inferred.
+    assert.equal(row.api_lines_omitted, 0);
+  }
+  for (const row of rows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    assert.ok(row.reported_navigation_api_ms <= row.api_ms);
+    assert.ok(JSON.stringify(row).length + 'LEAF_PW_PHASE '.length < 4096);
+  }
+  output = '';
+  const located = result();
+  const location = line => ({file: test.location.file, line, column: 1, title: secret});
+  const at = (r, start, duration, line, parent) => step(r, start, duration, secret,
+    'pw:api', parent, location(line));
+  reporter.onTestBegin(test, located);
+  at(located, 1000, 90, 50, nested); // Hook descendants never become line timings.
+  reporter.onStepEnd(test, located, before);
+  step(located, 1080, 50, 'After Hooks', 'hook');
+  const outer = at(located, 1010, 60, 10);
+  at(located, 1040, 30, 10); // Same-line overlaps are unioned.
+  at(located, 1030, 40, 20, outer); // Different lines remain inclusive.
+  at(located, 990, 40, 30);
+  at(located, 1070, 200, 40);
+  step(located, 1040, 5, secret, 'pw:api', undefined,
+    {file: String.raw`\repo\web\e2e\sub\..\campaign-panel.spec.mjs`, line: 60});
+  for (const loc of [undefined, {}, {file: test.location.file},
+    {file: '/foreign/web/e2e/campaign-panel.spec.mjs', line: 70},
+    {file: '/repo/web/e2e/recovery-controls.spec.mjs', line: 71},
+    ...[true, 0, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(location)]) {
+    step(located, 1040, 5, secret, 'pw:api', undefined, loc);
+  }
+  reporter.onTestEnd(test, located);
+  const ranked = result();
+  reporter.onTestBegin(test, ranked);
+  for (let line = 1; line <= 20; line++) at(ranked, 1000, line, line);
+  at(ranked, 1000, 0, 100);
+  at(ranked, 1100, 10, 101);
+  reporter.onTestEnd(test, ranked);
+  const clipped = result();
+  reporter.onTestBegin(test, clipped);
+  at(clipped, 990, 40, 1);
+  at(clipped, 1080, 50, 2);
+  step(clipped, 1040, 10, secret, 'test.step', undefined, location(3));
+  reporter.onTestEnd(test, clipped);
+  assert.ok(!output.includes(secret));
+  const lineRows = output.trim().split('\n').map(line => {
+    assert.ok(line.length < 4096);
+    return JSON.parse(line.slice('LEAF_PW_PHASE '.length));
+  });
+  assert.equal(lineRows.length, 3);
+  assert.deepEqual(lineRows[0].api_lines, [
+    {line: 10, api_ms: 50}, {line: 20, api_ms: 40},
+    {line: 30, api_ms: 10}, {line: 40, api_ms: 10}, {line: 60, api_ms: 5}]);
+  assert.equal(lineRows[0].api_lines_omitted, 0);
+  assert.deepEqual([lineRows[0].setup_ms, lineRows[0].teardown_ms, lineRows[0].api_ms,
+    lineRows[0].unattributed_ms], [20, 20, 60, 0]);
+  assert.ok(lineRows[0].api_lines.reduce((sum, item) => sum + item.api_ms, 0) > lineRows[0].api_ms);
+  assert.deepEqual(lineRows[1].api_lines,
+    Array.from({length: 16}, (_, i) => ({line: 20 - i, api_ms: 20 - i})));
+  assert.equal(lineRows[1].api_lines_omitted, 4);
+  assert.deepEqual(lineRows[2].api_lines, [{line: 1, api_ms: 30}, {line: 2, api_ms: 20}]);
+  assert.equal(lineRows[2].api_lines_omitted, 0);
+  for (const row of lineRows) {
+    assert.ok(Math.abs(row.duration_ms - row.setup_ms - row.teardown_ms - row.api_ms
+      - row.unattributed_ms) <= 0.005);
+    for (const item of row.api_lines) {
+      assert.deepEqual(Object.keys(item).sort(), ['api_ms', 'line']);
+      assert.ok(item.api_ms >= 0 && item.api_ms <= row.api_ms);
+    }
+  }
+} finally { process.stdout.write = write; }
+"""
+    proc = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+
+
 def _failed_log_retention_helper():
     spec = importlib.util.spec_from_file_location(
         "retain_failed_gate_logs", SCRIPTS / "ci/retain_failed_gate_logs.py")
@@ -511,6 +875,7 @@ def test_unprivileged_named_gates_preserve_contract(monkeypatch, tmp_path):
         ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
         ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
         ("server-project-drawing-write", "tests/test_project_drawing_write.py", 9, True),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
     ):
         # The launcher must accept every target the registry routes through it (job 18101).
         launched = runner._py_pytest(target)[2:]
@@ -975,6 +1340,170 @@ def test_failed_log_retention_tail_and_total_budget(tmp_path):
         assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
     assert all(entry["status"] == "budget_exhausted" and entry["truncated"]
                for entry in manifest["files"][8:])
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_failed_log_retention_window_without_marker(tmp_path, monkeypatch, oversized):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    # Marker-like text inside a line must not select a failure window.
+    content = b"prefix FAIL: not a marker\n" * (400 if oversized else 4) + b"final summary\n"
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied == content[-helper.FILE_LIMIT:]
+    entry = manifest["files"][0]
+    assert entry["truncated"] is oversized
+    assert entry["source_sha256"] == hashlib.sha256(content).hexdigest()
+    assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"================ ERRORS ================\n",
+    b"FAIL: test_x\n",
+    b"ERROR: test_x\n",
+    b"Traceback (most recent call last):\n",
+])
+def test_failed_log_retention_failure_window(tmp_path, monkeypatch, marker):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup output\n" * 400 + marker
+               + b"Traceback (most recent call last):\nAssertionError: Roles confirmed\n"
+               + b"0.00s call test_x\n" * 3000 + b"1 failed, 3000 passed\n")
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied.startswith(marker)
+    assert b"AssertionError: Roles confirmed\n" in copied
+    assert b"\n[device CI: middle of log omitted]\n" in copied
+    assert copied.endswith(b"1 failed, 3000 passed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+    assert manifest["files"][0]["truncated"] is True
+    assert manifest["files"][0]["source_sha256"] == hashlib.sha256(content).hexdigest()
+
+
+@pytest.mark.parametrize("limit", [16 * 1024, 64 * 1024])
+def test_failed_log_retention_guarantees_head_after_marker_with_long_line(tmp_path, monkeypatch, limit):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n____ test_x ____\n"
+               + b"E   AssertionError: boom\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000
+               + b"1 failed\n")
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    assert notice
+    assert head == failure[:head_budget]
+    assert head.startswith(marker)
+    assert len(head) >= min(32 * 1024, head_budget)
+    assert tail.endswith(b"1 failed\n")
+    assert len(copied) <= limit
+
+
+@pytest.mark.parametrize("newline_offset", [32 * 1024 - 1, 32 * 1024, 32 * 1024 + 1])
+def test_failed_log_retention_head_newline_guarantee_boundary(tmp_path, monkeypatch, newline_offset):
+    helper = _failed_log_retention_helper()
+    limit = 64 * 1024
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (newline_offset - len(marker)) + b"\n"
+               + b"y" * (100 * 1024) + b"\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000)
+    (logs / "red.log").write_bytes(failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    # Trimming is allowed only at or beyond the guaranteed window.
+    expected_length = newline_offset + 1 if newline_offset >= 32 * 1024 else head_budget
+    assert head == failure[:expected_length]
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= limit
+
+
+def test_failed_log_retention_default_limit_keeps_traceback_after_long_line(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    traceback = b"____ test_x ____\nE   AssertionError: boom\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n" + traceback
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 10000)
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    assert head.startswith(failure[:32 * 1024])
+    assert traceback in head
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"FAIL: test_x\n",
+    b"Traceback (most recent call last):\n",
+    b"=" * 65536 + b" ERRORS =\n",
+])
+def test_failed_log_retention_marker_crosses_digest_chunk(tmp_path, monkeypatch, marker):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 8192)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"x" * (65536 - 5) + b"\n" + marker + b"AssertionError: boundary\n"
+               + b"0.00s call test_x\n" * 1000 + b"1 failed\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    if len(marker) < helper.FILE_LIMIT:
+        assert copied.startswith(marker)
+        assert b"AssertionError: boundary\n" in copied
+    else:
+        # An unbounded banner must still be detected with bounded scanner memory.
+        # The guaranteed head now keeps banner bytes even without a newline.
+        assert copied.startswith(b"=" * 1024)
+        assert b"\n[device CI: middle of log omitted]\n" in copied
+    assert copied.endswith(b"1 failed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_tail_drops_partial_line(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup\n" * 1000 + b"FAIL: test_x\nAssertionError: failure\n"
+               + b"timing row\n" * 1000 + b"credential=" + b"s" * 1500
+               + b"\ncomplete final line\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    # The guaranteed head may end mid-line; only the tail must be line-aligned.
+    assert head.startswith(b"FAIL: test_x\nAssertionError: failure\n")
+    assert tail == b"complete final line\n"
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_overlapping_tail(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    failure = b"FAIL: test_x\nAssertionError: failure\n" + b"timing row\n" * 100 + b"1 failed\n"
+    (logs / "red.log").write_bytes(b"setup\n" * 1000 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    assert (output / "red.log").read_bytes() == failure
 
 
 def test_failed_log_retention_count_cap_and_result_cap(tmp_path):
@@ -1547,6 +2076,35 @@ def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
         _evidence_result(g, log)])
 
 
+@pytest.mark.parametrize("preferred, other", [
+    ("E   AssertionError: real", "FAILED tests/test_x.py::test_x\nnot ok 1 - real"),
+    ("FAILED tests/test_x.py::test_x", "not ok 1 - real"),
+    ("not ok 1 - real", ""),
+])
+def test_failed_suite_evidence_prefers_failure_lines_over_durations(tmp_path, preferred, other):
+    g = _load_runner()
+    log = tmp_path / "durations.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "error: earlier generic diagnostic\n" + other + "\n" + preferred + "\n",
+        encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + preferred
+
+
+@pytest.mark.parametrize("cause", ["Connection refused", None])
+def test_failed_suite_evidence_generic_first_error_skips_durations(tmp_path, cause):
+    g = _load_runner()
+    log = tmp_path / "generic.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "  2s setup tests/test_x.py::test_fatal_path\n"
+        "0.01s teardown tests/test_x.py::test_exception_path\n"
+        + (cause + "\n" if cause else "ordinary output\n"), encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + (cause or "none matched")
+
+
 @pytest.mark.parametrize("marker", ["\u2718 26", "x 26", "1)"])
 def test_failed_suite_evidence_playwright_failure_beats_passing_policy_title(tmp_path, marker):
     g = _load_runner()
@@ -1855,6 +2413,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
             ("src/cadedit/cadEditSurface.test.jsx", 16),
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         )
         assert suite.kind == "vitest" and suite.cwd == g.WEB
         assert suite.timeout_s == 900
@@ -2038,7 +2597,7 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
         "server-w4g7c-01s": 19,
         "server-w4g7c-02s": 25,
         "server-w4g7c-03s": 37,
-        "server-w4g7b-01s": 49,
+        "server-w4g7b-01s": 58,
         "server-w4g7b-02s": 64,
         "server-w4g7b-03s": 40,
         "server-w4g7b-04s": 57,
@@ -3665,6 +4224,8 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     ("src/cad/engineBatchAtomic.test.js", 12, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 13, "PASS"),
     ("src/cad/engineBatchAtomic.test.js", 14, "FAIL"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 4, "PASS"),
+    ("src/cad/solarLifecycleReplay.test.jsx", 5, "FAIL"),
     ("src/cad/unexpected.test.js", 13, "FAIL"),
 ))
 def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, status):
@@ -3679,6 +4240,7 @@ def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, stat
         allowed_vitest_skips=(
             ("src/cad/engineBatchAtomic.test.js", 12),
             ("src/cad/engineBatchAtomic.test.js", 13),
+            ("src/cad/solarLifecycleReplay.test.jsx", 4),
         ),
     )
 
@@ -4081,6 +4643,34 @@ def test_partition_keeps_catalog_order_within_a_shard():
     for shard in g.partition_suites(suites, 8):
         indexes = [order[s.id] for s in shard]
         assert indexes == sorted(indexes)
+
+
+def test_pr_tier_three_shard_memory_rebalance():
+    g = _load_runner()
+    suites = g.build_suites()
+    moves = {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }
+    assert set(moves) <= {s.id for s in suites}
+    # Exercise the real catalog and selections that omit some or all moved IDs.
+    for selection in (suites,
+                      [s for s in suites if s.id != "web-studio-panels-proof"],
+                      [s for s in suites if s.id not in moves]):
+        ordinary = g.partition_suites(selection, 3)
+        partitions = g.partition_pr_tier_suites(selection, 3)
+        placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+        baseline = {s.id: i for i, shard in enumerate(ordinary) for s in shard}
+        assert placement == {sid: moves.get(sid, i) for sid, i in baseline.items()}
+        union = [s.id for shard in partitions for s in shard]
+        assert Counter(union) == Counter(s.id for s in selection)
+        for i, shard in enumerate(partitions):
+            assert shard == [s for s in selection if placement[s.id] == i]
+        for count in (1, 2, 4, 8):
+            assert g.partition_pr_tier_suites(selection, count) == \
+                   g.partition_suites(selection, count)
 
 
 def test_partition_separates_all_three_web_vitest_suites():
@@ -5063,23 +5653,25 @@ def _wellformed_reused_from():
     }
 
 
-def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     data.update(mode="reused", reused_from=_wellformed_reused_from())
     out.write_text(json.dumps(data), encoding="utf-8")
 
-    assert g.verify_gate_proof(out, tree) == 0
+    assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
     assert "VERIFIED mode: reused from 3 CI builds" in capsys.readouterr().out
 
 
-def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     for explicit_mode in (False, True):
         if explicit_mode:
             data["mode"] = "run"
         out.write_text(json.dumps(data), encoding="utf-8")
 
-        assert g.verify_gate_proof(out, tree) == 0
+        assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
         output = capsys.readouterr().out
         assert "VERIFIED: gate proof binds tree" in output
         assert "VERIFIED mode: run" in output
@@ -5143,6 +5735,122 @@ def test_reused_from_problem_never_raises(reused_from):
     assert isinstance(problem, str) and problem
 
 
+def _device_verdict_gate_proof():
+    return {
+        "schema": 2, "kind": "leaf-gate-proof", "tree": "b" * 40,
+        "mode": "device-verdict", "coverage": "selected",
+        "device_verdict": {
+            "bucket": "device-verdicts", "version_id": "version-1", "sha256": "c" * 64,
+            "key": "forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/"
+                   + "a" * 40 + "/dv-0123456789abcdef.json",
+            "repository": "LEAF-Solar-Design/leaf-web-demo", "head_sha": "a" * 40,
+            "run_id": "dv-0123456789abcdef", "verdict_schema": "leaf.forge-ci.device-verdict.v1",
+            "mode": "selected", "state": "success", "shard_total": 2,
+            "shards": [{"shard": i, "run_id": f"dv-{i:016x}", "state": "success"}
+                       for i in range(2)],
+        },
+    }
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypatch, capsys, allowed):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--verify-gate-proof", str(proof),
+                                    "--expect-tree", data["tree"]]
+                        + (["--allow-device-verdict"] if allowed else []))
+    # Device proofs must never depend on or imply the suite catalog's results.
+    monkeypatch.setattr(g, "build_suites", lambda: pytest.fail("device proof consulted catalog"))
+    assert g.main() == (0 if allowed else 1)
+    output = capsys.readouterr().out
+    if allowed:
+        assert output == "VERIFIED mode: device-verdict coverage=selected\n"
+    else:
+        assert output == "NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted\n"
+
+
+@pytest.mark.parametrize("path,value,reason", [
+    (("schema",), 2.0, "schema"),
+    (("kind",), "other", "schema-2"),
+    (("tree",), "c" * 40, "bound to tree"),
+    (("tree",), 42, "40-hex tree"),
+    (("coverage",), "full", "coverage"),
+    (("device_verdict",), [], "object"),
+    (("device_verdict", "extra"), "unknown", "extra"),
+    (("extra",), "unknown", "extra"),
+    (("audit_suites",), [], "audit_suites"),
+    (("total_suites",), 1, "total_suites"),
+    (("results",), [], "results"),
+    (("suites",), [], "suites"),
+    (("reused_from",), {}, "reused_from"),
+    (("device_verdict", "bucket"), "", "bucket"),
+    (("device_verdict", "version_id"), None, "version_id"),
+    (("device_verdict", "sha256"), "z" * 64, "sha256"),
+    (("device_verdict", "key"), "wrong/path", "key"),
+    (("device_verdict", "repository"), "other/repo", "repository"),
+    (("device_verdict", "head_sha"), "d" * 40, "head_sha"),
+    (("device_verdict", "run_id"), "dv-ffffffffffffffff", "run_id"),
+    (("device_verdict", "verdict_schema"), "other", "verdict_schema"),
+    (("device_verdict", "mode"), "full", "mode"),
+    (("device_verdict", "state"), "failure", "state"),
+    (("device_verdict", "shard_total"), 3, "shard_total"),
+    (("device_verdict", "shard_total"), 0, "shard_total"),
+    (("device_verdict", "shard_total"), True, "shard_total"),
+    (("device_verdict", "shard_total"), 2.0, "shard_total"),
+    (("device_verdict", "shards"), [], "shard_total"),
+    (("device_verdict", "shards"), {}, "shards"),
+    (("device_verdict", "shards", 1), None, "entry"),
+    (("device_verdict", "shards", 1, "shard"), 0, "indices"),
+    (("device_verdict", "shards", 1, "shard"), 2, "indices"),
+    (("device_verdict", "shards", 1, "shard"), True, "indices"),
+    (("device_verdict", "shards", 1, "state"), "failure", "success"),
+    (("device_verdict", "shards", 1, "run_id"), "bad", "run_id"),
+    (("device_verdict", "shards", 1, "extra"), True, "entry"),
+])
+def test_device_verdict_gate_proof_refuses_mutations(tmp_path, capsys, path, value, reason):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    output = capsys.readouterr().out
+    assert output.startswith("NOT VERIFIED: ") and reason in output
+
+
+@pytest.mark.parametrize("section,key", [
+    *[((), key) for key in _device_verdict_gate_proof()],
+    *[(("device_verdict",), key) for key in _device_verdict_gate_proof()["device_verdict"]],
+    *[(("device_verdict", "shards", 0), key) for key in ("shard", "run_id", "state")],
+])
+def test_device_verdict_gate_proof_refuses_missing_fields(tmp_path, capsys, section, key):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for part in section:
+        target = target[part]
+    del target[key]
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    assert capsys.readouterr().out.startswith("NOT VERIFIED: ")
+
+
+def test_device_verdict_gate_proof_refuses_missing_shard(tmp_path, capsys):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    data["device_verdict"]["shards"].pop()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, data["tree"], allow_device_verdict=True) == 1
+    assert "shard_total" in capsys.readouterr().out
+
+
 def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     """Same silence class as the shard CLI guards: each of these would
     otherwise answer a different question than the one typed. All must exit 2
@@ -5150,6 +5858,7 @@ def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     proof = tmp_path / "gate-proof.json"
     proof.write_text("{}", encoding="utf-8")
     cases = (
+        ["--allow-device-verdict"],
         ["--verify-gate-proof", str(proof)],                      # no tree
         ["--expect-tree", "0" * 40],                              # no proof
         ["--emit-proof", str(tmp_path / "out.json")],             # no fan-in
@@ -5358,9 +6067,13 @@ def _jobs_catalog(g, count=4):
 
 
 def _jobs_main(g, monkeypatch, capsys, tmp_path, flags):
+    # Byte-output drills exclude optional nondeterministic nested memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     monkeypatch.setattr(sys, "argv", [
         "run-all-gates.py", "--log-dir", str(tmp_path), *flags,
     ])
+    # Isolate scoreboard output from inherited memory telemetry.
+    monkeypatch.delenv("LEAF_GATE_MEM", raising=False)
     rc = g.main()
     return rc, capsys.readouterr().out
 
@@ -5544,6 +6257,19 @@ def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
     g = _load_runner()
     suite = next(suite for suite in g.build_suites() if suite.id == sid)
     assert sid not in g._WEB_SOURCE_READERS
+    if sid == "web-studio-panels-proof":
+        expected = [g._npx(), "--no-install", "playwright", "test", "--config",
+                    "playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
+                    "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
+                    "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
+                    "e2e/project-page-editor.spec.mjs", "--workers=2"]
+        assert suite.argv == expected
+        assert g._BROWSER_DIRECT_PROOFS[sid] == expected[5:]
+        assert g.isolated_browser_suite(suite)
+        drifted = g.replace(suite, argv=[*expected[:-1], "--workers=3"])
+        assert not g.isolated_browser_suite(drifted)
+        assert g.browser_suite_env(drifted) == {}
+        assert g.serial_suite_reason(drifted) == "browser resource declaration drift"
     if g.isolated_browser_suite(suite):
         assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": sid}
         resources = g.conflict_resources(suite)
@@ -6073,6 +6799,31 @@ def test_server_test_targets_count_only_real_targets(tmp_path):
         SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "tests/test_f.py::test_one"]),
     ]
     assert _server_test_targets(suites, tests) == {"test_a.py"}
+
+
+def test_string_tag_suites_registered():
+    runner = _load_runner()
+    suites = runner.build_suites()
+    for sid, target, floor, database in (
+        ("server-solar-string-tags", "tests/test_solar_string_tags.py", 82, False),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
+    ):
+        rows = [suite for suite in suites if suite.id == sid]
+        assert len(rows) == 1
+        suite = rows[0]
+        assert suite.kind == "pytest" and suite.cwd == runner.SERVER
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert not suite.opt_in_env and not suite.db_deferred
+        assert suite.allowed_skip_reasons == () and suite.database_skip_reasons == ()
+        if database:
+            assert suite.argv == runner._unprivileged_pytest(target)
+            launched = runner._py_pytest(target)[2:]
+            assert _unprivileged_helper().validate_args(launched) == launched
+        else:
+            assert suite.argv == runner._py_pytest(target)
+    registered = _server_test_targets(suites, runner.SERVER / "tests")
+    assert {"test_solar_string_tags.py", "test_project_string_tags.py"} <= registered
 
 
 def test_every_server_test_file_is_registered_or_named():

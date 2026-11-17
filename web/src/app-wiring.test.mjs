@@ -30,6 +30,7 @@ import { createWorkspaceController } from './controllers/workspace/createWorkspa
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
+import { requiresReconciliation } from './errorPresentation.js'
 
 it('every solar panel module is mounted from App or explicitly API-only or tutorial-only', () => {
   const exceptions = {
@@ -629,6 +630,7 @@ function r13Fixture({ project = true, context = null, rows = null } = {}) {
   const envelope = { ok: true, result: { new_version: { drawing_id: 'drawing-1', version: 8 } } }
   const env = {
     projectModeRef: { current: project }, drawingErrorRef: { current: null }, projectSolarAppReason,
+    requiresReconciliation, runErr: null, result: null,
     SOLAR_SETTINGS_TOOL_NAME, catalogRunContextRef: { current: context },
     catalogRunContext: context ?? standalone, mock: false, session: { status: 'active' },
     running: false, previewing: false, writeLocked: false, canRunWrite: true, engineDirty: false,
@@ -2876,6 +2878,7 @@ function formBHarness(shell) {
   const tools = [formBTool, { ...formBTool, name: 'solar-combiners' }]
   const env = {
     tools, mock: false, session: { status: 'active' }, canOperate: true,
+    requiresReconciliation, runErr: null, result: null,
     running: false, previewing: false, busy: false, jobRunning: false,
     writeLocked: false, canRunWrite: true, engineDirty: false,
     catalogRunContext: formBContext, catalogRunContextRef: { current: formBContext },

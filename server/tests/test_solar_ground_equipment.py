@@ -58,9 +58,10 @@ CONVERTED_BASIS = "fb773c11b8a39a7e5786b4301a4a3e66cb568fb6273214f4b92c6409e09a7
 SIZED_SHA = "aa7e815c169780207578046380c915903180340502f5c0071f623205b0e07fd8"
 STRUNG_SHA = "d9fbe549a60289ec083f339992f9bd580207c0bded2197535627df5dcf9e6717"
 EQUIPPED_SHA = "9f344ba1e0746ccf22364e550e5a0ae11f5564f35fda61bfacd70c165ee83b47"
-# The whole readiness map has 54 entries after solar-takeoff.
+# The whole readiness map has 55 entries after X02's solar-add-all-inverters.
 # The PVcase readers require conversion on this W1 fixture.
-W1_READINESS_SHA = "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
+W1_READINESS_SHA = "be7f9ecd19cb8694fe3470b0c3beba834d86f3ee5e709c314ec78eaee74cfd2e"
+W1_PRE_INVERTER_READINESS_SHA = "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
 
 
 class FixedDatetime:
@@ -257,7 +258,14 @@ def test_ground_equipment_plain_graph_never_imports_the_codec(graph, monkeypatch
     assert cloud.compact_slot_tables(w1) == {}
     assert cloud.sizing_basis(w1) == W1_BASIS
     assert cloud.sizing_targets(w1, "global") == {w1["settings"]["id"]: w1["settings"]}
-    assert lsha(reasons(w1)) == W1_READINESS_SHA
+    readiness = reasons(w1)
+    assert len(readiness) == 55
+    assert lsha(readiness) == W1_READINESS_SHA
+    # X02 #3197 adds one hook-backed entry. Its guard still requires settings.
+    # Pin the complete previous map as well, so no unrelated reason can drift.
+    assert readiness.pop("solar-add-all-inverters") == "valid_settings_required"
+    assert len(readiness) == 54
+    assert lsha(readiness) == W1_PRE_INVERTER_READINESS_SHA
 
 
 def test_ground_equipment_module_import_never_loads_the_codec():

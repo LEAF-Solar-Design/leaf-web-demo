@@ -8,6 +8,11 @@ import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 
+// Discovery reads and status rendering have dedicated component tests.
+vi.mock('./DrawingRoleProposal.jsx', () => ({
+  default: () => <section data-testid="drawing-role-proposal" />,
+}))
+
 afterEach(cleanup)
 afterEach(() => vi.restoreAllMocks())
 
@@ -124,6 +129,75 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
   return h
 }
 const last = (values) => values[values.length - 1]
+
+it('hosts engineering reconciliation in the admitted project scope and removes it when stale', async () => {
+  const h = fixture()
+  h.mount()
+  expect(screen.getByRole('region', { name: 'Engineering reconciliation' })).toBeTruthy()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Read saved design' }))
+  await screen.findByText(/Saved design unavailable/)
+  expect(h.client.readContext).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  h.current = false
+  act(() => h.emit())
+  expect(screen.queryByRole('region', { name: 'Engineering reconciliation' })).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  await waitFor(() => expect(document.activeElement).toBe(recovery))
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 preserves focus outside the editor when authority expires', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 leaves other Solar editor focus behavior unchanged', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-string-add')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).not.toBe(screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 does not focus a different drawing recovery notice after a context switch', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  const next = { ...B, drawing_id: '66666666-6666-4666-8666-666666666666' }
+  h.snapshot = { ...h.snapshot, binding: next }
+  h.current = false
+  h.update({ solarBinding: next })
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  expect(document.activeElement).not.toBe(recovery)
+  expect(h.submit).not.toHaveBeenCalled()
+})
 
 function solveDraftFixture() {
   const h = fixture('solar-solve-proposal')
@@ -678,6 +752,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-31 sizing dispatches to the manual-global R9 project host', () => {
     const h = fixture('solar-size-strings')
     h.mount()
+    expect(screen.getByTestId('drawing-role-proposal')).toBeInTheDocument()
     h.open()
     stepContract(h)
     expect(h.props.onOpenTool).toHaveBeenCalledWith(h.row)
@@ -1387,7 +1462,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './ProjectReconciliationPanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
@@ -1411,7 +1486,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(24)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(25)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 
@@ -1443,5 +1518,30 @@ it('production cloud Solve opens the saved-group preparation form', async () => 
   expect(screen.queryByLabelText('Frame')).toBeNull()
   expect(screen.queryByLabelText('Request')).toBeNull()
   await waitFor(() => expect(h.client.readContext).toHaveBeenCalledWith(expect.objectContaining({ prepareSolve: true })))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['solar-panel-groups', 'solar-solaredge-accept'])('explains revoked write access for %s without submitting', (name) => {
+  const h = fixture(name)
+  h.mount({ openTool: h.row })
+  const guidance = 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.'
+  expect(screen.queryByText(guidance)).toBeNull()
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false,
+    refusal_reasons: ['ENTITLEMENT_REQUIRED'] } }
+  h.rows = [denied]
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: h.rows }] } })
+  expect(screen.getByText(guidance).getAttribute('role')).toBe('status')
+  expect(h.submit).not.toHaveBeenCalled()
+  const restored = { ...h.row, availability: { ...h.row.availability } }
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [restored] }] } })
+  expect(screen.queryByText(guidance)).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('does not describe denied read permission as lost write access', () => {
+  const h = fixture('solar-string-data')
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false } }
+  h.mount({ openTool: h.row, projectCatalog: { ...h.catalog, families: [{ capabilities: [denied] }] } })
+  expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
   expect(h.submit).not.toHaveBeenCalled()
 })

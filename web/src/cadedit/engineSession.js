@@ -294,6 +294,18 @@ export function projectionEntities(message) {
   return next
 }
 
+function validEditSuccess(message) {
+  const bytes = message.bytes
+  if (!ArrayBuffer.isView(bytes) || Object.prototype.toString.call(bytes) !== '[object Uint8Array]'
+      || bytes.byteLength === 0 || bytes.byteLength > MAX_UNDO_BYTES
+      || (message.byteLength !== undefined && message.byteLength !== bytes.byteLength)) return false
+  return Array.isArray(message.entities) && message.entities.every(entity => entity
+    && typeof entity.type === 'string'
+    && (typeof entity.id === 'string' || (typeof entity.id === 'number' && Number.isFinite(entity.id)))
+    && (entity.vertices === undefined || (Array.isArray(entity.vertices) && entity.vertices.every(point =>
+      Array.isArray(point) && point.length >= 2 && point.every(Number.isFinite)))))
+}
+
 const INITIAL_SESSION = Object.freeze({
   documentId: '',
   documentOrigin: null,
@@ -1270,6 +1282,9 @@ export default function useEngineSession({
   // W4g-3b: whether the load in flight is the head (see openBytes).
   const committedLoadRef = useRef(false)
   const pendingLoadRef = useRef(null)
+  const pendingEditRef = useRef(null)
+  const replacementOpenRef = useRef(null)
+  const fileReadSessionRef = useRef(null)
   const committedVersionRef = useRef(null)
   const onSavedRef = useRef(onSaved)
   onSavedRef.current = onSaved
@@ -1301,6 +1316,7 @@ export default function useEngineSession({
     return Uint8Array.from(owned)
   }
   const clearHistory = () => {
+    pendingEditRef.current = null
     snapshotCopiesRef.current = new WeakMap()
     selectionEditRef.current = null
     batchVerbRef.current = null
@@ -1320,6 +1336,8 @@ export default function useEngineSession({
     boundaryRef.current?.terminate()
     boundaryRef.current = null
     pendingLoadRef.current = null
+    replacementOpenRef.current = null
+    fileReadSessionRef.current = null
     clearHistory()
   }, [])
 
@@ -1338,6 +1356,23 @@ export default function useEngineSession({
   const onWorkerDiedRef = useRef(onWorkerDied)
   onWorkerDiedRef.current = onWorkerDied
 
+  const postEdit = (boundary, message) => {
+    if (pendingEditRef.current) return false
+    pendingEditRef.current = message.op
+    const posted = boundary.post(message)
+    if (!posted) pendingEditRef.current = null
+    return posted
+  }
+  const failOpenRestore = useCallback((opening) => {
+    replacementOpenRef.current = null
+    clearHistory()
+    patch({ ...opening.session, busy: false, entities: NO_ENTITIES, entityCount: 0,
+      ...withSelection([]), savedBytes: opening.bytes, committedEntities: null,
+      engineParsed: false, geometrySource: null, undoDepth: 0, redoDepth: 0,
+      errorKind: SESSION_ERROR.ENGINE,
+      status: 'The previous drawing could not be restored. Download its retained bytes, then open it again.' })
+  }, [patch])
+
   const ensureBoundary = useCallback(() => {
     if (boundaryRef.current) return boundaryRef.current
     const spawn = () => {
@@ -1354,6 +1389,43 @@ export default function useEngineSession({
       // A message from a superseded session (a switch raced the worker's
       // reply) must never seat state over the current document.
       if (generation !== generationRef.current) return
+      if (message.type === 'documentLoaded' && message.documentId === pendingLoadRef.current?.documentId) {
+        selectionEditRef.current = null
+        batchVerbRef.current = null
+        batchNoteRef.current = ''
+      }
+      const opening = replacementOpenRef.current
+      if (opening) {
+        const loaded = message.type === 'documentLoaded'
+          && message.documentId === pendingLoadRef.current?.documentId
+        if (opening.restoring && loaded && !message.refusal) {
+          replacementOpenRef.current = null
+          historyRef.current = opening.history
+          snapshotCopiesRef.current = opening.copies
+          pendingLoadRef.current = opening.pendingLoad
+          committedLoadRef.current = opening.committedLoad
+          committedVersionRef.current = opening.committedVersion
+          setSession(Object.freeze({ ...opening.session, busy: false,
+            errorKind: opening.errorKind,
+            status: 'The new drawing could not be opened. Your previous drawing is still open.' }))
+          return
+        }
+        if (message.type === 'error' || (loaded && message.refusal)) {
+          if (opening.restoring) {
+            failOpenRestore(opening)
+            return
+          }
+          opening.restoring = true
+          opening.errorKind = message.refusal ? SESSION_ERROR.REFUSED : SESSION_ERROR.ENGINE
+          pendingLoadRef.current = { documentId: opening.session.documentId }
+          try {
+            if (boundary.post({ type: 'loadDocument', documentId: opening.session.documentId, bytes: opening.bytes })) return
+          } catch { /* Restore failure must not leave an editable projection. */ }
+          failOpenRestore(opening)
+          return
+        }
+        if (loaded) replacementOpenRef.current = null
+      }
       if (message.type === 'ready') return
       if (message.type === 'documentLoaded') {
         const pendingLoad = pendingLoadRef.current
@@ -1425,6 +1497,26 @@ export default function useEngineSession({
         return
       }
       if (message.type === 'editApplied') {
+        if ((pendingEditRef.current && message.op !== pendingEditRef.current) || typeof message.ok !== 'boolean'
+            || (message.ok && !validEditSuccess(message))) {
+          // The worker may already have mutated its document. Keep trusted
+          // bytes for download, but invalidate alignment instead of claiming
+          // rollback or seating an unproved projection/history snapshot.
+          const savedBytes = restoredSnapshot(sessionRef.current.savedBytes)
+          const committedBytes = restoredSnapshot(sessionRef.current.committedBytes)
+          teardown()
+          setSession(current => Object.freeze({
+            ...INITIAL_SESSION,
+            documentId: current.documentId,
+            documentOrigin: current.documentOrigin,
+            savedBytes,
+            committedBytes,
+            errorKind: SESSION_ERROR.TRANSPORT,
+            status: 'The drawing reply could not be verified. Download your last changes or reopen the drawing.',
+          }))
+          return
+        }
+        pendingEditRef.current = null
         const selectionEdit = message.op === 'batch' ? selectionEditRef.current : null
         selectionEditRef.current = null
         // W4g-6: a batch answers as `batch`; the verb that posted it is the
@@ -1531,7 +1623,7 @@ export default function useEngineSession({
     boundary.post({ type: 'init' })
     boundaryRef.current = boundary
     return boundary
-  }, [patch])
+  }, [failOpenRestore, patch])
 
   // W4g-1b: the ONE load path. `open(file)` reads a chosen file into it;
   // `openBytes(bytes, name)` is what the head opener calls with bytes it
@@ -1540,6 +1632,12 @@ export default function useEngineSession({
   const openBytes = useCallback((bytes, name, opts = null) => {
     if (savingRef.current) {
       patch({ status: 'Wait for the drawing to finish saving, then try again.' })
+      return null
+    }
+    const previous = fileReadSessionRef.current || sessionRef.current
+    fileReadSessionRef.current = null
+    if (replacementOpenRef.current || (previous.engineParsed && previous.busy)) {
+      patch({ status: 'Wait for the current drawing operation to finish, then open another drawing.' })
       return null
     }
     // toString, not instanceof: bytes from another realm (a test harness, a
@@ -1562,11 +1660,20 @@ export default function useEngineSession({
       patch({ errorKind: SESSION_ERROR.REFUSED, status: 'Open refused: the drawing bytes are no longer available.' })
       return null
     }
+    if (previous.engineParsed && historyRef.current.current) {
+      const history = historyRef.current
+      replacementOpenRef.current = { session: previous, history,
+        copies: snapshotCopiesRef.current, pendingLoad: pendingLoadRef.current,
+        committedLoad: committedLoadRef.current, committedVersion: committedVersionRef.current,
+        bytes: Uint8Array.from(snapshotCopiesRef.current.get(history.current) || history.current),
+        restoring: false }
+    }
     committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
     const projectVersion = opts?.project === true && saveTargetRef.current?.kind === 'project'
       && typeof opts.version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.version)
     committedVersionRef.current = committedLoadRef.current && (projectVersion || Number.isInteger(opts.version) && opts.version > 0) ? opts.version : null
-    patch({ busy: true, documentId: name, documentOrigin: null, errorKind: null, status: `Opening ${name}...` })
+    patch({ busy: true, documentId: name, documentOrigin: null,
+      errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
     clearHistory()
@@ -1575,7 +1682,22 @@ export default function useEngineSession({
     pendingLoadRef.current = { documentId: name, drawingUnit: drawingUnitFromBytes(loadBytes), origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
     // Native postMessage clones synchronously. Keep the boundary-facing identity;
     // the private history copy above is independent of later caller mutation.
-    if (!boundary.post({ type: 'loadDocument', documentId: name, bytes })) {
+    let posted
+    try { posted = boundary.post({ type: 'loadDocument', documentId: name, bytes }) }
+    catch { posted = false }
+    if (!posted) {
+      const opening = replacementOpenRef.current
+      if (opening) {
+        replacementOpenRef.current = null
+        historyRef.current = opening.history
+        snapshotCopiesRef.current = opening.copies
+        pendingLoadRef.current = opening.pendingLoad
+        committedLoadRef.current = opening.committedLoad
+        committedVersionRef.current = opening.committedVersion
+        setSession(Object.freeze({ ...opening.session, busy: false, errorKind: SESSION_ERROR.TRANSPORT,
+          status: 'The new drawing could not be sent. Your previous drawing is still open.' }))
+        return null
+      }
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1599,6 +1721,16 @@ export default function useEngineSession({
     }
     const projectTarget = saveTargetRef.current
     if (projectTarget?.kind === 'project') {
+      const current = sessionRef.current
+      if (current.busy || pendingEditRef.current) {
+        patch({ status: 'Wait for the current drawing operation to finish, then open another drawing.' })
+        return null
+      }
+      if (current.savedBytes !== null && current.savedBytes !== current.committedBytes) {
+        patch({ errorKind: SESSION_ERROR.REFUSED,
+          status: 'Save or undo your current edits before opening another drawing. Download the edited DXF to keep a copy.' })
+        return null
+      }
       const generation = generationRef.current
       const scopeKey = projectTarget.scopeKey
       patch({ busy: true, errorKind: null, status: `Adding ${file.name} to the project...` })
@@ -1615,9 +1747,12 @@ export default function useEngineSession({
         return null
       }
     }
+    if (sessionRef.current.engineParsed && sessionRef.current.busy) return null
     const generation = generationRef.current
-    const { documentId, documentOrigin } = sessionRef.current
-    patch({ busy: true, documentId: file.name, documentOrigin: null, errorKind: null, status: `Reading ${file.name}...` })
+    const previous = sessionRef.current
+    const { documentId, documentOrigin } = previous
+    patch({ busy: true, ...(previous.engineParsed ? {} : { documentId: file.name }), documentOrigin: null,
+      errorKind: null, status: `Reading ${file.name}...` })
     let bytes
     try {
       bytes = new Uint8Array(await file.arrayBuffer())
@@ -1629,6 +1764,7 @@ export default function useEngineSession({
     // The read outlived this session (drawing switch, reset, unmount): drop
     // the bytes rather than post a document nobody asked for any more.
     if (generation !== generationRef.current) return
+    fileReadSessionRef.current = previous
     openBytes(bytes, file.name)
   }, [openBytes, patch])
 
@@ -1702,13 +1838,14 @@ export default function useEngineSession({
       patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal })
       return
     }
+    if (pendingEditRef.current) return
     const boundary = boundaryRef.current
     if (!boundary || !sessionRef.current.engineParsed) {
       patch({ errorKind: SESSION_ERROR.TRANSPORT, status: 'Draw refused: no document is open.' })
       return
     }
     patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op: WORKER_OP[op] || op, payload })) {
+    if (!postEdit(boundary, { type: 'applyEdit', op: WORKER_OP[op] || op, payload })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1725,6 +1862,7 @@ export default function useEngineSession({
   // verbs) refuse it with a status and post nothing. Without it, every rung
   // below is exactly the selection-driven ladder it always was.
   const applyEdit = useCallback((op, inputs, options) => {
+    if (pendingEditRef.current) return
     const explicit = options !== null && typeof options === 'object' && options.targetId !== undefined
     if (explicit) {
       if (op === 'group' || op === 'ungroup' || op === 'offset' || op === 'matchprop' || INTERSECT_VERBS[op]) {
@@ -1749,7 +1887,7 @@ export default function useEngineSession({
       batchVerbRef.current = op
       batchNoteRef.current = ''
       patch({ busy: true, errorKind: null })
-      if (!boundaryRef.current.post({ type: 'applyEdit', op: 'batch', payload })) {
+      if (!postEdit(boundaryRef.current, { type: 'applyEdit', op: 'batch', payload })) {
         selectionEditRef.current = null
         batchVerbRef.current = null
         patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: `Edit refused (${op}): the boundary rejected the message.` })
@@ -1776,7 +1914,7 @@ export default function useEngineSession({
       const boundary = boundaryRef.current
       if (!boundary || !sessionRef.current.engineParsed) return
       patch({ busy: true, errorKind: null })
-      if (!boundary.post({ type: 'applyEdit', op: GROUP_OPS[op], payload })) {
+      if (!postEdit(boundary, { type: 'applyEdit', op: GROUP_OPS[op], payload })) {
         patch({ busy: false, errorKind: SESSION_ERROR.TRANSPORT, status: 'Group operation refused by the boundary.' })
       }
       return
@@ -1856,7 +1994,7 @@ export default function useEngineSession({
       batchNoteRef.current = planned.skipped?.includes('layer')
         ? `; layer not copied: an ${destination.type} keeps its layer in this round` : ''
       patch({ busy: true, errorKind: null })
-      if (!boundary.post({ type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
+      if (!postEdit(boundary, { type: 'applyEdit', op: 'batch', payload: { verb: op, steps: lowered.steps } })) {
         batchVerbRef.current = null
         batchNoteRef.current = ''
         patch({
@@ -1878,7 +2016,7 @@ export default function useEngineSession({
       return
     }
     patch({ busy: true, errorKind: null })
-    if (!boundary.post({ type: 'applyEdit', op, payload })) {
+    if (!postEdit(boundary, { type: 'applyEdit', op, payload })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
@@ -1896,7 +2034,7 @@ export default function useEngineSession({
     // `busy` alone cannot gate this: two clicks in one tick both read the
     // pre-render value. A version write is not an operation to do twice, so
     // the in-flight latch is a ref, set before the first await.
-    if (!bytes || !target || sessionRef.current.busy || savingRef.current) return null
+    if (!bytes || !target || !sessionRef.current.engineParsed || sessionRef.current.busy || savingRef.current) return null
     const { committedEntities, entities } = sessionRef.current
     // W4g-3b: the edit as a plan, when the engine holds the head. A diff the
     // contract cannot carry (a kind change, past the operation bound) sends

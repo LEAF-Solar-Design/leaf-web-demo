@@ -1,24 +1,6 @@
-/**
- * DangerZone — reset (delete all files) and delete (remove the project),
- * each behind a typed confirmation naming the project, each showing the
- * server's receipt on success.
- *
- * Card B-U5 acceptance:
- *   Delete requires typed confirmation naming the project; reset distinct
- *   from delete; both show the server receipt.
- *   Undo affordance surfaces exactly what the server contract offers (no
- *   fake undo: if the API is terminal, the UI says so before confirm).
- *
- * Purely props-driven (ExportDialog.jsx / Membership.jsx pattern): this
- * component owns no fetch. `onReset`/`onDelete` are the only things that
- * talk to a server, and `resetUndo`/`deleteUndo` are the server's own
- * account of what — if anything — can be undone for that action; the
- * component never invents an undo path the caller did not hand it. The
- * platform's actual reset/delete routes (platform/project_lifecycle.py
- * reset_project/delete_project) mint no restore token, so a caller wiring
- * this component against that API passes no undo prop and both actions
- * render as terminal — "This can't be undone" — before the typed
- * confirmation is even shown.
+/** Archive and restore use server state; permanent deletion requires the exact name.
+ * Reset keeps its existing independent typed confirmation and receipt flow.
+ * This component owns no fetch and never retries a failed action.
  */
 import { useLayoutEffect, useRef, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
@@ -28,11 +10,12 @@ function errorMessage(e, fallback) {
 }
 
 function DangerAction({
-  kind, // 'reset' | 'delete' — used only for aria labels/test hooks, never shared state
+  kind, // used only for aria labels/test hooks, never shared state
   projectName,
   heading,
   description,
   confirmLabel,
+  requiresName = true,
   undo, // null/undefined (terminal, no undo) | { description: string }
   onRun, // async () => result with result.receipt.receipt_id
 }) {
@@ -43,18 +26,20 @@ function DangerAction({
   const [receipt, setReceipt] = useState(null)
   const triggerRef = useRef(null)
   const inputRef = useRef(null)
+  const confirmRef = useRef(null)
   const openedRef = useRef(false)
 
   useLayoutEffect(() => {
     if (open) {
       openedRef.current = true
-      inputRef.current?.focus()
+      const target = inputRef.current || confirmRef.current
+      target?.focus()
     } else if (openedRef.current) {
       triggerRef.current?.focus()
     }
   }, [open])
 
-  const matches = typed.trim() === projectName
+  const matches = !requiresName || (kind === 'delete' ? typed === projectName : typed.trim() === projectName)
 
   const start = () => {
     setOpen(true)
@@ -73,12 +58,12 @@ function DangerAction({
     setBusy(true)
     setError(null)
     try {
-      const result = await onRun()
+      const result = await onRun(...(kind === 'delete' ? [typed] : []))
       setReceipt(result?.receipt || null)
       setOpen(false)
       setTyped('')
     } catch (e) {
-      setError(errorMessage(e, `${kind === 'delete' ? 'Delete' : 'Reset'} did not go through. Nothing changed.`))
+      setError(errorMessage(e, `${heading} did not go through. Nothing changed.`))
     } finally {
       setBusy(false)
     }
@@ -107,7 +92,7 @@ function DangerAction({
             </p>
           )}
 
-          <label className="danger-action-typed">
+          {requiresName && <label className="danger-action-typed">
             Type <strong>{projectName}</strong> to confirm
             <input
               ref={inputRef}
@@ -117,10 +102,11 @@ function DangerAction({
               disabled={busy}
               aria-label={`Type the project name to confirm ${kind}`}
             />
-          </label>
+          </label>}
 
           <div className="danger-action-buttons">
             <button
+              ref={confirmRef}
               type="button"
               className="chip-danger-confirm"
               disabled={!matches || busy}
@@ -146,10 +132,44 @@ function DangerAction({
   )
 }
 
+function RestoreAction({ onRestore }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [receipt, setReceipt] = useState(null)
+  const restore = async () => {
+    if (busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await onRestore()
+      setReceipt(result?.receipt || null)
+    } catch (e) {
+      setError(errorMessage(e, 'Restore did not go through. Nothing changed.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div aria-label="Restore project">
+      <button type="button" disabled={busy} onClick={restore}>{busy ? 'Restoring…' : 'Restore'}</button>
+      {error && <p role="alert">{error}</p>}
+      {receipt && (
+        <p className="danger-action-receipt" role="status">
+          Receipt: <span className="danger-action-receipt-id">{receipt.receipt_id}</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
 export default function DangerZone({
   projectName,
   resetUndo = null,
-  deleteUndo = null,
+  projectStatus = 'active',
+  archivedAt,
+  restoreUntil,
+  onArchive,
+  onRestore,
   onReset,
   onDelete,
 }) {
@@ -166,15 +186,31 @@ export default function DangerZone({
         undo={resetUndo}
         onRun={onReset}
       />
-      <DangerAction
-        kind="delete"
-        projectName={projectName}
-        heading="Delete project"
-        description="Removes this project and revokes every member's access."
-        confirmLabel="Delete"
-        undo={deleteUndo}
-        onRun={onDelete}
-      />
+      {projectStatus === 'archived' ? (
+        <>
+          <p>Archived on {archivedAt} · restorable until {restoreUntil}</p>
+          <RestoreAction onRestore={onRestore} />
+          <DangerAction
+            kind="delete"
+            projectName={projectName}
+            heading="Delete permanently"
+            description="Deletes this project permanently and revokes every member's access. Deletion is permanent and cannot be undone."
+            confirmLabel="Delete permanently"
+            onRun={onDelete}
+          />
+        </>
+      ) : (
+        <DangerAction
+          kind="archive"
+          projectName={projectName}
+          heading="Archive project"
+          description="Hidden from lists and read-only once archived. Restorable for 30 days."
+          confirmLabel="Archive project"
+          requiresName={false}
+          undo={{ description: 'You can restore this project for 30 days.' }}
+          onRun={onArchive}
+        />
+      )}
     </section>
   )
 }
