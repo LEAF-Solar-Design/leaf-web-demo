@@ -961,3 +961,30 @@ Stop on another panel's abort, stale drafts, changed CAS baseline, retained
 subscription, export disagreement or uncaught error. No staging or database
 claim is made. The separate focused tests also cover losing shared-client
 Save drafts, per-field receipt substitution and edit/revert during Save.
+
+## Same-scope client replacement replay
+
+Parent: X05 report receipt isolation. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-client-replacement-qodfmvug/replay.py`.
+Use the local React/esbuild and Python Playwright setup above. Two actual panels
+use independent clients; A then receives a replacement client at the same drawing
+and authority. The shared file API and saved-design reads are mocked. The
+1920 by 2200 forced-colors viewport fits both panels and all five rows.
+
+1. Read saved design in both panels. Enter A's Panels `001` and Save, holding
+   its response after file revision 1 commits. Other fields are `0,01,1,0.4`.
+2. Reload B, change its Panels to `003`, then Save at expected revision 1.
+   Require its saved cue and file revision 2.
+3. Replace only A's client, leaving the drawing and authority unchanged.
+   Require Save disabled and the explicit Read prompt. Read saved design again.
+   Require the loaded report cue and `003` from revision 2.
+4. Deliver the old client's Save receipt last. A must keep `003` with no saved
+   cue from that receipt. Download both actual CSVs and compare all five rows
+   with each visible table. Capture `same-scope-client-replaced.png`.
+5. Enter A's Panels `004`, Save and export again. Require expected revision 2,
+   file revision 3, unchanged B values and exact CSV/DOM rows. Three exports
+   must equal 15 rows. `proof.json` binds source hashes, traffic and cleanup.
+
+Stop on stale drafts, a false saved cue, an incorrect CAS baseline or a row
+mismatch. Browser, context, server and thread close in `finally`. The retained
+replay and `REPLAY.md` are offline proof, without database or staging acceptance.
