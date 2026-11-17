@@ -8,6 +8,7 @@ const valid = row => row && typeof row.block === 'string' && row.block && typeof
   && (row.design_window ?? row.insertion_bounds)[0] <= (row.design_window ?? row.insertion_bounds)[2]
   && (row.design_window ?? row.insertion_bounds)[1] <= (row.design_window ?? row.insertion_bounds)[3]
 const identity = row => JSON.stringify([row.block, row.layer])
+const PAGE_SIZE = 10
 
 // Data and persistence are injected. A resolved callback confirms once; rejection
 // preserves the chosen set for retry. Cancellation supplies an aborted signal.
@@ -22,7 +23,10 @@ export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
 function Confirmation({ rows, initial, onConfirm, onCancel }) {
   const radioName = useId()
   const [selected, select] = useState(rows[initial] ? identity(rows[initial]) : null)
+  const [page, setPage] = useState(Math.floor(initial / PAGE_SIZE))
   const selectedRow = rows.find(row => identity(row) === selected)
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
+  const visible = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
   const [busy, setBusy] = useState(false)
   const [confirmed, setConfirmed] = useState(false)
   const [cancelled, setCancelled] = useState(false)
@@ -68,11 +72,18 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
   return <form onSubmit={submit} aria-label="Confirm drawing roles">
     <fieldset disabled={busy}><legend>Module set</legend>
       {rows.length > 1 && <p>Choose the module set for this design.</p>}
-      {rows.map(row => <label key={identity(row)}>
+      <p>{rows.length} selectable module sets</p>
+      {visible.map(row => <label key={identity(row)}>
         <input type="radio" name={radioName} checked={selected === identity(row)} onChange={() => select(identity(row))} />
         {row.block} on {row.layer}, {row.count} inserts
       </label>)}
       {!rows.length && <p>No module set is available.</p>}
+      {pages > 1 && <nav aria-label="Selectable module set pages">
+        <button type="button" disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous choices</button>
+        <span role="status">Choices page {page + 1} of {pages}</span>
+        <button type="button" disabled={page + 1 === pages} onClick={() => setPage(value => value + 1)}>Next choices</button>
+      </nav>}
+      {selectedRow && <p>Selected module set: {selectedRow.block} on {selectedRow.layer}, {selectedRow.count} inserts</p>}
     </fieldset>
     {error && <p role="alert">{error}</p>}
     <button type="submit" disabled={busy || !rows.length || typeof onConfirm !== 'function'}>{busy ? 'Saving roles…' : 'Confirm roles'}</button>

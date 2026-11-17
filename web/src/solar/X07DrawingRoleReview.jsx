@@ -11,8 +11,12 @@ export default function X07DrawingRoleReview(props) {
   </div>
   const confirm = async (selection, options) => {
     if (!read.isCurrent() || options.signal.aborted) return { ok: false, message: 'The drawing scope changed. Read roles again.' }
-    return props.onConfirm(selection, { ...options, authorityKey: props.authorityKey,
+    const result = await props.onConfirm(selection, { ...options, authorityKey: props.authorityKey,
       solarBinding: { ...props.solarBinding } })
+    if (!result || typeof result !== 'object' || Array.isArray(result) || result.ok !== true) {
+      return { ok: false, message: 'Roles could not be saved. Try again.' }
+    }
+    return { ok: true }
   }
   return <X07RoleConfirmation key={read.readKey} proposal={read.data}
     onConfirm={typeof props.onConfirm === 'function' ? confirm : undefined} onCancel={props.onCancel} />

@@ -19,6 +19,12 @@ export function normalizeDrawingRoles(value) {
     first_choice: value.module.first_choice == null ? null : row(value.module.first_choice),
     candidates: value.module.candidates.map(row), competing: value.module.competing,
   } }
+  const identities = new Set()
+  for (const candidate of result.module.candidates) {
+    const identity = JSON.stringify([candidate.block, candidate.layer])
+    if (identities.has(identity)) throw new TypeError('Ambiguous module set')
+    identities.add(identity)
+  }
   for (const role of ['roof', 'obstruction']) {
     if (!Array.isArray(value[role]) || value[role].length > MAX_SETS) throw new TypeError('Invalid drawing roles')
     result[role] = value[role].map(row)
