@@ -127,7 +127,8 @@ def parse_legend_pages(pages):
             candidate = candidate or (label is not None and len(tokens) >= 2
                                       and _POSITIVE.fullmatch(tokens[1]) is not None
                                       and len(window) == 5
-                                      and _MODEL.fullmatch(tokens[3]) is not None
+                                      and (_MODEL.fullmatch(tokens[3]) is not None
+                                           or re.fullmatch(r"[0-9]+", tokens[2]) is None)
                                       and _boxes(window) is not None)
             if not candidate:
                 index += 1

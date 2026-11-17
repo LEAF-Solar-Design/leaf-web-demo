@@ -257,3 +257,12 @@ def test_aligned_numeric_diagram_sequence_is_not_a_model_row():
     result = oracle.parse_legend_pages([page(diagram + row("2.1"))])
     assert result.status == "READABLE"
     assert result.totals == {"modules": 7, "optimizers": 4, "inverters": 1, "strings": 1}
+
+
+@pytest.mark.parametrize("marker", ["*", "?", "invalid"])
+@pytest.mark.parametrize("model", ["9Demo", "Demo-9", "9"])
+def test_compound_invalid_marker_and_model_cannot_silently_shrink_legend(marker, model):
+    words = row() + row("2.1", marker=marker, model=model)
+    result = oracle.parse_legend_pages([page(words)])
+    assert_unreadable(result, "INVALID_ROW_GRAMMAR")
+    assert len(result.strings) == 1
