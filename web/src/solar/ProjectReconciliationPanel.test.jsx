@@ -128,6 +128,29 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
 
+it.each([2147483646, 2147483647])('retains drafts, CSV and CAS at the revision ceiling after loading %i', async initialRevision => {
+  const h = fixture(); canonicalReports(h, { response: totalsResponse(initialRevision, reportValues) })
+  read(); await reportsLoaded()
+  if (initialRevision === 2147483646) {
+    h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2147483647, reportValues))
+    saveTotals(); await screen.findByText('Engineering totals saved.')
+    expect(h.client.saveEngineeringTotals.mock.calls[0][0].expectedRevision).toBe(2147483646)
+  }
+  const dirty = ['2', '0', '1', '1', '0.5']; fill(dirty)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2147483648, dirty))
+  saveTotals(); await screen.findByText('Engineering totals could not be saved. Retry Save engineering totals.')
+  expect(inputValues()).toEqual(dirty); expect(screen.queryByText('Engineering totals saved.')).toBeNull()
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 2147483647, drafts: dirty })
+  const createObjectURL = vi.fn(() => 'blob:revision-ceiling')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toContain('"panels","1","2","-1","FAIL"')
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2147483648, dirty))
+  saveTotals(); await screen.findByText('Engineering totals could not be saved. Retry Save engineering totals.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0].expectedRevision).toBe(2147483647)
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 
