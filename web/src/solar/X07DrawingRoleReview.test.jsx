@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import X07DrawingRoleReview from './X07DrawingRoleReview.jsx'
+import X07DrawingRoleProfileReview from './X07DrawingRoleProfileReview.jsx'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 
@@ -159,3 +160,55 @@ it('runs the actual review through the disposable Python adapter bridge', () => 
     '--deps', path.resolve('node_modules')], { cwd: root, timeout: 30000, encoding: 'utf8' })
   expect(output).toContain('PASS: role review adapter journey')
 }, 40000)
+
+it('hides synchronous and rejected private callback errors behind a fixed refusal', async () => {
+  for (const callback of [() => { throw new Error('PRIVATE_SYNC_SENTINEL') }, () => Promise.reject(new Error('PRIVATE_ASYNC_SENTINEL'))]) {
+    const confirm = vi.fn().mockImplementationOnce(callback).mockResolvedValueOnce({ ok: true })
+    const view = render(<X07DrawingRoleReview {...scope} projectClient={{ readContext: async () => reply }} onConfirm={confirm} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm roles' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/^Roles could not be saved\. Try again\.$/)
+    expect(document.body.textContent).not.toContain('PRIVATE_')
+    expect(screen.getByRole('radio', { name: /Review Panel/ })).toBeChecked()
+    expect(screen.queryByText('Roles confirmed.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm roles' }))
+    expect(await screen.findByText('Roles confirmed.')).toBeTruthy()
+    expect(confirm).toHaveBeenCalledTimes(2)
+    view.unmount()
+  }
+})
+
+it('restarts a cancelled review before submission with a fresh scoped read and explicit click', async () => {
+  const client = { readContext: vi.fn().mockResolvedValue(reply) }
+  const confirm = vi.fn().mockResolvedValue({ ok: true }), cancel = vi.fn()
+  render(<X07DrawingRoleReview {...scope} projectClient={client} onConfirm={confirm} onCancel={cancel} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+  expect(cancel).toHaveBeenCalledTimes(1)
+  expect(confirm).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Read roles again' }))
+  await screen.findByRole('button', { name: 'Confirm roles' })
+  expect(client.readContext).toHaveBeenCalledTimes(2)
+  expect(confirm).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm roles' }))
+  expect(await screen.findByText('Roles confirmed.')).toBeTruthy()
+  expect(confirm).toHaveBeenCalledTimes(1)
+})
+
+it('composes confirmation and optional-role editing while retaining the supplied old pin', async () => {
+  const pin = { customer_key: 'synthetic-a', profile_id: 'profile-a', version: 1 }
+  const profile = { ...pin, roles: { module: { block: 'Review Panel', layer: 'MODULES' } } }
+  const loadProfile = vi.fn().mockResolvedValue(profile)
+  const saveProfile = vi.fn(async (customer, roles) => ({ ...profile, version: 2, roles }))
+  render(<X07DrawingRoleProfileReview {...scope} customerKey="synthetic-a" drawingKey="drawing-a"
+    projectClient={{ readContext: async () => reply }} onConfirm={async () => ({ ok: true, applied_profile: pin })}
+    loadProfile={loadProfile} saveProfile={saveProfile} />)
+  expect(loadProfile).not.toHaveBeenCalled()
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm roles' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Add roof role' }))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Roof layer' }), { target: { value: 'ROOF' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  expect(await screen.findByText('Profile version: 2')).toBeTruthy()
+  expect(screen.getByText('Project is pinned to version 1.')).toBeTruthy()
+  expect(saveProfile.mock.calls[0][0]).toBe('synthetic-a')
+  expect(saveProfile.mock.calls[0][1].roof).toEqual({ layer: 'ROOF' })
+  expect(pin.version).toBe(1)
+})

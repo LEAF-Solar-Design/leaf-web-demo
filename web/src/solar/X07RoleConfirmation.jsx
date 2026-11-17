@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 const valid = row => row && typeof row.block === 'string' && row.block && typeof row.layer === 'string'
   && row.layer && Number.isSafeInteger(row.count) && row.count >= 0
@@ -13,18 +13,23 @@ const PAGE_SIZE = 10
 // Data and persistence are injected. A resolved callback confirms once; rejection
 // preserves the chosen set for retry. Cancellation supplies an aborted signal.
 export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
-  const rows = Array.isArray(proposal?.module?.candidates) ? proposal.module.candidates.filter(valid) : []
-  const first = proposal?.module?.first_choice
-  const initial = Math.max(0, rows.findIndex(row => row.block === first?.block && row.layer === first?.layer))
-  return <Confirmation key={JSON.stringify([proposal?.id, [...rows].sort((a,b) => identity(a).localeCompare(identity(b)))])} rows={rows} initial={initial}
+  const model = useMemo(() => {
+    const rows = Array.isArray(proposal?.module?.candidates) ? proposal.module.candidates.filter(valid) : []
+    const first = proposal?.module?.first_choice
+    const initial = Math.max(0, rows.findIndex(row => row.block === first?.block && row.layer === first?.layer))
+    const key = JSON.stringify([proposal?.id, [...rows].sort((a,b) => identity(a).localeCompare(identity(b)))])
+    return { rows, initial, key }
+  }, [proposal])
+  return <Confirmation key={model.key} rows={model.rows} initial={model.initial}
     onConfirm={onConfirm} onCancel={onCancel} />
 }
 
 function Confirmation({ rows, initial, onConfirm, onCancel }) {
   const radioName = useId()
-  const [selected, select] = useState(rows[initial] ? identity(rows[initial]) : null)
+  const [selected, select] = useState(() => rows[initial] ? identity(rows[initial]) : null)
   const [page, setPage] = useState(Math.floor(initial / PAGE_SIZE))
-  const selectedRow = rows.find(row => identity(row) === selected)
+  const byIdentity = useMemo(() => new Map(rows.map(row => [identity(row), row])), [rows])
+  const selectedRow = byIdentity.get(selected)
   const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE))
   const visible = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
   const [busy, setBusy] = useState(false)
