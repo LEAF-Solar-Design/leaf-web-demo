@@ -436,6 +436,64 @@ it.each(['Save', 'Reload'])('ignores visibility events during held %s', async op
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
 })
 
+const persistenceEvents = {
+  page: () => [new PageTransitionEvent('pagehide', { persisted: true }), new PageTransitionEvent('pageshow', { persisted: true })],
+  connectivity: () => [new Event('offline'), new Event('online')],
+  print: () => [new Event('beforeprint'), new Event('afterprint')],
+  storage: () => [binding.drawing_id, '99999999-9999-4999-8999-999999999999'].map(drawing =>
+    new StorageEvent('storage', { key: 'engineering-reconciliation/' + drawing, newValue: 'synthetic foreign report' })),
+}
+
+it.each(Object.keys(persistenceEvents).flatMap(kind => ['Save', 'Reload'].map(operation => [kind, operation])))
+('isolates %s lifecycle events during held %s', async (kind, operation) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(dirtyFormValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const reads = h.client.loadEngineeringTotals.mock.calls.length
+  const writes = h.client.saveEngineeringTotals.mock.calls.length
+  for (const event of persistenceEvents[kind]()) fireEvent(window, event)
+  expect(inputValues()).toEqual(dirtyFormValues)
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(reads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes)
+  await act(async () => settle(totalsResponse(1, dirtyFormValues)))
+  expect(inputValues()).toEqual(dirtyFormValues)
+  const createObjectURL = vi.fn(() => 'blob:lifecycle')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes + 1)
+})
+
+it.each(['paste', 'cut'].flatMap(action => ['success', 'rejection'].map(outcome => [action, outcome])))
+('retains %s edits across held Save %s using synthetic clipboard events', async (action, outcome) => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle, reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((resolve, fail) => { settle = resolve; reject = fail }))
+  saveTotals()
+  const field = screen.getAllByRole('textbox')[0]
+  field.focus(); field.setSelectionRange(action === 'paste' ? 0 : 1, field.value.length)
+  fireEvent[action](field, { clipboardData: { getData: () => '002' } })
+  const values = [...reportValues]; values[0] = action === 'paste' ? '002' : '0'
+  fireEvent.input(field, { target: { value: values[0] }, inputType: action === 'paste' ? 'insertFromPaste' : 'deleteByCut' })
+  if (outcome === 'success') await act(async () => settle(totalsResponse(1, reportValues)))
+  else await act(async () => reject(new Error('synthetic interrupted write')))
+  expect(inputValues()).toEqual(values)
+  const createObjectURL = vi.fn(() => 'blob:clipboard')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  const csv = await blobText(createObjectURL.mock.calls[0][0])
+  expect(csv).toContain(action === 'paste' ? '"panels","1","002","-1","FAIL"' : '"panels","1","0","1","FAIL"')
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(outcome === 'success' ? 2 : 1, values))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: values })
+})
+
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
   'private credential SYNTHETIC_PRIVATE_X05']
 

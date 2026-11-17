@@ -3486,3 +3486,26 @@ run. Equal or later freeze instants do not authorize nonzero deltas. Tests shift
 both clocks together, permute metric bindings, swap fixture approvals and reuse
 records across calls without changing prior outputs. These are supplied synthetic
 policy records. The helper grants no real approval and accepts no live X05 run.
+
+
+## Discrepancy covariance replay
+
+Parent X05 independent reconciliation policy. Run the preserved synthetic script
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-discrepancy-covariance-replay.py`
+with `python -P`. Its adjacent JSON stores the four exact output cases.
+
+1. Baseline uses signed deltas `1,-2,3,-4,0.25` for the five metrics and timely
+   named matching records. Require policy PASS and all five measured row
+   verdicts FAIL. Table integrity passes because its displayed values and
+   deltas correctly represent the supplied maps.
+2. Add 100 to each saved and oracle baseline. Require identical signed deltas
+   and policy outcome.
+3. Multiply deltas and approval deltas by 3. Require exact deltas
+   `3,-6,9,-12,0.75`, policy PASS and five measured row FAIL verdicts.
+4. Keep those scaled values but restore unscaled approval deltas. Require
+   policy FAIL with all five metrics rejected. Table integrity still passes.
+
+The script uses Fraction to derive signed differences and Decimal to emit exact
+finite values. It reads no customer inputs or transport. These synthetic policy
+records provide comparator evidence. Frozen X05 acceptance still needs the
+admitted live pass and its independently supplied revision record.

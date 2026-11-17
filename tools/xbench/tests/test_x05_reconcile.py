@@ -9522,3 +9522,100 @@ def test_discrepancy_scope_direct_strict_and_bound_cli_agree_on_simultaneous_fau
     assert observed['fixtures'][expected[0]]['reconciliation']['steps']['5']['table']['verdict'] == 'FAIL'
     assert all(observed['fixtures'][key]['verdict'] == 'PASS' for key in expected[1:])
     assert records == supplied
+
+
+def covariance_policy_evidence(offset=0, factor=1):
+    from fractions import Fraction
+    evidence = complete_evidence()
+    signed = dict(zip(METRICS, [1, -2, 3, -4, "0.25"]))
+    evidence["oracle_values"] = {metric: 40 + offset for metric in METRICS}
+    evidence["saved_values"] = {metric: 40 + offset + int(Fraction(value) * factor)
+        for metric, value in signed.items() if metric != "kw_dc"}
+    evidence["saved_values"]["kw_dc"] = f"{40 + offset + factor // 4}.{factor % 4 * 25:02d}"
+    evidence["discrepancy_records"] = [dict(fixture_id="synthetic", metric=metric,
+        delta=str(Fraction(value) * factor) if metric != "kw_dc" else f"{factor // 4}.{factor % 4 * 25:02d}",
+        name="synthetic revision " + metric, frozen_at="2026-11-15T12:00:00Z")
+        for metric, value in signed.items()]
+    return evidence
+
+
+@pytest.mark.parametrize("offset", [0, 1, 1000])
+def test_discrepancy_covariance_baseline_shift_preserves_signed_deltas(offset):
+    from fractions import Fraction
+    original = covariance_policy_evidence()
+    shifted = covariance_policy_evidence(offset=offset)
+    before = deepcopy((original, shifted))
+    expected = {metric: Fraction(original["saved_values"][metric]) - Fraction(original["oracle_values"][metric])
+        for metric in METRICS}
+    assert {metric: Fraction(shifted["saved_values"][metric]) - Fraction(shifted["oracle_values"][metric])
+        for metric in METRICS} == expected
+    assert reconcile_offline(shifted)["stages"]["policy"] == reconcile_offline(original)["stages"]["policy"]
+    shifted["discrepancy_records"] = []
+    assert reconcile_offline(shifted)["stages"]["policy"]["rejected_metrics"] == list(METRICS)
+    shifted["discrepancy_records"] = before[1]["discrepancy_records"]
+    assert (original, shifted) == before
+
+
+@pytest.mark.parametrize("factor", [1, 2, 7])
+def test_discrepancy_covariance_scaling_requires_scaled_approvals(factor):
+    from fractions import Fraction
+    original = covariance_policy_evidence()
+    scaled = covariance_policy_evidence(factor=factor)
+    before = deepcopy(scaled)
+    for metric in METRICS:
+        delta = Fraction(scaled["saved_values"][metric]) - Fraction(scaled["oracle_values"][metric])
+        assert delta == Fraction(original["discrepancy_records"][list(METRICS).index(metric)]["delta"]) * factor
+    assert reconcile_offline(scaled)["stages"]["policy"]["verdict"] == "PASS"
+    assert scaled == before
+    scaled["discrepancy_records"] = original["discrepancy_records"]
+    observed = reconcile_offline(scaled)["stages"]["policy"]
+    assert observed["verdict"] == ("PASS" if factor == 1 else "FAIL")
+    assert observed["rejected_metrics"] == ([] if factor == 1 else list(METRICS))
+
+
+@pytest.mark.parametrize("mask", range(32))
+def test_discrepancy_covariance_approval_subsets_match_independent_reference(mask):
+    evidence = covariance_policy_evidence()
+    evidence["discrepancy_records"] = [row for index, row in enumerate(evidence["discrepancy_records"]) if mask & (1 << index)]
+    before = deepcopy(evidence)
+    expected = [metric for index, metric in enumerate(METRICS) if not mask & (1 << index)]
+    direct = reconcile_offline(evidence)["stages"]["policy"]
+    strict = reconcile_json(json.dumps(evidence))["stages"]["policy"]
+    assert direct == strict
+    assert direct["rejected_metrics"] == expected
+    assert direct["verdict"] == ("FAIL" if expected else "PASS")
+    assert evidence == before
+
+
+@pytest.mark.parametrize("label", ["A", "replacement name", "synthetic revised engineering record"])
+def test_discrepancy_covariance_names_do_not_authorize_wrong_deltas(label):
+    evidence = covariance_policy_evidence()
+    for record in evidence["discrepancy_records"]:
+        record["name"] = label
+    before = deepcopy(evidence)
+    assert reconcile_offline(evidence)["stages"]["policy"]["verdict"] == "PASS"
+    assert evidence == before
+    for record in evidence["discrepancy_records"]:
+        record["delta"] = "0"
+    result = reconcile_offline(evidence)["stages"]["policy"]
+    assert result["verdict"] == "FAIL" and result["rejected_metrics"] == list(METRICS)
+
+
+@pytest.mark.parametrize("mutation", ["blank-name", "bad-delta", "bad-clock", "duplicate"])
+def test_discrepancy_covariance_zero_deltas_still_validate_policy_records(mutation):
+    deltas = dict.fromkeys(METRICS, 0)
+    record = dict(fixture_id="synthetic", metric="panels", delta=0,
+        name="synthetic zero revision", frozen_at="2026-11-15T12:00:00Z")
+    records = [deepcopy(record)]
+    if mutation == "duplicate":
+        records.append(deepcopy(record))
+    else:
+        field, value = {"blank-name": ("name", ""), "bad-delta": ("delta", True),
+            "bad-clock": ("frozen_at", "invalid")}[mutation]
+        records[0][field] = value
+    before = deepcopy(records)
+    result = check_discrepancies("synthetic", deltas, records, "2026-11-15T13:00:00Z")
+    assert result["verdict"] == "UNREADABLE"
+    assert result["reason"] == ("duplicate_discrepancy_record" if mutation == "duplicate" else "discrepancy_record_unreadable")
+    assert records == before
+    assert check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")["verdict"] == "PASS"
