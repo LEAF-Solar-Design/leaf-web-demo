@@ -935,7 +935,10 @@ def test_x02_header_route_preserves_auth_and_durable_context(case, monkeypatch, 
         assert fault.current_mode() is None
 
 
-@pytest.mark.parametrize("kind", ["production", "local", "missing_project", "conversation", "wrong_tool", "invalid_identity"])
+@pytest.mark.parametrize("kind", [
+    "production", "local", "missing_project", "conversation", "wrong_tool",
+    "unknown_tool", "invalid_identity",
+])
 def test_x02_fault_header_cannot_escape_scope(case, monkeypatch, kind):
     fault = _fault_staging(monkeypatch)
     for lane in routes.lane.__wrapped__(monkeypatch):
@@ -953,11 +956,15 @@ def test_x02_fault_header_cannot_escape_scope(case, monkeypatch, kind):
             headers.update({"X-Authority-Session-Id": "session", "X-Authority-Turn-Id": "turn"})
         elif kind == "wrong_tool":
             body["tool"] = "solar-settings"
+        elif kind == "unknown_tool":
+            body["tool"] = "xbench-unknown-tool"
         else:
             monkeypatch.setattr(fault.deployment_identity, "deployment_identity", lambda:
                 (_ for _ in ()).throw(ValueError("unattested deployment")))
         response = lane.client.post("/api/run", json=body, headers=headers)
         assert response.status_code == 403, response.text
+        if kind in ("wrong_tool", "unknown_tool"):
+            assert response.json()["error"]["reason_code"] == "XBENCH_SOLVER_FAULT_SCOPE_REQUIRED"
         assert not lane.a.accepted and fault.current_mode() is None
 
 
