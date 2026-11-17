@@ -4,7 +4,7 @@ import './resultObjectLinks.css'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
-import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { compactRefusal, errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
@@ -29,6 +29,7 @@ function errParts(e) {
 }
 
 function isRetryable(e) {
+  if (compactRefusal(e)) return false
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
@@ -405,6 +406,8 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
 // The calm quota/entitlement variants keep the broker's own sentence — a
 // budget/plan boundary is not a failure to re-phrase.
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
+  const refusal = compactRefusal(err)
+  if (refusal) return <div className="inline-error" role="alert" data-error-code={refusal.code}>{refusal.text}</div>
   const { message, code, nextAction, actor } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`} role="alert">
@@ -531,7 +534,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // is visible. Skipped while typing in a field and while a run is in flight;
   // the condition mirrors the `retry` props on the two ErrorLine sites below.
   const canRetryKey = !running && !!onRetry &&
-    (!!error || !!(result && result.error && !isEnt && isRetryable(result.error)))
+    ((!!error && !compactRefusal(error)) || !!(result && result.error && !isEnt && isRetryable(result.error)))
   useEffect(() => {
     if (!canRetryKey) return undefined
     const onKey = (e) => {
