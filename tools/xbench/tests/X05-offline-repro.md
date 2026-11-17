@@ -3199,3 +3199,62 @@ Readable numeric and verdict comparisons are symmetric. Fixture permutations
 preserve independent mask diagnostics and table results. Paired column moves,
 mixed quoting and exact equivalent decimal spellings preserve a single verdict
 mismatch. This synthetic replay does not establish live exports or live parity.
+
+
+## CSV parser fault recovery replay
+
+Within Studio X-bench X05, a transport-supplied CSV reader error yields fixed
+uncertainty rather than leaked parser text. This replay uses scoped offline
+mocks only. It preserves the process field limit and restores the real reader.
+
+```python
+import sys, runpy, csv
+from io import StringIO
+from unittest.mock import patch
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+_, view = fixtures['table_fixture']()
+text = fixtures['csv_fixture'](view)
+matrix = list(csv.reader(StringIO(text)))
+previous = csv.field_size_limit()
+try:
+    csv.field_size_limit(3)
+    for label, fault_index in [('header', 0), ('midstream', 3)]:
+        def faulty_reader(*args, **kwargs):
+            def records():
+                for index, row in enumerate(matrix):
+                    if index == fault_index:
+                        raise csv.Error('private parser payload that must not escape')
+                    yield row
+            return records()
+        with patch.object(m.csv, 'reader', faulty_reader):
+            result = m.compare_csv_view(text, view)
+        assert result == dict(verdict='UNREADABLE', reason='csv_evidence_unreadable')
+        assert csv.field_size_limit() == 3
+        print(label, result['verdict'], result['reason'], csv.field_size_limit())
+    clean = m.compare_csv_view(text, view)
+    assert clean['verdict'] == 'PASS' and csv.field_size_limit() == 3
+    print('clean', clean['verdict'], clean['reason'], csv.field_size_limit())
+finally:
+    csv.field_size_limit(previous)
+assert csv.field_size_limit() == previous
+```
+
+Expected output:
+
+```text
+header UNREADABLE csv_evidence_unreadable 3
+midstream UNREADABLE csv_evidence_unreadable 3
+clean PASS csv_view_equal 3
+```
+
+Tests also inject errors during reader construction, each of five data records,
+and the terminal read. Bound aggregation targets one distinct LF export so a
+mock fault cannot contaminate clean sibling fixtures. Poison readers prove bad
+headers and wrong arity stop at the first decisive record. Reader spies require
+strict parsing and preserve quoted CR, LF and CRLF through semantic rejection.
+The comparison-law tests count normalized cells independently with Fraction,
+verify all 512 triples among eight readable tables, and check overlapping binary
+toggle cancellation with exact direct and bound diagnostics. No live input,
+upload, staging mutation, or live X05 acceptance is part of this replay.
