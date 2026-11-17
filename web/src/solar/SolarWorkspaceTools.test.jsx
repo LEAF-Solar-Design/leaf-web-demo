@@ -1256,6 +1256,7 @@ describe('canonical project layout publication action', () => {
     f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
       parent_version_id: null, physical_source: undefined } })
     render(<SolarWorkspaceTools {...f.props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
     fireEvent.change(screen.getByLabelText('Site boundary (JSON)'), { target: { value: JSON.stringify(generationIntake.boundary) } })
     fireEvent.change(screen.getByLabelText('Complete preset (JSON)'), { target: { value: JSON.stringify(generationIntake.active_preset) } })
     fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
@@ -1266,6 +1267,138 @@ describe('canonical project layout publication action', () => {
     expect(c).toMatchObject({ mode: 'initial', drawing_id: null, input_version_id: null })
     expect(JSON.parse(c.parameters_json)).toEqual({ boundary: generationIntake.boundary,
       preset: generationIntake.active_preset, drawing_units: 'm' })
+    expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
+  })
+  function initialFixture() {
+    const initial = { ...scope, drawing_id: null, input_version_id: null }
+    const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
+    f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
+      parent_version_id: null, physical_source: undefined } })
+    return f
+  }
+  const generate = () => screen.getByRole('button', { name: 'Generate editable project drawing' })
+  function change(label, value) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } })
+  }
+  function site() {
+    change('Site origin X (drawing units)', '10')
+    change('Site origin Y (drawing units)', '-20')
+    change('Site width (drawing units)', '100')
+    change('Site height (drawing units)', '50')
+  }
+  async function readInitial() {
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    await screen.findByText('Current layout read. Review it before publishing.')
+  }
+  it.each(['m', 'ft'])('publishes ordinary %s inputs through the canonical capture with native preset keys', async units => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    expect(screen.getByRole('button', { name: 'Advanced JSON' })).toBeTruthy()
+    expect(screen.getAllByText('Terrain-free layout preview. No terrain or engineering assessment is included.')).toHaveLength(1)
+    expect(generate().disabled).toBe(true)
+    site()
+    change('Site drawing units', units)
+    change('Preset name', '  My frame  ')
+    change('Module length (metres)', '2.5')
+    change('Module width (metres)', '1.2')
+    change('Module rows', '3')
+    change('Module columns', '10')
+    change('Tilt (degrees)', '25')
+    change('Axis azimuth (degrees)', '190')
+    expect(screen.getAllByText(`Site 100 × 50 ${units === 'm' ? 'metres' : 'feet'} · 30 modules per frame.`)).toHaveLength(1)
+    await readInitial()
+    fireEvent.click(generate())
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    const captured = f.api.publish.mock.calls[0][0]
+    expect(captured.mode).toBe('initial')
+    expect(JSON.parse(captured.parameters_json)).toEqual({ boundary: [[10, -20], [110, -20], [110, 30], [10, 30]],
+      drawing_units: units, preset: { Name: 'My frame', ModuleLengthM: 2.5, ModuleWidthM: 1.2,
+        ModuleThicknessM: 0.033, ModulePowerWp: 715, FramingType: 'FixedTilt', Orientation: 'Portrait',
+        Rows: 3, Columns: 10, TiltDegrees: 25, HorizontalGapM: 0.02, VerticalGapM: 0.02, AxisAzimuthDeg: 190 } })
+    await waitFor(() => expect(f.props.onProjectDrawingPublished).toHaveBeenCalledOnce())
+    expect(f.props.onProjectDrawingPublished.mock.calls[0][2]()).toBe(true)
+  })
+  it('refuses blank, malformed, nonfinite and out of range structured values', async () => {
+    const f = initialFixture()
+    render(<SolarWorkspaceTools {...f.props} />)
+    await readInitial()
+    expect(generate().disabled).toBe(true)
+    site()
+    const cases = [
+      ['Site width (drawing units)', ['', ' ', '-1', '0', 'NaN', 'Infinity', '1e999', '1x', '0x10', '1000001', '1'.repeat(65)]],
+      ['Site height (drawing units)', ['', '-10', 'Infinity']],
+      ['Site origin X (drawing units)', ['1000000000', '-1000000001']],
+      ['Site origin Y (drawing units)', ['1000000000', 'NaN']],
+      ['Module length (metres)', ['0', '-1', '101', '1e999']],
+      ['Module width (metres)', ['', 'Infinity', '101']],
+      ['Module rows', ['0', '1.5', '1001', '1000']],
+      ['Module columns', ['0', '1001']],
+      ['Tilt (degrees)', ['-1', '91']], ['Axis azimuth (degrees)', ['-1', '361']],
+      ['Preset name', ['', ' ', 'a'.repeat(257)]],
+    ]
+    for (const [label, invalids] of cases) {
+      const previous = screen.getByLabelText(label).value
+      for (const invalid of invalids) {
+        change(label, invalid)
+        expect(generate().disabled).toBe(true)
+        expect(screen.getByRole('alert').textContent.length).toBeGreaterThan(0)
+        fireEvent.click(generate())
+      }
+      change(label, previous)
+      expect(generate().disabled).toBe(false)
+    }
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it('preserves separate mode drafts and drops them when the selected project changes', async () => {
+    const f = initialFixture()
+    const view = render(<SolarWorkspaceTools {...f.props} />)
+    site(); await readInitial()
+    expect(generate().disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
+    expect(generate().disabled).toBe(true)
+    change('Site boundary (JSON)', JSON.stringify(generationIntake.boundary))
+    change('Complete preset (JSON)', JSON.stringify(generationIntake.active_preset))
+    expect(generate().disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Structured inputs' }))
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe('100')
+    expect(generate().disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
+    expect(screen.getByLabelText('Complete preset (JSON)').value).toBe(JSON.stringify(generationIntake.active_preset))
+    view.rerender(<SolarWorkspaceTools {...f.props} projectId={id(99)}
+      projectScope={{ ...f.props.projectScope, project_id: id(99) }} />)
+    expect(screen.getByLabelText('Site width (drawing units)').value).toBe('')
+    await readInitial()
+    expect(generate().disabled).toBe(true)
+    fireEvent.click(generate())
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it.each(['structured', 'advanced'])('locks %s drafts while pending and unknown and reconciles the exact capture', async mode => {
+    const f = initialFixture(), pending = gp5Deferred()
+    f.api.publish.mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({ ok: false, code: 'PROJECT_LAYOUT_OUTCOME_UNKNOWN', outcomeUnknown: true })
+    render(<SolarWorkspaceTools {...f.props} />)
+    site()
+    if (mode === 'advanced') {
+      fireEvent.click(screen.getByRole('button', { name: 'Advanced JSON' }))
+      change('Site boundary (JSON)', JSON.stringify(generationIntake.boundary))
+      change('Complete preset (JSON)', JSON.stringify(generationIntake.active_preset))
+    }
+    await readInitial()
+    fireEvent.click(generate())
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    const assertLocked = () => {
+      for (const label of ['Site width (drawing units)', 'Site drawing units', 'Site boundary (JSON)',
+        'Complete preset (JSON)', 'Drawing units for publication', 'Original layout intake (JSON)'])
+        expect(screen.getByLabelText(label).matches(':disabled')).toBe(true)
+      expect(screen.getByRole('button', { name: mode === 'advanced' ? 'Structured inputs' : 'Advanced JSON' }).matches(':disabled')).toBe(true)
+    }
+    assertLocked()
+    await act(async () => pending.resolve({ ok: false, code: 'PROJECT_LAYOUT_OUTCOME_UNKNOWN', outcomeUnknown: true }))
+    assertLocked()
+    expect(screen.getByRole('button', { name: 'Read current layout for publication' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Reconcile layout publication' }))
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledTimes(2))
+    expect(f.api.publish.mock.calls[1][0]).toEqual(f.api.publish.mock.calls[0][0])
     expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
   })
   it.each([undefined, 'current-native'])('captures original CRLF intake with original loading by default or explicit producer %s across publication recovery', async (semantics) => {
