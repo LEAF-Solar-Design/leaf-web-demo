@@ -330,7 +330,7 @@ def test_null_policy_missing_counts_and_non_object_results_are_unreadable():
 
 def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, envelope=None,
                  installation_design="Roof", saved_strings=None, unresolved=False,
-                 report_artifact="e" * 64):
+                 report_artifact="e" * 64, saved_graph=None):
     """Exact owner-confirmed client signatures, with no browser or disk IO."""
     import xbench_session
 
@@ -375,8 +375,12 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
 
         def create_project(self, name):
             assert name.startswith("xbench-x05-")
+            ctx.created_name = name
             events.append("create")
             return {"project_id": "new-project", "org_id": "new-org"}
+
+        def tools(self):
+            return [{"name": "solar-panel-groups", "label": "Normal grouping"}]
 
         def upload_drawing(self, filename, content, *, engine=None):
             assert filename.endswith(".dwg") and content == b"drawing"
@@ -407,7 +411,8 @@ def live_harness(monkeypatch, *, failure=None, health=None, server_code=None, en
                                 "is_head": version_id == f"v{self.stage}",
                                 "organization_id": "new-org", "project_id": project_id,
                                 "drawing_id": drawing_id, "intake_sha256": "b" * 64},
-                    "intake": {"solar_design_graph": {"rev": self.stage,
+                    "intake": {"solar_design_graph": deepcopy(saved_graph) if
+                        self.stage >= 4 and saved_graph is not None else {"rev": self.stage,
                         "panels": [{}] * (4 if self.stage >= 2 else 0),
                         "frames": [{"id": ref} for ref in ["frame-a", "frame-b"]]
                                   if self.stage >= 3 else [],
@@ -1063,3 +1068,256 @@ def test_accept_completion_must_bind_receipt_and_independently_read_head(monkeyp
     assert receipts[0]["results"][0]["reason_code"] == "SAVED_STRINGS_UNREADABLE"
     assert events.count("release") == events.count("delete") == 1
     assert "synthetic-private-canary" not in json.dumps(receipts)
+
+
+def ui_contract():
+    """Complete numeric scorer inputs; no claim that optimizer totals ship."""
+    project, result = observation()
+    project.update(collect_reconciliation_ui=True, oracle_fixture="oracle", expected_kw_dc="2")
+    values = dict(zip(x05.METRICS, ("4", "2", "1", "2", "2")))
+    rows = [dict(metric=m, studio=v, oracle=v, delta="0", verdict="PASS")
+            for m, v in values.items()]
+    ui = dict(before_rows=rows, reopened_rows=deepcopy(rows),
+              before_drafts=dict(values), reopened_drafts=dict(values),
+              reopen_observed=True, recommendations=[{"group_count": 2}],
+              grouping_status="proposals_shown")
+    ui["csv_text"] = table_csv(rows)
+    result.update(oracle_readable=True, accepted=True, saved_head_read=True,
+                  saved_string_count=2, ui_head_stable=True, saved_values=dict(values),
+                  oracle_values=dict(values), strings_sha256_before="a" * 64,
+                  strings_sha256_after="a" * 64, ui_observation=ui)
+    return project, result
+
+
+def table_csv(rows):
+    return ",".join(x05.COLUMNS) + "\n" + "\n".join(
+        ",".join(row[key] for key in x05.COLUMNS) for row in rows) + "\n"
+
+
+def test_complete_ui_scorer_contract_preserves_step3_uncertainty():
+    project, result = ui_contract()
+    steps = score([project], [result])
+    assert [s.verdict for s in steps] == ["PASS", "PASS", "UNREADABLE"] + ["PASS"] * 4
+    assert "optimizer_measurements_unavailable" in steps[2].evidence
+    assert steps[4].observed[0]["table_sha256_before"] == steps[4].observed[0]["table_sha256_after"]
+
+
+@pytest.mark.parametrize("change,failed", [
+    ("table", [5]), ("csv", [5]), ("delta", [6]),
+    ("strings", [7]), ("reopened-table", [7]), ("drafts", [7]),
+])
+def test_independent_ui_mismatches_are_detected(change, failed):
+    project, result = ui_contract()
+    ui = result["ui_observation"]
+    if change == "table":
+        ui["before_rows"][0]["studio"] = "5"
+        ui["csv_text"] = table_csv(ui["before_rows"])
+    elif change == "csv":
+        ui["csv_text"] = ui["csv_text"].replace("panels,4,4", "panels,5,4")
+    elif change == "delta":
+        result["saved_values"]["panels"] = "5"
+        ui["before_rows"][0].update(studio="5", delta="1", verdict="FAIL")
+        ui["csv_text"] = table_csv(ui["before_rows"])
+    elif change == "strings":
+        result["strings_sha256_after"] = "b" * 64
+    elif change == "reopened-table":
+        ui["reopened_rows"][0]["studio"] = "5"
+    else:
+        ui["reopened_drafts"]["panels"] = "5"
+    steps = score([project], [result])
+    assert all(steps[n - 1].verdict == "FAIL" for n in failed)
+    if change == "delta":
+        assert steps[4].observed[0]["table_truth"] == "PASS"
+
+
+def test_partial_grouping_and_nullable_dc_keep_readable_siblings():
+    project, result = ui_contract()
+    project.update(expected_kw_dc=None, reconciliation_exclusions=["kw_dc"])
+    result["oracle_values"]["kw_dc"] = None
+    result["saved_values"]["kw_dc"] = None
+    ui = result["ui_observation"]
+    ui.update(status="UNREADABLE", grouping_status="UNREADABLE", recommendations=None)
+    for rows in (ui["before_rows"], ui["reopened_rows"]):
+        rows[-1].update(studio="", oracle="", delta="", verdict="UNREADABLE")
+    for key in ("before_drafts", "reopened_drafts"):
+        ui[key]["kw_dc"] = ""
+    ui["csv_text"] = table_csv(ui["before_rows"])
+    assert [s.verdict for s in score([project], [result])][3:] == ["UNREADABLE", "PASS", "PASS", "PASS"]
+    project.update(expected_grids=None, grid_count_policy="match_or_named")
+    ui.update(grouping_status="no_proposals_shown", recommendations=[])
+    assert "report_grid_count_unreadable" in score([project], [result])[3].evidence
+    del project["reconciliation_exclusions"]
+    assert [s.verdict for s in score([project], [result])][4:6] == ["UNREADABLE"] * 2
+
+
+@pytest.mark.parametrize("exclusions", [["optimizers"], ["kw_dc", "kw_dc"], None, "kw_dc", ["private-secret"]])
+def test_unexpected_exclusions_are_unreadable(exclusions):
+    project, result = ui_contract()
+    project["reconciliation_exclusions"] = exclusions
+    assert all(s.verdict == "UNREADABLE" for s in score([project], [result])[3:])
+
+
+def test_dc_exclusion_requires_explicit_null_and_missing_dc_is_not_waived():
+    project, result = ui_contract()
+    project["reconciliation_exclusions"] = ["kw_dc"]
+    assert all(s.verdict == "UNREADABLE" for s in score([project], [result])[3:])
+    del project["expected_kw_dc"]
+    assert all(s.verdict == "UNREADABLE" for s in score([project], [result])[3:])
+    project["reconciliation_exclusions"] = []
+    assert [s.verdict for s in score([project], [result])][4:6] == ["UNREADABLE"] * 2
+
+
+def test_excluded_dc_row_still_required_and_compared_in_csv():
+    project, result = ui_contract()
+    project.update(expected_kw_dc=None, reconciliation_exclusions=["kw_dc"])
+    ui = result["ui_observation"]
+    ui["csv_text"] = ui["csv_text"].replace("kw_dc,2,2", "kw_dc,3,2")
+    assert score([project], [result])[4].verdict == "FAIL"
+    ui["before_rows"].pop()
+    assert score([project], [result])[4].verdict == "UNREADABLE"
+
+
+def test_valid_no_proposals_and_shown_delta_mismatch():
+    project, result = ui_contract()
+    ui = result["ui_observation"]
+    ui.update(grouping_status="no_proposals_shown", recommendations=[])
+    assert score([project], [result])[3].verdict == "PASS"
+    ui["before_rows"][0]["delta"] = "1"
+    ui["csv_text"] = table_csv(ui["before_rows"])
+    assert [s.verdict for s in score([project], [result])][4:6] == ["FAIL"] * 2
+
+
+def test_delta_subtraction_uses_isolated_exact_decimal_context():
+    from decimal import localcontext
+
+    project, result = ui_contract()
+    project["expected_kw_dc"] = "123456789012345678.000000000000000001"
+    result["oracle_values"]["kw_dc"] = project["expected_kw_dc"]
+    result["saved_values"]["kw_dc"] = "123456789012345678.000000000000000002"
+    ui = result["ui_observation"]
+    ui["before_rows"][-1].update(studio=result["saved_values"]["kw_dc"],
+        oracle=project["expected_kw_dc"], delta="0.000000000000000001", verdict="FAIL")
+    ui["csv_text"] = table_csv(ui["before_rows"])
+    with localcontext() as context:
+        context.prec = 2
+        steps = score([project], [result])
+    assert steps[4].verdict == "PASS" and steps[5].verdict == "FAIL"
+
+
+@pytest.mark.parametrize("value", ["-1", "01", "1.0", "١", "1e0", "9" * 39])
+def test_observed_counts_require_bounded_ascii_canonical_numbers(value):
+    project, result = ui_contract()
+    result["ui_observation"]["before_rows"][0]["studio"] = value
+    assert score([project], [result])[4].verdict == "UNREADABLE"
+
+
+@pytest.mark.parametrize("missing", ["metric", "duplicate", "source", "oracle", "blank", "malformed", "reopen"])
+def test_missing_or_malformed_ui_evidence_never_manufactures_fail(missing):
+    project, result = ui_contract()
+    ui = result["ui_observation"]
+    if missing == "metric":
+        ui["before_rows"].pop()
+    elif missing == "duplicate":
+        ui["before_rows"][1] = dict(ui["before_rows"][0])
+    elif missing == "source":
+        result["saved_values"]["optimizers"] = None
+    elif missing == "oracle":
+        result["oracle_values"]["optimizers"] = None
+    elif missing == "blank":
+        ui["before_rows"][1].update(studio="", delta="", verdict="UNREADABLE")
+    elif missing == "malformed":
+        ui["before_rows"][1]["studio"] = "02"
+    else:
+        ui["reopen_observed"] = False
+    steps = score([project], [result])
+    assert steps[6 if missing == "reopen" else 4].verdict == "UNREADABLE"
+
+
+def test_ui_fixture_aggregation_retains_unknowns_duplicates_and_missing():
+    project, result = ui_contract()
+    other = dict(project, id="other")
+    bad = deepcopy(result)
+    bad["ui_observation"]["before_rows"][0]["studio"] = "5"
+    for projects, results in (([project, other], [bad]), ([project], [bad, result]),
+                              ([project, project], [bad])):
+        assert all(s.verdict == "UNREADABLE" for s in score(projects, results)[3:])
+
+
+def measured_graph():
+    panels = [f"leaf:panel:00000000-0000-4000-8000-{i:012d}" for i in range(1, 5)]
+    return dict(rev=4, panels=[{"id": ref} for ref in panels],
+        frames=[{"id": "leaf:frame:00000000-0000-4000-8000-000000000001",
+                 "panel_refs": panels, "module_power_watts": 500}],
+        inverters=[{"id": "leaf:inverter:00000000-0000-4000-8000-000000000001",
+                    "equipment_type": "string_inverter"}],
+        strings=[dict(row, ordered_panel_refs=panels[i * 2:i * 2 + 2], module_count=2)
+                 for i, row in enumerate(electrical_strings())])
+
+
+@pytest.mark.parametrize("mode", ["normal", "fallback-label", "callback-error", "head-drift", "changed-strings"])
+def test_flagged_normal_ui_lifecycle_is_independent_sanitized_and_cleans_up(monkeypatch, tmp_path, mode):
+    from benches import x05_table_observer
+    from xbench_core import write_json_atomic
+
+    graph = measured_graph()
+    ctx, events, requests, receipts = pinned_harness(monkeypatch, tmp_path, saved_graph=graph)
+    ctx.out_dir = tmp_path
+    project = ctx.manifest["projects"][0]
+    project.update(collect_reconciliation_ui=True, expected_kw_dc=None,
+                   reconciliation_exclusions=["kw_dc"])
+    monkeypatch.setattr(x05, "write_json_atomic", write_json_atomic)
+    client_class = sys.modules["xbench_studio"].StudioClient
+    if mode == "fallback-label":
+        monkeypatch.setattr(client_class, "tools", lambda self: [{"name": "solar-panel-groups"}])
+    (tmp_path / "x05-ui-1").mkdir()
+    original_context = client_class.drawing_context
+    observed = []
+
+    def context(self, *args):
+        current = original_context(self, *args)
+        if observed and mode == "head-drift":
+            current["context"]["head_version_id"] = "private-secret-head"
+        if observed and mode == "changed-strings":
+            current["intake"]["solar_design_graph"]["strings"][0]["extra"] = "private-secret"
+        return current
+
+    monkeypatch.setattr(client_class, "drawing_context", context)
+
+    def observe(page, **kwargs):
+        assert page is not None
+        assert kwargs["project_name"] == ctx.created_name
+        assert kwargs["version_id"] == "v4"
+        assert kwargs["grouping_label"] == ("solar-panel-groups" if mode == "fallback-label" else "Normal grouping")
+        assert kwargs["oracle_values"] == dict(panels="4", optimizers="2", inverters="1", strings="2", kw_dc=None)
+        assert kwargs["out_dir"].parent == tmp_path and kwargs["out_dir"].is_dir()
+        assert kwargs["out_dir"].name == "x05-ui-2"
+        observed.append(kwargs)
+        if mode == "callback-error":
+            raise RuntimeError("private-secret-callback")
+        _, result = ui_contract()
+        ui = result["ui_observation"]
+        for key in ("before_rows", "reopened_rows"):
+            ui[key][1].update(studio="", delta="", verdict="UNREADABLE")
+            ui[key][-1].update(oracle="", delta="", verdict="UNREADABLE")
+        for key in ("before_drafts", "reopened_drafts"):
+            ui[key]["kw_dc"] = ""
+        ui["csv_text"] = table_csv(ui["before_rows"])
+        ui["private_debug"] = "private-secret-dom-csv"
+        return ui
+
+    monkeypatch.setattr(x05_table_observer, "observe_reconciliation", observe)
+    steps = x05.run(ctx)
+    assert len(observed) == 1
+    assert events.count("release") == events.count("delete") == events.count("close") == 1
+    text = (tmp_path / "x05-evidence.json").read_text()
+    assert "private-secret" not in text and ctx.created_name not in text and "leaf:string:" not in text
+    result = json.loads(text)["results"][0]
+    assert result["saved_values"] == dict(panels="4", optimizers=None, inverters="1", strings="2", kw_dc="2")
+    assert result["saved_metric_reasons"]["optimizers"] == "OPTIMIZER_MEASUREMENT_ABSENT"
+    if mode in ("normal", "fallback-label"):
+        assert [s.verdict for s in steps][3:] == ["PASS", "UNREADABLE", "UNREADABLE", "PASS"]
+        assert steps[4].observed[0]["csv_view"] == "PASS"
+    elif mode == "changed-strings":
+        assert steps[6].verdict == "FAIL"
+    else:
+        assert all(s.verdict == "UNREADABLE" for s in steps[3:])

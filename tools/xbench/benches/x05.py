@@ -6,6 +6,7 @@ below. A missing or incompatible client is harness evidence, never product FAIL.
 
 import hashlib
 from collections import Counter, defaultdict
+from decimal import Context, Decimal, localcontext
 import json
 import math
 from pathlib import Path
@@ -23,7 +24,9 @@ LIMITS = ("Steps 1-2 cover source import and grid correspondence only. "
           "followed by canonical saved electrical string counts; report rows are diagnostic only. "
           "Count mismatches can FAIL, but matching counts remain UNREADABLE because "
           "per-string saved optimizer measurements are unavailable. Without an explicit "
-          "oracle no acceptance is attempted. Steps 4-7 are unimplemented. Unknown wire "
+          "oracle no acceptance is attempted. Steps 4-7 cover optional normal-UI grouping, "
+          "table/CSV, active deltas and reload persistence with independent saved metrics; "
+          "missing metrics remain UNREADABLE, including optimizer totals. Unknown wire "
           "formats, missing fixtures, auth, drift and nonterminal jobs are UNREADABLE.")
 REQUIRED = {"id", "drawing_fixture", "report_fixture", "panel_layer_contains",
             "drawing_units", "installation_design", "branch_max_offset",
@@ -241,13 +244,149 @@ def _grid_score(project, result):
     return "PASS", "exact_grid_correspondence"
 
 
+METRICS = ("panels", "optimizers", "inverters", "strings", "kw_dc")
+COLUMNS = ("metric", "studio", "oracle", "delta", "verdict")
+
+
+def _observed_number(value, *, count=False, signed=False):
+    if type(value) is not str or not 1 <= len(value) <= 38:
+        return False
+    pattern = (r"-?" if signed else "") + r"(?:0|[1-9][0-9]{0,17})"
+    if not count:
+        pattern += r"(?:\.[0-9]{0,17}[1-9])?"
+    return (re.fullmatch(pattern, value) is not None and value != "-0"
+            and (not count or abs(int(value)) <= 2**53 - 1))
+
+
+def _observed_table(rows):
+    if type(rows) is not list or len(rows) != 5:
+        return None
+    indexed = {}
+    for row in rows:
+        if type(row) is not dict or set(row) != set(COLUMNS):
+            return None
+        metric = row["metric"]
+        if type(metric) is not str or metric not in METRICS or metric in indexed:
+            return None
+        if type(row["verdict"]) is not str or row["verdict"] not in ("PASS", "FAIL", "UNREADABLE"):
+            return None
+        for field in ("studio", "oracle", "delta"):
+            value = row[field]
+            if value == "" and type(value) is str:
+                if row["verdict"] != "UNREADABLE":
+                    return None
+            elif not _observed_number(value, count=metric != "kw_dc", signed=field == "delta"):
+                return None
+        indexed[metric] = dict(row)
+    return [indexed[metric] for metric in METRICS]
+
+
+def _table_hash(rows):
+    return hashlib.sha256(json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _combine(verdicts):
+    return ("UNREADABLE" if not verdicts or "UNREADABLE" in verdicts else
+            "FAIL" if "FAIL" in verdicts else "PASS")
+
+
+def _ui_scores(project, result):
+    from .x05_reconcile import _csv_rows, compare_recommendations
+
+    stages = {n: ("UNREADABLE", "reconciliation_observation_unreadable") for n in range(4, 8)}
+    diagnostics = {}
+    if (project.get("collect_reconciliation_ui") is not True
+            or result.get("oracle_readable") is not True
+            or result.get("accepted") is not True or result.get("saved_head_read") is not True):
+        return stages, diagnostics
+    if result.get("ui_head_stable") is not True:
+        return {n: ("UNREADABLE", "canonical_head_unreadable") for n in stages}, diagnostics
+    exclusions = project.get("reconciliation_exclusions", [])
+    if (type(exclusions) is not list or exclusions not in ([], ["kw_dc"])
+            or (exclusions and ("expected_kw_dc" not in project or project["expected_kw_dc"] is not None))
+            or (project.get("expected_kw_dc") is not None
+                and not _observed_number(project["expected_kw_dc"]))):
+        return {n: ("UNREADABLE", "reconciliation_policy_unreadable") for n in stages}, diagnostics
+    ui = result.get("ui_observation")
+    if type(ui) is not dict:
+        return stages, diagnostics
+    grouping = ui.get("grouping_status")
+    if grouping in ("proposals_shown", "no_proposals_shown"):
+        compared = compare_recommendations(project.get("expected_grids"), ui.get("recommendations"),
+            no_recommendations_shown=grouping == "no_proposals_shown")
+        stages[4] = compared["verdict"], compared["reason"]
+    elif project.get("expected_grids") is None:
+        stages[4] = "UNREADABLE", "report_grid_count_unreadable"
+    rows = _observed_table(ui.get("before_rows"))
+    csv_text = ui.get("csv_text")
+    csv_rows = None
+    if type(csv_text) is str and len(csv_text) <= 16384:
+        parsed, error = _csv_rows(csv_text)
+        if error is None:
+            csv_rows = _observed_table(parsed)
+    csv_verdict = ("UNREADABLE" if rows is None or csv_rows is None else
+                   "PASS" if rows == csv_rows else "FAIL")
+    truth, deltas = [], []
+    saved, oracle = result.get("saved_values"), result.get("oracle_values")
+    if rows is not None and type(saved) is dict and type(oracle) is dict:
+        for row in rows:
+            metric = row["metric"]
+            if metric in exclusions:
+                continue
+            a, b = saved.get(metric), oracle.get(metric)
+            if metric == "kw_dc":
+                b = project.get("expected_kw_dc")
+            if (not _observed_number(a, count=metric != "kw_dc")
+                    or not _observed_number(b, count=metric != "kw_dc")
+                    or any(row[key] == "" for key in ("studio", "oracle", "delta"))
+                    or row["verdict"] == "UNREADABLE"):
+                truth.append("UNREADABLE")
+                deltas.append("UNREADABLE")
+                continue
+            with localcontext(Context(prec=200)):
+                delta = Decimal(a) - Decimal(b)
+            shown = Decimal(row["delta"]) == delta
+            verdict = "PASS" if delta == 0 else "FAIL"
+            truth.append("PASS" if (row["studio"] == a and row["oracle"] == b
+                                      and shown and row["verdict"] == verdict) else "FAIL")
+            deltas.append("PASS" if delta == 0 and shown and row["verdict"] == "PASS" else "FAIL")
+    diagnostics.update(table_truth=_combine(truth), csv_view=csv_verdict,
+                       active_deltas=_combine(deltas))
+    diagnostics["table_reason"] = ("observed_table_unreadable" if rows is None else
+        "independent_metrics_unreadable" if diagnostics["table_truth"] == "UNREADABLE" else
+        "independent_table_equal" if diagnostics["table_truth"] == "PASS" else "independent_table_mismatch")
+    diagnostics["csv_reason"] = ("csv_or_view_unreadable" if csv_verdict == "UNREADABLE" else
+        "csv_view_equal" if csv_verdict == "PASS" else "csv_view_mismatch")
+    stages[5] = _combine([diagnostics["table_truth"], csv_verdict]), "table_truth_and_csv_view"
+    stages[6] = diagnostics["active_deltas"], "active_reconciliation_deltas"
+    reopened = _observed_table(ui.get("reopened_rows"))
+    if rows is not None:
+        diagnostics["table_sha256_before"] = _table_hash(rows)
+    if reopened is not None:
+        diagnostics["table_sha256_after"] = _table_hash(reopened)
+    hashes = [result.get(key) for key in ("strings_sha256_before", "strings_sha256_after")]
+    drafts = []
+    for key in ("before_drafts", "reopened_drafts"):
+        value = ui.get(key)
+        if (type(value) is dict and set(value) == set(METRICS)
+                and all(type(value[m]) is str and (value[m] == "" or
+                        _observed_number(value[m], count=m != "kw_dc")) for m in METRICS)):
+            drafts.append(value)
+    if (ui.get("reopen_observed") is True and rows is not None and reopened is not None
+            and len(drafts) == 2 and all(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)):
+        stages[7] = ("PASS" if hashes[0] == hashes[1] and rows == reopened
+                     and drafts[0] == drafts[1] else "FAIL"), "normal_reopen_persistence"
+    return stages, diagnostics
+
+
 def score(projects, results):
     """Aggregate every configured project, including missing/duplicate results.
 
     Results are internal observations, keyed by manifest project id. Only explicit
     validated source success and complete report mappings can establish a PASS.
     """
-    buckets = {1: [], 2: [], 3: []}
+    buckets = {n: [] for n in range(1, 8)}
+    ui_diagnostics = []
     diagnostics = []
     projects = projects if isinstance(projects, list) else []
     results = results if isinstance(results, list) else []
@@ -266,7 +405,14 @@ def score(projects, results):
             buckets[1].append(("UNREADABLE", "setup_or_session_unreadable"))
             buckets[2].append(("UNREADABLE", "setup_or_session_unreadable"))
             buckets[3].append(("UNREADABLE", "setup_or_session_unreadable"))
+            for n in range(4, 8):
+                buckets[n].append(("UNREADABLE", "setup_or_session_unreadable"))
+            ui_diagnostics.append({})
             continue
+        ui_stages, detail = _ui_scores(project, result)
+        ui_diagnostics.append(detail)
+        for n, stage in ui_stages.items():
+            buckets[n].append(stage)
         imported = result.get("import_verdict")
         buckets[1].append((imported if imported in ("PASS", "FAIL") else "UNREADABLE",
                            "source_import"))
@@ -297,8 +443,10 @@ def score(projects, results):
     verdict = ("FAIL" if rows and all(v == "FAIL" for v, _ in rows) else "UNREADABLE")
     steps.append(Step(3, verdict, "x05-evidence.json; " +
                       ", ".join(sorted({reason for _, reason in rows})), observed=diagnostics))
-    steps.extend(Step(n, "UNREADABLE", "Unimplemented in this slice. " + LIMITS)
-                 for n in range(4, 8))
+    for n in range(4, 8):
+        rows = buckets[n]
+        steps.append(Step(n, _combine([v for v, _ in rows]), "x05-evidence.json; " +
+                          ", ".join(sorted({reason for _, reason in rows})), observed=ui_diagnostics))
     return steps
 
 
@@ -377,17 +525,23 @@ def _oracle(ctx, project, pdf):
                 or modules != project["expected_modules"]
                 or len(rows) != project["expected_strings"]):
             raise ValueError
+        return {key: totals[key] for key in ("modules", "optimizers", "inverters", "strings")}
     except Exception:
         raise ObservationError(code="ORACLE_UNREADABLE") from None
 
 
-def _project(ctx, client, request, project, result):
+def _project(ctx, client, request, project, result, *, ui_observer=None):
     drawing = _fixture(ctx, project["drawing_fixture"])
     pdf = _fixture(ctx, project["report_fixture"])
     if "oracle_fixture" in project:
-        _oracle(ctx, project, pdf)
+        totals = _oracle(ctx, project, pdf)
+        dc = project.get("expected_kw_dc")
+        result["oracle_values"] = {"panels": str(totals["modules"]),
+            **{key: str(totals[key]) for key in ("optimizers", "inverters", "strings")},
+            "kw_dc": dc if _observed_number(dc) else None}
         result["oracle_readable"] = True
-    created = client.create_project(name="xbench-x05-" + uuid4().hex)
+    project_name = "xbench-x05-" + uuid4().hex
+    created = client.create_project(name=project_name)
     project_id = created["project_id"]
     capability = None
     drawing_id = version = None
@@ -524,6 +678,11 @@ def _project(ctx, client, request, project, result):
             if not _integer(graph.get("rev")) or graph["rev"] <= rev:
                 raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
             result["accepted"] = True
+            from .x05_saved_metrics import measure_saved_graph
+
+            measured = measure_saved_graph(graph)
+            result.update(saved_values=measured["values"], saved_metric_reasons=measured["reasons"],
+                          strings_sha256_before=measured["strings_sha256"])
             strings = graph.get("strings")
             if (not isinstance(strings, list) or any(
                     not isinstance(row, dict) or type(row.get("id")) is not str
@@ -532,6 +691,22 @@ def _project(ctx, client, request, project, result):
                     or len({row["id"] for row in strings}) != len(strings)):
                 raise ObservationError(code="SAVED_STRINGS_UNREADABLE")
             result.update(saved_head_read=True, saved_string_count=len(strings))
+            if project.get("collect_reconciliation_ui") is True and ui_observer is not None:
+                accepted_version = version
+                try:
+                    result["ui_observation"] = ui_observer(project_name=project_name,
+                        version_id=accepted_version, oracle_values=dict(result["oracle_values"]))
+                except Exception:
+                    result["ui_observation"] = {}
+                # Independently reread even after an observer failure. Never use a
+                # product-stored digest or an observer-supplied head as the oracle.
+                try:
+                    after = context()
+                    result["ui_head_stable"] = version == accepted_version
+                    result["strings_sha256_after"] = measure_saved_graph(
+                        after["intake"]["solar_design_graph"])["strings_sha256"]
+                except Exception:
+                    result["ui_head_stable"] = False
     finally:
         if capability is not None:
             try:
@@ -602,6 +777,33 @@ def run(ctx):
 
             # Client transport decodes JSON and preserves artifact bytes.
             client = StudioClient(transport)
+            ui_sequence = 0
+
+            def ui_observer(**kwargs):
+                nonlocal ui_sequence
+                from .x05_table_observer import observe_reconciliation
+
+                catalog = client.tools()
+                matches = [row for row in catalog if isinstance(row, dict)
+                           and row.get("name") == "solar-panel-groups"]
+                if len(matches) != 1:
+                    raise ValueError
+                label = matches[0].get("label", matches[0]["name"])
+                if label is None or label == "":
+                    label = matches[0]["name"]
+                # Numeric names reveal no project identity. mkdir is exclusive;
+                # preexisting artifacts are never reused or overwritten.
+                while True:
+                    ui_sequence += 1
+                    private_dir = Path(ctx.out_dir) / ("x05-ui-" + str(ui_sequence))
+                    try:
+                        private_dir.mkdir(mode=0o700)
+                        break
+                    except FileExistsError:
+                        continue
+                return observe_reconciliation(page, base=ctx.base, out_dir=private_dir,
+                                              grouping_label=label, **kwargs)
+
             for project in projects if isinstance(projects, list) else []:
                 result = {"id": project.get("id")} if isinstance(project, dict) else {}
                 results.append(result)
@@ -609,7 +811,10 @@ def run(ctx):
                     result["unreadable"] = True
                     continue
                 try:
-                    _project(ctx, client, request, project, result)
+                    if project.get("collect_reconciliation_ui") is True:
+                        _project(ctx, client, request, project, result, ui_observer=ui_observer)
+                    else:
+                        _project(ctx, client, request, project, result)
                 except ObservationError as exc:
                     result["status"] = exc.status
                     result["reason_code"] = _reason_code(exc.code)
@@ -642,7 +847,9 @@ def run(ctx):
         "results": [{k: r[k] for k in ("status", "reason_code", "reason", "panel_count", "frame_count",
                                        "import_verdict", "report_product_failure", "cleanup_errors",
                                        "oracle_readable", "accepted", "saved_head_read",
-                                       "saved_string_count") if k in r} for r in results],
+                                       "saved_string_count", "oracle_values", "saved_values",
+                                       "saved_metric_reasons", "strings_sha256_before",
+                                       "strings_sha256_after", "ui_head_stable") if k in r} for r in results],
         "steps": [{"n": s.n, "verdict": s.verdict, "evidence": s.evidence,
                    "observed": s.observed} for s in steps]})
     return steps
