@@ -1182,3 +1182,36 @@ Stop on a protected prompt, stale error, changed accepted value, CSV mismatch
 or wrong revision. The support fixture controls only transport timing and
 synthetic material. Product actions use visible controls. This is offline
 browser evidence. Frozen staging grading awaits its admitted window.
+
+
+## Native enclosing-form reset replay
+
+Parent X05 report persistence. Execute the retained support fixture at
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-native-reset-pvsfalac/replay.py`.
+It bundles actual panels and a shared persistence client with synthetic file
+storage and mocked saved-design reads. A native enclosing form supplies the
+visible Reset enclosing form button. Use the 1920 by 2200 forced-colors view
+so both complete panels and the reset button fit.
+
+1. Read saved design in both panels. In A enter `001,0,01,1,0.4` and Save.
+   Require the saved cue and file revision 1.
+2. Enter `002,0,01,1,0.6` and download `before-idle-reset.csv`. Click Reset
+   enclosing form. Require the same exact five input values, file revision 1
+   and equal `after-idle-reset.csv`. Capture `idle-native-reset.png`.
+3. Hold the next Save receipt after its synthetic file commits revision 2.
+   Enter `003,0,01,1,0.7`, then click Reset enclosing form again. Require those
+   newer values before and after releasing the old receipt. Require the
+   newer-edits-unsaved cue and no implicit write. Download
+   `held-save-reset.csv`. Its DC row must show Studio `0.4`, report `0.7`,
+   delta `-0.3` and FAIL. Capture `held-save-native-reset.png`.
+4. Each of the three actual CSVs must equal its five normalized DOM rows,
+   15 row pairs total. Save the newer drafts explicitly. Require expected
+   revision 2, committed revision 3 and the write baseline sequence `0,1,2`.
+5. Unmount both panels and require zero observers. Close context, browser,
+   server and thread in `finally`. Preserve the replay, proof, synthetic file,
+   CSVs, screenshots and this settled recipe. No video is used.
+
+Stop on a protected prompt, input/CSV disagreement, implicit write, lost newer
+draft or incorrect CAS revision. Support setup controls the synthetic transport
+receipt. Reset, Read, Save and Download use visible native controls. This run
+provides offline browser evidence. Frozen staging grading awaits admission.

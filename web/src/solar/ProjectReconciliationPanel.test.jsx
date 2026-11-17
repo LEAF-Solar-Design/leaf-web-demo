@@ -16,7 +16,7 @@ const response = () => ({ ok: true, data: { context: { ...binding }, intake: {
     inverters: [{ id: id('inverter'), equipment_type: 'string_inverter' }],
   },
 } } })
-function fixture({ strict = false, subscribe, parentSubmit } = {}) {
+function fixture({ strict = false, subscribe, parentSubmit, fieldset = false } = {}) {
   const h = { snapshot: { binding, authorityKey: 'a' }, current: true, listeners: new Set() }
   h.client = { readContext: vi.fn(async () => response()), getSnapshot: () => h.snapshot,
     subscribe: (listener) => { h.listeners.add(listener); return () => h.listeners.delete(listener) },
@@ -26,7 +26,8 @@ function fixture({ strict = false, subscribe, parentSubmit } = {}) {
   const element = () => {
     const panel = strict ? <React.StrictMode><ProjectReconciliationPanel {...h.props} /></React.StrictMode>
       : <ProjectReconciliationPanel {...h.props} />
-    return parentSubmit ? <form onSubmit={event => { event.preventDefault(); parentSubmit() }}>{panel}</form> : panel
+    const content = fieldset ? <fieldset disabled={h.props.fieldsetDisabled}>{panel}</fieldset> : panel
+    return parentSubmit ? <form onSubmit={event => { event.preventDefault(); parentSubmit() }}>{content}</form> : content
   }
   h.view = render(element())
   h.update = (props) => { h.props = { ...h.props, ...props }; h.view.rerender(element()) }
@@ -338,6 +339,101 @@ it('requires a fresh report binding after equal-total string assignments change'
   h.client.saveEngineeringTotals.mockResolvedValueOnce(committed)
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls[0][0]).toMatchObject({ expectedRevision: 2, graphSha256: 'b'.repeat(64) })
+})
+
+const dirtyFormValues = ['002', '0', '01', '1', '0.6']
+const dirtyFormCsv = 'metric,studio,oracle,delta,verdict\r\n' +
+  '"panels","1","002","-1","FAIL"\r\n"optimizers","","0","","UNREADABLE"\r\n' +
+  '"inverters","1","01","0","PASS"\r\n"strings","1","1","0","PASS"\r\n' +
+  '"kw_dc","0.4","0.6","-0.2","FAIL"\r\n'
+
+it.each(['idle', 'Save'])('keeps native parent form reset coherent while %s', async phase => {
+  const h = fixture({ parentSubmit: vi.fn() }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(reportValues)
+  let settle
+  if (phase === 'Save') {
+    h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+    saveTotals()
+  }
+  fill(dirtyFormValues)
+  act(() => h.view.container.querySelector('form').reset())
+  expect(inputValues()).toEqual(dirtyFormValues)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(phase === 'Save' ? 1 : 0)
+  if (settle) await act(async () => settle(totalsResponse(1, reportValues)))
+  expect(inputValues()).toEqual(dirtyFormValues)
+  const createObjectURL = vi.fn(() => 'blob:native-reset')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(phase === 'Save' ? 2 : 1, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: phase === 'Save' ? 1 : 0, drafts: dirtyFormValues })
+})
+
+it.each(['Save', 'Reload'])('settles %s inside a disabled parent fieldset', async operation => {
+  const h = fixture({ fieldset: true }); canonicalReports(h)
+  read(); await reportsLoaded(); fill(dirtyFormValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const signal = method.mock.calls.at(-1)[0].signal
+  h.update({ fieldsetDisabled: true })
+  expect(screen.getByRole('button', { name: 'Save engineering totals' }).matches(':disabled')).toBe(true)
+  await act(async () => settle(totalsResponse(1, dirtyFormValues)))
+  expect(signal.aborted).toBe(false); expect(inputValues()).toEqual(dirtyFormValues)
+  h.update({ fieldsetDisabled: false })
+  const createObjectURL = vi.fn(() => 'blob:disabled-fieldset')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
+})
+
+it.each(['success', 'rejection'])('preserves same-panel caret through held Save %s', async outcome => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(reportValues)
+  let settle, reject
+  h.client.saveEngineeringTotals.mockReturnValueOnce(new Promise((resolve, fail) => { settle = resolve; reject = fail }))
+  saveTotals(); fill(dirtyFormValues)
+  const field = screen.getAllByRole('textbox')[0]
+  field.focus(); field.setSelectionRange(1, 3)
+  if (outcome === 'success') await act(async () => settle(totalsResponse(1, reportValues)))
+  else await act(async () => reject(new Error('synthetic failed write')))
+  expect(document.activeElement).toBe(field); expect(field.value).toBe('002')
+  expect([field.selectionStart, field.selectionEnd]).toEqual([1, 3])
+  const createObjectURL = vi.fn(() => 'blob:caret')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+})
+
+it.each(['Save', 'Reload'])('ignores visibility events during held %s', async operation => {
+  const h = fixture(); canonicalReports(h); read(); await reportsLoaded(); fill(dirtyFormValues)
+  const method = operation === 'Save' ? h.client.saveEngineeringTotals : h.client.loadEngineeringTotals
+  let settle; method.mockReturnValueOnce(new Promise(resolve => { settle = resolve }))
+  if (operation === 'Save') saveTotals(); else reloadTotals()
+  const reads = h.client.loadEngineeringTotals.mock.calls.length
+  const writes = h.client.saveEngineeringTotals.mock.calls.length
+  for (const state of ['hidden', 'visible']) {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue(state)
+    fireEvent(document, new Event('visibilitychange'))
+  }
+  expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(reads)
+  expect(h.client.saveEngineeringTotals).toHaveBeenCalledTimes(writes)
+  await act(async () => settle(totalsResponse(1, dirtyFormValues)))
+  expect(inputValues()).toEqual(dirtyFormValues)
+  const createObjectURL = vi.fn(() => 'blob:visibility')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
+  saveTotals(); await screen.findByText('Engineering totals saved.')
+  expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
 })
 
 const privateErrors = ['<img src=x onerror="SYNTHETIC_PRIVATE_X05">', '\u0000\u001b[31mSYNTHETIC_PRIVATE_X05\r\n',
