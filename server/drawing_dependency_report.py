@@ -26,7 +26,7 @@ def _inline_fonts(text):
         position = delimiter.end()
 
 
-def from_pairs(pairs):
+def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
@@ -57,7 +57,8 @@ def from_pairs(pairs):
         while end < len(pairs) and pairs[end][0] != 0:
             groups.setdefault(*pairs[end])
             if inline_record and pairs[end][0] in (1, 3, 304):
-                text_parts.append(pairs[end][1])
+                value = pairs[end][1] if literal_text is None else literal_text.get(end, pairs[end][1])
+                text_parts.append(value)
             end += 1
         kind = kind.upper()
         if kind == "EOF":

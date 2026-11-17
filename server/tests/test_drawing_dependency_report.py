@@ -89,6 +89,44 @@ def test_inline_scanner_preserves_literal_paths_and_refuses_unterminated_control
     assert from_pairs([(0, "MTEXT"), (1, r"\f" * 10000)])["dependencies"] == []
 
 
+@pytest.mark.parametrize("font", ["Synthetic Panel Sans", "\u5c4b\u6839 Sans", "  Literal Family  "])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_normal_reader_keeps_literal_inline_font_chunks(font, newline):
+    text = "{\\f" + font + "|b0|i0;Caption}"
+    for boundary in range(1, len(text)):
+        records = [(0, "SECTION"), (2, "ENTITIES"), (0, "MTEXT"),
+                   (5, "A1"), (8, "Notes"), (10, "0"), (20, "0"), (40, "1"),
+                   (3, text[:boundary]), (1, text[boundary:]),
+                   (0, "ENDSEC"), (0, "EOF")]
+        raw = "".join(str(code) + newline + value + newline for code, value in records).encode()
+        observed = parse_dxf_bytes(raw)["dependency_report"]["dependencies"]
+        assert [row["name"] for row in observed] == [font], (boundary, observed)
+
+
+def test_literal_font_metadata_keeps_default_geometry_tokenization():
+    from dxf_intake import _group_pairs
+
+    raw = ("0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n A1 \n8\n Panels \n"
+           "10\n 1 \n20\n 2 \n11\n 3 \n21\n 4 \n0\nENDSEC\n0\nEOF\n")
+    assert _group_pairs("1\n  value  \n") == [(1, "value")]
+    intake = parse_dxf_bytes(raw.encode())
+    assert intake["polylines"][0]["pts"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
+    assert intake["polylines"][0]["layer"] == "Panels"
+
+
+def test_literal_text_overrides_only_retain_inline_text_record_values():
+    from dxf_intake import _group_pairs
+
+    text = ("0\nSTYLE\n3\n font.shx \n0\nTEXT\n1\n label \n"
+            "0\nMTEXT\n3\n{\\fA \n1\n Face|b0;text}\n0\nLINE\n10\n 1 \n")
+    literal = {}
+    pairs = _group_pairs(text, literal_text=literal)
+    assert list(literal.values()) == ["{\\fA ", " Face|b0;text}"]
+    assert pairs[1] == (3, "font.shx")
+    assert pairs[3] == (1, "label")
+    assert pairs[-1] == (10, "1")
+
+
 @pytest.mark.parametrize("path", [r"\\unavailable-host\share\reference.dat",
                                 r"C:\not-present\reference.dat", "../../reference.dat"])
 def test_dependency_paths_are_reported_without_any_filesystem_access(path, monkeypatch):
