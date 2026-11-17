@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { authHeaders, config, createProjectDrawingEditorTransport, getDrawingIntake, noteUnauthorized, runToolAsync } from '../api.js'
 import { createSolarLandxmlClient } from './solarLandxmlClient.js'
 import SolarLandxmlUpload from './SolarLandxmlUpload.jsx'
+import SolarGroundInputForm from './SolarGroundInputForm.jsx'
 import SolarCombinerIntake from './SolarCombinerIntake.jsx'
 import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
@@ -143,7 +144,7 @@ export default function SolarWorkspaceTools({
 
   return (
     <ToolsForScope
-      key={JSON.stringify([drawingId ?? null, projectId ?? null])}
+      key={JSON.stringify([drawingId ?? null, projectId ?? null, projectScope?.organization_id ?? null])}
       drawingId={drawingId}
       projectId={projectId}
       projectScope={projectScope} getProjectScope={getProjectScope}
@@ -190,6 +191,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [initialBoundary, setInitialBoundary] = useState('')
   const [initialPreset, setInitialPreset] = useState('')
   const [initialUnits, setInitialUnits] = useState('m')
+  const [inputMode, setInputMode] = useState('structured')
+  const [structuredParameters, setStructuredParameters] = useState(null)
   const [originalIntake, setOriginalIntake] = useState(null)
   const [gridLongAxis, setGridLongAxis] = useState('150')
   const initialProject = JSON.stringify([projectScope?.organization_id, projectId])
@@ -199,6 +202,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   if (selectedOriginal) {
     initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis), selectedOriginal.producerSemantics)
     if (initialParameters) originalSummary = JSON.parse(selectedOriginal.text.replace(/^\uFEFF/, ''))
+  } else if (inputMode === 'structured') {
+    initialParameters = structuredParameters
   } else {
     try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
   }
@@ -767,13 +772,15 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   }
 
   const hasProjectPublication = projectId !== null && (flow === 'ground-physical' || flow === 'project-publication')
+  const publicationInputsLocked = publication.phase === 'pending' || publication.phase === 'unknown'
   if (!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
       hidden={!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
       data-physical-head-index={physicalHead?.index ?? undefined}>
       {hasProjectPublication && <div aria-label="Project layout publication">
-        {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <div>
+        {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <fieldset disabled={publicationInputsLocked}>
+          <legend>Initial project layout</legend>
           <label>Original layout intake (JSON)<input type="file" accept=".json,application/json"
             disabled={publication.phase === 'pending'} onChange={chooseOriginalIntake} /></label>
           {selectedOriginal ? <>
@@ -795,6 +802,12 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <button type="button" disabled={publication.phase === 'pending'}
               onClick={() => setOriginalIntake(null)}>Clear original intake</button>
           </> : <>
+            <button type="button" onClick={() => setInputMode(current => current === 'structured' ? 'advanced' : 'structured')}>
+              {inputMode === 'structured' ? 'Advanced JSON' : 'Structured inputs'}</button>
+            <div hidden={inputMode !== 'structured'}>
+              <SolarGroundInputForm disabled={publicationInputsLocked} onParameters={setStructuredParameters} />
+            </div>
+            <div hidden={inputMode !== 'advanced'}>
             <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}
               onChange={event => setInitialBoundary(event.target.value)} /></label>
             <label>Complete preset (JSON)<textarea value={initialPreset} maxLength={2000000}
@@ -802,9 +815,10 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Drawing units for publication<select value={initialUnits} onChange={event => setInitialUnits(event.target.value)}>
               <option value="m">Metres</option><option value="ft">Feet</option>
             </select></label>
+            </div>
           </>}
-        </div>}
-        <button type="button" disabled={publication.phase === 'pending' || busy || !projectScope}
+        </fieldset>}
+        <button type="button" disabled={publicationInputsLocked || busy || !projectScope}
           onClick={readPublicationHead}>Read current layout for publication</button>
         <button type="button" disabled={publication.phase === 'pending' || busy
           || !publicationReadback || !projectScope || (projectScope.input_version_id === null && !initialParameters)
