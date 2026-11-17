@@ -15,6 +15,19 @@ from x07_workflow_adapter import ConfirmationReceiptStore, _check_connection, _d
 MAX_RECEIPT_BYTES=262144
 MAX_RECEIPT_DEPTH=32  # root container has depth one
 MAX_RECEIPT_NODES=10000  # containers and values, excluding member keys
+MAX_TOTAL_RECEIPT_BYTES=8*1024*1024  # scoped payload bytes before bulk reads
+
+
+def require_settled_files(path):
+    require_database_file(path)
+    wal=Path(str(path)+'-wal')
+    if wal.exists():
+        require_database_file(wal)
+        shared=Path(str(path)+'-shm')
+        require_database_file(shared)
+        # Refuse before SQLite can create a missing shared-memory index.
+        with shared.open('rb') as stream:
+            stream.read(1)
 
 
 class ReceiptBudgetError(ValueError):
@@ -68,7 +81,7 @@ def parse_receipt(encoded):
 def audit_receipts(store, journal, *, customer_key):
     customer_key = _key(customer_key)
     if store.read_only is not True or journal.read_only is not True: raise ValueError('read-only stores required')
-    require_database_file(store.path); require_database_file(journal.path)
+    require_settled_files(store.path); require_settled_files(journal.path)
     _distinct_store_paths(store.path,journal.path)
     issues = {'invalid_receipts':0,'missing_references':0,'inconsistent_references':0}
     receipt_connection = journal._connect()
@@ -78,6 +91,9 @@ def audit_receipts(store, journal, *, customer_key):
     with closing(receipt_connection) as receipts, store._connection() as db:
         begin_audit(db); _check_connection(receipts)
         receipts.execute('BEGIN')
+        count,total=receipts.execute('SELECT count(*),coalesce(sum(length(CAST(result AS BLOB))),0) FROM main.confirmations WHERE customer_key=?', (customer_key,)).fetchone()
+        if count>MAX_AUDIT_ROWS or total>MAX_TOTAL_RECEIPT_BYTES:
+            raise ReceiptBudgetError('scoped receipt budget exceeded')
         rows = receipts.execute('SELECT project_key,result FROM main.confirmations WHERE customer_key=? ORDER BY project_key LIMIT ?', (customer_key,MAX_AUDIT_ROWS+1)).fetchall()
         if len(rows)>MAX_AUDIT_ROWS: raise ValueError('row budget exceeded')
         for project, encoded in rows:
@@ -115,7 +131,7 @@ def main():
     parser.add_argument('--database',type=Path,required=True); parser.add_argument('--journal',type=Path,required=True); parser.add_argument('--customer',required=True)
     args=parser.parse_args()
     try:
-        require_database_file(args.database); require_database_file(args.journal)
+        require_settled_files(args.database); require_settled_files(args.journal)
         result=audit_receipts(CustomerProfileStore(args.database,read_only=True),ConfirmationReceiptStore(args.journal,read_only=True),customer_key=args.customer)
     except (OSError,ValueError,sqlite3.Error):
         publish_stdout({'schema':'leaf.x07.receipt-history-audit.v1','error':'AUDIT_UNAVAILABLE'}); return 2

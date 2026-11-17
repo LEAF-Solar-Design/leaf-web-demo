@@ -53,7 +53,7 @@ def measure_plans(directory, *, smoke=False):
                     details = [row[3] for row in connection.execute('EXPLAIN QUERY PLAN ' + sql, parameters)]
                 plans.append({'store': side, 'statement': sql, 'details': details,
                               'foreign_table_scan': any(detail.upper().startswith('SCAN ') for detail in details)})
-            if len(plans) != 4:
+            if len(plans) != 5:
                 raise ValueError('unexpected actual SELECT inventory')
             for customer, pin in pins.items():
                 if store.application_record('old-' + customer, customer) != pin:
