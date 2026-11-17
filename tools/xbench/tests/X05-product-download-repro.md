@@ -155,8 +155,11 @@ window.switchDrawing = () => render(nextBinding, 'synthetic-next', nextClient);
 window.oldReadAborted = () => oldSignal?.aborted === true;
 window.enableReportPersistence = () => {
   let loseSaveResponse = false;
+  let failReportGet = false;
   window.loseNextSaveResponse = () => { loseSaveResponse = true; };
+  window.failNextReportReload = () => { failReportGet = true; };
   const exchange = async (method, body, signal) => {
+    if (method === 'GET' && failReportGet) { failReportGet = false; throw new Error('Synthetic report GET failure'); }
     const result = await fetch('/mock-engineering-totals', {
       method, signal, headers: {'Content-Type': 'application/json'},
       ...(body ? {body: JSON.stringify(body)} : {}),
@@ -787,6 +790,21 @@ try:
     assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == lost_values
     assert canonical_file.read_bytes() == committed_bytes
     recovered = capture_comparison('lost-save-response-recovered')
+    # A failed report GET must retain a usable dirty comparison and export.
+    dirty_values = ['006', '01', '02', '01', '0.8']
+    for label, value in zip(labels, dirty_values):
+        page.get_by_role('textbox', name=label + ' engineering report/BOM', exact=True).fill(value)
+    page.evaluate('window.failNextReportReload()')
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Engineering totals could not be loaded. Reload saved engineering totals to try again.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == dirty_values
+    assert canonical_file.read_bytes() == committed_bytes
+    failed_reload = capture_comparison('failed-report-get-dirty-csv')
+    page.get_by_role('button', name='Reload saved engineering totals', exact=True).click()
+    expect(page.get_by_text('Saved engineering totals loaded.', exact=True)).to_be_visible()
+    assert page.get_by_role('textbox').evaluate_all('(nodes) => nodes.map(n => n.value)') == lost_values
+    assert canonical_file.read_bytes() == committed_bytes
+    reload_recovered = capture_comparison('failed-report-get-recovered-csv')
     final_document = json.loads(committed_bytes)
     assert final_document['intake'] == first_document['intake'] and final_document['version'] == 7
     report_persistence = dict(restored=restored, exact_values=persisted_values, blank_dc=True,
@@ -794,6 +812,7 @@ try:
         stale_save_rejected=True, stale_save_file_bytes_unchanged=True,
         explicit_reload_values=newer_values, graph_and_version_unchanged=True,
         lost_save_response_recovered=True, recovery_without_write=True, recovered=recovered,
+        failed_reload=failed_reload, failed_reload_recovered=reload_recovered,
         canonical_file_sha256=hashlib.sha256(committed_bytes).hexdigest())
     def digest(path):
         return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -847,3 +866,125 @@ print(json.dumps({'proof': str(proof_path), 'rows_matched': 5, 'keyboard_retries
                   'valid_empty_design': True,
                   'same_drawing_revision_refresh': True}))
 ```
+
+## Independent two-panel CAS replay
+
+Parent: X05 durable report reconciliation. The executed support fixture is
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-report-persistence-hhl93ep9/replay.py`.
+It bundles the actual panel and persistence client from the lifecycle worktree.
+It runs one browser, two independently scoped clients, one synthetic file API
+and one file store. Its saved-design read is mocked. It does not prove PostgreSQL
+concurrency or staging behavior. No authentication, customer data or video is used.
+
+Use the compatible React/esbuild cache and installed Python Playwright. Run that
+retained `replay.py` on Windows. The viewport is 1920 by 2200, forced colors active;
+both complete panels and their controls fit side by side. The helper records exact
+source hashes and closes browser, context, server and thread in `finally`.
+
+1. Explicitly Read saved design in both panels. Enter A's reports
+   `001,0,01,1,blank` and B's `002,0,01,1,0.4`, both based on file revision zero.
+2. Save A and wait for its saved cue. Save B and require the conflict cue. B keeps
+   its entered values, A remains unchanged, and the entire newer file stays equal.
+3. Download A and B CSVs. Normalize each panel's five DOM rows independently and
+   require exact equality with its downloaded rows, including unreadable text.
+4. Explicitly reload B's report. It adopts A's saved values without a write.
+   Change B's Panels to `003`, DC to `0.4`, and Save. Change A's Panels to `004`
+   and Save from its stale baseline. Require conflict and unchanged newer bytes.
+5. Download each panel again and compare all rows. Explicitly reload A, require
+   B's saved values, and repeat both downloads. Six exports and 30 rows must agree.
+6. Set A's Panels to `005`, hold only its next Save response, and Save. Edit A to
+   `006` while pending. Explicitly Read saved design. The old save observation is
+   cancelled, the fresh read detects the committed newer report, and A retains
+   `006` with explicit reload required. Deliver the old receipt last. It must not
+   show a saved cue or change the file, drafts, baseline or B's accepted values.
+
+Stop on extra writes, row disagreement, stale saved cue, changed newer file or an
+uncaught browser error. `proof.json`, `independent-clients-conflict.png` and
+`read-cancels-save-observation.png` preserve the result. This replay is separate
+from the single-client lost-response recipe above; its two clients share neither
+the client instance nor panel state.
+
+## Late Reload after a newer retry
+
+Parent: X05 durable report reconciliation. Executed replay and source hashes:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-report-persistence-_isz7cma/replay.py`.
+Run this retained Python helper with the same React/esbuild cache and Playwright
+setup described above. It uses actual panels and independent persistence clients,
+a synthetic file API, and mocked saved-design reads. This is offline browser
+evidence. The 1920 by 2200 forced-colors viewport fits both complete panels.
+
+1. Complete the preceding competing-save and failed-GET recovery sequence. After
+   the held Save response is discarded, explicitly Reload both panels. Each
+   adopts Panels `005` at file revision 3.
+2. Hold A's next GET response after the server has captured that record. Click
+   Reload in A. In B, enter Panels `007` and Save. Require the saved cue and file
+   revision 4.
+3. Wait for A's real 20-second load timeout and retry message. Explicitly Reload
+   A again. Require the loaded cue and `007`. Deliver the old GET response last.
+   A must retain `007`, and B must remain unchanged.
+4. Download both actual CSVs and compare every field with each panel's five DOM
+   rows. Enter Panels `008` in A and Save. The captured PUT must name
+   `expected_revision: 4`, the file must advance to revision 5, and B stays `007`.
+   Download A's CSV again and compare all five rows.
+
+The complete run checks 11 exports against 55 DOM rows. `proof.json` records the
+timeout, traffic, exact source hashes and cleanup. `late-reload-newer-retry.png`
+shows both panels after the stale response. Stop on any stale draft, wrong CAS
+revision, row mismatch or browser error. The helper closes its browser, context,
+server and thread in `finally`. No video, staging or PostgreSQL claim is made.
+
+## Shared-client teardown replay
+
+Parent: X05 report persistence. Retained executable support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-shared-client-_b4l0h8b/replay.py`.
+Run with the same local React/esbuild and Python Playwright setup above. Two
+actual panels use one actual persistence client, one synthetic file API and
+mocked saved-design reads. The 1920 by 2200 forced-colors viewport fits the
+surviving panel and all five rows. This is offline evidence, without video.
+
+1. Read saved design in both panels. Require two subscriptions. Enter A's
+   Panels `001` and B's `002`, with `0,01,1,0.4` in their other fields.
+2. Hold A's next Reload GET response after capture. Start that Reload. Hold
+   B's next Save response, then Save B from revision zero.
+3. Unmount only A. Require A's signal aborted, B's Save signal still active
+   and one remaining subscription. Deliver A's old GET. B must keep its dirty
+   `002` and its pending Save cue.
+4. Deliver B's Save response. Require the saved cue. Reload B explicitly and
+   download its CSV. Require all five rows to equal the visible table.
+5. Change B's Panels to `003`, Save, Reload and download again. Captured PUTs
+   must have expected revisions `[0,1]`. Both exports equal ten DOM rows.
+6. Capture `shared-client-survivor.png`, then unmount B. Require zero
+   subscriptions. The helper closes context, browser, server and thread in
+   `finally`; `proof.json` records cleanup, source hashes and exact traffic.
+
+Stop on another panel's abort, stale drafts, changed CAS baseline, retained
+subscription, export disagreement or uncaught error. No staging or database
+claim is made. The separate focused tests also cover losing shared-client
+Save drafts, per-field receipt substitution and edit/revert during Save.
+
+## Same-scope client replacement replay
+
+Parent: X05 report receipt isolation. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-client-replacement-qodfmvug/replay.py`.
+Use the local React/esbuild and Python Playwright setup above. Two actual panels
+use independent clients; A then receives a replacement client at the same drawing
+and authority. The shared file API and saved-design reads are mocked. The
+1920 by 2200 forced-colors viewport fits both panels and all five rows.
+
+1. Read saved design in both panels. Enter A's Panels `001` and Save, holding
+   its response after file revision 1 commits. Other fields are `0,01,1,0.4`.
+2. Reload B, change its Panels to `003`, then Save at expected revision 1.
+   Require its saved cue and file revision 2.
+3. Replace only A's client, leaving the drawing and authority unchanged.
+   Require Save disabled and the explicit Read prompt. Read saved design again.
+   Require the loaded report cue and `003` from revision 2.
+4. Deliver the old client's Save receipt last. A must keep `003` with no saved
+   cue from that receipt. Download both actual CSVs and compare all five rows
+   with each visible table. Capture `same-scope-client-replaced.png`.
+5. Enter A's Panels `004`, Save and export again. Require expected revision 2,
+   file revision 3, unchanged B values and exact CSV/DOM rows. Three exports
+   must equal 15 rows. `proof.json` binds source hashes, traffic and cleanup.
+
+Stop on stale drafts, a false saved cue, an incorrect CAS baseline or a row
+mismatch. Browser, context, server and thread close in `finally`. The retained
+replay and `REPLAY.md` are offline proof, without database or staging acceptance.
