@@ -1,10 +1,56 @@
-# Prepared solar string tags
+# Solar string tags in source drawings
 
-Studio X01 needs visible circuit labels on normal exported drawings. The product
-core in `server/solar_string_tags.py` prepares deterministic placement data for
-that work. It does not bind a catalog operation, write CAD entities, materialize
-a drawing, or export text. The caller separately owns publication. This slice
-adds no graph text kind and never fabricates `tag_text_ref`.
+The normal registered `solar-string-tags` drawing.write tool publishes visible
+circuit labels as top-level DXF TEXT through `project_drawing_editor.save_dxf`.
+The pure placement core in `server/solar_string_tags.py` still prepares a plan;
+the trusted builtin reads the exact stored `solar_design_graph` and verifies its
+companion SHA-256. The source writer splices that plan into the exact parent
+source bytes. No graph, string list, or drawing identity is accepted in params.
+This adds no graph text kind and never fabricates `tag_text_ref`.
+
+## Normal catalog publication
+
+Discover `solar-string-tags` in the normal catalog and use that row's current
+`catalog_digest`. Obtain a checkout with
+`POST /api/projects/{project_id}/drawings/{drawing_id}/checkout`, retaining its
+`checkout_capability`. Confirm the exact canonical parent version UUID with:
+
+```http
+POST /api/run
+Content-Type: application/json
+X-Org-Id: <organization UUID>
+X-Project-Id: <project UUID>
+X-Checkout-Capability: <checkout_capability>
+Idempotency-Key: <unique confirmation key>
+
+{
+  "tool": "solar-string-tags",
+  "dwg": "<canonical parent drawing version UUID>",
+  "catalog_digest": "<digest from the normal catalog row>",
+  "params": {
+    "expected_rev": 0,
+    "paper_mm_per_drawing_unit": 0.254,
+    "paper_height_mm": 2.0,
+    "tag_layer": "LEAF_STRING_TAGS"
+  }
+}
+```
+
+`expected_rev` must match the stored graph revision; it is independent of the
+drawing version sequence. The normal HTTP response includes result, overlay,
+producer, and the immutable child in `version.version_id`; the server writer
+also returns its existing publication receipt internally.
+The result includes `tag_layer`, `tag_count`, and the internal proposed
+`string_tag_plan`. Read the exact child bytes at
+`GET /api/projects/{project_id}/drawings/{drawing_id}/versions/{version_id}/dxf`.
+`X-Leaf-Source-Sha256` binds that ordinary export to the published source bytes;
+the receipt and producer proof bind source and intake hashes. The original version remains readable
+and unchanged. There is no separate exporter or direct file-store write.
+
+The same key, parent, and params replay the same child, including after checkout
+release when the original capability remains verifiable. Changed params under
+that key conflict. A fresh key against a stale parent refuses. Tenant, catalog,
+entitlement, checkout, and parent compare-and-set guards remain the ordinary ones.
 
 ## API and scale
 
@@ -71,10 +117,50 @@ path compression, and panel lookup scans stored/compact panels once.
 Each nominal rectangle stays within its reserved cell, with a margin on all
 sides. Distinct cells give disjoint nominal rectangles. This guarantees separation
 between these tag boxes only: it does not avoid panels, routes, or other drawing
-annotations, and does not bound glyphs rendered using arbitrary source styles.
-A future writer must use a matching controlled TEXT style/insertion convention
-or validate the resulting rendered extents. Collocated tags may move many rows
+annotations. The source writer uses controlled style `LEAF_STRING_TAGS`: stock
+`txt` font, width factor 1, fixed height 0, zero oblique and generation flags,
+left/baseline justification, zero rotation, and modelspace insertion at z=0.
+These are controlled nominal boxes, not a glyph-extents or obstacle-avoidance
+guarantee. Collocated tags may move many rows
 upward; this core does not promise a maximum distance from the source string.
+
+## Source publication boundaries
+
+This slice admits source-intake drawings with standard ASCII R2000-or-newer DXF
+HEADER/TABLES/BLOCKS/ENTITIES topology, unique relevant tables/records/handles,
+and an unambiguous `*Model_Space` BLOCK_RECORD with matching BLOCK/ENDBLK owners.
+Required symbol tables are LAYER, STYLE, APPID, BLOCK_RECORD, and LTYPE; the
+Continuous linetype must actually be a continuous pattern.
+Missing or ambiguous topology refuses before publication. Binary DXF and native
+`solar_physical_layout` parents explicitly refuse; the native decoder and
+materializer are unchanged. Native support is not implied by this feature.
+
+Source `$INSUNITS` 1 requires graph scale .0254; 6 requires scale 1. Source 0
+requires explicitly resolved graph units. Unsupported or inconsistent source
+units refuse. The source header units are never rewritten. Paper scale remains
+required, without a catalog default: it describes intended plotting and cannot
+be inferred from the drawing's physical units.
+
+The named tag layer is on, thawed, unlocked, and plot-enabled. A conflicting
+existing definition refuses instead of changing customer layers. Controlled
+STYLE and APPID definitions are added or safely reused; unsafe definitions
+refuse. Each new TEXT has a fresh unique hexadecimal handle, genuine modelspace
+owner, and XDATA `LEAF_STRING_TAGS` / `leaf.solar-string-tags.v1` / stable
+`string_ref`. Only exact schema-marked controlled TEXT is replaced on a later
+confirmation, so a child upsert retains one tag per current string. A customer's
+label on the same layer without that ownership marker survives. Reactors,
+external application data, or references to an owned removal refuse.
+
+All other source records preserve their raw bytes and order, including latin-1
+groups and newline encodings. Only owned tag records, required new symbol-table
+records/counts, and HANDSEED change. Input/output bytes are bounded by the
+editor's 16 MiB maximum; plans admit at most 10,000 tags. Parsed source geometry
+must match the stored intake before splicing; parsed unrelated geometry must
+survive afterward. The server derives a merged intake from the new parsed CAD
+fields and the original non-CAD material, preserving the exact validated graph,
+companion digest, validity, and semantic revision. Deterministic handle/plan
+metadata lives outside the graph as `leaf_string_tags`, without timestamps or
+randomness. Ordinary raw editor writes retain their existing invalidation rules.
 
 ## Practical limits and refusals
 
@@ -102,12 +188,20 @@ Run through the canonical off-host service environment (`offhost.py leaf-svc
 --scope verify --no-local`), using:
 
 ```sh
-python3 -P -m pytest --disable-plugin-autoload -p no:cacheprovider -o pythonpath=server server/tests/test_solar_string_tags.py server/tests/test_w2_string_add.py server/tests/test_solar_registry.py -q
+python3 -P -m pytest --disable-plugin-autoload -p no:cacheprovider -o pythonpath=server server/tests/test_solar_string_tags.py server/tests/test_project_string_tags.py server/tests/test_project_drawing_write.py server/tests/test_solar_registry.py -q
 ```
 
-Tests use small seeded graphs and a synthetic bounded large collection, without
-real drawings. They independently calculate heights and boxes, cover equivalent
-resolved physical scales and midpoint choices, compare compact slots to stored
-panels, verify deterministic replay/input preservation, exercise refusal paths,
-and count reservation-map operations for 10,000 collocated strings without a
-timing gate. Prepared plans alone are not evidence of written or exported tags.
+The pure core suite checks bounded placement and compact slots independently.
+The source writer suite uses real hand-authored DXF tables and modelspace
+topology for inches, metres, and explicitly resolved unitless inputs. It checks
+TEXT, controlled symbols, ownership, physical heights, independent nominal box
+separation, raw preservation, deterministic replay, child upsert, and refusals.
+Mounted `/api/run` and ordinary `/dxf` cases use the existing lane/checkout/
+versions fixtures with the genuine disposable PostgreSQL producer. They cover
+catalog binding, immutable publication, graph preservation, confirmation replay,
+and admission controls. A skipped integration is not publication evidence.
+
+Prepared-core evidence, mounted local HTTP evidence, and actual staging delivery
+are separate milestones. This documentation describes the implemented contract;
+it makes no live-delivery claim. Staging completion requires the root's semantic
+receipt from the delivered normal API and exported child.
