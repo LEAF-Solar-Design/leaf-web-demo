@@ -3313,3 +3313,73 @@ after complete bytes were accepted; those bytes do not establish delivery
 success. Tests cover binary/text sinks in all ten modes and reject invalid stdin
 return types or oversized chunks after valid prefixes, preserving sanitized
 UNREADABLE output and clean recovery. No live streams or X05 acceptance are used.
+
+
+## Closed input and nonblocking output replay
+
+Within Studio X-bench X05, input uncertainty and output delivery failure have
+separate exits. This replay uses synthetic local streams and compares a clean
+recovery against exact canonical result bytes. No live input is used.
+
+```python
+import sys, runpy, json
+from io import BytesIO, StringIO
+from types import SimpleNamespace
+from unittest.mock import patch
+sys.path.insert(0, 'tools/xbench')
+from benches import x05_reconcile as m
+fixtures = runpy.run_path('tools/xbench/tests/test_x05_reconcile.py')
+Sink = fixtures['DeliveryOutput']
+raw = m.serialize_result(fixtures['framed_payload'](None)).encode()
+class ClosedInput:
+    def __init__(self, prefix): self.prefix, self.calls = prefix, 0
+    def read(self, size):
+        self.calls += 1
+        if self.prefix and self.calls == 1: return raw[:13]
+        raise ValueError('private-closed-input')
+class NonblockingSink(Sink):
+    def write(self, value):
+        if not self.requests: return super().write(value)
+        self.requests.append(value)
+        self.accepted += value[:3]
+        raise BlockingIOError(11, 'private-nonblocking-output', 3)
+cases = [('closed before prefix', ClosedInput(False), Sink(True)),
+         ('closed after prefix', ClosedInput(True), Sink(True)),
+         ('nonblocking after prefix', BytesIO(raw), NonblockingSink(True, limit=11)),
+         ('clean recovery', BytesIO(raw), Sink(True, limit=8192))]
+for label, source, sink in cases:
+    errors = StringIO()
+    with patch.object(sys, 'stdin', SimpleNamespace(buffer=source)), \
+         patch.object(sys, 'stdout', SimpleNamespace(buffer=sink)), \
+         patch.object(sys, 'stderr', errors):
+        code = m.main([])
+    assert not errors.getvalue()
+    if label.startswith('closed'):
+        assert sink.accepted == b'{"reason":"cli_evidence_unreadable","verdict":"UNREADABLE"}\n'
+        verdict = 'UNREADABLE'
+    elif label.startswith('nonblocking'):
+        assert len(sink.accepted) == 14 and len(sink.requests) == 2 and sink.flushes == 0
+        verdict = 'partial'
+    else:
+        exact = (m.serialize_result(m.reconcile_json(raw.decode()))+chr(10)).encode()
+        assert sink.accepted == exact
+        verdict = json.loads(sink.accepted)['verdict']
+    print(label, code, verdict, sink.flushes)
+```
+
+Expected output:
+
+```text
+closed before prefix 4 UNREADABLE 1
+closed after prefix 4 UNREADABLE 1
+nonblocking after prefix 5 partial 0
+clean recovery 0 PASS 1
+```
+
+ValueError from a closed read stays inside the existing sanitized input path.
+Interrupted reads also yield uncertainty; interrupted writes or flushes yield
+exit 5. A BlockingIOError may report characters already accepted. The CLI stops
+without replaying that prefix or flushing again. Binary/text short-write schedules
+advance exactly by accepted progress, including across the 8192-character or byte
+submission boundary. Work-count tests use exact offsets and hashes rather than
+timing limits. These offline delivery results do not establish live X05 parity.

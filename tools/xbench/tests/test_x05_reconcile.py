@@ -9167,3 +9167,119 @@ def test_stdio_closed_stdout_write_and_flush_return_five_without_recursive_outpu
         assert len(output.accepted.splitlines()) == 1
         assert json.loads(output.accepted)['verdict'] == 'PASS' and output.flushes == 1
     assert b'private-closed-output' not in output.accepted if binary else 'private-closed-output' not in output.accepted
+
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('prefix', [False, True])
+def test_io_fault_closed_stdin_before_or_after_prefix_is_sanitized_and_recovers(monkeypatch, mode, prefix):
+    raw = serialize_result(framed_payload(mode)).encode()
+    calls = []
+    class ClosedInput:
+        def read(self, size):
+            calls.append(size)
+            if prefix and len(calls) == 1: return raw[:13]
+            raise ValueError('private-closed-stdin')
+    output = DeliveryOutput(True)
+    assert delivery_run(monkeypatch, mode, output, input_stream=ClosedInput()) == 4
+    assert output.accepted == b'{"reason":"cli_evidence_unreadable","verdict":"UNREADABLE"}\n'
+    assert len(calls) == (2 if prefix else 1)
+    clean = DeliveryOutput(True)
+    assert delivery_run(monkeypatch, mode, clean) == 0 and json.loads(clean.accepted)['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('stage', ['read', 'write', 'flush'])
+def test_io_fault_interrupted_after_progress_is_bounded_without_duplicate_output(monkeypatch, mode, binary, stage):
+    raw = serialize_result(framed_payload(mode)).encode(); reads = []
+    class InterruptedInput:
+        def read(self, size):
+            reads.append(size)
+            if len(reads) == 1: return raw[:13]
+            raise InterruptedError('private-interrupted-input')
+    class InterruptedOutput(DeliveryOutput):
+        def write(self, value):
+            if stage == 'write' and self.requests:
+                self.requests.append(value)
+                raise InterruptedError('private-interrupted-write')
+            return super().write(value)
+        def flush(self):
+            super().flush()
+            if stage == 'flush': raise InterruptedError('private-interrupted-flush')
+    output = InterruptedOutput(binary, limit=11 if stage == 'write' else 8192)
+    assert delivery_run(monkeypatch, mode, output, input_stream=InterruptedInput() if stage == 'read' else None) == (4 if stage == 'read' else 5)
+    if stage == 'read':
+        assert len(reads) == 2 and json.loads(output.accepted) == dict(verdict='UNREADABLE', reason='cli_evidence_unreadable')
+    elif stage == 'write':
+        baseline = DeliveryOutput(binary, limit=8192)
+        assert delivery_run(monkeypatch, mode, baseline) == 0
+        assert output.accepted == baseline.accepted[:11] and len(output.requests) == 2 and output.flushes == 0
+        assert output.requests[1] == baseline.accepted[11:11+8192]
+    else:
+        assert json.loads(output.accepted)['verdict'] == 'PASS' and output.flushes == 1
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('schedule', [(1,8191,2,8192,7), (8192,1,8191,2)])
+def test_io_fault_mixed_short_write_schedule_preserves_exact_remaining_slices(monkeypatch, mode, binary, schedule):
+    baseline = DeliveryOutput(binary, limit=8192)
+    assert delivery_run(monkeypatch, mode, baseline) == 0
+    class ScheduledOutput(DeliveryOutput):
+        def write(self, value):
+            self.limit = schedule[len(self.requests) % len(schedule)]
+            return super().write(value)
+    output = ScheduledOutput(binary)
+    assert delivery_run(monkeypatch, mode, output) == 0
+    assert output.accepted == baseline.accepted and output.flushes == 1
+    offset = 0
+    for index, piece in enumerate(output.requests):
+        assert piece == baseline.accepted[offset:offset+8192] and 0 < len(piece) <= 8192
+        offset += min(len(piece), schedule[index % len(schedule)])
+    assert offset == len(baseline.accepted) and len(output.accepted.splitlines()) == 1
+
+
+@pytest.mark.parametrize('mode', STDIO_MODES)
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('extra', [0,3,7])
+def test_io_fault_nonblocking_error_reports_accepted_prefix_without_retry_or_flush(monkeypatch, mode, binary, extra):
+    baseline = DeliveryOutput(binary, limit=8192)
+    assert delivery_run(monkeypatch, mode, baseline) == 0
+    class NonblockingOutput(DeliveryOutput):
+        def write(self, value):
+            if not self.requests: return super().write(value)
+            self.requests.append(value)
+            self.accepted += value[:extra]
+            error = BlockingIOError(11, 'private-blocked-output', extra)
+            assert error.characters_written == extra
+            raise error
+    output = NonblockingOutput(binary, limit=11)
+    assert delivery_run(monkeypatch, mode, output) == 5
+    assert output.accepted == baseline.accepted[:11+extra]
+    assert len(output.requests) == 2 and output.requests[1] == baseline.accepted[11:11+8192]
+    assert output.flushes == 0
+
+
+@pytest.mark.parametrize('binary', [False, True])
+@pytest.mark.parametrize('size', [0,8191,8192,8193,32771])
+@pytest.mark.parametrize('progress', [1,17,8192])
+def test_io_fault_submission_work_count_tracks_progress_with_bounded_pieces(binary, size, progress):
+    from hashlib import sha256
+    from benches import x05_reconcile as m
+    text = serialize_result(dict(verdict='PASS', payload='x'*size)) + chr(10)
+    assert len(text.splitlines()) == 1 and json.loads(text)['verdict'] == 'PASS'
+    payload = text.encode('ascii') if binary else text
+    class CountedOutput:
+        offset = calls = flushes = 0
+        def __init__(self): self.digest = sha256()
+        def write(self, piece):
+            assert piece == payload[self.offset:self.offset+8192] and 0 < len(piece) <= 8192
+            accepted = min(progress, len(piece))
+            self.digest.update(piece[:accepted] if binary else piece[:accepted].encode('ascii'))
+            self.offset += accepted; self.calls += 1
+            return accepted
+        def flush(self): self.flushes += 1
+    output = CountedOutput(); m._write_all(output, payload)
+    assert output.offset == len(payload) and output.calls == (len(payload)+progress-1)//progress
+    assert output.flushes == 1 and output.digest.digest() == sha256(text.encode('ascii')).digest()
