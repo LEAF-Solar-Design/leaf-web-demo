@@ -1075,3 +1075,38 @@ Stop on an enabled action while busy, a lost draft, a wrong CAS revision or a
 CSV mismatch. Focused synthetic tests separately cover rejection and timeout.
 This browser replay proves successful held responses only, without staging or
 PostgreSQL acceptance. No video or private engineering inputs are used.
+
+## Save and Reload error-redaction replay
+
+Parent: X05 report recovery. Executed support fixture:
+`D:/agent-data/leaf-research/studio-xbench-2026-11/synthetic-tests/x05-error-redaction-qfm7itt1/replay.py`.
+Use the local React/esbuild and Python Playwright setup above. Actual panels
+share one actual persistence client, with a synthetic file API and mocked
+saved-design reads. Transport exceptions contain only a synthetic sentinel,
+HTML and control characters. No real secret is used. The 1920 by 2200
+forced-colors viewport fits both full panels.
+
+1. Read saved design in both panels. Enter A's `001,0,01,1,0.4`. Reject its
+   next Save transport with the injected error. Require fixed, polite live
+   feedback, unchanged drafts, no saved cue, no image node and no sentinel in
+   the DOM. The synthetic file must remain absent. Export the five retained
+   rows and capture `save-error-sanitized.png`.
+2. Retry Save explicitly. Require the saved cue and file revision 1. Change
+   Panels to `002`, then reject the next explicit Reload transport similarly.
+   Require fixed live feedback, retained `002`, unchanged file revision 1,
+   no injected node or sentinel, and an exact five-row CSV. Capture
+   `reload-error-sanitized.png`.
+3. Reload explicitly without injection. Require restored `001` and export
+   again. Three actual CSVs must equal 15 normalized DOM rows. Enter `003`
+   and Save: require expected revision 1 and stored revision 2. Capture
+   `redaction-recovered.png`.
+4. Unmount both panels and require zero observers. Browser, context, server
+   and thread close in `finally`. `proof.json` binds source hashes, traffic,
+   redaction checks and cleanup; executable replay and `REPLAY.md` are retained.
+
+Stop on exposed injected text, a changed draft, an implicit overwrite or a CSV
+mismatch. This is offline transport-failure evidence, not staging or PostgreSQL
+acceptance. The focused tests independently cover each error shape and numeric
+boundaries. They also reproduce same-turn Read then Reload sending a stale
+report request; the generation guard now rejects it before transport. Both
+action orders recover through a fresh graph/report read and ignore old results.
