@@ -61,6 +61,41 @@ class AuthoringError(ValueError):
         super().__init__(message)
 
 
+_VERIFIED_DEPENDENCY_REFUSAL = object()
+
+
+class AuthorDependencyRefusal(AuthoringError):
+    """Trusted RPC gate disposition, with caller-supplied wire correlation."""
+    def __init__(self, disposition, *, request, binding, provenance=None):
+        super().__init__('author_unavailable', author_subphase='author_http')
+        self.disposition = copy.deepcopy(disposition)
+        self.request = copy.deepcopy(request)
+        self.binding = copy.deepcopy(binding)
+        self.provenance = provenance
+
+
+def _dependency_refusal(response, request, wire, attempt_id, wire_digest):
+    """Capture a closed gate response. Echoed hashes are not byte verification."""
+    if type(response.status_code) is not int or response.status_code != 503:
+        return None
+    try:
+        raw = getattr(response, 'content', b'')
+        if type(raw) is not bytes or not raw or len(raw) > 4096:
+            return None
+        value = json.loads(raw, object_pairs_hook=source._closed_pairs)
+        expected = dict(schema='leaf.project-source-author-disposition.v1', attempt_id=attempt_id,
+                        wire_sha256=wire_digest, outcome='not_started', stage='author_dependency_gate')
+        if (type(value) is not dict or set(value) != {'error', 'disposition'}
+                or value['error'] != dict(code='source_unavailable', message='source is unavailable')
+                or value['disposition'] != expected):
+            return None
+        binding = {key: wire[key] for key in (*_AUTHORITY, 'actor_binding_id', 'expected_base_commit')}
+        return AuthorDependencyRefusal(expected, request=request, binding=binding,
+                                       provenance=_VERIFIED_DEPENDENCY_REFUSAL)
+    except Exception:
+        return None  # An unreadable optional disposition retains the unknown outcome.
+
+
 def _uuid(value):
     if type(value) is not str or str(uuid.UUID(value)) != value or not uuid.UUID(value).int:
         raise ValueError()
@@ -294,6 +329,10 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
     if not url or not headers.get('X-Harness-Secret'):
         raise AuthoringError('author_unavailable', author_subphase='missing_binding')
     headers = dict(headers, **{'X-Tenant-Id': scope[0], 'Content-Type': 'application/json'})
+    attempt_id, wire_digest = None, None
+    if source_profile == NATIVE_PROFILE:
+        attempt_id, wire_digest = str(uuid.uuid4()), hashlib.sha256(encoded).hexdigest()
+        headers.update({'X-Source-Author-Attempt': attempt_id, 'X-Source-Author-Wire-SHA256': wire_digest})
     recheck()
     if _repo(scope) != authority:
         raise AuthoringError('source_changed')
@@ -313,6 +352,10 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
             raise AuthoringError('source_changed')
         if response.status_code != 200:
             author_diagnostics.record_failure('author_http', http_status=response.status_code)
+            if source_profile == NATIVE_PROFILE:
+                refusal = _dependency_refusal(response, request, body, attempt_id, wire_digest)
+                if refusal is not None:
+                    raise refusal
             raise AuthoringError('author_unavailable', author_subphase='author_http')
         if source_profile == NATIVE_PROFILE and len(getattr(response, 'content', b'')) > 256 * 1024:
             raise AuthoringError('author_unavailable', author_subphase='author_response')
