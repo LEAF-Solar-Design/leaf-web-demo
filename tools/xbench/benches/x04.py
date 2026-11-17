@@ -1,5 +1,6 @@
 """Raw customer DWG intake acceptance, using the Studio product routes."""
 
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -155,7 +156,62 @@ def _module_result(transport, project, adoption, tool, selector):
     return result
 
 
-def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
+def set_evidence(intake, set_id):
+    """Summarize matching intake rows without exposing geometry or changing counts."""
+    try:
+        identity = json.loads(set_id) if isinstance(set_id, str) else set_id
+        if (not isinstance(identity, (list, tuple)) or len(identity) != 3
+                or any(not isinstance(value, str) for value in identity)):
+            raise ValueError("set_id must be a JSON triple of strings")
+        entity_type, layer, block = identity
+        if entity_type not in ("INSERT", "LWPOLYLINE"):
+            raise ValueError("unsupported set_id entity_type")
+        if not isinstance(intake, dict):
+            raise ValueError("intake must be an object")
+        key = "inserts" if entity_type == "INSERT" else "polylines"
+        entries = intake.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"intake {key} must be a list")
+        total, duplicates = 0, 0
+        handles, samples, multiplicity, spaces = set(), [], {}, {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"intake {key} row must be an object")
+            for field in ("layer", "name", "handle", "space", "layout"):
+                if field in entry and not isinstance(entry[field], str):
+                    raise ValueError(f"intake {key} {field} must be a string")
+            if (entry.get("layer") or "0") != layer:
+                continue
+            if entity_type == "INSERT" and entry.get("name") != block:
+                continue
+            total += 1
+            handle = (entry.get("handle") or "").strip().upper().removeprefix("0X")
+            if handle and all(char in "0123456789ABCDEF" for char in handle):
+                handle = handle.lstrip("0") or "0"
+            if handle:
+                if handle in handles:
+                    duplicates += 1
+                else:
+                    handles.add(handle)
+                    if len(samples) < 10:
+                        samples.append(handle)
+            if entity_type == "INSERT":
+                dimensions = (entry.get("rows", 1), entry.get("columns", 1))
+                if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
+                    raise ValueError("intake inserts rows and columns must be positive UInt16 integers")
+                multiplicity[dimensions] = multiplicity.get(dimensions, 0) + 1
+            location = (entry.get("space") or "model", entry.get("layout") or "Model")
+            spaces[location] = spaces.get(location, 0) + 1
+        return {"rows_total": total, "distinct_handles": len(handles),
+                "duplicate_handle_rows": duplicates,
+                "multiplicity": [[*pair, n] for pair, n in sorted(multiplicity.items())],
+                "space_layout": [[*pair, n] for pair, n in sorted(spaces.items())],
+                "sample_handles": samples}
+    except (TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake):
     field = "count-modules candidate response"
     try:
         listing = _module_result(transport, project, adoption, tool, {})
@@ -215,6 +271,7 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
         if not max(item["count"] for item in selected.values()) <= count <= sum(
                 item["count"] for item in selected.values()):
             raise ValueError("count inconsistent with selected_sets")
+        row["set_evidence"] = {set_id: set_evidence(intake, set_id) for set_id in ids}
         row["counts"].append(count)
         row["module_set"] = {"set_ids": ids}
         mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
@@ -226,16 +283,44 @@ def _grade_modules(transport, project, adoption, fixture, tool, row, mark):
         mark(6, "UNREADABLE", reason)
 
 
-def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
+def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
+                stop_on_5xx=False):
     rows = {}
+    stopped = None
+
+    def record_status(status):
+        nonlocal stopped
+        if stop_on_5xx and status >= 500 and stopped is None:
+            stopped = f"not attempted: pass stopped after HTTP {status} on {fid}"
+
+    def record_error(exc):
+        if isinstance(exc, StudioError):
+            record_status(exc.status)
+
+    if stop_on_5xx:
+        original_transport = transport
+
+        def transport(*args, **kwargs):
+            try:
+                status, body = original_transport(*args, **kwargs)
+            except StudioError as exc:
+                record_error(exc)
+                raise
+            record_status(status)
+            return status, body
+
     for fixture in fixtures:
         fid = fixture["id"]
         row = {"id": fid, "timings": {}, "statuses": {}, "counts": [], "limits": [],
+               "missing_deps": [], "dependency_report": None,
                "steps": {str(n): "UNREADABLE" for n in range(1, 7)},
                "evidence": {str(n): "upload unavailable" for n in range(1, 7)},
                "insert_fixture": fixture.get("module_entity") == "INSERT" and
                                  bool(fixture.get("module_blocks"))}
         rows[fid] = row
+        if stopped is not None:
+            row["evidence"] = {str(n): stopped for n in range(1, 7)}
+            continue
 
         def mark(n, verdict, evidence):
             row["steps"][str(n)] = verdict
@@ -257,6 +342,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                 continue
             mark(1, "PASS", "ready within deadline")
         except Exception as exc:
+            record_error(exc)
             if isinstance(exc, StudioError):
                 row["statuses"]["upload_error"] = exc.status
             mark(1, "FAIL", "upload failed or timed out")
@@ -270,6 +356,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             intake = client.drawing_context(project["project_id"], adoption["version_id"],
                                             adoption["drawing_id"])["intake"]
         except Exception as exc:
+            record_error(exc)
             message = xbench_session.redact(str(exc))
             if isinstance(exc, StudioError):
                 code = exc.reason_code or exc.error_code
@@ -282,14 +369,18 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
 
         provenance = adoption.get("provenance", {})
         report = find_dependency_report(upload, provenance, intake)
+        row["dependency_report"] = report
         if report is None:
             mark(2, "FAIL", "no dependency report exposed")
         elif "deps" not in fixture:
             mark(2, "UNREADABLE", "dependency inventory unavailable")
         else:
-            ok = all(_dependency_present(report, dep) for dep in fixture["deps"])
+            missing = [dep for dep in fixture["deps"] if not _dependency_present(report, dep)]
+            row["missing_deps"] = [{"kind": dep["kind"], "name": dep["name"]} for dep in missing]
+            ok = not missing
             mark(2, "PASS" if ok else "FAIL", "dependency dispositions complete" if ok else
-                 "dependency missing or without disposition")
+                 f"dependency missing or without disposition: {len(missing)} of {len(fixture['deps'])} missing: "
+                 + "; ".join(f"{dep['kind']}:{dep['name']}" for dep in missing[:20]))
         retained = find_sha(provenance, fixture["sha256"]) or find_sha(upload, fixture["sha256"])
         mark(3, "PASS" if retained else "FAIL", "original SHA-256 exposed" if retained else
              "original SHA-256 not exposed")
@@ -330,7 +421,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             continue
         if tool is not None:
             row["tool"] = tool
-            _grade_modules(transport, project, adoption, fixture, tool, row, mark)
+            _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake)
             continue
         row["limits"].append("count-modules not live")
         layers = list(dict.fromkeys(fixture.get("module_layers", [])))
@@ -343,6 +434,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                                           project_id=project["project_id"], version_id=adoption["version_id"],
                                           params={"drawing_id": adoption["drawing_id"], "layer": layer})
                 row["statuses"].setdefault("count", []).append(status)
+                record_status(status)
                 if status != 200:
                     raise ValueError("count not inline")
                 count = body["result"]["counts"][layer]
@@ -353,7 +445,8 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             verdict = "PASS" if total == fixture["modules"] else "FAIL" if whole else "UNREADABLE"
             mark(5, verdict, f"count {total}, oracle {fixture['modules']}" if whole or verdict == "PASS"
                  else "competing-set pick needs the UI, not built")
-        except Exception:
+        except Exception as exc:
+            record_error(exc)
             mark(5, "UNREADABLE", "layer count unavailable")
     return rows
 
@@ -415,7 +508,8 @@ def run(ctx):
         transport = _transport(page, origin=ctx.base)
         client = StudioClient(transport)
         with disposable_project(client, f"XBench X04 {ctx.source_sha[:8]} {utc_now()}") as project:
-            rows = grade_files(client, transport, project=project, fixtures=fixtures)
+            rows = grade_files(client, transport, project=project, fixtures=fixtures,
+                               stop_on_5xx=(getattr(ctx, "options", {}).get("stop_on_5xx") == "1"))
             write_json_atomic(Path(ctx.out_dir) / "files.json", rows)
     tokens = [token for fixture in fixtures for token in forbidden_tokens(fixture)]
     step7 = scan_source(ctx.manifest.get("source_repo", "D:/GitHub/leaf-web-demo"), ctx.source_sha, tokens)

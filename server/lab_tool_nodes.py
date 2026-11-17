@@ -12,6 +12,7 @@ import uuid
 import catalog
 import entitlements
 import lab_registry
+import lab_corpus_failures
 import lab_tool_manifests
 from lab_evaluate import RunBudgetExceeded, RunCancelled, canonical_json
 
@@ -324,7 +325,7 @@ class ToolNodeAdapter:
                 if row is None or row['tenant_id'] != self.tenant:
                     return {'error': 'lab_corpus_job_unavailable'}
                 if row['status'] == 'failed':
-                    return {'error': 'lab_corpus_failed'}
+                    return {'error': lab_corpus_failures.failure_code(row.get('error'))}
                 if row['status'] == 'complete':
                     value = row['result']['result']
                     if value['context'] != context:

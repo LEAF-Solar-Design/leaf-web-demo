@@ -571,7 +571,7 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
         merged = restitch(responses, [piece["row_indices"] for piece in binding["pieces"]])
         cut = ordered_strings(merged)
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER") from None
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.restitch") from None
     members = set(frame["panel_refs"])
     # StringPlacement commits upper-cased handles; map them back to panel ids.
     by_upper = {ref.upper(): ref for ref in members}
@@ -581,7 +581,7 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     flat = [ref for string in ordered_lists for ref in string]
     if (not ordered_lists or any(not string for string in ordered_lists)
             or None in flat or len(set(flat)) != len(flat) or set(flat) != members):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.coverage")
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
     _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)

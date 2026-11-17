@@ -1,4 +1,4 @@
-"""X05 normal-user import and exact grid correspondence, bounded first slice.
+"""X05 normal-user import and explicitly bound grid coverage, bounded first slice.
 
 The runtime-only xbench_studio must supply the project lifecycle methods used
 below. A missing or incompatible client is harness evidence, never product FAIL.
@@ -15,9 +15,10 @@ from uuid import uuid4
 from xbench_core import Step, read_health, write_json_atomic
 
 
-LIMITS = ("Steps 1-2 cover source import and exact grid correspondence only. "
-          "This slice supports the Roof geometry setup only; Ground is ungraded. "
-          "Geometry discovery counts must equal independent manifest oracles. "
+LIMITS = ("Steps 1-2 cover source import and grid correspondence only. "
+          "This slice supports Roof and Ground geometry setups. "
+          "Module counts must equal independent manifest oracles; grid counts are exact "
+          "unless explicitly bound to null-grid match_or_named coverage. "
           "Step 3 report string counts are diagnostic: strings are not accepted "
           "or independently saved. Steps 4-7 are unimplemented. Unknown wire "
           "formats, missing fixtures, auth, drift and nonterminal jobs are UNREADABLE.")
@@ -93,14 +94,93 @@ def _setup(project):
             and all(isinstance(project[k], str) and project[k].strip() for k in
                     ("id", "drawing_fixture", "report_fixture", "panel_layer_contains"))
             and project["drawing_units"] in ("m", "mm", "cm", "km", "in", "ft", "yd")
-            and project["installation_design"] == "Roof"
+            and type(project["installation_design"]) is str
+            and project["installation_design"] in ("Roof", "Ground")
             and all(_positive_number(project[k]) for k in ("branch_max_offset", "alignment_tolerance"))
+            and (_integer(project["expected_grids"], 1)
+                 or (project["expected_grids"] is None
+                     and project.get("grid_count_policy") == "match_or_named"))
             and all(_integer(project[k], 1) for k in
-                    ("expected_modules", "expected_grids", "expected_strings")))
+                    ("expected_modules", "expected_strings")))
+
+
+def _null_grid_score(project, result):
+    """Cover saved frames with matches or named causes, without a grid oracle."""
+    if not isinstance(result, dict):
+        return "UNREADABLE", "report_wire_unreadable"
+    if (not _integer(result.get("panel_count"), 1)
+            or not _integer(result.get("frame_count"), 1)
+            or result["panel_count"] != project["expected_modules"]):
+        return "UNREADABLE", "discovery_count_blocker"
+    frames = result.get("frame_refs")
+    if (not isinstance(frames, list) or len(frames) != result["frame_count"]
+            or any(not isinstance(f, str) or not f.strip() for f in frames)
+            or len(set(frames)) != len(frames)):
+        return "UNREADABLE", "report_wire_unreadable"
+    if result.get("report_product_failure") is True:
+        if not _setup(project) or result.get("setup_verified") is not True:
+            return "UNREADABLE", "setup_or_session_unreadable"
+        return "FAIL", "product_report_refusal"
+    report = result.get("report")
+    if not isinstance(report, dict):
+        return "UNREADABLE", "report_wire_unreadable"
+    counts, rows = report.get("counts"), report.get("matches")
+    if not isinstance(counts, dict) or not isinstance(rows, list):
+        return "UNREADABLE", "report_wire_unreadable"
+    for key in ("pdf_panels", "matchable_grids", "frames", "matched_frames"):
+        if not _integer(counts.get(key)):
+            return "UNREADABLE", "report_counts_unreadable"
+    if (counts["pdf_panels"] != project["expected_modules"]
+            or counts["frames"] != len(frames)):
+        return "UNREADABLE", "report_setup_count_blocker"
+    seen_frames, seen_grids, causes = [], [], set()
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("frame_ref"), str)
+                or not row["frame_ref"].strip()):
+            return "UNREADABLE", "report_row_unreadable"
+        candidates = row.get("candidates")
+        if (not isinstance(candidates, list) or any(not _integer(c) for c in candidates)
+                or len(set(candidates)) != len(candidates)
+                or not _integer(row.get("candidate_count"))):
+            return "UNREADABLE", "report_candidates_unreadable"
+        if "status" in row:
+            status = row["status"]
+            if (status not in ("unmatched", "ambiguous")
+                    or any(key not in row or row[key] is not None
+                           for key in ("pdf_grid", "pdf_matrix", "pdf_sub_grid"))):
+                return "UNREADABLE", "report_row_unreadable"
+            if (row["candidate_count"] != len(candidates)
+                    or (status == "unmatched" and candidates)
+                    or (status == "ambiguous" and not candidates)):
+                return "UNREADABLE", "report_candidates_unreadable"
+            causes.add("SOLAREDGE_GRID_UNMATCHED" if status == "unmatched"
+                       else "SOLAREDGE_GRID_AMBIGUOUS")
+        else:
+            if (not _integer(row.get("pdf_grid"))
+                    or not _integer(row.get("pdf_matrix"))
+                    or not _integer(row.get("pdf_sub_grid"), -1)):
+                return "UNREADABLE", "report_row_unreadable"
+            if (not candidates or row["pdf_grid"] not in candidates
+                    or row["candidate_count"] < len(candidates)):
+                return "UNREADABLE", "report_candidates_unreadable"
+            seen_grids.append(row["pdf_grid"])
+        seen_frames.append(row["frame_ref"])
+    if counts["matched_frames"] != len(seen_grids):
+        return "UNREADABLE", "report_counts_unreadable"
+    if len(set(seen_frames)) != len(seen_frames) or len(set(seen_grids)) != len(seen_grids):
+        return "FAIL", "product_duplicate_grid_association"
+    if len(rows) != len(frames) or set(seen_frames) != set(frames):
+        return "FAIL", "product_incomplete_grid_correspondence"
+    reason = "match_or_named_grid_coverage"
+    if causes:
+        reason += "; normalized status causes (not emitted row codes): " + ", ".join(sorted(causes))
+    return "PASS", reason
 
 
 def _grid_score(project, result):
     """Validate nested wire containers before comparing any associations."""
+    if project.get("expected_grids") is None and project.get("grid_count_policy") == "match_or_named":
+        return _null_grid_score(project, result)
     if not isinstance(result, dict):
         return "UNREADABLE", "report_wire_unreadable"
     if (not _integer(result.get("panel_count"), 1)
@@ -305,7 +385,9 @@ def _project(ctx, client, request, project, result):
         graph = current["intake"]["solar_design_graph"]
         result["frame_refs"] = [f["id"] for f in graph["frames"]]
         result["frame_count"] = len(graph["frames"])
-        if result["frame_count"] != project["expected_grids"]:
+        if (not _integer(result["frame_count"], 1)
+                or (project["expected_grids"] is not None
+                    and result["frame_count"] != project["expected_grids"])):
             return
         # Source artifacts bind to their input version. Import again at the
         # current head before generating a report over the populated graph.

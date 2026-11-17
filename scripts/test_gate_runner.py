@@ -875,6 +875,7 @@ def test_unprivileged_named_gates_preserve_contract(monkeypatch, tmp_path):
         ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
         ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
         ("server-project-drawing-write", "tests/test_project_drawing_write.py", 9, True),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
     ):
         # The launcher must accept every target the registry routes through it (job 18101).
         launched = runner._py_pytest(target)[2:]
@@ -1386,6 +1387,70 @@ def test_failed_log_retention_failure_window(tmp_path, monkeypatch, marker):
     assert manifest["files"][0]["source_sha256"] == hashlib.sha256(content).hexdigest()
 
 
+@pytest.mark.parametrize("limit", [16 * 1024, 64 * 1024])
+def test_failed_log_retention_guarantees_head_after_marker_with_long_line(tmp_path, monkeypatch, limit):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n____ test_x ____\n"
+               + b"E   AssertionError: boom\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000
+               + b"1 failed\n")
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    assert notice
+    assert head == failure[:head_budget]
+    assert head.startswith(marker)
+    assert len(head) >= min(32 * 1024, head_budget)
+    assert tail.endswith(b"1 failed\n")
+    assert len(copied) <= limit
+
+
+@pytest.mark.parametrize("newline_offset", [32 * 1024 - 1, 32 * 1024, 32 * 1024 + 1])
+def test_failed_log_retention_head_newline_guarantee_boundary(tmp_path, monkeypatch, newline_offset):
+    helper = _failed_log_retention_helper()
+    limit = 64 * 1024
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (newline_offset - len(marker)) + b"\n"
+               + b"y" * (100 * 1024) + b"\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000)
+    (logs / "red.log").write_bytes(failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    # Trimming is allowed only at or beyond the guaranteed window.
+    expected_length = newline_offset + 1 if newline_offset >= 32 * 1024 else head_budget
+    assert head == failure[:expected_length]
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= limit
+
+
+def test_failed_log_retention_default_limit_keeps_traceback_after_long_line(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    traceback = b"____ test_x ____\nE   AssertionError: boom\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n" + traceback
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 10000)
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    assert head.startswith(failure[:32 * 1024])
+    assert traceback in head
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
 @pytest.mark.parametrize("marker", [
     b"================ FAILURES ================\n",
     b"FAIL: test_x\n",
@@ -1406,7 +1471,9 @@ def test_failed_log_retention_marker_crosses_digest_chunk(tmp_path, monkeypatch,
         assert b"AssertionError: boundary\n" in copied
     else:
         # An unbounded banner must still be detected with bounded scanner memory.
-        assert copied.startswith(b"\n[device CI: middle of log omitted]\n")
+        # The guaranteed head now keeps banner bytes even without a newline.
+        assert copied.startswith(b"=" * 1024)
+        assert b"\n[device CI: middle of log omitted]\n" in copied
     assert copied.endswith(b"1 failed\n")
     assert len(copied) <= helper.FILE_LIMIT
 
@@ -1423,7 +1490,8 @@ def test_failed_log_retention_window_tail_drops_partial_line(tmp_path, monkeypat
     copied = (output / "red.log").read_bytes()
     head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
     assert notice
-    assert head.endswith(b"\n")
+    # The guaranteed head may end mid-line; only the tail must be line-aligned.
+    assert head.startswith(b"FAIL: test_x\nAssertionError: failure\n")
     assert tail == b"complete final line\n"
     assert len(copied) <= helper.FILE_LIMIT
 
@@ -2006,6 +2074,35 @@ def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
     log.write_text("$ python test.py\nordinary output\n", encoding="utf-8")
     assert "  first error: none matched" in g.failed_suite_evidence([
         _evidence_result(g, log)])
+
+
+@pytest.mark.parametrize("preferred, other", [
+    ("E   AssertionError: real", "FAILED tests/test_x.py::test_x\nnot ok 1 - real"),
+    ("FAILED tests/test_x.py::test_x", "not ok 1 - real"),
+    ("not ok 1 - real", ""),
+])
+def test_failed_suite_evidence_prefers_failure_lines_over_durations(tmp_path, preferred, other):
+    g = _load_runner()
+    log = tmp_path / "durations.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "error: earlier generic diagnostic\n" + other + "\n" + preferred + "\n",
+        encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + preferred
+
+
+@pytest.mark.parametrize("cause", ["Connection refused", None])
+def test_failed_suite_evidence_generic_first_error_skips_durations(tmp_path, cause):
+    g = _load_runner()
+    log = tmp_path / "generic.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "  2s setup tests/test_x.py::test_fatal_path\n"
+        "0.01s teardown tests/test_x.py::test_exception_path\n"
+        + (cause + "\n" if cause else "ordinary output\n"), encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + (cause or "none matched")
 
 
 @pytest.mark.parametrize("marker", ["\u2718 26", "x 26", "1)"])
@@ -6712,6 +6809,31 @@ def test_x07_role_product_wrapper_registered_with_thirteen_cases():
     assert suite.expected >= 432
     assert suite.allowed_skip_reasons == (
         r'X07 actual JSX dependency set unavailable on this host; Node-prepared replay required',)
+
+
+def test_string_tag_suites_registered():
+    runner = _load_runner()
+    suites = runner.build_suites()
+    for sid, target, floor, database in (
+        ("server-solar-string-tags", "tests/test_solar_string_tags.py", 82, False),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
+    ):
+        rows = [suite for suite in suites if suite.id == sid]
+        assert len(rows) == 1
+        suite = rows[0]
+        assert suite.kind == "pytest" and suite.cwd == runner.SERVER
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert not suite.opt_in_env and not suite.db_deferred
+        assert suite.allowed_skip_reasons == () and suite.database_skip_reasons == ()
+        if database:
+            assert suite.argv == runner._unprivileged_pytest(target)
+            launched = runner._py_pytest(target)[2:]
+            assert _unprivileged_helper().validate_args(launched) == launched
+        else:
+            assert suite.argv == runner._py_pytest(target)
+    registered = _server_test_targets(suites, runner.SERVER / "tests")
+    assert {"test_solar_string_tags.py", "test_project_string_tags.py"} <= registered
 
 
 def test_every_server_test_file_is_registered_or_named():

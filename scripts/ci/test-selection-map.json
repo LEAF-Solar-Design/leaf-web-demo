@@ -197,6 +197,8 @@
     "server-appbundle-activity-spec",
     "server-x04-intake-selection",
     "server-upload-extraction-concurrency",
+    "server-project-string-tags",
+    "server-solar-string-tags",
     "server-approval-consume",
     "server-approval-policy",
     "server-aps-callback-adapter",

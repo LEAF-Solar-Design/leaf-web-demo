@@ -4167,6 +4167,11 @@ def build_suites() -> List[Suite]:
         Suite("server-project-drawing-write", "server C01 project drawing.write producer on a private PostgreSQL project", "pytest", SERVER,
               _unprivileged_pytest("tests/test_project_drawing_write.py"), 9,
               uses_database=True, db_gated=True),
+        Suite("server-project-string-tags", "server project string tags on a private PostgreSQL project", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_project_string_tags.py"), 48,
+              uses_database=True, db_gated=True),
+        Suite("server-solar-string-tags", "server tests/test_solar_string_tags.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_string_tags.py"), 82),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
@@ -8453,9 +8458,15 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
             # Prefer an actual Playwright failure marker with its source path.
             first = next((line for line in lines if playwright_failure.search(line)
                           and spec_path.search(line)), None)
-            first = first or next((line for line in lines if re.search(
-                r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
+            durations = re.compile(r"^\s*\d+(?:\.\d+)?s\s+(?:call|setup|teardown)\s")
+            for pattern in (r"^E\s", r"^FAILED\s", r"^not ok\s",
+                            r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b"):
+                if first is not None:
+                    break
+                first = next((line for line in lines if not durations.match(line)
+                              and re.search(pattern, line)
+                              and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), None)
+            first = first or "none matched"
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}"]

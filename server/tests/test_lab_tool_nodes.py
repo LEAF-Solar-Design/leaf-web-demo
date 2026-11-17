@@ -741,3 +741,27 @@ def test_default_ledger_reads_tenant_utc_day(monkeypatch):
     assert nodes._sandbox_seconds_today(tenant, midnight) == 3.75
     assert calls == [((conn, tenant, midnight, midnight + timedelta(days=1)),
                       {"addon": "e2b_exec", "limit": 10000})]
+
+
+@pytest.mark.parametrize('failure,expected', [
+    ({'corpus_failure': 'result_identity'}, 'lab_corpus_failed_result_identity'),
+    ({'corpus_failure': 'lease_or_budget'}, 'lab_corpus_failed_lease_or_budget'),
+    ({'corpus_failure': 'synthetic-private-label'}, 'lab_corpus_failed'),
+    ({'message': 'synthetic-private-label'}, 'lab_corpus_failed'),
+    (None, 'lab_corpus_failed'),
+])
+def test_corpus_failure_report_projects_only_fixed_categories(monkeypatch, failure, expected):
+    import lab_corpus_executor as corpus
+    authority = {'tenant_id': TENANT, 'project_id': 'project', 'actor_id': 'actor',
+                 'doc_id': 'doc', 'graph_revision': 2, 'graph_sha256': 'a' * 64}
+    adapter = nodes.ToolNodeAdapter(TENANT, 'retained-run', cancelled=lambda: False,
+        corpus_authority=authority, corpus_owned=lambda: True)
+    monkeypatch.setattr(corpus, 'validate_context', lambda value: value)
+    monkeypatch.setattr(corpus, 'compile_policy', lambda *args: {})
+    monkeypatch.setattr(corpus, 'submit_policy', lambda *args, **kwargs: 'retained-job')
+    monkeypatch.setattr(jobs, 'get_job', lambda job_id: {
+        'tenant_id': TENANT, 'status': 'failed', 'error': failure})
+    output = adapter._corpus('corpus-evaluator-1',
+        {'project_id': 'project', 'corpus': {}, 'suite': {}}, None)
+    assert output == {'error': expected}
+    assert 'synthetic-private-label' not in str(output)

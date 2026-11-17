@@ -31,6 +31,58 @@ import test_sip_r5_routes as routes
 _blocking_transport = cloud.post_stringer
 
 
+@pytest.mark.parametrize("stage", ["split.restitch", "split.coverage", "split.string_length"])
+def test_split_failure_diagnostics_persist_stage_and_piece_order(monkeypatch, caplog, stage):
+    """The real assembly refusal must remain classifiable through GET job.error."""
+    children = [{"piece_index": index, **{key: str(index + 1) * 64 for key in (
+        "request_sha256", "response_sha256", "candidate_sha256", "proof_sha256")}}
+        for index in range(2)]
+    store = SimpleNamespace(get_exchange=lambda *args: {})
+    monkeypatch.setattr(solve, "_store", lambda: store)
+    monkeypatch.setattr(solve, "_piece_scope", lambda *args: None)
+    monkeypatch.setattr(solve, "_piece_plan", lambda *args: {})
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_prepare_piece", lambda *args: children[args[3]])
+    failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", stage)
+    monkeypatch.setattr(solve, "_derive_split", lambda *args: (_ for _ in ()).throw(failure))
+    job_id = str(uuid4())
+    with caplog.at_level("WARNING"), pytest.raises(GraphValidationError) as caught:
+        solve._prepare_split({"job_id": job_id}, None,
+            {"split_binding": {"pieces": [{}, {}]}}, {"classification": "live"},
+            None, None, SimpleNamespace(lost=False))
+    assert caught.value is failure
+    error = service._preparation_error(failure)
+    assert error["reason_code"] == "INVALID_FINAL_GRID_ORDER"
+    assert error["retryable"] is False
+    assert error["solve_progress"] == {"status": "partial", "completed_pieces": 2,
+        "total_pieces": 2, "phase": "assembly", "validation_stage": stage,
+        "piece_order": [0, 1], "piece_order_truncated": False}
+    assert job_id in caplog.text and stage in caplog.text
+    assert "request_sha256" not in caplog.text
+    assert "response_sha256" not in caplog.text
+
+
+def test_split_failure_diagnostics_bound_order_and_omit_exception_text(monkeypatch, caplog):
+    children = [{"piece_index": index, **{key: "a" * 64 for key in (
+        "request_sha256", "response_sha256", "candidate_sha256", "proof_sha256")}}
+        for index in range(40)]
+    monkeypatch.setattr(solve, "_store", lambda: SimpleNamespace(get_exchange=lambda *args: {}))
+    monkeypatch.setattr(solve, "_piece_scope", lambda *args: None)
+    monkeypatch.setattr(solve, "_piece_plan", lambda *args: {})
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_prepare_piece", lambda *args: children[args[3]])
+    failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", "private-exception-material")
+    monkeypatch.setattr(solve, "_derive_split", lambda *args: (_ for _ in ()).throw(failure))
+    with caplog.at_level("WARNING"), pytest.raises(GraphValidationError):
+        solve._prepare_split({"job_id": str(uuid4())}, None,
+            {"split_binding": {"pieces": [{}] * 40}}, {}, None, None, SimpleNamespace(lost=False))
+    diagnostic = service._preparation_error(failure)["solve_progress"]
+    assert diagnostic["validation_stage"] == "split.unknown"
+    assert diagnostic["piece_order"] == list(range(32))
+    assert diagnostic["piece_order_truncated"] is True
+    assert "private-exception-material" not in caplog.text
+
+
 def ready_graph(value):
     value = deepcopy(value)
     value["settings"].update(global_string_sizing_confirmed=True,

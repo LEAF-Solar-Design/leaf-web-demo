@@ -100,13 +100,16 @@ it('writes an empty receipt when there is no listener', async () => {
 
 it('slow discovery within the deadline succeeds', async () => {
   const receiptPath = receiptFile()
+  let slowDone = false
   const exec = async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200))
+    slowDone = true
     return { stdout: '', stderr: '' }
   }
   const started = Date.now()
   const receipt = await clearStalePorts({ ports: [5275], receiptPath, timeoutMs: 5000, exec })
-  expect(Date.now() - started).toBeGreaterThanOrEqual(1200)
+  expect(slowDone).toBe(true)
+  expect(Date.now() - started).toBeGreaterThanOrEqual(1150)
   expect(receipt.ok).toBe(true)
   expect(receipt.remaining).toEqual([])
   expect(receipt.signalled).toEqual([])

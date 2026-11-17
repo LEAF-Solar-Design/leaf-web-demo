@@ -440,6 +440,22 @@ describe('Viewer local XY origin', () => {
     expect(Math.abs(head.position.x)).toBeLessThan(1)
   })
 
+  it('observes verified project engine lineage without changing the engine scene key', () => {
+    const engine = freeze({ ...drawing(), source: 'engine', documentId: 'project.dxf' })
+    const view = mount(editFixture, { drawingKey: 'project:verified' })
+    act(() => view.ref.current.applyVersion(engine))
+    frame()
+    let api = view.container.firstChild.__leafViewerObservation
+    expect(api.snapshot().drawingKey).toBe('engine:project.dxf')
+    view.update({ engineObservationBinding: { documentId: 'project.dxf', drawingKey: 'project:verified' } })
+    frame()
+    api = view.container.firstChild.__leafViewerObservation
+    expect(api.snapshot().drawingKey).toBe('project:verified')
+    expect(view.ref.current.getDrawingScene().drawingKey).toBe('engine:project.dxf')
+    view.update({ engineObservationBinding: null })
+    expect(api.snapshot().drawingKey).toBe('engine:project.dxf')
+  })
+
   it('resets the frame on applyVersion and drawing switches without translating persisted bridge data', () => {
     const bridge = freeze(bridgeToIntake({ drawing: 'large.dwg', bounds: { minX: O, maxX: O + 0.01 },
       lines: [{ handle: 'A', layer: 'Panels', pts: [pt(0, 0), pt(0.01, 0)] }] }))

@@ -737,6 +737,12 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
 
     monkeypatch.setattr(live, 'permitted_path', lambda value: tmp_path)
     monkeypatch.setattr(live, 'load_native_oracle', lambda manifest: oracle)
+    def frame(runtime):
+        assert runtime._oracle is oracle and runtime._expected_drawing_key == PROJECT_KEY
+        events.append('frame')
+        return {'before_cold_samples': True}
+
+    monkeypatch.setattr(live, 'frame_native_modules', frame)
     monkeypatch.setattr(live, 'navigate', navigate)
     monkeypatch.setattr(xbench_session, 'signed_in', session)
     monkeypatch.setattr(xbench_session, 'api', api)
@@ -744,7 +750,7 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
     monkeypatch.setattr(xbench_studio, 'disposable_project', project)
     value = live.make_live_runtime(SimpleNamespace(base=xbench_session.STAGING_ORIGIN,
         source_sha='a' * 40, manifest={}, out_dir=tmp_path))
-    assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate']
+    assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate', 'frame']
     assert value.expected_module_handles == ['native']
     assert value._expected_drawing_key == PROJECT_KEY
     assert dict(value.expected_run_binding) == dict(org_id=ORG_ID, project_id=PROJECT_ID,
