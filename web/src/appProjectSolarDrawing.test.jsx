@@ -1,3 +1,4 @@
+import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { scaleTimeout } from './testTimeScale.js'
 import React, { createRef, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -501,4 +502,24 @@ it('R13G2A-13 project drawing status uses the retained publication retry', async
     }
     view.unmount()
   }
+})
+
+it('X08 production observer binding follows only the exact clean committed project engine', () => {
+  const version = U(9), drawingKey = `project:org:project:drawing:${version}`
+  const env = { useMemo, projectEngineObservationBinding, projectMode: true,
+    projectEditorEngine: { scopeKey: 'current' }, projectEditorKey: 'current',
+    projectEngineIntake: { source: 'engine', documentId: 'project.dxf' },
+    engineDocument: { documentId: 'project.dxf', documentOrigin: 'head', committedVersion: version },
+    engineDirty: false, canonicalVersionId: version, projectDrawing: { drawingKey } }
+  const hook = renderHook(() => evaluate(decl('engineObservationBinding').init, env))
+  expect(hook.result.current).toEqual({ documentId: 'project.dxf', drawingKey })
+  expect(evaluate(prop(element('Viewer'), 'engineObservationBinding'), { engineObservationBinding: hook.result.current }))
+    .toBe(hook.result.current)
+  env.engineDirty = true
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
+  env.engineDirty = false
+  env.canonicalVersionId = U(8)
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
 })
