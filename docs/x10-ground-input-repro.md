@@ -49,9 +49,32 @@ dimension must produce a distinct corresponding corner: `x + width > x` and
 `y + height > y`. Tiny positive sizes that collapse at large positive or negative
 origins are refused without approximating geometry. Errors identify both the
 origin and size. Small representable dimensions remain legal.
+Nonzero decimal coefficients that convert to numeric zero, such as `1e-999`
+and `-1e-999`, are refused in every numeric field, including origins, gaps and
+angles. Significand digits determine mathematical zero independently of the
+exponent. Literal `0`, `-0`, `0.0` and `0e-999` remain legal where zero is allowed;
+`5e-324` remains supported where range and corner checks allow it. Rows, columns
+and watts require exact decimal-token integrality before conversion to Number.
+`1.00000000000000001` and `0.99999999999999999` refuse publication even if Number
+rounds them to an integer. `1e1`, `1000e-2` and `1.00e0` remain legal. The bounded
+parser compares decimal places, trailing zeros and an exponent; it never expands
+large powers of ten.
+Valid inputs show site rectangle area in square metres and perimeter in metres.
+Feet use 0.3048 only for this display calculation. A 10 by 20 metre rectangle
+and equivalent represented feet show 200 square metres and 60 metres, to six
+decimal places. Positive measurements below 0.000001, including calculation
+underflow, read "below display precision" instead of a false exact zero. These
+rectangle measurements make no buildable area or site DC claim and disappear
+with invalid inputs. Publication coordinates remain in the selected units.
 Trimmed preset names have 1 to 256
 characters. Orientation accepts only Portrait/Landscape. Revealed errors attach
 to the implicated controls; correcting a field removes its error association.
+The single revealed error summary links each invalid field by its human label.
+Links focus the real control without hash navigation. Correcting one field
+removes only its link; reset clears the summary. Locked forms disable these
+focus actions. Any site coordinate, size or units edit clears old conversion
+success or refusal feedback. Module-only edits retain that feedback; another
+conversion action supplies fresh feedback.
 
 **Advanced JSON** switches to **Site boundary (JSON)**, **Complete preset (JSON)**,
 and **Drawing units for publication**; **Structured inputs** returns to the retained
@@ -78,7 +101,7 @@ alongside the structured capture checks. Run the existing offhost command from
 the planner's Windows environment:
 
 ```text
-python C:/Users/ehaug/.claude/scripts/offhost.py run --host leaf-svc --scope verify --cwd D:/agent-wt/xbench-20261115-x10-ground-input-form/web --worktree D:/agent-wt/xbench-20261115-x10-ground-input-form --fallback none --no-local --timeout 240 -- npx vitest run src/solar/SolarWorkspaceTools.test.jsx --maxWorkers 1
+python C:/Users/ehaug/.claude/scripts/offhost.py run --host leaf-svc --scope verify --cwd D:/agent-wt/xbench-20261115-x10-ground-input-form/web --worktree D:/agent-wt/xbench-20261115-x10-ground-input-form --fallback none --no-local --timeout 240 -- npx vitest run src/solar/SolarWorkspaceTools.test.jsx src/solar/x10GroundFormIsolation.test.jsx --maxWorkers 1
 ```
 
 For focused reproduction, append
@@ -93,3 +116,13 @@ draft/reset coverage is
 `-t "preserves separate mode drafts|resets structured inputs|reset structured inputs preserves"`.
 The full command is the acceptance check. These notes record reproduction steps,
 not a LIVE or bench PASS result.
+
+New numeric and display filters are
+`-t "nonzero decimal underflow|mathematical zero|rectangle area and perimeter"`.
+Summary and feedback filters are
+`-t "single error summary|stale conversion"`.
+The explicitly named isolation suite mounts two real forms with independent
+callbacks and scoped fieldset queries. It edits either instance, checks local
+IDs and accessible targets, conversion feedback, errors, correction and reset,
+then replaces one callback and checks current capture and absence of late cross
+instance effects. Its filter is `-t "ground form instance isolation"`.

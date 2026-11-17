@@ -42,10 +42,26 @@ function validateSite(values, addError) {
   }
 }
 
-function numberToken(token) {
+function numberToken(token, integer = false) {
+  if (token.length > 64) return null
   const text = token.trim()
-  return token.length <= 64 && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)
-    && Number.isFinite(Number(text)) ? Number(text) : null
+  const match = /^[+-]?(\d+(?:\.\d*)?|\.\d+)(?:[eE]([+-]?\d+))?$/.exec(text)
+  if (!match) return null
+  const digits = match[1].replace('.', '')
+  const nonzero = /[1-9]/.test(digits)
+  if (integer && nonzero) {
+    const decimalPlaces = match[1].includes('.') ? match[1].length - match[1].indexOf('.') - 1 : 0
+    const trailingZeros = digits.length - digits.replace(/0+$/, '').length
+    // The token bound also bounds this exponent parse. Never expand powers of ten.
+    if (BigInt(match[2] || '0') + BigInt(trailingZeros) < BigInt(decimalPlaces)) return null
+  }
+  const value = Number(text)
+  return Number.isFinite(value) && !(value === 0 && nonzero) ? value : null
+}
+
+function rectangleMeasurement(value) {
+  if (value < 1e-6) return 'below display precision'
+  return String(Number(value.toFixed(6)))
 }
 
 export default function SolarGroundInputForm({ disabled, onParameters }) {
@@ -62,8 +78,9 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
     const values = {}
     for (const [key, label] of fields) {
       if (key === 'name' || key === 'orientation') continue
-      values[key] = numberToken(draft[key])
-      if (values[key] === null) addError([key], `${label}: enter a finite number of at most 64 characters.`)
+      const integer = ['power', 'rows', 'columns'].includes(key)
+      values[key] = numberToken(draft[key], integer)
+      if (values[key] === null) addError([key], `${label}: enter a finite ${integer ? 'whole ' : ''}number of at most 64 characters.`)
     }
     const name = draft.name.trim()
     if (!name || name.length > 256) addError(['name'], 'Preset name: enter 1 to 256 characters after trimming.')
@@ -116,11 +133,14 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
   const previewScale = Math.max(Number(draft.width), Number(draft.height))
   const previewWidth = result.parameters ? Math.max(2, 100 * (Number(draft.width) / previewScale)) : 0
   const previewHeight = result.parameters ? Math.max(2, 100 * (Number(draft.height) / previewScale)) : 0
+  const displayFactor = units === 'ft' ? metresPerFoot : 1
+  const rectangleWidthM = Number(draft.width) * displayFactor
+  const rectangleHeightM = Number(draft.height) * displayFactor
 
   return <fieldset disabled={disabled} aria-describedby={description}>
     <legend>Ground layout inputs</legend>
     <p id={description}>Site coordinates and dimensions use drawing units. Module dimensions and gaps use metres; angles use degrees.</p>
-    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} value={units} onChange={event => { setEdited(true); setUnits(event.target.value) }}>
+    <label htmlFor={`${description}-units`}>Site drawing units</label><select id={`${description}-units`} value={units} onChange={event => { setEdited(true); setUnits(event.target.value); setConversionMessage('') }}>
       <option value="m">Metres</option><option value="ft">Feet</option>
     </select>
     <button type="button" onClick={convertUnits}>Convert site units to {units === 'm' ? 'feet' : 'metres'}</button>
@@ -136,6 +156,7 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
         'aria-describedby': error ? `${description} ${id}-error` : description,
         value: draft[key], onChange: event => {
           setEdited(true)
+          if (siteKeys.includes(key)) setConversionMessage('')
           setDraft(current => ({ ...current, [key]: event.target.value }))
         } }
       return <div key={key}><label htmlFor={id}>{label}</label>{key === 'orientation'
@@ -145,10 +166,20 @@ export default function SolarGroundInputForm({ disabled, onParameters }) {
           maxLength={key === 'name' ? 512 : 64} />}
       {error && <p id={`${id}-error`}>{error}</p>}</div>
     })}
-    {edited && Object.keys(result.errors).length > 0 && <p role="alert">{[...new Set(Object.values(result.errors))].join(' ')}</p>}
+    {edited && Object.keys(result.errors).length > 0 && <div role="alert">
+      <p>{[...new Set(Object.values(result.errors))].join(' ')}</p>
+      <ul>{fields.filter(([key]) => result.errors[key]).map(([key, label]) => <li key={key}>
+        <a href={`#${description}-${key}`} aria-disabled={disabled || undefined} tabIndex={disabled ? -1 : undefined} onClick={event => {
+          event.preventDefault()
+          if (!disabled) document.getElementById(`${description}-${key}`)?.focus()
+        }}>{label}</a>
+      </li>)}</ul>
+    </div>}
     {result.parameters && <p>Site {draft.width.trim()} × {draft.height.trim()} {units === 'm' ? 'metres' : 'feet'}
       {' · '}{result.parameters.preset.Rows * result.parameters.preset.Columns} modules per frame.</p>}
     {result.parameters && <p>Per-frame DC watts: {result.parameters.preset.Rows * result.parameters.preset.Columns * result.parameters.preset.ModulePowerWp}. This is the module power sum for one frame.</p>}
+    {result.parameters && <p>Site rectangle area: {rectangleMeasurement(rectangleWidthM * rectangleHeightM)} square metres.
+      {' '}Site rectangle perimeter: {rectangleMeasurement(2 * (rectangleWidthM + rectangleHeightM))} metres.</p>}
     {result.parameters && <p>Site rectangle schematic (not to scale). Narrow dimensions are enlarged for visibility.</p>}
     {result.parameters && <svg role="img" aria-labelledby={`${description}-preview-title`} aria-describedby={`${description}-preview-desc`} viewBox="0 0 120 120" width="240" height="240">
       <title id={`${description}-preview-title`}>Site rectangle schematic (not to scale)</title>
