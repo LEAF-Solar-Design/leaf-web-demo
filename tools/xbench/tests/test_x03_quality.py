@@ -36,3 +36,59 @@ def test_string_connectivity(graph, members, islands):
     assert string_quality(members, graph) == "PASS"
     assert string_quality(islands, graph) == "FAIL"
     assert string_quality(members+"z", graph) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("bad", [
+    {"a":"bcd","b":"a","c":"a","d":"a"},
+    {"a":"bc","b":"ac","c":"ab"},
+    {"a":"b","b":"c","c":"b"}])
+def test_connected_nonchains_fail(bad):
+    assert string_quality(list(bad), bad) == "FAIL"
+
+
+@pytest.mark.parametrize("case", ["invalid-mask", "point-route", "zero-segment"])
+def test_malformed_route_fails(case):
+    from shapely.geometry import LineString, Point, Polygon, box
+    route = LineString([(0,0),(1,1)])
+    aisle = box(-2,-2,2,2)
+    arrays = []
+    if case == "invalid-mask":
+        arrays = [Polygon([(0,0),(1,1),(0,1),(1,0)])]
+    elif case == "point-route":
+        route = Point(0,0)
+    else:
+        route = LineString([(0,0),(0,0),(1,1)])
+    assert route_quality(route, aisle, arrays) == "FAIL"
+
+
+def test_all_tiny_allocations_against_independent_exhaustive_minima():
+    from fractions import Fraction
+    from itertools import product
+    for caps in [(2,3), (2,3,4), (3,3,3)]:
+        allocations = list(product(*(range(c+1) for c in caps)))
+        def spread(loads):
+            fills = [Fraction(n,c) for n,c in zip(loads,caps)]
+            return max(fills)-min(fills)
+        for loads in allocations:
+            strings = list(range(sum(loads)))
+            groups = [strings[sum(loads[:i]):sum(loads[:i+1])] for i in range(len(loads))]
+            best = min(spread(alt) for alt in allocations if sum(alt)==sum(loads))
+            assert inverter_quality(strings,caps,groups) == ("PASS" if spread(loads)==best else "FAIL")
+
+
+@pytest.mark.parametrize("devices,cap", [(20,24),(32,48),(40,72)])
+def test_large_feasible_optimum_has_bounded_work(monkeypatch, devices, cap):
+    import benches.x03_quality as quality
+    calls = 0
+    real = quality.ceil
+    def counted(value):
+        nonlocal calls
+        calls += 1
+        return real(value)
+    monkeypatch.setattr(quality, "ceil", counted)
+    groups = [[(i,j) for j in range(2+(i==0))] for i in range(devices)]
+    strings = [s for group in groups for s in group]
+    assert inverter_quality(strings,[cap]*devices,groups) == "PASS"
+    assert 0 < calls <= 2 * devices * (min(cap,len(strings))+1)
+    groups[0].append(groups[-1].pop())
+    assert inverter_quality(strings,[cap]*devices,groups) == "FAIL"
