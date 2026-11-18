@@ -91,3 +91,19 @@ def test_saved_entities_survive_export(field, value):
     assert grade([dict(after, **{field: value})]) == "FAIL"
     assert grade([{k: v for k, v in after.items() if k != field}]) == "INCOMPLETE"
     assert grade([]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("transform,local", [
+    ([1,0,0,1,10,-8], [-8,11]), ([0,-1,1,0,0,0], [3,-2]),
+    ([0,1,-1,0,1,1], [-2,1]),
+], ids=["translate-export-origin", "rotate-quarter-turn", "rotate-and-translate"])
+def test_snapshot_world_points(transform, local):
+    from benches.x03_selection_oracle import framed_snapshot_quality
+    def snapshot(frame, point):
+        entity = dict(handle="AB", layer="roof", attributes={}, geometry={"point": point})
+        return dict(drawing="site", version="1", frame=frame, entities=[entity])
+    saved = snapshot("world", [2,3])
+    frames = dict(world=[1,0,0,1,0,0], export=transform)
+    assert framed_snapshot_quality(saved, snapshot("export", local), ["AB"], frames) == "PASS"
+    assert framed_snapshot_quality(saved, snapshot("export", [local[0]+1,local[1]]), ["AB"], frames) == "FAIL"
+    assert framed_snapshot_quality(saved, snapshot("unknown", local), ["AB"], frames) == "INCOMPLETE"

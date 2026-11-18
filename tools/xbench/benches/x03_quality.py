@@ -677,3 +677,40 @@ def apparent_power_quality(kw, kvar, kva):
         if rating <= 0 or p*p + q*q > rating*rating:
             return "FAIL"
     return "PASS"
+
+
+def short_circuit_withstand_quality(fault_amps, clearing_seconds, withstand_a2s):
+    """Use constant RMS fault current and the recorded total clearing time per conductor."""
+    if not all(isinstance(group, dict) and group for group in (fault_amps, clearing_seconds, withstand_a2s)):
+        return "INCOMPLETE"
+    if not fault_amps.keys() == clearing_seconds.keys() == withstand_a2s.keys():
+        return "INCOMPLETE"
+    for key, amps in fault_amps.items():
+        values = (amps, clearing_seconds[key], withstand_a2s[key])
+        if None in values:
+            return "INCOMPLETE"
+        if not all(finite_measure(value) and value > 0 for value in values):
+            return "FAIL"
+        current, seconds, rating = (Fraction(str(value)) for value in values)
+        if current**2 * seconds > rating:
+            return "FAIL"
+    return "PASS"
+
+
+def ac_voltage_drop_quality(phases, amps, length_m, pf, load, resistance, reactance, impedance_unit, reported_v):
+    """Signed longitudinal drop on a balanced line using one-way conductor length."""
+    from math import isclose, sqrt
+    values = (amps, length_m, pf, resistance, reactance, reported_v)
+    if None in (*values, phases, load, impedance_unit):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, values)) or type(phases) is not int or phases not in (1, 3):
+        return "FAIL"
+    if load not in ("leading", "lagging") or not 0 <= pf <= 1 or min(amps, length_m, resistance, reactance) < 0:
+        return "FAIL"
+    if impedance_unit not in ("ohm/m", "ohm/km"):
+        return "INCOMPLETE"
+    length = length_m if impedance_unit == "ohm/m" else length_m / 1000
+    sine = sqrt(1 - pf**2) * (-1 if load == "leading" else 1)
+    multiplier = 2 if phases == 1 else sqrt(3)
+    drop = multiplier * amps * length * (resistance * pf + reactance * sine)
+    return "PASS" if isclose(reported_v, drop, abs_tol=1e-9, rel_tol=1e-9) else "FAIL"

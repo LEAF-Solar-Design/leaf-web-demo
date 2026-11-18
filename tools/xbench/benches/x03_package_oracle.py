@@ -87,3 +87,20 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
         if any("/".join(parts[:end]) in files for end in range(1, len(parts))):
             return "FAIL"
     return "PASS" if set(expected) == files else "FAIL"
+
+
+def runtime_abi_quality(requirements, target_profiles):
+    """A single recorded target profile must support the whole pinned runtime tuple."""
+    fields = ("runtime", "version", "architecture", "abi")
+    if not isinstance(requirements, dict) or not isinstance(target_profiles, list) or not target_profiles:
+        return "INCOMPLETE"
+    if not all(isinstance(requirements.get(key), str) and requirements[key].strip() for key in fields):
+        return "INCOMPLETE"
+    incomplete = False
+    for profile in target_profiles:
+        if not isinstance(profile, dict) or not all(isinstance(profile.get(k), str) and profile[k].strip() for k in fields):
+            incomplete = True
+            continue
+        if all(profile[key] == requirements[key] for key in fields):
+            return "PASS"
+    return "INCOMPLETE" if incomplete else "FAIL"

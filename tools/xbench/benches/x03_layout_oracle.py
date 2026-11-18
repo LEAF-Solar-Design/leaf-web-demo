@@ -263,3 +263,23 @@ def rail_joint_quality(rails, cold_c, hot_c):
         previous_end = end
         previous_growth = (end - fixed) * alpha * rise
     return "PASS"
+
+
+def member_edge_quality(members, attachments, minimum_distance):
+    """Check point attachments against the full boundary of their assigned planar member."""
+    if not isinstance(members, dict) or not isinstance(attachments, list) or not attachments or minimum_distance is None:
+        return "INCOMPLETE"
+    if not finite_measure(minimum_distance) or minimum_distance < 0:
+        return "FAIL"
+    for row in attachments:
+        if not isinstance(row, dict) or not isinstance(row.get("member"), str):
+            return "INCOMPLETE"
+        shape, point = members.get(row["member"]), row.get("point")
+        if shape is None or point is None:
+            return "INCOMPLETE"
+        if (getattr(shape, "geom_type", None) != "Polygon" or not shape.is_valid or shape.is_empty
+                or getattr(point, "geom_type", None) != "Point" or point.is_empty or not point.is_valid):
+            return "FAIL"
+        if not shape.covers(point) or point.distance(shape.boundary) < minimum_distance:
+            return "FAIL"
+    return "PASS"

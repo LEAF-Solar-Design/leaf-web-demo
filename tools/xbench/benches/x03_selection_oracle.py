@@ -114,3 +114,43 @@ def snapshot_roundtrip_quality(saved, exported, expected_handles):
             return "INCOMPLETE"
         snapshots.append(entities)
     return "PASS" if snapshots[0] == snapshots[1] else "FAIL"
+
+
+def framed_snapshot_quality(saved, exported, expected_handles, transforms):
+    """Resolve planar points and ordered paths with declared local-to-world affine matrices."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(transforms, dict):
+        return "INCOMPLETE"
+    normalized = []
+    for snapshot in (saved, exported):
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get("frame"), str):
+            return "INCOMPLETE"
+        matrix = transforms.get(snapshot["frame"])
+        if not isinstance(matrix, (tuple, list)) or len(matrix) != 6 or None in matrix:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, matrix)):
+            return "FAIL"
+        a, b, c, d, tx, ty = (Fraction(str(v)) for v in matrix)
+        if a*d == b*c:
+            return "FAIL"
+        entities = []
+        if not isinstance(snapshot.get("entities"), list):
+            return "INCOMPLETE"
+        for entity in snapshot["entities"]:
+            geom = entity.get("geometry") if isinstance(entity, dict) else None
+            if not isinstance(geom, dict) or set(geom) not in ({"point"}, {"vertices"}):
+                return "INCOMPLETE"
+            kind, coords = next(iter(geom.items()))
+            points = [coords] if kind == "point" else coords
+            if not isinstance(points, (list, tuple)) or not points:
+                return "INCOMPLETE"
+            world = []
+            for point in points:
+                if not isinstance(point, (list, tuple)) or len(point) != 2 or not all(map(finite_measure, point)):
+                    return "INCOMPLETE"
+                x, y = (Fraction(str(v)) for v in point)
+                world.append([str(a*x + b*y + tx), str(c*x + d*y + ty)])
+            entities.append(dict(entity, geometry={kind: world}))
+        normalized.append(dict(snapshot, entities=entities))
+    return snapshot_roundtrip_quality(*normalized, expected_handles)

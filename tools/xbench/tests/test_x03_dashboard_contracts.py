@@ -155,3 +155,16 @@ def test_release_cohort(after, verdict):
 def test_cutoff_duration(end, policy, exact, lower, expected):
     from benches.x03_dashboard_oracle import censored_durations_quality
     assert censored_durations_quality({"a": dict(start=2,end=end)}, 10, policy, exact, lower) == expected
+
+
+@pytest.mark.parametrize("weights,reported,expected", [
+    ({"a":1,"b":1}, 0.9, "PASS"), ({"a":1,"b":1}, 0.5, "FAIL"),
+    ({"a":1,"b":9}, 0.5, "PASS"), ({"a":0,"b":1}, 0, "PASS"),
+    ({"a":1}, 0.9, "INCOMPLETE"),
+], ids=["pool-unequal-cohorts", "reject-mean-of-percentages", "weight-exposure", "exclude-zero-weight", "missing-weight"])
+def test_dashboard_weighted_exposure(weights, reported, expected):
+    from benches.x03_dashboard_oracle import weighted_rate_quality
+    rows = {"a":dict(successes=9, exposures=9), "b":dict(successes=0, exposures=1)}
+    assert weighted_rate_quality(rows, weights, "weighted-exposures", reported) == expected
+    rows["a"].pop("exposures")
+    assert weighted_rate_quality(rows, weights, "weighted-exposures", reported) == "INCOMPLETE"
