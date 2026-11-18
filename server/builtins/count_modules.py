@@ -246,6 +246,28 @@ def _cumulative_shares(counts):
                      "percentage": 100 * running / total})
     return rows
 
+def _coverage(counts, percent):
+    from fractions import Fraction
+    from itertools import combinations
+
+    target = Fraction(str(percent))
+    if target < 0:
+        raise InputValidationError("Choose a nonnegative coverage percentage.")
+    required = target * _module_total(counts.values()) / 100
+    weights = sorted(counts.values(), reverse=True)
+    size = 0
+    covered = 0
+    while size < len(weights) and covered < required:
+        covered += weights[size]
+        size += 1
+    if covered < required:
+        return {"reachable": False, "solutions": []}
+    if math.comb(len(counts), size) > 100000:
+        raise InputValidationError("Too many layer combinations to enumerate. Narrow the selected layers.")
+    solutions = [list(group) for group in combinations(sorted(counts), size)
+                 if sum(counts[layer] for layer in group) >= required]
+    return {"reachable": True, "solutions": solutions}
+
 def run(intake, params):
     params = params or {}
     top = params.get("top_layers")
@@ -353,6 +375,8 @@ def run(intake, params):
         breakdown["counts"] = counts
         if cumulative:
             breakdown["cumulative_shares"] = _cumulative_shares(counts)
+        if params.get("coverage_percent") is not None:
+            breakdown["coverage"] = _coverage(counts, params["coverage_percent"])
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)
 

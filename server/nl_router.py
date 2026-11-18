@@ -574,6 +574,16 @@ def _decide(
             ],
         )
 
+    minimum_layers = re.search(
+        r"\b(?:fewest layers|smallest set of layers|minimum number of layers)\b", text, re.I
+    )
+    if minimum_layers:
+        target = re.search(r"\b(?:cover(?:ing)?|reach(?:ing)?)\s+(?:at least\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent\b)", text, re.I)
+        if target and any(doc.tool.get("name") == "count-modules" for doc in docs):
+            options = {"group_by": "layer", "panel_scope": "all_layers", "coverage_percent": float(target[1])}
+            return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                                  rationale="Find the minimum-size layer sets that reach the module coverage target.")
+
     shares = _share_params(text)
     if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
         return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
