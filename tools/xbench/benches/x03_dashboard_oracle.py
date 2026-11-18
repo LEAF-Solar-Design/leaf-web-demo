@@ -817,3 +817,39 @@ def failure_streak_quality(rows, reset_outcomes, reported_longest):
             streak += 1
             longest = max(longest, streak)
     return "PASS" if longest == reported_longest else "FAIL"
+
+
+def counter_throughput_quality(epochs, modulus, reported):
+    """Sum within-epoch changes, using explicit wrap counts and simultaneous reset snapshots."""
+    if type(modulus) is not int or modulus <= 0 or type(reported) is not int:
+        return "INCOMPLETE"
+    if not isinstance(epochs, list) or not epochs:
+        return "INCOMPLETE"
+    last_end = None
+    seen = set()
+    total = 0
+    for epoch in epochs:
+        if not isinstance(epoch, dict):
+            return "INCOMPLETE"
+        identity, samples = epoch.get("epoch"), epoch.get("samples")
+        if not isinstance(identity, str) or not identity or identity in seen or not isinstance(samples, list) or len(samples) < 2:
+            return "INCOMPLETE"
+        seen.add(identity)
+        previous = None
+        for row in samples:
+            if not isinstance(row, (tuple, list)) or len(row) != 3 or any(type(n) is not int for n in row):
+                return "INCOMPLETE"
+            stamp, count, wraps = row
+            if not 0 <= count < modulus or wraps < 0:
+                return "INCOMPLETE"
+            value = wraps * modulus + count
+            if previous is None:
+                if last_end is not None and (stamp != last_end or value != 0):
+                    return "INCOMPLETE"
+            else:
+                if stamp <= previous[0] or value < previous[1]:
+                    return "INCOMPLETE"
+                total += value - previous[1]
+            previous = stamp, value
+        last_end = previous[0]
+    return "PASS" if reported == total else "FAIL"

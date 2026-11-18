@@ -909,3 +909,34 @@ def test_energize_battery_controls_before_main_supply(steps, energy):
     assert grade(steps+[(6,1)],2,5,12,10) == "FAIL"
     assert grade([(4,8),(3,5)],2,5,12,10) == "FAIL"
     assert grade(None,2,5,12,energy) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("equipment,terminals,rotation,phases", [
+    ("pump", ("U","V","W"), "forward", ("B","C","A")),
+    ("fan", ("1","2","3"), "reverse", ("A","C","B")),
+    ("drive", ("R","S","T"), "forward", ("C","A","B")),
+])
+def test_equipment_rotation_with_balanced_supply(equipment, terminals, rotation, phases):
+    from benches.x03_quality import phase_sequence_quality as grade
+    mapping = dict(zip(terminals, phases))
+    def check(mapping):
+        return grade(("A","B","C"), terminals, mapping, rotation)
+    assert check(mapping) == "PASS"
+    a, b, c = terminals
+    mapping[a], mapping[b] = mapping[b], mapping[a]
+    assert check(mapping) == "FAIL"
+    del mapping[c]
+    assert check(mapping) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("capacity,start,target,power,deadline,shortcut", [
+    (10,0,1,10,3,1), (20,0.25,0.75,4,3.75,2.5), (8,0.5,1,8,2,0.5),
+])
+def test_recharge_before_deadline_with_soc_taper(capacity,start,target,power,deadline,shortcut):
+    from benches.x03_quality import recharge_deadline_quality
+    curve = dict(revision="r", method="step-kw", soc_bands=[(0,0.5,10),(0.5,1,2)])
+    def grade(hours, data=curve):
+        return recharge_deadline_quality("r",data,capacity,start,target,power,hours)
+    assert grade(deadline) == "PASS"
+    assert grade(shortcut) == "FAIL"
+    assert grade(deadline,dict(curve,soc_bands=[(0,0.5,10)])) == "INCOMPLETE"

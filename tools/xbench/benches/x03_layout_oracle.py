@@ -716,3 +716,19 @@ def bolt_preload_quality(torque_nm, nut_factors, diameter_m, min_clamp_n, proof_
     adequate = low >= Fraction(str(min_clamp_n)) * k_max * diameter
     within_proof = high <= Fraction(str(proof_n)) * k_min * diameter
     return "PASS" if adequate and within_proof else "FAIL"
+
+
+def rail_bending_stress_quality(moments_nm, section_moduli_m3, allowable_pa):
+    """Compare the absolute bending stress at every recorded section to its allowable."""
+    if not isinstance(moments_nm, dict) or not moments_nm:
+        return "INCOMPLETE"
+    for ratings in (section_moduli_m3, allowable_pa):
+        if not isinstance(ratings, dict) or not moments_nm.keys() <= ratings.keys():
+            return "INCOMPLETE"
+    for section, moment in moments_nm.items():
+        modulus, limit = section_moduli_m3[section], allowable_pa[section]
+        if not all(map(finite_measure, (moment, modulus, limit))) or min(modulus, limit) <= 0:
+            return "INCOMPLETE"
+        if abs(Fraction(str(moment))) > Fraction(str(modulus)) * Fraction(str(limit)):
+            return "FAIL"
+    return "PASS"

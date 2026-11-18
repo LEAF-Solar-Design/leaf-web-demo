@@ -404,3 +404,18 @@ def test_dashboard_longest_outage(outcomes,resets,longest):
     assert grade(rows,resets,longest) == "PASS"
     assert grade(rows,resets,0) == "FAIL"
     assert grade(rows+[rows[0]],resets,longest) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("before,after,delta", [
+    ([(0,95,0),(1,2,1)],[(1,0,0),(2,4,0)],11),
+    ([(0,40,0),(2,50,0)],[(2,0,0),(8,1,2)],211),
+    ([(3,8,4),(7,12,4)],[(7,0,0),(9,0,0)],4),
+])
+def test_counter_throughput_across_resets_and_wraps(before, after, delta):
+    from benches.x03_dashboard_oracle import counter_throughput_quality as grade
+    epochs = [dict(epoch="boot1",samples=before),dict(epoch="boot2",samples=after)]
+    assert grade(epochs,100,delta) == "PASS"
+    for wrong in (-1,delta+100):
+        assert grade(epochs,100,wrong) == "FAIL"
+    epochs[1]["samples"] = [(after[0][0],0,None),after[1]]
+    assert grade(epochs,100,delta) == "INCOMPLETE"

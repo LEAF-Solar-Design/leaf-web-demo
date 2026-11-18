@@ -545,3 +545,26 @@ def chemical_exposure_quality(revision, catalog, material, agent, concentration_
     if not decisions or len(set(decisions)) != 1:
         return "INCOMPLETE"
     return "PASS" if decisions[0] else "FAIL"
+
+
+def mating_life_quality(revision, catalog, part, opening_cycles, history, planned_cycles):
+    """Each consecutive history entry records completed mating cycles since the opening count."""
+    if not revision or not isinstance(catalog, dict) or catalog.get("revision") != revision:
+        return "INCOMPLETE"
+    ratings = catalog.get("cycle_ratings")
+    if not isinstance(ratings, dict) or not isinstance(part, str):
+        return "INCOMPLETE"
+    rating = ratings.get(part)
+    if any(type(n) is not int or n < 0 for n in (rating, opening_cycles, planned_cycles)):
+        return "INCOMPLETE"
+    if not isinstance(history, list):
+        return "INCOMPLETE"
+    total = opening_cycles + planned_cycles
+    for sequence, entry in enumerate(history, start=1):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            return "INCOMPLETE"
+        index, cycles = entry
+        if type(index) is not int or index != sequence or type(cycles) is not int or cycles < 0:
+            return "INCOMPLETE"
+        total += cycles
+    return "PASS" if total <= rating else "FAIL"

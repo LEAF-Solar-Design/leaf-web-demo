@@ -361,3 +361,14 @@ def test_joint_clamps_across_torque_and_friction_ranges(torque,k,d,min_force,pro
     assert grade(torque,k,d,min_force+1,proof) == "FAIL"
     assert grade(torque,k,d,min_force,proof-1) == "FAIL"
     assert grade(torque,None,d,min_force,proof) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("moment,modulus,allowable", [(240,0.000002,120e6), (-60,0.000001,60e6), (450,0.000003,150e6)])
+def test_rail_section_stress_at_positive_and_negative_moments(moment,modulus,allowable):
+    from benches.x03_layout_oracle import rail_bending_stress_quality as grade
+    moments = {"support":moment,"span":0}
+    sections = {"support":modulus,"span":modulus}
+    limits = dict.fromkeys(moments,allowable)
+    assert grade(moments,sections,limits) == "PASS"
+    assert grade(moments,sections,dict(limits,support=allowable-1)) == "FAIL"
+    assert grade(moments,{"span":modulus},limits) == "INCOMPLETE"
