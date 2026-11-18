@@ -1,3 +1,4 @@
+import { WidgetText } from './WidgetText.jsx'
 import { useEffect, useMemo, useState } from 'react'
 import { resolveValues } from './widgetsClient.js'
 import { renderWidget } from './widgetRender.js'
@@ -125,7 +126,7 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
       {elements.map(({ element, nodes, freshness, truncated, tainted }) => <g key={element.id} data-element-id={element.id} data-freshness={freshness} data-truncated={String(truncated)} data-host-tainted={String(tainted)}>
         <title>{`${element.id}: ${freshness}${truncated ? ' (truncated)' : ''}`}</title>
         {nodes.map((node) => <svg key={node.id} x={node.x} y={node.y} width={node.w} height={node.h} viewBox={node.viewBox ?? `0 0 ${node.w} ${node.h}`} overflow="hidden" opacity={node.opacity}>
-          {node.kind === 'text' ? <text x={node.align === 'right' ? node.w : node.align === 'center' ? node.w / 2 : 0} y={node.h / 2} dominantBaseline="central" textAnchor={node.align === 'right' ? 'end' : node.align === 'center' ? 'middle' : 'start'} fill={`var(${node.color}, #ffffff)`} fontSize={node.fontSize} fontWeight={node.weight}>{node.text}</text>
+          {node.kind === 'text' ? <WidgetText node={node} fill={`var(${node.color}, #ffffff)`} />
             : node.kind === 'box' ? <rect width={node.w} height={node.h} fill={`var(${node.color}, #86efac)`} />
               : <path d={node.path} fill={node.stroke ? 'none' : `var(${node.color}, #86efac)`} stroke={node.stroke ? `var(${node.color}, #86efac)` : undefined} strokeWidth={2 * node.scale} />}
         </svg>)}
