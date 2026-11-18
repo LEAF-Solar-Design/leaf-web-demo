@@ -89,9 +89,9 @@ def validate_document(document):
         slugs.add(slug)
         text(category['title'], 1, 120)
         text(category['description'], 0, 1200)
-        items(category['images'], 1, 200)
+        items(category['images'], 0, 200)
         total += len(category['images'])
-        if total > 200 or type(category['hero']) is not int or not 0 <= category['hero'] < len(category['images']):
+        if total > 200 or type(category['hero']) is not int or not (0 <= category['hero'] < len(category['images']) if category['images'] else category['hero'] == 0):
             raise ValueError('Invalid hero or more than 200 images')
         seen = set()
         for image in category['images']:
@@ -199,7 +199,7 @@ export default function Layout({children}){const n=page.nav||{};return <html lan
 ''',
         'app/page.jsx': b'''import page from '../portfolio.json';
 import {textStyle,containerStyle,photoStyle,galleryStyle} from './design';
-export default function Home(){return <><h1 style={textStyle(page.textStyles?.headline)}>{page.headline}</h1><p style={textStyle(page.textStyles?.introduction)}>{page.introduction}</p><div className="portfolio-grid" style={galleryStyle(page)}>{page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={containerStyle(c.layout)}>{!c.images[c.hero].display?.hidden&&<img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt} style={photoStyle(c.images[c.hero].display,page.appearance)}/>}<h2 style={textStyle(c.textStyles?.title)}>{c.title}</h2><p style={textStyle(c.textStyles?.description)}>{c.description}</p></a>)}</div></>;}
+export default function Home(){return <><h1 style={textStyle(page.textStyles?.headline)}>{page.headline}</h1><p style={textStyle(page.textStyles?.introduction)}>{page.introduction}</p><div className="portfolio-grid" style={galleryStyle(page)}>{page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={containerStyle(c.layout)}>{c.images[c.hero]&&!c.images[c.hero].display?.hidden&&<img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt} style={photoStyle(c.images[c.hero].display,page.appearance)}/>}<h2 style={textStyle(c.textStyles?.title)}>{c.title}</h2><p style={textStyle(c.textStyles?.description)}>{c.description}</p>{!c.images.length&&<p>No photos in this gallery yet.</p>}</a>)}</div></>;}
 ''',
         'app/[slug]/page.jsx': b'''import page from '../../portfolio.json';
 import Gallery from '../Gallery';
@@ -234,9 +234,16 @@ function Photograph({image,page,onOpen,onRetryFocus}){
   {failed&&<div role="status"><p>The photo could not load. Check your connection and try again.</p><button style={{marginTop:'0.5rem',textDecoration:'underline'}} onClick={retry}>Retry photo</button></div>}</>;
 }
 export default function Gallery({page,category}){
- const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{});
+ const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{}),emptyStatus=useRef(null);
  const close=()=>{restoreBackground.current();setSelected(null);trigger.current?.focus();};
  useEffect(()=>{setSelected(null);trigger.current=null;},[category.slug]);
+ useEffect(()=>{
+  if(selected&&!category.images.some(image=>image.material_id===selected.material_id&&!image.display?.hidden)){
+   restoreBackground.current();setSelected(null);
+   if(trigger.current?.isConnected)trigger.current.focus();else emptyStatus.current?.focus();
+   trigger.current=null;
+  }
+ },[category.images,selected]);
  useEffect(()=>{
    if(!selected)return;
    const background=[];let branch=dialog.current;
@@ -264,7 +271,7 @@ export default function Gallery({page,category}){
    window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
  },[selected]);
  const open=(image,button)=>{trigger.current=button;setSelected(image);};
- return <><div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={selected.material_id} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
+ return <>{!category.images.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={selected.material_id} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
 }
 ''',
     }

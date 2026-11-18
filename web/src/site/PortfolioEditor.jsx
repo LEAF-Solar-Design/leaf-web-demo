@@ -63,7 +63,7 @@ export function PortfolioPreview({ document, projectId, onSelectField, onInlineC
 function PortfolioView({ document, projectId, scope, onSelectField, onInlineChange, onSelectElement, selectedElement }) {
   const [view, setView] = useState('home')
   const [selected, setSelected] = useState(null)
-  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null), viewer = useRef(null)
+  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null), viewer = useRef(null), emptyStatus = useRef(null)
   const navigationSelection = useRef(null)
   useEffect(() => {
     const selection = (onInlineChange || onSelectField) ? selectedElement : null
@@ -127,6 +127,14 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
     }
   }, [selected])
   const category = document.categories.find(item => item.slug === view)
+  useEffect(() => {
+    if (selected && !category?.images.some(image => image.material_id === selected.material_id)) {
+      closeDialog(viewer.current); setSelected(null)
+      if (trigger.current?.isConnected) trigger.current.focus()
+      else emptyStatus.current?.focus()
+      trigger.current = null
+    }
+  }, [category, selected])
   const navigate = next => { setSelected(null); setView(next) }
   const selectedIdentity = (onInlineChange || onSelectField) ? selectedElement?.split(':')[0] : null
   const reveals = node => selectionIdentity(node) === selectedIdentity || node.images?.some(reveals) || node.entries?.some(reveals)
@@ -160,9 +168,9 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
       </article>)}</section>)}</>
         : category ? <section data-element={`${selectionIdentity(category)}:layout`} style={layout(category)}><h1>{text(category, ['title'], 'Gallery title', 120, category.textStyles?.title)}</h1><p>{text(category, ['description'], 'Gallery description', 1200, category.textStyles?.description)}</p>{galleryEdits(category)}<div className="portfolio-grid" style={grid(category)} data-gallery-layout={document.galleryLayout || 'grid'}>{category.images.filter(image => reveals(image) || !image.display?.hidden).map(image => <figure key={image.material_id} data-element={`${selectionIdentity(image)}:display`} style={photoSpanStyle(image.display, document, category)}><button onClick={event => { if (onInlineChange) { onSelectElement?.(`${selectionIdentity(image)}:display`, true); return } trigger.current = event.currentTarget; setSelected(image) }} aria-label={`View ${image.alt}`}>
           {photo(image)}{!onInlineChange && <span style={textStyle(image.captionStyle)}>{image.title}</span>}
-        </button>{onInlineChange && text(image, ['title'], 'Photo caption', 200, image.captionStyle)}{edit({ field: 'caption', gallery: category.slug, material: image.material_id }, `${category.title} caption for ${image.alt}`)}</figure>)}</div></section>
+        </button>{onInlineChange && text(image, ['title'], 'Photo caption', 200, image.captionStyle)}{edit({ field: 'caption', gallery: category.slug, material: image.material_id }, `${category.title} caption for ${image.alt}`)}</figure>)}</div>{!category.images.length && <p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}</section>
           : <><h1>{rootText('headline', 240)}</h1>{edit({ field: 'headline' }, 'headline')}<p>{rootText('introduction', 2400)}</p>{edit({ field: 'introduction' }, 'introduction')}<div className="portfolio-grid" style={grid()}>{visibleCategories.map(item => <div key={selectionIdentity(item)} data-element={`${selectionIdentity(item)}:layout`} style={layout(item)}><button onClick={() => navigate(item.slug)}>
-            {item.images[item.hero] && !item.images[item.hero].display?.hidden ? photo(item.images[item.hero]) : <span>Add photos in the Project panel.</span>}{!onInlineChange && galleryText(item)}
+            {item.images[item.hero] && !item.images[item.hero].display?.hidden ? photo(item.images[item.hero]) : <span>{!item.images.length ? 'No photos in this gallery yet.' : 'Add photos in the Project panel.'}</span>}{!onInlineChange && galleryText(item)}
           </button>{onInlineChange && galleryText(item)}{galleryEdits(item)}</div>)}</div></>}
     {selected && <dialog ref={viewer} className="portfolio-viewer" aria-modal="true" aria-label={selected.alt} onCancel={event => { event.preventDefault(); close() }}>
       <button ref={closeButton} onClick={close}>{labels.viewerClose || 'Close image'}</button>{photo(selected)}<p style={textStyle(selected.captionStyle)}>{selected.title}</p>
@@ -265,7 +273,7 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     <Field inputRef={target({ field: 'contact.email' })} label="Contact email" value={document.contact.email} limit={254} onChange={value => update(next => { next.contact.email = value })} />
     <Field inputRef={target({ field: 'contact.location' })} label="Location" value={document.contact.location} limit={160} onChange={value => update(next => { next.contact.location = value })} />
     </Disclosure>
-    <h3>Galleries</h3><p>Add photos from this project. At least one photo per gallery is required to save.</p>
+    <h3>Galleries</h3><p>Add photos from this project. Empty galleries can be saved; add their first photo whenever you are ready.</p>
     <label><span>Photo layout</span><select value={document.galleryLayout || 'grid'} onChange={event => update(next => {
       if (event.target.value === 'single') next.galleryLayout = 'single'
       else delete next.galleryLayout
