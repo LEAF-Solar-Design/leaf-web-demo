@@ -267,3 +267,18 @@ def temperature_unit_voltage_quality(weather, **conditions):
     if value < Fraction("-273.15"):
         return "FAIL"
     return weather_quality(dict(weather, unit="C", cell_temp=float(value)), **conditions)
+
+
+def irradiance_voltage_quality(weather, irradiance_w_m2, model, **conditions):
+    """Use a declared linear ambient-to-cell rise for the recorded irradiance."""
+    from benches.x03_quality import finite_measure
+    if not isinstance(weather, dict) or not isinstance(model, dict) or model.get("method") != "linear-rise":
+        return "INCOMPLETE"
+    rise = model.get("rise_c_per_w_m2")
+    ambient = weather.get("ambient_c")
+    if not all(map(finite_measure, (rise, ambient, irradiance_w_m2))) or min(rise, irradiance_w_m2) < 0:
+        return "INCOMPLETE"
+    if ambient < -273.15:
+        return "FAIL"
+    sample = dict(weather, cell_temp=ambient + rise * irradiance_w_m2, unit="C")
+    return weather_quality(sample, **conditions)

@@ -634,3 +634,32 @@ def test_cold_string_voltage_across_weather_units(unit, value, impossible):
     assert grade(sample) == "PASS"
     assert grade(dict(sample, cell_temp=impossible)) == "FAIL"
     assert grade(dict(sample, unit=None)) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("assembly,opening,insert,tol,clearance", [
+    ("gland", 12, 10, 0.5, 1), ("lug", 8, 7, 0.25, 0.5), ("frame", 60, 55, 2, 1),
+])
+def test_worst_case_mating_clearance(assembly, opening, insert, tol, clearance):
+    from benches.x03_catalog_oracle import mating_clearance_quality
+    record = dict(revision=assembly, opening_mm=opening, insert_mm=insert,
+                  opening_minus_mm=tol, insert_plus_mm=tol)
+    assert mating_clearance_quality(assembly, record, clearance) == "PASS"
+    assert mating_clearance_quality(assembly, record, clearance+0.1) == "FAIL"
+    del record["opening_minus_mm"]
+    assert mating_clearance_quality(assembly, record, clearance) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ambient,irradiance,voltage,ambient_only", [
+    (25, 500, 98, 100), (15, 1000, 98, 102), (5, 250, 103, 104),
+])
+def test_voltage_uses_irradiance_heated_cell(ambient, irradiance, voltage, ambient_only):
+    from benches.x03_weather_oracle import irradiance_voltage_quality
+    sample = dict(site="roof", station="mast", timezone="UTC", timestamp=1, ambient_c=ambient)
+    model = dict(method="linear-rise", rise_c_per_w_m2=0.02)
+    def grade(reported, rule=model):
+        return irradiance_voltage_quality(sample, irradiance, rule, reported=reported, site="roof",
+                                        station="mast", as_of=1, max_age=0, voc_at_25=50,
+                                        coefficient_per_c=-0.002, modules=2)
+    assert grade(voltage) == "PASS"
+    assert grade(ambient_only) == "FAIL"
+    assert grade(voltage, {}) == "INCOMPLETE"

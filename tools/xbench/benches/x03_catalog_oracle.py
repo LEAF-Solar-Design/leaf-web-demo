@@ -502,3 +502,19 @@ def accessory_compatibility_quality(revision, assembly, selected):
     if any(value is False for value in decisions):
         return "FAIL"
     return "PASS" if all(value is True for value in decisions) else "INCOMPLETE"
+
+
+def mating_clearance_quality(revision, drawing, required_mm):
+    """One-dimensional fit with independent bilateral manufacturing tolerances."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(drawing, dict) or revision != drawing.get("revision"):
+        return "INCOMPLETE"
+    fields = ("opening_mm", "opening_minus_mm", "insert_mm", "insert_plus_mm")
+    values = [drawing.get(key) for key in fields] + [required_mm]
+    if not all(finite_measure(v) and v >= 0 for v in values):
+        return "INCOMPLETE"
+    opening, minus, insert, plus, minimum = [Fraction(str(v)) for v in values]
+    if opening <= minus or insert <= 0:
+        return "INCOMPLETE"
+    return "PASS" if opening - minus - insert - plus >= minimum else "FAIL"

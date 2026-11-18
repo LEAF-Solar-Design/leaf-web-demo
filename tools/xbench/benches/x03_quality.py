@@ -1484,3 +1484,63 @@ def series_energy_quality(cell_ids, capacities_ah, cutoff_rule, bank_volts, requ
         return "INCOMPLETE"
     available = Fraction(str(min(capacities_ah.values()))) * Fraction(str(bank_volts))
     return "PASS" if available >= Fraction(str(required_wh)) else "FAIL"
+
+
+def arc_interruption_quality(events, coverage, traces, limit_s):
+    """Each arc has its own observation window and detector/interrupt timestamps."""
+    if not isinstance(events, dict) or not events or not isinstance(coverage, dict) or not isinstance(traces, dict):
+        return "INCOMPLETE"
+    if not finite_measure(limit_s) or limit_s < 0:
+        return "INCOMPLETE"
+    for event_id, event in events.items():
+        if not isinstance(event, tuple) or len(event) != 2:
+            return "INCOMPLETE"
+        segment, start = event
+        if not isinstance(segment, str) or not finite_measure(start):
+            return "INCOMPLETE"
+        sensor = coverage.get(segment)
+        trace = traces.get(event_id)
+        if sensor is False:
+            return "FAIL"
+        if not isinstance(sensor, str) or not sensor or not isinstance(trace, dict):
+            return "INCOMPLETE"
+        if trace.get("sensor") != sensor or not {"detected", "interrupted", "through"} <= trace.keys():
+            return "INCOMPLETE"
+        through, detected, cleared = (trace[key] for key in ("through", "detected", "interrupted"))
+        if not finite_measure(through) or through < start:
+            return "INCOMPLETE"
+        observed = [t for t in (detected, cleared) if t is not None]
+        if any(not finite_measure(t) or not start <= t <= through for t in observed):
+            return "INCOMPLETE"
+        deadline = Fraction(str(start)) + Fraction(str(limit_s))
+        if detected is None or cleared is None:
+            return "FAIL" if Fraction(str(through)) >= deadline else "INCOMPLETE"
+        if cleared < detected or Fraction(str(cleared)) > deadline:
+            return "FAIL"
+    return "PASS"
+
+
+def reactive_envelope_quality(revision, curves, condition, p_kw, q_kvar):
+    """Linearly interpolate signed reactive limits at the recorded active power."""
+    if not revision or not isinstance(curves, dict) or curves.get("revision") != revision:
+        return "INCOMPLETE"
+    envelopes = curves.get("conditions")
+    if not isinstance(envelopes, dict) or not isinstance(condition, str):
+        return "INCOMPLETE"
+    rows = envelopes.get(condition)
+    if not isinstance(rows, list) or len(rows) < 2 or not all(map(finite_measure, (p_kw, q_kvar))):
+        return "INCOMPLETE"
+    points = []
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        power, low, high = map(lambda n: Fraction(str(n)), row)
+        if low > high or (points and power <= points[-1][0]):
+            return "INCOMPLETE"
+        points.append((power, low, high))
+    power, q = Fraction(str(p_kw)), Fraction(str(q_kvar))
+    for (left, lo, hi), (right, lo2, hi2) in zip(points, points[1:]):
+        if left <= power <= right:
+            t = (power - left) / (right - left)
+            return "PASS" if lo + t * (lo2 - lo) <= q <= hi + t * (hi2 - hi) else "FAIL"
+    return "FAIL"

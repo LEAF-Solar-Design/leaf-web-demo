@@ -274,3 +274,18 @@ def test_zip_ratio_gate_before_any_member_read(tmp_path,monkeypatch,name,size):
     assert grade(path,manifest,(size-1)/packed) == "FAIL"
     for limit in (None,0,False,float("nan")):
         assert grade(path,manifest,limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("dep,fact,target,other", [
+    ("native-reader", "os", "windows", "linux"), ("arm-kernel", "arch", "arm64", "amd64"),
+    ("renderer", "backend", "software", "gpu"),
+])
+def test_dependency_resolution_uses_recorded_target(dep, fact, target, other):
+    from benches.x03_package_oracle import target_dependency_quality
+    markers = {dep: {fact: target}}
+    def grade(facts, packaged):
+        return target_dependency_quality(markers, facts, packaged)
+    assert grade({fact: target}, {dep}) == "PASS"
+    assert grade({fact: target}, set()) == "FAIL"
+    assert grade({fact: other}, set()) == "PASS"
+    assert grade({}, {dep}) == "INCOMPLETE"

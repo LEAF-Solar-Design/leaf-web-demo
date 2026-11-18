@@ -211,3 +211,30 @@ def reproducible_zip_quality(first, second, ignore):
     if left is None or right is None:
         return "INCOMPLETE"
     return "PASS" if left == right else "FAIL"
+
+
+def target_dependency_quality(markers, target_facts, shipped):
+    """Evaluate recorded fact-equality markers without consulting the host or loading packages."""
+    if not isinstance(markers, dict) or not isinstance(target_facts, dict) or not isinstance(shipped, set):
+        return "INCOMPLETE"
+    unknown = False
+    for dependency, requirements in markers.items():
+        if not isinstance(requirements, dict):
+            return "INCOMPLETE"
+        missing = False
+        inactive = False
+        for fact, expected in requirements.items():
+            observed = target_facts.get(fact)
+            if not isinstance(expected, str) or not expected:
+                return "INCOMPLETE"
+            if not isinstance(observed, str) or not observed:
+                missing = True
+            elif observed != expected:
+                inactive = True
+        if inactive:
+            continue
+        if missing:
+            unknown = True
+        elif dependency not in shipped:
+            return "FAIL"
+    return "INCOMPLETE" if unknown else "PASS"

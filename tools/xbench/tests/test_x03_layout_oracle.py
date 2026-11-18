@@ -326,3 +326,17 @@ def test_module_edge_clamp_placement(zone, position, outside):
     assert check({"near": position, "far": 100}) == "PASS"
     assert check({"near": outside, "far": 100}) == "FAIL"
     assert check({"near": position}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("xy,force,moment,peak", [
+    ({"a": (-1,0), "b": (1,0)}, (0,8), 4, 6),
+    ({"a": (7,3), "b": (7,7)}, (12,0), 8, 8),
+    ({"a": (-2,0), "b": (0,0), "c": (2,0)}, (0,12), -8, 6),
+])
+def test_peak_anchor_shear_from_eccentric_load(xy, force, moment, peak):
+    from benches.x03_layout_oracle import eccentric_anchor_quality
+    def grade(coords, limit):
+        return eccentric_anchor_quality(coords, dict.fromkeys(xy, limit), *force, moment)
+    assert grade(xy, peak) == "PASS"
+    assert grade(xy, peak-0.1) == "FAIL"
+    assert grade({}, peak) == "INCOMPLETE"
