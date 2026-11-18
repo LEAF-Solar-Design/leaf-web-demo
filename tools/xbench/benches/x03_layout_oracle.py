@@ -699,3 +699,20 @@ def resonance_quality(excitation_hz, modes_hz, separation_hz):
             if abs(Fraction(str(mode)) - Fraction(str(excitation))) < minimum:
                 return "FAIL"
     return "PASS"
+
+
+def bolt_preload_quality(torque_nm, nut_factors, diameter_m, min_clamp_n, proof_n):
+    """Bound preload using the recorded nut-factor model T = K F d."""
+    for bounds in (torque_nm, nut_factors):
+        if not isinstance(bounds, (tuple, list)) or len(bounds) != 2 or not all(map(finite_measure, bounds)):
+            return "INCOMPLETE"
+        if not 0 < bounds[0] <= bounds[1]:
+            return "INCOMPLETE"
+    if not all(map(finite_measure, (diameter_m, min_clamp_n, proof_n))) or min(diameter_m, min_clamp_n, proof_n) <= 0:
+        return "INCOMPLETE"
+    low, high = (Fraction(str(v)) for v in torque_nm)
+    k_min, k_max = (Fraction(str(v)) for v in nut_factors)
+    diameter = Fraction(str(diameter_m))
+    adequate = low >= Fraction(str(min_clamp_n)) * k_max * diameter
+    within_proof = high <= Fraction(str(proof_n)) * k_min * diameter
+    return "PASS" if adequate and within_proof else "FAIL"

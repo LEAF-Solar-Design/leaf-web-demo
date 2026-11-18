@@ -289,3 +289,19 @@ def test_dependency_resolution_uses_recorded_target(dep, fact, target, other):
     assert grade({fact: target}, set()) == "FAIL"
     assert grade({fact: other}, set()) == "PASS"
     assert grade({}, {dep}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("name,expression,expected", [
+    ("viewer", "MIT OR GPL-3.0-only AND Apache-2.0", "PASS"),
+    ("exporter", "(MIT OR Apache-2.0) AND GPL-3.0-only", "FAIL"),
+    ("parser", "MIT AND (GPL-3.0-only OR Apache-2.0)", "PASS"),
+])
+def test_distribution_dependency_license_policy(name,expression,expected):
+    from benches.x03_package_oracle import dependency_license_quality as grade
+    policy = dict(revision="dist-v2",licenses={"MIT":True,"Apache-2.0":True,"GPL-3.0-only":False})
+    def check(expr):
+        return grade("dist-v2",policy,{name},{name:expr})
+    assert check(expression) == expected
+    assert check("MIT AND GPL-3.0-only") == "FAIL"
+    assert check("MIT OR LicenseRef-unknown") == "INCOMPLETE"
+    assert check("(MIT AND)") == "INCOMPLETE"

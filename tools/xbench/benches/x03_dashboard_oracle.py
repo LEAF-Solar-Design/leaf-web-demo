@@ -788,3 +788,32 @@ def histogram_merge_quality(shards, reported):
         seen.update(ids)
         totals = [a+b for a, b in zip(totals, counts)]
     return "PASS" if all(type(n) is int for n in reported) and reported == totals else "FAIL"
+
+
+def failure_streak_quality(rows, reset_outcomes, reported_longest):
+    """Count the longest failure run in a complete sequence, ignoring declared neutral outcomes."""
+    if not isinstance(rows, list) or not rows or not isinstance(reset_outcomes, set) or "failure" in reset_outcomes:
+        return "INCOMPLETE"
+    if type(reported_longest) is not int:
+        return "INCOMPLETE"
+    ordered = {}
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) != 2:
+            return "INCOMPLETE"
+        sequence, outcome = row
+        if type(sequence) is not int or sequence in ordered or not isinstance(outcome, str):
+            return "INCOMPLETE"
+        if outcome not in reset_outcomes and outcome not in ("failure", "skipped"):
+            return "INCOMPLETE"
+        ordered[sequence] = outcome
+    if max(ordered) - min(ordered) + 1 != len(ordered):
+        return "INCOMPLETE"
+    longest = streak = 0
+    for sequence in sorted(ordered):
+        outcome = ordered[sequence]
+        if outcome in reset_outcomes:
+            streak = 0
+        elif outcome == "failure":
+            streak += 1
+            longest = max(longest, streak)
+    return "PASS" if longest == reported_longest else "FAIL"

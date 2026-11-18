@@ -1574,3 +1574,59 @@ def dc_load_break_quality(revision, device, category, voltage_v, load_a):
     if not isinstance(rating, (tuple, list)) or len(rating) != 2 or not all(map(finite_measure, rating)) or min(rating) <= 0:
         return "INCOMPLETE"
     return "PASS" if voltage_v <= rating[0] and load_a <= rating[1] else "FAIL"
+
+
+def conversion_loss_quality(revision, datasheet, intervals, reported_loss_kwh):
+    """Integrate DC input energy times loss fraction, interpolating only between recorded loads."""
+    from math import isclose
+    if not revision or not isinstance(datasheet, dict) or datasheet.get("revision") != revision:
+        return "INCOMPLETE"
+    points = datasheet.get("dc_kw_efficiency")
+    if not isinstance(points, list) or len(points) < 2 or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    if not finite_measure(reported_loss_kwh):
+        return "INCOMPLETE"
+    curve = []
+    for row in points:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        load, efficiency = (Fraction(str(v)) for v in row)
+        if load < 0 or not 0 <= efficiency <= 1 or (curve and load <= curve[-1][0]):
+            return "INCOMPLETE"
+        curve.append((load, efficiency))
+    loss = Fraction(0)
+    for interval in intervals:
+        if not isinstance(interval, (tuple, list)) or len(interval) != 2 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        load, hours = (Fraction(str(v)) for v in interval)
+        if hours <= 0:
+            return "INCOMPLETE"
+        for (low, eta_low), (high, eta_high) in zip(curve, curve[1:]):
+            if low <= load <= high:
+                efficiency = eta_low + (eta_high - eta_low) * (load - low) / (high - low)
+                loss += hours * load * (1 - efficiency)
+                break
+        else:
+            return "INCOMPLETE"
+    return "PASS" if isclose(reported_loss_kwh, loss, rel_tol=1e-9, abs_tol=1e-12) else "FAIL"
+
+
+def black_start_quality(steps, continuous_kw, surge_kw, surge_seconds, available_kwh):
+    """Test contiguous auxiliary-load stages using available pre-energization power and energy."""
+    ratings = (continuous_kw, surge_kw, surge_seconds, available_kwh)
+    if not all(map(finite_measure, ratings)) or min(ratings) < 0 or surge_kw < continuous_kw:
+        return "INCOMPLETE"
+    if not isinstance(steps, list) or not steps:
+        return "INCOMPLETE"
+    energy_kws = surge_time = Fraction(0)
+    for step in steps:
+        if not isinstance(step, (list, tuple)) or len(step) != 2 or not all(map(finite_measure, step)):
+            return "INCOMPLETE"
+        load, seconds = (Fraction(str(v)) for v in step)
+        if load < 0 or seconds <= 0:
+            return "INCOMPLETE"
+        surge_time = surge_time + seconds if load > Fraction(str(continuous_kw)) else 0
+        if load > Fraction(str(surge_kw)) or surge_time > Fraction(str(surge_seconds)):
+            return "FAIL"
+        energy_kws += load * seconds
+    return "PASS" if energy_kws <= Fraction(str(available_kwh)) * 3600 else "FAIL"

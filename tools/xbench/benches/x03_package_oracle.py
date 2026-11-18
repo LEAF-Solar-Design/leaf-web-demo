@@ -238,3 +238,60 @@ def target_dependency_quality(markers, target_facts, shipped):
         elif dependency not in shipped:
             return "FAIL"
     return "INCOMPLETE" if unknown else "PASS"
+
+
+def dependency_license_quality(revision, policy, required, expressions):
+    """Evaluate pinned SPDX identifiers, AND, OR and parentheses without loading dependencies."""
+    if not revision or not isinstance(policy, dict) or policy.get("revision") != revision:
+        return "INCOMPLETE"
+    decisions = policy.get("licenses")
+    if not isinstance(decisions, dict) or not isinstance(required, set) or not isinstance(expressions, dict):
+        return "INCOMPLETE"
+    compatible = True
+    for dependency in required:
+        expr = expressions.get(dependency)
+        if not isinstance(expr, str):
+            return "INCOMPLETE"
+        tokens = re.findall(r"[A-Za-z0-9.+-]+|[^\s]", expr)
+        pos = 0
+
+        def term():
+            nonlocal pos
+            if pos >= len(tokens):
+                raise ValueError
+            token = tokens[pos]
+            pos += 1
+            if token == "(":
+                result = alternative()
+                if pos >= len(tokens) or tokens[pos] != ")":
+                    raise ValueError
+                pos += 1
+                return result
+            if token in ("AND", "OR", ")") or type(decisions.get(token)) is not bool:
+                raise ValueError
+            return decisions[token]
+
+        def conjunction():
+            nonlocal pos
+            result = term()
+            while tokens[pos:pos+1] == ["AND"]:
+                pos += 1
+                result = term() and result
+            return result
+
+        def alternative():
+            nonlocal pos
+            result = conjunction()
+            while tokens[pos:pos+1] == ["OR"]:
+                pos += 1
+                result = conjunction() or result
+            return result
+
+        try:
+            allowed = alternative()
+        except (ValueError, RecursionError):
+            return "INCOMPLETE"
+        if pos != len(tokens):
+            return "INCOMPLETE"
+        compatible = compatible and allowed
+    return "PASS" if compatible else "FAIL"

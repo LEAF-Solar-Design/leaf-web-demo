@@ -348,3 +348,16 @@ def test_support_modes_clear_operating_frequencies(sources, modes, gap):
     assert grade(sources, modes, gap) == "PASS"
     assert grade(sources, modes + [sources[-1]], gap) == "FAIL"
     assert grade(sources, [], gap) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("torque,k,d,min_force,proof", [
+    ((10,12),(0.2,0.25),0.01,4000,6000),
+    ((32,36),(0.15,0.2),0.02,8000,12000),
+    ((6,7.5),(0.1,0.12),0.005,10000,15000),
+])
+def test_joint_clamps_across_torque_and_friction_ranges(torque,k,d,min_force,proof):
+    from benches.x03_layout_oracle import bolt_preload_quality as grade
+    assert grade(torque,k,d,min_force,proof) == "PASS"
+    assert grade(torque,k,d,min_force+1,proof) == "FAIL"
+    assert grade(torque,k,d,min_force,proof-1) == "FAIL"
+    assert grade(torque,None,d,min_force,proof) == "INCOMPLETE"

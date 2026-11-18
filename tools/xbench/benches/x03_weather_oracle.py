@@ -308,3 +308,25 @@ def interval_weather_quality(window, observations, rule, reported):
         return "INCOMPLETE"
     mean = total / (Fraction(str(window[1])) - Fraction(str(window[0])))
     return "PASS" if isclose(reported, mean, rel_tol=1e-9, abs_tol=1e-12) else "FAIL"
+
+
+def voltage_temperature_alignment_quality(voltages, temperatures, max_skew, reported_pairs):
+    """Each required voltage timestamp pairs with its unique nearest temperature timestamp."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not finite_measure(max_skew) or max_skew < 0 or not isinstance(reported_pairs, dict):
+        return "INCOMPLETE"
+    for trace in (voltages, temperatures):
+        if not isinstance(trace, dict) or not trace or not all(map(finite_measure, (*trace.keys(), *trace.values()))):
+            return "INCOMPLETE"
+    expected = {}
+    for stamp in voltages:
+        distances = {t: abs(Fraction(str(t)) - Fraction(str(stamp))) for t in temperatures}
+        nearest = min(distances.values())
+        matches = [t for t, delta in distances.items() if delta == nearest]
+        if len(matches) != 1 or nearest > Fraction(str(max_skew)):
+            return "INCOMPLETE"
+        expected[stamp] = matches[0]
+    if expected.keys() - reported_pairs.keys():
+        return "INCOMPLETE"
+    return "PASS" if expected == reported_pairs and all(map(finite_measure, reported_pairs.values())) else "FAIL"

@@ -391,3 +391,16 @@ def test_merge_disjoint_recorded_histograms(unit, edges):
     for change in (dict(edges=[edges[0],edges[1]+1,edges[2]]), dict(unit="other"), dict(sample_ids=["a"])):
         assert grade([a,dict(b,**change)], [2,1]) == "FAIL"
     assert grade([a,dict(b,sample_ids=None)], [2,1]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("outcomes,resets,longest", [
+    (["pass","failure","failure","pass","failure"], {"pass"}, 2),
+    (["failure","skipped","failure","recovered","failure"], {"recovered"}, 2),
+    (["failure","skipped","failure","pass"], {"skipped","pass"}, 1),
+])
+def test_dashboard_longest_outage(outcomes,resets,longest):
+    from benches.x03_dashboard_oracle import failure_streak_quality as grade
+    rows = list(reversed(list(enumerate(outcomes))))
+    assert grade(rows,resets,longest) == "PASS"
+    assert grade(rows,resets,0) == "FAIL"
+    assert grade(rows+[rows[0]],resets,longest) == "INCOMPLETE"
