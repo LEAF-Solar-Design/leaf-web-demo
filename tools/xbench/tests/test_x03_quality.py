@@ -221,3 +221,43 @@ def test_all_assigned_terminal_paths(span, tolerance):
     assert grade(paths, assignments, LineString([(0, 4), (span, 4)])) == "FAIL"
     assert grade(paths, assignments, None) == "INCOMPLETE"
     assert grade({"a": paths["a"]}, assignments, trunk) == "FAIL"
+
+
+@pytest.mark.parametrize("rated,factors,capacity", [
+    (100, {"heat": 0.8, "bundle": 0.75}, 60),
+    (75, {"ambient": 0.92}, 69),
+    (50, {"ambient": 0.8, "group": 0.8, "installation": 0.5}, 16),
+])
+def test_recorded_ampacity(rated, factors, capacity):
+    from benches.x03_quality import conductor_ampacity_quality
+    names = list(factors)
+    assert conductor_ampacity_quality(rated, capacity, factors, names) == "PASS"
+    assert conductor_ampacity_quality(rated, capacity+0.01, factors, names) == "FAIL"
+    assert conductor_ampacity_quality(rated, capacity, {}, names) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("length,length_unit,resistance,res_unit,amps,volts", [
+    (100, "m", 0.01, "ohm/m", 3, 3), (0.4, "km", 2, "ohm/km", 10, 8),
+    (100, "ft", 0.5, "ohm/km", 10, 0.1524),
+])
+def test_round_trip_drop(length, length_unit, resistance, res_unit, amps, volts):
+    from benches.x03_quality import dc_drop_quality
+    units = dict(length=length_unit, resistance=res_unit, current="A", drop="V")
+    assert dc_drop_quality(length, resistance, amps, volts, units=units) == "PASS"
+    assert dc_drop_quality(length, resistance, amps, volts-0.001, units=units) == "FAIL"
+    del units["resistance"]
+    assert dc_drop_quality(length, resistance, amps, volts, units=units) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("radius,sign,offset", [(2, 1, 0), (3, -1, 7), (4, 1, -3)])
+def test_circular_bend_and_tangent_join(radius, sign, offset):
+    from benches.x03_quality import bend_radius_quality
+    start = (offset, 0)
+    end = (offset+radius, sign*radius)
+    arc = dict(kind="arc", start=start, end=end, center=(offset, sign*radius),
+               direction="ccw" if sign == 1 else "cw")
+    lead = dict(kind="line", start=(offset-1, 0), end=start)
+    assert bend_radius_quality([lead, arc], radius) == "PASS"
+    assert bend_radius_quality([lead, arc], radius+0.01) == "FAIL"
+    assert bend_radius_quality([lead, dict(kind="line", start=start, end=end)], radius) == "FAIL"
+    assert bend_radius_quality([lead, dict(arc, center=None)], radius) == "INCOMPLETE"

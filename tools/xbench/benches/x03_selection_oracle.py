@@ -76,3 +76,41 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
         expected = [visible, visible]
     return "PASS" if (expected == sets[2:] and after-before == additions
                       and before-after == removals) else "FAIL"
+
+
+def snapshot_roundtrip_quality(saved, exported, expected_handles):
+    """Compare a revision's exported entity snapshots keyed by normalized handle."""
+    import json
+    expected = handle_set(expected_handles)
+    if expected is None or not all(isinstance(s, dict) for s in (saved, exported)):
+        return "INCOMPLETE"
+    for key in ("drawing", "version"):
+        if not all(isinstance(s.get(key), str) and s[key] for s in (saved, exported)):
+            return "INCOMPLETE"
+        if saved[key] != exported[key]:
+            return "FAIL"
+    snapshots = []
+    for record in (saved, exported):
+        if not isinstance(record.get("entities"), list):
+            return "INCOMPLETE"
+        entities = {}
+        for entity in record["entities"]:
+            if not isinstance(entity, dict):
+                return "INCOMPLETE"
+            handles = handle_set([entity.get("handle")])
+            if (not handles or not isinstance(entity.get("geometry"), dict) or not entity["geometry"]
+                    or not isinstance(entity.get("layer"), str) or not entity["layer"]
+                    or not isinstance(entity.get("attributes"), dict)):
+                return "INCOMPLETE"
+            handle = next(iter(handles))
+            if handle in entities or handle not in expected:
+                return "FAIL"
+            try:
+                entities[handle] = json.dumps([entity[k] for k in ("geometry", "layer", "attributes")],
+                                              sort_keys=True, allow_nan=False)
+            except (ValueError, TypeError):
+                return "INCOMPLETE"
+        if entities.keys() != expected:
+            return "INCOMPLETE"
+        snapshots.append(entities)
+    return "PASS" if snapshots[0] == snapshots[1] else "FAIL"

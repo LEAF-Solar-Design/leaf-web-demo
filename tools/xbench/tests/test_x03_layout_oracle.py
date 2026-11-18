@@ -29,3 +29,20 @@ def test_rotated_rows_and_pitch(angle, pitch):
     assert grade(angle+90, pitch) == "FAIL"
     assert grade(angle, pitch+0.01) == "FAIL"
     assert grade(None, pitch) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("unit,panel_start,panel_end", [
+    ("m", 0.3048, 0.6096), ("mm", 304.8, 609.6), ("ft", 1, 2),
+])
+def test_mixed_unit_layout(unit, panel_start, panel_end):
+    from benches.x03_layout_oracle import measured_layout_quality
+    # One square foot, one foot from the boundary, on a site recorded in metres.
+    area = box(0, 0, 1, 1)
+    panels = [box(panel_start, panel_start, panel_end, panel_end)]
+    def grade(distance, units):
+        return measured_layout_quality(panels, area, distance, panel_unit=units,
+                                       area_unit="m", setback_unit="ft")
+    assert grade(1, unit) == "PASS"
+    assert grade(1.01, unit) == "FAIL"
+    assert grade(1, "kg") == "FAIL"
+    assert grade(1, None) == "INCOMPLETE"

@@ -75,3 +75,19 @@ def test_versioned_visibility(entity_visible, on, frozen):
     assert check(inv, ["A", "B"]) == "FAIL"
     assert check(dict(inv, layers={}), ["A"]) == "INCOMPLETE"
     assert check(dict(inv, version="2"), ["A"]) == "FAIL"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("geometry", {"point": [2, 1]}), ("layer", "hidden"), ("attributes", {"serial": "other"}),
+])
+def test_saved_entities_survive_export(field, value):
+    from benches.x03_selection_oracle import snapshot_roundtrip_quality
+    entity = dict(handle="0a", geometry={"point": [1, 2]}, layer="base", attributes={"serial": "initial"})
+    before = dict(drawing="roof", version="7", entities=[entity])
+    after = dict(entity, handle="A")
+    def grade(rows):
+        return snapshot_roundtrip_quality(before, dict(before, entities=rows), ["000A"])
+    assert grade([after]) == "PASS"
+    assert grade([dict(after, **{field: value})]) == "FAIL"
+    assert grade([{k: v for k, v in after.items() if k != field}]) == "INCOMPLETE"
+    assert grade([]) == "INCOMPLETE"

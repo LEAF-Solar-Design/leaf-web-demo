@@ -54,3 +54,19 @@ def row_layout_quality(rows, usable_area, setback, *, orientation=None, row_axis
     offsets.sort()
     return "PASS" if all(b-a >= min_pitch or isclose(b-a, min_pitch, rel_tol=1e-12)
                          for a, b in zip(offsets, offsets[1:])) else "FAIL"
+
+
+def measured_layout_quality(panels, usable_area, setback, *, panel_unit=None, area_unit=None, setback_unit=None):
+    """Put panel, usable-area and setback records in the area coordinate system."""
+    from shapely.affinity import scale
+    metres = {"m": 1.0, "mm": 0.001, "ft": 0.3048}
+    units = (panel_unit, area_unit, setback_unit)
+    if None in units or setback is None or not isinstance(panels, (list, tuple)) or not panels:
+        return "INCOMPLETE"
+    if any(not isinstance(unit, str) or unit not in metres for unit in units) or not finite_measure(setback):
+        return "FAIL"
+    ratio = metres[panel_unit] / metres[area_unit]
+    if any(panel is None or not hasattr(panel, "geom_type") for panel in panels):
+        return "INCOMPLETE"
+    converted = [scale(panel, xfact=ratio, yfact=ratio, origin=(0, 0)) for panel in panels]
+    return layout_quality(converted, usable_area, setback * (metres[setback_unit] / metres[area_unit]))

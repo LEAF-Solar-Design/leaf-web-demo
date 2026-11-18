@@ -276,3 +276,85 @@ def terminal_route_quality(routes, terminals, destinations, assignments, trunk, 
         if route.project(Point(trunk.coords[0])) >= route.project(Point(trunk.coords[-1])):
             return "FAIL"
     return "PASS"
+
+
+def conductor_ampacity_quality(rated_amps, required_amps, factors, required_factors):
+    """Compare recorded load to base ampacity times every declared derating factor."""
+    if rated_amps is None or required_amps is None or not isinstance(factors, dict):
+        return "INCOMPLETE"
+    if not isinstance(required_factors, (tuple, list)) or not all(
+            isinstance(name, str) and name for name in required_factors):
+        return "INCOMPLETE"
+    if len(set(required_factors)) != len(required_factors) or set(required_factors) != factors.keys():
+        return "INCOMPLETE"
+    if not finite_measure(rated_amps) or rated_amps <= 0 or not finite_measure(required_amps) or required_amps < 0:
+        return "FAIL"
+    capacity = Fraction(str(rated_amps))
+    for factor in factors.values():
+        if factor is None:
+            return "INCOMPLETE"
+        if not finite_measure(factor) or not 0 < factor <= 1:
+            return "FAIL"
+        capacity *= Fraction(str(factor))
+    return "PASS" if capacity >= Fraction(str(required_amps)) else "FAIL"
+
+
+def dc_drop_quality(round_trip_length, resistance_per_length, current, max_drop, *, units=None):
+    """Use the full conductor loop length once. The drop limit is in volts."""
+    if not isinstance(units, dict) or any(units.get(k) is None for k in ("length", "resistance", "current", "drop")):
+        return "INCOMPLETE"
+    lengths = {"m": 1, "km": 1000, "ft": Fraction(381, 1250)}
+    resistance_lengths = {"ohm/" + unit: scale for unit, scale in lengths.items()}
+    if (not all(isinstance(v, str) for v in units.values()) or units["length"] not in lengths
+            or units["resistance"] not in resistance_lengths or units["current"] != "A" or units["drop"] != "V"):
+        return "FAIL"
+    values = (round_trip_length, resistance_per_length, current, max_drop)
+    if None in values:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in values):
+        return "FAIL"
+    length, resistance, amps, limit = (Fraction(str(v)) for v in values)
+    drop = amps * length * lengths[units["length"]] * resistance / resistance_lengths[units["resistance"]]
+    return "PASS" if drop <= limit else "FAIL"
+
+
+def bend_radius_quality(segments, min_radius):
+    """Grade directed planar line and circular arc centerlines, including their joins."""
+    from math import dist, hypot, isclose
+    if not isinstance(segments, (tuple, list)) or not segments or min_radius is None:
+        return "INCOMPLETE"
+    if not finite_measure(min_radius) or min_radius <= 0:
+        return "FAIL"
+    previous_end = previous_tangent = None
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("kind") not in ("line", "arc"):
+            return "INCOMPLETE"
+        arc = segment["kind"] == "arc"
+        keys = ("start", "end", "center") if arc else ("start", "end")
+        if any(not isinstance(segment.get(k), (tuple, list)) or len(segment[k]) != 2
+               or not all(map(finite_measure, segment[k])) for k in keys):
+            return "INCOMPLETE"
+        start, end = tuple(segment["start"]), tuple(segment["end"])
+        if start == end or (previous_end is not None and start != previous_end):
+            return "FAIL"
+        if arc:
+            center = segment["center"]
+            radius = dist(start, center)
+            if not finite_measure(radius) or radius < min_radius or not isclose(dist(end, center), radius, rel_tol=1e-12):
+                return "FAIL"
+            if segment.get("direction") not in ("cw", "ccw"):
+                return "INCOMPLETE"
+            sign = 1 if segment["direction"] == "ccw" else -1
+            tangents = [(sign*(center[1]-p[1]), sign*(p[0]-center[0])) for p in (start, end)]
+        else:
+            tangents = [(end[0]-start[0], end[1]-start[1])] * 2
+        normalized = []
+        for dx, dy in tangents:
+            norm = hypot(dx, dy)
+            if not finite_measure(norm) or norm == 0:
+                return "FAIL"
+            normalized.append((dx/norm, dy/norm))
+        if previous_tangent is not None and dist(previous_tangent, normalized[0]) > 1e-9:
+            return "FAIL"
+        previous_end, previous_tangent = end, normalized[1]
+    return "PASS"
