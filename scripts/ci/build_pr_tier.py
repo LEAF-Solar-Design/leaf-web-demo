@@ -19,6 +19,20 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 REPO_SLUG = "LEAF-Solar-Design/leaf-web-demo"
 SCHEMA = "leaf.ci.pr-tier.v1"
+# Cross-cutting contract suites that broke production FULL on 2026-11-17 because PR tier runs skipped them; ~65 s total.
+CONTRACT_KEEP = (
+    "scripts-proof-string-sizer",
+    "server-capabilities-project-read",
+    "server-engine-registry-scripts",
+    "server-lab-capability-coverage",
+    "server-solar-design-survives-saves",
+    "server-solar-tool-solar-string-reports",
+    "server-surface-entitlements",
+    "server-w1-catalog-gates",
+    "server-w1-cloud-solve-probe",
+    "server-w1-solve-parity",
+    "server-w1c-solve-proposal",
+)
 
 
 def unique_object(pairs):
@@ -115,6 +129,8 @@ def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner
     for sid in sentinels:
         include(sid, "hard-harm-sentinel")
     include("web-version-restore-proof", "studio-keep")
+    for sid in CONTRACT_KEEP:
+        include(sid, "contract-keep")
     # An optional baseline makes a future regeneration retain every new suite,
     # even when that suite has an otherwise perfectly understood owner.
     baseline = (suite_ids(proposal["catalog_suite_ids"], "proposal catalog_suite_ids")
