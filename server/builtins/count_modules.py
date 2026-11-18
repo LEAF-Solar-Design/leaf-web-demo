@@ -229,8 +229,18 @@ def _selected_layer_counts(selected_sets, multiplicities):
     return counts
 
 
+def _rank_layers(counts, limit):
+    """Include every layer tied with the layer in the final requested slot."""
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    cutoff = ordered[min(limit, len(ordered)) - 1][1]
+    return [{"layer": layer, "count": count} for layer, count in ordered if count >= cutoff]
+
+
 def run(intake, params):
     params = params or {}
+    top = params.get("top_layers")
+    if "top_layers" in params and (type(top) is not int or top < 1):
+        raise InputValidationError("Choose a positive integer for the number of top layers.")
     window = _selection_region(params)
     if not isinstance(intake, dict):
         raise InputValidationError("Saved intake must be an object; re-import the drawing.")
@@ -285,7 +295,7 @@ def run(intake, params):
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
         sets.append(group)
-    if not selected_ids and params.get("group_by") == "layer" and "panel_scope" in params:
+    if not selected_ids and (params.get("group_by") == "layer" or top is not None) and "panel_scope" in params:
         selected_ids = _named_panel_sets(sets, params["panel_scope"])
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
     if len(selected_sets) != len(selected_ids):
@@ -293,6 +303,13 @@ def run(intake, params):
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
+    breakdown = {}
+    if selected_sets and (params.get("group_by") == "layer" or top is not None):
+        counts = _selected_layer_counts(selected_sets, multiplicities)
+        breakdown["counts"] = counts
+        if top is not None:
+            breakdown["ranking"] = _rank_layers(counts, top)
+
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
@@ -300,8 +317,7 @@ def run(intake, params):
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
-             **({"counts": _selected_layer_counts(selected_sets, multiplicities)}
-                if selected_sets and params.get("group_by") == "layer" else {}),
+             **breakdown,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]

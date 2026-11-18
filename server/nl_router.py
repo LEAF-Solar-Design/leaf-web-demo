@@ -431,6 +431,34 @@ _GROUPED_PANELS = re.compile(
 )
 
 
+_LAYER_LEADERS = re.compile(
+    r"(?:which|what)\s+(?P<roof>roof(?:top)?\s+)?layers?\s+"
+    r"(?:(?:has|have|holds?|contains?)\s+(?:the\s+)?most\s+(?:solar\s+)?(?:modules?|panels?)"
+    r"|(?:is|are)\s+(?:tied\s+for\s+)?(?:the\s+)?(?:largest|highest|greatest)\s+"
+    r"(?:solar\s+)?(?:module|panel)\s+count)[?.!]?", re.I,
+)
+_TOP_LAYER_COUNT = re.compile(
+    r"(?:rank|show|list|give me)\s+(?:the\s+)?top\s+(?P<n>\d{1,9}|one|two|three|four|five|six|seven|eight|nine|ten)"
+    r"\s+(?P<roof>roof(?:top)?\s+)?layers?\s+by\s+(?:solar\s+)?(?:module|panel)\s+count"
+    r"(?:,?\s+(?:highest first|descending))?[?.!]?", re.I,
+)
+
+
+def _layer_ranking_params(text):
+    query = text.strip()
+    match = _LAYER_LEADERS.fullmatch(query)
+    limit = 1
+    if match is None:
+        match = _TOP_LAYER_COUNT.fullmatch(query)
+        if match is None:
+            return None
+        number = match["n"].lower()
+        words = "one two three four five six seven eight nine ten".split()
+        limit = int(number) if number.isdecimal() else words.index(number) + 1
+    scope = "roof_layers" if match["roof"] else "all_layers"
+    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit}
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -498,6 +526,11 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
+
+    ranking_params = _layer_ranking_params(text)
+    if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=ranking_params,
+                              confidence=0.95, rationale="Rank selected physical module counts by layer.")
 
     grouped = _GROUPED_PANELS.fullmatch(text.strip())
     if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):
