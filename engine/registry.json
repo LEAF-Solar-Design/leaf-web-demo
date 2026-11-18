@@ -67,6 +67,8 @@
       "params": {
         "type": "object",
         "properties": {
+          "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
+          "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
           "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
           "set_ids": {"type": "array", "items": {"type": "string"}, "description": "Choose the listed sets that together form the intended design."},
           "region": {"type": ["array", "null"], "default": null, "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "Optional world-XY [minimum X, minimum Y, maximum X, maximum Y]. Counts fully contained individual INSERT bounds and eligible outlines. Overlapping boundaries and incomplete geometry refuse as ambiguous. INSERT arrays require whole-set counting."}

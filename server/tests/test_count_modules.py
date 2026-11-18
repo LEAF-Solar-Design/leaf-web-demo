@@ -471,3 +471,31 @@ def test_native_insert_array_defaults_are_normalized_without_hiding_invalid_coun
     if expected <= 0:
         with pytest.raises(ValueError, match="invalid array multiplicity"):
             module.run(intake, {})
+
+
+def test_group_selected_modules_by_layer_with_arrays_and_repeated_handles():
+    intake = {"inserts": [
+        {"name": "Panel A", "layer": "Upper", "handle": "A", "rows": 2},
+        {"name": "Panel B", "layer": "Upper", "handle": "A", "rows": 2},
+        {"name": "Panel A", "layer": "Lower", "handle": "B"},
+        {"name": "Roof Outline", "layer": "Upper", "handle": "C"},
+    ]}
+    listing, _ = module.run(intake, {"group_by": "layer"})
+    assert listing["selection_required"] and "counts" not in listing
+    ids = [s["set_id"] for s in listing["sets"] if s["block"].startswith("Panel")]
+    result, overlay = module.run(intake, {"set_ids": ids, "group_by": "layer"})
+    assert result["counts"] == {"Lower": 1, "Upper": 2}
+    assert result["count"] == 3
+    assert set(overlay["highlight_handles"]) == {"A", "B"}
+
+
+def test_named_roles_keep_competing_blocks_unselected():
+    intake = {"inserts": [
+        {"name": "PV_MODULE", "layer": "Roof A", "handle": "A"},
+        {"name": "PV Module", "layer": "Roof A", "handle": "B"},
+    ]}
+    request = {"group_by": "layer", "panel_scope": "all_layers"}
+    listing, overlay = module.run(intake, request)
+    assert listing["selection_required"] and overlay is None
+    result, _ = module.run(intake, {**request, "set_id": listing["sets"][0]["set_id"]})
+    assert result["counts"] == {"Roof A": 1}

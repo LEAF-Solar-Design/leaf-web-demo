@@ -6,6 +6,7 @@ the listing; the normal job records that selection with the result.
 from __future__ import annotations
 
 import json
+import re
 import math
 
 MAX_EXACT_COUNT = 2**53 - 1
@@ -188,6 +189,42 @@ def _four_corners(entity):
         return False
 
 
+def _named_panel_sets(sets, scope):
+    """Use explicit block roles only. An unresolved group leaves the picker open."""
+    if scope not in ("roof_layers", "all_layers"):
+        raise ValueError("Unknown panel layer scope.")
+    found = []
+    block_names = set()
+    for group in sets:
+        layer_words = re.findall(r"[a-z0-9]+", group["layer"].casefold())
+        if scope == "roof_layers" and not {"roof", "rooftop"}.intersection(layer_words):
+            continue
+        words = re.findall(r"[a-z0-9]+", group["block"].casefold())
+        if group["entity_type"] == "INSERT" and re.fullmatch(
+            r"(?:(?:pv|solar|photovoltaic) )?(?:panels?|modules?)", " ".join(words)
+        ):
+            block_names.add(group["block"])
+            found.append(group["set_id"])
+        elif words not in (["outline"], ["roof", "outline"], ["roof", "boundary"]):
+            return []
+    return found if len(block_names) == 1 else []
+
+
+def _selected_layer_counts(selected_sets, multiplicities):
+    """Count physical entities once within each selected layer."""
+    by_layer = {}
+    for group in selected_sets:
+        by_layer.setdefault(group["layer"], set()).update(group["_keys"])
+    assigned = set()
+    counts = {}
+    for layer, keys in sorted(by_layer.items()):
+        if assigned.intersection(keys):
+            raise ValueError("A selected entity belongs to more than one layer. Check the drawing before counting by layer.")
+        assigned.update(keys)
+        counts[layer] = _module_total(multiplicities[key][0] * multiplicities[key][1] for key in keys)
+    return counts
+
+
 def run(intake, params):
     params = params or {}
     window = _selection_region(params)
@@ -244,6 +281,8 @@ def run(intake, params):
     for identity, group in sorted(groups.items()):
         group["set_id"] = json.dumps(identity, ensure_ascii=True, separators=(",", ":"))
         sets.append(group)
+    if not selected_ids and params.get("group_by") == "layer" and "panel_scope" in params:
+        selected_ids = _named_panel_sets(sets, params["panel_scope"])
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
     if len(selected_sets) != len(selected_ids):
         if window is not None:
@@ -257,6 +296,8 @@ def run(intake, params):
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
+             **({"counts": _selected_layer_counts(selected_sets, multiplicities)}
+                if selected_sets and params.get("group_by") == "layer" else {}),
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]
