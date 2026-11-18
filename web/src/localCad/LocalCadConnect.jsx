@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
+import { studioFeatureNote } from '../site/studioAvailability.js'
 
 // LCERR: the browser's own words for "nothing answered on this port" (Chromium, Firefox, Safari). Unreachable already
 // says AutoCAD was not found, so these add nothing. Other failures use the shared error copy.
@@ -30,6 +31,7 @@ export default function LocalCadConnect({ status = 'stopped', drawing, summary, 
   return <div className="local-cad-connect" style={{ display: 'inline-flex', order: 3, alignItems: 'center', gap: 6, minWidth: 0, maxWidth: 400, flexShrink: 1, whiteSpace: 'nowrap' }}>
     <button type="button" className="chip-act" data-testid="local-cad-connect"
       style={{ flexShrink: 0 }}
+      title={connect ? studioFeatureNote('cad.connect-autocad') || undefined : undefined}
       onClick={connect ? onConnect : onDisconnect}>{connect ? 'Connect AutoCAD' : 'Disconnect'}</button>
     <span aria-live="polite" style={{ fontSize: 'var(--leaf-size-caption)', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
       <span data-testid="local-cad-status">{label}</span>

@@ -23,6 +23,7 @@ import { zoomViewer } from '../site/DrawingCockpit.jsx'
 import { deriveIosState } from '../ios/IosSurface.jsx'
 import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 import { RIBBON_TABS, profileRibbonTabData } from './ribbonTabs.data.js'
+import { catalogToolDisclaimer } from '../site/studioAvailability.js'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 import { solarFormKeys, solarView } from '../solar/solarView.js'
@@ -703,7 +704,12 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       // nothing until a later slice — so it is unconditionally unrunnable,
       // ahead of every transient gate below.
       const mcpSource = toolMcpSource(tool)
-      const reason = mcpSource
+      // Availability manifest: a tool the staging walk proved cannot run says
+      // so here, ahead of every transient gate (site/studioAvailability.js).
+      const notYet = catalogToolDisclaimer(tool.name)
+      const reason = notYet
+        ? notYet
+        : mcpSource
         ? REASONS.mcpToolNotWired
         : running
           ? REASONS.running
