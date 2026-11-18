@@ -5,6 +5,9 @@ import csv
 import hashlib
 import json
 import math
+import os
+from fractions import Fraction
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 import re
 import time
@@ -16,6 +19,21 @@ import xbench_session
 
 LIMITS = "50 frozen prompts; sequential execution (one in flight); 600 seconds per prompt; staging only; ordinary supported agent sign-in; no template credit."
 TRADES = {"solar": 30, "structural": 10, "mechanical": 10}
+
+
+def read_unique_json(text):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    return json.loads(text, object_pairs_hook=unique)
+
+
+def finite_number(value):
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def content_hash(value):
@@ -31,9 +49,9 @@ def matches(actual, expected, rule):
         return isinstance(actual, list) and len(actual) == len(expected) and all(
             matches(a, b, rule) for a, b in zip(actual, expected))
     if type(expected) in (int, float):
-        if type(actual) not in (int, float) or not math.isfinite(actual):
+        if not finite_number(actual) or not finite_number(expected):
             return False
-        return (abs(actual - expected) <= rule["tolerance"]
+        return (abs(Fraction(actual) - Fraction(expected)) <= rule["tolerance"]
                 if rule["mode"] == "absolute" else actual == expected)
     return type(actual) is type(expected) and actual == expected
 
@@ -48,7 +66,7 @@ def load_prompts(manifest):
     raw = Path(fixture["path"]).read_bytes()
     if hashlib.sha256(raw).hexdigest() != fixture.get("sha256"):
         raise ValueError("frozen prompt SHA-256 mismatch")
-    payload = json.loads(raw.decode("utf-8-sig"))
+    payload = read_unique_json(raw.decode("utf-8-sig"))
     rows = payload["rows"]
     if payload.get("schema") != "leaf.xbench.x03-prompts.v1" or not isinstance(rows, list) or len(rows) != 50:
         raise ValueError("invalid frozen prompt file")
@@ -73,8 +91,7 @@ def load_prompts(manifest):
         compare = row["compare"]
         if compare.get("mode") not in ("exact", "absolute"):
             raise ValueError("invalid comparison mode")
-        if compare["mode"] == "absolute" and (type(compare.get("tolerance")) not in (int, float)
-                or not math.isfinite(compare["tolerance"]) or compare["tolerance"] < 0):
+        if compare["mode"] == "absolute" and (not finite_number(compare.get("tolerance")) or compare["tolerance"] < 0):
             raise ValueError("invalid tolerance")
     review = manifest.get("oracle_review", {})
     if (not review.get("evidence") or len(set(review.get("row_ids", []))) < 10
@@ -385,6 +402,10 @@ def validate_baseline(baseline, prompt_sha256):
 
 
 def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, frozen_rows, run_unreadable=False):
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise ValueError("invalid run source digest")
+    if not isinstance(prompt_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", prompt_sha256):
+        raise ValueError("invalid run prompt digest")
     frozen = {row["id"]: row for row in frozen_rows}
     identities = {row["id"]: (row["trade"], row["drawing"]) for row in frozen_rows}
     if len(identities) != 50:
@@ -418,7 +439,7 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
     for record in records:
         if record["score"] == 1:
             try:
-                output = json.loads((out_dir / (record["id"] + "-output.json")).read_text(encoding="utf-8"))
+                output = read_unique_json((out_dir / (record["id"] + "-output.json")).read_text(encoding="utf-8"))
                 digest = content_hash(output)
             except (OSError, ValueError, TypeError):
                 raise ValueError("credited output artifact is missing or invalid") from None
@@ -467,6 +488,22 @@ def grade_records(records, *, baseline, prompt_sha256, source_sha, out_dir, froz
     return steps, report
 
 
+def publish_baseline(path, report):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Link only the fully written file. Linking also refuses an existing destination.
+    stream = NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False)
+    temp = Path(stream.name)
+    try:
+        with stream:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temp, path)
+    finally:
+        temp.unlink()
+
+
 def run(ctx):
     from xbench_studio import StudioClient, disposable_project
     rows, prompt_sha = load_prompts(ctx.manifest)
@@ -474,7 +511,7 @@ def run(ctx):
     baseline_path = Path(ctx.manifest["baseline_path"])
     baseline = None
     if baseline_path.exists():
-        baseline = json.loads(baseline_path.read_text())
+        baseline = read_unique_json(baseline_path.read_text(encoding="utf-8"))
         validate_baseline(baseline, prompt_sha)
     fixtures = {f["id"]: f for f in ctx.manifest["fixtures"] if f.get("role") == "drawing"}
     records = []
@@ -500,6 +537,7 @@ def run(ctx):
                     drawings[fixture_id] = client.adopt_drawing(projects[trade]["project_id"], uploaded, name)
                 write_json_atomic(ctx.out_dir / "projects.json", {"projects": projects, "drawings": drawings})
                 for row in rows:
+                    record = None
                     deadline = time.monotonic() + 600
                     try:
                         with author_authority(transport, row, projects[row["trade"]],
@@ -509,6 +547,13 @@ def run(ctx):
                                 source_sha=ctx.source_sha, evidence_dir=ctx.out_dir, run_id=run_id,
                                 authority_headers=authority, deadline_at=deadline)
                     except Exception as exc:
+                        if record is not None:
+                            records.append(record)
+                            write_json_atomic(ctx.out_dir / "records.json", records)
+                            run_errors.append({"stage": "authority_receipt", "id": row["id"],
+                                               "failure": type(exc).__name__})
+                            write_json_atomic(ctx.out_dir / "cleanup.json", run_errors)
+                            break
                         record = {"id": row["id"], "trade": row["trade"], "drawing": row["drawing"],
                                   "source_sha": ctx.source_sha, "model_id": None, "tool_name": None,
                                   "version": None, "tool_source_hash": None, "output_hash": None,
@@ -521,6 +566,12 @@ def run(ctx):
                     print(f"{row['id']} score={record['score']} stage={record['failing_stage']}", flush=True)
                     if record.get("unreadable") or record.get("failing_stage") == "source_drift":
                         break
+    except KeyboardInterrupt:
+        if records:
+            write_json_atomic(ctx.out_dir / "records.json", records)
+            grade_records(records, baseline=baseline, prompt_sha256=prompt_sha, source_sha=ctx.source_sha,
+                          out_dir=ctx.out_dir, frozen_rows=rows, run_unreadable=True)
+        raise
     except Exception as exc:
         if not records:
             raise
@@ -530,9 +581,5 @@ def run(ctx):
                                   source_sha=ctx.source_sha, out_dir=ctx.out_dir, frozen_rows=rows,
                                   run_unreadable=bool(run_errors))
     if report["complete"] and baseline is None:
-        baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        # One immutable baseline; a later run can never silently replace it.
-        with baseline_path.open("x", encoding="utf-8") as stream:
-            json.dump(report, stream, indent=2)
-            stream.write("\n")
+        publish_baseline(baseline_path, report)
     return steps

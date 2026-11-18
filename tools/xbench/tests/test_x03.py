@@ -1054,7 +1054,7 @@ def test_malformed_nested_success_envelope_has_bounded_receipt(tmp_path, route, 
     assert (tmp_path / "X03-01.json").exists()
 
 
-@pytest.mark.parametrize("case", ["complete", "output-write", "receipt-write"])
+@pytest.mark.parametrize("case", ["complete", "output-write", "receipt-write", "authority-write", "interrupt"])
 def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeypatch, case):
     manifest = prompt_manifest(tmp_path)
     rows, _ = bench.load_prompts(manifest)
@@ -1115,6 +1115,8 @@ def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeyp
             assert kw["headers"]["X-Authority-Turn-Id"] == "turn-"+row["id"]
             authored.append(row["id"])
             events.append("author-"+row["id"])
+            if case == "interrupt" and len(authored) == 2:
+                raise KeyboardInterrupt
             phase = "author"
             return 200, {"tool": {"name": "generated-"+row["id"]}, "model_id": "synthetic-model",
                 "receipt": {"state": "staged", "staged_commit": "b"*40, "change_set_id": "change-"+row["id"]}}
@@ -1137,7 +1139,9 @@ def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeyp
     def write(path, value):
         nonlocal injected
         target = "X03-02-output.json" if case == "output-write" else "X03-02.json"
-        if case != "complete" and Path(path).name == target and not injected:
+        if case == "authority-write":
+            target = "X03-02-authority.json"
+        if case in {"output-write", "receipt-write", "authority-write"} and Path(path).name == target and not injected:
             injected = True
             raise OSError("SECRET SENTINEL injected write failure")
         return original_write(path, value)
@@ -1145,7 +1149,17 @@ def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeyp
     monkeypatch.setattr(bench.xbench_session, "signed_in", signed_in)
     monkeypatch.setattr(bench, "transport_for", lambda *args: transport)
     monkeypatch.setitem(sys.modules, "xbench_studio", SimpleNamespace(StudioClient=Client, disposable_project=project))
-    steps = bench.run(SimpleNamespace(manifest=manifest, out_dir=out, source_sha=SHA, base="https://synthetic.invalid"))
+    ctx = SimpleNamespace(manifest=manifest, out_dir=out, source_sha=SHA, base="https://synthetic.invalid")
+    if case == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            bench.run(ctx)
+        assert authored == ["X03-01", "X03-02"] and active is None
+        assert [r["id"] for r in json.loads((out/"records.json").read_text())] == ["X03-01"]
+        assert events[-4:] == ["delete-mechanical", "delete-structural", "delete-solar", "sign-out"]
+        assert not json.loads((out/"summary.json").read_text())["complete"]
+        assert not Path(manifest["baseline_path"]).exists()
+        return
+    steps = bench.run(ctx)
     collected = json.loads((out/"records.json").read_text())
     assert active is None
     assert events[-4:] == ["delete-mechanical", "delete-structural", "delete-solar", "sign-out"]
@@ -1163,7 +1177,13 @@ def test_fifty_prompt_real_functions_lifecycle_without_network(tmp_path, monkeyp
     else:
         assert injected and authored == ["X03-01", "X03-02"]
         assert len(collected) == 2 and collected[0]["score"] == 1
-        assert collected[1]["score"] == 0 and collected[1]["unreadable"] is True
+        if case == "authority-write":
+            assert collected[1]["score"] == 1 and collected[1]["failing_stage"] is None
+            assert bench.content_hash(json.loads((out/"X03-02-output.json").read_text())) == collected[1]["output_hash"]
+            assert json.loads((out/"cleanup.json").read_text()) == [
+                {"stage": "authority_receipt", "id": "X03-02", "failure": "OSError"}]
+        else:
+            assert collected[1]["score"] == 0 and collected[1]["unreadable"] is True
         assert all(step.verdict == "UNREADABLE" for step in steps)
         assert json.loads((out/"summary.json").read_text())["complete"] is False
         assert not Path(manifest["baseline_path"]).exists()
@@ -1237,3 +1257,66 @@ def test_isolated_trade_regression_ten_vs_twenty_points(tmp_path, mechanical, re
     _, report = bench.grade_records(rows, frozen_rows=records(), baseline=baseline,
         prompt_sha256="d"*64, source_sha=SHA, out_dir=tmp_path)
     assert report["REGRESSION"] is regression
+
+
+@pytest.mark.parametrize("competing", [False, True])
+def test_partial_baseline_never_published(tmp_path, monkeypatch, competing):
+    path = tmp_path / "baseline.json"
+    def fail(report, stream, **kwargs):
+        stream.write('{"partial":')
+        stream.flush()
+        assert not path.exists()
+        if competing:
+            path.write_bytes(b"other writer")
+        raise OSError("short write")
+    monkeypatch.setattr(bench.json, "dump", fail)
+    with pytest.raises(OSError, match="short write"):
+        bench.publish_baseline(path, {})
+    if competing:
+        assert path.read_bytes() == b"other writer"
+    assert list(tmp_path.iterdir()) == ([path] if competing else [])
+
+
+@pytest.mark.parametrize("kind", ["prompt", "baseline", "output"])
+def test_duplicate_keys_rejected_at_evidence_boundary(tmp_path, kind):
+    manifest = prompt_manifest(tmp_path)
+    fixture = manifest["fixtures"][0]
+    out = tmp_path / "out"
+    if kind == "prompt":
+        path = Path(fixture["path"])
+        raw = path.read_bytes().replace(b'{', b'{"rows":null,', 1)
+        path.write_bytes(raw)
+        fixture["sha256"] = hashlib.sha256(raw).hexdigest()
+    elif kind == "baseline":
+        Path(manifest["baseline_path"]).write_text('{"overall":0,"overall":1}')
+    else:
+        out.mkdir()
+        persist_outputs(out)
+        (out/"X03-01-output.json").write_text('{"value":7,"value":3}')
+    with pytest.raises(ValueError, match="duplicate JSON key|artifact is missing or invalid"):
+        if kind == "output":
+            bench.grade_records(records(), frozen_rows=records(), baseline=None, prompt_sha256="d"*64,
+                                source_sha=SHA, out_dir=out)
+        else:
+            bench.run(SimpleNamespace(manifest=manifest, out_dir=out, source_sha=SHA))
+    assert not (out/"summary.json").exists() and not (out/"scores.csv").exists()
+
+
+@pytest.mark.parametrize("size", [1, 50])
+@pytest.mark.parametrize("source,prompt", [("bad", "d"*64), (SHA, "bad")])
+def test_zero_score_run_requires_valid_digests(tmp_path, size, source, prompt):
+    rows = records()[:size]
+    for row in rows:
+        row.update(source_sha=source, score=0, failing_stage="author")
+    with pytest.raises(ValueError, match="digest"):
+        bench.grade_records(rows, frozen_rows=records(), baseline=None, source_sha=source,
+                            prompt_sha256=prompt, out_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_integer_comparison_beyond_float_range():
+    large = 10**400
+    assert bench.matches(large, large, {"mode": "exact"})
+    assert not bench.matches(large, large+1, {"mode": "exact"})
+    assert bench.matches(large, large-1, {"mode": "absolute", "tolerance": 1.0})
+    assert not bench.matches(large, 1.0, {"mode": "absolute", "tolerance": 1e308})
