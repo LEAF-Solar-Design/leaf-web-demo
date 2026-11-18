@@ -70,3 +70,34 @@ def measured_layout_quality(panels, usable_area, setback, *, panel_unit=None, ar
         return "INCOMPLETE"
     converted = [scale(panel, xfact=ratio, yfact=ratio, origin=(0, 0)) for panel in panels]
     return layout_quality(converted, usable_area, setback * (metres[setback_unit] / metres[area_unit]))
+
+
+def zone_load_quality(panel_loads, ballast_loads, supports, zones):
+    """Mass and support shares are recorded per panel. Limits are mass per unit area."""
+    from fractions import Fraction
+    if not all(isinstance(x, dict) and x for x in (panel_loads, ballast_loads, supports, zones)):
+        return "INCOMPLETE"
+    if panel_loads.keys() != ballast_loads.keys() or panel_loads.keys() != supports.keys():
+        return "INCOMPLETE"
+    totals = dict.fromkeys(zones, Fraction(0))
+    for panel, mass in panel_loads.items():
+        ballast = ballast_loads[panel]
+        shares = supports[panel]
+        if mass is None or ballast is None or not isinstance(shares, dict) or not shares:
+            return "INCOMPLETE"
+        if not all(finite_measure(v) and v >= 0 for v in (mass, ballast, *shares.values())):
+            return "FAIL"
+        shares = {zone: Fraction(str(v)) for zone, v in shares.items()}
+        if sum(shares.values()) != 1 or not shares.keys() <= zones.keys():
+            return "FAIL"
+        for zone, share in shares.items():
+            totals[zone] += (Fraction(str(mass)) + Fraction(str(ballast))) * share
+    for zone, record in zones.items():
+        if not isinstance(record, dict) or any(record.get(k) is None for k in ("area", "limit")):
+            return "INCOMPLETE"
+        area, limit = record["area"], record["limit"]
+        if not all(finite_measure(v) for v in (area, limit)) or area <= 0 or limit < 0:
+            return "FAIL"
+        if totals[zone] > Fraction(str(area)) * Fraction(str(limit)):
+            return "FAIL"
+    return "PASS"

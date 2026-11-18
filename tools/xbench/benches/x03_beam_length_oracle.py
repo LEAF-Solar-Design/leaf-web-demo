@@ -5,31 +5,35 @@ from math import atan, dist, isclose, isfinite, radians
 METRES = {"m": 1, "mm": 0.001, "ft": 0.3048}
 
 
-def _lengths(entities, units, inherited, active, remaining, mode):
+def _lengths(entities, units, inherited, active, remaining, mode, transforms=(), curve_scale=1):
     totals = defaultdict(float)
     for entity in entities:
         remaining[0] -= 1
         if remaining[0] < 0:
             return None
         layer = inherited if entity.dxf.layer == "0" else entity.dxf.layer
-        if mode is not None and entity.dxftype() != "LINE":
+        if mode is not None and entity.dxftype() not in ("LINE", "INSERT"):
             return None
         if entity.dxftype() == "INSERT":
             attrs = entity.dxf
             name = attrs.name.casefold()
             scales = [abs(attrs.get(axis+"scale", 1)) for axis in "xyz"]
-            if (len(active) >= 64 or name in active or len(set(scales)) != 1 or not isfinite(scales[0]) or scales[0] == 0
+            if (len(active) >= 64 or name in active or not all(isfinite(v) and v > 0 for v in scales)
                     or not all(isfinite(v) for v in (*attrs.insert,attrs.rotation))):
                 return None
             definition = entity.doc.blocks.get(name) if entity.doc else None
             if definition is None:
                 return None
-            nested = _lengths(definition, units, layer, active | {name}, remaining, mode)
+            scale = curve_scale * scales[0] if curve_scale is not None and len(set(scales)) == 1 else None
+            nested = _lengths(definition, units, layer, active | {name}, remaining, mode,
+                              (entity.matrix44(), *transforms), scale)
             if nested is None:
                 return None
             for target, length in nested.items():
-                totals[target] += length * scales[0] * entity.mcount
+                totals[target] += length * entity.mcount
             continue
+        if curve_scale is None and entity.dxftype() != "LINE":
+            return None
         if entity.dxftype() == "LWPOLYLINE":
             vertices = list(entity.get_points("xyb"))
             if len(vertices) < 2 or not all(all(map(isfinite, v)) for v in vertices):
@@ -44,7 +48,7 @@ def _lengths(entities, units, inherited, active, remaining, mode):
                 # theta=4*atan(bulge), radius=chord*(1+b*b)/(4*b).
                 factor = (atan(bulge)/bulge + atan(bulge)*bulge) if bulge else 1
                 length += chord * factor
-            totals[layer] += length * METRES[units]
+            totals[layer] += length * curve_scale * METRES[units]
             continue
         if entity.dxftype() == "ARC":
             radius, start, end = (entity.dxf.get(k) for k in ("radius","start_angle","end_angle"))
@@ -53,7 +57,7 @@ def _lengths(entities, units, inherited, active, remaining, mode):
             sweep = (end-start) % 360
             if sweep == 0 and start != end:
                 sweep = 360
-            totals[layer] += radius * radians(sweep) * METRES[units]
+            totals[layer] += radius * radians(sweep) * curve_scale * METRES[units]
             continue
         if entity.dxftype() != "LINE":
             return None
@@ -63,6 +67,8 @@ def _lengths(entities, units, inherited, active, remaining, mode):
                 return None
             if mode == "spatial" and any(len(p) != 3 for p in points):
                 return None
+            for transform in transforms:
+                points = [tuple(transform.transform(p)) for p in points]
             if mode == "plan":
                 points = [p[:2] for p in points]
             totals[layer] += dist(*points) * METRES[units]
