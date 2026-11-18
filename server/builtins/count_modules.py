@@ -266,6 +266,9 @@ def run(intake, params):
     selected_ids = list(dict.fromkeys(params.get("set_ids") or
         ([params["set_id"]] if params.get("set_id") else [])))
     shares = params.get("layer_shares", False)
+    cumulative = params.get("cumulative_shares", False)
+    if type(cumulative) is not bool or (cumulative and params.get("group_by") != "layer"):
+        raise InputValidationError("Cumulative shares require grouping by layer.")
     names = params.get("layer_names")
     if type(shares) is not bool or (shares and params.get("group_by") != "layer"):
         raise InputValidationError("Layer shares require grouping by layer.")
@@ -348,7 +351,7 @@ def run(intake, params):
     if selected_sets and (params.get("group_by") == "layer" or top is not None):
         counts = _selected_layer_counts(selected_sets, multiplicities)
         breakdown["counts"] = counts
-        if params.get("cumulative_shares"):
+        if cumulative:
             breakdown["cumulative_shares"] = _cumulative_shares(counts)
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)

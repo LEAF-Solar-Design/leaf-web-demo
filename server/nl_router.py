@@ -448,6 +448,15 @@ _SHARE_QUERY = re.compile(
     r"|(?:panel |module )?layer share breakdown))", re.I)
 
 
+_CUMULATIVE_SHARE_QUERY = re.compile(
+    r"(?:(?:rank|sort|order) layers by (?:panel|module) count(?: then name)? and "
+    r"(?:give|show|report) (?:the )?(?:running|cumulative) (?:share|percentage|fraction)"
+    r"(?: after each layer)?|(?:show|give|report|list) (?:the )?(?:running|cumulative) "
+    r"(?:panel|module) (?:share|percentage|fraction) (?:by|per) layer"
+    r"(?:, largest first)?(?:\. break ties by layer name)?)", re.I,
+)
+
+
 def _share_params(text):
     remaining = text.strip()
     params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
@@ -460,7 +469,9 @@ def _share_params(text):
         params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection["names"], flags=re.I)
         remaining = remaining[:selection.start()] + " " + remaining[selection.end():]
     query = remaining.strip(" ,.?!")
-    if not _SHARE_QUERY.fullmatch(query):
+    if _CUMULATIVE_SHARE_QUERY.fullmatch(query):
+        params["cumulative_shares"] = True
+    elif not _SHARE_QUERY.fullmatch(query):
         return None
     if re.search(r"\b(?:selected|that selection)\b", query, re.I) and not (window or selection):
         return None
@@ -562,12 +573,6 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
-
-    match = re.fullmatch('(?:(?:rank|sort) layers by (?:panel|module) count(?: then name)? and (?:give|show) the cumulative (?:share|percentage)(?: after each layer)?|show the running (?:panel|module) fraction by layer, largest first(?:\\. break ties by layer name)?)[.!?]?', text.strip(), re.I)
-    if match and any(doc.tool.get("name") == "count-modules" for doc in docs):
-        options = {"group_by": "layer", "panel_scope": "all_layers", "cumulative_shares": True}
-        return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
-                              rationale="Analyze selected physical modules by layer.")
 
     shares = _share_params(text)
     if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
