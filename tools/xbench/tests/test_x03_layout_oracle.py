@@ -340,3 +340,11 @@ def test_peak_anchor_shear_from_eccentric_load(xy, force, moment, peak):
     assert grade(xy, peak) == "PASS"
     assert grade(xy, peak-0.1) == "FAIL"
     assert grade({}, peak) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sources,modes,gap", [([20],[22],2), ([30,60],[35,65],5), ([2.2],[1,2.4],0.2)])
+def test_support_modes_clear_operating_frequencies(sources, modes, gap):
+    from benches.x03_layout_oracle import resonance_quality as grade
+    assert grade(sources, modes, gap) == "PASS"
+    assert grade(sources, modes + [sources[-1]], gap) == "FAIL"
+    assert grade(sources, [], gap) == "INCOMPLETE"

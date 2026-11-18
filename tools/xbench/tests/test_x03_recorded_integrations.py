@@ -663,3 +663,24 @@ def test_voltage_uses_irradiance_heated_cell(ambient, irradiance, voltage, ambie
     assert grade(voltage) == "PASS"
     assert grade(ambient_only) == "FAIL"
     assert grade(voltage, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("material,agent,pct,temp", [("liner","wash",10,20), ("seal","cleaner",2,40), ("housing","brine",5,35)])
+def test_exposure_grade_at_recorded_conditions(material, agent, pct, temp):
+    from benches.x03_catalog_oracle import chemical_exposure_quality as grade
+    catalog = dict(revision="v2", exposures={(material,agent): [(0,pct,0,temp,True), (0,pct,temp+1,80,False)]})
+    assert grade("v2",catalog,material,agent,pct,temp) == "PASS"
+    assert grade("v2",catalog,material,agent,pct,temp+1) == "FAIL"
+    assert grade("v2",catalog,material,agent,pct+1,temp) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("first,last,split,mean", [(0,10,2,8), (80,40,7,68), (-5,15,1,13)])
+def test_time_weighted_site_readings(first, last, split, mean):
+    from benches.x03_weather_oracle import interval_weather_quality
+    def grade(rows, value):
+        return interval_weather_quality((0,10), rows, "duration-weighted-mean", value)
+    rows = [(split,10,last), (0,split,first)]
+    assert grade(rows, mean) == "PASS"
+    assert grade(rows, (first+last)/2) == "FAIL"
+    for offset in (-0.5,0.5):
+        assert grade([(0,split,first),(split+offset,10,last)], mean) == "INCOMPLETE"

@@ -757,3 +757,34 @@ def abandonment_quality(admissions, starts, abandoned, reported_served):
     if any(time < admissions[key] for key, time in terminal.items()):
         return "FAIL"
     return "PASS" if reported_served == starts.keys() else "FAIL"
+
+
+def histogram_merge_quality(shards, reported):
+    """Merge interval counts only for identical units and edges and disjoint sample IDs."""
+    from benches.x03_quality import finite_measure
+    if not isinstance(shards, list) or not shards or not isinstance(reported, list):
+        return "INCOMPLETE"
+    schema = None
+    seen = set()
+    for shard in shards:
+        if not isinstance(shard, dict):
+            return "INCOMPLETE"
+        unit, edges, ids, counts = (shard.get(k) for k in ("unit", "edges", "sample_ids", "counts"))
+        if not isinstance(unit, str) or not unit or not isinstance(edges, list) or len(edges) < 2:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, edges)) or any(a >= b for a, b in zip(edges, edges[1:])):
+            return "INCOMPLETE"
+        if not isinstance(ids, list) or not all(isinstance(i, str) and i for i in ids):
+            return "INCOMPLETE"
+        if not isinstance(counts, list) or len(counts) != len(edges)-1 or not all(type(n) is int and n >= 0 for n in counts):
+            return "INCOMPLETE"
+        if len(set(ids)) != len(ids) or seen.intersection(ids) or sum(counts) != len(ids):
+            return "FAIL"
+        if schema is None:
+            schema = (unit, edges)
+            totals = [0] * len(counts)
+        elif (unit, edges) != schema:
+            return "FAIL"
+        seen.update(ids)
+        totals = [a+b for a, b in zip(totals, counts)]
+    return "PASS" if all(type(n) is int for n in reported) and reported == totals else "FAIL"

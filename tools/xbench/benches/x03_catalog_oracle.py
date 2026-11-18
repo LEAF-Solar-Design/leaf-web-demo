@@ -518,3 +518,30 @@ def mating_clearance_quality(revision, drawing, required_mm):
     if opening <= minus or insert <= 0:
         return "INCOMPLETE"
     return "PASS" if opening - minus - insert - plus >= minimum else "FAIL"
+
+
+def chemical_exposure_quality(revision, catalog, material, agent, concentration_pct, temperature_c):
+    """Use the pinned material/agent rating at the recorded concentration and temperature."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(catalog, dict) or catalog.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(v, str) and v for v in (material, agent)):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (concentration_pct, temperature_c))) or not 0 <= concentration_pct <= 100:
+        return "INCOMPLETE"
+    rules = catalog.get("exposures")
+    rows = rules.get((material, agent)) if isinstance(rules, dict) else None
+    if not isinstance(rows, list):
+        return "INCOMPLETE"
+    decisions = []
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) != 5:
+            return "INCOMPLETE"
+        lo, hi, cold, hot, allowed = row
+        if not all(map(finite_measure, row[:4])) or not 0 <= lo <= hi <= 100 or cold > hot or type(allowed) != bool:
+            return "INCOMPLETE"
+        if lo <= concentration_pct <= hi and cold <= temperature_c <= hot:
+            decisions.append(allowed)
+    if not decisions or len(set(decisions)) != 1:
+        return "INCOMPLETE"
+    return "PASS" if decisions[0] else "FAIL"
