@@ -151,3 +151,52 @@ def entrypoint_quality(declared, modules):
     if not isinstance(exports, list) or not all(isinstance(name, str) for name in exports):
         return "INCOMPLETE"
     return "PASS" if exports.count(symbol) == 1 else "FAIL"
+
+
+def reproducible_zip_quality(first, second, ignore):
+    """Compare SHA-256 of normalized ZIPs. Only order and DOS timestamps may be normalized."""
+    from copy import copy
+    from io import BytesIO
+    from pathlib import Path
+    from zipfile import ZIP_DEFLATED, ZIP_STORED
+    if not isinstance(ignore, list) or not all(k in ("member-order", "timestamps") for k in ignore):
+        return "INCOMPLETE"
+
+    def digest(path):
+        # Restrict normalization to lossless round-trips so undeclared metadata cannot disappear.
+        if Path(path).stat().st_size > 32 * 1024 * 1024:
+            return None
+        raw = Path(path).read_bytes()
+        with ZipFile(BytesIO(raw)) as archive:
+            entries = archive.infolist()
+            keys = [member_key(entry.orig_filename) for entry in entries]
+            if not entries or len(entries) > 1024 or None in keys or len(set(keys)) != len(keys):
+                return None
+            if any(e.compress_type not in (ZIP_STORED, ZIP_DEFLATED) or e.flag_bits & 1 for e in entries):
+                return None
+            if sum(e.file_size for e in entries) > 32 * 1024 * 1024:
+                return None
+
+            def repack(normalize):
+                buffer = BytesIO()
+                with ZipFile(buffer, "w") as output:
+                    output.comment = archive.comment
+                    ordered = sorted(entries, key=lambda e: e.filename) if normalize and "member-order" in ignore else entries
+                    for original in ordered:
+                        info = copy(original)
+                        if normalize and "timestamps" in ignore:
+                            info.date_time = (1980, 1, 1, 0, 0, 0)
+                        output.writestr(info, archive.read(original))
+                return buffer.getvalue()
+
+            if repack(False) != raw:
+                return None
+            return hashlib.sha256(repack(True)).digest()
+
+    try:
+        left, right = digest(first), digest(second)
+    except (OSError, BadZipFile, RuntimeError, ValueError):
+        return "INCOMPLETE"
+    if left is None or right is None:
+        return "INCOMPLETE"
+    return "PASS" if left == right else "FAIL"

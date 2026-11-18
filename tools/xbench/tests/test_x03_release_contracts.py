@@ -228,3 +228,26 @@ def test_recorded_entrypoint(declaration, records, expected):
     from benches.x03_package_oracle import entrypoint_quality
     modules = [dict(module=name, callable_exports=exports) for name,exports in records]
     assert entrypoint_quality(declaration, modules) == expected
+
+
+@pytest.mark.parametrize("change,ignore,expected", [
+    ("order", ["member-order"], "PASS"), ("time", ["timestamps"], "PASS"),
+    ("payload", ["member-order","timestamps"], "FAIL"), ("time", [], "FAIL"),
+    ("comment", ["member-order","timestamps"], "FAIL"),
+], ids=["reordered-members","rebuilt-later","altered-payload","undeclared-time-change","preserve-comments"])
+def test_reproducible_content_zip(tmp_path, change, ignore, expected):
+    from zipfile import ZipFile, ZipInfo
+    from benches.x03_package_oracle import reproducible_zip_quality
+    paths = [tmp_path / "a.zip", tmp_path / "b.zip"]
+    for index, path in enumerate(paths):
+        names = ["module", "manifest"]
+        if index and change == "order":
+            names.reverse()
+        with ZipFile(path, "w") as archive:
+            for name in names:
+                year = 2021 if index and change == "time" else 2020
+                entry = ZipInfo(name, (year,1,1,0,0,0))
+                archive.writestr(entry, b"changed" if index and change == "payload" else name.encode())
+            if index and change == "comment":
+                archive.comment = b"changed"
+    assert reproducible_zip_quality(*paths, ignore) == expected

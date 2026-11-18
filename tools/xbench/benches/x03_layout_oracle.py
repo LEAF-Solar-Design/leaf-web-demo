@@ -334,3 +334,25 @@ def sliding_resistance_quality(load_cases):
         if demand - capacity > 2 * ulp(demand):
             return "FAIL"
     return "PASS"
+
+
+def module_snow_quality(modules, zone_pressures, mount_ratings):
+    """Compare the peak pressure over each module to its model and mounting rating in kPa."""
+    if not isinstance(modules, list) or not modules or not all(isinstance(v, dict) for v in (zone_pressures, mount_ratings)):
+        return "INCOMPLETE"
+    for row in modules:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) for k in ("model", "mount")):
+            return "INCOMPLETE"
+        zones = row.get("zones")
+        if not isinstance(zones, list) or not zones or not all(isinstance(z, str) for z in zones):
+            return "INCOMPLETE"
+        ratings = mount_ratings.get(row["model"])
+        rating = ratings.get(row["mount"]) if isinstance(ratings, dict) else None
+        pressures = [zone_pressures.get(zone) for zone in zones]
+        if rating is None or None in pressures:
+            return "INCOMPLETE"
+        if not finite_measure(rating) or rating <= 0 or not all(finite_measure(p) and p >= 0 for p in pressures):
+            return "FAIL"
+        if max(pressures) > rating:
+            return "FAIL"
+    return "PASS"

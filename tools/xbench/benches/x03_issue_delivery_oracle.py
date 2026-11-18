@@ -184,3 +184,40 @@ def atomic_batch_quality(manifests, previous, target, events):
         else:
             return "FAIL"
     return "PASS" if observed else "INCOMPLETE"
+
+
+def generation_receipt_quality(events):
+    """Check receipt credit against the active generation of each drawing at delivery time."""
+    if not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    active, seen, credited = {}, set(), set()
+    receipts = 0
+    for row in events:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in ("drawing", "generation", "kind")):
+            return "INCOMPLETE"
+        drawing, generation = row["drawing"], row["generation"]
+        identity = drawing, generation
+        if row["kind"] == "create":
+            if drawing in active or identity in seen:
+                return "FAIL"
+            active[drawing] = generation
+            seen.add(identity)
+        elif row["kind"] == "delete":
+            if active.get(drawing) != generation:
+                return "FAIL"
+            del active[drawing]
+        elif row["kind"] == "receipt":
+            if type(row.get("credited")) is not bool or not isinstance(row.get("effect"), str) or not row["effect"]:
+                return "INCOMPLETE"
+            if identity not in seen:
+                return "INCOMPLETE"
+            key = drawing, generation, row["effect"]
+            eligible = active.get(drawing) == generation and key not in credited
+            if row["credited"] != eligible:
+                return "FAIL"
+            if eligible:
+                credited.add(key)
+            receipts += 1
+        else:
+            return "INCOMPLETE"
+    return "PASS" if receipts else "INCOMPLETE"

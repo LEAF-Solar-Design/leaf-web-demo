@@ -197,3 +197,14 @@ def test_task_critical_path(case, path, duration, expected):
     if case == "missing":
         tasks["long"]["predecessors"] = ["other"]
     assert critical_path_quality(tasks, path, duration) == expected
+
+
+@pytest.mark.parametrize("start,amount,unit,peak,expected", [
+    (1,512,"KiB",1.5,"PASS"), (1,512,"KiB",1,"FAIL"),
+    (2,2,"MiB",2,"PASS"), (3,1,"MiB",1,"PASS"), (1,512,None,1.5,"INCOMPLETE"),
+], ids=["sum-overlap","understated-peak","equal-time-handoff","disjoint-tasks","missing-unit"])
+def test_peak_concurrent_memory(start, amount, unit, peak, expected):
+    from benches.x03_dashboard_oracle import peak_memory_quality
+    tasks = {"load":dict(start=0,end=2,allocation=1,unit="MiB"),
+             "export":dict(start=start,end=4,allocation=amount,unit=unit)}
+    assert peak_memory_quality(tasks, peak, "MiB") == expected

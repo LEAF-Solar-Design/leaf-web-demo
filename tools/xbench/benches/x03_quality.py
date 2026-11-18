@@ -793,3 +793,62 @@ def startup_voltage_quality(series_start_volts, threshold_volts):
         if sum(Fraction(str(v)) for v in module_volts) < Fraction(str(threshold_volts)):
             return "FAIL"
     return "PASS"
+
+
+def parallel_current_quality(total_amps, resistances, ampacities):
+    """Split total current by conductance between common terminals, then check each path."""
+    if total_amps is None or not isinstance(resistances, dict) or not isinstance(ampacities, dict):
+        return "INCOMPLETE"
+    if len(resistances) < 2 or resistances.keys() != ampacities.keys():
+        return "INCOMPLETE"
+    if None in resistances.values() or None in ampacities.values():
+        return "INCOMPLETE"
+    if not finite_measure(total_amps) or total_amps < 0:
+        return "FAIL"
+    if not all(finite_measure(v) and v > 0 for v in (*resistances.values(), *ampacities.values())):
+        return "FAIL"
+    conductances = {path: 1 / Fraction(str(r)) for path, r in resistances.items()}
+    total_g = sum(conductances.values())
+    for path, g in conductances.items():
+        if Fraction(str(total_amps)) * g > Fraction(str(ampacities[path])) * total_g:
+            return "FAIL"
+    return "PASS"
+
+
+def coordination_quality(downstream, upstream, current_range):
+    """Strict separation of piecewise-linear time envelopes on linear current and time axes."""
+    from bisect import bisect_right
+    if not isinstance(current_range, (list, tuple)) or len(current_range) != 2 or None in current_range:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, current_range)) or not 0 < current_range[0] <= current_range[1]:
+        return "FAIL"
+    low, high = map(lambda value: Fraction(str(value)), current_range)
+    curves = []
+    probes = {low, high}
+    for envelope, column in ((downstream, 2), (upstream, 1)):
+        if not isinstance(envelope, list) or len(envelope) < 2:
+            return "INCOMPLETE"
+        currents, times = [], []
+        for row in envelope:
+            if not isinstance(row, (list, tuple)) or len(row) != 3 or None in row:
+                return "INCOMPLETE"
+            if not all(map(finite_measure, row)) or not (row[0] > 0 and 0 <= row[1] <= row[2]):
+                return "FAIL"
+            current = Fraction(str(row[0]))
+            if currents and current <= currents[-1]:
+                return "FAIL"
+            currents.append(current)
+            times.append(Fraction(str(row[column])))
+            if low <= current <= high:
+                probes.add(current)
+        if low < currents[0] or high > currents[-1]:
+            return "INCOMPLETE"
+        curves.append((currents, times))
+
+    def at(curve, current):
+        currents, times = curve
+        i = min(bisect_right(currents, current) - 1, len(times) - 2)
+        weight = (current - currents[i]) / (currents[i+1] - currents[i])
+        return times[i] + weight * (times[i+1] - times[i])
+
+    return "PASS" if all(at(curves[0], i) < at(curves[1], i) for i in probes) else "FAIL"
