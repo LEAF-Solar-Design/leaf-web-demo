@@ -47,3 +47,12 @@ def test_export_scope(scope,handles):
     assert check(dict(row,scope=scope,handles=handles)) == "PASS"
     assert check(dict(row,scope=scope,handles=[])) == "FAIL"
     assert check(row) == "INCOMPLETE"
+
+@pytest.mark.parametrize("scope", ["selected-only", "visible-only", "full-drawing"])
+def test_conflicting_handle_states(scope):
+    row = dict(drawing="d", version="v", rule_revision="r", handles=["AB"], scope=scope)
+    for live in (["AB", "00ab"], ["00ab", "AB"]):
+        inv = dict(drawing="d", version="v", live_handles=live, visible_handles=["ab"])
+        for deleted, verdict in ((["CD"], "PASS"), (["CD", "0Ab"], "FAIL"), (["0Ab", "CD"], "FAIL")):
+            assert selection_quality(row, row, [row, row], [], [], requested_scope=scope,
+                                     inventory=dict(inv, deleted_handles=deleted)) == verdict

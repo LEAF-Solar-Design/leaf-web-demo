@@ -5,21 +5,24 @@ from math import atan, dist, isclose, isfinite, radians
 METRES = {"m": 1, "mm": 0.001, "ft": 0.3048}
 
 
-def _lengths(entities, units, inherited, active):
+def _lengths(entities, units, inherited, active, remaining):
     totals = defaultdict(float)
     for entity in entities:
+        remaining[0] -= 1
+        if remaining[0] < 0:
+            return None
         layer = inherited if entity.dxf.layer == "0" else entity.dxf.layer
         if entity.dxftype() == "INSERT":
             attrs = entity.dxf
             name = attrs.name.casefold()
             scales = [abs(attrs.get(axis+"scale", 1)) for axis in "xyz"]
-            if (name in active or len(set(scales)) != 1 or not isfinite(scales[0]) or scales[0] == 0
+            if (len(active) >= 64 or name in active or len(set(scales)) != 1 or not isfinite(scales[0]) or scales[0] == 0
                     or not all(isfinite(v) for v in (*attrs.insert,attrs.rotation))):
                 return None
             definition = entity.doc.blocks.get(name) if entity.doc else None
             if definition is None:
                 return None
-            nested = _lengths(definition, units, layer, active | {name})
+            nested = _lengths(definition, units, layer, active | {name}, remaining)
             if nested is None:
                 return None
             for target, length in nested.items():
@@ -62,10 +65,10 @@ def _lengths(entities, units, inherited, active):
     return totals
 
 
-def beam_length_quality(entities, units, reported):
-    if units not in METRES:
+def beam_length_quality(entities, units, reported, *, max_entities=100_000):
+    if units not in METRES or type(max_entities) is not int or max_entities < 0:
         return "INCOMPLETE"
-    totals = _lengths(entities, units, "0", set())
+    totals = _lengths(entities, units, "0", set(), [max_entities])
     if totals is None:
         return "INCOMPLETE"
     if not isinstance(reported, dict) or totals.keys() != reported.keys():

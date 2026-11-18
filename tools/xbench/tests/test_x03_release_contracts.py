@@ -138,3 +138,28 @@ def test_aggregate_limit_checked_before_read(tmp_path,monkeypatch,count):
     assert package_quality(path,manifest,max_total_bytes=count*2) == "PASS"
     monkeypatch.setattr(ZipFile,"open",lambda *a,**kw:pytest.fail("early content read"))
     assert package_quality(path,manifest,max_total_bytes=count*2-1) == "FAIL"
+
+@pytest.mark.parametrize(("first", "alias", "distinct"), [
+    ("panels/Table.csv", "panels/TABLE.csv", "panels/tables.csv"),
+    ("beams/caf\u00e9.py", "beams/cafe\u0301.py", "beams/cafe.py"),
+    ("ducts/Stra\u00dfe.dat", "ducts/STRASSE.dat", "ducts/strase.dat"),
+])
+def test_canonical_package_collisions(tmp_path, first, alias, distinct):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+
+    package = tmp_path / "package.zip"
+    digest = hashlib.sha256(b"tool").hexdigest()
+
+    def manifest(names):
+        return {"members": list(names), "sha256": dict.fromkeys(names, digest)}
+
+    for second, verdict in ((alias, "FAIL"), (distinct, "PASS")):
+        for names in ((first, second), (second, first)):
+            with ZipFile(package, "w") as archive:
+                for name in names:
+                    archive.writestr(name, b"tool")
+            assert package_quality(package, manifest(names)) == verdict
+            if second == alias:
+                assert package_quality(package, manifest([first])) == "FAIL"
+    assert list(tmp_path.iterdir()) == [package]

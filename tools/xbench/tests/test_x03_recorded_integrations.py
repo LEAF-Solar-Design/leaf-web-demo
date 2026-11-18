@@ -98,3 +98,29 @@ def test_clock_skew_and_latest_revision(site):
     assert check([new]) == "PASS"
     assert check([old]) == "FAIL"
     assert check(None) == "INCOMPLETE"
+
+@pytest.mark.parametrize("part,source,target,value,converted", [
+    ("panel", "kW", "W", 0.425, 425), ("relay", "mA", "A", 125, 0.125),
+    ("inverter", "V", "kV", 1200, 1.2),
+])
+def test_catalog_unit_conversion(part, source, target, value, converted):
+    row = dict(part=part, version="r1", unit=source, rating=value)
+    out = dict(row, unit=target, rating=converted)
+    def check(entry, report):
+        return catalog_quality([entry], part, "r1", target, report)
+    assert check(row, out) == "PASS"
+    assert check(row, dict(out, rating=value)) == "FAIL"
+    assert check(dict(row, unit="A" if target != "A" else "W"), out) == "FAIL"
+    assert check(dict(row, unit=None), out) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("drawing", ["roof", "frame", "duct"])
+def test_ack_before_receiver_commit(drawing):
+    row = dict(destination="issues", drawing=drawing, revision="1", payload_bytes=b"issue",
+               payload_digest=hashlib.sha256(b"issue").hexdigest())
+    requests = [dict(row, http_status=202), dict(row, http_status=200)]
+    assert delivery_quality(requests, [requests[-1]]) == "INCOMPLETE"
+    events = [dict(row, state="accepted"), dict(row, state="pending")]
+    assert delivery_quality(requests, events) != "PASS"
+    assert delivery_quality(requests, events + [dict(row, state="applied")]) == "PASS"
+    assert delivery_quality(requests, [dict(row, state="unknown")]) == "INCOMPLETE"

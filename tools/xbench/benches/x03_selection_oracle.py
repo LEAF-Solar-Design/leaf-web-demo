@@ -33,6 +33,11 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
     live = handle_set(inventory.get("live_handles"))
     if live is None:
         return "INCOMPLETE"
+    deleted = handle_set(inventory.get("deleted_handles", []))
+    if deleted is None:
+        return "INCOMPLETE"
+    if live & deleted:
+        return "FAIL"
     if any(not handles.issubset(live) for handles in sets):
         return "FAIL"
     before, after = sets[:2]

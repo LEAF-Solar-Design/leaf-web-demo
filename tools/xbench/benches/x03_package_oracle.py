@@ -21,7 +21,9 @@ def member_key(name):
         if (component.endswith((" ", ".")) or any(ord(c) < 32 or ord(c) == 127 for c in component)
                 or re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9???]", device, re.I)):
             return None
-    key = posixpath.normpath(path).casefold()
+    # Canonical caseless matching decomposes before folding combining marks.
+    decomposed = unicodedata.normalize("NFD", posixpath.normpath(path))
+    key = unicodedata.normalize("NFC", decomposed.casefold())
     return key if key not in {"", "."} and ":" not in key else None
 
 
@@ -46,11 +48,13 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
                 return "FAIL"
             if sum(entry.file_size for entry in entries) > max_total_bytes:
                 return "FAIL"
-            for entry in entries:
+            keys = [member_key(entry.orig_filename) for entry in entries]
+            if None in keys or len(set(keys)) != len(keys):
+                return "FAIL"
+            for entry, key in zip(entries, keys):
                 if entry.flag_bits & 1:
                     return "INCOMPLETE"
-                key = member_key(entry.orig_filename)
-                if key is None or key in seen or stat.S_ISLNK(entry.external_attr >> 16):
+                if stat.S_ISLNK(entry.external_attr >> 16):
                     return "FAIL"
                 seen.add(key)
                 if not entry.is_dir():
