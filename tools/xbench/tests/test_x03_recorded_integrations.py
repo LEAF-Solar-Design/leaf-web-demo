@@ -1,3 +1,4 @@
+import hashlib
 import pytest
 from benches.x03_catalog_oracle import catalog_quality
 from benches.x03_issue_delivery_oracle import delivery_quality
@@ -18,8 +19,8 @@ def test_catalog_identity_and_unique_finite_rating(part, unit):
 
 @pytest.mark.parametrize("drawing", ["roof","frame","duct"])
 def test_receiver_effect_after_timeout_retry(drawing):
-    old = dict(destination="primary",drawing=drawing,revision="1",payload_digest="first")
-    new = dict(old,revision="2",payload_digest="second")
+    old = dict(destination="primary",drawing=drawing,revision="1",payload_bytes=b"first",payload_digest=hashlib.sha256(b"first").hexdigest())
+    new = dict(old,revision="2",payload_bytes=b"second",payload_digest=hashlib.sha256(b"second").hexdigest())
     attempts = [dict(old,status="timeout"),dict(old,status="ack"),dict(new,status="ack")]
     assert delivery_quality(attempts,[old,new]) == "PASS"
     for effects in ([old], [old,old,new], [old,dict(new,payload_digest="changed")]):
@@ -65,8 +66,18 @@ def test_weather_location_and_delivery_destination(site):
     assert check(dict(weather,site="other")) == "FAIL"
     assert check(dict(weather,station="other")) == "FAIL"
     assert check(dict(weather,site=None)) == "INCOMPLETE"
-    a = dict(destination="primary",drawing=site,revision="one",payload_digest="abc")
+    a = dict(destination="primary",drawing=site,revision="one",payload_bytes=b"abc",payload_digest=hashlib.sha256(b"abc").hexdigest())
     b = dict(a,destination="backup")
     assert delivery_quality([a,a,b],[a,b]) == "PASS"
     assert delivery_quality([a,b],[a]) == "FAIL"
     assert delivery_quality([a,b],[a,a]) == "FAIL"
+
+
+@pytest.mark.parametrize("case", ["roof","frame","duct"])
+def test_receiver_bytes_must_match_label(case):
+    data = case.encode()
+    row = dict(destination="test",drawing=case,revision="v1",payload_bytes=data,
+               payload_digest=hashlib.sha256(data).hexdigest())
+    assert delivery_quality([row,row],[row]) == "PASS"
+    assert delivery_quality([row],[dict(row,payload_bytes=data+b"!")]) == "FAIL"
+    assert delivery_quality([row],[dict(row,payload_bytes=None)]) == "INCOMPLETE"

@@ -72,10 +72,44 @@ def string_quality(members, adjacency):
     return "PASS" if reached == selected else "FAIL"
 
 
+def finite_measure(value):
+    from math import isfinite
+    try:
+        return type(value) in (int, float) and isfinite(value)
+    except OverflowError:
+        return False
+
+
+def string_edge_quality(members, adjacency, coordinates, max_distance):
+    from math import dist
+    chain = string_quality(members, adjacency)
+    if chain != "PASS":
+        return chain
+    if coordinates is None or max_distance is None:
+        return "INCOMPLETE"
+    if not finite_measure(max_distance) or max_distance < 0:
+        return "FAIL"
+    selected = set(members)
+    for member in members:
+        point = coordinates.get(member)
+        if not isinstance(point, (list, tuple)) or len(point) not in (2, 3) or not all(map(finite_measure, point)):
+            return "INCOMPLETE"
+    for member in members:
+        for other in selected.intersection(adjacency[member]):
+            a, b = coordinates[member], coordinates[other]
+            if len(a) != len(b):
+                return "INCOMPLETE"
+            if dist(a, b) > max_distance:
+                return "FAIL"
+    return "PASS"
+
+
 def bundled_route_quality(routes, endpoints, trunk, *, min_shared, max_detour):
     """Require each branch to follow the common trunk and meet its detour ceiling."""
     if routes is None or endpoints is None or trunk is None or len(routes) != len(endpoints):
         return "INCOMPLETE"
+    if not finite_measure(min_shared) or not finite_measure(max_detour):
+        return "FAIL"
     if len(routes) < 2 or min_shared <= 0 or max_detour < 1:
         return "FAIL"
     common = trunk
@@ -88,6 +122,7 @@ def bundled_route_quality(routes, endpoints, trunk, *, min_shared, max_detour):
             return "FAIL"
         start, end = ends
         if (tuple(start.coords[0]) != route.coords[0] or tuple(end.coords[0]) != route.coords[-1]
+                or not finite_measure(max_detour * start.distance(end))
                 or route.length > max_detour * start.distance(end)):
             return "FAIL"
         common = common.intersection(route)

@@ -64,3 +64,12 @@ def test_nested_beam_lengths(scale,angle):
     outer.set_scale(2)
     beam.add_blockref("frame",(0,0))
     assert beam_length_quality(space,"m",{"upper":10*scale}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("units", ["m","mm","ft"])
+def test_invalid_report_numeric_range(units):
+    doc = pytest.importorskip("ezdxf").new()
+    space = doc.modelspace()
+    space.add_line((0,0),(3,4))
+    for bad in (10**500,float("nan"),float("inf"),float("-inf")):
+        assert beam_length_quality(space,units,{"0":bad}) == "FAIL"

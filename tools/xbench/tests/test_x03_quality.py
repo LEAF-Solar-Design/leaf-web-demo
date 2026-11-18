@@ -122,3 +122,20 @@ def test_clearance_to_obstacles_and_corridor(width):
     assert clearance_quality(route,aisle,[],width+0.01) == "FAIL"
     assert clearance_quality(route,aisle,[box(3,width/2,4,width)],width) == "FAIL"
     assert clearance_quality(route,aisle,arrays,None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("limit", [1,3,5])
+def test_bounded_route_and_geometry_backed_string(limit):
+    from shapely.geometry import LineString, Point
+    from benches.x03_quality import bundled_route_quality, string_edge_quality
+    line = LineString([(0,0),(limit,0)])
+    ends = [(Point(0,0),Point(limit,0))]*2
+    for bad in (True,float("nan"),float("inf"),10**400):
+        for shared, detour in [(bad,2),(1,bad)]:
+            assert bundled_route_quality([line,line],ends,line,min_shared=shared,max_detour=detour) == "FAIL"
+    graph = {"a":"b","b":"ac","c":"b"}
+    points = {"a":(0,0),"b":(limit,0),"c":(limit,limit)}
+    assert string_edge_quality("abc",graph,points,limit) == "PASS"
+    assert string_edge_quality("abc",graph,dict(points,c=(limit,limit+1)),limit) == "FAIL"
+    del points["a"]
+    assert string_edge_quality("abc",graph,points,limit) == "INCOMPLETE"

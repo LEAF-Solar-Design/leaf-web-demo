@@ -74,6 +74,10 @@ def beam_length_quality(entities, units, reported):
         if not isfinite(length):
             return "INCOMPLETE"
         value = reported[layer]
-        if type(value) not in (float, int) or not isclose(value, length, rel_tol=1e-9, abs_tol=1e-9):
+        try:
+            matches = type(value) in (float, int) and isfinite(value) and isclose(value, length, rel_tol=1e-9, abs_tol=1e-9)
+        except OverflowError:
+            matches = False
+        if not matches:
             return "FAIL"
     return "PASS"

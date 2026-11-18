@@ -97,3 +97,29 @@ def test_package_file_cannot_contain_members(tmp_path,prefix):
                 archive.writestr(name,b"data")
         manifest = {"members":order,"sha256":{n:hashlib.sha256(b"data").hexdigest() for n in order}}
         assert package_quality(path,manifest) == "FAIL"
+
+
+@pytest.mark.parametrize("count", [2,9,16])
+def test_member_count_includes_directories_before_reads(tmp_path,monkeypatch,count):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path/"bag.zip"
+    with ZipFile(path,"w") as z:
+        z.writestr("tool", b"")
+        for i in range(count-1):
+            z.writestr(f"dir{i}/", b"")
+    manifest = {"members":["tool"],"sha256":{"tool":hashlib.sha256(b"").hexdigest()}}
+    assert package_quality(path,manifest,max_members=count) == "PASS"
+    monkeypatch.setattr(ZipFile,"open",lambda *a,**kw: pytest.fail("content opened over budget"))
+    assert package_quality(path,manifest,max_members=count-1) == "FAIL"
+
+
+@pytest.mark.parametrize("name", ["Nul.txt","d/tool. ","d/ascii"+chr(9)+"name"])
+def test_windows_invalid_members(tmp_path,name):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path/"tool.zip"
+    with ZipFile(path,"w") as z:
+        z.writestr(name,b"")
+    manifest = {"members":[name],"sha256":{name:hashlib.sha256(b"").hexdigest()}}
+    assert package_quality(path,manifest) == "FAIL"

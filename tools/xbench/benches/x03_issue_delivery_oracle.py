@@ -1,4 +1,7 @@
 """Reconcile requests and retries to independently recorded receiver effects."""
+import hashlib
+
+
 def delivery_quality(attempts, effects):
     wanted, received = {}, {}
     for rows, index, unique in ((attempts, wanted, False), (effects, received, True)):
@@ -10,6 +13,11 @@ def delivery_quality(attempts, effects):
                 return "INCOMPLETE"
             key = row["destination"], row["drawing"], row["revision"]
             digest = row["payload_digest"]
+            payload = row.get("payload_bytes")
+            if not isinstance(payload, bytes):
+                return "INCOMPLETE"
+            if hashlib.sha256(payload).hexdigest() != digest:
+                return "FAIL"
             if key in index and (unique or index[key] != digest):
                 return "FAIL"
             index[key] = digest
