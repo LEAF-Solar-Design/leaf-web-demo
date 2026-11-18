@@ -834,3 +834,33 @@ def test_series_pack_requested_energy_at_first_cutoff(capacities, volts, wh):
     assert check(cells, wh) == "PASS"
     assert check(cells, wh + 1) == "FAIL"
     assert check(dict(list(cells.items())[1:]), wh) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("segment,start,limit", [("string", 12, 2), ("combiner", 0.1, 0.2), ("feeder", 80, 1.5)])
+def test_clear_recorded_arc_before_deadline(segment, start, limit):
+    from fractions import Fraction
+    from benches.x03_quality import arc_interruption_quality
+    end = float(Fraction(str(start)) + Fraction(str(limit)))
+    sensor = "sensor-" + segment
+    event = {"arc": (segment, start)}
+    trace = dict(sensor=sensor, detected=start, interrupted=end, through=end+1)
+    def grade(record, coverage=sensor):
+        return arc_interruption_quality(event, {segment: coverage}, {"arc": record}, limit)
+    assert grade(trace) == "PASS"
+    assert grade(dict(trace, interrupted=end+0.01)) == "FAIL"
+    assert grade(dict(trace, interrupted=None, detected=None)) == "FAIL"
+    assert grade(trace, False) == "FAIL"
+    assert grade(None) == "INCOMPLETE"
+    assert grade(dict(trace, through=start, detected=None, interrupted=None)) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("condition,point,expected", [("hot", (5, 6), "PASS"), ("cold", (5, -4), "PASS"), ("high-altitude", (5, 6.1), "FAIL")])
+def test_reactive_dispatch_inside_ten_kva_nameplate(condition, point, expected):
+    from benches.x03_quality import reactive_envelope_quality
+    curve = {"revision": "r2", "conditions": {condition: [(0,-5,8), (10,-3,4)]}}
+    def grade(p, q, catalog=curve):
+        return reactive_envelope_quality("r2", catalog, condition, p, q)
+    assert grade(*point) == expected
+    assert grade(5, -4.1) == "FAIL"
+    assert grade(5, 6) == "PASS"
+    assert grade(5, 6, {}) == "INCOMPLETE"

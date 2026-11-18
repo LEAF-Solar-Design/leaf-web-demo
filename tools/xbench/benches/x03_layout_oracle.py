@@ -659,3 +659,28 @@ def clamp_zone_quality(revision, mounting_rule, positions_mm):
         if not low <= position <= high:
             return "FAIL"
     return "PASS"
+
+
+def eccentric_anchor_quality(anchors_xy, limits, fx, fy, moment):
+    """Equal-stiffness planar anchor group under direct shear and torque about its centroid."""
+    if not isinstance(limits, dict) or not limits or not isinstance(anchors_xy, dict) or anchors_xy.keys() != limits.keys():
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (fx, fy, moment))) or not all(finite_measure(v) and v > 0 for v in limits.values()):
+        return "INCOMPLETE"
+    if any(not isinstance(pt, (tuple, list)) or len(pt) != 2 or not all(map(finite_measure, pt)) for pt in anchors_xy.values()):
+        return "INCOMPLETE"
+    points = {k: tuple(Fraction(str(v)) for v in pt) for k, pt in anchors_xy.items()}
+    n = len(points)
+    cx = sum(x for x, y in points.values()) / n
+    cy = sum(y for x, y in points.values()) / n
+    offsets = {k: (x - cx, y - cy) for k, (x, y) in points.items()}
+    polar = sum(x*x + y*y for x, y in offsets.values())
+    if not polar and moment:
+        return "INCOMPLETE"
+    twist = Fraction(str(moment)) / polar if polar else 0
+    for key, (x, y) in offsets.items():
+        sx = Fraction(str(fx)) / n - twist * y
+        sy = Fraction(str(fy)) / n + twist * x
+        if sx*sx + sy*sy > Fraction(str(limits[key]))**2:
+            return "FAIL"
+    return "PASS"
