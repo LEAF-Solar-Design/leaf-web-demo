@@ -594,6 +594,14 @@ def _decide(
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Compare physical module counts by layer in two drawing windows.")
 
+    share_change = re.search(r"\bpercentage[ -]points?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
+    match = re.search(r"\bcompare\s+(.+?)\s+(?:against|with|versus)\s+([^.;!?]+)", text, re.I) if share_change else None
+    if match and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        before, after = (re.split(r"\s+plus\s+", side.strip(), flags=re.I) for side in match.groups())
+        options = {"compare_selections": {"by": "block", "before": before, "after": after}}
+        return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                              rationale="Analyze selected physical modules by layer.")
+
     shares = _share_params(text)
     if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
         return Classification(lane=LANE_RUN, tool="count-modules", params=shares,

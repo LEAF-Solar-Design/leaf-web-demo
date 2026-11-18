@@ -624,3 +624,9 @@ def test_minimum_layer_set(target, expected):
 def test_region_rank_comparison_requires_two_windows():
     with pytest.raises(ValueError, match="two windows"):
         module.run({}, {"rank_windows": []})
+
+
+def test_empty_selection_has_no_percentage_point_delta():
+    d = {"inserts": [{"layer": "W", "name": "Module", "handle": "A"}]}
+    r, _ = module.run(d, {"compare_selections": {"by": "block", "before": [], "after": ["Module"]}})
+    assert r["share_change"] == {"totals": [0, 1], "percentage_points": {"W": None}, "defined": False}
