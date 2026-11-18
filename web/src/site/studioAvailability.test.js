@@ -5,7 +5,7 @@
 // web/src to an id that exists.
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { APP_ONLY_HOSTS } from './appHosts.js'
 import {
@@ -204,7 +204,7 @@ describe('reading the manifest', () => {
   })
 
   it('reads the override from the address bar or storage, and nothing by default', () => {
-    expect(availabilityEnv()).toEqual({ hostname: window.location.hostname, walk: false })
+    expect(availabilityEnv()).toEqual({ hostname: window.location.hostname, walk: false, investorDemo: false })
     window.localStorage.setItem('leaf.availability.walk', '1')
     try {
       expect(availabilityEnv().walk).toBe(true)
@@ -238,6 +238,25 @@ describe('reading the manifest', () => {
     // Every `tool` names one row, so two rows can never fight over a tool.
     const tools = rows.filter(([, row]) => row.tool).map(([, row]) => row.tool)
     expect(new Set(tools).size).toBe(tools.length)
+  })
+
+  it('shows the view-only disclaimer for every investor tool, even during a walk', () => {
+    for (const env of [STAGING, WALKING]) {
+      for (const name of ['arlo-design', 'count-by-layer', 'unknown']) {
+        expect(catalogToolDisclaimer(name, { ...env, investorDemo: true })).toBe('Not available in the view-only demo')
+        expect(catalogToolDisclaimer(name, { ...env, investorDemo: false })).toBe(catalogToolDisclaimer(name, env))
+      }
+    }
+  })
+
+  it('skips the address bar for a tool without a row and no investor session', () => {
+    const readSearch = vi.fn(() => '')
+    const location = { hostname: STAGING_HOST, get search() { return readSearch() } }
+    vi.stubGlobal('window', { location, localStorage: window.localStorage })
+    try {
+      expect(catalogToolDisclaimer('count-by-layer')).toBeNull()
+      expect(readSearch).not.toHaveBeenCalled()
+    } finally { vi.unstubAllGlobals() }
   })
 
   it('hands an enabled feature its prerequisite note and an unavailable one none', () => {

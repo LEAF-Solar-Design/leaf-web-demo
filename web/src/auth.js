@@ -15,6 +15,7 @@
 
 import { track, flushNow } from './telemetry.js'
 import { clearComposerDrafts } from './lib/composerDraft.js'
+import { clearInvestorWorkspace, INVESTOR_ORG_KEY, isInvestorSession } from './investorDemo.js'
 import { serviceSession, serviceState, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
 import {
   stageCheckoutAuthReturn,
@@ -280,8 +281,12 @@ export function isSignedIn() {
 
 // Clear the local token and (best-effort) end the Auth0 session, returning to
 // the app origin -- which comes back up in the calm signed-out gate.
-export async function logout() {
+export async function logout(hint) {
   const service = serviceState()
+  let investor = !service.mode && (hint?.investor === true || isInvestorSession())
+  if (!service.mode && !investor) {
+    try { investor = !localStorage.getItem(JWT_KEY) && !!localStorage.getItem(INVESTOR_ORG_KEY) } catch { /* storage unavailable */ }
+  }
   const jointHeaders = service.mode ? serviceHeaders(API_BASE) : null
   const serviceStorage = service.mode ? authorityStorage() : null
   for (const listener of beforeLogoutListeners) {
@@ -302,8 +307,13 @@ export async function logout() {
   try {
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
+    if (investor) clearInvestorWorkspace(localStorage)
   } catch { /* ignore */ }
   clearComposerDrafts()
+  if (investor) {
+    window.location.reload()
+    return
+  }
   const c = await client()
   if (c) {
     try { await c.logout({ logoutParams: { returnTo: window.location.origin } }); return } catch { /* fall through */ }

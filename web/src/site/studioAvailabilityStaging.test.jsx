@@ -32,7 +32,7 @@ afterEach(() => {
 
 describe('the availability manifest on the staging host', () => {
   it('is running on the host the staging rows speak for', () => {
-    expect(availabilityEnv()).toEqual({ hostname: 'platform-staging.leafdesign.ai', walk: false })
+    expect(availabilityEnv()).toEqual({ hostname: 'platform-staging.leafdesign.ai', walk: false, investorDemo: false })
   })
 
   it('disables the landing sheet tabs with one visible sentence and keeps Cover and the entry buttons', () => {

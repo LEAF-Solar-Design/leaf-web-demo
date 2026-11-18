@@ -21,6 +21,7 @@ import catalog
 import converse_registry
 import customization_service
 import deps
+import investor_demo
 import mcp_tool_projection
 import product_capability_availability as availability
 import solar_project_admission
@@ -124,6 +125,16 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_project_id: _Header = None,
                  authorization: _Header = None,
                  x_checkout_capability: _Header = None) -> Any:
+    if investor_demo.is_investor_context(tenant):
+        tools = [deps.catalog_tool_view(tool) for tool in deps.shared_tools()]
+        families = catalog.build_catalog(tools, include_internal=False)
+        for family in families:
+            for row in family["capabilities"]:
+                row["availability"] = {
+                    "entitled": False, "engine_ready": False, "runnable": False,
+                    "refusal_reasons": ["entitlement_required"],
+                }
+        return with_envelope_fields({"families": families, "cad_engine": cad_engine_selector()})
     return _capabilities(
         x_internal_role=x_internal_role, x_ops_secret=x_ops_secret, tenant=tenant,
         drawing_id=drawing_id, project_id=project_id, drawing_version=drawing_version,

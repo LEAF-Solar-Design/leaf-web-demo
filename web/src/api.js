@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { clearInvestorWorkspace, isInvestorToken } from './investorDemo.js'
 import { readSourceFailureBody, sourceInitializationError } from './lib/sourceFailureDiagnostic.js'
 import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
@@ -376,6 +377,7 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
   let stored = null
   try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
   if (!sentToken || !stored || sentToken !== stored) return response
+  try { if (isInvestorToken(stored)) clearInvestorWorkspace(localStorage) } catch { /* storage unavailable */ }
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
   notifyActiveScopeChanged()
   for (const listener of unauthorizedListeners) {

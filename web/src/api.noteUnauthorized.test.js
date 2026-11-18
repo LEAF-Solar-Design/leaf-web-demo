@@ -8,6 +8,7 @@
 // token every time -- every signed-in user landed back in the guest workspace.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { noteUnauthorized, subscribeUnauthorized } from './api.js'
+import { INVESTOR_ISSUER } from './investorDemo.js'
 import { serviceSession, serviceState } from './lib/serviceAuthSession.js'
 
 it('invalidates only the exact sent service generation before notifying, without touching a human token', async () => {
@@ -77,9 +78,24 @@ describe('noteUnauthorized token-wipe guard', () => {
 
   it('a 401 from a request that carried the CURRENT token wipes it and notifies', () => {
     localStorage.setItem(AUTH_KEY, 'live-token')
+    localStorage.setItem('leaf.org_id', 'human-org')
     noteUnauthorized(res401, '/api/entitlements', 'Bearer live-token')
     expect(localStorage.getItem(AUTH_KEY)).toBeNull()
+    expect(localStorage.getItem('leaf.org_id')).toBe('human-org')
     expect(notified).toEqual(['/api/entitlements'])
+  })
+
+  it.each(['demo-org', 'human-org'])('clears only the investor workspace on a 401 with active org %s', active => {
+    const payload = btoa(JSON.stringify({ iss: INVESTOR_ISSUER })).replace(/=+$/, '')
+    const token = 'e30.' + payload + '.c2ln'
+    localStorage.setItem(AUTH_KEY, token)
+    localStorage.setItem('leaf.investorDemo.org', 'demo-org')
+    localStorage.setItem('leaf.org_id', active)
+    noteUnauthorized(res401, '/api/session', 'Bearer ' + token)
+    expect(localStorage.getItem(AUTH_KEY)).toBeNull()
+    expect(localStorage.getItem('leaf.investorDemo.org')).toBeNull()
+    expect(localStorage.getItem('leaf.org_id')).toBe(active === 'demo-org' ? null : active)
+    expect(notified).toEqual(['/api/session'])
   })
 
   it('a 401 with a bearer but no stored token neither throws nor notifies', () => {

@@ -1471,6 +1471,10 @@ def build_suites() -> List[Suite]:
         Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
               # LD1a's boundary matrix plus LD1d2's three W1 route contracts.
               SERVER, _py_pytest("tests/test_demo_sessions.py"), 271),
+        Suite("server-investor-demo", "server staging investor identity and route boundaries", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo.py"), 29),
+        Suite("server-investor-demo-postgres", "server investor workspace provisioning and revocation", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo_postgres.py"), 9, db_gated=True),
         Suite("server-demo-policy", "server local W1 demo execution policy", "pytest",
               SERVER, _py_pytest("tests/test_demo_policy.py"), 27),
         Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",
@@ -3385,6 +3389,9 @@ def build_suites() -> List[Suite]:
         # Staging audience (P-178): 14 offline plan/apply tests, no network.
         Suite("auth0-staging-audience-check", "scripts test_auth0_staging_audience.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_auth0_staging_audience.py"), 14),
+        Suite("scripts-investor-demo-link", "staging investor link provisioning and rotation",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_investor_demo_link.py"), 11 if os.name == "nt" else 10,
+              allowed_skip_reasons=(r"Windows file ACLs require Windows",)),
         # 33 cases: 19 original functions (27 parametrized cases), plus three
         # dry-run plans, two digest round trips and the CI deploy contract. No network.
         Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",

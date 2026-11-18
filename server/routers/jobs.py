@@ -29,6 +29,7 @@ import deps
 from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor, require_demo_project
 import entitlements
 import entity_scope
+import investor_demo
 import jobs
 import write_loop
 import product_capability_availability as capability_catalog
@@ -1622,6 +1623,8 @@ def _trim_list_body(body):
 
 @router.get("/api/jobs")
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant), summary: bool = False):
+    if investor_demo.is_investor_context(tenant):
+        return with_envelope_fields({"jobs": []})
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     actor = None
