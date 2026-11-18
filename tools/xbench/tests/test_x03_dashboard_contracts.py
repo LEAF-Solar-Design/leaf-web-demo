@@ -208,3 +208,24 @@ def test_peak_concurrent_memory(start, amount, unit, peak, expected):
     tasks = {"load":dict(start=0,end=2,allocation=1,unit="MiB"),
              "export":dict(start=start,end=4,allocation=amount,unit=unit)}
     assert peak_memory_quality(tasks, peak, "MiB") == expected
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("matched","PASS"), ("duplicate","FAIL"), ("unit","FAIL"), ("currency","FAIL"),
+    ("missing-rate","INCOMPLETE"), ("wrong-total","FAIL"),
+], ids=["reconcile-two-meters","duplicate-charge","wrong-usage-unit","wrong-currency","absent-tariff","understated-report"])
+def test_synthetic_cost_report(case, expected):
+    from benches.x03_dashboard_oracle import usage_cost_quality
+    rows = {"a":dict(meter="worker",quantity=2.5,unit="hours"), "b":dict(meter="storage",quantity=4,unit="GB-day")}
+    rates = {"worker":dict(unit="hours",unit_price=0.2), "storage":dict(unit="GB-day",unit_price=0.05)}
+    charges = [dict(usage_id="a",amount=0.5,currency="USD"),dict(usage_id="b",amount=0.2,currency="USD")]
+    if case == "duplicate":
+        charges.append(charges[0].copy())
+    if case == "unit":
+        rows["a"]["unit"] = "minutes"
+    if case == "currency":
+        charges[1]["currency"] = "EUR"
+    if case == "missing-rate":
+        del rates["storage"]
+    tariff = dict(version="v1",currency="USD",rates=rates)
+    assert usage_cost_quality(rows,tariff,"v1","USD",charges,0.6 if case=="wrong-total" else 0.7) == expected

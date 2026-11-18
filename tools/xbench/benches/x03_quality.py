@@ -852,3 +852,50 @@ def coordination_quality(downstream, upstream, current_range):
         return times[i] + weight * (times[i+1] - times[i])
 
     return "PASS" if all(at(curves[0], i) < at(curves[1], i) for i in probes) else "FAIL"
+
+
+def pulling_tension_quality(initial_n, segments):
+    """In pull order, add straight-run friction then apply the capstan factor at the bend."""
+    from math import exp, radians
+    if initial_n is None or not isinstance(segments, list) or not segments:
+        return "INCOMPLETE"
+    if not finite_measure(initial_n) or initial_n < 0:
+        return "FAIL"
+    tension = initial_n
+    for segment in segments:
+        fields = ("friction", "normal_force_n", "bend_degrees", "limit_n")
+        if not isinstance(segment, dict) or any(segment.get(k) is None for k in fields):
+            return "INCOMPLETE"
+        mu, normal, angle, limit = (segment[k] for k in fields)
+        if not all(map(finite_measure, (mu, normal, angle, limit))) or min(mu, normal, angle) < 0 or limit <= 0:
+            return "FAIL"
+        try:
+            tension = (tension + mu * normal) * exp(mu * radians(angle))
+        except OverflowError:
+            return "FAIL"
+        if not finite_measure(tension) or tension > limit:
+            return "FAIL"
+    return "PASS"
+
+
+def battery_energy_quality(initial_kwh, capacity_kwh, reserve_kwh, charge_efficiency, discharge_efficiency, steps):
+    """Positive external kW discharges the battery. Check stored energy after every step."""
+    fields = (initial_kwh, capacity_kwh, reserve_kwh, charge_efficiency, discharge_efficiency)
+    if None in fields or not isinstance(steps, list) or not steps:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, fields)):
+        return "FAIL"
+    energy, capacity, reserve, charge, discharge = (Fraction(str(v)) for v in fields)
+    if capacity <= 0 or not 0 <= reserve <= energy <= capacity or not (0 < charge <= 1 and 0 < discharge <= 1):
+        return "FAIL"
+    for step in steps:
+        if not isinstance(step, dict) or any(step.get(k) is None for k in ("load_kw", "hours", "stored_kwh")):
+            return "INCOMPLETE"
+        values = (step["load_kw"], step["hours"], step["stored_kwh"])
+        if not all(map(finite_measure, values)) or step["hours"] <= 0:
+            return "FAIL"
+        power, hours, recorded = (Fraction(str(v)) for v in values)
+        energy -= power * hours * (1 / discharge if power >= 0 else charge)
+        if energy != recorded or not reserve <= energy <= capacity:
+            return "FAIL"
+    return "PASS"

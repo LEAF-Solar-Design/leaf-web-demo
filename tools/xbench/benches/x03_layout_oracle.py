@@ -356,3 +356,30 @@ def module_snow_quality(modules, zone_pressures, mount_ratings):
         if max(pressures) > rating:
             return "FAIL"
     return "PASS"
+
+
+def overturning_quality(wind, ballast, pivot_m, restoring_side):
+    """About one recorded tipping edge, compare applied wind moments with ballast moments."""
+    if not isinstance(wind, list) or not wind or not isinstance(ballast, list) or pivot_m is None:
+        return "INCOMPLETE"
+    if restoring_side not in ("positive", "negative"):
+        return "INCOMPLETE"
+    if not finite_measure(pivot_m):
+        return "FAIL"
+    demand = resistance = Fraction(0)
+    for rows, fields in ((wind, ("force_n", "arm_m")), (ballast, ("weight_n", "centroid_m"))):
+        for row in rows:
+            if not isinstance(row, dict) or any(row.get(k) is None for k in fields):
+                return "INCOMPLETE"
+            force, position = (row[k] for k in fields)
+            if not all(map(finite_measure, (force, position))) or force < 0:
+                return "FAIL"
+            force, position = Fraction(str(force)), Fraction(str(position))
+            if fields[0] == "force_n":
+                if position < 0:
+                    return "FAIL"
+                demand += force * position
+            else:
+                arm = position - Fraction(str(pivot_m))
+                resistance += force * (arm if restoring_side == "positive" else -arm)
+    return "PASS" if resistance >= demand else "FAIL"

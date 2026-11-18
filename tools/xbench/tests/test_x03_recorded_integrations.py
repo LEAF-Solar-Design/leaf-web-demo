@@ -335,3 +335,32 @@ def test_recreation_receipt_sequence(case, expected):
     if case == "missing-generation":
         del events[-1]["generation"]
     assert generation_receipt_quality(events) == expected
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("ok", "PASS"), ("mating","FAIL"), ("protocol","FAIL"), ("unrecorded","INCOMPLETE"), ("stale","FAIL"),
+], ids=["sensor-hub-controller","second-link-mate-mismatch","protocol-mismatch","missing-port-inventory","wrong-version"])
+def test_assembly_interfaces(case, expected):
+    from benches.x03_catalog_oracle import assembly_interface_quality
+    plug = dict(connector="plug",mates=["socket"],protocols=["v2"])
+    socket = dict(connector="socket",mates=["plug"],protocols=["v2"])
+    target = dict(socket)
+    if case == "mating":
+        target["mates"] = ["other"]
+    if case == "protocol":
+        target["protocols"] = ["v1"]
+    if case == "unrecorded":
+        del target["protocols"]
+    catalog = dict(version="7",parts={"sensor":{"out":plug},"hub":{"in":socket,"out":plug},"control":{"in":target}})
+    links = [{"from":[a,"out"],"to":[b,"in"],"protocol":"v2"} for a,b in (("sensor","hub"),("hub","control"))]
+    assert assembly_interface_quality("6" if case=="stale" else "7", catalog, links) == expected
+
+
+@pytest.mark.parametrize("sent,budget,delay,expected", [
+    (12,1,10,"PASS"), (11,1,10,"FAIL"), (12,0,10,"FAIL"),
+    (12,None,10,"INCOMPLETE"), (12,1,None,"INCOMPLETE"),
+], ids=["at-retry-boundary","early-from-response","budget-exhausted","missing-budget","missing-retry-after"])
+def test_retry_schedule(sent, budget, delay, expected):
+    from benches.x03_issue_delivery_oracle import retry_schedule_quality
+    rows = [dict(sent=0,received=2,status=429,retry_after_seconds=delay), dict(sent=sent,received=sent+1,status=200)]
+    assert retry_schedule_quality(rows,budget) == expected

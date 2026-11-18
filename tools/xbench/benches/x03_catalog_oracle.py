@@ -240,3 +240,34 @@ def stock_allocation_quality(version, inventory, demand, allocations):
         if used[lot] > lots[lot]["available"]:
             return "FAIL"
     return "PASS" if all(supplied[k] == row["required"] for k, row in demand.items()) else "FAIL"
+
+
+def assembly_interface_quality(version, catalog, connections):
+    """Each pinned port declares its connector, approved mates and supported protocols."""
+    if not isinstance(catalog, dict) or not isinstance(connections, list) or not connections or not version:
+        return "INCOMPLETE"
+    if catalog.get("version") is None or not isinstance(catalog.get("parts"), dict):
+        return "INCOMPLETE"
+    if catalog["version"] != version:
+        return "FAIL"
+    for link in connections:
+        if not isinstance(link, dict) or not isinstance(link.get("protocol"), str):
+            return "INCOMPLETE"
+        ports = []
+        for side in ("from", "to"):
+            endpoint = link.get(side)
+            if not isinstance(endpoint, (list, tuple)) or len(endpoint) != 2 or not all(isinstance(k, str) for k in endpoint):
+                return "INCOMPLETE"
+            part = catalog["parts"].get(endpoint[0])
+            port = part.get(endpoint[1]) if isinstance(part, dict) else None
+            if not isinstance(port, dict) or not isinstance(port.get("connector"), str):
+                return "INCOMPLETE"
+            if not all(isinstance(port.get(k), list) and all(isinstance(v, str) for v in port[k]) for k in ("mates", "protocols")):
+                return "INCOMPLETE"
+            ports.append(port)
+        a, b = ports
+        if a["connector"] not in b["mates"] or b["connector"] not in a["mates"]:
+            return "FAIL"
+        if any(link["protocol"] not in port["protocols"] for port in ports):
+            return "FAIL"
+    return "PASS"
