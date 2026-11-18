@@ -680,3 +680,40 @@ def little_law_quality(metrics, steady_state, tolerance):
         return "FAIL"
     jobs, rate, seconds = values
     return "PASS" if abs(jobs-rate*seconds) <= Fraction(str(tolerance)) else "FAIL"
+
+
+def starvation_quality(ready, dispatches, as_of, aging_limits, reported):
+    """Flag any continuous ready spell exceeding its priority's maximum eligible wait.
+
+    Ready rows are (job, priority, start, end), with None for a still-ready job.
+    Dispatches are keyed by (job, ready-start) so repeated spells stay distinct.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(ready,list) or not isinstance(dispatches,dict) or not isinstance(aging_limits,dict) or not aging_limits or not finite_measure(as_of):
+        return "INCOMPLETE"
+    seen, overdue = set(), set()
+    for row in ready:
+        if not isinstance(row,(tuple,list)) or len(row) != 4:
+            return "INCOMPLETE"
+        job, priority, start, end = row
+        if not all(isinstance(v,str) and v for v in (job,priority)) or not finite_measure(start):
+            return "INCOMPLETE"
+        limit = aging_limits.get(priority)
+        if not finite_measure(limit) or limit < 0 or (end is not None and (not finite_measure(end) or end < start)):
+            return "INCOMPLETE"
+        key = (job,start)
+        if key in seen:
+            return "INCOMPLETE"
+        seen.add(key)
+        stop = as_of if end is None else min(as_of,end)
+        if key in dispatches:
+            at = dispatches[key]
+            if not finite_measure(at) or at < start or (end is not None and at > end):
+                return "INCOMPLETE"
+            stop = min(stop,at)
+        if Fraction(str(stop)) - Fraction(str(start)) > Fraction(str(limit)):
+            overdue.add(job)
+    if not dispatches.keys() <= seen or not isinstance(reported,list) or not all(isinstance(v,str) for v in reported):
+        return "INCOMPLETE"
+    return "PASS" if len(reported) == len(overdue) and set(reported) == overdue else "FAIL"

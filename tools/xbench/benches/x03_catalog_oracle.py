@@ -444,3 +444,25 @@ def shelf_life_quality(manufactured, install_on, rule, revision):
     if age < 0:
         return "FAIL"
     return "PASS" if age < days or (inclusive and age == days) else "FAIL"
+
+
+def galvanic_quality(first, second, exposure, isolation, catalog, revision):
+    """Look up an unordered material pair in the declared exposure and isolation policy."""
+    if not all(isinstance(v,str) and v for v in (first,second,exposure,isolation,revision)):
+        return "INCOMPLETE"
+    if not isinstance(catalog,dict) or not catalog.get("revision") or not isinstance(catalog.get("rules"),list):
+        return "INCOMPLETE"
+    if catalog["revision"] != revision:
+        return "FAIL"
+    matches = []
+    for row in catalog["rules"]:
+        if not isinstance(row,dict) or not isinstance(row.get("materials"),(list,tuple)):
+            return "INCOMPLETE"
+        pair = row["materials"]
+        if len(pair) != 2 or not all(isinstance(v,str) and v for v in pair):
+            return "INCOMPLETE"
+        if sorted(pair) == sorted((first,second)) and row.get("exposure") == exposure:
+            matches.append(row.get("allowed_isolation"))
+    if len(matches) != 1 or not isinstance(matches[0],list):
+        return "INCOMPLETE"
+    return "PASS" if isolation in matches[0] else "FAIL"

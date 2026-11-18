@@ -228,3 +228,23 @@ def condensation_quality(air_c, humidity_pct, surface_c, rule, reported_risk):
         return "INCOMPLETE"
     dew_c = air_c if humidity_pct == 100 else b * gamma / (a-gamma)
     return "PASS" if reported_risk == (surface_c <= dew_c) else "FAIL"
+
+
+def wind_period_quality(speed_mps, observed_seconds, required_seconds, rules, reported_mps):
+    """Apply only an explicitly approved directed conversion between averaging periods."""
+    from benches.x03_quality import finite_measure
+    if not all(map(finite_measure,(speed_mps,observed_seconds,required_seconds,reported_mps))):
+        return "INCOMPLETE"
+    if speed_mps < 0 or min(observed_seconds,required_seconds) <= 0:
+        return "INCOMPLETE"
+    factor = 1
+    if observed_seconds != required_seconds:
+        if not isinstance(rules,dict):
+            return "INCOMPLETE"
+        key = (observed_seconds,required_seconds)
+        if key not in rules:
+            return "FAIL"
+        factor = rules[key]
+        if not finite_measure(factor) or factor <= 0:
+            return "INCOMPLETE"
+    return "PASS" if isclose(reported_mps,speed_mps*factor,rel_tol=1e-9) else "FAIL"

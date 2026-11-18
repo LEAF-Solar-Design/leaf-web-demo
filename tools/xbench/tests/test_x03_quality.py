@@ -764,3 +764,23 @@ def test_installed_surge_protection(clamp,lead,rating):
     assert grade(clamp,lead,rating) == "PASS"
     assert grade(clamp,lead+1,rating) == "FAIL"
     assert grade(clamp,lead,None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("fundamental,third,fifth,limit", [(100,3,4,5),(240,0,12,5),(120,0,0,0)])
+def test_voltage_thd_with_valid_fundamental(fundamental,third,fifth,limit):
+    from benches.x03_quality import voltage_thd_quality as grade
+    spectrum = {1:fundamental,3:third,5:fifth}
+    assert grade(spectrum,[3,5],limit) == "PASS"
+    assert grade({**spectrum,5:fifth+1},[3,5],limit) == "FAIL"
+    assert grade({1:fundamental,3:third},[3,5],limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("peak,width,running", [(90,0.1,10),(300,0.5,25),(75,1,15)])
+def test_transformer_energization_trip_envelope(peak,width,running):
+    from benches.x03_quality import inrush_quality as grade
+    policy = [(width,peak),(3,running)]
+    trace = [(0,width,peak,False),(width,3,running,False)]
+    assert grade(trace,policy) == "PASS"
+    assert grade([(0,width,peak,True),trace[1]],policy) == "FAIL"
+    assert grade([(0,width+0.1,peak,False),(width+0.1,3,running,False)],policy) == "FAIL"
+    assert grade(trace[1:],policy) == "INCOMPLETE"

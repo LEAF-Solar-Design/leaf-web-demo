@@ -604,3 +604,23 @@ def settlement_quality(displacements, spans):
         if abs(left-right) > distance * ratio:
             return "FAIL"
     return "PASS"
+
+
+def fatigue_quality(cycles, required_bins, curve, revision, rule):
+    """Miner's linear damage rule for discrete recorded stress bins. D >= 1 exhausts life."""
+    if rule != "miner-linear" or not isinstance(cycles, dict) or not isinstance(curve, dict):
+        return "INCOMPLETE"
+    if not revision or not curve.get("revision") or not isinstance(required_bins,(tuple,list)) or not required_bins:
+        return "INCOMPLETE"
+    if curve["revision"] != revision:
+        return "FAIL"
+    endurance = curve.get("cycles_to_failure")
+    if not isinstance(endurance, dict) or not all(map(finite_measure, required_bins)) or set(required_bins) != cycles.keys():
+        return "INCOMPLETE"
+    damage = Fraction(0)
+    for stress, count in cycles.items():
+        life = endurance.get(stress)
+        if not finite_measure(life) or life <= 0 or type(count) is not int or count < 0 or stress < 0:
+            return "INCOMPLETE"
+        damage += count / Fraction(str(life))
+    return "PASS" if damage < 1 else "FAIL"
