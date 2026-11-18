@@ -697,3 +697,314 @@ def test_cli_is_byte_identical_across_explicit_encoding_and_hash_profiles(tmp_pa
                 assert not json.loads(result.stdout)['origin_authenticated']
                 outputs.append(result.stdout)
     assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize('invalid', ['none', 'text', 'bytearray', 'oversized'])
+def test_stdin_return_contract_after_complete_valid_prefix_and_clean_recovery(monkeypatch, invalid):
+    raw = cli_payload()
+    class InvalidReturn(ShortInput):
+        def read(self, count):
+            if self.pos < len(self.data): return super().read(count)
+            self.requests.append(count)
+            return {'none': None, 'text': 'synthetic private stdin text',
+                    'bytearray': bytearray(b'x'), 'oversized': b'x' * (count + 1)}[invalid]
+    calls, original = [], bundle.replay_bundle_json
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    reader = InvalidReturn(raw)
+    code, output, errors = in_process_cli(monkeypatch, reader)
+    assert code == 4 and not errors and calls == [] and reader.pos == len(raw)
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+    assert b'synthetic private' not in output and len(output.splitlines()) == 1
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and calls == [raw.decode('utf-8')]
+    assert json.loads(output)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('reported', [0, -1, True, None, 'overreported'])
+@pytest.mark.parametrize('binary', [False, True])
+def test_stdout_invalid_progress_after_prefix_stops_once(monkeypatch, reported, binary):
+    from types import SimpleNamespace
+    raw = cli_payload()
+    expected = bundle.reconciliation.serialize_result(bundle.replay_bundle_json(raw.decode())) + '\n'
+    class InvalidProgress:
+        def __init__(self): self.parts, self.calls, self.flushes = [], 0, 0
+        def write(self, data):
+            self.calls += 1
+            if self.calls == 1: self.parts.append(data[:7]); return 7
+            return len(data) + 1 if reported == 'overreported' else reported
+        def flush(self): self.flushes += 1
+    sink = InvalidProgress()
+    code, _, errors = in_process_cli(monkeypatch, ShortInput(raw), SimpleNamespace(buffer=sink) if binary else sink)
+    delivered = b''.join(sink.parts).decode('ascii') if binary else ''.join(sink.parts)
+    assert code == 5 and not errors and sink.calls == 2 and sink.flushes == 0
+    assert delivered == expected[:7]
+
+
+def borrowed_cli(monkeypatch, raw, *, args=('--replay',), fail_write=False):
+    import io
+    import sys
+    class Buffer(io.BytesIO):
+        closes = 0
+        def close(self): self.closes += 1; super().close()
+        def write(self, data):
+            if fail_write: raise OSError('synthetic interrupted borrowed output')
+            return super().write(data)
+    class Stream:
+        def __init__(self, data=b''): self.buffer, self.closes, self.text = Buffer(data), 0, []
+        def write(self, value): self.text.append(value); return len(value)
+        def flush(self): pass
+        def close(self): self.closes += 1; self.buffer.close()
+        def fileno(self): raise OSError('borrowed memory stream has no descriptor')
+    incoming, outgoing, errors = Stream(raw), Stream(), Stream()
+    monkeypatch.setattr(sys, 'stdin', incoming); monkeypatch.setattr(sys, 'stdout', outgoing); monkeypatch.setattr(sys, 'stderr', errors)
+    try:
+        code = bundle.main(list(args))
+    except SystemExit as stopped:
+        code = stopped.code
+    assert all(s.closes == 0 and s.buffer.closes == 0 and not s.buffer.closed for s in (incoming, outgoing, errors))
+    return code, outgoing.buffer.getvalue(), incoming, outgoing, errors
+
+
+@pytest.mark.parametrize('kind,expected', [('PASS', 0), ('malformed', 4), ('delivery', 5), ('help', 0), ('usage', 2)])
+def test_cli_never_closes_borrowed_streams_or_buffers(monkeypatch, kind, expected):
+    args = ('--help',) if kind == 'help' else ('--unknown',) if kind == 'usage' else ('--replay',)
+    code, output, incoming, outgoing, errors = borrowed_cli(monkeypatch,
+        cli_payload('malformed' if kind == 'malformed' else 'PASS'), args=args, fail_write=kind == 'delivery')
+    assert code == expected
+    if kind in ('help', 'usage'): assert incoming.buffer.tell() == 0 and output == b''
+    if kind == 'PASS': assert json.loads(output)['semantic']['verdict'] == 'PASS'
+    if kind == 'malformed': assert codes(json.loads(output)['integrity']) == {'JSON_INVALID': 1}
+
+
+def test_interrupted_stdin_after_partial_progress_is_sanitized_and_recovers(monkeypatch):
+    raw = cli_payload()
+    calls, original = [], bundle.replay_bundle_json
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw[:len(raw)//2], failure=InterruptedError))
+    assert code == 4 and not errors and calls == []
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and len(calls) == 1 and json.loads(output)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('stage', ['write', 'flush'])
+@pytest.mark.parametrize('binary', [False, True])
+def test_interrupted_delivery_does_not_repeat_prefix_or_replay(monkeypatch, stage, binary):
+    from types import SimpleNamespace
+    raw = cli_payload()
+    calls, original = [], bundle.replay_bundle_json
+    expected = bundle.reconciliation.serialize_result(original(raw.decode())) + '\n'
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    class Interrupted:
+        def __init__(self): self.parts, self.writes, self.flushes = [], 0, 0
+        def write(self, data):
+            self.writes += 1
+            if stage == 'write' and self.writes == 2: raise InterruptedError('synthetic private interrupted write')
+            piece = data[:7]; self.parts.append(piece); return len(piece)
+        def flush(self): self.flushes += 1; raise InterruptedError('synthetic private interrupted flush')
+    sink = Interrupted()
+    code, _, errors = in_process_cli(monkeypatch, ShortInput(raw), SimpleNamespace(buffer=sink) if binary else sink)
+    delivered = b''.join(sink.parts).decode('ascii') if binary else ''.join(sink.parts)
+    assert code == 5 and not errors and len(calls) == 1
+    assert delivered == (expected[:7] if stage == 'write' else expected)
+    assert sink.flushes == (0 if stage == 'write' else 1)
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and len(calls) == 2 and output.decode('ascii') == expected
+
+
+def exact_decimal_cli_payload(exponent, direction):
+    source = reconciliation_bundle()
+    member = source['members'][0]
+    record = json.loads(source['payloads'][member['name']])
+    record['envelope']['assurance']['evidence']['saved_strings'][0]['optimizers'] = 9007199254740991
+    record['envelope']['grid']['dc_power'][0]['kw_dc'] = (
+        '4.' + '0' * (exponent - 1) + '1' if direction > 0 else '3.' + '9' * exponent)
+    raw = json.dumps(record, sort_keys=True).encode()
+    source['payloads'][member['name']] = raw
+    member.update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    return json.dumps(replay_envelope(source)).encode()
+
+
+@pytest.mark.parametrize('exponent', [18, 30, 60])
+@pytest.mark.parametrize('direction', [-1, 1])
+def test_cli_serializes_tiny_deltas_and_large_counts_exactly_without_context_changes(monkeypatch, exponent, direction):
+    from decimal import Decimal, getcontext, localcontext, ROUND_FLOOR
+    from fractions import Fraction
+    raw = exact_decimal_cli_payload(exponent, direction)
+    def context_state(ctx):
+        return (ctx.prec, ctx.rounding, ctx.Emin, ctx.Emax, ctx.capitals, ctx.clamp, dict(ctx.flags), dict(ctx.traps))
+    prior = context_state(getcontext())
+    with localcontext() as ctx:
+        ctx.prec = 7; ctx.rounding = ROUND_FLOOR; ctx.clear_flags()
+        before = context_state(ctx)
+        code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+        assert context_state(getcontext()) == before
+    assert context_state(getcontext()) == prior
+    result = json.loads(output, parse_float=Decimal)
+    assert code == 1 and not errors and result['integrity']['integrity_verified']
+    assert result['semantic']['verdict'] == 'FAIL' and not result['origin_authenticated']
+    def nodes(value):
+        yield value
+        if isinstance(value, dict):
+            for child in value.values(): yield from nodes(child)
+        elif isinstance(value, list):
+            for child in value: yield from nodes(child)
+    observed = list(nodes(result))
+    assert any(type(value) is int and value == 9007199254740991 for value in observed)
+    assert any(type(value) is int and value == 9007199254740998 for value in observed)
+    tiny = Fraction(direction, 10**exponent)
+    matching = [row for row in observed if isinstance(row, dict) and 'delta' in row
+                and isinstance(row['delta'], (Decimal, int)) and Fraction(row['delta']) == tiny]
+    assert matching
+    assert any(Fraction(row['saved']) == Fraction(48, 5) + tiny for row in matching if 'saved' in row)
+
+
+def encoder_args(source):
+    return dict(inventory=dict(members=source['members'], expected_fixture_ids=sorted(source['expected_fixture_versions']),
+                               required_stages=source['required_stages']), references=source['references'], member_bytes=source['payloads'],
+                expected_fixture_versions=source['expected_fixture_versions'], evidence_stage=source['evidence_stage'])
+
+
+ENCODER_WIRE_VECTOR = (
+    '{"evidence_stage":"saved","expected_fixture_versions":{"unit":"v1"},'
+    '"inventory":{"expected_fixture_ids":["unit"],"members":[{"byte_length":$length,'
+    '"design_version":"v1","fixture":"unit","name":"unit/saved.bin",'
+    '"sha256":"$digest","stage":"saved"}],"required_stages":["saved"]},'
+    '"member_bytes_hex":{"unit/saved.bin":"$hex"},"references":[{"design_version":"v1",'
+    '"fixture":"unit","name":"unit/saved.bin","stage":"saved"}]}')
+
+
+def literal_encoder_case(data, digest):
+    member = dict(name='unit/saved.bin', fixture='unit', stage='saved', byte_length=len(data), sha256=digest, design_version='v1')
+    return dict(inventory=dict(members=[member], expected_fixture_ids=['unit'], required_stages=['saved']),
+                references=[dict(name=member['name'], fixture='unit', stage='saved', design_version='v1')],
+                member_bytes={member['name']:data}, expected_fixture_versions={'unit':'v1'}, evidence_stage='saved')
+
+
+@pytest.mark.parametrize('data,digest,raw_hex,length', [(data,digest,h,n) for (data,digest),(h,n) in
+    zip(REFERENCE_VECTORS,[('',0),('00',1),('ff',1)])])
+def test_encoder_matches_independent_literal_wire_vectors(data,digest,raw_hex,length,monkeypatch):
+    args = literal_encoder_case(data,digest)
+    before = deepcopy(args)
+    def forbidden(*args): raise AssertionError('encoder recomputed a supplied digest')
+    monkeypatch.setattr(bundle,'sha256',forbidden)
+    expected = ENCODER_WIRE_VECTOR.replace('$length',str(length)).replace('$digest',digest).replace('$hex',raw_hex)
+    result = bundle.encode_replay_json(**args)
+    assert result['ok'] and result['text']==expected and result['wire_bytes']==len(expected.encode('ascii'))
+    assert not result['integrity_verified'] and not result['origin_authenticated']
+    assert json.loads(result['text'])['inventory']['members'][0]['sha256']==digest and args==before
+
+
+def test_encoder_exact_wire_and_backslash_escape_boundaries_precede_output_allocation(monkeypatch):
+    data,digest=REFERENCE_VECTORS[1]
+    args=literal_encoder_case(data,digest)
+    name='unit\\saved.bin'
+    args['inventory']['members'][0]['name']=name;args['references'][0]['name']=name
+    args['member_bytes']={name:data}
+    expected=ENCODER_WIRE_VECTOR.replace('$length','1').replace('$digest',digest).replace('$hex','00').replace('unit/saved.bin',r'unit\\saved.bin')
+    limit=len(expected.encode('ascii'))
+    result=bundle.encode_replay_json(**args,max_wire_bytes=limit)
+    assert result['ok'] and result['text']==expected and result['wire_bytes']==limit
+    def forbidden(*args):raise AssertionError('over-budget encoder allocated output')
+    monkeypatch.setattr(bundle,'_encode_member_hex',forbidden);monkeypatch.setattr(bundle,'_dump_replay',forbidden)
+    result=bundle.encode_replay_json(**args,max_wire_bytes=limit-1)
+    assert codes(result)=={'ENCODER_WIRE_BUDGET_EXCEEDED':1} and result['text'] is None
+    assert result['wire_bytes_lower_bound']==limit
+
+
+@pytest.mark.parametrize('limit',[True,-1,bundle.MAX_STDIN_BYTES+1,None])
+def test_encoder_rejects_invalid_wire_limits(limit):
+    args=literal_encoder_case(*REFERENCE_VECTORS[0])
+    assert codes(bundle.encode_replay_json(**args,max_wire_bytes=limit))=={'ENCODER_WIRE_LIMIT_INVALID':1}
+
+
+@pytest.mark.parametrize('kind,exit_code',[('PASS',0),('FAIL',1),('UNREADABLE',4)])
+def test_encoder_round_trips_real_replay_and_cli_without_changing_pins(tmp_path,kind,exit_code):
+    import subprocess
+    source=reconciliation_bundle(('alpha','beta'),failed=('alpha',) if kind=='FAIL' else ())
+    if kind=='UNREADABLE':source['payloads']['alpha/seven.json']+=b' '
+    args=encoder_args(source);before=deepcopy(args)
+    result=bundle.encode_replay_json(**args)
+    assert result['ok'] and args==before
+    encoded=json.loads(result['text'])
+    assert encoded['inventory']['members']==sorted(source['members'],key=lambda row:row['name'])
+    expected=bundle.reconcile_bundle(**source)
+    assert bundle.replay_bundle_json(result['text'])==expected
+    completed=subprocess.run(cli_command('--replay'),input=result['text'].encode('ascii'),capture_output=True,cwd=tmp_path,timeout=15)
+    assert completed.returncode==exit_code and completed.stderr==b''
+    assert completed.stdout==(bundle.reconciliation.serialize_result(expected)+'\n').encode('ascii')
+    assert not json.loads(completed.stdout)['origin_authenticated']
+    changed=deepcopy(args)
+    changed['inventory']['members'].reverse();changed['inventory']['expected_fixture_ids'].reverse();changed['references'].reverse()
+    changed['member_bytes']=dict(reversed(list(changed['member_bytes'].items())))
+    changed['expected_fixture_versions']=dict(reversed(list(changed['expected_fixture_versions'].items())))
+    assert bundle.encode_replay_json(**changed)['text']==result['text']
+
+
+def test_encoder_preserves_explicitly_mismatched_length_and_digest_without_hashing(monkeypatch):
+    args=literal_encoder_case(b'\x00','0'*64)
+    args['inventory']['members'][0]['byte_length']=9
+    def forbidden(*args):raise AssertionError('encoder replaced an explicit supplied pin')
+    monkeypatch.setattr(bundle,'sha256',forbidden)
+    encoded=bundle.encode_replay_json(**args)
+    assert encoded['ok']
+    member=json.loads(encoded['text'])['inventory']['members'][0]
+    assert member['byte_length']==9 and member['sha256']=='0'*64
+
+
+@pytest.mark.parametrize('mutation,code',[('metadata','MEMBER_FIELDS_INVALID'),('name','MEMBER_NAME_INVALID'),
+    ('payload','PAYLOAD_TYPE_INVALID'),('missing','ENCODER_MEMBER_COVERAGE_INVALID'),
+    ('reference','REFERENCE_DANGLING'),('version','REFERENCE_DESIGN_VERSION_CONFLICT'),
+    ('extra_reference','ENCODER_REFERENCE_FIELDS_INVALID')])
+def test_encoder_failures_are_named_immutable_and_recover(mutation,code,monkeypatch):
+    args=literal_encoder_case(*REFERENCE_VECTORS[1]);original=deepcopy(args)
+    if mutation=='metadata':del args['inventory']['members'][0]['sha256']
+    elif mutation=='name':args['inventory']['members'][0]['name']='../bad'
+    elif mutation=='payload':args['member_bytes']['unit/saved.bin']=None
+    elif mutation=='missing':args['member_bytes'].clear()
+    elif mutation=='reference':args['references'][0]['name']='unit/foreign.bin'
+    elif mutation=='version':args['references'][0]['design_version']='foreign'
+    else:args['references'][0]['extra']='foreign'
+    before=deepcopy(args)
+    with monkeypatch.context() as patch:
+        def forbidden(*args):raise AssertionError('invalid encoder allocated output')
+        patch.setattr(bundle,'_encode_member_hex',forbidden);patch.setattr(bundle,'_dump_replay',forbidden)
+        result=bundle.encode_replay_json(**args)
+    assert not result['ok'] and code in codes(result) and result['text'] is None
+    assert args==before and len(json.dumps(result))<4096
+    args.clear();args.update(original)
+    assert bundle.encode_replay_json(**args)['ok']
+
+
+@pytest.mark.parametrize('bad',['text',[],{},bytearray(b'x')])
+def test_encoder_rejects_nonbinary_payloads_without_consuming_or_mutating_them(bad):
+    args=literal_encoder_case(*REFERENCE_VECTORS[1]);args['member_bytes']['unit/saved.bin']=bad
+    result=bundle.encode_replay_json(**args)
+    assert codes(result)=={'PAYLOAD_TYPE_INVALID':1} and args['member_bytes']['unit/saved.bin'] is bad
+
+
+def test_literal_encoder_vectors_are_stable_across_explicit_hash_profiles(tmp_path):
+    import os,subprocess,sys
+    from pathlib import Path
+    script='''import json,sys
+sys.path.insert(0,sys.argv[1])
+from benches import x05_bundle as b
+d=b.decode_replay_json(sys.stdin.buffer.read().decode('ascii'))['envelope']
+i=dict(members=d['members'],expected_fixture_ids=sorted(d['expected_fixture_versions']),required_stages=d['required_stages'])
+r=b.encode_replay_json(i,d['references'],d['payloads'],expected_fixture_versions=d['expected_fixture_versions'],evidence_stage=d['evidence_stage'])
+assert r['ok'] and not r['origin_authenticated']
+sys.stdout.buffer.write(r['text'].encode('ascii'))
+'''
+    for (data,digest),raw_hex,length in [(REFERENCE_VECTORS[0],'',0),(REFERENCE_VECTORS[1],'00',1),(REFERENCE_VECTORS[2],'ff',1)]:
+        expected=ENCODER_WIRE_VECTOR.replace('$length',str(length)).replace('$digest',digest).replace('$hex',raw_hex)
+        raw=dict(reversed(list(json.loads(expected).items())))
+        raw['inventory']['members'][0]=dict(reversed(list(raw['inventory']['members'][0].items())))
+        for seed in ('0','19'):
+            env={'PYTHONHASHSEED':seed,'PYTHONUTF8':'1','PYTHONIOENCODING':'ascii:strict'}
+            if os.name=='nt':env['SystemRoot']='C:\\Windows'
+            completed=subprocess.run([sys.executable,'-P','-B','-c',script,str(Path(bundle.__file__).resolve().parents[1])],
+                input=json.dumps(raw).encode('ascii'),capture_output=True,cwd=tmp_path,env=env,timeout=15)
+            assert completed.returncode==0 and completed.stderr==b'' and completed.stdout==expected.encode('ascii')

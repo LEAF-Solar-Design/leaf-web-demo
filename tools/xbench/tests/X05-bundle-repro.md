@@ -292,3 +292,154 @@ Stop on any mismatch. Each subprocess has a 15-second deadline; the standard
 runner terminates and waits for an expired child. No child, browser, service,
 extraction or product mutation is retained. The live grader and its source-bound
 admission remain separate from these offline CLI verdicts.
+
+## Borrowed stream failure and recovery replay
+
+The CLI rejects `None`, text, `bytearray` and overreported read chunks, including
+after a complete valid prefix, without replaying that prefix. Zero, negative,
+boolean, absent and overreported write counts stop with exit 5. Interrupted
+reads return sanitized exit 4; interrupted writes/flushes return 5 without
+restarting output or semantics. The CLI never closes caller-owned stream or
+buffer objects. A caller can invoke it again with working streams.
+
+The following executable uses the same synthetic builder dependency as the
+prior examples. Run it with `python -P -B` after saving it outside git. It
+checks failure exits `4,5,5`, then recovery exit `0`, exact partial prefixes,
+one replay per deliverable invocation and no CLI stream closure. The caller
+closes its own memory streams only after those assertions.
+
+```python
+from io import BytesIO
+from pathlib import Path
+import json
+import sys
+from pytest import MonkeyPatch
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import cli_payload
+
+raw = cli_payload()
+original = bundle.replay_bundle_json
+expected = (bundle.reconciliation.serialize_result(original(raw.decode())) + '\n').encode('ascii')
+calls, owned, observed = [], [], []
+class Buffer(BytesIO):
+    def __init__(self, data=b'', mode='clean'):
+        super().__init__(data); self.mode, self.writes, self.closes = mode, 0, 0
+    def read(self, count):
+        if self.mode == 'invalid_read' and self.tell() == len(raw): return None
+        return super().read(min(7, count))
+    def write(self, data):
+        self.writes += 1
+        if self.mode in ('zero_write', 'interrupted_write'):
+            if self.writes == 1: return super().write(data[:7])
+            if self.mode == 'zero_write': return 0
+            raise InterruptedError('synthetic interrupted delivery')
+        return super().write(data)
+    def close(self): self.closes += 1; super().close()
+class Stream:
+    def __init__(self, buffer): self.buffer, self.closes = buffer, 0
+    def write(self, text): return len(text)
+    def flush(self): pass
+    def fileno(self): raise OSError('memory stream has no descriptor')
+    def close(self): self.closes += 1; self.buffer.close()
+def replayed(text): calls.append(text); return original(text)
+with MonkeyPatch.context() as patch:
+    patch.setattr(bundle, 'replay_bundle_json', replayed)
+    for mode, expected_exit in [('invalid_read',4), ('zero_write',5), ('interrupted_write',5), ('clean',0)]:
+        incoming = Stream(Buffer(raw, mode))
+        outgoing = Stream(Buffer(mode=mode))
+        errors = Stream(Buffer())
+        owned.extend((incoming, outgoing, errors))
+        patch.setattr(sys, 'stdin', incoming); patch.setattr(sys, 'stdout', outgoing); patch.setattr(sys, 'stderr', errors)
+        code = bundle.main(['--replay'])
+        output = outgoing.buffer.getvalue()
+        assert code == expected_exit and all(s.closes == 0 and s.buffer.closes == 0 for s in owned)
+        if mode == 'invalid_read':
+            assert calls == [] and json.loads(output)['integrity']['diagnostic_counts'] == {'CLI_INPUT_UNREADABLE':1}
+        elif mode != 'clean': assert output == expected[:7]
+        else: assert output == expected and len(calls) == 3
+        observed.append(code)
+assert all(not s.buffer.closed for s in owned)
+for stream in owned: stream.close()  # Caller cleanup, after ownership checks.
+print(json.dumps(dict(exits=observed, semantic_calls=len(calls), cli_closed_streams=0, origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. The monkeypatch context restores interpreter streams and
+the replay function even on failure. No child, browser, service or product state
+is retained. Exact-number tests additionally exercise signed DC deltas down to
+`1e-60`, the maximum supported per-string count `9007199254740991`, and its
+aggregate `9007199254740998`. JSON retains exact values and does not change the
+caller's Decimal context. Counts outside the per-string contract remain
+UNREADABLE rather than being reclassified as readable mismatches.
+
+## Deterministic encoder-to-CLI replay
+
+`encode_replay_json` accepts an explicit inventory envelope, references and
+member bytes, with expected fixture versions and an evidence stage. It returns
+compact, sorted, ASCII JSON in `text`, plus its exact `wire_bytes`. Inventory
+and reference arrays use canonical order. Caller objects and supplied length/
+SHA pins remain unchanged. Encoding does not hash payloads or run semantics;
+validly shaped but mismatched pins are intentionally passed to the auditor.
+
+The encoder bounds declared and actual member bytes, then computes exact hex
+and JSON escape expansion before creating hex or output JSON strings. The
+optional `max_wire_bytes` can lower the CLI wire ceiling, never raise it. A
+budget rejection returns `ENCODER_WIRE_BUDGET_EXCEEDED`, `text: null`, and a
+`wire_bytes_lower_bound`, without launching a CLI process. Encoder `ok` proves
+format and resource validity only; `integrity_verified` and
+`origin_authenticated` remain false.
+
+Run this executable example with `python -P -B`, using the same synthetic
+builder/test dependency as the earlier examples. It checks deterministic output,
+unchanged mismatched pins, exact CLI exits `0,1,4`, and producer-side wire-budget
+rejection before a CLI launch.
+
+```python
+from copy import deepcopy
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import reconciliation_bundle, encoder_args, cli_command
+
+observed = []
+for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4)]:
+    source = reconciliation_bundle(('alpha','beta'), failed=('alpha',) if kind == 'FAIL' else ())
+    if kind == 'UNREADABLE': source['payloads']['alpha/seven.json'] += b' '
+    arguments = encoder_args(source)
+    preserved = deepcopy(arguments)
+    encoded = bundle.encode_replay_json(**arguments)
+    assert encoded['ok'] and not encoded['integrity_verified'] and not encoded['origin_authenticated']
+    assert arguments == preserved and len(encoded['text'].encode('ascii')) == encoded['wire_bytes']
+    assert json.loads(encoded['text'])['inventory']['members'] == sorted(source['members'], key=lambda m:m['name'])
+    reordered = deepcopy(arguments)
+    reordered['inventory']['members'].reverse(); reordered['inventory']['expected_fixture_ids'].reverse()
+    reordered['references'].reverse()
+    reordered['member_bytes'] = dict(reversed(list(reordered['member_bytes'].items())))
+    assert bundle.encode_replay_json(**reordered)['text'] == encoded['text']
+    rejected = bundle.encode_replay_json(**arguments, max_wire_bytes=encoded['wire_bytes']-1)
+    assert rejected['diagnostic_counts'] == {'ENCODER_WIRE_BUDGET_EXCEEDED':1} and rejected['text'] is None
+    assert rejected['wire_bytes_lower_bound'] == encoded['wire_bytes']
+    completed = subprocess.run(cli_command('--replay'), input=encoded['text'].encode('ascii'), capture_output=True, timeout=15)
+    result = json.loads(completed.stdout)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1 and not result['origin_authenticated']
+    assert result['semantic']['verdict'] == kind
+    if kind == 'UNREADABLE':
+        assert result['integrity']['diagnostic_counts'] == {'PAYLOAD_LENGTH_MISMATCH':1,'PAYLOAD_SHA256_MISMATCH':1}
+    observed.append(completed.returncode)
+print(json.dumps(dict(cli_exits=observed, deterministic=True, supplied_pins_preserved=True,
+    wire_rejection='ENCODER_WIRE_BUDGET_EXCEEDED', origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. Encoding is pure and launches no process itself. The
+example's three children have 15-second deadlines and terminate before the
+summary. No browser, service, extraction or product state is retained. Pins
+and agreeing claims can all be forged together; this encoder authenticates
+neither evidence origin nor a live X05 result.

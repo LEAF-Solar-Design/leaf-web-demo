@@ -542,6 +542,111 @@ def replay_bundle_json(text):
     return reconcile_bundle(**decoded["envelope"])
 
 
+class _WireLimit(ValueError):
+    pass
+
+
+def _wire_size(value, limit):
+    """Exact compact ASCII JSON size, treating bytes as unallocated hex text."""
+    used = 0
+    def add(count):
+        nonlocal used
+        used += count
+        if used > limit:
+            raise _WireLimit()
+    def visit(item):
+        if type(item) is bytes:
+            add(2 + 2 * len(item))
+        elif type(item) is str:
+            add(2)
+            for char in item:
+                ordinal = ord(char)
+                add(2 if char in '\\"\b\f\n\r\t' else 6 if ordinal < 32 or 127 <= ordinal <= 65535
+                    else 12 if ordinal > 65535 else 1)
+        elif type(item) is int:
+            add(len(str(item)))
+        elif type(item) is list:
+            add(2 + max(0, len(item) - 1))
+            for child in item: visit(child)
+        elif type(item) is dict:
+            add(2 + max(0, len(item) - 1))
+            for key, child in item.items():
+                visit(key); add(1); visit(child)
+        else:
+            raise ValueError("wire_type_invalid")
+    visit(value)
+    return used
+
+
+def _encode_member_hex(data):
+    return data.hex()
+
+
+def _dump_replay(data):
+    return json.dumps(data, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+
+
+def encode_replay_json(inventory, references, member_bytes, *, expected_fixture_versions,
+                       evidence_stage, max_wire_bytes=MAX_STDIN_BYTES):
+    """Encode explicit supplied pins unchanged, including integrity conflicts.
+
+    No hashing or semantic evaluation occurs. Both byte budgets and exact hex/
+    JSON escape expansion are checked before allocating output strings.
+    """
+    def rejected(code):
+        return _result([{"code": code}], text=None)
+    if type(max_wire_bytes) is not int or not 0 <= max_wire_bytes <= min(MAX_STDIN_BYTES, MAX_REPLAY_JSON_CHARS):
+        return rejected("ENCODER_WIRE_LIMIT_INVALID")
+    decoded = _inventory_envelope(inventory)
+    if not decoded["ok"]:
+        return {k: v for k, v in {**decoded, "text": None}.items() if k != "inventory"}
+    if type(expected_fixture_versions) is not dict or set(expected_fixture_versions) != set(inventory["expected_fixture_ids"]):
+        return rejected("REPLAY_FIXTURES_INVALID")
+    bindings = check_stage_references(inventory["members"], references,
+        expected_fixture_versions=expected_fixture_versions, required_stages=inventory["required_stages"])
+    if not bindings["ok"]:
+        return {**bindings, "text": None}
+    if any(set(ref) != {"name", "fixture", "stage", "design_version"} for ref in references):
+        return rejected("ENCODER_REFERENCE_FIELDS_INVALID")
+    if not _token(evidence_stage) or evidence_stage not in inventory["required_stages"]:
+        return rejected("REPLAY_STAGE_INVALID")
+    if type(member_bytes) is not dict or len(member_bytes) > MAX_MEMBERS:
+        return rejected("ENCODER_BYTES_INVALID")
+    names = validate_member_names(list(member_bytes))
+    if not names["ok"]:
+        return {**names, "text": None}
+    expected = {_name(m["name"]) for m in inventory["members"]}
+    if {_name(name) for name in member_bytes} != expected:
+        return rejected("ENCODER_MEMBER_COVERAGE_INVALID")
+    errors, total = [], 0
+    for index, name in enumerate(sorted(member_bytes)):
+        raw = member_bytes[name]
+        if type(raw) is not bytes:
+            _error(errors, "PAYLOAD_TYPE_INVALID", member_index=index)
+            continue
+        total += len(raw)
+        if len(raw) > MAX_MEMBER_BYTES:
+            _error(errors, "PAYLOAD_BYTES_EXCEEDED", member_index=index)
+    if total > MAX_TOTAL_BYTES:
+        _error(errors, "PAYLOAD_TOTAL_EXCEEDED")
+    if errors:
+        return _result(errors, text=None)
+    canonical = dict(inventory=dict(members=[row for _, _, row in _ordered_rows(inventory["members"])],
+        expected_fixture_ids=sorted(inventory["expected_fixture_ids"]), required_stages=sorted(inventory["required_stages"])),
+        references=[row for _, _, row in _ordered_rows(references)], expected_fixture_versions=expected_fixture_versions,
+        evidence_stage=evidence_stage, member_bytes_hex=member_bytes)
+    try:
+        wire_bytes = _wire_size(canonical, max_wire_bytes)
+    except _WireLimit:
+        return _result([{"code": "ENCODER_WIRE_BUDGET_EXCEEDED"}], text=None,
+                       wire_bytes_lower_bound=max_wire_bytes + 1)
+    except (ValueError, RecursionError):
+        return rejected("ENCODER_WIRE_UNREADABLE")
+    canonical["member_bytes_hex"] = {name: _encode_member_hex(member_bytes[name]) for name in sorted(member_bytes)}
+    text = _dump_replay(canonical)
+    return _result([], text=text, wire_bytes=wire_bytes)
+
+
 def _cli_unknown(code):
     return _adapter_result(_result([{"code": code}]), _result([{"code": "REPLAY_NOT_DECODED"}]), {})
 
