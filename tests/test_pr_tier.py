@@ -92,6 +92,22 @@ def test_web_path_normalization(runner, path):
     assert not runner.pr_tier_owns(row("server-owner", "tests/widget.test.js"), path)
 
 
+def test_generator_keeps_cross_cutting_contract_suite(generator):
+    documents = inputs()
+    sid = "server-w1c-solve-proposal"
+    documents[3]["suites"].append(row(sid))
+    result = build(generator, documents)
+    assert sid in result["suite_ids"]
+    assert result["reasons"][sid] == ["contract-keep"]
+
+
+def test_committed_pr_tier_keeps_cross_cutting_contract_suites(generator):
+    policy = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    for sid in generator.CONTRACT_KEEP:
+        assert sid in policy["suite_ids"]
+        assert "contract-keep" in policy["reasons"][sid]
+
+
 def test_generator_retains_unknown_new_and_transitive_prerequisites(generator):
     documents = inputs()
     proposal, _, _, catalog = documents

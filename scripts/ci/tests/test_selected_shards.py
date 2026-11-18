@@ -241,7 +241,7 @@ class SelectedShardsTests(unittest.TestCase):
         self.assertEqual(plan["algorithm"], "lpt")
         tier = json.loads(path.with_name("pr-tier.json").read_text(encoding="utf-8"))
         catalog = tier["suite_ids"]
-        self.assertEqual(len(catalog), 108)
+        self.assertEqual(len(catalog), 119)
         self.assertIn("server-integration-turn-grants-postgres", catalog)
         plan = helper.make_plan(catalog, catalog, 13, 0, path)
         self.assert_exact(plan, catalog)
