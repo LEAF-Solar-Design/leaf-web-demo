@@ -453,3 +453,42 @@ def test_procurement_delivery_deadline(lead, deadline, expected):
     assert grade(*args, days) == expected
     assert grade(7, *args[1:], days) == "FAIL"
     assert grade(*args, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("model,location,mount", [("A","outdoor","roof"), ("B","indoor","wall"), ("C","marine","deck")])
+def test_certified_installation_scope(model, location, mount):
+    from benches.x03_catalog_oracle import certification_scope_quality as grade
+    conditions = dict(location=location, mount=mount)
+    record = dict(revision="r3", scopes=[dict(model=model, conditions=dict(location=[location], mount=[mount]))])
+    assert grade(record, "r3", model, conditions) == "PASS"
+    assert grade(record, "r3", "different", conditions) == "FAIL"
+    assert grade(record, "r3", model, dict(conditions, mount="pole")) == "FAIL"
+    assert grade(dict(revision="r3"), "r3", model, conditions) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("states,station,temp,volts", [
+    ([True, True, True], "local", 25, 100), ([False, True, True], "ridge", 15, 110),
+    ([False, False, True], "valley", 35, 90)])
+def test_voltage_station_priority(states, station, temp, volts):
+    from benches.x03_weather_oracle import failover_voltage_quality as grade
+    priority = ["local", "ridge", "valley"]
+    state = dict(zip(priority, states))
+    sample = dict(station=station, site="roof", unit="C", timezone="UTC", cell_temp=temp, timestamp=10)
+    kwargs = dict(site="roof", reported=volts, as_of=10, max_age=1, voc_at_25=50, modules=2, coefficient_per_c=-0.01)
+    assert grade(priority, state, sample, **kwargs) == "PASS"
+    assert grade(priority, state, dict(sample, station="unapproved"), **kwargs) == "FAIL"
+    if station != "valley":
+        assert grade(priority, state, dict(sample, station="valley"), **kwargs) == "FAIL"
+    assert grade(None, state, sample, **kwargs) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("action,effective,at,expected", [("revoke", 9, 8, "PASS"), ("revoke", 9, 9, "FAIL"),
+                                                          ("supersede", 7, 10, "FAIL")])
+def test_adjudicated_acknowledgement(action, effective, at, expected):
+    from benches.x03_issue_delivery_oracle import revocation_quality as grade
+    event = dict(receipt="ack", action=action, effective_at=effective, replacement="ack2")
+    history = dict(complete_through=10, events=[event])
+    assert grade("ack", 5, at, history) == expected
+    assert grade("other", 5, at, history) == "PASS"
+    assert grade("ack", 5, at, dict(history, complete_through=at-1)) == "INCOMPLETE"
+    assert grade("ack", 5, at, None) == "INCOMPLETE"

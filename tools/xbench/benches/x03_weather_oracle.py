@@ -172,3 +172,17 @@ def calibrated_voltage_quality(sensor, revision, at, raw_volts, records, reporte
     if len(active) != 1 or reported is None:
         return "INCOMPLETE"
     return "PASS" if finite_measure(reported) and isclose(reported, raw_volts + active[0], rel_tol=0, abs_tol=1e-9) else "FAIL"
+
+
+def failover_voltage_quality(priority, online, sample, *, reported, **conditions):
+    """At the observation time the first online station in the approved list owns the sample."""
+    if not isinstance(priority, list) or not priority or not isinstance(online, dict):
+        return "INCOMPLETE"
+    if not all(isinstance(s, str) and s for s in priority) or len(set(priority)) != len(priority):
+        return "INCOMPLETE"
+    for station in priority:
+        if type(online.get(station)) is not bool:
+            return "INCOMPLETE"
+        if online[station]:
+            return weather_quality(sample, station=station, reported=reported, **conditions)
+    return "FAIL"

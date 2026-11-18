@@ -246,3 +246,13 @@ def test_combined_anchor_utilization(equation, tension, shear):
     assert grade([anchor], equation) == "PASS"
     assert grade([anchor, dict(anchor, shear=shear+1)], equation) == "FAIL"
     assert grade([anchor], None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("factors,limit", [((1,1,1), 60), ((1.2,0.5,1.5), 67), ((1,2,0), 50)])
+def test_roof_load_combinations(factors, limit):
+    from benches.x03_layout_oracle import combined_load_quality as grade
+    loads = dict(dead=10, maintenance=20, snow=30)
+    rules = {"design": dict(zip(loads, factors)), "dead only": dict(dead=1, maintenance=0, snow=0)}
+    assert grade(loads, rules, limit) == "PASS"
+    assert grade(loads, rules, limit-1) == "FAIL"
+    assert grade(loads, {}, limit) == "INCOMPLETE"

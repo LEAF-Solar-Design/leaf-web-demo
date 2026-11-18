@@ -288,3 +288,14 @@ def test_multiwindow_slo_burn(older, recent, thresholds, rates, alert):
     assert grade(events, (4, 10), 10, windows, 0.75, report) == "PASS"
     assert grade(events, (4, 10), 10, windows, 0.75, dict(report, alert=not alert)) == "FAIL"
     assert grade(events, (5, 10), 10, windows, 0.75, report) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("opening,added,done,cancelled,end", [
+    (["a"], ["b","c"], ["b"], ["a"], ["c"]), ([], ["x","y"], [], ["y"], ["x"]),
+    (["r","s"], [], ["r"], [], ["s"])])
+def test_queue_inventory_conservation(opening, added, done, cancelled, end):
+    from benches.x03_dashboard_oracle import queue_balance_quality as grade
+    assert grade(opening, added, done, cancelled, end) == "PASS"
+    assert grade(opening, added, done, cancelled, []) == "FAIL"
+    assert grade(opening, added, done+[end[0]], cancelled+[end[0]], []) == "FAIL"
+    assert grade(None, added, done, cancelled, end) == "INCOMPLETE"

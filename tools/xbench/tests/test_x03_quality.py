@@ -652,3 +652,17 @@ def test_idle_storage_reserve(initial, hours, retention, expected):
     assert grade(initial, 4, 4 + hours, retention, expected) == "PASS"
     assert grade(initial, 4, 4 + hours, retention, initial) == "FAIL"
     assert grade(initial, 4, 4 + hours, None, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("altitude,capacity", [(1500, 90), (2000, 80), (2750, 65)])
+def test_altitude_limited_inverter(altitude, capacity):
+    from benches.x03_quality import altitude_rating_quality
+    curve = dict(model="I100", revision="r2", elevation_kw=[(1000, 100), (2000, 80), (3000, 60)],
+                 interpolation="linear-no-extrapolation")
+    def grade(record, metres, kw):
+        return altitude_rating_quality("I100", "r2", record, metres, kw)
+    assert grade(curve, altitude, capacity) == "PASS"
+    assert grade(curve, altitude, 100) == "FAIL"
+    assert grade(curve, 3001, 1) == "FAIL"
+    assert grade(dict(curve, revision="r1"), altitude, capacity) == "FAIL"
+    assert grade(None, altitude, capacity) == "INCOMPLETE"

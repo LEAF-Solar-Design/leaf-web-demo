@@ -566,3 +566,21 @@ def burn_window_quality(outcomes, coverage, as_of, windows, target, report):
         return "FAIL"
     return "PASS" if all(finite_measure(report["rates"][w]) and isclose(report["rates"][w], float(r), rel_tol=1e-12)
                          for w, r in rates.items()) else "FAIL"
+
+
+def queue_balance_quality(opening, admissions, completions, cancellations, closing):
+    """Reconcile unique work IDs across one reporting interval."""
+    inventories = []
+    for rows in (opening, admissions, completions, cancellations, closing):
+        if not isinstance(rows, list) or not all(isinstance(work, str) and work for work in rows):
+            return "INCOMPLETE"
+        ids = set(rows)
+        if len(ids) != len(rows):
+            return "FAIL"
+        inventories.append(ids)
+    start, added, done, cancelled, end = inventories
+    if start & added or done & cancelled:
+        return "FAIL"
+    available = start | added
+    removed = done | cancelled
+    return "PASS" if removed <= available and end == available - removed else "FAIL"

@@ -279,3 +279,31 @@ def idempotency_collision_quality(attempts):
             if (row["outcome"], receipt) != expected or row["new_effects"] != 0:
                 return "FAIL"
     return "PASS"
+
+
+def revocation_quality(receipt, issued_at, as_of, supersessions):
+    """Adjudicate the original acknowledgement against a complete recorded revocation history."""
+    from benches.x03_quality import finite_measure
+    if not receipt or not all(map(finite_measure, (issued_at, as_of))) or not isinstance(supersessions, dict):
+        return "INCOMPLETE"
+    covered = supersessions.get("complete_through")
+    events = supersessions.get("events")
+    if not finite_measure(covered) or covered < as_of or not isinstance(events, list):
+        return "INCOMPLETE"
+    if issued_at > as_of:
+        return "FAIL"
+    for event in events:
+        if not isinstance(event, dict) or not event.get("receipt"):
+            return "INCOMPLETE"
+        if event["receipt"] != receipt:
+            continue
+        when = event.get("effective_at")
+        if not finite_measure(when) or event.get("action") not in ("revoke", "supersede"):
+            return "INCOMPLETE"
+        if event["action"] == "supersede" and not event.get("replacement"):
+            return "INCOMPLETE"
+        if when < issued_at:
+            return "INCOMPLETE"
+        if when <= as_of:
+            return "FAIL"
+    return "PASS"
