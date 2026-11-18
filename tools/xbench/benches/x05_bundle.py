@@ -26,6 +26,7 @@ MAX_MEMBERS = 128
 MAX_MEMBER_BYTES = 1_048_576
 MAX_TOTAL_BYTES = 8_388_608
 MAX_DIAGNOSTICS = 32
+DIGEST_CHUNK_BYTES = 8192
 MAX_JSON_CHARS = 262_144
 MAX_JSON_DEPTH = 16
 MAX_REPLAY_JSON_CHARS = 2 * MAX_TOTAL_BYTES + MAX_JSON_CHARS
@@ -225,7 +226,8 @@ def audit_bundle_bytes(members, payloads, *, expected_fixture_ids, required_stag
                         codes.append("PAYLOAD_LENGTH_MISMATCH")
                     try:
                         digest = sha256(b"")
-                        digest.update(value)
+                        for offset in range(0, len(value), DIGEST_CHUNK_BYTES):
+                            digest.update(value[offset:offset + DIGEST_CHUNK_BYTES])
                         actual_digest = digest.hexdigest()
                     except Exception:
                         # Provider failures are uncertainty, never byte equality.

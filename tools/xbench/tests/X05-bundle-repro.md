@@ -548,8 +548,38 @@ for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4), ('HASH_COR
         assert result['integrity']['diagnostic_counts'] == {'PAYLOAD_LENGTH_MISMATCH':1, 'PAYLOAD_SHA256_MISMATCH':1}
     else: assert result['integrity']['integrity_verified']
     observed.append(completed.returncode)
+renaming_exits = []
+raw = json.dumps(fixture_record('unit', 'v1'), sort_keys=True).encode('ascii')
+original = dict(name='unit/seven.json', fixture='unit', stage='seven_step', design_version='v1',
+                byte_length=len(raw), sha256=sha256(raw).hexdigest())
+renamed = dict(original, name='renamed/safe.bin')
+reference = {key:renamed[key] for key in ('name', 'fixture', 'stage', 'design_version')}
+args = dict(inventory=dict(members=[renamed], expected_fixture_ids=['unit'], required_stages=['seven_step']),
+    references=[reference], member_bytes={renamed['name']:raw},
+    expected_fixture_versions={'unit':'v1'}, evidence_stage='seven_step')
+baseline_args = deepcopy(args)
+baseline_args['inventory']['members'][0]['name'] = original['name']
+baseline_args['references'][0]['name'] = original['name']
+baseline_args['member_bytes'] = {original['name']:raw}
+baseline_wire = bundle.encode_replay_json(**baseline_args)
+wire = bundle.encode_replay_json(**args)
+assert wire['ok'] and baseline_wire['ok']
+assert bundle.replay_bundle_json(wire['text']) == bundle.replay_bundle_json(baseline_wire['text'])
+for stale, expected_exit in [(False,0), (True,4), (False,0)]:
+    candidate = json.loads(wire['text'])
+    if stale: candidate['references'][0]['name'] = original['name']
+    completed = subprocess.run([sys.executable, '-P', '-B', str(Path(bundle.__file__).resolve()), '--replay'],
+        input=json.dumps(candidate).encode('ascii'), capture_output=True, timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1
+    result = json.loads(completed.stdout)
+    assert result['semantic']['verdict'] == ('UNREADABLE' if stale else 'PASS')
+    assert not result['origin_authenticated']
+    if stale: assert result['integrity']['diagnostic_counts'] == {'REFERENCE_DANGLING':1}
+    renaming_exits.append(completed.returncode)
 assert not any(name == 'pytest' or name.startswith('tests.') for name in sys.modules)
-print(json.dumps(dict(cli_exits=observed, standard_library_builder=True, origin_authenticated=False), sort_keys=True))
+print(json.dumps(dict(cli_exits=observed, renaming_cli_exits=renaming_exits,
+    standard_library_builder=True, origin_authenticated=False), sort_keys=True))
 ```
 
 Stop on any mismatch. Each child has a 15-second deadline. `subprocess.run`
@@ -562,3 +592,10 @@ one saved string from five optimizers to six and computes fresh member pins.
 The auditor accepts those bytes, but step 3 fails against the unchanged
 independent synthetic oracle. Expected exits for the extended example are
 `0,1,4,1`. Origin remains unauthenticated in all four cases.
+
+The same executable example also renames the inventory member, its reference
+and its payload-map key together. It requires the full replay result to equal
+the original. Leaving the reference at its old path returns named
+`REFERENCE_DANGLING` uncertainty, and restoring the new path recovers PASS.
+Expected renaming exits are `0,4,0`. This is a path-identity test, never archive
+extraction or evidence-origin authentication.
