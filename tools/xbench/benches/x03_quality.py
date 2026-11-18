@@ -736,3 +736,60 @@ def mismatch_loss_quality(string_currents, max_loss_fraction, rule):
         if lost > limit * available:
             return "FAIL"
     return "PASS"
+
+
+def disconnect_isolation_quality(nodes, sources, protected, links, switch_states):
+    """Trace every energized source through bidirectional wires and closed disconnects."""
+    from collections import defaultdict
+    if not all(isinstance(v, list) and v for v in (nodes, sources, protected)):
+        return "INCOMPLETE"
+    if not isinstance(links, list) or not isinstance(switch_states, dict):
+        return "INCOMPLETE"
+    if not all(isinstance(v, str) and v for v in (*nodes, *sources, *protected)):
+        return "INCOMPLETE"
+    inventory = set(nodes)
+    if not set(sources + protected) <= inventory:
+        return "INCOMPLETE"
+    unknown_switch = False
+    adjacent = defaultdict(set)
+    for link in links:
+        if not isinstance(link, dict) or not all(isinstance(link.get(k), str) for k in ("a", "b", "kind")):
+            return "INCOMPLETE"
+        a, b = link["a"], link["b"]
+        if a not in inventory or b not in inventory:
+            return "INCOMPLETE"
+        if link["kind"] == "switch":
+            if not isinstance(link.get("id"), str) or switch_states.get(link["id"]) not in ("open", "closed"):
+                unknown_switch = True
+                continue
+            if switch_states[link["id"]] == "open":
+                continue
+        elif link["kind"] != "wire":
+            return "INCOMPLETE"
+        adjacent[a].add(b)
+        adjacent[b].add(a)
+    energized = set(sources)
+    pending = list(energized)
+    while pending:
+        unseen = adjacent[pending.pop()] - energized
+        energized.update(unseen)
+        pending.extend(unseen)
+    if energized.intersection(protected):
+        return "FAIL"
+    return "INCOMPLETE" if unknown_switch else "PASS"
+
+
+def startup_voltage_quality(series_start_volts, threshold_volts):
+    """Each listed string must start independently at its recorded pre-start condition."""
+    if not isinstance(series_start_volts, dict) or not series_start_volts or threshold_volts is None:
+        return "INCOMPLETE"
+    if not finite_measure(threshold_volts) or threshold_volts <= 0:
+        return "FAIL"
+    for module_volts in series_start_volts.values():
+        if not isinstance(module_volts, list) or not module_volts or None in module_volts:
+            return "INCOMPLETE"
+        if not all(finite_measure(v) and v >= 0 for v in module_volts):
+            return "FAIL"
+        if sum(Fraction(str(v)) for v in module_volts) < Fraction(str(threshold_volts)):
+            return "FAIL"
+    return "PASS"

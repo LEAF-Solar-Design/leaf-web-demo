@@ -467,3 +467,29 @@ def test_recorded_string_loss(currents, limit, expected):
     strings = {"roof": dict(enumerate(currents)), "annex": {"a": 10, "b": 10}}
     assert mismatch_loss_quality(strings, limit, "equal-voltage-min-current") == expected
     assert mismatch_loss_quality(strings, limit, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("extra,states,expected", [
+    ([], {"main":"open"}, "PASS"),
+    ([("aux","protected","tie")], {"main":"open","tie":"closed"}, "FAIL"),
+    ([("protected","bus",None), ("bus","aux",None)], {"main":"open"}, "FAIL"),
+    ([], {}, "INCOMPLETE"),
+    ([("aux","protected",None)], {}, "FAIL"),
+], ids=["verify-open-disconnect", "trace-alternate-feed", "trace-reverse-backfeed", "unknown-disconnect", "known-live-despite-unknown"])
+def test_protected_section_isolation(extra, states, expected):
+    from benches.x03_quality import disconnect_isolation_quality
+    links = [dict(a="utility", b="protected", kind="switch", id="main")]
+    for a, b, switch in extra:
+        links.append(dict(a=a, b=b, kind="switch" if switch else "wire", id=switch))
+    assert disconnect_isolation_quality(["utility","aux","protected","bus"], ["utility","aux"],
+                                        ["protected"], links, states) == expected
+
+
+@pytest.mark.parametrize("modules,threshold,expected", [
+    ([40,40,40], 120, "PASS"), ([30,40,40], 120, "FAIL"), ([50,45,35], 125, "PASS"),
+    ([40,None,40], 120, "INCOMPLETE"),
+], ids=["exact-startup-threshold", "operating-range-insufficient-to-start", "mixed-module-start", "missing-condition"])
+def test_prestart_string_voltage(modules, threshold, expected):
+    from benches.x03_quality import startup_voltage_quality
+    assert startup_voltage_quality({"east":modules,"west":[140]}, threshold) == expected
+    assert startup_voltage_quality({"east":modules}, None) == "INCOMPLETE"

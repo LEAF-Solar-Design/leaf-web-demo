@@ -289,3 +289,37 @@ def duration_histogram_quality(runs, edges, policy, counts):
     for duration in runs.values():
         expected[locate(edges, duration)] += 1
     return "PASS" if expected == counts else "FAIL"
+
+
+def critical_path_quality(tasks, reported_path, reported_duration):
+    """Grade an actual longest source-to-sink path; ties may use any longest path."""
+    from fractions import Fraction
+    from graphlib import CycleError, TopologicalSorter
+    from benches.x03_quality import finite_measure
+    if not isinstance(tasks, dict) or not tasks or not isinstance(reported_path, list) or reported_duration is None:
+        return "INCOMPLETE"
+    parents, durations = {}, {}
+    for task, row in tasks.items():
+        if not isinstance(row, dict) or not isinstance(row.get("predecessors"), list) or row.get("duration") is None:
+            return "INCOMPLETE"
+        deps = row["predecessors"]
+        if not all(isinstance(dep, str) and dep in tasks for dep in deps):
+            return "INCOMPLETE"
+        if not finite_measure(row["duration"]) or row["duration"] < 0:
+            return "FAIL"
+        parents[task] = set(deps)
+        durations[task] = Fraction(str(row["duration"]))
+    ends = {}
+    try:
+        for task in TopologicalSorter(parents).static_order():
+            ends[task] = durations[task] + max((ends[p] for p in parents[task]), default=0)
+    except CycleError:
+        return "FAIL"
+    if not reported_path or not all(isinstance(t, str) and t in tasks for t in reported_path):
+        return "FAIL"
+    if parents[reported_path[0]] or any(reported_path[-1] in predecessors for predecessors in parents.values()):
+        return "FAIL"
+    if any(a not in parents[b] for a, b in zip(reported_path, reported_path[1:])):
+        return "FAIL"
+    actual = sum(durations[t] for t in reported_path)
+    return "PASS" if finite_measure(reported_duration) and Fraction(str(reported_duration)) == actual == max(ends.values()) else "FAIL"

@@ -311,3 +311,26 @@ def drain_access_quality(footprints, drains, boundary_policy):
             if boundary_policy == "touch-forbidden" and (distance == radius or shape.intersects(access)):
                 return "FAIL"
     return "PASS"
+
+
+def sliding_resistance_quality(load_cases):
+    """Weight and rated downslope restraint use the same force unit. Slope is in degrees."""
+    from math import cos, radians, sin, ulp
+    if not isinstance(load_cases, list) or not load_cases:
+        return "INCOMPLETE"
+    for case in load_cases:
+        keys = ("slope_deg", "weight", "friction", "restraint")
+        if not isinstance(case, dict) or any(case.get(k) is None for k in keys):
+            return "INCOMPLETE"
+        slope, weight, friction, restraint = (case[k] for k in keys)
+        if not all(map(finite_measure, (slope, weight, friction, restraint))):
+            return "FAIL"
+        if not 0 <= slope <= 90 or weight <= 0 or min(friction, restraint) < 0:
+            return "FAIL"
+        angle = radians(slope)
+        demand = weight * sin(angle)
+        normal = 0 if slope == 90 else weight * cos(angle)
+        capacity = normal * friction + restraint
+        if demand - capacity > 2 * ulp(demand):
+            return "FAIL"
+    return "PASS"

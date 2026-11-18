@@ -179,3 +179,21 @@ def test_duration_histogram_bins(policy, counts, expected):
     runs = dict(enumerate([1, 5, 6, 10, 12]))
     assert duration_histogram_quality(runs, [5,10], policy, counts) == expected
     assert duration_histogram_quality(runs, [5,10], None, counts) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("case,path,duration,expected", [
+    ("parallel", ["load","long","write"], 9, "PASS"),
+    ("parallel", ["load","short","write"], 6, "FAIL"),
+    ("parallel", ["load","long","write"], 11, "FAIL"),
+    ("cycle", ["load","long","write"], 9, "FAIL"),
+    ("missing", ["load","long","write"], 9, "INCOMPLETE"),
+], ids=["longest-parallel-branch","shorter-real-path","sum-over-parallel-work","cyclic-dependency","unknown-predecessor"])
+def test_task_critical_path(case, path, duration, expected):
+    from benches.x03_dashboard_oracle import critical_path_quality
+    tasks = {"load":dict(duration=2,predecessors=[]), "short":dict(duration=2,predecessors=["load"]),
+             "long":dict(duration=5,predecessors=["load"]), "write":dict(duration=2,predecessors=["short","long"])}
+    if case == "cycle":
+        tasks["load"]["predecessors"] = ["write"]
+    if case == "missing":
+        tasks["long"]["predecessors"] = ["other"]
+    assert critical_path_quality(tasks, path, duration) == expected

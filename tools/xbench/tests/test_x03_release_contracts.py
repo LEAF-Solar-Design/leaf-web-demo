@@ -215,3 +215,16 @@ def test_dependency_inventory(case, expected):
     if case == "cycle":
         inventory["lib"]["requires"]["a"] = "1"
     assert dependency_closure_quality({"a":"1", "b":"1"}, inventory) == expected
+
+
+@pytest.mark.parametrize("declaration,records,expected", [
+    ("pkg.main:run", [("pkg.main",["run","inspect"])], "PASS"),
+    ("pkg.missing:run", [("pkg.main",["run"])], "FAIL"),
+    ("pkg.main:build", [("pkg.main",["run"])], "FAIL"),
+    ("pkg.main:run", [("pkg.main",["run"]),("pkg.main",["run"])], "FAIL"),
+    ("pkg.main:run", [("pkg.main",None)], "INCOMPLETE"),
+], ids=["resolve-static-export","missing-module","absent-symbol","ambiguous-target","missing-exports"])
+def test_recorded_entrypoint(declaration, records, expected):
+    from benches.x03_package_oracle import entrypoint_quality
+    modules = [dict(module=name, callable_exports=exports) for name,exports in records]
+    assert entrypoint_quality(declaration, modules) == expected

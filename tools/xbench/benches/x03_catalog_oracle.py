@@ -203,3 +203,40 @@ def temperature_derating_quality(curve, temperature, required, policy):
             limit = first + (last-first) * (t-low) / (high-low)
             return "PASS" if duty <= limit else "FAIL"
     return "FAIL"
+
+
+def stock_allocation_quality(version, inventory, demand, allocations):
+    """Allocate quantities from pinned lots to distinct order lines without double use."""
+    from collections import Counter
+    if not isinstance(version, str) or not version or not isinstance(inventory, dict):
+        return "INCOMPLETE"
+    if inventory.get("version") is None:
+        return "INCOMPLETE"
+    if inventory["version"] != version:
+        return "FAIL"
+    lots = inventory.get("lots")
+    if not isinstance(lots, dict) or not isinstance(demand, dict) or not demand or not isinstance(allocations, list):
+        return "INCOMPLETE"
+    for records, field in ((lots, "available"), (demand, "required")):
+        for row in records.values():
+            if not isinstance(row, dict) or not isinstance(row.get("part"), str) or row.get(field) is None:
+                return "INCOMPLETE"
+            if type(row[field]) is not int or row[field] < 0:
+                return "FAIL"
+    used, supplied, seen = Counter(), Counter(), set()
+    for row in allocations:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in ("id", "lot", "line")):
+            return "INCOMPLETE"
+        qty, lot, line = row.get("quantity"), row["lot"], row["line"]
+        if qty is None:
+            return "INCOMPLETE"
+        if type(qty) is not int or qty <= 0 or lot not in lots or line not in demand or row["id"] in seen:
+            return "FAIL"
+        seen.add(row["id"])
+        if lots[lot]["part"] != demand[line]["part"]:
+            return "FAIL"
+        used[lot] += qty
+        supplied[line] += qty
+        if used[lot] > lots[lot]["available"]:
+            return "FAIL"
+    return "PASS" if all(supplied[k] == row["required"] for k, row in demand.items()) else "FAIL"

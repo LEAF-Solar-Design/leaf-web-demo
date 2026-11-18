@@ -167,3 +167,13 @@ def test_drain_keepout_and_access(footprint, policy, expected):
     drain = dict(center=Point(0,0), radius=2, access=box(-4,-0.5,0,0.5))
     assert drain_access_quality([footprint], [drain], policy) == expected
     assert drain_access_quality([footprint], [dict(drain, access=None)], policy) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("slope,weight,friction,restraint,expected", [
+    (30,100,0,50,"PASS"), (30,100,0.2,30,"FAIL"), (45,100,1,0,"PASS"),
+    (30,100,None,100,"INCOMPLETE"),
+], ids=["exact-rated-restraint", "friction-plus-restraint-shortfall", "friction-at-limit", "missing-coefficient"])
+def test_downslope_resistance(slope, weight, friction, restraint, expected):
+    from benches.x03_layout_oracle import sliding_resistance_quality
+    case = dict(slope_deg=slope, weight=weight, friction=friction, restraint=restraint)
+    assert sliding_resistance_quality([case]) == expected
