@@ -979,9 +979,11 @@ def assembly_native_response(request):
     final = model.wire_payload()["grid"]
     path = []
     for r, row in enumerate(final["Rows"], 1):
-        for c, cell in enumerate(row["Panels"], 1):
+        columns = range(len(row["Panels"])) if r % 2 else reversed(range(len(row["Panels"])))
+        for c in columns:
+            cell = row["Panels"][c]
             if cell["Code"] == 1:
-                path.append([r, c])
+                path.append([r, c + 1])
                 cell["Seq"] = len(path)
     lengths, counts = model.grid.Sequences
     sequence = [length for length, count in zip(lengths, counts) for _ in range(count)]
@@ -1302,3 +1304,54 @@ def test_assembly_attribution_invalid_authority_or_evidence_fails_closed(assembl
     assert "must-not-leak" not in response.text
     if fault in {"tenant", "member", "version", "stored_parent", "stored_tenant"}:
         assert assembly_world.db.queries == []
+
+
+def test_roof_continuity_single_refuses_before_proposal_completion(case, monkeypatch):
+    from test_w1_solve_commit import roof_continuity_case
+    roof_continuity_case(case, step=40.0)
+    a = world.__wrapped__(admitted.__wrapped__(case, monkeypatch), case, monkeypatch)
+    before = deepcopy((a.context.graph, a.s.versions, a.s.writes))
+    with pytest.raises(CloudError) as refused:
+        solve.prepare_job(a.row, a.guard)
+    assert refused.value.classification == "cloud_response_invalid"
+    assert a.store.events == ["prepare", "begin_send", "capture", "refuse"]
+    assert a.store.exchange["state"] == "refused"
+    assert a.store.exchange["candidate_bytes"] is None
+    assert a.store.exchange["proof_bytes"] is None
+    assert (a.context.graph, a.s.versions, a.s.writes) == before
+
+
+@pytest.mark.parametrize("long_step", [False, True])
+def test_roof_continuity_split_refuses_before_proposal_return(graph, monkeypatch, long_step):
+    from test_w1_solve_split import roof_seam_candidate
+    value, candidate = roof_seam_candidate(graph, monkeypatch, long_step=long_step)
+    envelopes = candidate["proposals"]
+    children = [{"piece_index": i, "classification": "synthetic",
+        "request_sha256": envelope["request_sha256"], "response_sha256": envelope["response_sha256"],
+        "candidate_bytes": b"candidate", "candidate_sha256": solve._sha(b"candidate"),
+        "proof_bytes": b"proof", "proof_sha256": solve._sha(b"proof")} for i, envelope in enumerate(envelopes)]
+    response = solve._piece_manifest(children)
+    exchange = {"classification": "synthetic", "response_bytes": response,
+        "response_sha256": solve._sha(response), "solver_endpoint": cloud.SOLVER_URL, "solver_version": "1.0.0"}
+    context = SimpleNamespace(graph=value, organization_id=uuid4(), project_id=uuid4(),
+        drawing_id=uuid4(), parent_version_id=uuid4(), intake_sha256="c" * 64)
+    plan = {"split_binding": candidate["binding"],
+        "binding": {"frame_ref": value["frames"][0]["id"]}, "max_string_length": 3}
+    monkeypatch.setattr(solve, "_authority", lambda job: (None, None))
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_piece_evidence", lambda job, context, plan, i, child:
+        (envelopes[i], child["candidate_bytes"], child["proof_bytes"]))
+    store = Store()
+    monkeypatch.setattr(solve, "_store", lambda: store)
+    before = deepcopy((value, candidate, children, exchange))
+    job = {"job_id": "split-job", "execution_context": {"tool_manifest_sha256": "d" * 64}}
+    if long_step:
+        with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+            solve._derive_split(job, context, plan, exchange, children=children)
+    else:
+        envelope, proof, summary = solve._derive_split(job, context, plan, exchange, children=children)
+        assert json.loads(envelope)["candidate"] == candidate
+        assert json.loads(proof)["candidate_sha256"] == solve._sha(envelope)
+        assert [row["panel_count"] for row in summary] == [3, 1]
+    assert (value, candidate, children, exchange) == before
+    assert store.events == [] and store.exchange is None
