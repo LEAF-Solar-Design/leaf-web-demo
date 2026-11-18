@@ -23,10 +23,10 @@ it.each([
     expect(label).toHaveAttribute('x', String(x))
     expect(label).toHaveAttribute('y', '18')
     expect(Number(label.getAttribute('font-size'))).toBeCloseTo(28.8 / lines.length)
+    expect(label.textContent).toBe(text)
     const spans = Array.from(label.querySelectorAll('tspan'))
     if (lines.length === 1) {
       expect(spans).toHaveLength(0)
-      expect(label.textContent).toBe(text)
     } else {
       expect(spans.map(span => span.textContent)).toEqual(lines)
       spans.forEach((span, i) => {
