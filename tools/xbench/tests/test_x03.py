@@ -821,7 +821,7 @@ def test_owned_turn_cleanup_failure_keeps_result_and_bounded_diagnostics(tmp_pat
 
 @pytest.mark.parametrize("case", ["provider-exception", "nested-error", "invalid-code"])
 def test_secret_sentinel_never_enters_prompt_receipt(tmp_path, case):
-    secret = "SECRET SENTINEL bearer sk-test-token"
+    secret = "SECRET SENTINEL private provider detail"
     def wrapper(original):
         def transport(method, path, **kwargs):
             if path == "/api/author":
