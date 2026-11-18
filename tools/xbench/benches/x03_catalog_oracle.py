@@ -353,3 +353,20 @@ def lot_recall_quality(selected, bulletin, revision):
         if any(lo <= serial <= hi for lo,hi in recalls.get((unit["part"],unit["lot"]), [])):
             return "FAIL"
     return "PASS"
+
+
+def procurement_deadline_quality(stock, units, lead_days, order_date, deadline, delivery_days):
+    """Lead time counts listed delivery days strictly after order. Zero permits same-day delivery."""
+    from datetime import date
+    if None in (stock, units, lead_days) or type(order_date) is not date or type(deadline) is not date:
+        return "INCOMPLETE"
+    if not isinstance(delivery_days, (tuple, list)) or any(type(day) is not date for day in delivery_days):
+        return "INCOMPLETE"
+    if any(type(n) is not int for n in (stock, units, lead_days)) or min(stock, lead_days) < 0 or units <= 0:
+        return "FAIL"
+    if stock < units:
+        return "FAIL"
+    slots = {day for day in delivery_days if order_date <= day <= deadline}
+    if lead_days == 0:
+        return "PASS" if slots else "FAIL"
+    return "PASS" if len(slots - {order_date}) >= lead_days else "FAIL"

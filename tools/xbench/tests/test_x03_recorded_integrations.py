@@ -442,3 +442,14 @@ def test_voltage_uses_pinned_valid_calibration(raw, offset, corrected):
     assert check(9, records, raw) == "FAIL"
     assert check(10, records, corrected) == "FAIL"
     assert check(9, records[:1], corrected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("lead,deadline,expected", [(1, 5, "FAIL"), (2, 9, "PASS"), (0, 4, "PASS")])
+def test_procurement_delivery_deadline(lead, deadline, expected):
+    from datetime import date
+    from benches.x03_catalog_oracle import procurement_deadline_quality as grade
+    days = [date(2026, 12, d) for d in (4, 8, 8, 9)]
+    args = (8, 8, lead, days[0], date(2026, 12, deadline))
+    assert grade(*args, days) == expected
+    assert grade(7, *args[1:], days) == "FAIL"
+    assert grade(*args, None) == "INCOMPLETE"

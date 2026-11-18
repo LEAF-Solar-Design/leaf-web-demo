@@ -1112,3 +1112,38 @@ def neutral_harmonic_quality(spectra, neutral_ampacity):
         rms_components.append(abs(total))
     current = hypot(*rms_components)
     return "PASS" if neutral_ampacity > 0 and (current <= neutral_ampacity or isclose(current, neutral_ampacity, rel_tol=1e-12)) else "FAIL"
+
+
+def inverter_ramp_quality(samples, rise_kw_per_s, fall_kw_per_s):
+    """Grade each adjacent pair in acquisition order, including downward ramps."""
+    if not isinstance(samples, (list, tuple)) or len(samples) < 2:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (rise_kw_per_s, fall_kw_per_s))):
+        return "INCOMPLETE"
+    rise, fall = (Fraction(str(n)) for n in (rise_kw_per_s, fall_kw_per_s))
+    if min(rise, fall) < 0:
+        return "FAIL"
+    previous = None
+    for sample in samples:
+        if not isinstance(sample, (tuple, list)) or len(sample) != 2 or not all(map(finite_measure, sample)):
+            return "INCOMPLETE"
+        timestamp, power = (Fraction(str(n)) for n in sample)
+        if previous is not None:
+            elapsed, delta = timestamp - previous[0], power - previous[1]
+            if elapsed <= 0:
+                return "INCOMPLETE"
+            if not -fall * elapsed <= delta <= rise * elapsed:
+                return "FAIL"
+        previous = timestamp, power
+    return "PASS"
+
+
+def idle_reserve_quality(initial_kwh, start_hour, end_hour, retention_per_hour, claimed_kwh):
+    """Compound the recorded hourly retention fraction over uninterrupted idle time."""
+    from math import isclose
+    if not all(map(finite_measure, (initial_kwh, start_hour, end_hour, retention_per_hour, claimed_kwh))):
+        return "INCOMPLETE"
+    if end_hour < start_hour or not 0 <= retention_per_hour <= 1 or min(initial_kwh, claimed_kwh) < 0:
+        return "FAIL"
+    retained = initial_kwh * retention_per_hour ** (end_hour - start_hour)
+    return "PASS" if claimed_kwh <= retained or isclose(claimed_kwh, retained, rel_tol=1e-12) else "FAIL"

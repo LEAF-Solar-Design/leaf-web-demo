@@ -274,3 +274,17 @@ def test_availability_from_eligible_time(policy, maintenance, expected):
     assert availability_quality((0, 10), outages, maintenance, policy, expected) == "PASS"
     assert availability_quality((0, 10), outages, maintenance, policy, 1) == "FAIL"
     assert availability_quality((0, 10), outages, maintenance, None, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("older,recent,thresholds,rates,alert", [
+    ([True, True], [True, False], (2, 1), (2, 1), True),
+    ([True, True], [True, False], (2, 2), (2, 1), False),
+    ([False, False], [True, True], (1, 2), (0, 2), False)])
+def test_multiwindow_slo_burn(older, recent, thresholds, rates, alert):
+    from benches.x03_dashboard_oracle import burn_window_quality as grade
+    events = list(zip([5, 6, 9, 10], older + recent))
+    windows = dict(zip([2, 6], thresholds))
+    report = dict(rates=dict(zip([2, 6], rates)), alert=alert)
+    assert grade(events, (4, 10), 10, windows, 0.75, report) == "PASS"
+    assert grade(events, (4, 10), 10, windows, 0.75, dict(report, alert=not alert)) == "FAIL"
+    assert grade(events, (5, 10), 10, windows, 0.75, report) == "INCOMPLETE"

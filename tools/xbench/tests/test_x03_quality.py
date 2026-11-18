@@ -635,3 +635,20 @@ def test_neutral_rms_with_balanced_fundamental(third, ninth, expected):
     assert neutral_harmonic_quality(phases, expected - 1) == "FAIL"
     del phases["C"][3]
     assert neutral_harmonic_quality(phases, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("start,end,dt,rise,fall", [(10, 40, 3, 10, 5), (50, 30, 4, 2, 5), (-5, 5, 0.5, 20, 2)])
+def test_recorded_ramp_rate(start, end, dt, rise, fall):
+    from benches.x03_quality import inverter_ramp_quality as grade
+    assert max(abs(start), abs(end)) <= 50
+    assert grade([(0, start), (dt, end)], rise, fall) == "PASS"
+    assert grade([(0, start), (dt/2, end), (dt, end)], rise, fall) == "FAIL"
+    assert grade([(0, start), (None, end)], rise, fall) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("initial,hours,retention,expected", [(100, 2, 0.9, 81), (40, 0.5, 0.81, 36), (12, 3, 0.5, 1.5)])
+def test_idle_storage_reserve(initial, hours, retention, expected):
+    from benches.x03_quality import idle_reserve_quality as grade
+    assert grade(initial, 4, 4 + hours, retention, expected) == "PASS"
+    assert grade(initial, 4, 4 + hours, retention, initial) == "FAIL"
+    assert grade(initial, 4, 4 + hours, None, expected) == "INCOMPLETE"

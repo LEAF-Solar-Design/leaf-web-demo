@@ -237,3 +237,12 @@ def test_bearing_pressure_is_local(force, area, limit):
     assert pad_pressure_quality(reactions, areas, limits) == "PASS"
     assert pad_pressure_quality(reactions, dict(areas, corner=area / 2), limits) == "FAIL"
     assert pad_pressure_quality(reactions, {"corner": area}, limits) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("equation,tension,shear", [("linear", 25, 75), ("quadratic", 60, 80), ("quadratic", 80, 60)])
+def test_combined_anchor_utilization(equation, tension, shear):
+    from benches.x03_layout_oracle import anchor_interaction_quality as grade
+    anchor = dict(tension=tension, shear=shear, tension_rating=100, shear_rating=100)
+    assert grade([anchor], equation) == "PASS"
+    assert grade([anchor, dict(anchor, shear=shear+1)], equation) == "FAIL"
+    assert grade([anchor], None) == "INCOMPLETE"

@@ -473,3 +473,22 @@ def pad_pressure_quality(reactions, areas, roof_limits):
         if reaction < 0 or min(area, limit) <= 0 or Fraction(str(reaction)) > Fraction(str(area)) * Fraction(str(limit)):
             return "FAIL"
     return "PASS"
+
+
+def anchor_interaction_quality(anchors, equation):
+    """Use recorded nonnegative force magnitudes and capacities in matching units."""
+    if equation not in ("linear", "quadratic") or not isinstance(anchors, list) or not anchors:
+        return "INCOMPLETE"
+    exponent = 1 if equation == "linear" else 2
+    for anchor in anchors:
+        if not isinstance(anchor, dict):
+            return "INCOMPLETE"
+        values = [anchor.get(k) for k in ("tension", "shear", "tension_rating", "shear_rating")]
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        tension, shear, tr, sr = (Fraction(str(v)) for v in values)
+        if min(tension, shear) < 0 or min(tr, sr) <= 0:
+            return "FAIL"
+        if (tension / tr)**exponent + (shear / sr)**exponent > 1:
+            return "FAIL"
+    return "PASS"
