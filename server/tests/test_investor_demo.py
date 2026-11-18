@@ -3,6 +3,7 @@ import asyncio
 import base64
 from datetime import datetime
 import hmac
+import json
 import re
 import secrets
 import sys
@@ -39,12 +40,12 @@ def configured(monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     monkeypatch.setenv("LEAF_INVESTOR_DEMO_SECRET", secrets.token_urlsafe(32))
     monkeypatch.setattr(demo, "_db", forbidden)
+    monkeypatch.setattr(exchange, "_guard", demo.ExchangeGuard())
 
 
 @pytest.fixture
 def client(configured, monkeypatch):
     from app import app
-    monkeypatch.setattr(exchange, "_guard", demo.ExchangeGuard())
     monkeypatch.setattr(demo, "binding_ok", lambda: True)
     monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
                         lambda subject: (str(demo.ORG_ID), demo.TIER))
@@ -196,6 +197,20 @@ def test_ordinary_auth_with_investor_disabled(configured, monkeypatch):
                                  audience=rig.AUD, issuer=rig.ISS)
 
 
+def test_ordinary_auth_with_investor_enabled(client, monkeypatch):
+    import test_auth as rig
+    for name, value in rig._ENV.items():
+        monkeypatch.setenv(name, value)
+    assert demo.enabled()
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", rig._active_test_tenant)
+    monkeypatch.setattr(demo, "binding_ok", forbidden)
+    token = rig.mint(tenant_id=rig.PLATFORM_TENANT_ID)
+    response = client.get(IDENTITY, headers=bearer(token))
+    assert response.status_code == 200
+    assert response.json()["org_id"] == rig.PLATFORM_TENANT_ID
+    assert response.json()["tier"] == "hosted_pro"
+
+
 def test_runtime_host_and_binding_refusals(client, monkeypatch):
     headers = bearer(session_token())
     mixed = {**headers, "x-dispatch-secret": "test-dispatch", "x-tenant-id": TEST_ID}
@@ -296,11 +311,13 @@ def test_bundled_drawing_only(client, monkeypatch, tmp_path):
     assert client.get("/api/session", headers=headers).status_code == 404
 
 
-@pytest.mark.parametrize("path,field", [
-    ("/api/tools", "tools"),
-    ("/api/capabilities", "families"),
+@pytest.mark.parametrize("path,field,field_type", [
+    ("/api/tools", "tools", list),
+    ("/api/capabilities", "families", list),
+    ("/api/entitlements", "entitlements", dict),
+    (IDENTITY, "org_id", str),
 ])
-def test_catalog_reads_do_not_initialize_or_materialize(client, monkeypatch, tmp_path, path, field):
+def test_reads_do_not_initialize_or_materialize(client, monkeypatch, tmp_path, path, field, field_type):
     import customization_service
     import requests
 
@@ -316,7 +333,10 @@ def test_catalog_reads_do_not_initialize_or_materialize(client, monkeypatch, tmp
     monkeypatch.setattr(requests.sessions.Session, "request", forbidden)
     response = client.get(path, headers=bearer(session_token()))
     assert response.status_code == 200
-    assert isinstance(response.json()[field], list)
+    assert isinstance(response.json()[field], field_type)
+    if path in (IDENTITY, "/api/entitlements"):
+        assert response.json()["org_id"] == str(demo.ORG_ID)
+        assert response.json()["tier"] == demo.TIER
 
 
 def test_jobs_list_does_not_open_writable_legacy_store(client, monkeypatch):
@@ -422,6 +442,10 @@ def test_boundary_precedes_preflight_and_credential_translation(client, monkeypa
     assert client.options("/api/telemetry", headers=headers).status_code == 403
     mixed = [("authorization", "LeafServiceSession invalid"), *bearer(token).items()]
     assert client.get("/api/health", headers=mixed).status_code == 403
+    duplicate = [*bearer(token).items(), ("authorization", "Bearer other")]
+    response = client.get(IDENTITY, headers=duplicate)
+    assert response.status_code == 403
+    assert response.json()["error"]["message"] == "ambiguous investor demo credentials"
     monkeypatch.delenv("LEAF_INVESTOR_DEMO_SECRET")
     assert client.get("/api/health", headers=bearer(token)).status_code == 403
     for other in ("Bearer malformed", "Bearer e30.W10.", "Basic irrelevant"):
@@ -450,6 +474,8 @@ def test_exchange_rejections_and_success(client, monkeypatch, capsys, caplog):
     post(400, content=b'{"token":"x","token":"y"}')
     for obj in ([], {}, {"token": "x", "extra": 0}, {"token": 1}, {"token": {}}):
         post(400, json=obj)
+    # Exercise the link checks with a fresh client bucket after the body errors.
+    client.headers["cf-connecting-ip"] = "192.0.2.1"
     now = int(time.time())
     with monkeypatch.context() as patch:
         patch.setattr(demo, "binding_ok", forbidden)
@@ -513,23 +539,78 @@ def test_exchange_client_address_rate_limit(client):
         assert response.status_code == (401 if index < 10 else 429)
 
 
+async def raw_exchange(receive):
+    from app import app
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+             "http_version": "1.1", "method": "POST", "scheme": "https",
+             "path": exchange.PATH, "raw_path": exchange.PATH.encode(), "query_string": b"",
+             "client": ("192.0.2.1", 1234), "server": (HOST, 443),
+             "headers": [(b"host", HOST.encode())]}
+    messages = []
+
+    async def send(message):
+        messages.append(message)
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=2)
+    start, *chunks = messages
+    assert start["type"] == "http.response.start"
+    assert dict(start["headers"])[b"cache-control"] == b"no-store"
+    assert chunks and all(chunk["type"] == "http.response.body" for chunk in chunks)
+    assert not chunks[-1].get("more_body", False)
+    body = b"".join(chunk.get("body", b"") for chunk in chunks)
+    return start["status"], json.loads(body)
+
+
+def test_exchange_body_deadline(configured, monkeypatch):
+    monkeypatch.setattr(exchange, "_BODY_TIMEOUT_S", 0.01)
+
+    async def stalled():
+        await asyncio.Event().wait()
+
+    assert asyncio.run(raw_exchange(stalled)) == (408, {"detail": "request body timed out"})
+
+
+def test_exchange_limits_client_before_receiving_body(configured):
+    async def bad_link():
+        return {"type": "http.request", "body": b'{"token":"invalid"}'}
+
+    async def unexpected_read():
+        pytest.fail("rate-limited request read the body")
+
+    async def requests():
+        for _ in range(10):
+            assert (await raw_exchange(bad_link))[0] == 401
+        assert await raw_exchange(unexpected_read) == (429, {"detail": "too many requests"})
+
+    asyncio.run(requests())
+
+
+def test_exchange_only_charges_shared_ceiling_for_verified_links(client, monkeypatch):
+    # Leave one verified exchange in the process budget.
+    for _ in range(239):
+        assert exchange._guard.allow_verified(time.monotonic())
+    assert client.post(exchange.PATH, json={"token": "invalid"}).status_code == 401
+    body = {"token": link(int(time.time()))}
+    assert client.post(exchange.PATH, json=body).status_code == 200
+    monkeypatch.setattr(demo, "binding_ok", forbidden)
+    assert client.post(exchange.PATH, json=body).status_code == 429
+
+
 def test_guard_concurrent_caps_and_lru():
     from concurrent.futures import ThreadPoolExecutor
     guard = demo.ExchangeGuard()
     with ThreadPoolExecutor(max_workers=12) as pool:
-        assert sum(pool.map(lambda _: guard.allow("peer", 0), range(30))) == 10
-    assert not guard.allow("peer", 59)
-    assert guard.allow("peer", 60)
-    guard = demo.ExchangeGuard()
-    for i in range(240):
-        assert guard.allow(str(i), 0)
-    assert not guard.allow("new", 59)
-    assert guard.allow("new", 60)
+        assert sum(pool.map(lambda _: guard.allow_client("peer", 0), range(30))) == 10
+        assert sum(pool.map(lambda _: guard.allow_verified(0), range(260))) == 240
+    assert not guard.allow_client("peer", 59)
+    assert guard.allow_client("peer", 60)
+    assert not guard.allow_verified(59)
+    assert guard.allow_verified(60)
     guard = demo.ExchangeGuard()
     for i in range(4096):
-        assert guard.allow(str(i), i)
-    assert guard.allow("0", 4096)
-    assert guard.allow("4096", 4097)
+        assert guard.allow_client(str(i), i)
+    assert guard.allow_client("0", 4096)
+    assert guard.allow_client("4096", 4097)
     assert len(guard._clients) == 4096 and "0" in guard._clients and "1" not in guard._clients
 
 

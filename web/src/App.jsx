@@ -156,6 +156,8 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { readActiveScope } from './auth/activeScope.js'
+import { consumeInvestorNotice, isInvestorSession } from './investorDemo.js'
+import { serviceState } from './lib/serviceAuthSession.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -326,9 +328,11 @@ const devControls = (() => {
 function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}` }
 
 function SignedOutGate({ onDemo, onSignIn }) {
+  const [investorNotice] = useState(() => consumeInvestorNotice())
   return (
     <div className="card enter" style={{ margin: '0 0 16px' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {investorNotice && <p className="panel-sub" style={{ margin: 0 }}>This demo link has expired or is no longer valid. Sign in to continue.</p>}
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--foreground)' }}>You’re not signed in</div>
         <p className="panel-sub" style={{ margin: 0 }}>
           {onSignIn
@@ -1030,6 +1034,7 @@ export default function App() {
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  const investorDemo = signedIn && !serviceState().mode && isInvestorSession()
   // Pause authenticated reads for guests before the session response arrives.
   const knownGuest = consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
@@ -5550,6 +5555,7 @@ export default function App() {
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
+        {investorDemo && <span className="tag amber">View-only demo</span>}
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">

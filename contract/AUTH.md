@@ -553,9 +553,14 @@ leading zero. The MAC has 43 canonical unpadded base64url characters.
 HMAC-SHA256 binds the fields to the link purpose, staging origin, fixed org
 and role. A link lasts at most 31 days. Send it in the JSON body of
 `POST /api/site/investor-demo/session`. Every exchange response is `no-store`.
-The exchange performs no database work before the link verifies, then makes
-exactly one read-only binding check. On success it returns `session`,
-`expires_at`, `org_id` and `drawing`.
+Before reading the body, each process admits up to 10 requests per client per
+60 seconds and tracks up to 4096 clients. This limit is best effort because
+`CF-Connecting-IP` is meaningful only when the origin is reachable solely
+through the edge. The body read has a five-second deadline. Only verified
+links count toward the shared ceiling of 240 per process per 60 seconds.
+The exchange performs no database work before the link verifies. Each verified
+link admitted under the ceiling gets exactly one read-only binding check. On
+success it returns `session`, `expires_at`, `org_id` and `drawing`.
 
 The session is a compact JWT with three base64url segments. Its header carries
 only `alg=HS256` and `typ=JWT`. HKDF-SHA256 derives separate link, session
@@ -565,7 +570,10 @@ random session ID. It expires after two hours or at link expiry, whichever is
 earlier. The reserved issuer and subject never go to the Auth0 key resolver.
 
 The Host must be exactly `platform-staging.leafdesign.ai`. An Origin on the
-exchange must equal `https://platform-staging.leafdesign.ai`. For a session,
+exchange must equal `https://platform-staging.leafdesign.ai`. Clients choose
+their Host header, so this check cannot protect production. Production relies
+on the disabled flag, the exact staging runtime and live-auth requirements,
+and the absence of the investor secret. For a session,
 only GET requests to these eight dispatched route templates can pass.
 
 * `/api/session/identity` and `/api/session`
@@ -577,6 +585,8 @@ request checks for exactly one active, unrevoked read-only binding to the
 fixed active, restricted demo org. The drawing view reads the bundled rooftop
 intake. Tool runs, uploads, authoring, telemetry writes and solve are closed.
 
-Rotate the secret or turn the flag off to revoke links and sessions. Deactivate
-the org to refuse the next authenticated request. This identity adds no tier,
-capability, role or claim-namespace vocabulary.
+Revoke access by rotating the secret, turning the flag off, or setting the
+binding or the org to a non-active status. A non-active status stops new
+exchanges and the next authenticated request from a live session. Deleting
+rows does not revoke access durably because startup inserts missing rows again.
+This identity adds no tier, capability, role or claim-namespace vocabulary.

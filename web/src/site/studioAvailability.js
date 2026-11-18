@@ -50,6 +50,8 @@
 // ---------------------------------------------------------------------------
 
 import { APP_ONLY_HOSTS } from './appHosts.js'
+import { isInvestorSession } from '../investorDemo.js'
+import { serviceState } from '../lib/serviceAuthSession.js'
 
 export const STUDIO_AVAILABILITY_SCHEMA = 'leaf.studio-availability.v1'
 
@@ -258,18 +260,19 @@ export const WALK_OVERRIDE_STORAGE_KEY = 'leaf.availability.walk'
  * a test or a Node walker states its own host instead of faking a window.
  */
 export function availabilityEnv() {
-  if (typeof window === 'undefined') return { hostname: '', walk: false }
+  if (typeof window === 'undefined') return { hostname: '', walk: false, investorDemo: false }
   let walk = false
   try {
     walk = new URLSearchParams(window.location.search || '').get(WALK_OVERRIDE_PARAM) === WALK_OVERRIDE_VALUE
       || window.localStorage?.getItem(WALK_OVERRIDE_STORAGE_KEY) === '1'
   } catch { /* a blocked storage read means no override */ }
-  return { hostname: String(window.location.hostname || '').toLowerCase(), walk }
+  return { hostname: String(window.location.hostname || '').toLowerCase(), walk,
+    investorDemo: isInvestorSession() && !serviceState().mode }
 }
 
 // `env` is resolved LAZILY: an enabled row and a tool no row names never read
-// the address bar or storage, so a per-tool call in a 67 tool ribbon costs one
-// own-property check for every tool but the one the table speaks for.
+// the address bar or walk override. After the memoized investor check, a
+// per-tool call in a 67 tool ribbon needs only an own-property check for a miss.
 function rowApplies(row, env) {
   if (row.status !== 'unavailable') return false
   const here = env || availabilityEnv()
@@ -313,6 +316,8 @@ const TOOL_ROWS = Object.freeze(Object.fromEntries(
  * the staging walk proved is not.
  */
 export function catalogToolDisclaimer(toolName, env) {
+  const investor = env ? env.investorDemo === true : isInvestorSession() && !serviceState().mode
+  if (investor) return 'Not available in the view-only demo'
   const id = typeof toolName === 'string' && Object.prototype.hasOwnProperty.call(TOOL_ROWS, toolName) ? TOOL_ROWS[toolName] : null
   return id ? notYetAvailable(id, env) : null
 }

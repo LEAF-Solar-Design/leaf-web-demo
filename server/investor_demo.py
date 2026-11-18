@@ -286,7 +286,11 @@ def provision_at_startup() -> str:
 
 
 class ExchangeGuard:
-    """Best-effort guard per process. The real per-address limit belongs at the edge."""
+    """Limit clients before body reads and verified links before database reads.
+
+    The per-client limit is best effort. CF-Connecting-IP is meaningful only
+    when the origin is reachable solely through the edge.
+    """
 
     def __init__(self):
         self._lock = Lock()
@@ -294,15 +298,11 @@ class ExchangeGuard:
         self._burst_start = None
         self._burst = 0
 
-    def allow(self, client_key: str, now: float) -> bool:
+    def allow_client(self, client_key: str, now: float) -> bool:
         if (not isinstance(client_key, str) or not 0 < len(client_key) <= 255
                 or type(now) not in (float, int) or not 0 <= now <= sys.float_info.max):
             return False
         with self._lock:
-            if self._burst_start is None or now - self._burst_start >= 60:
-                self._burst_start, self._burst = now, 0
-            if self._burst >= 240:
-                return False
             start, count = self._clients.get(client_key, (now, 0))
             if now - start >= 60:
                 start, count = now, 0
@@ -312,6 +312,16 @@ class ExchangeGuard:
             self._clients.move_to_end(client_key)
             if len(self._clients) > 4096:
                 self._clients.popitem(last=False)
+            return True
+
+    def allow_verified(self, now: float) -> bool:
+        if type(now) not in (float, int) or not 0 <= now <= sys.float_info.max:
+            return False
+        with self._lock:
+            if self._burst_start is None or now - self._burst_start >= 60:
+                self._burst_start, self._burst = now, 0
+            if self._burst >= 240:
+                return False
             self._burst += 1
             return True
 

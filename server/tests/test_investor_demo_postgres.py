@@ -1,8 +1,11 @@
 """Investor provisioning and revocation in a migrated, isolated PostgreSQL schema."""
+from contextlib import contextmanager
 import secrets
+import time
 import uuid
 
 import pytest
+from fastapi.testclient import TestClient
 
 from test_demo_sessions_postgres import postgres_registry
 import demo_sessions
@@ -46,6 +49,38 @@ def test_provision_twice(database):
             "SELECT 1 FROM project_member_bindings WHERE org_id = %s", (demo.ORG_ID,)).fetchone() is None
         assert conn.execute("SELECT 1 FROM broker_tenants WHERE tenant_id = %s",
                             (str(demo.ORG_ID),)).fetchone() is None
+
+
+def test_exchanged_session_resolves_real_binding_until_revoked(database, monkeypatch):
+    from app import app
+    from routers import investor_demo as exchange
+
+    # Route the platform store's reads to the same isolated schema as provisioning.
+    @contextmanager
+    def cursor():
+        with database.connect() as conn, conn.cursor() as cur:
+            yield cur
+
+    monkeypatch.setattr(platform_link.platform_store(), "cursor", cursor)
+    monkeypatch.setattr(exchange, "_guard", demo.ExchangeGuard())
+    assert demo.provision_at_startup() == "ready"
+    now = int(time.time())
+    token = demo.mint_link_token(issued_at=now, expires_at=now + 900)
+    client = TestClient(app, base_url=demo.ORIGIN)
+    try:
+        issued = client.post(exchange.PATH, json={"token": token})
+        assert issued.status_code == 200
+        headers = {"Authorization": "Bearer " + issued.json()["session"]}
+        identity = client.get("/api/session/identity", headers=headers)
+        assert identity.status_code == 200
+        assert identity.json()["org_id"] == str(demo.ORG_ID)
+        assert identity.json()["tier"] == demo.TIER
+        with database.connect() as conn:
+            conn.execute("UPDATE identity_bindings SET status = 'revoked', revoked_at = now() "
+                         "WHERE binding_id = %s", (demo.BINDING_ID,))
+        assert client.get("/api/session/identity", headers=headers).status_code == 401
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("statement,identifier", [

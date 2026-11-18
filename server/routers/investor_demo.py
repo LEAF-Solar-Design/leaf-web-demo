@@ -6,9 +6,10 @@ import re
 import sys
 import time
 
-from anyio import from_thread
+import anyio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
 
 import investor_demo as demo
@@ -19,6 +20,7 @@ PATH = "/api/site/investor-demo/session"
 CREDENTIALS = {b"authorization", b"x-demo-session", b"x-guest-session", b"x-dispatch-secret"}
 _NO_STORE = {"Cache-Control": "no-store"}
 _LIMIT = 1024
+_BODY_TIMEOUT_S = 5
 _guard = demo.ExchangeGuard()
 
 
@@ -58,7 +60,7 @@ def _client_key(request):
 
 
 @router.post(PATH)
-def exchange(request: Request):
+async def exchange(request: Request):
     if not demo.enabled():
         return _error(404, "not found")
     if any(k.lower() in CREDENTIALS for k, _ in request.scope["headers"]):
@@ -74,8 +76,11 @@ def exchange(request: Request):
         size = sizes[0].lstrip("0") or "0"
         if len(size) > 4 or int(size) > _LIMIT:
             return _error(413, "body too large")
+    if not _guard.allow_client(_client_key(request), time.monotonic()):
+        return _error(429, "too many requests")
     try:
-        body = from_thread.run(_bounded_body, request)
+        with anyio.fail_after(_BODY_TIMEOUT_S):
+            body = await _bounded_body(request)
         if body is None:
             return _error(413, "body too large")
         if sizes and int(size) != len(body):
@@ -83,17 +88,19 @@ def exchange(request: Request):
         obj = json.loads(body.decode("utf-8"), object_pairs_hook=_token_object)
         if not isinstance(obj, dict):
             raise ValueError
+    except TimeoutError:
+        return _error(408, "request body timed out")
     except (ValueError, RecursionError, ClientDisconnect):
         return _error(400, "invalid request body")
 
-    if not _guard.allow(_client_key(request), time.monotonic()):
-        return _error(429, "too many requests")
     now = int(time.time())
     try:
         link = demo.verify_link_token(obj["token"], now=now)
     except demo.InvalidLink:
         return _error(401, "invalid or expired link")
-    if not demo.binding_ok():
+    if not _guard.allow_verified(time.monotonic()):
+        return _error(429, "too many requests")
+    if not await run_in_threadpool(demo.binding_ok):
         return _error(503, "demo workspace unavailable")
     try:
         token, exp, jti = demo.mint_session(link, now=now)
@@ -101,7 +108,8 @@ def exchange(request: Request):
         return _error(503, "demo workspace unavailable")
     expires_at = datetime.fromtimestamp(exp, timezone.utc).isoformat()
     try:
-        sys.stderr.write(f"[leaf-demo] event=investor_demo_session_issued session={jti[:8]} expires={expires_at}\n")
+        await run_in_threadpool(sys.stderr.write,
+                                f"[leaf-demo] event=investor_demo_session_issued session={jti[:8]} expires={expires_at}\n")
     except Exception:
         pass
     return JSONResponse({

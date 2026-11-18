@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { listBuilds as defaultListBuilds } from '../api.js'
+import { isInvestorSession } from '../investorDemo.js'
+import { serviceState } from '../lib/serviceAuthSession.js'
 import { parseBuildRecords, runningBuildCount } from '../lib/buildQueue.js'
 
 const isUnauthorized = (error) => error?.status === 401 || / -> 401$/.test(String(error?.message || ''))
@@ -35,7 +37,7 @@ export default function useBuildQueue({
   listRef.current = (services && services.listBuilds) || defaultListBuilds
 
   useEffect(() => {
-    if (mock) {
+    if (mock || (isInvestorSession() && !serviceState().mode)) {
       setBuilds([])
       setWarnings([])
       setDropped(0)
