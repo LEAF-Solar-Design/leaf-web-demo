@@ -305,3 +305,15 @@ def test_voltage_fill_policy(timestamp, reported, interp, extra, gap, expected):
     assert filled_voltage_quality(samples, timestamp, reported, interpolation=interp, extrapolation=extra,
                                   max_gap=gap, site="s", station="roof", as_of=12, max_age=12,
                                   modules=2, voc_at_25=50, coefficient_per_c=-0.01) == expected
+
+
+@pytest.mark.parametrize("available,ids,version,expected", [
+    (5, ["r1","r2"], "v1", "PASS"), (4, ["r1","r2"], "v1", "FAIL"),
+    (5, ["r1","r1"], "v1", "FAIL"), (5, ["r1","r2"], "v2", "FAIL"),
+], ids=["split-stock-between-rows","overallocate-one-lot","duplicate-reservation","reject-stale-inventory"])
+def test_quantity_allocations(available, ids, version, expected):
+    from benches.x03_catalog_oracle import stock_allocation_quality
+    stock = dict(version="v1", lots={"warehouse":dict(part="panel", available=available)})
+    demand = {"east":dict(part="panel",required=2),"west":dict(part="panel",required=3)}
+    rows = [dict(id=i, line=k, lot="warehouse", quantity=v["required"]) for i,(k,v) in zip(ids,demand.items())]
+    assert stock_allocation_quality(version, stock, demand, rows) == expected

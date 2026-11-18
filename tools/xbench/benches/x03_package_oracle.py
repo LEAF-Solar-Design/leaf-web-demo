@@ -130,3 +130,24 @@ def dependency_closure_quality(required, lock):
     except CycleError:
         return "FAIL"
     return "PASS"
+
+
+def entrypoint_quality(declared, modules):
+    """Resolve module:symbol against a complete static module and export inventory."""
+    if not isinstance(declared, str) or not declared or not isinstance(modules, list):
+        return "INCOMPLETE"
+    module, separator, symbol = declared.partition(":")
+    if not separator or not all(p.isidentifier() for p in module.split(".")) or not symbol.isidentifier():
+        return "FAIL"
+    matches = []
+    for row in modules:
+        if not isinstance(row, dict) or not isinstance(row.get("module"), str):
+            return "INCOMPLETE"
+        if row["module"] == module:
+            matches.append(row)
+    if len(matches) != 1:
+        return "FAIL"
+    exports = matches[0].get("callable_exports")
+    if not isinstance(exports, list) or not all(isinstance(name, str) for name in exports):
+        return "INCOMPLETE"
+    return "PASS" if exports.count(symbol) == 1 else "FAIL"
