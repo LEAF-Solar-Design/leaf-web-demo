@@ -3,6 +3,7 @@ import { serviceState } from './lib/serviceAuthSession.js'
 
 export const INVESTOR_ISSUER = 'https://investor-demo.leaf.invalid/staging/'
 export const INVESTOR_NOTICE_KEY = 'leaf.investorLink.notice'
+export const INVESTOR_ORG_KEY = 'leaf.investorDemo.org'
 const JWT_KEY = 'leaf.jwt'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -42,13 +43,20 @@ export function consumeInvestorNotice(storage) {
   } catch { return false }
 }
 
-export async function bootstrapInvestorLink({ win = globalThis.window, fetchImpl = globalThis.fetch, apiBase = '' } = {}) {
+export function clearInvestorWorkspace(storage) {
+  const org = storage.getItem(INVESTOR_ORG_KEY)
+  if (org !== null && storage.getItem('leaf.org_id') === org) storage.removeItem('leaf.org_id')
+  storage.removeItem(INVESTOR_ORG_KEY)
+}
+
+export async function bootstrapInvestorLink(options = {}) {
+  const { win = globalThis.window, fetchImpl = globalThis.fetch, apiBase = '' } = options
   let timer
   let initialJwt
   let writtenJwt
   try {
     if (!win) return 'none'
-    const token = takeInvestorLink(win)
+    const token = Object.hasOwn(options, 'link') ? options.link : takeInvestorLink(win)
     if (token === undefined) return 'none'
     if (serviceState().mode) return 'kept-existing'
     initialJwt = win.localStorage.getItem(JWT_KEY)
@@ -73,6 +81,7 @@ export async function bootstrapInvestorLink({ win = globalThis.window, fetchImpl
     win.sessionStorage.removeItem(INVESTOR_NOTICE_KEY)
     win.localStorage.setItem(JWT_KEY, body.session)
     writtenJwt = body.session
+    win.localStorage.setItem(INVESTOR_ORG_KEY, body.org_id)
     win.localStorage.setItem('leaf.org_id', body.org_id)
     return 'signed-in'
   } catch {
@@ -80,7 +89,10 @@ export async function bootstrapInvestorLink({ win = globalThis.window, fetchImpl
       if (serviceState().mode) return 'kept-existing'
       const current = win.localStorage.getItem(JWT_KEY)
       if (current && current !== initialJwt && current !== writtenJwt) return 'kept-existing'
-      if (isInvestorToken(current)) win.localStorage.removeItem(JWT_KEY)
+      if (isInvestorToken(current)) {
+        win.localStorage.removeItem(JWT_KEY)
+        clearInvestorWorkspace(win.localStorage)
+      }
     } catch { /* storage may be blocked */ }
     try { win.sessionStorage.setItem(INVESTOR_NOTICE_KEY, '1') } catch { /* storage may be blocked */ }
     return 'failed'

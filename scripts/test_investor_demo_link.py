@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
+from unittest.mock import Mock
 
 import pytest
 
@@ -113,3 +115,71 @@ def test_refuse_git_worktree(ssm, tmp_path):
     path = nested / "link.txt"
     assert cli.main(["mint", "--expires", day_after(1).isoformat(), "--out", str(path)], client=ssm) == 1
     assert not path.exists()
+
+
+def test_check_distinguishes_unavailable_ssm_from_invalid_link(tmp_path, capsys):
+    assert cli.main(["check", "--file", str(tmp_path / "link.txt")], client=FakeSSM()) == 2
+    assert capsys.readouterr() == ("cannot check: secret unavailable\n", "")
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_write_restricts_empty_file_only_on_windows(tmp_path, monkeypatch, windows):
+    path = tmp_path / "link.txt"
+    fdopen = os.fdopen
+    events = []
+
+    def observe_stream(*args, **kwargs):
+        stream = fdopen(*args, **kwargs)
+        events.append("create")
+        write = stream.write
+
+        def record_write(value):
+            events.append("write")
+            return write(value)
+
+        stream.write = record_write
+        return stream
+
+    def restrict(argv, **kwargs):
+        assert path.is_file() and path.stat().st_size == 0
+        events.append("restrict")
+
+    runner = Mock(side_effect=restrict)
+    monkeypatch.setattr(cli, "_WINDOWS", windows)
+    monkeypatch.setattr(cli, "_windows_account", lambda: r"DOMAIN\visitor")
+    monkeypatch.setattr(cli.os, "fdopen", observe_stream)
+    monkeypatch.setattr(cli.subprocess, "run", runner)
+    cli._write_link(path, "sample")
+    if windows:
+        runner.assert_called_once_with(["icacls", str(path), "/inheritance:r", "/grant:r", r"DOMAIN\visitor:F"],
+                                       capture_output=True, timeout=15, check=True)
+        assert events == ["create", "restrict", "write"]
+    else:
+        runner.assert_not_called()
+        assert events == ["create", "write"]
+    assert path.read_text() == cli.LINK_PREFIX + "sample\n"
+
+
+def test_failed_acl_removes_empty_file(tmp_path, monkeypatch):
+    path = tmp_path / "link.txt"
+
+    def refuse(argv, **kwargs):
+        assert path.is_file() and path.stat().st_size == 0
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(cli, "_WINDOWS", True)
+    monkeypatch.setattr(cli, "_windows_account", lambda: r"DOMAIN\visitor")
+    monkeypatch.setattr(cli.subprocess, "run", refuse)
+    with pytest.raises(cli.Refused, match=r"^Could not restrict the link file to the current user\.$"):
+        cli._write_link(path, "sample")
+    assert not path.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file ACLs require Windows")
+def test_minted_file_acl_has_only_current_account(ssm, tmp_path):
+    path = tmp_path / "link.txt"
+    assert cli.main(["mint", "--expires", day_after(1).isoformat(), "--out", str(path)], client=ssm) == 0
+    listing = subprocess.run(["icacls", str(path)], capture_output=True, check=True, timeout=15,
+                             text=True, encoding="oem").stdout
+    acl = listing.split("\n\n", 1)[0].rstrip()
+    assert acl.casefold() == f"{path} {cli._windows_account()}:(F)".casefold()

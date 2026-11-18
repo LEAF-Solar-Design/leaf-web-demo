@@ -17,6 +17,7 @@ demo = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(demo)
 PARAMETER = "/stg/leaf/platform/investor-demo-secret"
 LINK_PREFIX = demo.ORIGIN + "/app#investor="
+_WINDOWS = os.name == "nt"
 
 
 class Refused(Exception):
@@ -63,6 +64,22 @@ def _output_path(path):
     return parent / path.name
 
 
+def _windows_account():
+    import ctypes
+    from ctypes import wintypes
+
+    # NameSamCompatible returns DOMAIN\user for the calling identity.
+    get_name = ctypes.windll.secur32.GetUserNameExW
+    get_name.argtypes = [ctypes.c_int, wintypes.LPWSTR, ctypes.POINTER(wintypes.ULONG)]
+    get_name.restype = ctypes.c_ubyte
+    size = wintypes.ULONG()
+    get_name(2, None, ctypes.byref(size))
+    name = ctypes.create_unicode_buffer(size.value)
+    if not get_name(2, name, ctypes.byref(size)):
+        raise OSError("Windows account lookup failed.")
+    return name.value
+
+
 def _write_link(path, token):
     # O_EXCL also refuses a final symlink and preserves any existing link file.
     try:
@@ -71,6 +88,12 @@ def _write_link(path, token):
         raise Refused("Output file exists. Move it away first.") from None
     try:
         with os.fdopen(fd, "w", encoding="ascii", newline="\n") as dest:
+            if _WINDOWS:
+                try:
+                    subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", _windows_account() + ":F"],
+                                   capture_output=True, timeout=15, check=True)
+                except Exception:
+                    raise Refused("Could not restrict the link file to the current user.") from None
             dest.write(LINK_PREFIX + token + "\n")
     except BaseException:
         path.unlink()
@@ -109,9 +132,17 @@ def main(argv=None, *, client=None):
             if day.isoformat() != args.expires or not 0 < int(expiry.timestamp()) - now <= demo.LINK_MAX_LIFETIME_S:
                 raise Refused("Expiry must be a future UTC day end within 31 days.")
             path = _output_path(args.out)
-        if client is None:
-            import boto3
-            client = boto3.client("ssm", region_name=args.region)
+        try:
+            if client is None:
+                import boto3
+                client = boto3.client("ssm", region_name=args.region)
+            if args.command != "put-secret":
+                secret = _resolve_secret(client, args.parameter)
+        except Exception:
+            if args.command == "check":
+                print("cannot check: secret unavailable")
+                return 2
+            raise
         if args.command == "put-secret":
             secret = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
             with _configured(secret):
@@ -123,7 +154,7 @@ def main(argv=None, *, client=None):
                 raise Refused("Parameter exists. Use --rotate to replace it.") from None
             print(args.parameter, result["Version"], kid)
         else:
-            with _configured(_resolve_secret(client, args.parameter)):
+            with _configured(secret):
                 if args.command == "check":
                     print("valid until", _check(args.file, now))
                 else:

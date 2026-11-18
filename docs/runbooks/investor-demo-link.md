@@ -11,8 +11,11 @@ The identity and route contract is in [AUTH.md, section 12](../../contract/AUTH.
    repository root, create the dedicated SSM SecureString.
 
    ```sh
-   python scripts/investor_demo_link.py put-secret --parameter /stg/leaf/platform/investor-demo-secret --region us-east-1
+   python scripts/investor_demo_link.py put-secret --region us-east-1
    ```
+
+   Git Bash on Windows rewrites an argument beginning with `/` into a file
+   path, so either omit `--parameter` or set `MSYS_NO_PATHCONV=1`.
 
 2. In the staging Terraform configuration, mirror the existing
    `service-browser-session-key` wiring in `leaf_platform.tf`. Set
@@ -32,8 +35,9 @@ and `LEAF_AUTH_LIVE=1` requirements, and the absence of the investor secret.
 
 ## Mint and check
 
-Use a private directory outside every git working tree. On Windows, restrict
-the directory's ACL to the operator. This shell example chooses a UTC date
+Use a private directory outside every git working tree and not in a synced folder
+(OneDrive, Dropbox). On Windows, the tool restricts the link file to the
+current user before writing the link. This shell example chooses a UTC date
 seven days from today. The tool creates a new file and prints its path, key ID
 and expiry. It refuses to overwrite an existing file.
 
@@ -44,15 +48,24 @@ python scripts/investor_demo_link.py mint --expires "$expiry" --out "$HOME/.leaf
 python scripts/investor_demo_link.py check --file "$HOME/.leaf-investor/staging-link.txt"
 ```
 
-A successful check prints the expiry in UTC. It verifies the token against
-the current SSM value locally. The staging walk also checks the deployed app.
+`check` verifies the token locally against the current SSM value. It prints
+`valid until` with the UTC expiry (exit 0), `invalid` (exit 1), or
+`cannot check: secret unavailable` (exit 2). For exit 2, restore access to
+SSM and retry. The staging walk also checks the deployed app.
 Share the link privately with its intended visitors. Keep it out of tickets,
 repositories, screen recordings and command lines.
 
+Mail gateways that rewrite or pre-open links, including Safe Links, Proofpoint
+and Mimecast, copy the whole URL including its fragment into their logs and may
+open it. The link is a shared, view-only credential by design. Rotate the
+secret if a gateway has retained a link that needs to be revoked.
+
 ## Visitor experience and limits
 
-The console removes the fragment and exchanges it for a session. Existing
-human and service sessions take precedence. Visitors can inspect the sample
+On a full page load the console removes the fragment and exchanges the link
+for a session. Pasting the link into an open tab on the same page forces a
+full page load. Existing human and service sessions take precedence.
+Visitors can inspect the sample
 drawing, catalog and demo workspace. Tool runs, uploads, edits, builds and
 access to other drawings or orgs are refused. Sign-out ends the local visit.
 Sessions last up to two hours, bounded by link expiry. Links expire at
@@ -63,6 +76,9 @@ Sessions last up to two hours, bounded by link expiry. Links expire at
 * Rotate with `python scripts/investor_demo_link.py put-secret --rotate` and
   replace every staging app task to load the new SSM version. Each updated task
   refuses old links and live sessions signed with the previous key.
+  Wait until every task has been replaced before minting a link or running
+  the walk. During a rolling replacement, old and new tasks use different
+  keys, so fresh links fail at random depending on which task receives them.
 * Set the enable flag to `0` in both lists and replace all tasks. Each updated
   task refuses exchanges and previously issued sessions while disabled.
 * Set the binding to `revoked` or the org to a non-active status to refuse new
@@ -77,5 +93,6 @@ LEAF_E2E_INVESTOR_LINK_FILE="$HOME/.leaf-investor/staging-link.txt" npm --prefix
 ```
 
 Use a fresh link and the fixed staging origin. The report attaches only the
-paths of forbidden API responses during boot. Repeated walks can hit the
-per-process exchange limit. Individual link holders cannot be revoked separately.
+paths of forbidden API responses during boot. Each walk makes three exchanges.
+Repeated walks can hit the per-client limit of 10 exchanges per minute per
+address. Individual link holders cannot be revoked separately.

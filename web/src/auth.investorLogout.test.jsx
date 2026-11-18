@@ -13,8 +13,8 @@ afterEach(() => {
   sessionStorage.clear()
 })
 
-const cases = [[true, false], [true, true], [false, true]]
-it.each(cases)('clears drafts and ends the right session (investor=%s, controller=%s)', async (investor, viaController) => {
+const cases = [[true, false, true], [true, true, true], [false, true, true], [true, false, false]]
+it.each(cases)('clears drafts and ends the right session (investor=%s, controller=%s, hasToken=%s)', async (investor, viaController, hasToken) => {
   vi.resetModules()
   for (const key of ['DOMAIN', 'CLIENT_ID', 'AUDIENCE']) vi.stubEnv('VITE_AUTH0_' + key, 'configured')
   const sdkLogout = vi.fn()
@@ -29,7 +29,8 @@ it.each(cases)('clears drafts and ends the right session (investor=%s, controlle
     get(target, key) { return key === 'location' ? { origin, reload } : Reflect.get(target, key, target) },
   }))
   const payload = btoa(JSON.stringify({ iss: investor ? INVESTOR_ISSUER : 'https://human.auth0.com/' })).replace(/=+$/, '')
-  localStorage.setItem('leaf.jwt', 'e30.' + payload + '.c2ln')
+  if (hasToken) localStorage.setItem('leaf.jwt', 'e30.' + payload + '.c2ln')
+  if (investor) localStorage.setItem('leaf.investorDemo.org', 'workspace')
   const draft = composerDraftKey('account:visitor', '/app')
   localStorage.setItem(draft, 'private draft')
   localStorage.setItem('leaf.inflightAuthor.v1', 'private pointer')
@@ -48,6 +49,7 @@ it.each(cases)('clears drafts and ends the right session (investor=%s, controlle
   expect(localStorage.getItem('unrelated')).toBe('keep')
   if (investor) {
     expect(localStorage.getItem('leaf.org_id')).toBeNull()
+    expect(localStorage.getItem('leaf.investorDemo.org')).toBeNull()
     expect(createAuth0Client).not.toHaveBeenCalled()
     expect(sdkLogout).not.toHaveBeenCalled()
     expect(reload).toHaveBeenCalledOnce()

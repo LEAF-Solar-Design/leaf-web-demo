@@ -4,6 +4,9 @@ export const INVESTOR_LINK_PATTERN = /^v1\.[0-9a-f]{8}\.[1-9][0-9]{9}\.[1-9][0-9
 // Executed by the HTML parser before the application or its telemetry loads.
 export const INVESTOR_LINK_CAPTURE_SOURCE = `(function () {
   try {
+    window.addEventListener('hashchange', function () {
+      if (location.hash.indexOf('#investor=') === 0) location.reload();
+    });
     var hash = location.hash;
     if (hash.indexOf('#investor=') !== 0) return;
     history.replaceState(history.state, '', location.pathname + location.search);

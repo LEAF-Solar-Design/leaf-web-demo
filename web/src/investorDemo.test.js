@@ -71,6 +71,16 @@ it('does nothing when the page had no link', async () => {
   expect(consumeInvestorNotice()).toBe(true)
 })
 
+it('uses the supplied link and only checks the window when the option is absent', async () => {
+  capture('')
+  try {
+    expect(await boot({ link: undefined })).toBe('none')
+    expect(await boot({ link })).toBe('signed-in')
+    expect(window[INVESTOR_LINK_GLOBAL]).toBe('')
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  } finally { delete window[INVESTOR_LINK_GLOBAL] }
+})
+
 it.each(['human', 'service'])('preserves an existing %s session', async mode => {
   capture()
   if (mode === 'human') localStorage.setItem('leaf.jwt', 'existing-human')
@@ -84,6 +94,8 @@ it.each(['human', 'service'])('preserves an existing %s session', async mode => 
 it.each(['malformed', 401, 429, 503, 'network', 'wrong issuer', 'bad org', 'expired', 'foreign API'])(
   'removes a stale investor session and records one notice on %s', async failure => {
     localStorage.setItem('leaf.jwt', jwt(INVESTOR_ISSUER, 'stale'))
+    localStorage.setItem('leaf.org_id', org)
+    localStorage.setItem('leaf.investorDemo.org', org)
     capture(failure === 'malformed' ? '' : link)
     const value = body()
     if (failure === 'wrong issuer') value.session = jwt('other')
@@ -96,6 +108,8 @@ it.each(['malformed', 401, 429, 503, 'network', 'wrong issuer', 'bad org', 'expi
     expect(await boot(failure === 'foreign API' ? { apiBase: 'https://other.invalid' } : {})).toBe('failed')
     expect(fetchImpl).toHaveBeenCalledTimes(['malformed', 'foreign API'].includes(failure) ? 0 : 1)
     expect(localStorage.getItem('leaf.jwt')).toBeNull()
+    expect(localStorage.getItem('leaf.org_id')).toBeNull()
+    expect(localStorage.getItem('leaf.investorDemo.org')).toBeNull()
     expect(consumeInvestorNotice()).toBe(true)
     expect(consumeInvestorNotice()).toBe(false)
   })
@@ -123,7 +137,7 @@ it.each([false, true])('stores only the session and org after a single credentia
     method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'omit', cache: 'no-store',
     redirect: 'error', signal: expect.any(AbortSignal), body: JSON.stringify({ token: link }),
   })
-  expect({ ...localStorage }).toEqual({ 'leaf.jwt': session, 'leaf.org_id': org })
+  expect({ ...localStorage }).toEqual({ 'leaf.jwt': session, 'leaf.org_id': org, 'leaf.investorDemo.org': org })
   expect(sessionStorage.length).toBe(0)
 })
 

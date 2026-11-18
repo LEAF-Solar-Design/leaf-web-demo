@@ -3390,7 +3390,8 @@ def build_suites() -> List[Suite]:
         Suite("auth0-staging-audience-check", "scripts test_auth0_staging_audience.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_auth0_staging_audience.py"), 14),
         Suite("scripts-investor-demo-link", "staging investor link provisioning and rotation",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_investor_demo_link.py"), 6),
+              "pytest", SCRIPTS_DIR, _py_pytest("test_investor_demo_link.py"), 11 if os.name == "nt" else 10,
+              allowed_skip_reasons=(r"Windows file ACLs require Windows",)),
         # 33 cases: 19 original functions (27 parametrized cases), plus three
         # dry-run plans, two digest round trips and the CI deploy contract. No network.
         Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",

@@ -15,7 +15,7 @@
 
 import { track, flushNow } from './telemetry.js'
 import { clearComposerDrafts } from './lib/composerDraft.js'
-import { isInvestorSession } from './investorDemo.js'
+import { clearInvestorWorkspace, INVESTOR_ORG_KEY, isInvestorSession } from './investorDemo.js'
 import { serviceSession, serviceState, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
 import {
   stageCheckoutAuthReturn,
@@ -283,7 +283,10 @@ export function isSignedIn() {
 // the app origin -- which comes back up in the calm signed-out gate.
 export async function logout(hint) {
   const service = serviceState()
-  const investor = !service.mode && (hint?.investor === true || isInvestorSession())
+  let investor = !service.mode && (hint?.investor === true || isInvestorSession())
+  if (!service.mode && !investor) {
+    try { investor = !localStorage.getItem(JWT_KEY) && !!localStorage.getItem(INVESTOR_ORG_KEY) } catch { /* storage unavailable */ }
+  }
   const jointHeaders = service.mode ? serviceHeaders(API_BASE) : null
   const serviceStorage = service.mode ? authorityStorage() : null
   for (const listener of beforeLogoutListeners) {
@@ -304,7 +307,7 @@ export async function logout(hint) {
   try {
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
-    if (investor) localStorage.removeItem('leaf.org_id')
+    if (investor) clearInvestorWorkspace(localStorage)
   } catch { /* ignore */ }
   clearComposerDrafts()
   if (investor) {

@@ -58,8 +58,13 @@ test('a fresh visitor reaches the signed-in console within five seconds', async 
     const url = new URL(response.url())
     return url.origin === DEFAULT_STAGING_BASE_URL && url.pathname === '/api/session/identity' && response.status() === 200
   }, { timeout: 5000 })
+  const sample = page.waitForResponse(response => {
+    const url = new URL(response.url())
+    return url.origin === DEFAULT_STAGING_BASE_URL && url.pathname === '/api/session'
+      && url.searchParams.get('dwg') === 'rooftop_demo' && response.request().method() === 'GET' && response.status() === 200
+  })
   try {
-    await Promise.all([identity, openLink(page, token),
+    await Promise.all([identity, sample, openLink(page, token),
       expect(page.getByText('View-only demo', { exact: true })).toBeVisible({ timeout: 5000 })])
     const address = new URL(page.url())
     expect(address.origin === DEFAULT_STAGING_BASE_URL && address.pathname === '/app').toBe(true)
@@ -81,11 +86,19 @@ test('a fresh visitor reaches the signed-in console within five seconds', async 
 
 test('a modified link opens the signed-out gate', async ({ page }) => {
   const modified = token.slice(0, -1) + (token.endsWith('A') ? 'Q' : 'A')
-  await openLink(page, modified)
-  await expect(page.getByText('This demo link has expired or is no longer valid. Sign in to continue.', {
-    exact: true,
-  })).toBeVisible()
-  expect(await page.evaluate(() => localStorage.getItem('leaf.jwt') === null)).toBe(true)
+  try {
+    await openLink(page, modified)
+    const gate = page.getByText('This demo link has expired or is no longer valid. Sign in to continue.', {
+      exact: true,
+    })
+    await expect.poll(() => gate.isVisible()).toBe(true)
+    const address = page.url()
+    expect(address.includes('#investor') || address.includes(modified) || address.includes(token)).toBe(false)
+    expect(await page.evaluate(() => localStorage.getItem('leaf.jwt') === null)).toBe(true)
+  } finally {
+    // Failure snapshots can include the address if fragment capture regresses.
+    await page.close()
+  }
 })
 
 async function request(path, init) {
@@ -100,6 +113,15 @@ test('the session refuses unrelated objects, writes and other drawings', async (
   const { session } = await exchange.json()
   expect(isInvestorToken(session)).toBe(true)
   const headers = { Authorization: `Bearer ${session}` }
+  const otherOrg = randomUUID()
+  const org = await request('/api/orgs/' + otherOrg, { headers })
+  expect(org.status).toBe(404)
+  expect((await org.text()).includes(otherOrg)).toBe(false)
+  const projects = await request('/api/projects', { headers: { ...headers, 'X-Org-Id': otherOrg } })
+  expect(projects.status).toBe(200)
+  const body = await projects.json()
+  expect(JSON.stringify(body).includes(otherOrg)).toBe(false)
+  expect(Array.isArray(body.projects) && body.projects.length === 0).toBe(true)
   for (const [method, path] of [
     ['GET', '/api/projects/' + randomUUID()], ['GET', '/api/jobs/' + randomUUID()],
     ['POST', '/api/run'], ['POST', '/api/orgs'], ['GET', '/api/session?dwg=not-the-sample'],
@@ -112,4 +134,20 @@ test('the session refuses unrelated objects, writes and other drawings', async (
 test('the exchange token cannot serve as an API bearer', async () => {
   const result = await request('/api/session/identity', { headers: { Authorization: `Bearer ${token}` } })
   expect(result.status).toBe(401)
+})
+
+test('the app document captures the link before other executable scripts', async ({ page }) => {
+  const response = await request('/app')
+  expect(response.status).toBe(200)
+  const order = await page.evaluate(html => {
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const scripts = Array.from(doc.scripts)
+    const capture = scripts.find(script => !script.hasAttribute('src') && script.textContent.includes('__leafInvestorLink'))
+    if (!capture || !doc.head.contains(capture)) return false
+    const first = scripts.find(script => script.hasAttribute('src')
+      ? !script.hasAttribute('async') && !script.hasAttribute('defer')
+      : !/(?:\/|\+)json$/i.test(script.type.split(';')[0].trim()))
+    return first === capture
+  }, await response.text())
+  expect(order).toBe(true)
 })

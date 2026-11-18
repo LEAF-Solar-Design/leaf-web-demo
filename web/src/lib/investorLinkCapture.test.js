@@ -5,10 +5,11 @@ const capture = new Function('window', 'location', 'history', INVESTOR_LINK_CAPT
 const token = 'v1.1234abcd.1800000000.1800000050.' + 'a'.repeat(43)
 
 function run(hash, replaceState = vi.fn()) {
-  const win = {}
+  const win = new EventTarget()
+  const location = { pathname: '/app', search: '?keep=1', hash, reload: vi.fn() }
   const history = { state: { visit: 3 }, replaceState }
-  capture(win, { pathname: '/app', search: '?keep=1', hash }, history)
-  return { win, history }
+  capture(win, location, history)
+  return { win, history, location }
 }
 
 describe('pre-bundle investor link capture', () => {
@@ -32,5 +33,15 @@ describe('pre-bundle investor link capture', () => {
   it('swallows a history failure and publishes nothing', () => {
     const { win } = run('#investor=' + token, () => { throw new Error('blocked') })
     expect(takeInvestorLink(win)).toBeUndefined()
+  })
+
+  it('reloads only when a same-document navigation opens an investor link', () => {
+    const { win, location } = run('')
+    location.hash = '#pricing'
+    win.dispatchEvent(new Event('hashchange'))
+    expect(location.reload).not.toHaveBeenCalled()
+    location.hash = '#investor=' + token
+    win.dispatchEvent(new Event('hashchange'))
+    expect(location.reload).toHaveBeenCalledOnce()
   })
 })
