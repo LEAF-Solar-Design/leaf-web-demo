@@ -282,3 +282,29 @@ def irradiance_voltage_quality(weather, irradiance_w_m2, model, **conditions):
         return "FAIL"
     sample = dict(weather, cell_temp=ambient + rise * irradiance_w_m2, unit="C")
     return weather_quality(sample, **conditions)
+
+
+def interval_weather_quality(window, observations, rule, reported):
+    """Mean of piecewise constant readings over an exactly covered observation window."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if rule != "duration-weighted-mean" or not isinstance(window, (list, tuple)) or len(window) != 2:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, window)) or window[0] >= window[1] or not finite_measure(reported):
+        return "INCOMPLETE"
+    if not isinstance(observations, list) or not observations:
+        return "INCOMPLETE"
+    for row in observations:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+    cursor = window[0]
+    total = Fraction(0)
+    for start, end, value in sorted(observations, key=lambda r: r[0]):
+        if start != cursor or not start < end <= window[1]:
+            return "INCOMPLETE"
+        total += (Fraction(str(end)) - Fraction(str(start))) * Fraction(str(value))
+        cursor = end
+    if cursor != window[1]:
+        return "INCOMPLETE"
+    mean = total / (Fraction(str(window[1])) - Fraction(str(window[0])))
+    return "PASS" if isclose(reported, mean, rel_tol=1e-9, abs_tol=1e-12) else "FAIL"

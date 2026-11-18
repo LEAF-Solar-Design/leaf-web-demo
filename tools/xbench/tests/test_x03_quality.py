@@ -864,3 +864,27 @@ def test_reactive_dispatch_inside_ten_kva_nameplate(condition, point, expected):
     assert grade(5, -4.1) == "FAIL"
     assert grade(5, 6) == "PASS"
     assert grade(5, 6, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("voltage,band,minimum,maximum", [
+    (0.45, (0.3, 0.5), 1, 3), (0.82, (0.8, 0.9), 4, 6), (1.2, (1.1, 1.3), 2, 5),
+])
+def test_voltage_excursion_trips_in_recorded_window(voltage, band, minimum, maximum):
+    from benches.x03_quality import voltage_ride_quality
+    profile = dict(revision="grid-2", bands=[(*band, minimum, maximum)])
+    end = maximum + 2
+    def grade(trip, covered):
+        return voltage_ride_quality((0, end), [(0, trip, voltage, True), (trip, covered, voltage, False)], "grid-2", profile)
+    assert grade(minimum, end) == grade(maximum, end) == "PASS"
+    assert grade(minimum/2, end) == grade(maximum+1, end) == "FAIL"
+    assert grade(minimum, end-1) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("category,v,a", [("resistive",48,10), ("inductive",125,4), ("pv",600,15)])
+def test_break_dc_load_under_recorded_conditions(category, v, a):
+    from benches.x03_quality import dc_load_break_quality as grade
+    device = dict(revision="r", load_break=True, dc_ratings={category: (v, a)})
+    assert grade("r", device, category, v, a) == "PASS"
+    assert grade("r", device, category, v, a+1) == "FAIL"
+    assert grade("r", dict(device, load_break=False), category, v, a) == "FAIL"
+    assert grade("r", dict(device, dc_ratings={}), category, v, a) == "INCOMPLETE"

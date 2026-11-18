@@ -1302,9 +1302,13 @@ def bypass_string_quality(substrings, current, revision, curves, reported_watts)
 
 
 def frequency_ride_quality(window, intervals, envelope):
-    """Grade contiguous [start,end) frequency and connection records from excursion onset.
+    return _band_duration_quality(window, intervals, envelope)
 
-    Each half-open frequency band specifies minimum and maximum connected seconds
+
+def _band_duration_quality(window, intervals, envelope):
+    """Grade contiguous [start,end) measurement and connection records from excursion onset.
+
+    Each half-open measurement band specifies minimum and maximum connected seconds
     per continuous visit. A trip at either time boundary is allowed.
     """
     if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(map(finite_measure, window)):
@@ -1322,12 +1326,12 @@ def frequency_ride_quality(window, intervals, envelope):
     for row in intervals:
         if not isinstance(row, (tuple, list)) or len(row) != 4:
             return "INCOMPLETE"
-        start, stop, hz, connected = row
-        if not all(map(finite_measure, (start, stop, hz))) or type(connected) is not bool:
+        start, stop, value, connected = row
+        if not all(map(finite_measure, (start, stop, value))) or type(connected) is not bool:
             return "INCOMPLETE"
         if start != cursor or not start < stop <= end:
             return "INCOMPLETE"
-        matches = [b for b in envelope if b[0] <= hz < b[1]]
+        matches = [b for b in envelope if b[0] <= value < b[1]]
         if len(matches) != 1:
             return "INCOMPLETE"
         band = matches[0]
@@ -1544,3 +1548,29 @@ def reactive_envelope_quality(revision, curves, condition, p_kw, q_kvar):
             t = (power - left) / (right - left)
             return "PASS" if lo + t * (lo2 - lo) <= q <= hi + t * (hi2 - hi) else "FAIL"
     return "FAIL"
+
+
+def voltage_ride_quality(window, intervals, revision, profile):
+    """Grade a voltage excursion in the same units as its pinned duration bands."""
+    if not revision or not isinstance(profile, dict) or profile.get("revision") != revision:
+        return "INCOMPLETE"
+    return _band_duration_quality(window, intervals, profile.get("bands"))
+
+
+def dc_load_break_quality(revision, device, category, voltage_v, load_a):
+    """Grade an interruption under the circuit's specified DC utilization category."""
+    if not revision or not isinstance(device, dict) or device.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (voltage_v, load_a))) or voltage_v <= 0 or load_a <= 0:
+        return "INCOMPLETE"
+    if device.get("load_break") is False:
+        return "FAIL"
+    ratings = device.get("dc_ratings")
+    if device.get("load_break") is not True or not isinstance(ratings, dict) or not isinstance(category, str):
+        return "INCOMPLETE"
+    rating = ratings.get(category)
+    if rating is False:
+        return "FAIL"
+    if not isinstance(rating, (tuple, list)) or len(rating) != 2 or not all(map(finite_measure, rating)) or min(rating) <= 0:
+        return "INCOMPLETE"
+    return "PASS" if voltage_v <= rating[0] and load_a <= rating[1] else "FAIL"

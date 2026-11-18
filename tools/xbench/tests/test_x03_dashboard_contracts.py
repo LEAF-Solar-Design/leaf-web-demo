@@ -379,3 +379,15 @@ def test_queue_report_excludes_abandoned_requests(served, left):
     assert abandonment_quality(arrivals, starts, exits, set(arrivals)) == "FAIL"
     del exits[left[0]]
     assert abandonment_quality(arrivals, starts, exits, set(served)) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("unit,edges", [("seconds",[0,2,4]), ("watts",[10,20,50]), ("metres",[-2,0,3])])
+def test_merge_disjoint_recorded_histograms(unit, edges):
+    from benches.x03_dashboard_oracle import histogram_merge_quality as grade
+    a = dict(unit=unit,edges=edges,sample_ids=["a","b"],counts=[2,0])
+    b = dict(unit=unit,edges=edges,sample_ids=["c"],counts=[0,1])
+    assert grade([a,b], [2,1]) == "PASS"
+    assert grade([a,b], [1,2]) == "FAIL"
+    for change in (dict(edges=[edges[0],edges[1]+1,edges[2]]), dict(unit="other"), dict(sample_ids=["a"])):
+        assert grade([a,dict(b,**change)], [2,1]) == "FAIL"
+    assert grade([a,dict(b,sample_ids=None)], [2,1]) == "INCOMPLETE"

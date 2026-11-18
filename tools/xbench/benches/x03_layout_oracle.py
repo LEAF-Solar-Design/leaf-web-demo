@@ -684,3 +684,18 @@ def eccentric_anchor_quality(anchors_xy, limits, fx, fy, moment):
         if sx*sx + sy*sy > Fraction(str(limits[key]))**2:
             return "FAIL"
     return "PASS"
+
+
+def resonance_quality(excitation_hz, modes_hz, separation_hz):
+    """Require the recorded absolute frequency separation for every excitation/mode pair."""
+    if not finite_measure(separation_hz) or separation_hz <= 0:
+        return "INCOMPLETE"
+    for values in (excitation_hz, modes_hz):
+        if not isinstance(values, (tuple, list)) or not values or not all(finite_measure(v) and v > 0 for v in values):
+            return "INCOMPLETE"
+    minimum = Fraction(str(separation_hz))
+    for excitation in excitation_hz:
+        for mode in modes_hz:
+            if abs(Fraction(str(mode)) - Fraction(str(excitation))) < minimum:
+                return "FAIL"
+    return "PASS"
