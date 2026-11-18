@@ -529,3 +529,48 @@ def overcurrent_quality(design_amps, device_amps, conductor_ampacity, equipment_
     if not all(finite_measure(a) and a > 0 for a in values):
         return "FAIL"
     return "PASS" if design_amps <= device_amps <= min(conductor_ampacity, equipment_limit) else "FAIL"
+
+
+def tray_capacity_quality(ratings, occupancy):
+    """Compare the sum of recorded cable loads on each segment to its rating."""
+    if not isinstance(ratings, dict) or not ratings or not isinstance(occupancy, dict):
+        return "INCOMPLETE"
+    if ratings.keys() - occupancy.keys():
+        return "INCOMPLETE"
+    if occupancy.keys() - ratings.keys():
+        return "FAIL"
+    for segment, rating in ratings.items():
+        loads = occupancy[segment]
+        if rating is None or not isinstance(loads, dict) or None in loads.values():
+            return "INCOMPLETE"
+        if not finite_measure(rating) or rating <= 0 or not all(finite_measure(v) and v > 0 for v in loads.values()):
+            return "FAIL"
+        if sum(Fraction(str(v)) for v in loads.values()) > Fraction(str(rating)):
+            return "FAIL"
+    return "PASS"
+
+
+def bonding_quality(equipment, reference, bonds):
+    """Trace recorded intact bonds from the reference to every inventoried item."""
+    if not isinstance(equipment, list) or not equipment or not isinstance(reference, str) or not isinstance(bonds, list):
+        return "INCOMPLETE"
+    if not all(isinstance(item, str) and item for item in equipment) or not reference:
+        return "INCOMPLETE"
+    network = {node: set() for node in [reference, *equipment]}
+    for bond in bonds:
+        if not isinstance(bond, dict) or type(bond.get("intact")) is not bool:
+            return "INCOMPLETE"
+        a, b = bond.get("a"), bond.get("b")
+        if not isinstance(a, str) or not isinstance(b, str):
+            return "INCOMPLETE"
+        if a not in network or b not in network or a == b:
+            return "FAIL"
+        if bond["intact"]:
+            network[a].add(b)
+            network[b].add(a)
+    reached, pending = {reference}, [reference]
+    while pending:
+        unseen = network[pending.pop()] - reached
+        reached.update(unseen)
+        pending.extend(unseen)
+    return "PASS" if reached == network.keys() else "FAIL"

@@ -183,3 +183,40 @@ def test_deleted_drawing_requires_explicit_recreation(drawing,start,late):
     assert tombstone_replay_quality(events, set(), snapshots) == "FAIL"
     assert tombstone_replay_quality(events, grants, [*snapshots[:2], [drawing], *snapshots[3:]]) == "FAIL"
     assert tombstone_replay_quality(events, None, snapshots) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("selected, status, successor, rating, approval, expected", [
+    ("old", "active", None, 10, True, "FAIL"),
+    ("new", "withdrawn", "old", 10, True, "FAIL"),
+    ("new", "active", None, 15, True, "FAIL"),
+    ("new", "active", None, 10, False, "FAIL"),
+    ("new", "active", None, None, True, "INCOMPLETE"),
+    ("new", "active", None, 10, True, "PASS"),
+], ids=["reject-withdrawn-part", "resolve-cycle", "check-replacement-capacity",
+        "missing-approval", "missing-rating", "approved-compatible-successor"])
+def test_substitution(selected, status, successor, rating, approval, expected):
+    from benches.x03_catalog_oracle import replacement_quality
+    parts = {"old": dict(status="withdrawn", replacement="new"),
+             "new": dict(status=status, replacement=successor, ratings={"amps": rating})}
+    approvals = [["old", "new"], ["new", "old"]] if approval else []
+    assert replacement_quality(parts, "old", selected, approvals, {"amps": (9, 12)}) == expected
+
+
+@pytest.mark.parametrize("scenario, expected", [
+    ("partial-retry", "PASS"), ("omitted", "INCOMPLETE"), ("wrong-revision", "FAIL"),
+    ("duplicate-effect", "FAIL"), ("pending", "INCOMPLETE"),
+])
+def test_batch_item_delivery(scenario, expected):
+    from benches.x03_issue_delivery_oracle import batch_ack_quality
+    items = [dict(item=k, revision="2") for k in ("rack", "panel")]
+    acks = [dict(items[1], state="pending"), *(dict(item, state="accepted") for item in items)]
+    effects = [dict(item, state="committed") for item in items]
+    if scenario == "omitted":
+        effects.pop()
+    if scenario == "pending":
+        acks.pop()
+    if scenario == "wrong-revision":
+        effects[1]["revision"] = "1"
+    if scenario == "duplicate-effect":
+        effects.append(effects[1].copy())
+    assert batch_ack_quality(items, acks, effects) == expected

@@ -105,3 +105,16 @@ def test_concurrent_run_accounting(spans, elapsed, worker):
     assert concurrent_time_quality(spans, worker, "worker") == "PASS"
     assert concurrent_time_quality(spans, worker, "elapsed") == "FAIL"
     assert concurrent_time_quality(spans, elapsed) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("samples, percentile, policy, reported, verdict", [
+    ([4, 1, 9, 4], 75, "nearest-rank", 4, "PASS"),
+    ([10, 2], 25, "linear", 4, "PASS"),
+    ([8], 99, "linear", 8, "PASS"),
+    ([10, 2], 25, "nearest-rank", 4, "FAIL"),
+    ([10, 2], 25, None, 2, "INCOMPLETE"),
+], ids=["rank-tied-latencies", "interpolate-two-samples", "report-single-sample",
+        "reject-wrong-rule", "require-declared-policy"])
+def test_latency_percentiles(samples, percentile, policy, reported, verdict):
+    from benches.x03_dashboard_oracle import latency_percentile_quality
+    assert latency_percentile_quality(samples, percentile, reported, policy) == verdict
