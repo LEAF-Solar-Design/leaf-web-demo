@@ -1,13 +1,13 @@
 import React from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getArloReviews, openProject, proposePlatformChange, saveArloReview } from '../api.js'
+import { getArloJob, getArloReviews, proposePlatformChange, saveArloReview } from '../api.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import ArloProjectJob from './ArloProjectJob.jsx'
 import CustomizePanel from './CustomizePanel.jsx'
 
 vi.mock('../api.js', () => ({
-  getArloReviews: vi.fn(), saveArloReview: vi.fn(), openProject: vi.fn(),
+  getArloReviews: vi.fn(), saveArloReview: vi.fn(), getArloJob: vi.fn(),
   getPlatformChange: vi.fn(), landPlatformChange: vi.fn(), mergePlatformChange: vi.fn(), proposePlatformChange: vi.fn(),
 }))
 
@@ -49,13 +49,15 @@ describe('readable errors on proposal and change screens', () => {
   })
 
   it('replaces project opening transport errors with a service message', async () => {
-    openProject.mockRejectedValueOnce(new Error(`GET /api/projects/${context.project_id}/open -> 500`))
+    getArloJob.mockRejectedValueOnce(new Error(`GET /api/projects/${context.project_id}/arlo-jobs/${context.job_id} -> 500`))
     render(<ArloProjectJob project={context} job={{ job_id: context.job_id }} />)
     fireEvent.click(screen.getByRole('button', { name: 'Open feeder proposal' }))
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('The service had a temporary problem. Try again.')
     expect(alert).not.toHaveTextContent(/GET|\/api\/|500/)
     expect(screen.queryByRole('region', { name: 'Saved feeder proposal' })).not.toBeInTheDocument()
+    expect(getArloJob).toHaveBeenCalledTimes(1)
+    expect(getArloJob).toHaveBeenCalledWith({ org_id: context.org_id, project_id: context.project_id, job_id: context.job_id })
   })
 
   it('humanizes the Customize panel fallback when proposing fails', async () => {
