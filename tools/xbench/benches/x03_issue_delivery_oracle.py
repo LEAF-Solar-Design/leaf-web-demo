@@ -5,10 +5,10 @@ def delivery_quality(attempts, effects):
         if not isinstance(rows, list) or not rows:
             return "INCOMPLETE"
         for row in rows:
-            fields = ("drawing", "revision", "payload_digest")
+            fields = ("drawing", "revision", "payload_digest", "destination")
             if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
                 return "INCOMPLETE"
-            key = row["drawing"], row["revision"]
+            key = row["destination"], row["drawing"], row["revision"]
             digest = row["payload_digest"]
             if key in index and (unique or index[key] != digest):
                 return "FAIL"

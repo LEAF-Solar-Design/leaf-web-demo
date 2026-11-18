@@ -10,7 +10,7 @@ def handle_set(items):
     return {int(h, 16) for h in items}
 
 
-def selection_quality(saved, reverted, exports, added, removed):
+def selection_quality(saved, reverted, exports, added, removed, *, inventory=None):
     if not isinstance(exports, (list, tuple)) or len(exports) != 2:
         return "INCOMPLETE"
     rows = [saved, reverted, *exports]
@@ -25,6 +25,15 @@ def selection_quality(saved, reverted, exports, added, removed):
     if len({(r["drawing"], r["version"]) for r in rows}) != 1:
         return "FAIL"
     if any(a["rule_revision"] != b["rule_revision"] for a, b in zip(rows[:2], exports)):
+        return "FAIL"
+    if not isinstance(inventory, dict) or not inventory.get("drawing") or not inventory.get("version"):
+        return "INCOMPLETE"
+    if (inventory["drawing"], inventory["version"]) != (saved["drawing"], saved["version"]):
+        return "FAIL"
+    live = handle_set(inventory.get("live_handles"))
+    if live is None:
+        return "INCOMPLETE"
+    if any(not handles.issubset(live) for handles in sets):
         return "FAIL"
     before, after = sets[:2]
     return "PASS" if (sets[:2] == sets[2:] and after-before == additions

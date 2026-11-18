@@ -58,4 +58,8 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
         return "FAIL"
     except (OSError, NotImplementedError, RuntimeError):
         return "INCOMPLETE"
+    for key in seen:
+        parts = key.split("/")
+        if any("/".join(parts[:end]) in files for end in range(1, len(parts))):
+            return "FAIL"
     return "PASS" if set(expected) == files else "FAIL"

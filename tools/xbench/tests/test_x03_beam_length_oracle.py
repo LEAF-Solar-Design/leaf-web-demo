@@ -47,3 +47,20 @@ def test_polyline_beams(closed, bulge, expected):
     assert beam_length_quality(space,"m",{"0":expected}) == "PASS"
     line.set_points([(0,0,float("nan")),(3,4,0)],format="xyb")
     assert beam_length_quality(space,"m",{"0":expected}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("scale,angle", [(1,90),(2,45),(3,180)])
+def test_nested_beam_lengths(scale,angle):
+    doc = pytest.importorskip("ezdxf").new()
+    beam = doc.blocks.new("part")
+    beam.add_line((1,1),(4,5))
+    frame = doc.blocks.new("frame")
+    frame.add_blockref("part",(7,8),dxfattribs={"rotation":angle}).set_scale(scale)
+    space = doc.modelspace()
+    outer = space.add_blockref("frame",(10,20),dxfattribs={"layer":"upper"}).set_scale(2)
+    assert beam_length_quality(space,"m",{"upper":10*scale}) == "PASS"
+    outer.dxf.xscale = 4
+    assert beam_length_quality(space,"m",{"upper":10*scale}) == "INCOMPLETE"
+    outer.set_scale(2)
+    beam.add_blockref("frame",(0,0))
+    assert beam_length_quality(space,"m",{"upper":10*scale}) == "INCOMPLETE"

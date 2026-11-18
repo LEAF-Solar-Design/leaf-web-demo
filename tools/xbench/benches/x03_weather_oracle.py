@@ -2,9 +2,14 @@
 from math import isfinite, isclose
 
 
-def weather_quality(weather, *, as_of, max_age, voc_at_25, coefficient_per_c, modules, reported):
+def weather_quality(weather, *, site=None, station=None, as_of, max_age, voc_at_25, coefficient_per_c, modules, reported):
     if not isinstance(weather, dict) or any(weather.get(k) is None for k in ("unit","cell_temp","timestamp")):
         return "INCOMPLETE"
+    location = (weather.get("site"), weather.get("station"))
+    if not all(isinstance(s, str) and s.strip() for s in (*location, site, station)):
+        return "INCOMPLETE"
+    if location != (site, station):
+        return "FAIL"
     values = (weather["timestamp"], weather["cell_temp"], as_of, max_age, voc_at_25, coefficient_per_c, reported)
     try:
         values = tuple(float(x) if type(x) in (float, int) else float("nan") for x in values)

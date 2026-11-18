@@ -92,3 +92,17 @@ def bundled_route_quality(routes, endpoints, trunk, *, min_shared, max_detour):
             return "FAIL"
         common = common.intersection(route)
     return "PASS" if common.length >= min_shared else "FAIL"
+
+
+def clearance_quality(route, aisle, arrays, clearance):
+    from math import isfinite
+    if clearance is None:
+        return "INCOMPLETE"
+    if type(clearance) not in (int, float) or not isfinite(clearance) or clearance < 0:
+        return "FAIL"
+    verdict = route_quality(route, aisle, arrays)
+    if verdict != "PASS":
+        return verdict
+    # Distance is the exact buffer-radius test and includes boundary equality.
+    distances = [route.distance(aisle.boundary), *(route.distance(a) for a in arrays)]
+    return "PASS" if min(distances) >= clearance else "FAIL"

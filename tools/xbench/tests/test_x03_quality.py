@@ -109,3 +109,16 @@ def test_shared_trunk_and_detour(length):
     assert check([LineString([start,tip]) for tip in tips], ends) == "FAIL"
     assert check([LineString([start,fork,(length+10,0),tips[0]]),paths[1]],ends) == "FAIL"
     assert check(paths,[None,ends[1]]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("width", [1, 2, 4])
+def test_clearance_to_obstacles_and_corridor(width):
+    from shapely.geometry import LineString, box
+    from benches.x03_quality import clearance_quality
+    route = LineString([(0,0),(10,0)])
+    aisle = box(-width,-width,10+width,5*width)
+    arrays = [box(3,width,4,3*width)]
+    assert clearance_quality(route,aisle,arrays,width) == "PASS"
+    assert clearance_quality(route,aisle,[],width+0.01) == "FAIL"
+    assert clearance_quality(route,aisle,[box(3,width/2,4,width)],width) == "FAIL"
+    assert clearance_quality(route,aisle,arrays,None) == "INCOMPLETE"

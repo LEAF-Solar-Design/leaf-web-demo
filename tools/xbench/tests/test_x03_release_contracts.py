@@ -83,3 +83,17 @@ def test_package_unreadable_encoding(tmp_path,method,flags):
     path.write_bytes(data)
     manifest = {"members":["part"],"sha256":{"part":hashlib.sha256(b"payload").hexdigest()}}
     assert package_quality(path,manifest) in {"FAIL","INCOMPLETE"}
+
+
+@pytest.mark.parametrize("prefix", ["lib","LIB","./lib"])
+def test_package_file_cannot_contain_members(tmp_path,prefix):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path/"package.zip"
+    names = [prefix, "lib/tool.py"]
+    for order in (names,names[::-1]):
+        with ZipFile(path,"w") as archive:
+            for name in order:
+                archive.writestr(name,b"data")
+        manifest = {"members":order,"sha256":{n:hashlib.sha256(b"data").hexdigest() for n in order}}
+        assert package_quality(path,manifest) == "FAIL"
