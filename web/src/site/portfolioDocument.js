@@ -51,9 +51,9 @@ export function validatePortfolioDocument(document, importing = false) {
     if (!fullMatch(/^[a-z][a-z0-9-]{0,47}$/, category.slug) || ['home', 'about', 'resume'].includes(category.slug) || slugs.has(category.slug)) throw new Error('Choose unique category slugs; home, about and resume are reserved.')
     slugs.add(category.slug)
     text(category.title, 1, 120, 'category title'); text(category.description, 0, 1200, 'category description')
-    items(category.images, 1, 200)
+    items(category.images, 0, 200)
     total += category.images.length
-    if (total > 200 || !Number.isInteger(category.hero) || category.hero < 0 || category.hero >= category.images.length) throw new Error('Choose a hero image and use at most 200 images in total.')
+    if (total > 200 || !Number.isInteger(category.hero) || category.hero < 0 || (category.images.length ? category.hero >= category.images.length : category.hero !== 0)) throw new Error('Choose a hero image (zero for an empty gallery) and use at most 200 images in total.')
     const seen = new Set()
     for (const image of category.images) {
       exact(image, importing ? 'source_sha256 title alt' : 'material_id sha256 preview_sha256 title alt', Object.keys(DESIGN_FIELDS.image))
