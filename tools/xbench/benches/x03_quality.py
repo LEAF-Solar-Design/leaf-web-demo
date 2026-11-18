@@ -1147,3 +1147,13 @@ def idle_reserve_quality(initial_kwh, start_hour, end_hour, retention_per_hour, 
         return "FAIL"
     retained = initial_kwh * retention_per_hour ** (end_hour - start_hour)
     return "PASS" if claimed_kwh <= retained or isclose(claimed_kwh, retained, rel_tol=1e-12) else "FAIL"
+
+
+def altitude_rating_quality(model, revision, curve, elevation_m, required_kw):
+    """Compare site demand to the pinned table of absolute kW by elevation."""
+    from benches.x03_catalog_oracle import temperature_derating_quality
+    if not model or not revision or not isinstance(curve, dict) or not curve.get("model") or not curve.get("revision"):
+        return "INCOMPLETE"
+    if (curve["model"], curve["revision"]) != (model, revision):
+        return "FAIL"
+    return temperature_derating_quality(curve.get("elevation_kw"), elevation_m, required_kw, curve.get("interpolation"))

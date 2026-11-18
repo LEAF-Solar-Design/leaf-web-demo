@@ -370,3 +370,32 @@ def procurement_deadline_quality(stock, units, lead_days, order_date, deadline, 
     if lead_days == 0:
         return "PASS" if slots else "FAIL"
     return "PASS" if len(slots - {order_date}) >= lead_days else "FAIL"
+
+
+def certification_scope_quality(certificate, revision, model, conditions):
+    """A single scope entry must cover the model and all installation conditions."""
+    if not isinstance(certificate, dict) or not revision or not certificate.get("revision") or not model:
+        return "INCOMPLETE"
+    if certificate["revision"] != revision:
+        return "FAIL"
+    scopes = certificate.get("scopes")
+    if not isinstance(scopes, list) or not isinstance(conditions, dict) or not conditions or None in conditions.values():
+        return "INCOMPLETE"
+    unknown = False
+    for scope in scopes:
+        if not isinstance(scope, dict) or not scope.get("model"):
+            unknown = True
+            continue
+        if scope["model"] != model:
+            continue
+        allowed = scope.get("conditions")
+        if not isinstance(allowed, dict):
+            unknown = True
+            continue
+        missing = [key for key in conditions if not isinstance(allowed.get(key), list)]
+        if any(value not in allowed[key] for key, value in conditions.items() if key not in missing):
+            continue
+        if not missing:
+            return "PASS"
+        unknown = True
+    return "INCOMPLETE" if unknown or not scopes else "FAIL"

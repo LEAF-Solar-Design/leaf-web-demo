@@ -492,3 +492,22 @@ def anchor_interaction_quality(anchors, equation):
         if (tension / tr)**exponent + (shear / sr)**exponent > 1:
             return "FAIL"
     return "PASS"
+
+
+def combined_load_quality(loads, combinations, capacity):
+    """Apply every recorded combination to concurrent nonnegative loads in matching units."""
+    if not isinstance(loads, dict) or not loads or not combinations or not isinstance(combinations, dict):
+        return "INCOMPLETE"
+    if not finite_measure(capacity) or not all(map(finite_measure, loads.values())):
+        return "INCOMPLETE"
+    if capacity <= 0 or min(loads.values()) < 0:
+        return "FAIL"
+    for factors in combinations.values():
+        if not isinstance(factors, dict) or factors.keys() != loads.keys() or not all(map(finite_measure, factors.values())):
+            return "INCOMPLETE"
+        if min(factors.values()) < 0:
+            return "FAIL"
+        demand = sum(Fraction(str(factors[k])) * Fraction(str(v)) for k, v in loads.items())
+        if demand > Fraction(str(capacity)):
+            return "FAIL"
+    return "PASS"
