@@ -17,6 +17,7 @@ import { labValueStore } from '../runs/valueStore.js'
 import { canonicalJSON } from '../contract.js'
 import { colorLiteralsIn, replacedWordsIn } from '../standardsChecks.js'
 import { sentence } from '../honesty.js'
+import { serviceSession } from '../../lib/serviceAuthSession.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
 const authLifecycle = vi.hoisted(() => ({ logouts: new Set(), stored: new Set() }))
@@ -133,7 +134,8 @@ describe('project corpus evaluation flow', () => {
     return client
   }
 
-  it('selects named project originals and saves/reloads immutable descriptors with existing graph links', async () => {
+  // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+  it('selects named project originals and saves/reloads immutable descriptors with existing graph links', { retry: 1 }, async () => {
     let graph = addBlock(emptyGraph(), registry['constant@1.0.0'])
     graph = addBlock(graph, registry['constant@1.0.0'])
     graph.blocks[0].settings = { value: 2 }; graph.blocks[1].settings = { value: 3 }
@@ -179,6 +181,30 @@ describe('project corpus evaluation flow', () => {
     expect(screen.queryByRole('textbox', { name: /uuid/i })).toBeNull()
   })
 
+  it('distinguishes same-name originals and retains the selected content descriptor', async () => {
+    const data = options(), saved = {}, graph = emptyGraph()
+    const second = { ...material, material_id: 'cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa', sha256: 'f'.repeat(64) }
+    data.materials.push(second)
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => data }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const client = clientFor(graph, saved)
+    render(<GraphView initialDocument={graph} client={client} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Evaluate project corpus' }))
+    await screen.findByRole('option', { name: 'Shared research project' })
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: project } })
+    const firstLabel = `${material.name} (SHA-256 ${material.sha256.slice(0, 12)}, ID ${material.material_id})`
+    const secondLabel = `${second.name} (SHA-256 ${second.sha256.slice(0, 12)}, ID ${second.material_id})`
+    await screen.findByRole('option', { name: firstLabel })
+    expect(screen.getByRole('option', { name: secondLabel })).toHaveValue(second.material_id)
+    fireEvent.change(screen.getByLabelText('Original corpus'), { target: { value: second.material_id } })
+    fireEvent.change(screen.getByLabelText('Evaluation suite'), { target: { value: suiteId } })
+    expect(screen.getByLabelText('Original corpus')).toHaveDisplayValue(secondLabel)
+    fireEvent.click(screen.getByRole('button', { name: 'Add corpus evaluation' }))
+    await waitFor(() => expect(client.state.restoredGraph.blocks.at(-1).registry.id).toBe('corpus-evaluator'))
+    expect(client.state.restoredGraph.blocks.at(-1).settings.corpus).toEqual({ material_id: second.material_id, sha256: second.sha256, byte_size: second.byte_size })
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+  })
+
   it('drops pending project material replies on explicit logout', async () => {
     let deliver
     vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { deliver = resolve })))
@@ -203,6 +229,7 @@ describe('durable run recovery', () => {
   })
   afterEach(() => {
     cleanup()
+    serviceSession().human()
     if (previousToken === null) localStorage.removeItem('leaf.jwt')
     else localStorage.setItem('leaf.jwt', previousToken)
     Object.keys(localStorage).filter(key => key.startsWith('leaf.lab.run-receipts.v1:')).forEach(key => localStorage.removeItem(key))
@@ -220,6 +247,78 @@ describe('durable run recovery', () => {
       { seq: 1, kind: 'finished', payload: {} },
     ] }
   }
+
+  async function serviceIdentity(subject, issuer = 'https://service.example.test') {
+    const session = serviceSession()
+    const binding = '11111111-2222-4333-8444-555555555555'
+    session.select(binding)
+    expect(await session.probe({ origin: window.location.origin, fetchImpl: async () => json({
+      authenticated: true, binding_id: binding, expires_at: new Date(now + 60000).toISOString(),
+      identity: { sub: subject, subject, iss: issuer, tenant_id: 'service-tenant',
+        org_id: 'service-org', principal_type: 'service' },
+    }) })).toBe(true)
+  }
+
+  it('reconciles a service-session interrupted receipt after reload instead of executing twice', async () => {
+    localStorage.removeItem('leaf.jwt')
+    await serviceIdentity('service-recovery-owner')
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = 'durable-service-interrupted', runId = `${docId}-run`, posts = []
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) return json({ runs: [] })
+      if (init.method === 'POST') {
+        posts.push(JSON.parse(init.body))
+        if (posts.length === 1) throw new Error('Response lost after admission')
+        return json({ run_id: runId, state: 'finished' }, 202)
+      }
+      if (url.includes('/events?')) return json(finalEvents(337))
+      return json({ run_id: runId, state: 'finished', graph_revision: 9 })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    let view = render(<GraphView client={clientFor(docId, graph)} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r9' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await screen.findByText('Run outcome unknown. Retry to recover this submission.')
+    const key = Object.keys(localStorage).find(key => key.startsWith('leaf.lab.run-receipts.v1:') && key.includes(docId))
+    expect(key).toBeTruthy()
+    expect(JSON.parse(localStorage.getItem(key))).toContainEqual({ id: posts[0].submission_id, graphRevision: 9 })
+    view.unmount()
+    view = render(<GraphView client={clientFor(docId, graph)} provider={provider} initialDocument={graph} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('337')).toBeVisible())
+    expect(posts).toHaveLength(2)
+    expect(posts[1]).toEqual({ ...posts[0], reconcile_only: true })
+    expect(posts.filter(body => !body.reconcile_only)).toHaveLength(1)
+    view.unmount()
+  })
+
+  it.each(['subject', 'issuer'])('isolates service-session retained evidence after the %s changes', async boundary => {
+    localStorage.removeItem('leaf.jwt')
+    await serviceIdentity('service-recovery-owner')
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const docId = `durable-service-${boundary}`, runId = `${docId}-run`
+    let first = true
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (url.includes('/runs?')) {
+        const runs = first ? [{ run_id: runId, state: 'finished', graph_revision: 9,
+          doc_id: docId, project_id: '', submission_id: receiptId() }] : []
+        return json({ runs })
+      }
+      if (url.includes('/events?')) return json(finalEvents(349))
+      return json({ run_id: runId, state: 'finished', graph_revision: 9 })
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const props = { client: clientFor(docId, graph), provider, initialDocument: graph }
+    const view = render(<GraphView {...props} />)
+    await waitFor(() => expect(within(cardNamed('Count')).getByText('349')).toBeVisible())
+    first = false
+    await act(async () => serviceIdentity(boundary === 'subject' ? 'other-owner' : 'service-recovery-owner',
+      boundary === 'issuer' ? 'https://other-service.example.test' : undefined))
+    view.rerender(<GraphView {...props} />)
+    await screen.findByRole('button', { name: 'Run saved revision r9' })
+    expect(within(cardNamed('Count')).queryByText('349')).toBeNull()
+    expect(fetchImpl.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+  })
 
   it.each(['reload', 'graph restoration'])('reconciles a persisted interrupted identity after %s before another execution', async recovery => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])

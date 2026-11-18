@@ -385,3 +385,249 @@ def test_optional_independent_ezdxf_recovery(generated):
     assert len(drawing.modelspace().query('CIRCLE[layer=="LEAF-PILING"]')) == len(document["state"]["piles"])
     first = drawing.modelspace().query('CIRCLE[layer=="LEAF-PILING"]')[0]
     assert len(first.get_xdata("LEAFPILING")) == 10
+
+
+def insertion_units_header(raw, declarations):
+    """Replace only the test fixture's insertion-unit variables."""
+    data = pairs(raw)
+    start = data.index((2, "HEADER")) + 1
+    end = data.index((0, "ENDSEC"), start)
+    header, index = [], start
+    while index < end:
+        if data[index] == (9, "$INSUNITS"):
+            index += 2
+        else:
+            header.append(data[index])
+            index += 1
+    return emit(data[:start] + header + declarations + data[end:])
+
+
+def synthetic_units_layout(units):
+    preset = {"Name": "Synthetic units", "Rows": 2, "Columns": 3,
+              "ModuleLengthM": 2.0, "ModuleWidthM": 1.0, "ModulePowerWp": 400,
+              "Orientation": "Portrait", "FramingType": "FixedTilt",
+              "HorizontalGapM": 0.1, "VerticalGapM": 0.1,
+              "TiltDegrees": 15.0, "AxisAzimuthDeg": 180.0,
+              "HeightAtLowPoseM": 0.7, "HeightAtHighPoseM": 1.7,
+              "PileTemplateName": "Synthetic piles"}
+    return fp.prepare_initial_frames(boundary=[[0, 0], [20, 0], [20, 40], [0, 40]],
+                                     preset=preset, drawing_units=units)
+
+
+@pytest.mark.parametrize("units,code", [("m", "6"), ("ft", "2")])
+def test_insertion_units_declare_physical_document(units, code):
+    document, parameters = synthetic_units_layout(units)
+    raw = write(document, parameters)
+    header = sections(raw)["HEADER"]
+    index = header.index((9, "$INSUNITS"))
+    assert header[index + 1] == (70, code)
+    assert header.count((9, "$INSUNITS")) == 1
+    assert native.decode_native_layout(raw).document == document
+
+
+@pytest.mark.parametrize("code", [None, "0"])
+def test_insertion_units_legacy_read_and_explicit_rewrite(code):
+    document, parameters = synthetic_units_layout("m")
+    declarations = [] if code is None else [(9, "$INSUNITS"), (70, code)]
+    legacy = insertion_units_header(write(document, parameters), declarations)
+    assert native.decode_native_layout(legacy).document == document
+    rewritten = write(document, parameters, legacy)
+    header = sections(rewritten)["HEADER"]
+    assert header[header.index((9, "$INSUNITS")) + 1] == (70, "6")
+    assert native.decode_native_layout(rewritten).document == document
+
+
+@pytest.mark.parametrize("units,conflicting", [("m", "2"), ("ft", "6")])
+def test_insertion_units_conflict_refuses_without_rescaling(units, conflicting):
+    document, parameters = synthetic_units_layout(units)
+    raw = insertion_units_header(write(document, parameters), [(9, "$INSUNITS"), (70, conflicting)])
+    refuse("UNITS_MISMATCH", native.decode_native_layout, raw)
+    refuse("UNITS_MISMATCH", write, document, parameters, raw)
+
+
+@pytest.mark.parametrize("declarations", [
+    [(9, "$INSUNITS"), (70, "6"), (9, "$INSUNITS"), (70, "6")],
+    [(9, "$INSUNITS"), (40, "6")],
+    [(9, "$INSUNITS"), (70, "6.0")],
+    [(9, "$INSUNITS"), (70, "-1")],
+])
+def test_insertion_units_malformed_or_duplicate_refuses(declarations):
+    document, parameters = synthetic_units_layout("m")
+    raw = insertion_units_header(write(document, parameters), declarations)
+    refuse("UNITS_INVALID", native.decode_native_layout, raw)
+    refuse("UNITS_INVALID", write, document, parameters, raw)
+
+
+def test_insertion_units_preserve_unrelated_raw_header_and_frame_attributes():
+    document, parameters = synthetic_units_layout("m")
+    raw = insertion_units_header(write(document, parameters), [])
+    retained = b"  9\r\n$USERI1\r\n 70\r\n17\r\n"
+    raw = insert(raw, "HEADER", retained)
+    before = native.decode_native_layout(raw)
+    result = write(document, parameters, raw)
+    assert retained in result
+    after = native.decode_native_layout(result)
+    assert after.document == before.document
+    assert after.parameters == before.parameters
+    assert [(r['row'], r['col'], r['vertices'], r['elevation']) for r in after.frames] == [
+        (r['row'], r['col'], r['vertices'], r['elevation']) for r in before.frames]
+
+
+# Native worker byte repair contract. This executes Node, not WASM.
+from copy import deepcopy
+import base64
+import shutil
+import subprocess
+import solar_frames_piles as frames
+
+HELPER = ROOT / "vendor/acadrust-worker/native-layout-bytes.mjs"
+NODE = shutil.which("node")
+
+
+def worker_repair(parent, written):
+    # Missing Node is a failed prerequisite, never an optional passing skip.
+    assert NODE, "Node is required for the native worker export contract"
+    script = """
+import {readFileSync} from 'node:fs';
+const {readNativeLayout,repairNativeLayout}=await import(process.argv[1]);
+const input=JSON.parse(readFileSync(0,'utf8'));
+try {
+ const parent=await readNativeLayout(Uint8Array.from(Buffer.from(input.parent,'base64')));
+ const result=await repairNativeLayout(parent,Uint8Array.from(Buffer.from(input.written,'base64')));
+ process.stdout.write(JSON.stringify({bytes:Buffer.from(result).toString('base64')}));
+} catch(error) {process.stdout.write(JSON.stringify({error:error.message}));}
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", script, HELPER.as_uri()],
+        input=json.dumps({"parent": base64.b64encode(parent).decode(),
+                          "written": base64.b64encode(written).decode()}),
+        text=True, capture_output=True, check=True, timeout=20)
+    reply = json.loads(result.stdout)
+    return reply if "error" in reply else base64.b64decode(reply["bytes"])
+
+
+@pytest.fixture
+def source():
+    fixture = json.loads((ROOT / "docs/parity/evidence/ground/generate/intake.json").read_text(encoding="utf-8"))
+    document, parameters = frames.prepare_initial_frames(
+        boundary=[[0, 0], [20, 0], [20, 40], [0, 40]],
+        preset=fixture["active_preset"], drawing_units="m")
+    parameters["export_test"] = {"label": "synthetic \u00e9", "small": 1e-12}
+    scope = {key: UUID(int=index + 1) for index, key in enumerate(
+        ("organization_id", "project_id", "drawing_id"))}
+    raw = native.materialize_native_layout(scope, None, document, None, parameters=parameters)
+    return raw, native.decode_native_layout(raw)
+
+
+def written_bytes(raw, change):
+    """Model only the observed writer lexemes; this is not a fake WASM proof."""
+    drawing = native._Drawing(raw)
+    row = next(r for r in drawing.records["ENTITIES"] if r.one(0) == "LWPOLYLINE")
+    pairs = []
+    first_x = True
+    for pair in row.pairs:
+        value = pair.value
+        if pair.code == 10:
+            value = format(float(value) + (2 if change != "resize" or first_x else 0), ".17g")
+            first_x = False
+        if pair.code == 8 and change == "layer":
+            value = "Changed"
+        pairs.append((pair.code, value))
+        if pair.code == 20:
+            pairs.extend([(40, "1" if change == "width" else "0"), (41, "0"), (42, "0")])
+    body = native._pack(pairs)
+    # The actual writer pads group codes. The owned canonical output must not.
+    lines = body.splitlines(keepends=True)
+    body = b"".join(code.rstrip(b"\r\n").rjust(3) + b"\n" + value
+                    for code, value in zip(lines[::2], lines[1::2]))
+    result = (b"".join(p.raw for p in drawing.pairs[:row.start]) + body
+              + b"".join(p.raw for p in drawing.pairs[row.end:]))
+    if change == "added":
+        result = result.replace(b"0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n",
+            native._pack([(0, "LWPOLYLINE"), (5, "FFFFFFFF"), (8, "LEAF-TRACKERS")])
+            + b"0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n", 1)
+    if change == "metadata":
+        result = result.replace(b'"document_sha256":"', b'"document_sha256":"f', 1)
+    return result
+
+
+def foreign(raw, handles):
+    drawing = native._Drawing(raw)
+    owned = [r for rows in drawing.records.values() for r in rows
+             if r.one(5) in handles or (r.one(0) == "XRECORD" and r.values(1)[0] == native.SCHEMA)]
+    offsets = [0]
+    for pair in drawing.pairs:
+        offsets.append(offsets[-1] + len(pair.raw))
+    spans = sorted((offsets[r.start], offsets[r.end]) for r in owned)
+    chunks, start = [], 0
+    for begin, end in spans:
+        chunks.append(raw[start:begin])
+        start = end
+    return b"".join(chunks) + raw[start:]
+
+
+def test_worker_export_rigid_edit_updates_tuple_state_and_keeps_opaque_metadata(source):
+    raw, before = source
+    written = written_bytes(raw, "move")
+    # Retain foreign UTF-8 entity text byte for byte, not a re-encoded string.
+    marker = b"0\nSECTION\n2\nENTITIES\n"
+    written = written.replace(marker, marker +
+        b"0\nTEXT\n5\nFFFFFFFE\n8\nForeign\n10\n0\n20\n0\n1\nforeign \xc3\xa9\n", 1)
+    with pytest.raises(native.NativeLayoutError):
+        native.decode_native_layout(written)
+    repaired = worker_repair(raw, written)
+    assert isinstance(repaired, bytes), repaired
+    after = native.decode_native_layout(repaired)
+    expected = deepcopy(before.document)
+    frame = expected["state"]["frames"][0]
+    frame["vertices"] = [(x + 2, y) for x, y in frame["vertices"]]
+    assert after.document == expected
+    assert after.parameters == before.parameters and after.scope == before.scope
+    assert after.handles == before.handles
+    assert after.xrecord["parameters_sha256"] == before.xrecord["parameters_sha256"]
+    assert foreign(repaired, set(before.handles.values())) == foreign(written, set(before.handles.values()))
+
+
+def test_worker_export_second_edit_retains_the_first_pose_and_metadata(source):
+    raw, before = source
+    first = worker_repair(raw, written_bytes(raw, "move"))
+    second = worker_repair(first, written_bytes(first, "move"))
+    after = native.decode_native_layout(second)
+    expected = deepcopy(before.document)
+    expected["state"]["frames"][0]["vertices"] = [
+        (x + 4, y) for x, y in expected["state"]["frames"][0]["vertices"]]
+    assert after.document == expected and after.parameters == before.parameters
+
+
+@pytest.mark.parametrize("change", ["resize", "layer", "width", "added", "metadata"])
+def test_worker_export_refuses_non_pose_changes_without_mutating_parent(source, change):
+    raw, _ = source
+    original = bytes(raw)
+    result = worker_repair(raw, written_bytes(raw, change))
+    assert isinstance(result, dict) and result["error"].startswith("native_layout:"), result
+    assert raw == original
+
+
+def test_worker_export_non_native_bytes_bypass_without_rewriting():
+    raw = b"0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n"
+    assert worker_repair(raw, raw) == raw
+
+
+@pytest.mark.parametrize("literal", ["\\U+0041", "prefix \\U+4e2d suffix", "\\U+D83D\\U+DE00"])
+def test_worker_export_preserves_canonical_dxf_escapes_in_opaque_parameters(source, literal):
+    _, before = source
+    parameters = deepcopy(before.parameters)
+    parameters["opaque_dxf"] = {"literal": literal, "unicode": "café Ω 中 😀"}
+    scope = {key: UUID(value) for key, value in before.scope.items()}
+    parent = native.materialize_native_layout(scope, None, before.document, None, parameters=parameters)
+    assert native.decode_native_layout(parent).parameters["opaque_dxf"]["literal"] == literal
+    expected = deepcopy(before.document)
+    for distance in (2, 4):
+        result = worker_repair(parent, written_bytes(parent, "move"))
+        assert isinstance(result, bytes), result
+        after = native.decode_native_layout(result)
+        expected["state"]["frames"][0]["vertices"] = [
+            (x + distance, y) for x, y in before.document["state"]["frames"][0]["vertices"]]
+        assert after.document == expected
+        assert after.parameters == parameters and after.scope == before.scope
+        assert after.handles == before.handles
+        parent = result

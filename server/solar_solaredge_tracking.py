@@ -139,6 +139,68 @@ def _check(condition):
         raise GraphValidationError(REPORT_INVALID)
 
 
+def optimizer_measurement(graph, report):
+    """Validate explicit marker references and derive completeness and string membership.
+
+    Unknown and partially mapped markers survive for review, but never supply totals.
+    A revision binding deliberately invalidates the measurement on every later edit.
+    """
+    raw = report["optimizer_measurement"]
+    _check(type(raw) is dict and set(raw) == {"complete", "optimizers"}
+           and type(raw["complete"]) is bool and type(raw["optimizers"]) is list
+           and len(raw["optimizers"]) <= 100_000)
+    handles = {p["id"]: p["provenance"].get("source_handle") for p in graph["panels"]}
+    framed = {ref for frame in graph["frames"] for ref in frame["panel_refs"]}
+    owners = {ref: row["index"] for row in report["strings"] for ref in row["panel_refs"]}
+    complete = raw["complete"] and not report["unassigned_panel_refs"] and all(
+        not row["partial"] for row in report["strings"]) and all(
+        row.get("pdf_grid") is not None for row in report["matches"])
+    ids, covered, rows = set(), set(), []
+    per_string = [0] * len(report["strings"])
+    reference_count = 0
+    for opt in raw["optimizers"]:
+        _check(type(opt) is dict and set(opt) == {"id", "vendor_label", "pdf_matrix", "panel_handles", "panel_refs"})
+        _check(type(opt["id"]) is str and re.fullmatch(r"pdf-optimizer-[0-9]{1,10}", opt["id"]) is not None
+               and _int(opt["pdf_matrix"], 0, MAX_INDEX)
+               and (opt["vendor_label"] is None or type(opt["vendor_label"]) is str
+                    and re.fullmatch(r"[0-9]{1,32}", opt["vendor_label"]) is not None))
+        refs, source_handles = opt["panel_refs"], opt["panel_handles"]
+        _check(type(refs) is list and type(source_handles) is list
+               and len(refs) == len(source_handles) <= MAX_PANELS)
+        reference_count += len(refs)
+        _check(reference_count <= MAX_PANELS)
+        valid = bool(refs) and opt["id"] not in ids
+        ids.add(opt["id"])
+        membership = set()
+        for ref, handle in zip(refs, source_handles):
+            if ref is None or handle is None:
+                _check(ref is None and handle is None)
+                valid = False
+                continue
+            _check(type(ref) is str and ref in framed and type(handle) is str
+                   and type(handles.get(ref)) is str and handles[ref].upper() == handle)
+            if ref in covered or ref not in owners:
+                valid = False
+            covered.add(ref)
+            membership.add(owners.get(ref))
+        string_index = next(iter(membership)) if valid and len(membership) == 1 else None
+        if string_index is None:
+            valid = False
+        else:
+            row = report["strings"][string_index]
+            valid = valid and row["pdf_matrix"] == opt["pdf_matrix"] and not row["partial"]
+        complete = complete and valid
+        if valid:
+            per_string[string_index] += 1
+        rows.append({**opt, "string_index": string_index})
+    complete = bool(complete and covered == framed == set(handles)
+                    and len(report["matches"]) == len(graph["frames"]))
+    return {"schema": "leaf.solaredge-optimizer-measurement.v1", "graph_rev": graph["rev"] + 1,
+            "complete": complete, "optimizers": rows,
+            "total_count": len(ids) if complete else None,
+            "string_counts": per_string if complete else None}
+
+
 def import_record(graph, params, resolved):
     """Fail closed with a named refusal when reading malformed stored report content."""
     try:

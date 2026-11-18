@@ -190,10 +190,10 @@ _REAL_PARSE = report.parse_source
 
 @pytest.fixture
 def cached_parse(monkeypatch):
-    def parse(content):
-        key = hashlib.sha256(content).hexdigest()
+    def parse(content, *, legacy=False):
+        key = (hashlib.sha256(content).hexdigest(), legacy)
         if key not in _PARSED:
-            _PARSED[key] = _REAL_PARSE(content)
+            _PARSED[key] = _REAL_PARSE(content, legacy=legacy)
         return copy.deepcopy(_PARSED[key])
     monkeypatch.setattr(report, "parse_source", parse)
 
@@ -201,7 +201,7 @@ def cached_parse(monkeypatch):
 @pytest.fixture
 def stub(monkeypatch):
     calls = []
-    def parse(content):
+    def parse(content, *, legacy=False):
         calls.append(content)
         return copy.deepcopy(GRIDS)
     monkeypatch.setattr(report, "parse_source", parse)
@@ -378,7 +378,8 @@ def test_solaredge_report_c14_core(cached_parse):
     value = report.report_from_matrices(graph, matrices, alignment_tolerance=12.0, selection_order="unknown")
     assert value["counts"] == C14_COUNTS
     assert value["row_angle"] == 0.03235485534444149
-    assert digest(value) == "27038f6f09d395b16973b673baceb3f0d09854077cd71e0f21507b7bfc9b592e"
+    assert "optimizer_measurement" in value
+    assert digest({key: item for key, item in value.items() if key != "optimizer_measurement"}) == "27038f6f09d395b16973b673baceb3f0d09854077cd71e0f21507b7bfc9b592e"
     assert digest(value["matches"]) == "04a885dda8b69661c4cbf1c489d6dec97c234b667b7147afad4bbbe0d0e5d272"
     assert digest(value["strings"]) == "ed69e9a6627a2f5a25d140ebe1a0757f920f3c30627aa7e44b2f346f9ca5d36f"
     assert value["matches"][0] == {"frame_ref": app_id("frame", 1), "pdf_grid": 24,
@@ -404,6 +405,25 @@ def test_solaredge_report_c14_recorded_core(cached_parse):
     graph, matrices = intake_graph(), report.parse_source(PDF)
     assert report.report_from_matrices(graph, matrices, alignment_tolerance=12.0, selection_order="recorded") == report.report_from_matrices(
         graph, matrices, alignment_tolerance=12.0, selection_order="unknown")
+
+
+def test_optimizer_cells_resolve_through_subgrid_offsets_not_parser_panel_ids():
+    graph = small_graph()
+    matrix = two_block_grid()
+    matrix["Optimizers"] = [{"id": f"pdf-optimizer-{c}", "vendor_label": str(c), "cells": [[0, c]]}
+                            for c in [0, 1, 2, 4, 5, 6]]
+    # Parser-local panel IDs are unrelated to drawing handles and cannot be used as keys.
+    for cell in matrix["Rows"][0]["Panels"]:
+        if cell["Code"] == 1:
+            cell["Id"] = "DEADBEEF"
+    choices = {graph["frames"][0]["id"]: 0, graph["frames"][1]["id"]: 1}
+    value = report.report_from_matrices(graph, [matrix], alignment_tolerance=1.0,
+                                      selection_order="unknown", associations=choices)
+    measured = value["optimizer_measurement"]["optimizers"]
+    assert [opt["panel_handles"] for opt in measured] == [[h] for h in ["B02", "B01", "B00", "A02", "A01", "A00"]]
+    assert [opt["panel_refs"] for opt in measured] == [[app_id("panel", n)] for n in [6, 5, 4, 3, 2, 1]]
+    assert value["strings"][2]["source"] == "bridge"
+    assert value["strings"][2]["panel_handles"] == ["A02", "B00", "B01"]
 
 
 def test_solaredge_report_c15():
@@ -663,7 +683,7 @@ def test_solaredge_report_accept_refuses_unresolved_groups(tmp_path, monkeypatch
         matrices.insert(0, copy.deepcopy(matrices[0]))
     backend, _ = seed(tmp_path, monkeypatch, graph)
     source = sources.import_solaredge_source(backend, TENANT, "solar", pdf(1))["source"]
-    monkeypatch.setattr(report, "parse_source", lambda content: copy.deepcopy(matrices))
+    monkeypatch.setattr(report, "parse_source", lambda content, **kwargs: copy.deepcopy(matrices))
     value = save(backend, source, selection_order=order)
     context = resolve_graph_context(backend, TENANT, "solar", "head")
     params = {"expected_rev": graph["rev"], "report_artifact_id": value["report"]["artifact_id"]}
@@ -960,6 +980,7 @@ def test_solaredge_report_route_c14(tmp_path, monkeypatch, cached_parse, client)
     ("source", 404, "IMPORT_SOURCE_NOT_FOUND"), ("project", 409, "REPORT_PROJECT_MISMATCH"),
     ("ambiguous", 200, None), ("drawing-id", 400, "REPORT_DRAWING_ID_INVALID"),
     ("drained", 503, "REPORT_WRITES_DRAINED"), ("busy", 503, "REPORT_BUSY"),
+    ("resource", 422, "REPORT_RESOURCE_LIMIT"),
     ("backend", 503, "REPORT_STORE_UNAVAILABLE"), ("drawing", 404, "REPORT_DRAWING_NOT_FOUND"),
     ("graphless", 409, "REPORT_GRAPH_REQUIRED"), ("csv", 409, "IMPORT_SOURCE_KIND_MISMATCH"),
     ("real", 200, None),
@@ -968,7 +989,7 @@ def test_solaredge_report_route_refusals(tmp_path, monkeypatch, client, case, st
     from routers import drawings
     backend, source = seed_small(tmp_path, monkeypatch)
     if case != "real":
-        monkeypatch.setattr(report, "parse_source", lambda content: copy.deepcopy(GRIDS))
+        monkeypatch.setattr(report, "parse_source", lambda content, **kwargs: copy.deepcopy(GRIDS))
     payload, media, url = body(source), "application/json", URL
     if case == "media":
         media = "text/plain"
@@ -989,6 +1010,10 @@ def test_solaredge_report_route_refusals(tmp_path, monkeypatch, client, case, st
         monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
     elif case == "busy":
         exhausted(monkeypatch)
+    elif case == "resource":
+        def resource_refused(content, **kwargs):
+            raise report.SolarEdgeReportError("REPORT_RESOURCE_LIMIT")
+        monkeypatch.setattr(report, "parse_source", resource_refused)
     elif case == "backend":
         def unavailable(*args):
             raise RuntimeError("down")

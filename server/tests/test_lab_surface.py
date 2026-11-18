@@ -37,6 +37,7 @@ LAB_PATHS = [
     "/api/lab/runs",
     "/api/lab/runs",
     "/api/lab/runs/{run_id}",
+    "/api/lab/runs/{run_id}/recovery-plan",
     "/api/lab/runs/{run_id}/events",
     "/api/lab/runs/{run_id}/cancel",
     "/api/lab/runs/worker/pause",
@@ -607,3 +608,37 @@ def test_tools_inherits_admission_refusals(monkeypatch, rail, auth, status):
 
 def test_tools_requires_verified_tenant():
     assert _client(tenant_override=False).get("/api/lab/tools").status_code == 401
+
+
+B03_PRIVATE_PREVIEW_PATHS = ['/api/projects/{project_id}/browser/source/requests/{source_request_id}/preview/{job_id}/asset']
+
+def test_b03_private_preview_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path in B03_PRIVATE_PREVIEW_PATHS]
+    assert [route.path for route in routes]==B03_PRIVATE_PREVIEW_PATHS
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
+
+
+B03_PRIVATE_BUILD_PATH = '/api/projects/{project_id}/browser/source/requests/{source_request_id}/preview/{job_id}'
+
+
+def test_b03_private_build_status_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path==B03_PRIVATE_BUILD_PATH]
+    assert len(routes)==2
+    assert {method for route in routes for method in route.methods}=={'GET','POST'}
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)
+
+
+B03_PRIVATE_CHART_STATE_PATH = B03_PRIVATE_BUILD_PATH + '/chart-state'
+
+
+def test_b03_chart_state_inventory_requires_active_studio_tenant():
+    from routers import browser_project
+    app=FastAPI();app.include_router(browser_project.router)
+    routes=[route for path,route in iter_leaf_routes(app.routes) if path==B03_PRIVATE_CHART_STATE_PATH]
+    assert len(routes)==2
+    assert {method for route in routes for method in route.methods}=={'GET','PUT'}
+    assert all(deps.require_active_tenant in [d.call for d in route.dependant.dependencies] for route in routes)

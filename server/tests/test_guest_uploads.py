@@ -366,6 +366,36 @@ def test_guest_and_account_upload_id_mints_keep_distinct_syntax():
     assert str(uuid.UUID(account_id)) == account_id
 
 
+def test_upload_cap_defaults_and_override(monkeypatch):
+    monkeypatch.delenv("LEAF_UPLOAD_MAX_BYTES", raising=False)
+    assert guest_uploads.max_upload_bytes() == 64 * 1024 * 1024
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "invalid")
+    assert guest_uploads.max_upload_bytes() == 64 * 1024 * 1024
+    monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "1024")
+    assert guest_uploads.max_upload_bytes() == 1024
+
+
+def test_upload_cap_accepts_large_dwg_unchanged(client, monkeypatch):
+    import hashlib
+
+    monkeypatch.delenv("LEAF_UPLOAD_MAX_BYTES", raising=False)
+    monkeypatch.setattr(guest_uploads, "start_extraction_thread", lambda *_: None)
+    monkeypatch.setattr(uploads_router.dwg_convert, "available", lambda: True)
+    data = b"AC1032" + b"x" * (26 * 1024 * 1024)
+    response = client.post(
+        "/api/drawings/upload",
+        files={"file": ("large.dwg", io.BytesIO(data))},
+        data={"engine": "local"},
+    )
+    assert response.status_code == 202, response.text
+    body = response.json()
+    staged = guest_uploads.staged_path(body["tenant_id"], body["drawing_id"], ".dwg")
+    assert hashlib.sha256(staged.read_bytes()).digest() == hashlib.sha256(data).digest()
+    backend = write_loop.upload_backend_for_tenant(body["tenant_id"])
+    marker = guest_uploads.read_marker(backend, body["tenant_id"], body["drawing_id"])
+    assert marker["content_sha256"] == hashlib.sha256(data).hexdigest()
+
+
 def test_upload_oversize_413(client, monkeypatch):
     monkeypatch.setenv("LEAF_UPLOAD_MAX_BYTES", "64")
     r = _upload(client, data=b"0\nSECTION\n" + b"x" * 100 + b"\nENTITIES\n")
@@ -1098,6 +1128,7 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
     RUNNING when the retry replaces the marker must fence itself out — the
     locked tail re-checks the attempt token, not mere marker existence."""
     import dxf_intake
+    from concurrent.futures import ThreadPoolExecutor
     real_parse = dxf_intake.parse_dxf_file
     state = {"old_worker_ran": False}
 
@@ -1112,8 +1143,8 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
             marker = guest_uploads.read_marker(backend, tenant, did)
             guest_uploads._mark_failed(backend, tenant, did, marker,
                                        "TIMEOUT", "budget exceeded", retryable=True)
-            # ...and the user's retry replaces the attempt and completes
-            # fully (inline extraction) before the old worker resumes.
+            # ...and the user's retry replaces the attempt and queues its
+            # worker. The old worker must retire before the retry extracts.
             retry = _upload(client, headers={"X-Tenant-Id": tenant})
             assert retry.status_code == 202
             assert retry.json()["drawing_id"] == did
@@ -1128,12 +1159,16 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
     first = _upload(client)
     tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
     state["tenant"], state["did"] = tenant, did
-    # Re-enable inline extraction for the RETRY inside the wrapper.
-    monkeypatch.setattr(
-        guest_uploads, "start_extraction_thread",
-        lambda t, d, e: guest_uploads.run_extraction(t, d, e))
-
-    guest_uploads.run_extraction(tenant, did, ".dxf")  # the OLD worker
+    retry_workers = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def start_retry(t, d, e):
+            worker = pool.submit(guest_uploads.run_extraction, t, d, e)
+            retry_workers.append(worker)
+            return worker
+        monkeypatch.setattr(guest_uploads, "start_extraction_thread", start_retry)
+        guest_uploads.run_extraction(tenant, did, ".dxf")  # the OLD worker
+        assert len(retry_workers) == 1
+        retry_workers[0].result(timeout=10)
 
     backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
     final = guest_uploads.read_marker(backend, tenant, did)

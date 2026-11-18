@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "x07_customers": {"customer_key", "profile_id"},
+    "x07_profile_versions": {
+        "customer_key", "profile_id", "version", "roles_json", "created_at",
+    },
+    "x07_project_applications": {"project_key", "customer_key", "profile_id", "version"},
     "project_checkout_custody": {
         "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
         "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",
@@ -739,6 +744,12 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "customization": {
+        "customization_stage_attempt_history": {
+            "tenant_id", "change_set_id", "failed_version", "attempt",
+            "reason_code", "reason_message", "retryable",
+            "authority_session_id", "authority_turn_id", "finished_at",
+            "retry_authority_session_id", "retry_authority_turn_id",
+        },
         "customization_change_sets": {
             "change_set_id", "tenant_id", "idempotency_key", "state", "version",
             "base_commit", "staged_commit", "catalog_digest",
@@ -940,7 +951,8 @@ _REQUIRED_CONSTRAINTS = {
         "candidate_bytes IS NOT NULL", "proof_bytes IS NOT NULL", "response_bytes IS NOT NULL",
         "sender_worker IS NOT NULL", "refusal_code IS NULL", "refusal_code IS NOT NULL",
         "'SOLVE_OUTCOME_UNKNOWN'", "'cloud_request_invalid'", "'cloud_auth_missing'",
-        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'"),
+        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'",
+        "'CLOUD_REQUEST_REJECTED'"),
     "demo_sessions_pkey": _catalog_contract(
         "demo_sessions", "PRIMARY KEY (id)"),
     "demo_sessions_subject_key": _catalog_contract(
@@ -1834,6 +1846,12 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
+        "customization_stage_attempt_history_pkey": _catalog_contract(
+            "customization_stage_attempt_history",
+            "PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)"),
+        "customization_stage_attempt_history_change_set_id_fkey": _catalog_contract(
+            "customization_stage_attempt_history", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
         "customization_change_sets_pkey": _catalog_contract(
             "customization_change_sets", "PRIMARY KEY (change_set_id)"),
         "customization_change_sets_tenant_id_idempotency_key_key": _catalog_contract(

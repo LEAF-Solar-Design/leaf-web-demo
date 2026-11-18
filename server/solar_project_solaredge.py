@@ -4,10 +4,14 @@ The PDF and matching kernels are shared with the legacy drawing route. UUID
 provenance stays in this adapter and never crosses its integer-version contract.
 """
 from copy import deepcopy
+from contextlib import contextmanager
 from hashlib import sha256
 import json
 import math
-from uuid import UUID
+import re
+import sys
+from time import monotonic
+from uuid import UUID, uuid4
 
 import entitlements
 import solar_artifacts
@@ -34,6 +38,28 @@ STORE_SCHEMA = "leaf.solar-project-solaredge-import.v1"
 READ_SCHEMA = "leaf.solar-project-solaredge-tracking-read.v1"
 READ_TOOL = "solar-solaredge-tracking-read"
 ACCEPT_TOOL = "solar-solaredge-accept"
+
+
+class SolarEdgeGridRefusal(GraphValidationError):
+    """Validated object and candidate identity for an unresolved reviewed grid."""
+
+    def __init__(self, code, frame_ref, candidate_ids, action):
+        valid = (
+            code in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS")
+            and type(frame_ref) is str and len(frame_ref) <= 128
+            and re.fullmatch(r"[A-Za-z0-9_.:-]+", frame_ref) is not None
+            and type(candidate_ids) is list and len(candidate_ids) <= 20
+            and all(type(value) is int and 0 <= value <= tracking.MAX_INDEX for value in candidate_ids)
+            and len(set(candidate_ids)) == len(candidate_ids)
+            and action == ("redraw_frame" if code == "SOLAREDGE_GRID_UNMATCHED" else "pick_candidate")
+            and (not candidate_ids if code == "SOLAREDGE_GRID_UNMATCHED" else bool(candidate_ids))
+        )
+        if not valid:
+            raise GraphValidationError(tracking.REPORT_INVALID)
+        super().__init__(code)
+        self.frame_ref = frame_ref
+        self.candidate_ids = list(candidate_ids)
+        self.action = action
 
 
 def tracking_read_catalog_availability(tool, tenant, input_version_id):
@@ -143,7 +169,7 @@ def _ref(meta):
     return ref
 
 
-def _read(context, artifact_id, tool, media_type, filename):
+def _read_metadata(context, artifact_id, tool, media_type, filename):
     if not solar_artifacts._hex(artifact_id):
         _fail("ARTIFACT_ID_INVALID")
     backend = artifacts._backend(context.organization_id)
@@ -162,6 +188,13 @@ def _read(context, artifact_id, tool, media_type, filename):
     if any(meta[key] != value for key, value in _identity(context).items()
            if key != "graph_project_id"):
         _fail(tracking.REPORT_STALE)
+    return backend, meta
+
+
+def _read(context, artifact_id, tool, media_type, filename):
+    backend, meta = _read_metadata(context, artifact_id, tool, media_type, filename)
+    scope = {key: _identity(context)[key] for key in
+             ("organization_id", "project_id", "drawing_id")}
     try:
         content = backend.get(artifacts._key(scope, meta["content_sha256"], blob=True))
     except KeyError:
@@ -198,25 +231,62 @@ def _reserve(context, content_sha):
     _fail("IMPORT_QUOTA_EXCEEDED")
 
 
-def import_source(tenant, project_id, drawing_id, input_version_id, data):
-    context, denial = _authorized(tenant, project_id, drawing_id, input_version_id, "upload")
-    if denial is not None:
-        return denial
-    if write_loop.drawing_mutations_refusal() is not None:
-        _fail("IMPORT_WRITES_DRAINED")
+_IMPORT_TRACE_STREAM = None  # Optional inert stream seam; resolve live stderr per event.
+
+
+def _emit_import_phase(attempt_id, phase, state, started):
+    # The existing application log driver collects stderr. No request identity,
+    # content, exception prose or new CloudWatch metric is emitted here.
     try:
-        page_count = sources.inspect_solaredge_pdf(data)
-    except sources.ImportSourceError as exc:
-        _fail(exc.code)
-    content_sha = sha256(data).hexdigest()
-    sink = _sink(context, sources.SOURCE_TOOL, content_sha)
-    prepared = sink.prepare(solar_artifacts.ArtifactOutput(
-        {"page_count": page_count}, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME, data))
-    _recheck(tenant, context, write=True)
+        event = {"event": "solar_pdf_intake_phase", "schema": "leaf.solar-pdf-intake-phase.v1",
+                 "attempt_id": attempt_id, "phase": phase, "state": state,
+                 "elapsed_ms": max(0, round((monotonic() - started) * 1000))}
+        stream = sys.stderr if _IMPORT_TRACE_STREAM is None else _IMPORT_TRACE_STREAM
+        stream.write(json.dumps(event, separators=(",", ":"), allow_nan=False) + "\n")
+        stream.flush()
+    except Exception:
+        pass  # Observability must not change success, denial or refusal behavior.
+
+
+@contextmanager
+def _import_phase(attempt_id, phase):
+    started = monotonic()
+    _emit_import_phase(attempt_id, phase, "started", started)
+    state = "failed"
+    try:
+        yield
+        state = "completed"
+    finally:
+        _emit_import_phase(attempt_id, phase, state, started)
+
+
+def import_source(tenant, project_id, drawing_id, input_version_id, data):
+    attempt_id = uuid4().hex
+    with _import_phase(attempt_id, "authorization"):
+        context, denial = _authorized(tenant, project_id, drawing_id, input_version_id, "upload")
+        if denial is not None:
+            return denial
+        if write_loop.drawing_mutations_refusal() is not None:
+            _fail("IMPORT_WRITES_DRAINED")
+    with _import_phase(attempt_id, "inspection"):
+        try:
+            page_count = sources.inspect_solaredge_pdf(data)
+        except sources.ImportSourceError as exc:
+            _fail(exc.code)
+    with _import_phase(attempt_id, "artifact_prepare"):
+        content_sha = sha256(data).hexdigest()
+        sink = _sink(context, sources.SOURCE_TOOL, content_sha)
+        prepared = sink.prepare(solar_artifacts.ArtifactOutput(
+            {"page_count": page_count}, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME, data))
+    with _import_phase(attempt_id, "authority_recheck"):
+        _recheck(tenant, context, write=True)
     # Conditional reservations survive store failures. Same bytes reuse the slot.
-    _reserve(context, content_sha)
-    sink.finish(prepared)
-    ref = sink.commit()
+    with _import_phase(attempt_id, "slot_reservation"):
+        _reserve(context, content_sha)
+    with _import_phase(attempt_id, "artifact_finish"):
+        sink.finish(prepared)
+    with _import_phase(attempt_id, "artifact_commit"):
+        ref = sink.commit()
     return with_envelope_fields({"schema": SOURCE_SCHEMA, "kind": sources.SOURCE_KIND,
         **_result_scope(context), "page_count": page_count, "source": ref})
 
@@ -224,13 +294,18 @@ def import_source(tenant, project_id, drawing_id, input_version_id, data):
 def _report_request(request):
     required = {"source_artifact_id", "alignment_tolerance", "selection_order"}
     if (type(request) is not dict or not required <= set(request)
-            or not set(request) <= required | {"associations"}):
+            or not set(request) <= required | {"associations", "matching_policy"}):
         _fail("REPORT_REQUEST_INVALID")
     try:
         normalized = reports.validate_request({key: request[key] for key in required})
     except reports.SolarEdgeReportError as exc:
         _fail(exc.code)
     normalized.pop("project_id")
+    if "matching_policy" in request:
+        matching = request["matching_policy"]
+        if type(matching) is not str or matching not in reports.MATCHING_POLICIES:
+            _fail("REPORT_REQUEST_INVALID")
+        normalized["matching_policy"] = matching
     if "associations" in request:
         choices = request["associations"]
         if (type(choices) is not dict or len(choices) > tracking.MAX_FRAMES
@@ -243,9 +318,31 @@ def _report_request(request):
     return normalized
 
 
-def _request_sha(req, source_meta):
-    return sha256(canonical_bytes({"schema": "leaf.solar-project-solaredge-report-request.v1",
+def _build_report_request(request):
+    req = _report_request(request)
+    # Old stored requests never acquire a new policy on load. A fresh request
+    # uses the new policy, while old clients' explicit choices keep old indexes.
+    req.setdefault("matching_policy", reports.ATOMIC_POLICY if req.get("associations")
+                   else reports.WHOLE_MATRIX_POLICY)
+    return req
+
+
+def _request_sha(req, source_meta, *, legacy=False):
+    schema = "leaf.solar-project-solaredge-report-request.v1" if legacy else "leaf.solar-project-solaredge-report-request.v2"
+    return sha256(canonical_bytes({"schema": schema,
         **req, "source_content_sha256": source_meta["content_sha256"]})).hexdigest()
+
+
+def _bounded_source_matrices(content, *, legacy=False):
+    if not reports._PARSE_SLOTS.acquire(blocking=False):
+        _fail("REPORT_BUSY")
+    try:
+        try:
+            return reports.parse_source(content, legacy=True) if legacy else reports.parse_source(content)
+        except reports.SolarEdgeReportError as error:
+            _fail(error.code)
+    finally:
+        reports._PARSE_SLOTS.release()
 
 
 def build_report(tenant, project_id, drawing_id, input_version_id, request):
@@ -254,7 +351,7 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
         return denial
     if write_loop.drawing_mutations_refusal() is not None:
         _fail("REPORT_WRITES_DRAINED")
-    req = _report_request(request)
+    req = _build_report_request(request)
     source_meta, content = _read(context, req["source_artifact_id"], sources.SOURCE_TOOL,
         sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME)
     if source_meta["request_sha256"] != source_meta["content_sha256"]:
@@ -266,19 +363,12 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
     except GraphValidationError as exc:
         if exc.code != "ARTIFACT_NOT_FOUND":
             raise
-        if not reports._PARSE_SLOTS.acquire(blocking=False):
-            _fail("REPORT_BUSY")
-        try:
-            try:
-                matrices = reports.parse_source(content)
-            except reports.SolarEdgeReportError as error:
-                _fail(error.code)
-        finally:
-            reports._PARSE_SLOTS.release()
+        matrices = _bounded_source_matrices(content)
         try:
             core = reports.report_from_matrices(context.graph, matrices,
                 alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
-                associations=req.get("associations"))
+                associations=req.get("associations"),
+                matching_policy=req.get("matching_policy", reports.ATOMIC_POLICY))
         except reports.SolarEdgeReportError as error:
             _fail(error.code)
         report = {"schema": REPORT_SCHEMA, **_identity(context),
@@ -302,6 +392,10 @@ def build_report(tenant, project_id, drawing_id, input_version_id, request):
 def _load_report(context, artifact_id):
     meta, content = _read(context, artifact_id, reports.REPORT_TOOL,
         reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME)
+    return meta, _decode_report(context, meta, content)
+
+
+def _decode_report(context, meta, content):
     try:
         report = json.loads(content.decode("utf-8"), object_pairs_hook=project._object_pairs,
             parse_constant=project._nonfinite, parse_float=project._json_float)
@@ -314,14 +408,70 @@ def _load_report(context, artifact_id):
                 or source_meta["request_sha256"] != source_meta["content_sha256"]):
             _fail(tracking.REPORT_CORRUPT)
         req = _report_request({"source_artifact_id": source_meta["artifact_id"], **report["request"]})
-        if meta["request_sha256"] != _request_sha(req, source_meta):
+        if meta["request_sha256"] not in (_request_sha(req, source_meta), _request_sha(req, source_meta, legacy=True)):
             _fail(tracking.REPORT_CORRUPT)
         _record(context, meta, report, review=True)
     except GraphValidationError:
         raise
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError):
         _fail(tracking.REPORT_CORRUPT)
-    return meta, report
+    return report
+
+
+def _missing_blob(backend, key):
+    try:
+        backend.get(key)
+    except KeyError:
+        return True
+    except Exception:
+        _fail("ARTIFACT_STORE_UNAVAILABLE")
+    return False
+
+
+def _recover_missing_report(context, record):
+    """Reproduce exact immutable bytes; never repair storage or forgive corruption."""
+    backend, meta = _read_metadata(context, record["report"]["artifact_id"],
+        reports.REPORT_TOOL, reports.REPORT_MEDIA_TYPE, reports.REPORT_FILENAME)
+    _check(all(record["report"][key] == meta[key] for key in
+        ("artifact_id", "content_sha256", "byte_length")), tracking.REPORT_CORRUPT)
+    scope = {key: meta[key] for key in ("organization_id", "project_id", "drawing_id")}
+    blob_key = artifacts._key(scope, meta["content_sha256"], blob=True)
+    # A present bad blob is an integrity failure, not an availability fallback.
+    if not _missing_blob(backend, blob_key):
+        _fail("ARTIFACT_CORRUPT")
+    source_meta, source_bytes = _read(context, record["source"]["artifact_id"],
+        sources.SOURCE_TOOL, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME)
+    _check(record["source"] == {key: source_meta[key] for key in
+        ("artifact_id", "content_sha256", "byte_length")}
+        and source_meta["request_sha256"] == source_meta["content_sha256"], tracking.REPORT_CORRUPT)
+    req = _report_request({"source_artifact_id": source_meta["artifact_id"], **record["request"]})
+    legacy = meta["request_sha256"] == _request_sha(req, source_meta, legacy=True)
+    _check(legacy or meta["request_sha256"] == _request_sha(req, source_meta), tracking.REPORT_CORRUPT)
+    matrices = _bounded_source_matrices(source_bytes, legacy=legacy)
+    core = reports.report_from_matrices(context.graph, matrices,
+        alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
+        associations=req.get("associations"),
+        matching_policy=req.get("matching_policy", reports.ATOMIC_POLICY))
+    report = {"schema": REPORT_SCHEMA, **_identity(context),
+        "source": {key: source_meta[key] for key in ("artifact_id", "content_sha256", "byte_length")},
+        "request": {key: value for key, value in req.items() if key != "source_artifact_id"}, **core}
+    raw = canonical_bytes(report)
+    _check(len(raw) == meta["byte_length"] and sha256(raw).hexdigest() == meta["content_sha256"],
+           tracking.REPORT_CORRUPT)
+    if not _missing_blob(backend, blob_key):
+        _fail("ARTIFACT_CORRUPT")
+    return meta, _decode_report(context, meta, raw)
+
+
+def _load_tracking_report(context, record):
+    try:
+        meta, report = _load_report(context, record["report"]["artifact_id"])
+        return meta, report, False
+    except GraphValidationError as error:
+        if error.code != "ARTIFACT_CORRUPT":
+            raise
+    meta, report = _recover_missing_report(context, record)
+    return meta, report, True
 
 
 def _record(context, meta, report, *, review=False):
@@ -340,7 +490,8 @@ def _record(context, meta, report, *, review=False):
 
 
 def _validated_record(context, meta, report, *, review=False):
-    _check(type(report) is dict and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA)
+    _check(type(report) is dict and set(report) in (_REPORT_KEYS, _REPORT_KEYS | {"optimizer_measurement"})
+           and report["schema"] == REPORT_SCHEMA)
     _check(all(report[key] == value for key, value in _identity(context).items()), tracking.REPORT_STALE)
     graph = context.graph
     _check(type(report["row_angle"]) in (int, float)
@@ -431,7 +582,9 @@ def _validated_record(context, meta, report, *, review=False):
         "group_strings": sum(row["source"] == "group" for row in strings),
         "bridge_strings": sum(row["source"] == "bridge" for row in strings)}
     _check(all(counts[key] == value for key, value in expected_counts.items()))
-    return {"schema": STORE_SCHEMA, "source": deepcopy(report["source"]),
+    measurement = ({"optimizer_measurement": tracking.optimizer_measurement(graph, report)}
+                   if "optimizer_measurement" in report else {})
+    return {"schema": STORE_SCHEMA, **measurement, "source": deepcopy(report["source"]),
         "report": {**{key: meta[key] for key in ("artifact_id", "content_sha256", "byte_length")},
                    **_identity(context)}, "request": deepcopy(report["request"]),
         "frames": frame_rows, "strings": rows, "unassigned_panel_refs": list(unassigned)}
@@ -439,6 +592,17 @@ def _validated_record(context, meta, report, *, review=False):
 
 def _accepted_record(context, meta, report, matched_only=False):
     if not matched_only:
+        unresolved = [row for row in report["matches"]
+                      if row.get("status") in ("unmatched", "ambiguous")]
+        if unresolved:
+            # Bind diagnostics only after the report's source and references validate.
+            _record(context, meta, report, review=True)
+            row = unresolved[0]
+            unmatched = row["status"] == "unmatched"
+            raise SolarEdgeGridRefusal(
+                "SOLAREDGE_GRID_UNMATCHED" if unmatched else "SOLAREDGE_GRID_AMBIGUOUS",
+                row["frame_ref"], row["candidates"],
+                "redraw_frame" if unmatched else "pick_candidate")
         return _record(context, meta, report)
     record = _record(context, meta, report, review=True)
     _check(bool(record["frames"]) and bool(record["strings"]), "SOLAREDGE_MATCHED_TRACKING_REQUIRED")
@@ -476,11 +640,15 @@ def read_tracking(tenant, context, params):
         source = graphs.resolve_project_graph_context(verified)
         _check((source.organization_id, source.project_id, source.drawing_id)
             == (context.organization_id, context.project_id, context.drawing_id))
-        meta, report = _load_report(source, record["report"]["artifact_id"])
+        meta, report, unavailable = _load_tracking_report(source, record)
         choice = record.get("acceptance")
         matched_only = type(choice) is dict and choice.get("mode") == "matched-only"
         _check(record == _accepted_record(source, meta, report, matched_only))
-    except (GraphValidationError, project.ProjectContextError, ValueError, TypeError,
+    except GraphValidationError as error:
+        if error.code in ("REPORT_RESOURCE_LIMIT", "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE"):
+            raise
+        _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
+    except (project.ProjectContextError, ValueError, TypeError,
             KeyError, IndexError, AttributeError):
         _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
     page_items = {"strings": record["strings"], "frames": record["frames"],
@@ -490,9 +658,18 @@ def read_tracking(tenant, context, params):
         "provenance": {key: record[key] for key in ("source", "report", "request")},
         "counts": module._counts(record), "references": module._references(context.graph, record),
         "section": section, "page": page, "items": items}
+    if "optimizer_measurement" in record:
+        measured = deepcopy(record["optimizer_measurement"])
+        if measured["graph_rev"] != context.graph["rev"] or not output["references"]["current"]:
+            measured.update(complete=False, total_count=None, string_counts=None)
+        output["optimizer_measurement"] = measured
     if matched_only:
         output["acceptance"] = {"mode": "matched-only", "status": choice["status"],
                                 "unresolved_groups": len(choice["unresolved_frame_refs"])}
         if choice["status"] == "partial":
             output["one_liner"] = "Matched tracking is saved. Remaining groups, panels or partial strings need correction. Labels are not electrical verification."
+    if unavailable:
+        message = "Report download is unavailable. The saved report hash was reproduced from its original source."
+        output["report_download"] = {"available": False, "message": message}
+        output["one_liner"] = output.get("one_liner", "Tracking labels are not electrical verification.") + " " + message
     return deepcopy(output)

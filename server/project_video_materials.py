@@ -33,6 +33,7 @@ class VideoError(ValueError):
     """Only fixed public error codes leave this module."""
     def __init__(self, code='video_unavailable'):
         self.code = code
+        self.decoder_diagnostic = None
         super().__init__(code)
 
 
@@ -74,6 +75,37 @@ def _finish(proc):
         time.sleep(.01)
 
 
+def _process_diagnostic(name, returncode, stderr):
+    """Retain closed failure facts only, after the owned process group is reaped."""
+    reason = 'unknown'
+    stderr_state, stderr_prefix = 'unreadable', 'unknown'
+    try:
+        stderr.seek(0)
+        bounded = stderr.read(8192)
+        stderr_state = 'nonempty' if bounded else 'empty'
+        stderr_prefix = 'other' if bounded else 'none'
+        first_line = bounded.split(b'\n', 1)[0].lower()
+        # Observed spelling only, not trusted attribution of the failure.
+        for prefix in ('bwrap', 'prlimit', 'ffprobe', 'ffmpeg'):
+            if first_line.startswith(prefix.encode('ascii') + b':'):
+                stderr_prefix = prefix
+                break
+        denied = b'operation not permitted' in first_line or b'permission denied' in first_line
+        if first_line.startswith(b'bwrap:') and denied:
+            reason = 'sandbox_denied'
+        elif first_line.startswith(b'bwrap: execvp ') and b'no such file or directory' in first_line:
+            reason = 'exec_unavailable'
+        elif first_line.startswith(b'prlimit:') and denied:
+            reason = 'resource_limit_denied'
+        else:
+            reason = 'process_failed'
+    except OSError:
+        pass
+    return dict(operation=name if name in {'sandbox', 'probe', 'decode'} else 'unknown',
+                returncode=returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
+                reason=reason, stderr_state=stderr_state, stderr_prefix=stderr_prefix)
+
+
 def _run(scratch, binary, args, name, deadline, recheck):
     output = scratch / 'output'
     argv = [
@@ -88,7 +120,8 @@ def _run(scratch, binary, args, name, deadline, recheck):
         '--', binary, *args,
     ]
     proc = None
-    with (output / (name + '.stdout')).open('xb') as stdout, (output / (name + '.stderr')).open('xb') as stderr:
+    failure = None
+    with (output / (name + '.stdout')).open('xb') as stdout, (output / (name + '.stderr')).open('xb+') as stderr:
         try:
             recheck()
             if time.monotonic() >= deadline:
@@ -103,7 +136,8 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     raise VideoError('video_timeout')
                 time.sleep(.02)
             if proc.returncode:
-                raise VideoError('video_incomplete')
+                failure = VideoError('video_incomplete')
+                raise failure
             recheck()
         except PermissionError:
             raise
@@ -115,6 +149,20 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     _finish(proc)
                 except Exception:
                     raise VideoError('video_cleanup_failed') from None
+                if failure is not None:
+                    failure.decoder_diagnostic = _process_diagnostic(name, proc.returncode, stderr)
+
+
+def _require_sandbox(scratch, deadline, recheck):
+    """Check the identical cage with an image-supplied fixed no-media command."""
+    try:
+        _run(scratch, TOOLS[2], ['-version'], 'sandbox', deadline, recheck)
+    except VideoError as exc:
+        if exc.code != 'video_incomplete':
+            raise
+        failure = VideoError('video_unavailable')
+        failure.decoder_diagnostic = exc.decoder_diagnostic
+        raise failure from None
 
 
 def _number(value, minimum, maximum):
@@ -203,6 +251,7 @@ def decode(raw, material, *, identity, transcripts, recheck, deadline):
             handle.write(raw)
         inputs = ['-protocol_whitelist', 'file', '-enable_drefs', '0',
                   '-use_absolute_path', '0', '-f', 'mov']
+        _require_sandbox(scratch, deadline, recheck)
         _run(scratch, TOOLS[2], [
             '-v', 'error', '-threads', '1', '-err_detect', 'explode', *inputs,
             '-select_streams', 'v:0', '-count_frames',

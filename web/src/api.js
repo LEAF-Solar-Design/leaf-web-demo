@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { readSourceFailureBody, sourceInitializationError } from './lib/sourceFailureDiagnostic.js'
 import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
@@ -70,31 +71,12 @@ export function isProjectSourcePreGenerationRefusal(error, expected) {
   return !!witness && closedSourceObject(expected, refusalKeys)
     && refusalKeys.every((key) => witness[key] === expected[key])
 }
-async function readVideoRefusal(response, expected) {
-  if (response.status !== 503 || response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') return null
-  const reader = response.body?.getReader()
-  if (!reader) return null
-  try {
-    const decoder = new TextDecoder('utf-8', { fatal: true })
-    let raw = '', total = 0
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > 4096) return null
-      raw += decoder.decode(value, { stream: true })
-    }
-    raw += decoder.decode()
-    const value = JSON.parse(raw)
-    if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
-      || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
-      || !closedSourceObject(value.refusal, refusalKeys)
-      || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
-    return Object.freeze({ ...value.refusal })
-  } catch { return null } finally {
-    await reader.cancel().catch(() => {})
-    reader.releaseLock()
-  }
+function readVideoRefusal(value, expected) {
+  if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
+    || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
+    || !closedSourceObject(value.refusal, refusalKeys)
+    || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
+  return Object.freeze({ ...value.refusal })
 }
 export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
 function sourceId(value) {
@@ -202,7 +184,8 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
     redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
   if (!current()) throw sourceUnavailable()
   if (!response.ok) {
-    const refusal = refusalExpected && await readVideoRefusal(response, refusalExpected)
+    const failureBody = await readSourceFailureBody(response)
+    const refusal = refusalExpected && readVideoRefusal(failureBody, refusalExpected)
     if (!current()) throw sourceUnavailable()
     if (refusal) {
       const error = new Error(VIDEO_REFUSAL_MESSAGE)
@@ -210,6 +193,8 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
       preGenerationRefusals.set(error, refusal)
       throw error
     }
+    const initialization = action === 'request' && sourceInitializationError(failureBody, body.source_request_id)
+    if (initialization) throw initialization
     const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
       : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
     error.status = response.status
@@ -2201,15 +2186,44 @@ const recoveryString = (value) => typeof value === 'string' && value.trim().leng
 // One lookup only. The controller owns admission waits and decides whether a
 // validated absence permits submission of the saved request.
 export async function recoverAuthorStage(idempotencyKey, { signal, changeSetId = null, targetToolName = null } = {}) {
-  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   if (!recoveryString(idempotencyKey) || idempotencyKey.length > 200) throw authorRecoveryError()
+  return readAuthorStageRecovery({ idempotency_key: idempotencyKey }, { signal, changeSetId, targetToolName })
+}
+
+export async function recoverAuthorStageById(changeSetId, { signal } = {}) {
+  if (typeof changeSetId !== 'string'
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(changeSetId)) throw authorRecoveryError()
+  const recovered = await readAuthorStageRecovery({ change_set_id: changeSetId }, { signal, changeSetId })
+  if (recovered.job?.status === 'staged') {
+    const result = authorStageResult(recovered.job)
+    if (result?.receipt?.change_set_id !== changeSetId || !recoveryString(result?.tool?.name)) throw authorRecoveryError()
+    return { ...recovered, result }
+  }
+  return recovered
+}
+
+export async function retryAuthorStage(job, authority, { signal } = {}) {
+  if (job?.status !== 'failed' || job?.error?.retryable !== true
+    || !Number.isInteger(job.version) || job.version < 0
+    || !Number.isInteger(job.attempt) || job.attempt < 0
+    || !recoveryString(authority?.sessionId) || !recoveryString(authority?.turnId)
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(job.change_set_id || '')) throw authorRecoveryError()
+  return readAuthorStageRecovery({ change_set_id: job.change_set_id, retry: true,
+    expected_version: job.version, expected_attempt: job.attempt }, {
+    signal, changeSetId: job.change_set_id, authority,
+  })
+}
+
+async function readAuthorStageRecovery(request, { signal, changeSetId = null, targetToolName = null, authority = null } = {}) {
+  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   let status
   try {
     const path = '/api/author/stage/recover'
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(),
+        ...(authority ? { 'X-Authority-Session-Id': authority.sessionId, 'X-Authority-Turn-Id': authority.turnId } : {}) },
+      body: JSON.stringify(request),
       signal,
     }, path)
     status = res.status

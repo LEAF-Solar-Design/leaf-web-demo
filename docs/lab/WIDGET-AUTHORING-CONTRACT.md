@@ -5,6 +5,11 @@ how the same project is presented; it does not create another project or another
 product. This document describes the editor/client contract. It does not grant
 service access, publication, financial-data access or production exposure.
 
+If the browser cannot create or start a definition download, the editor shows
+a local error and keeps the draft and stored revision. Choose Download again
+to retry explicitly. A successful retry clears that download error. The export
+still does not save edits to the project.
+
 ## Host inputs and lifetime
 
 Mount `WidgetsView` from `web/src/lab/widgets/WidgetsView.jsx` with the current
@@ -87,6 +92,13 @@ overflow can still show clipped text. For the synthetic four-row summary, the
 proved recipe sets each row to X14, W330, H24 with Y14/46/78/110, leaving room for
 the sample values. Check actual glyph bounds and the screenshot after changing
 text, font, scale or geometry. Increase the box or reduce scale when needed.
+
+The short Text field keeps its one-line, 40-character limit. Choose Edit full
+text for a multiline editor using the document contract's 512 UTF-16-unit limit.
+Long or multiline loaded values open in that editor automatically. Use short
+text becomes available when the value fits the short field. Changing editor
+mode does not change document text or save it. Newlines remain document data;
+the existing SVG clipping and line-layout rules still apply.
 
 Preview paints prefer defined semantic palette roles. If a role is absent, the
 renderer falls back to host foreground, then host ink, then current color. The

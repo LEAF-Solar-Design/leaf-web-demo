@@ -2,8 +2,11 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ReadableStream } from 'node:stream/web'
 import { TextDecoder, TextEncoder } from 'node:util'
+import { Blob } from 'node:buffer'
+import { webcrypto } from 'node:crypto'
 import { OpsWorkspaceGround } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
+import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 
 vi.mock('../site/SurfaceFrame.jsx', () => ({ useSurfaceFrame: () => undefined }))
 vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer current' }), noteUnauthorized: vi.fn() }))
@@ -44,6 +47,7 @@ function response(value) {
 }
 function harness(initial) {
   let stored = initial
+  let imported
   const authority = { subject: 'synthetic-subject', projectId }
   const calls = []
   const fetchImpl = vi.fn(async (raw, options) => {
@@ -55,6 +59,13 @@ function harness(initial) {
       platformUserId: projectId, bindingId: projectId, projectRole: 'owner',
       externalAuthority: 'auth0', externalSubject: authority.subject })
     if (url.pathname.endsWith('/datasets')) return response({ records: [metadata], nextCursor: null })
+    if (url.pathname.endsWith('/dataset-imports')) {
+      imported = JSON.parse(options.body)
+      return response({ reference, revision: 1, rowCount: 6, status: 'complete' })
+    }
+    if (url.pathname.endsWith(`/datasets/${reference.id}/versions/1`)) {
+      return response({ ...metadata, fields: imported?.definition.fields || fields })
+    }
     if (url.pathname.endsWith('/elements') && options.method === 'GET') return response({ records: stored ? [stored] : [], nextCursor: null })
     if (url.pathname.endsWith('/elements') && options.method === 'POST') {
       stored = { element: JSON.parse(options.body), revision: 1 }
@@ -66,31 +77,35 @@ function harness(initial) {
   })
   const snapshot = { status: 'active', generation: 1 }
   const controller = { getSnapshot: () => snapshot, subscribe: () => () => {} }
-  return { calls, authority, snapshot, saved: () => stored, removeSaved: () => { stored = null }, props: { active: true, signedIn: true, projectId,
+  return { calls, authority, snapshot, saved: () => stored, imported: () => imported, removeSaved: () => { stored = null }, props: { active: true, signedIn: true, projectId,
     accountScope: 'synthetic-account', session: { ...snapshot, controller },
     client: createIntegrationsClient({ origin: 'https://fixture.invalid', fetchImpl }) } }
 }
+const pairTableName = 'Capacity view data: provider pairs'
+
 async function expectSixRecords() {
-  const main = await screen.findByRole('region', { name: 'Pair main' })
-  const second = screen.getByRole('region', { name: 'Pair second' })
-  const unpaired = screen.getByRole('region', { name: 'Unpaired accounts' })
-  for (const [region, indices] of [[main, [0, 1]], [second, [2, 3]], [unpaired, [5, 4]]]) {
-    const rows = within(region).getAllByRole('row').slice(1)
-    expect(rows).toHaveLength(2)
-    indices.forEach((index, i) => {
-      const [account, provider, key, pct] = records[index]
-      const cells = within(rows[i]).getAllByRole('cell')
-      expect(cells[0]).toHaveTextContent(account)
-      expect(cells[1]).toHaveTextContent(provider)
-      expect(cells[2].textContent).toBe(key)
-      expect(cells[3].textContent).toBe(`${pct}%`)
-      expect(cells[4].textContent).toBe(`Nov ${index + 2}, 2026, 12:00:00 UTC`)
-    })
-  }
-  expect(main.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(second.compareDocumentPosition(unpaired) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(within(unpaired).getByRole('cell', { name: 'Fixture Kimi', exact: true }).closest('tr'))
-    .not.toHaveTextContent('Fixture unpaired Claude')
+  const table = within(await screen.findByRole('table', { name: pairTableName }))
+  const providers = ['Claude', 'Codex', 'Other']
+  const metrics = ['Account', 'Remaining', 'Reset']
+  expect(table.getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+    'Pair / account', ...providers.flatMap(provider => metrics.map(metric => `${provider} ${metric}`)),
+  ])
+  const expected = [
+    ['Pair main', [0, 1, null]],
+    ['Pair second', [2, 3, null]],
+    ['Unpaired Kimi', [null, null, 5]],
+    ['Unpaired Claude', [4, null, null]],
+  ]
+  const rows = table.getAllByRole('row').slice(1)
+  expect(rows).toHaveLength(expected.length)
+  expected.forEach(([label, slots], i) => {
+    const row = within(rows[i])
+    expect(row.getAllByRole('cell').map(cell => cell.textContent)).toEqual([
+      label, ...slots.flatMap(index => index === null ? metrics.map(() => 'Unavailable') : [
+        records[index][0], `${records[index][3]}%`, `Nov ${index + 2}, 2026, 12:00:00 UTC`,
+      ]),
+    ])
+  })
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
@@ -122,13 +137,55 @@ it('saves, reopens and restores the six-record capacity view after an Ops profil
   fireEvent.click(await screen.findByRole('button', { name: 'Capacity view · revision 1' }))
   await expectSixRecords()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active={false} />)
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active />)
   await expectSixRecords()
   expect(screen.getByText(/Recipe revision 1/)).toBeInTheDocument()
   expect(h.calls.filter(call => call.method === 'POST' && call.path.endsWith('/elements'))).toHaveLength(1)
   expect(h.calls.every(call => !/connections|actions|preview|providers/.test(call.path))).toBe(true)
   await waitFor(() => expect(screen.queryByText('Loading integrations…')).toBeNull())
+})
+
+it.each(['percent', 'fraction', 'number'])('imports declared capacity type %s through the real original mapper and strict client', async (kind) => {
+  vi.stubGlobal('TextDecoder', TextDecoder)
+  vi.stubGlobal('TextEncoder', TextEncoder)
+  vi.stubGlobal('crypto', webcrypto)
+  const original = records.map(row => Object.fromEntries(ids.map((id, index) => [id, row[index]])))
+  const blob = new Blob([JSON.stringify(original)], { type: 'application/json' })
+  const sha256 = [...new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer()))]
+    .map(byte => byte.toString(16).padStart(2, '0')).join('')
+  const materialId = '22222222-2222-4222-8222-222222222222'
+  vi.mocked(listProjectReferences).mockResolvedValue({ materials: [{ material_id: materialId, project_id: projectId,
+    name: 'synthetic-capacity.json', media_type: 'application/json', byte_size: blob.size, sha256 }], next_cursor: null })
+  vi.mocked(readProjectReferenceOriginal).mockResolvedValue(blob)
+  const h = harness()
+  render(<OpsWorkspaceGround {...h.props} />)
+  await screen.findByRole('option', { name: 'Synthetic capacity · version 1' })
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: 'synthetic-capacity.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: materialId } })
+  await screen.findByLabelText('Original provenance')
+  fireEvent.change(screen.getByLabelText('Records array'), { target: { value: '' } })
+  fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: reference.id } })
+  fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Synthetic capacity' } })
+  const type = screen.getByLabelText('Field 4 type')
+  expect(within(type).getByRole('option', { name: 'ratio', exact: true })).toBeInTheDocument()
+  fireEvent.change(type, { target: { value: 'ratio' } })
+  expect(screen.getByLabelText('Field 4 ratio scale')).toHaveValue('percent')
+  if (kind !== 'percent') fireEvent.change(screen.getByLabelText('Field 4 ratio scale'), { target: { value: 'fraction' } })
+  if (kind === 'number') {
+    fireEvent.change(type, { target: { value: 'number' } })
+    expect(screen.queryByLabelText('Field 4 ratio scale')).toBeNull()
+  }
+  fireEvent.change(screen.getByLabelText('Field 5 type'), { target: { value: 'instant' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 6 records. Original bytes and source clocks are retained.')
+  const payload = h.imported()
+  expect(payload.definition.fields[3].type).toEqual(kind === 'number' ? { kind: 'number' } : { kind: 'ratio', scale: kind })
+  expect(payload.definition.fields[4].type).toEqual({ kind: 'instant' })
+  expect(payload.definition.lineage).toEqual({ kind: 'project_material', material_id: materialId, sha256, byte_length: blob.size })
+  expect(payload.mapping.fields[3]).toEqual({ field_id: 'remaining_pct', pointer: '/remaining_pct', conversion: 'identity' })
+  expect(h.calls.filter(call => call.path.endsWith('/dataset-imports'))).toHaveLength(1)
 })
 
 const existing = () => ({ revision: 1, element: { schema_version: 1, id: 'capacity-view', title: 'Capacity view',
@@ -153,7 +210,7 @@ it.each(['account', 'scope', 'removed', 'session', 'project', 'signout'])('does 
   mounted.rerender(<OpsWorkspaceGround {...h.props} projectId={h.authority.projectId}
     accountScope={change === 'account' ? 'other-account' : h.props.accountScope} active />)
   await screen.findByRole('option', { name: 'Synthetic capacity · version 1' })
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   expect(h.calls.filter(call => call.path.endsWith('/query'))).toHaveLength(queries)
   // Dataset reads use POST /query. No save, action or other mutation occurred.
   expect(h.calls.filter(call => call.method !== 'GET').map(call => call.path))

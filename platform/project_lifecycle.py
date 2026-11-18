@@ -730,18 +730,55 @@ def revoke_project_member(
     return run_transaction(operation, isolation="serializable")
 
 
+def get_project_file_by_path(
+    org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
+    path: str,
+) -> Dict[str, Any]:
+    path = _validate_path(path)
+
+    def operation(conn: Any) -> Dict[str, Any]:
+        with conn.cursor() as cur:
+            _project_row(cur, org_id, project_id, lock=False)
+            role = _require_project_role(
+                cur, org_id, project_id, actor_binding_id, write=False, lock=False,
+            )
+            cur.execute(
+                "SELECT file_id, path, media_type, content, content_sha256, revision, updated_at "
+                "FROM project_files WHERE org_id = %(org_id)s "
+                "AND project_id = %(project_id)s AND path = %(path)s",
+                {"org_id": org_id, "project_id": project_id, "path": path},
+            )
+            row = cur.fetchone()
+            return {
+                "organization_id": str(org_id),
+                "project_id": str(project_id),
+                "can_write": role in WRITE_ROLES,
+                "file": _file_dict(row, include_content=True) if row else None,
+            }
+
+    return run_transaction(
+        operation, isolation="serializable", read_only=True, deferrable=True,
+    )
+
+
 def put_project_file(
     org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
     path: str, media_type: str, content: str, idempotency_key: str,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if expected_revision is not None and (
+        type(expected_revision) is not int or not 0 <= expected_revision <= 2147483646
+    ):
+        raise ValueError("expected_revision must be an integer from 0 to 2147483646 or null")
     path = _validate_path(path)
     media_type = _validate_media_type(media_type)
     content = _validate_content(content)
     idempotency_key = _validate_idempotency_key(idempotency_key)
     content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    input_digest = _canonical_digest(
-        {"path": path, "media_type": media_type, "content_sha256": content_sha256},
-    )
+    digest_input = {"path": path, "media_type": media_type, "content_sha256": content_sha256}
+    if expected_revision is not None:
+        digest_input["expected_revision"] = expected_revision
+    input_digest = _canonical_digest(digest_input)
 
     def operation(conn: Any) -> Dict[str, Any]:
         with conn.cursor() as cur:
@@ -754,6 +791,16 @@ def put_project_file(
             )
             if replay is not None:
                 return replay
+            if expected_revision is not None:
+                cur.execute(
+                    "SELECT revision FROM project_files WHERE org_id = %(org_id)s "
+                    "AND project_id = %(project_id)s AND path = %(path)s",
+                    {"org_id": org_id, "project_id": project_id, "path": path},
+                )
+                existing = cur.fetchone()
+                revision = int(existing["revision"]) if existing else 0
+                if revision != expected_revision:
+                    raise LifecycleConflict("project_file_revision_conflict")
             cur.execute(
                 "INSERT INTO project_files "
                 "(file_id, org_id, project_id, path, media_type, content, "

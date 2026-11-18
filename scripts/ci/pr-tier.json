@@ -841,6 +841,9 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "scripts-proof-string-sizer": [
+      "contract-keep"
+    ],
     "scripts-solar-w1-studio-group-delete": [
       "hard-harm-sentinel",
       "proposal"
@@ -864,6 +867,9 @@
     "server-campaign-dxf-inventory": [
       "proposal"
     ],
+    "server-capabilities-project-read": [
+      "contract-keep"
+    ],
     "server-demo-actor": [
       "proposal"
     ],
@@ -873,6 +879,9 @@
     ],
     "server-engine-corpus-harness": [
       "proposal"
+    ],
+    "server-engine-registry-scripts": [
+      "contract-keep"
     ],
     "server-entity-scope-admission": [
       "hard-harm-sentinel",
@@ -917,6 +926,9 @@
     "server-jobs-tenant-inflight-cap": [
       "hard-harm-sentinel",
       "proposal"
+    ],
+    "server-lab-capability-coverage": [
+      "contract-keep"
     ],
     "server-lab-contract": [
       "proposal"
@@ -1000,18 +1012,39 @@
     "server-sip-r6-routes": [
       "proposal"
     ],
+    "server-solar-design-survives-saves": [
+      "contract-keep"
+    ],
     "server-solar-frames-piles": [
       "proposal"
     ],
     "server-solar-tool-physical-export": [
       "proposal"
     ],
+    "server-solar-tool-solar-string-reports": [
+      "contract-keep"
+    ],
     "server-start-leaf-harness-config": [
       "proposal"
+    ],
+    "server-surface-entitlements": [
+      "contract-keep"
     ],
     "server-tenant-mcp-fake-oauth": [
       "hard-harm-sentinel",
       "proposal"
+    ],
+    "server-w1-catalog-gates": [
+      "contract-keep"
+    ],
+    "server-w1-cloud-solve-probe": [
+      "contract-keep"
+    ],
+    "server-w1-solve-parity": [
+      "contract-keep"
+    ],
+    "server-w1c-solve-proposal": [
+      "contract-keep"
     ],
     "server-w2-panel-group-delete": [
       "hard-harm-sentinel",
@@ -1253,15 +1286,18 @@
     "platform-static",
     "platform-tenant-cost-store",
     "production-tenant-header-probe",
+    "scripts-proof-string-sizer",
     "scripts-solar-w1-studio-group-delete",
     "scripts-solar-w1-studio-string-delete",
     "server-authored-tenant-isolation",
     "server-broker-tenant-state",
     "server-campaign-capability-job-access",
     "server-campaign-dxf-inventory",
+    "server-capabilities-project-read",
     "server-demo-actor",
     "server-drawings-cross-tenant-canary",
     "server-engine-corpus-harness",
+    "server-engine-registry-scripts",
     "server-entity-scope-admission",
     "server-entity-scope-binding",
     "server-entity-scope-containment",
@@ -1273,6 +1309,7 @@
     "server-integration-turn-grants",
     "server-integration-turn-grants-postgres",
     "server-jobs-tenant-inflight-cap",
+    "server-lab-capability-coverage",
     "server-lab-contract",
     "server-lab-runs",
     "server-lab-surface",
@@ -1298,10 +1335,17 @@
     "server-sip-r5-policy",
     "server-sip-r5-routes",
     "server-sip-r6-routes",
+    "server-solar-design-survives-saves",
     "server-solar-frames-piles",
     "server-solar-tool-physical-export",
+    "server-solar-tool-solar-string-reports",
     "server-start-leaf-harness-config",
+    "server-surface-entitlements",
     "server-tenant-mcp-fake-oauth",
+    "server-w1-catalog-gates",
+    "server-w1-cloud-solve-probe",
+    "server-w1-solve-parity",
+    "server-w1c-solve-proposal",
     "server-w2-panel-group-delete",
     "server-w2-string-delete",
     "studio-walk-regressions",

@@ -636,6 +636,22 @@ def test_forge_full_gate_then_five_images_with_exact_members(tmp_path, monkeypat
     assert not (case.output / "forge-provenance.json").exists()
 
 
+@pytest.mark.parametrize("value", [None, "", "staging", "production", "Staging", "staging "])
+def test_forge_donor_allow_device_verdict_only_for_staging(tmp_path, monkeypatch, value):
+    case = forge_case(tmp_path, monkeypatch)
+    case.env.pop("LEAF_GATE_ALLOW_DEVICE_VERDICT", None)
+    if value is not None:
+        case.env["LEAF_GATE_ALLOW_DEVICE_VERDICT"] = value
+    forge_publisher(case)
+    fan_in = [cmd for cmd in case.calls if "--verify-gate-proof" in cmd]
+    assert len(fan_in) == 1 and "--allow-device-verdict" not in fan_in[0]
+    case.calls.clear()
+    producer.produce_forge(case.env, case.cb, case.s3)
+    donor = [cmd for cmd in case.calls if "--verify-gate-proof" in cmd]
+    assert len(donor) == 1
+    assert ("--allow-device-verdict" in donor[0]) == (value == "staging")
+
+
 @pytest.mark.parametrize("field,value", [
     ("arn", "wrong"), ("id", "wrong"), ("projectName", "wrong"), ("buildNumber", 8),
     ("buildNumber", True), ("serviceRole", "wrong"), ("buildStatus", "SUCCEEDED"),
@@ -913,6 +929,15 @@ def test_native_gate_cannot_use_missing_proof(tmp_path, monkeypatch):
         producer.run_gate(tmp_path, tmp_path / "results", env={})
 
 
+def test_native_fan_in_never_allows_device_verdict(tmp_path, monkeypatch):
+    calls = fake_gate(monkeypatch)
+    producer.run_gate(tmp_path, tmp_path / "results",
+                      env={"LEAF_GATE_ALLOW_DEVICE_VERDICT": "staging"})
+    verifiers = [command for command, _ in calls if "--verify-gate-proof" in command]
+    assert len(verifiers) == 1
+    assert "--allow-device-verdict" not in verifiers[0]
+
+
 def test_gate_restores_canonical_import_path_without_mutating_admission_env(tmp_path, monkeypatch):
     calls = fake_gate(monkeypatch)
     env = {"PYTHONSAFEPATH": "1", "PATH": "test"}
@@ -966,6 +991,10 @@ def test_browser_config_uses_private_worker_port(tmp_path, worker):
     (package / "index.mjs").write_text('export const defineConfig = value => value;')
     config = tmp_path / "playwright.config.mjs"
     config.write_bytes((Path(__file__).resolve().parents[1] / "web/playwright.config.mjs").read_bytes())
+    # The config imports ./scripts/gate-browser-resources.mjs (node builtins only); copy it beside the config.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/gate-browser-resources.mjs").write_bytes(
+        (Path(__file__).resolve().parents[1] / "web/scripts/gate-browser-resources.mjs").read_bytes())
     env = dict(os.environ)
     env.pop("LEAF_NATIVE_GATE_WORKER", None)
     if worker is not None:
@@ -1411,6 +1440,20 @@ def full_release_case(tmp_path, monkeypatch, build):
     monkeypatch.setattr(producer, "package_web_image", lambda *a: inputs["web"])
     env = {"CODEBUILD_SRC_DIR_provider_contract": "/unit/contract", "CODEBUILD_SRC_DIR_autofill_solver": "/unit/solver"}
     return request, env, work
+
+
+@pytest.mark.parametrize("value", [None, "", "staging", "production", "Staging", "staging "])
+def test_release_donor_allow_device_verdict_only_for_staging(tmp_path, monkeypatch, value):
+    request, env, _ = full_release_case(
+        tmp_path, monkeypatch, lambda inputs, root, service, *a, **k: inputs["images"][service])
+    if value is not None:
+        env["LEAF_GATE_ALLOW_DEVICE_VERDICT"] = value
+    calls = []
+    monkeypatch.setattr(producer.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    producer.produce_release(tmp_path, tmp_path / "artifacts", request, env, object(), object())
+    donor = [command for command in calls if "--verify-gate-proof" in command]
+    assert len(donor) == 1
+    assert ("--allow-device-verdict" in donor[0]) == (value == "staging")
 
 
 def test_release_raises_first_failure_in_services_order_after_all_builds(tmp_path, monkeypatch, capsys):

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./useLabSurfaceStatus.js', () => ({ useLabSurfaceStatus: vi.fn() }))
@@ -72,5 +72,45 @@ describe('Lab dark default', () => {
     const values = [foreground, background].map((role) => luminance(colors[role]))
     const contrast = (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05)
     expect(contrast).toBeGreaterThanOrEqual(4.5)
+  })
+})
+
+
+describe('Lab command dock clearance', () => {
+  it('keeps the scroll window above the measured dock and follows its resize', async () => {
+    let dockTop = 985
+    const rectangle = (left, top, width, height) => ({ left, top, width, height,
+      right: left + width, bottom: top + height, x: left, y: top, toJSON() {} })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      if (this.dataset.ground === 'lab') return rectangle(0, 0, 1600, 1100)
+      if (this.classList.contains('bar-dock')) return rectangle(440, dockTop, 720, 85)
+      if (this.classList.contains('test-lab-header')) return rectangle(0, 0, 1600, 95)
+      return rectangle(0, 0, 0, 0)
+    })
+    const { container } = render(<>
+      <header className="test-lab-header" />
+      <div className="bar-dock"><textarea aria-label="Command" /></div>
+      <LabGround active occluders={[[".test-lab-header", "top"]]} />
+    </>)
+    const viewport = container.querySelector('[data-measured]')
+    await waitFor(() => expect(viewport.style.top).toBe('111px'))
+    expect(Number.parseFloat(viewport.style.top) + Number.parseFloat(viewport.style.height)).toBe(969)
+    const workbench = container.querySelector('.lab-workbench')
+    dockTop = 920
+    window.dispatchEvent(new Event('resize'))
+    await waitFor(() => expect(Number.parseFloat(viewport.style.top) + Number.parseFloat(viewport.style.height)).toBe(904))
+    expect(container.querySelector('.lab-workbench')).toBe(workbench)
+  })
+
+  it('uses the full contained window when no command dock is present', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+      return this.dataset.ground === 'lab'
+        ? { left: 0, top: 0, width: 800, height: 600 }
+        : { left: 0, top: 0, width: 0, height: 0 }
+    })
+    const { container } = render(<LabGround active />)
+    const viewport = container.querySelector('[data-measured]')
+    await waitFor(() => expect(viewport.style.height).toBe('568px'))
+    expect(viewport.style.top).toBe('16px')
   })
 })

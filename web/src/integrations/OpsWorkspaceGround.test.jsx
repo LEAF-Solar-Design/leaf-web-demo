@@ -391,10 +391,77 @@ async function openOriginal() {
   await screen.findByLabelText('Original provenance')
 }
 function mapOriginal(pointer) {
-  fireEvent.change(screen.getByLabelText('Records array'), { target: { value: pointer } })
-  fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
-  fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
+  // Captured controls and scoped field queries avoid repeated large-form label scans.
+  const recordsArray = screen.getByLabelText('Records array')
+  const datasetId = screen.getByLabelText('Import dataset ID')
+  const datasetTitle = screen.getByLabelText('Import dataset title')
+  fireEvent.change(recordsArray, { target: { value: pointer } })
+  fireEvent.change(datasetId, { target: { value: 'original-records' } })
+  fireEvent.change(datasetTitle, { target: { value: 'Imported original' } })
 }
+it('maps an original scalar row with an empty pointer without browser validation blocking import', async () => {
+  const harness = await materialHarness({ repos: ['example/first', 'example/second'] }, '/repos')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/repos')
+  fireEvent.click(screen.getByRole('button', { name: 'Add import field' }))
+  fireEvent.change(screen.getByLabelText('Field 1 id'), { target: { value: 'repo' } })
+  fireEvent.change(screen.getByLabelText('Field 1 label'), { target: { value: 'Repository' } })
+  fireEvent.change(screen.getByLabelText('Field 1 type'), { target: { value: 'identifier' } })
+  fireEvent.click(screen.getByLabelText('Field 1 key'))
+  const pointer = screen.getByLabelText('Field 1 pointer')
+  const form = screen.getByRole('form', { name: 'Map project records' })
+  expect(pointer.value).toBe('')
+  expect(pointer.checkValidity()).toBe(true)
+  expect(form.checkValidity()).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 2 records. Original bytes and source clocks are retained.')
+  const body = JSON.parse(importPosts(harness.fetchImpl)[0][1].body)
+  expect(body.selection).toEqual({ records_pointer: '/repos' })
+  expect(body.mapping.fields).toEqual([{ field_id: 'repo', pointer: '', conversion: 'identity' }])
+  expect(body.definition.key_fields).toEqual(['repo'])
+  expect(body.definition.lineage).toEqual(harness.lineage)
+})
+it.each(['remaining_pct', 'reset_at'])('later-record discovery includes %s absent from the first record', async field => {
+  const harness = await materialHarness([{ account: 'first' }, { account: 'second', [field]: field === 'remaining_pct' ? 0 : '2026-11-02T12:00:00Z' }], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  expect(screen.getByLabelText('Field 1 id').value).toBe('account')
+  expect(screen.getByLabelText('Field 2 id').value).toBe(field)
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it('later-record discovery preserves first-seen order, exclusions and the 100 field limit', async () => {
+  vi.stubGlobal('open', vi.fn())
+  const later = JSON.parse('{"constructor":"blocked","prototype":"blocked","__proto__":"blocked","pair_key":"main"}')
+  for (let i = 0; i < 110; i++) later[`extra_${i}`] = i
+  const harness = await materialHarness([null, 7, ['not a record'], { account: 'first' }, later], '')
+  render(<OpsWorkspaceGround {...harness.props} />)
+  await loaded()
+  await openOriginal()
+  mapOriginal('')
+  const fieldId = (index) => within(screen.getByText(`Import field ${index}`, { exact: true, selector: 'legend' }).closest('fieldset')).getByLabelText(`Field ${index} id`).value
+  expect(fieldId(1)).toBe('account')
+  expect(fieldId(2)).toBe('pair_key')
+  expect(fieldId(100)).toBe('extra_97')
+  expect(screen.queryByText('Import field 101', { exact: true, selector: 'legend' })).toBeNull()
+  const ids = screen.getAllByText(/^Import field \d+$/, { selector: 'legend' }).map((legend, index) => within(legend.closest('fieldset')).getByLabelText(`Field ${index + 1} id`).value)
+  expect(ids).toEqual(['account', 'pair_key', ...Array.from({ length: 98 }, (_, index) => `extra_${index}`)])
+  for (const excluded of ['constructor', 'prototype', '__proto__']) expect(ids).not.toContain(excluded)
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it.each(['account', 'pair_key', 'remaining_pct', String.raw`acc\u006funt`])('refuses duplicate original JSON member %s before mapping', async key => {
+  const field = key.startsWith('acc') ? 'account' : key
+  const raw = `[{"${field}":"first","${key}":"second"}]`
+  const harness = await materialHarness([{ [field]: 'first' }], '')
+  const blob = new Blob([raw], { type: 'application/json' })
+  harness.material.byte_size = blob.size
+  harness.material.sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer())), byte => byte.toString(16).padStart(2, '0')).join('')
+  readProjectReferenceOriginal.mockResolvedValue(blob)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: '<img src=x onerror=alert(1)>.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  expect(await screen.findByRole('alert')).toHaveTextContent('Duplicate JSON members. Nothing was imported.')
+  expect(screen.queryByLabelText('Records array')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
 it.each([
   ['/pr_records', 15689, (rows) => ({ schema: 'history', scope: { repos: ['a', 'b'] }, captured_at: '2026-09-01', pr_records: rows })],
   ['/samples', 164, (rows) => ({ samples: rows, limitations: ['snapshot only'], ingested_at: '2026-09-02' })],
@@ -527,7 +594,7 @@ it.each(['digest', 'size', 'json'])('refuses an original with invalid %s evidenc
 it('refuses complete oversized context without truncating the original or importing', async () => {
   const harness = await materialHarness({ rows: [{ record_id: 'one' }], observations: ['x'.repeat(262144)] })
   render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
-  await screen.findByText('Complete material context is too large to display. The original and last valid dataset are retained.')
+  await screen.findByText('Context too large. Original and last valid dataset retained.')
   expect(screen.getByRole('button', { name: 'Import selected records' })).toBeDisabled()
   expect(importPosts(harness.fetchImpl)).toHaveLength(0)
   expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
@@ -1148,6 +1215,23 @@ it('retries the failed dataset page cursor while retaining the previous page unt
   expect(selected.queryByRole('alert')).toBeNull()
   expect(selected.queryByRole('button', { name: 'Load more' })).toBeNull()
 })
+it('bounds saved-view discovery on initial and continuation pages without dropping views', async () => {
+  const { props } = setup()
+  const other = { element: { ...element, id: 'other-view', title: 'Other view' }, revision: 1 }
+  const list = vi.spyOn(props.client, 'listElements').mockImplementation(async (_, options) => {
+    if (options.limit !== 1) throw new Error('The catalog exceeded its validation budget.')
+    return options.after === 'next-view' ? page([other]) : { records: [saved], nextCursor: 'next-view' }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Load more saved views' }))
+  expect(await screen.findByRole('button', { name: 'Other view · revision 1' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Order view · revision 2' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Load more saved views' })).toBeNull()
+  expect(list.mock.calls.map(([, options]) => ({ limit: options.limit, after: options.after })))
+    .toEqual([{ limit: 1, after: undefined }, { limit: 1, after: 'next-view' }])
+})
 it.each(['datasets', 'elements'])('gives a failed %s list its own global retry after a retained-read failure', async (resource) => {
   const { props } = setup()
   const extra = resource === 'datasets'
@@ -1246,6 +1330,32 @@ it.each(['record', 'revision', 'recipe'])('clears the last result when selecting
   expect(screen.getByRole('alert')).toHaveTextContent("Couldn't reach the service")
   expect(screen.queryByRole('table')).toBeNull()
 })
+it.each(['\u200b\u200c\u200d', '\u2060\ufeff'])('refuses an invisible native view title %j without saving and recovers', async title => {
+  const { props } = setup()
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: title } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Enter a visible view title.')
+  expect(save).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('Title')).toHaveValue(title)
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeEnabled()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Visible recovered view' } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  await screen.findByText('Saved Visible recovered view, revision 3.')
+  expect(save).toHaveBeenCalledOnce()
+})
+it.each(['حساب', '容量', '🌻', 'e\u0301'])('keeps a visible Unicode view title %s', async title => {
+  const { props } = setup()
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.change(screen.getByLabelText('Title'), { target: { value: title } })
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  await screen.findByText(`Saved ${title}, revision 3.`)
+  expect(save).toHaveBeenCalledOnce()
+})
 it.each(['table', 'line'])('saves strict native %s recipes with exact dataset refs', async (kind) => {
   const { props, fetchImpl } = setup()
   render(<OpsWorkspaceGround {...props} />)
@@ -1260,6 +1370,48 @@ it.each(['table', 'line'])('saves strict native %s recipes with exact dataset re
     props: kind === 'table' ? { columns: ['day', 'total'], row_limit: 100 } : { x_field: 'day', y_field: 'total' } })
   expect(saves[0][1].headers['If-Match']).toBeUndefined()
   expect(screen.getByText('Saved New order view, revision 3.')).toHaveFocus()
+})
+it.each(['title', 'query', 'columns'])('refuses an unverified saved recipe %s before announcing success', async (change) => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => {
+    const acknowledged = structuredClone(recipe)
+    if (change === 'title') acknowledged.title = 'Unexpected recipe'
+    if (change === 'query') acknowledged.query.limit = 1
+    if (change === 'columns') acknowledged.props.columns = ['day']
+    return { element: acknowledged, revision: 3 }
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('saved recipe did not match')
+  expect(screen.queryByText(/^Saved .*, revision \d+\.$/)).toBeNull()
+  expect(screen.getByLabelText('Title')).toHaveValue('New order view')
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeEnabled()
+})
+it('accepts the exact saved recipe with reordered object keys', async () => {
+  const { props } = setup()
+  vi.spyOn(props.client, 'saveElement').mockImplementation(async (_id, recipe) => ({
+    element: Object.fromEntries(Object.entries(recipe).reverse()), revision: 3,
+  }))
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded(); fill()
+  fireEvent.click(screen.getByRole('button', { name: 'Save view' }))
+  await screen.findByText('Saved New order view, revision 3.')
+})
+it.each(['reviewer', 'read_only'])('keeps the native view composer inert for %s while allowing saved reads', async projectRole => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  fetchImpl.mockImplementation((url, options) => url.endsWith('/scope')
+    ? Promise.resolve(response({ ...scope, projectRole })) : original(url, options))
+  const save = vi.spyOn(props.client, 'saveElement')
+  render(<OpsWorkspaceGround {...props} />)
+  await loaded()
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
+  fireEvent.submit(screen.getByRole('form', { name: 'Compose native view' }))
+  expect(save).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Order view · revision 2' }))
+  await screen.findByRole('table', { name: 'Order view data' })
+  expect(screen.getByRole('button', { name: 'Save view' })).toBeDisabled()
 })
 it('retries only the read after a saved view fails to load, without writing another revision', async () => {
   const { props } = setup()
@@ -1815,9 +1967,10 @@ const catalogAction = { connection_id: actionElement.connection_id, connection_t
 async function composeWorkflow() {
   fireEvent.click(screen.getByRole('button', { name: 'Open action catalog' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled())
-  fireEvent.change(screen.getByLabelText('Definition title'), { target: { value: 'Order workflow' } })
-  fireEvent.change(screen.getByLabelText('Definition stable ID'), { target: { value: reference.id } })
-  fireEvent.change(screen.getByLabelText('Definition version'), { target: { value: String(reference.version) } })
+  const definition = within(screen.getByRole('region', { name: 'Create manual workflow', exact: true }))
+  fireEvent.change(definition.getByLabelText('Definition title'), { target: { value: 'Order workflow' } })
+  fireEvent.change(definition.getByLabelText('Definition stable ID'), { target: { value: reference.id } })
+  fireEvent.change(definition.getByLabelText('Definition version'), { target: { value: String(reference.version) } })
   fireEvent.change(screen.getByLabelText('Step 1 action'), { target: { value: JSON.stringify([
     catalogAction.connection_id, catalogAction.connector_ref, catalogAction.operation_ref]) } })
 }

@@ -43,6 +43,7 @@ const setup = props => render(<ProjectPageEditor projectId={PROJECT} accountScop
 const openSaved = async () => { fireEvent.click(button('Open page')); await screen.findByDisplayValue('A page') }
 
 beforeEach(() => {
+  vi.stubGlobal('navigator', { locks: { request: async (_name, callback) => callback() } })
   vi.clearAllMocks()
   auth.scope = 'account-a'
   auth.org = 'org-a'; auth.actor = 'binding-a'
@@ -732,7 +733,8 @@ describe('portfolio project document', () => {
     expect(saveProjectPage).not.toHaveBeenCalled()
   })
 
-  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', async () => {
+  // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
+  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', { retry: 1 }, async () => {
     const original = portfolioDraft()
     original.categories = [32, 31, 31].map((length, ci) => ({ slug: `gallery-${ci}`, title: `Gallery name ${ci}`, description: '', hero: 0,
       images: Array.from({ length }, (_, ii) => ({ ...imageRef(PHOTO), material_id: `33333333-3333-4333-8333-${String(ci * 32 + ii).padStart(12, '0')}`, title: `Photo name ${ci}-${ii}` })) }))
@@ -1288,7 +1290,7 @@ describe('saved portfolio iOS preview', () => {
     setup(); await openPortfolio()
     vi.useFakeTimers()
     try {
-      fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview'))
+      await act(async () => { fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview')) })
       expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
       expect(submitProjectNativePreview).toHaveBeenCalledWith(PROJECT, 7, expect.any(String), { signal: expect.any(AbortSignal) })
       await act(async () => pending.resolve(nativeJob('queued')))
@@ -1404,6 +1406,7 @@ describe('saved portfolio iOS preview', () => {
     submitProjectNativePreview.mockReturnValueOnce(pending.promise)
     const view = setup(); await openPortfolio()
     fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(1))
     const signal = submitProjectNativePreview.mock.lastCall[3].signal
     if (kind === 'unmount') view.unmount()
     else if (kind === 'logout') act(() => auth.logout())

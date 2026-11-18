@@ -16,7 +16,8 @@ Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
      rotate into the bank frame, band centroids into rows by frame-y
      (tolerance = half the median rotated bbox height), and order panels
      serpentine (row 0 left->right, row 1 right->left, ...),
-  4. chunk each bank's walk into strings of at most
+  4. end a continuous run before a step longer than 1.5 median module long
+     edges, then balance each run into the fewest strings of at most
      ``max_modules_per_string``, where that limit comes from the NEC 690.7
      cold-temperature Voc check:
 
@@ -55,6 +56,7 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 INCHES_PER_FOOT = 12.0
+MAX_STEP_MODULE_LENGTHS = 1.5
 METERS_PER_INCH = 0.0254
 MAX_METERS_PER_UNIT = 1000.0
 SCALE_INVALID = "meters_per_unit must be a finite number greater than 0 and at most 1000"
@@ -236,6 +238,29 @@ def _bank_serpentine(panels: List[Dict[str, Any]], idxs: List[int],
     return ordered
 
 
+def _balanced_chunks(ordered, max_modules):
+    """Use the fewest strings, with sizes differing by at most one module."""
+    string_count = (len(ordered) + max_modules - 1) // max_modules
+    size, larger_strings = divmod(len(ordered), string_count)
+    offset = 0
+    for index in range(string_count):
+        length = size + (index < larger_strings)
+        yield ordered[offset:offset + length]
+        offset += length
+
+
+def _continuous_chunks(ordered, cents, max_modules, max_step):
+    """Balance each continuous bank walk without connecting across a gap."""
+    run = []
+    for index in ordered:
+        if run and math.dist(cents[run[-1]], cents[index]) > max_step:
+            yield from _balanced_chunks(run, max_modules)
+            run = []
+        run.append(index)
+    if run:
+        yield from _balanced_chunks(run, max_modules)
+
+
 def run(intake: Dict[str, Any], params: Dict[str, Any]):
     scale = _inches_per_unit(intake, params)
     p = dict(DEFAULTS)
@@ -258,31 +283,79 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
     cents = [_centroid(pl) for pl in panels]
     banks = _cluster_banks(cents, float(p["cluster_radius_factor"]))
 
-    strings: List[Dict[str, Any]] = []
-    lengths_ft: List[float] = []
+    constrained = any(key in (params or {}) for key in
+                      ("min_modules_per_string", "max_modules_per_string"))
+    minimum = 1
+    effective_maximum = max_modules
+    if constrained:
+        minimum = params.get("min_modules_per_string", 1)
+        requested_maximum = params.get("max_modules_per_string", max_modules)
+        if (type(minimum) is not int or minimum < 1
+                or type(requested_maximum) is not int or requested_maximum < 1
+                or ("max_modules_per_string" in params and requested_maximum < minimum)):
+            raise ValueError("string module bounds must be positive integers with minimum <= maximum")
+        effective_maximum = min(max_modules, requested_maximum)
+
+    plans = []
+    planning = None
+    remaining_budget = None
+    if constrained:
+        from solar_string_partition import DEFAULT_STATE_BUDGET, plan_partition
+        remaining_budget = DEFAULT_STATE_BUDGET
+        planning = {"status": "complete", "reason": "validated_partition",
+                    "minimum_modules": minimum, "maximum_modules": effective_maximum,
+                    "searched_states": 0, "witness": None}
+        if minimum > effective_maximum:
+            planning.update(status="infeasible", reason="electrical_capacity",
+                            witness={"requested_minimum": minimum,
+                                     "electrical_maximum": max_modules})
+
     for idxs in banks:
         ordered = _bank_serpentine(panels, idxs, cents)
-        for si in range(0, len(ordered), max_modules):
-            chunk = [cents[i] for i in ordered[si:si + max_modules]]
-            pts = [[round(c[0], 3), round(c[1], 3)] for c in chunk]
-            if scale != 1.0:
-                # Back to drawing units; never rounded again, so the inch grid is what is kept.
-                pts = [[x / scale, y / scale] for x, y in pts]
-            length_units = sum(
-                math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(chunk, chunk[1:]))
-            length_ft = round(length_units / INCHES_PER_FOOT, 1)
-            if scale != 1.0 and not (math.isfinite(length_ft)
-                                 and all(math.isfinite(c) for pt in pts for c in pt)):
-                raise ValueError(SCALE_OVERFLOW)
-            lengths_ft.append(length_ft)
-            strings.append({
-                "id": f"S{len(strings) + 1:03d}",
-                "modules": len(chunk),
-                "pts": pts,      # WORLD coordinates (same space as intake polylines)
-                "length_ft": length_ft,
-            })
+        module_length = statistics.median(
+            max(math.dist(a[:2], b[:2]) for a, b in zip(
+                panels[i]["pts"], panels[i]["pts"][1:] + panels[i]["pts"][:1]))
+            for i in idxs)
+        max_step = MAX_STEP_MODULE_LENGTHS * module_length
+        if constrained:
+            if planning["status"] != "complete":
+                break
+            outcome = plan_partition(ordered, cents, minimum, effective_maximum,
+                                     max_step, state_budget=remaining_budget)
+            remaining_budget -= outcome["searched_states"]
+            planning["searched_states"] += outcome["searched_states"]
+            planning.update({key: outcome[key] for key in ("status", "reason", "witness")})
+            if outcome["status"] != "complete":
+                plans = []
+                break
+            plans.extend(outcome["paths"])
+        else:
+            plans.extend(_continuous_chunks(ordered, cents, max_modules, max_step))
 
-    biggest = max(s["modules"] for s in strings)
+    strings: List[Dict[str, Any]] = []
+    lengths_ft: List[float] = []
+    for indices in plans:
+        chunk = [cents[i] for i in indices]
+        pts = [[round(c[0], 3), round(c[1], 3)] for c in chunk]
+        if scale != 1.0:
+            # Back to drawing units; never rounded again, so the inch grid is what is kept.
+            pts = [[x / scale, y / scale] for x, y in pts]
+        length_units = sum(
+            math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(chunk, chunk[1:]))
+        # Unit conversion can perturb exact half-tenths by a few ulps.
+        length_ft = round(round(length_units / INCHES_PER_FOOT, 9), 1)
+        if scale != 1.0 and not (math.isfinite(length_ft)
+                             and all(math.isfinite(c) for pt in pts for c in pt)):
+            raise ValueError(SCALE_OVERFLOW)
+        lengths_ft.append(length_ft)
+        strings.append({
+            "id": f"S{len(strings) + 1:03d}",
+            "modules": len(chunk),
+            "pts": pts,      # WORLD coordinates (same space as intake polylines)
+            "length_ft": length_ft,
+        })
+
+    biggest = max((s["modules"] for s in strings), default=0)
     worst_string_voc = round(biggest * worst_voc_per_module, 2)
 
     # Worst run delta: max deviation from the mean wire length, over FULL
@@ -293,7 +366,7 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
     full_lengths = [s["length_ft"] for s in strings if s["modules"] == max_modules]
     basis_lengths, basis = ((full_lengths, "full-strings") if len(full_lengths) >= 2
                             else (lengths_ft, "all-strings"))
-    mean_ft = sum(basis_lengths) / len(basis_lengths)
+    mean_ft = sum(basis_lengths) / len(basis_lengths) if basis_lengths else 0.0
     worst_run_delta_pct = (
         round(max(abs(l - mean_ft) for l in basis_lengths) / mean_ft * 100.0, 2)
         if mean_ft > 0 else 0.0)
@@ -324,6 +397,10 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
             "total_wire_ft": round(sum(lengths_ft), 1),
         },
     }
+    if constrained:
+        result["planning"] = planning
+        if planning["status"] != "complete":
+            result["electrical"].update(worst_string_voc=None, **{"pass": None})
     overlay = {
         "kind": "polylines",
         "layer": "StringRuns",

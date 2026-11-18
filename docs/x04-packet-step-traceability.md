@@ -1,0 +1,19 @@
+# X04 packet checks and frozen acceptance
+
+Parent: Studio X-bench X04 raw DWG intake, track 2. This is a static source map at local base `56fccc9e7d002bea0a9dc4dc3dea53a17560ca2a`. No suite, benchmark, browser or grader ran for this document. An assertion cited below describes source, not a new execution receipt.
+
+The frozen contract is `D:/agents/production-lanes-2026-11-10/XBENCH/X04.md:38-44`. Its shared grading rules require normal product routes, independent oracles and a staging source identity (`INDEX.md:28-30`). Packet validation is a separate offline check with scope `embedded_artifact_report_consistency` and integrity `unverified` (`scripts/validate_x04_evidence_packet.py:103-107`).
+
+| Frozen step | Packet field or assertion | Exact remaining gap |
+|---|---|---|
+| 1. Terminal upload, no blocking modal | None. The CLI reads JSON and writes a summary (`scripts/validate_x04_evidence_packet.py:110-123`). | No raw upload, five-minute deadline, drawing view, hang or modal observation. |
+| 2. Complete dependency dispositions | Embedded `drawing.dependency_pairs` must match `observed_dependencies`; scope is `local_dxf_records` (`scripts/export_x04_offline_evidence.py:101-111`). Comparison binds literal dependency deltas (`scripts/compare_x04_offline_evidence.py:35-36`). | Equality to embedded converted records does not prove that those records contain every raw DWG dependency. No independent raw inventory is read. |
+| 3. Original bytes unchanged | Artifact result integrity must equal `unverified` (`scripts/validate_x04_offline_evidence.py:25-26`). Packet output repeats that limit. | No original DWG bytes, stored-original digest or independently pinned fixture digest is checked. Preserving a synthetic JSON file is different evidence. |
+| 4. Block references rendered as geometry | `highlight_handles` must match trusted parent membership (`scripts/validate_x04_offline_evidence.py:20-24`). | Parent handles do not prove exploded INSERT geometry, a rendered path count or a visible drawing. |
+| 5. Exact normal-tool count on all ten | Embedded intake and set IDs go through `count-modules` with `aps_live=False` (`scripts/export_x04_offline_evidence.py:121-141`). Packet fixture assertions pin comparison 6/1/-5 and batch 6/1/6 (`server/tests/test_x04_packet_cross_binding.py:25-26`). | These are synthetic counts. No ten-drawing oracle comparison or normal Studio tool invocation is performed. |
+| 6. Named set/layer and recorded pick | Embedded `request.set_ids` selects explicit sets; comparison binds their changes (`scripts/export_x04_offline_evidence.py:98-100`, `scripts/compare_x04_offline_evidence.py:31`). Swapped occurrence IDs refuse (`server/tests/test_x04_packet_cross_binding.py:34-47`). | A saved request does not prove Studio listed the right competing sets, displayed their layer names or recorded a real user's choice. |
+| 7. No per-drawing deployed code | Packet IDs are generic local labels (`scripts/validate_x04_evidence_packet.py:18-24`). | Label syntax is not a deployed-source scan. The source-bound forbidden-token check remains with the real grader (`X04.md:34,55-57`). |
+
+The packet adds a useful narrower claim: individually valid artifacts and reports must agree with their explicit ordered bindings. The negative controls first validate each artifact and saved report separately, then require packet refusal (`server/tests/test_x04_packet_cross_binding.py:39-48`). The replay deletes separate synthetic source files before checking the embedded packet (`server/tests/test_x04_packet_replay_chain.py:26-42`). Neither check establishes source authenticity.
+
+All seven live steps remain unproved by the packet itself. Prior staging results, where available, remain separate receipts. Only the source-bound full-ten grader can supply the combined X04 verdict (`X04.md:48`, `INDEX.md:34`). This document changes no grading requirement or readiness marker.

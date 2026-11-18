@@ -73,9 +73,9 @@ def job_proof(s, result, prepared, monkeypatch):
     return adapter.project_graph_job_provenance(s.job, result, expected=prepared, conn=conn)
 
 
-# Current admission has eighteen tools and four creation tools.
+# Current admission has nineteen tools and four creation tools.
 def test_sip_r3c_multi_add_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
+    assert adapter.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 19
     assert adapter.CREATION_TOOLS == {"solar-string-add", "solar-assign-equipment", TOOL, "solar-panel-groups"}
     assert adapter._tool(TOOL, manifest(TOOL)) == solar_tools.get(TOOL)
     refused("SIP_R3_TOOL_MANIFEST_MISMATCH", lambda: adapter._tool(TOOL, "x"))

@@ -292,3 +292,20 @@ describe('W4g-7b-01c blockExpansion', () => {
     for (const mesh of meshes) { mesh.geometry.dispose(); mesh.material.dispose() }
   })
 })
+
+
+describe('anonymous server block geometry', () => {
+  it.each(['*U1', '*D1'])('projects %s as visible module geometry', (name) => {
+    const source = serverSource()
+    source.blocks = { [name]: source.blocks.Fixture }
+    source.inserts[0].name = name
+    const before = structuredClone(source)
+    const view = projectServerBlocks(source)
+    expect(view.polylines).toHaveLength(1)
+    expect(view.polylines[0].pts[0]).toEqual([100, 200, 0])
+    expect(view.polylines[0].pts.flat().every(Number.isFinite)).toBe(true)
+    expect(view.polylines[0].sourceHandle).toBe('A100')
+    expect(view.inserts[0].incomplete).toBe(false)
+    expect(source).toEqual(before)
+  })
+})

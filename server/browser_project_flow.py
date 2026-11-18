@@ -50,8 +50,37 @@ _ERRORS = {
 class FlowError(ValueError):
     def __init__(self, status):
         self.status = status
+        self.public_diagnostic = {}
         self.code, message = _ERRORS[status]
         super().__init__(message)
+
+
+def _author_failure(status, code, phase, correlation_id, request_id, metadata):
+    error = FlowError(status)
+    if status != 503 or code != 'author_unavailable' or phase != 'stage' or type(metadata) is not dict:
+        return error
+    if (set(metadata) - {'author_subphase', 'author_http_status'}
+            or type(metadata.get('author_subphase')) is not str
+            or metadata.get('author_subphase') not in {
+                'initialize_binding', 'initialize_authority', 'initialize_http',
+                'initialize_transport', 'initialize_response', 'initialization'}):
+        return error
+    try:
+        if (type(request_id) is not str or str(uuid.UUID(request_id)) != request_id
+                or not uuid.UUID(request_id).int or type(correlation_id) is not str
+                or str(uuid.UUID(correlation_id)) != correlation_id
+                or uuid.UUID(correlation_id).version != 4):
+            return error
+    except (ValueError, AttributeError):
+        return error
+    if 'author_http_status' in metadata and (
+            type(metadata['author_http_status']) is not int or not 100 <= metadata['author_http_status'] <= 599):
+        return error
+    error.code = 'author_unavailable'
+    error.args = ('Project source initialization failed. Review the original request before retrying.',)
+    error.public_diagnostic = dict(source_request_id=request_id, correlation_id=correlation_id,
+                                  phase='stage', **metadata)
+    return error
 
 
 VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
@@ -318,6 +347,54 @@ def _claim(session_id, turn_id, current, action, edit_id, digest, recheck, *, so
 def _request_digest(body, source_profile):
     value = dict(source_profile=source_profile, payload=body) if source_profile == NATIVE_PROFILE else body
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def _record_author_disposition(error, current, body, session_id, turn_id, action, digest, recheck):
+    """Capture gate provenance under the existing owner, never grant replay."""
+    if (type(error) is not authoring.AuthorDependencyRefusal
+            or error.provenance is not authoring._VERIFIED_DEPENDENCY_REFUSAL):
+        return
+    expected_request = dict(body_to_author(body), idempotency_key=_request_key(body, NATIVE_PROFILE, session_id, turn_id))
+    if error.request != expected_request:
+        return
+    recheck()
+    bound = repository(current)
+    if (bound is None or error.binding != dict(bound, actor_binding_id=current[2],
+                                               expected_base_commit=error.binding.get('expected_base_commit'))
+            or not _sha(error.binding.get('expected_base_commit'), 40)):
+        return
+    disposition = error.disposition
+    if (type(disposition) is not dict or set(disposition) != {
+            'schema', 'attempt_id', 'wire_sha256', 'outcome', 'stage'}
+            or disposition['schema'] != 'leaf.project-source-author-disposition.v1'
+            or disposition['outcome'] != 'not_started' or disposition['stage'] != 'author_dependency_gate'
+            or not _sha(disposition['wire_sha256'])):
+        return
+    if _uuid(disposition['attempt_id']) != disposition['attempt_id'] or uuid.UUID(disposition['attempt_id']).version != 4:
+        return
+    snapshot = session_store.get_session(session_id)
+    if not snapshot or snapshot.get('active_turn_id') != turn_id:
+        return
+    pinned = snapshot['last_seq']
+    events = session_store.recent_events(session_id, 64)
+    starts = [index for index, event in enumerate(events) if event['turn_id'] == turn_id
+              and event['type'] == 'turn_started' and event['seq'] <= pinned]
+    if len(starts) != 1:
+        return
+    tail = [event for event in events[starts[0]:] if event['seq'] <= pinned]
+    if not tail or [event['seq'] for event in tail] != list(range(tail[0]['seq'], pinned + 1)):
+        return
+    markers = [event for event in tail if event['turn_id'] == turn_id and event['type'] == 'browser_source_dispatch']
+    expected_marker = dict(action=action, source_request_id=body['source_request_id'], payload_digest=digest,
+                           source_profile=NATIVE_PROFILE, request=body, authority=list(current))
+    if len(markers) != 1 or markers[0]['data'] != expected_marker:
+        return
+    recheck()
+    if repository(current) != bound:
+        return
+    data = dict(disposition, **error.binding, source_request_id=body['source_request_id'], source_profile=NATIVE_PROFILE,
+                authority_session_id=session_id, authority_turn_id=turn_id, marker_seq=markers[0]['seq'], marker_digest=digest)
+    session_store.append_event(session_id, turn_id, 'native_source_author_disposition', data, expected_seq=pinned + 1)
 
 
 def _request_key(body, source_profile, session_id=None, turn_id=None):
@@ -663,6 +740,11 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
         known_refusal = True
         raise PreGenerationRefusal(witness, provenance=_RECORDED_REFUSAL) from None
     except authoring.AuthoringError as exc:
+        if source_profile == NATIVE_PROFILE and phase == 'stage' and action in ('create', 'edit'):
+            try:
+                _record_author_disposition(exc, current, body, session_id, turn_id, action, digest, recheck)
+            except Exception:
+                pass  # Capture failure leaves the original error and replay fencing intact.
         failure_status = exc.status if exc.status in _ERRORS else 503
         # Only canonical internal codes may enter the retained event, never exception text.
         canonical_error = authoring._ERRORS.get(exc.code) if isinstance(exc.code, str) else None
@@ -679,7 +761,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
             except Exception:
                 pass  # An unreadable optional attribute must not replace the failure.
             failure_metadata = author_diagnostics.snapshot()
-        raise FlowError(failure_status) from None
+        raise _author_failure(failure_status, failure_code, phase, correlation_id, edit_id, failure_metadata) from None
     except FlowError as exc:
         failure_status = exc.status
         failure_code = _ERRORS[failure_status][0]

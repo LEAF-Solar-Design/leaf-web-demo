@@ -16,8 +16,8 @@ const scope = {
   projectRole: 'owner', externalAuthority: 'auth0', externalSubject: 'fixture-service@clients',
 }
 
-function response(status = 200) {
-  const bytes = new TextEncoder().encode(JSON.stringify(scope))
+function response(status = 200, data = scope) {
+  const bytes = new TextEncoder().encode(JSON.stringify(data))
   return {
     status, ok: status >= 200 && status < 300,
     headers: { get: (name) => name === 'content-type' ? 'application/json' : null },
@@ -83,6 +83,28 @@ it('keeps ordinary bearer clients on their configured external transport', async
   expect(request).toMatchObject({ credentials: 'omit', redirect: 'error', cache: 'no-store',
     headers: { Authorization: 'Bearer fixture.invalid.signature' } })
   expect(request.headers).not.toHaveProperty('X-Leaf-Integration-Origin')
+})
+
+it('composes real retention methods through the existing verified service transport', async () => {
+  await verifiedService()
+  const payload = { tableId: 'retention-table:' + 'a'.repeat(64), revision: 1 }
+  const fetchImpl = vi.fn(async () => response(200, payload))
+  const client = createIntegrationsClient({ origin: upstream, fetchImpl })
+  const input = { datasetRef: { id: 'logs', version: 1, digest: 'b'.repeat(64) },
+    expectedDatasetRevision: 1, tableId: 'source-logs',
+    fields: { id: 'id', source: 'source', level: 'level', timestamp: 'timestamp' },
+    retentionClock: '2026-11-14T09:45:00.000Z' }
+  const options = { signal: new AbortController().signal }
+  await expect(client.retentionPrepare(projectId, input, options)).resolves.toEqual(payload)
+  const [[target, request]] = fetchImpl.mock.calls
+  expect(target).toBe(`/api/v1/projects/${projectId}/integrations/retention/prepare`)
+  expect(request).toMatchObject({ method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+    headers: { Authorization: `LeafServiceSession ${selector}`, 'X-Leaf-Integration-Origin': upstream,
+      'Content-Type': 'application/json' } })
+  expect(JSON.parse(request.body)).toEqual(input)
+  serviceSession().select(projectId)
+  await expect(client.retentionPrepare(projectId, input, options)).rejects.toMatchObject({ status: 401 })
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
 })
 
 it('does not dispatch an unverified public service selector', async () => {

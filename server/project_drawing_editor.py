@@ -197,6 +197,8 @@ def _imported_dwg(backend, org_id, source, digest, drawing_id):
         resolved, raw, _ = project.write_loop.read_dxf(
             backend, str(org_id), source["drawing_id"], version, source_binding=stored)
     except project.write_loop.DxfUnavailable as exc:
+        if exc.status_code == 413:
+            _fail("PROJECT_EDITOR_TOO_LARGE", 413)
         _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", exc.status_code, exc.retryable)
     except Exception:
         _fail("PROJECT_EDITOR_SOURCE_UNAVAILABLE", 503, True)
@@ -304,6 +306,17 @@ def save_dxf(tenant, project_id, drawing_id, parent_id, raw, *, request_id, capa
         project.refuse("INVALID_BINDING")
     parent = project.resolve_context(tenant, project_id, parent_id, drawing_id=drawing_id, write=True)
     intake = _edited_intake(parent, _parse(raw, drawing_id))
+    if _restored_intake is None:
+        import project_solar_materialization as physical
+        if physical.KEY in parent.intake:
+            from solar_native_edit_intake import NativeEditError, reconcile_native_intake
+            _, document, parameters = physical._canonical_state(parent)
+            try:
+                intake = reconcile_native_intake(parent, raw, intake,
+                    metadata_key=physical.KEY, trusted_document=document,
+                    trusted_parameters=parameters)
+            except NativeEditError:
+                _fail("PROJECT_EDITOR_NATIVE_LAYOUT_INVALID", 422)
     if _restored_intake is not None:
         # Only restore_dxf supplies this server-read verified predecessor
         # snapshot. Restore includes graph/settings, not just DXF geometry.

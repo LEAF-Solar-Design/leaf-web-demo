@@ -1,3 +1,4 @@
+import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { scaleTimeout } from './testTimeScale.js'
 import React, { createRef, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -160,6 +161,40 @@ it('R13G2A-02 project Viewer props exclude standalone overlays and ghosts', () =
   expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(false)
   evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], {})
   expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+})
+
+it.each([false, true])('project marquee commits native handles with additive=%s', additive => {
+  const scope = projection(environment())
+  const highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope, { workspaceCardRef: { current: { dataset: {} } } })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['10', 'CA'], { additive })
+  expect(highlight).toHaveBeenCalledWith(['10', 'CA'], { nativeHandles: true, additive })
+  expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+  if (additive) expect(env.setSelectedHandle).not.toHaveBeenCalled()
+  else expect(env.setSelectedHandle).toHaveBeenCalledWith(null)
+})
+
+it('standalone marquee still delegates to the drawing selection owner', () => {
+  const env = viewerEnv(projection(environment()), {
+    projectMode: false, workspaceCardRef: { current: { dataset: {} } },
+  })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], { additive: true })
+  expect(env.canvasMarqueeRef.current).toHaveBeenCalledWith(['CA'], { additive: true })
+  expect(env.setSelectedHandle).not.toHaveBeenCalled()
+})
+
+it('a plain project click replaces the previous marquee highlight', () => {
+  const scope = projection(environment()), highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope)
+  evaluate(prop(element('Viewer'), 'onSelectEntity'), env)('CA', { additive: false })
+  expect(highlight).toHaveBeenCalledWith([], { nativeHandles: true })
+  expect(env.setSelectedHandle).toHaveBeenCalledWith('CA')
 })
 
 it('R13G2A-03 engine presentation cannot overwrite the project drawing', async () => {
@@ -357,6 +392,7 @@ it('R13G2A-09 canonical identity changes clear selection and navigation history'
     const input = environment()
     const env = projection({ ...input, projectMode: mode, projectSolarRuntime: { ...input.projectSolarRuntime, contextView },
       projectSolar: { scope: { binding: contextView ? { ...B, input_version_id: contextView.context.input_version_id } : B } } })
+    env.projectDrawingScopeKey = evaluate(decl('projectDrawingScopeKey').init, env)
     env.previousProjectDrawing = evaluate(decl('previousProjectDrawing').init, { useRef })
     evaluate(effect, { ...env, useLayoutEffect, setSelectedHandle: reset, clearViewHistory: history })
   }, { initialProps: { mode: false, contextView: null } })
@@ -466,4 +502,24 @@ it('R13G2A-13 project drawing status uses the retained publication retry', async
     }
     view.unmount()
   }
+})
+
+it('X08 production observer binding follows only the exact clean committed project engine', () => {
+  const version = U(9), drawingKey = `project:org:project:drawing:${version}`
+  const env = { useMemo, projectEngineObservationBinding, projectMode: true,
+    projectEditorEngine: { scopeKey: 'current' }, projectEditorKey: 'current',
+    projectEngineIntake: { source: 'engine', documentId: 'project.dxf' },
+    engineDocument: { documentId: 'project.dxf', documentOrigin: 'head', committedVersion: version },
+    engineDirty: false, canonicalVersionId: version, projectDrawing: { drawingKey } }
+  const hook = renderHook(() => evaluate(decl('engineObservationBinding').init, env))
+  expect(hook.result.current).toEqual({ documentId: 'project.dxf', drawingKey })
+  expect(evaluate(prop(element('Viewer'), 'engineObservationBinding'), { engineObservationBinding: hook.result.current }))
+    .toBe(hook.result.current)
+  env.engineDirty = true
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
+  env.engineDirty = false
+  env.canonicalVersionId = U(8)
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
 })

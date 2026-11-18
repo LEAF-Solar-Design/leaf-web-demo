@@ -183,7 +183,7 @@ def test_postgres_lost_sender_settles_unknown(world, http, monkeypatch):
     expire(job)
     assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
     saved = row(job)
-    assert saved["status"] == "failed" and saved["error"]["reason_code"] == "SOLVE_OUTCOME_UNKNOWN"
+    assert saved["status"] == "failed" and saved["error"]["reason_code"] == "solve_outcome_unknown"
     assert saved["output_version_id"] is None and s.calls == ["sent"]
     # Settlement clears the live lease owner. Terminal reads use the finishing
     # worker identity retained in provenance and the stored attempt instead.
@@ -233,7 +233,7 @@ def test_postgres_transport_failures_never_retry(world, http, monkeypatch, failu
     monkeypatch.setattr(cloud, "post_stringer", failed)
     assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
     saved = row(job)
-    assert saved["status"] == "failed" and saved["error"]["reason_code"] == failure.upper()
+    assert saved["status"] == "failed" and saved["error"]["reason_code"] == (failure if failure == "solve_outcome_unknown" else failure.upper())
     with pg.db.cursor() as cur:
         cur.execute("SELECT state FROM project_solve_exchanges WHERE job_id=%s", (job,))
         assert cur.fetchone()["state"] == state
@@ -250,3 +250,69 @@ def test_postgres_invalid_captured_response_refused(world, http, monkeypatch):
         cur.execute("SELECT state,response_bytes FROM project_solve_exchanges WHERE job_id=%s", (job,))
         exchange = cur.fetchone()
         assert exchange["state"] == "refused" and bytes(exchange["response_bytes"]) == b"{}"
+
+
+@pytest.mark.parametrize("mode,cause,state", [("upstream-400", "CLOUD_REQUEST_REJECTED", "refused"),
+                                              ("timeout", "solve_outcome_unknown", "outcome_unknown")])
+def test_x02_postgres_header_fault_identity_and_terminal_custody(world, http, monkeypatch, mode, cause, state):
+    from test_w1c_solve_proposal import _fault_staging, _blocking_transport
+    fault = _fault_staging(monkeypatch)
+    monkeypatch.setattr(http.route.deps, "auth_live", lambda: True)
+    s = world;http.principal["tenant"] = helpers.principal(s)
+    body = {"tool": solve.TOOL_NAME, "dwg": str(s.parent), "params": s.params,
+        "catalog_digest": pg.manifest(solve.TOOL_NAME), "solve_context": s.solve_context}
+    headers = {**helpers.headers(s, str(uuid4())), fault.HEADER: mode}
+    before = pg.store.get_drawing_version(s.org, s.project, s.parent)
+    response = http.client.post("/api/run", json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    job = UUID(response.json()["job_id"])
+    assert row(job)["execution_context"]["xbench_solver_fault"] == mode
+    assert http.client.post("/api/run", json=body, headers=headers).json()["job_id"] == str(job)
+    changed = http.client.post("/api/run", json=body, headers={**headers, fault.HEADER:
+        "timeout" if mode == "upstream-400" else "upstream-400"})
+    assert changed.status_code == 409
+    monkeypatch.setattr(cloud, "post_stringer", _blocking_transport)
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    calls=[];real_post=fault.Transport.post
+    def post(self,*args,**kwargs):
+        calls.append(self.mode)
+        return real_post(self,*args,**kwargs)
+    monkeypatch.setattr(fault.Transport,"post",post)
+    assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
+    saved=row(job)
+    assert saved["status"]=="failed" and saved["error"]["reason_code"]==cause
+    assert not service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
+    with pg.db.cursor() as cur:
+        cur.execute("SELECT state,classification,send_protocol FROM project_solve_exchanges WHERE job_id=%s",(job,))
+        exchange=cur.fetchone()
+        assert exchange["state"]==state and exchange["classification"]=="synthetic" and exchange["send_protocol"] is None
+    binding=pg.store_graph.resolve_version_binding(s.org,s.project,s.parent)
+    assert binding.is_head and binding.version.version_id==before.version_id and calls==[mode] and not s.calls
+
+
+def test_x02_postgres_send_crash_reclaims_unknown_without_second_stub(world, http, monkeypatch):
+    from test_w1c_solve_proposal import _fault_staging, _blocking_transport
+    fault = _fault_staging(monkeypatch)
+    monkeypatch.setattr(http.route.deps, "auth_live", lambda: True)
+    s=world;http.principal["tenant"]=helpers.principal(s)
+    body={"tool":solve.TOOL_NAME,"dwg":str(s.parent),"params":s.params,
+          "catalog_digest":pg.manifest(solve.TOOL_NAME),"solve_context":s.solve_context}
+    headers={**helpers.headers(s,str(uuid4())),fault.HEADER:"timeout"}
+    response=http.client.post("/api/run",json=body,headers=headers)
+    assert response.status_code==202,response.text
+    job=UUID(response.json()["job_id"]);calls=[]
+    monkeypatch.setattr(cloud,"post_stringer",_blocking_transport)
+    def crash(self,*args,**kwargs):
+        calls.append(self.mode)
+        raise SystemExit("synthetic death after durable send intent")
+    monkeypatch.setattr(fault.Transport,"post",crash)
+    claimed=claim(uuid4().hex)
+    with pytest.raises(SystemExit):solve.prepare_job(claimed,SimpleNamespace(lost=False))
+    with pg.db.cursor() as cur:
+        cur.execute("SELECT state FROM project_solve_exchanges WHERE job_id=%s",(job,))
+        assert cur.fetchone()["state"]=="sending"
+    expire(job)
+    assert service.run_once(uuid4().hex,tool_name=solve.TOOL_NAME,lease_seconds=120)
+    saved=row(job)
+    assert saved["status"]=="failed" and saved["error"]["reason_code"]=="solve_outcome_unknown"
+    assert calls==["timeout"] and not s.calls

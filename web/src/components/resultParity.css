@@ -6,3 +6,5 @@
 .result-panel table[data-density="compact"] tr{height:var(--leaf-metric-row-compact)}
 .result-panel table[data-density="comfortable"] tr{height:var(--leaf-metric-row-comfortable)}
 .result-panel .table-scroll{overflow-x:auto;scrollbar-gutter:stable}
+.result-panel .files{min-width:0;max-width:100%;overflow-wrap:anywhere}
+.result-panel .files .btn{min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}
