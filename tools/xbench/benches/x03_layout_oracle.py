@@ -283,3 +283,31 @@ def member_edge_quality(members, attachments, minimum_distance):
         if not shape.covers(point) or point.distance(shape.boundary) < minimum_distance:
             return "FAIL"
     return "PASS"
+
+
+def drain_access_quality(footprints, drains, boundary_policy):
+    """Each drain has a point, radial keepout and a connected, recorded access polygon."""
+    if boundary_policy not in ("touch-allowed", "touch-forbidden") or not isinstance(drains, list) or not drains:
+        return "INCOMPLETE"
+    if not isinstance(footprints, list):
+        return "INCOMPLETE"
+    for shape in footprints:
+        if shape is None:
+            return "INCOMPLETE"
+        if getattr(shape, "geom_type", None) != "Polygon" or not shape.is_valid or shape.is_empty:
+            return "FAIL"
+    for drain in drains:
+        if not isinstance(drain, dict) or any(drain.get(k) is None for k in ("center", "radius", "access")):
+            return "INCOMPLETE"
+        point, radius, access = drain["center"], drain["radius"], drain["access"]
+        if (getattr(point, "geom_type", None) != "Point" or point.is_empty or not point.is_valid
+                or getattr(access, "geom_type", None) != "Polygon" or access.is_empty or not access.is_valid
+                or not access.covers(point) or not finite_measure(radius) or radius <= 0):
+            return "FAIL"
+        for shape in footprints:
+            distance = shape.distance(point)
+            if distance < radius or shape.relate_pattern(access, "T********"):
+                return "FAIL"
+            if boundary_policy == "touch-forbidden" and (distance == radius or shape.intersects(access)):
+                return "FAIL"
+    return "PASS"

@@ -268,3 +268,24 @@ def weighted_rate_quality(cohorts, weights, policy, reported):
     if not finite_measure(reported) or not 0 <= reported <= 1:
         return "FAIL"
     return "PASS" if isclose(reported, float(numerator / denominator), abs_tol=1e-12, rel_tol=1e-12) else "FAIL"
+
+
+def duration_histogram_quality(runs, edges, policy, counts):
+    """Count each recorded run in one bin, including underflow and overflow."""
+    from bisect import bisect_left, bisect_right
+    from benches.x03_quality import finite_measure
+    if policy not in ("left-closed", "right-closed") or not isinstance(runs, dict):
+        return "INCOMPLETE"
+    if not isinstance(edges, list) or not edges or not isinstance(counts, list):
+        return "INCOMPLETE"
+    if None in runs.values() or None in edges:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in (*runs.values(), *edges)) or edges != sorted(set(edges)):
+        return "FAIL"
+    if len(counts) != len(edges)+1 or not all(type(n) is int and n >= 0 for n in counts):
+        return "FAIL"
+    expected = [0] * len(counts)
+    locate = bisect_right if policy == "left-closed" else bisect_left
+    for duration in runs.values():
+        expected[locate(edges, duration)] += 1
+    return "PASS" if expected == counts else "FAIL"

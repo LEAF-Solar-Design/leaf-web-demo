@@ -175,3 +175,31 @@ def effective_catalog_quality(rows, design_time, part, version, unit, result):
     if active[0].get("rating") is None:
         return "INCOMPLETE"
     return catalog_quality(active, part, version, unit, result)
+
+
+def temperature_derating_quality(curve, temperature, required, policy):
+    """Compare duty with a piecewise-linear table of absolute ratings at recorded temperatures."""
+    from benches.x03_quality import finite_measure
+    if policy != "linear-no-extrapolation" or not isinstance(curve, list) or not curve or None in (temperature, required):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (temperature, required))) or required < 0:
+        return "FAIL"
+    points = []
+    for row in curve:
+        if not isinstance(row, (list, tuple)) or len(row) != 2 or None in row:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, row)) or row[1] < 0:
+            return "FAIL"
+        points.append(tuple(Fraction(str(v)) for v in row))
+    points.sort()
+    if len({t for t, rating in points}) != len(points):
+        return "FAIL"
+    t, duty = (Fraction(str(v)) for v in (temperature, required))
+    for knot, rating in points:
+        if t == knot:
+            return "PASS" if duty <= rating else "FAIL"
+    for (low, first), (high, last) in zip(points, points[1:]):
+        if low < t < high:
+            limit = first + (last-first) * (t-low) / (high-low)
+            return "PASS" if duty <= limit else "FAIL"
+    return "FAIL"

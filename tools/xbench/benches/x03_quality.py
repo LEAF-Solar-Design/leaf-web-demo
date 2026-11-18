@@ -714,3 +714,25 @@ def ac_voltage_drop_quality(phases, amps, length_m, pf, load, resistance, reacta
     multiplier = 2 if phases == 1 else sqrt(3)
     drop = multiplier * amps * length * (resistance * pf + reactance * sine)
     return "PASS" if isclose(reported_v, drop, abs_tol=1e-9, rel_tol=1e-9) else "FAIL"
+
+
+def mismatch_loss_quality(string_currents, max_loss_fraction, rule):
+    """Equal module operating voltages, series current limited to the weakest module."""
+    if rule != "equal-voltage-min-current" or not isinstance(string_currents, dict) or not string_currents:
+        return "INCOMPLETE"
+    if max_loss_fraction is None:
+        return "INCOMPLETE"
+    if not finite_measure(max_loss_fraction) or not 0 <= max_loss_fraction <= 1:
+        return "FAIL"
+    limit = Fraction(str(max_loss_fraction))
+    for modules in string_currents.values():
+        if not isinstance(modules, dict) or not modules or None in modules.values():
+            return "INCOMPLETE"
+        if not all(finite_measure(v) and v > 0 for v in modules.values()):
+            return "FAIL"
+        currents = [Fraction(str(v)) for v in modules.values()]
+        available = sum(currents)
+        lost = available - len(currents) * min(currents)
+        if lost > limit * available:
+            return "FAIL"
+    return "PASS"

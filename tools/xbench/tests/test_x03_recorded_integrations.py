@@ -281,3 +281,27 @@ def test_atomic_artifact_visibility(sequence, expected):
               "mixed": dict(kind="snapshot", revision="old", members=dict(old, panels=new["panels"])),
               "commit": dict(kind="commit", revision="new")}
     assert atomic_batch_quality({"old": old, "new": new}, "old", "new", [events[s] for s in sequence]) == expected
+
+
+@pytest.mark.parametrize("temperature,duty,expected", [
+    (20, 100, "PASS"), (40, 80, "PASS"), (40, 81, "FAIL"), (61, 20, "FAIL"),
+], ids=["nominal-knot", "exact-interpolated-rating", "derated-overload", "outside-envelope"])
+def test_catalog_derating(temperature, duty, expected):
+    from benches.x03_catalog_oracle import temperature_derating_quality
+    curve = [(20,100), (60,60)]
+    assert temperature_derating_quality(curve, temperature, duty, "linear-no-extrapolation") == expected
+    assert temperature_derating_quality(curve, temperature, duty, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("timestamp,reported,interp,extra,gap,expected", [
+    (5, 100, "linear", "none", 10, "PASS"), (5, 100, "linear", "none", 9, "FAIL"),
+    (12, 90, "linear", "none", 10, "FAIL"), (12, 90, "none", "hold", 2, "PASS"),
+    (5, 100, None, "none", 10, "INCOMPLETE"), (5, 110, "linear", "none", 10, "FAIL"),
+], ids=["midpoint-voltage", "gap-too-wide", "forbid-extrapolation", "bounded-hold", "missing-policy", "wrong-voltage"])
+def test_voltage_fill_policy(timestamp, reported, interp, extra, gap, expected):
+    from benches.x03_weather_oracle import filled_voltage_quality
+    base = dict(site="s", station="roof", unit="C", timezone="UTC")
+    samples = [dict(base, timestamp=10, cell_temp=35), dict(base, timestamp=0, cell_temp=15)]
+    assert filled_voltage_quality(samples, timestamp, reported, interpolation=interp, extrapolation=extra,
+                                  max_gap=gap, site="s", station="roof", as_of=12, max_age=12,
+                                  modules=2, voc_at_25=50, coefficient_per_c=-0.01) == expected

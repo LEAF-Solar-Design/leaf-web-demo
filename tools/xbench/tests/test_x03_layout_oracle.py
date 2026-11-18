@@ -155,3 +155,15 @@ def test_attachment_member_edges(x, y, expected):
     rows = [dict(member="purlin", point=Point(x, y))]
     assert member_edge_quality({"purlin": box(0, 0, 10, 2)}, rows, 1) == expected
     assert member_edge_quality({}, rows, 1) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("footprint,policy,expected", [
+    (box(2,0,3,1), "touch-allowed", "PASS"), (box(2,0,3,1), "touch-forbidden", "FAIL"),
+    (box(-3,-0.1,-2.5,0.1), "touch-allowed", "FAIL"), (box(1,0,3,1), "touch-allowed", "FAIL"),
+], ids=["exact-keepout", "exclude-boundary", "blocked-approach", "crosses-drain-radius"])
+def test_drain_keepout_and_access(footprint, policy, expected):
+    from shapely.geometry import Point
+    from benches.x03_layout_oracle import drain_access_quality
+    drain = dict(center=Point(0,0), radius=2, access=box(-4,-0.5,0,0.5))
+    assert drain_access_quality([footprint], [drain], policy) == expected
+    assert drain_access_quality([footprint], [dict(drain, access=None)], policy) == "INCOMPLETE"
