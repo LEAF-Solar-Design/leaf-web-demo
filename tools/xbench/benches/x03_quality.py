@@ -358,3 +358,98 @@ def bend_radius_quality(segments, min_radius):
             return "FAIL"
         previous_end, previous_tangent = end, normalized[1]
     return "PASS"
+
+
+def terminal_polarity_quality(modules, terminals, joins, leads):
+    """Trace one series string from the negative lead to the positive lead."""
+    if not isinstance(modules, (list, tuple)) or not modules or not isinstance(terminals, dict):
+        return "INCOMPLETE"
+    if not isinstance(joins, (list, tuple)) or not isinstance(leads, dict):
+        return "INCOMPLETE"
+    pins = {}
+    for module in modules:
+        pair = terminals.get(module)
+        if not isinstance(pair, dict) or any(not isinstance(pair.get(p), str) or not pair[p] for p in ("-", "+")):
+            return "INCOMPLETE"
+        for polarity in ("-", "+"):
+            pin = pair[polarity]
+            if pin in pins:
+                return "FAIL"
+            pins[pin] = (module, polarity)
+    if any(not isinstance(leads.get(p), str) or not leads[p] for p in ("-", "+")):
+        return "INCOMPLETE"
+    start, end = leads["-"], leads["+"]
+    if start not in pins or end not in pins or pins[start][1] != "-" or pins[end][1] != "+":
+        return "FAIL"
+    links = {}
+    for join in joins:
+        if not isinstance(join, (tuple, list)) or len(join) != 2 or not all(isinstance(p, str) for p in join):
+            return "INCOMPLETE"
+        a, b = join
+        if (a not in pins or b not in pins or pins[a][1] == pins[b][1] or a in links or b in links
+                or start in join or end in join):
+            return "FAIL"
+        links[a], links[b] = b, a
+    visited = set()
+    module = pins[start][0]
+    while module not in visited:
+        visited.add(module)
+        positive = terminals[module]["+"]
+        if positive == end:
+            return "PASS" if len(visited) == len(modules) else "FAIL"
+        if positive not in links:
+            break
+        module = pins[links[positive]][0]
+    return "FAIL"
+
+
+def mppt_window_quality(series_count, vmp_25, coefficient_per_c, cell_temperatures, voltage_window):
+    """Both endpoints of a linear Vmp model must lie in the inclusive tracker window."""
+    if None in (series_count, vmp_25, coefficient_per_c, cell_temperatures, voltage_window):
+        return "INCOMPLETE"
+    if any(not isinstance(pair, (list, tuple)) or len(pair) != 2 or None in pair
+           for pair in (cell_temperatures, voltage_window)):
+        return "INCOMPLETE"
+    if type(series_count) is not int or series_count <= 0 or not all(
+            finite_measure(v) for v in (vmp_25, coefficient_per_c, *cell_temperatures, *voltage_window)):
+        return "FAIL"
+    reference, coefficient, cold, hot, low, high = (
+        Fraction(str(v)) for v in (vmp_25, coefficient_per_c, *cell_temperatures, *voltage_window))
+    if reference <= 0 or hot < cold or low <= 0 or high < low:
+        return "FAIL"
+    for temperature in (cold, hot):
+        voltage = series_count * reference * (1 + coefficient * (temperature - 25))
+        if not low <= voltage <= high:
+            return "FAIL"
+    return "PASS"
+
+
+def circuit_separation_quality(routes, circuits, rules, junctions):
+    """A permitted crossing waives clearance on the two crossing segments only."""
+    from itertools import combinations, pairwise
+    from shapely.geometry import LineString
+    if not all(isinstance(x, dict) for x in (routes, circuits, rules, junctions)) or not routes:
+        return "INCOMPLETE"
+    for name, path in routes.items():
+        if not isinstance(circuits.get(name), str) or not circuits[name] or path is None:
+            return "INCOMPLETE"
+        if path.geom_type != "LineString" or path.is_empty or not path.is_valid:
+            return "FAIL"
+    for a, b in combinations(routes, 2):
+        key = frozenset((circuits[a], circuits[b]))
+        if key not in rules:
+            return "INCOMPLETE"
+        limit = rules[key]
+        if not finite_measure(limit) or limit < 0:
+            return "FAIL"
+        allowed = junctions.get(frozenset((a, b)), ())
+        for coords_a in pairwise(routes[a].coords):
+            first = LineString(coords_a)
+            for coords_b in pairwise(routes[b].coords):
+                second = LineString(coords_b)
+                if first.distance(second) >= limit:
+                    continue
+                crossing = first.intersection(second)
+                if crossing.geom_type != "Point" or crossing.is_empty or not any(crossing.equals(p) for p in allowed):
+                    return "FAIL"
+    return "PASS"

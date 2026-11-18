@@ -46,3 +46,16 @@ def test_mixed_unit_layout(unit, panel_start, panel_end):
     assert grade(1.01, unit) == "FAIL"
     assert grade(1, "kg") == "FAIL"
     assert grade(1, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("panel,ballast,share,local_mass", [(40, 20, 0.5, 30), (30, 10, 0.75, 30), (12, 8, 1, 20)])
+def test_roof_load_on_individual_zones(panel, ballast, share, local_mass):
+    from benches.x03_layout_oracle import zone_load_quality
+    zones = {"edge": dict(area=2, limit=local_mass/2), "center": dict(area=100, limit=20)}
+    def check(limits, ballast_record):
+        return zone_load_quality({"rack": panel}, ballast_record,
+                                 {"rack": {"edge": share, "center": 1-share}}, limits)
+    assert check(zones, {"rack": ballast}) == "PASS"
+    zones["edge"]["limit"] -= 0.01
+    assert check(zones, {"rack": ballast}) == "FAIL"
+    assert check(zones, {}) == "INCOMPLETE"

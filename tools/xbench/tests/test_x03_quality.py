@@ -261,3 +261,52 @@ def test_circular_bend_and_tangent_join(radius, sign, offset):
     assert bend_radius_quality([lead, arc], radius+0.01) == "FAIL"
     assert bend_radius_quality([lead, dict(kind="line", start=start, end=end)], radius) == "FAIL"
     assert bend_radius_quality([lead, dict(arc, center=None)], radius) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("order", [("A", "B"), ("C", "A", "B"), ("D", "C", "B", "A")])
+def test_external_leads_and_series_path(order):
+    from benches.x03_quality import terminal_polarity_quality
+    pins = {m: {"-": m+"1", "+": m+"2"} for m in order}
+    joins = [(a+"2", b+"1") for a, b in zip(order, order[1:])]
+    leads = {"-": order[0]+"1", "+": order[-1]+"2"}
+    def grade(edges, ends, mapping):
+        return terminal_polarity_quality(sorted(order), mapping, edges, ends)
+    assert grade([edge[::-1] for edge in reversed(joins)], leads, pins) == "PASS"
+    assert grade(joins, {"-": leads["+"], "+": leads["-"]}, pins) == "FAIL"
+    assert grade([(order[0]+"2", order[1]+"2"), *joins[1:]], leads, pins) == "FAIL"
+    assert grade(joins[1:], leads, pins) == "FAIL"
+    assert grade(joins, leads, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("count,reference,coefficient,temps,window", [
+    (10, 40, -0.002, (0, 75), (360, 420)),
+    (5, 32, -0.004, (0, 50), (144, 176)),
+    (4, 50, 0.001, (-25, 75), (190, 210)),
+])
+def test_mppt_temperature_extremes(count, reference, coefficient, temps, window):
+    from benches.x03_quality import mppt_window_quality
+    def check(bounds, factor):
+        return mppt_window_quality(count, reference, factor, temps, bounds)
+    assert check(window, coefficient) == "PASS"
+    assert check((window[0]+0.01, window[1]), coefficient) == "FAIL"
+    assert check((window[0], window[1]-0.01), coefficient) == "FAIL"
+    assert check(window, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("gap", [1, 2, 4])
+def test_circuit_clearance_and_declared_junctions(gap):
+    from shapely.geometry import LineString, Point
+    from benches.x03_quality import circuit_separation_quality
+    base = LineString([(-10, 0), (10, 0)])
+    circuits = {"feeder": "power", "sensor": "signal"}
+    rules = {frozenset(circuits.values()): gap}
+    junction = {frozenset(circuits): [Point(0, 0)]}
+    def check(path, allowed, ids=circuits):
+        return circuit_separation_quality({"feeder": base, "sensor": path}, ids, rules, allowed)
+    crossing = LineString([(0, -10), (0, 10)])
+    assert check(crossing, junction) == "PASS"
+    assert check(crossing, {}) == "FAIL"
+    assert check(base, junction) == "FAIL"
+    assert check(LineString([(-10, gap), (10, gap)]), {}) == "PASS"
+    assert check(LineString([(-10, gap/2), (10, gap/2)]), {}) == "FAIL"
+    assert check(crossing, junction, {}) == "INCOMPLETE"

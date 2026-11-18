@@ -60,7 +60,7 @@ def test_nested_beam_lengths(scale,angle):
     outer = space.add_blockref("frame",(10,20),dxfattribs={"layer":"upper"}).set_scale(2)
     assert beam_length_quality(space,"m",{"upper":10*scale}) == "PASS"
     outer.dxf.xscale = 4
-    assert beam_length_quality(space,"m",{"upper":10*scale}) == "INCOMPLETE"
+    assert beam_length_quality(space,"m",{"upper":10*scale}) == "FAIL"
     outer.set_scale(2)
     beam.add_blockref("frame",(0,0))
     assert beam_length_quality(space,"m",{"upper":10*scale}) == "INCOMPLETE"
@@ -108,3 +108,22 @@ def test_line_modes_require_evidence(end, plan, spatial):
     assert line_measurement_quality(entities, "m", {"L": plan}, mode="spatial") == "FAIL"
     assert line_measurement_quality(entities, "m", {"L": spatial}) == "INCOMPLETE"
     assert line_measurement_quality([line((0, 0), end[:2])], "m", {"L": plan}, mode="spatial") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("scales,delta", [((-2, 3, 1), (-2, 6, 2)), ((1, -4, 2), (1, -8, 4)),
+                                       ((3, 1, -2), (3, 2, -4))])
+def test_transformed_block_line_endpoints(scales, delta):
+    from math import dist
+    doc = pytest.importorskip("ezdxf").new()
+    block = doc.blocks.new("beam")
+    block.add_line((0, 0, 0), (1, 2, 2))
+    space = doc.modelspace()
+    space.add_blockref("beam", (10, 20, 30), dxfattribs=dict(
+        xscale=scales[0], yscale=scales[1], zscale=scales[2], rotation=90))
+    # Translate both endpoints after a quarter-turn about Z.
+    end = (10-delta[1], 20+delta[0], 30+delta[2])
+    expected = dist((10, 20, 30), end)
+    assert beam_length_quality(space, "m", {"0": expected}) == "PASS"
+    assert beam_length_quality(space, "m", {"0": 3}) == "FAIL"
+    block.add_arc((0, 0), 1, 0, 90)
+    assert beam_length_quality(space, "m", {"0": expected}) == "INCOMPLETE"
