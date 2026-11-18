@@ -51,6 +51,15 @@ def _lengths(entities, units, inherited, active, remaining, mode, transforms=(),
             totals[layer] += length * curve_scale * METRES[units]
             continue
         if entity.dxftype() == "ARC":
+            # OCS maps the arc plane to world coordinates by an orthonormal
+            # basis. Spatial length therefore uses the same radius and sweep.
+            # An omitted extrusion uses the DXF default world +Z axis.
+            normal = entity.dxf.get("extrusion", (0, 0, 1))
+            try:
+                if len(normal) != 3 or not all(map(isfinite, normal)) or not any(normal):
+                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
             radius, start, end = (entity.dxf.get(k) for k in ("radius","start_angle","end_angle"))
             if not all(type(x) in (int,float) and isfinite(x) for x in (radius,start,end)) or radius <= 0:
                 return None

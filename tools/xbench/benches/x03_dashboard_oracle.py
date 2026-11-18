@@ -116,3 +116,27 @@ def window_coverage_quality(runs, reported_ids, start, end, *, include_start, in
         if start < stamp < end or (include_start and stamp == start) or (include_end and stamp == end):
             expected.add(row["id"])
     return "PASS" if len(reported_ids) == len(set(reported_ids)) and expected == set(reported_ids) else "FAIL"
+
+
+def concurrent_time_quality(intervals, reported_seconds, policy=None):
+    """Use one wall clock for all worker intervals measured in seconds."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if policy not in ("elapsed", "worker") or not isinstance(intervals, list) or reported_seconds is None:
+        return "INCOMPLETE"
+    if not finite_measure(reported_seconds) or reported_seconds < 0:
+        return "FAIL"
+    spans = []
+    for span in intervals:
+        if not isinstance(span, (list, tuple)) or len(span) != 2 or None in span:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, span)) or span[1] < span[0]:
+            return "FAIL"
+        spans.append(tuple(Fraction(str(x)) for x in span))
+    total, last_end = 0, None
+    for start, end in sorted(spans):
+        if policy == "elapsed" and last_end is not None:
+            start = max(start, last_end)
+        total += max(0, end-start)
+        last_end = end if last_end is None else max(last_end, end)
+    return "PASS" if Fraction(str(reported_seconds)) == total else "FAIL"

@@ -124,3 +124,24 @@ def shade_exclusion_quality(panels, shade, *, drawing, revision, boundary_policy
             if panel.intersects(zone) and (boundary_policy == "exclude-touch" or not panel.touches(zone)):
                 return "FAIL"
     return "PASS"
+
+
+def access_path_quality(paths, entrances, service_points):
+    """Trace walkable, coplanar path centerlines from declared access points."""
+    if not all(isinstance(items, (list, tuple)) and items for items in (paths, entrances, service_points)):
+        return "INCOMPLETE"
+    for items, kind in ((paths, "LineString"), (entrances, "Point"), (service_points, "Point")):
+        for shape in items:
+            if shape is None or getattr(shape, "is_empty", True):
+                return "INCOMPLETE"
+            if shape.geom_type != kind or not shape.is_valid or shape.has_z:
+                return "FAIL"
+    pending = [i for i, path in enumerate(paths) if any(path.covers(p) for p in entrances)]
+    reached = set(pending)
+    while pending:
+        path = paths[pending.pop()]
+        for i, other in enumerate(paths):
+            if i not in reached and path.intersects(other):
+                reached.add(i)
+                pending.append(i)
+    return "PASS" if all(any(paths[i].covers(p) for i in reached) for p in service_points) else "FAIL"

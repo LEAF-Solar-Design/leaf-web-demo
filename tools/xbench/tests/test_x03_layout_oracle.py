@@ -75,3 +75,23 @@ def test_versioned_shade_masks(offset):
     assert grade([], "exclude-touch") == "PASS"
     assert grade(None, "allow-touch") == "INCOMPLETE"
     assert grade([], "allow-touch", "v1") == "FAIL"
+
+
+@pytest.mark.parametrize("edges", [[(0,1),(1,2)], [(0,1),(0,2),(2,3)], [(0,1),(1,2),(2,3),(3,0),(3,4)]])
+def test_service_access_matches_node_graph(edges):
+    from shapely.geometry import LineString, Point
+    from benches.x03_layout_oracle import access_path_quality
+    # Convex polygon vertices keep the chosen graph planar for these fixtures.
+    coords = [(0,0), (2,0), (3,2), (1,4), (-1,2)]
+    target = max(max(edge) for edge in edges)
+    for omitted in [None, *edges]:
+        remaining = [edge for edge in edges if edge != omitted]
+        reachable = {0}
+        for _ in coords:
+            for a,b in remaining:
+                if a in reachable or b in reachable:
+                    reachable.update((a,b))
+        paths = [LineString([coords[a], coords[b]]) for a,b in remaining]
+        assert access_path_quality(paths, [Point(coords[0])], [Point(coords[target])]) == (
+            "PASS" if target in reachable else "FAIL")
+    assert access_path_quality(paths, None, [Point(coords[target])]) == "INCOMPLETE"
