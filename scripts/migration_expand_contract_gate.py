@@ -32,6 +32,9 @@ RULES (per ``NNNN_name.sql`` in ``platform/migrations``):
     Anything else about the pair (a removed literal, another column, another
     table or name, a statement between them, an unknown prior definition)
     leaves the DROP a contract-phase statement.
+  * DROP TRIGGER IF EXISTS is additive when its table is first created in
+    this file and the next statement recreates the same trigger on that
+    same table. Tables created by earlier migrations get no exemption.
   * Applied migrations are GRANDFATHERED by number (the ledger stores each
     file's sha256, so retro-editing an applied file to add a marker would
     break ``assert_schema_current``). The grandfather set is frozen below —
@@ -268,6 +271,44 @@ def initial_table_revokes(stripped: str) -> set[int]:
     return allowed
 
 
+def initial_trigger_replaces(stripped: str, prior_tables: set[str]) -> set[int]:
+    """Offsets of idempotent trigger replacements on tables born in this file."""
+    if re.search(r"\$[A-Za-z_][A-Za-z_0-9]*\$|\bBEGIN\s+ATOMIC\b",
+                 stripped, re.IGNORECASE):
+        return set()
+    target = rf"{_IDENT}(?:\.{_IDENT})?"
+    create_table = re.compile(
+        rf"\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({target})\s*\(",
+        re.IGNORECASE)
+    drop_trigger = re.compile(
+        rf"\s*(DROP)\s+TRIGGER\s+IF\s+EXISTS\s+({_IDENT})\s+ON\s+({target})\s*;",
+        re.IGNORECASE)
+    create_trigger = re.compile(
+        rf"\s*CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+({_IDENT})\s+",
+        re.IGNORECASE)
+    on_table = re.compile(rf"\bON\s+({target})(?![A-Za-z_0-9$.])", re.IGNORECASE)
+    created: set[str] = set()
+    allowed: set[int] = set()
+    statements = list(re.finditer(r"[^;]*;", stripped))
+    for index, statement in enumerate(statements):
+        sql = statement.group()
+        table = create_table.match(sql)
+        if table:
+            created.add(table[1].lower())
+        drop = drop_trigger.fullmatch(sql)
+        if not drop or drop[3].lower() not in created or drop[3].lower() in prior_tables:
+            continue
+        if index + 1 >= len(statements):
+            continue
+        following = statements[index + 1].group()
+        trigger = create_trigger.match(following)
+        table = on_table.search(following)
+        if (trigger and table and trigger[1].lower() == drop[2].lower()
+                and table[1].lower() == drop[3].lower()):
+            allowed.add(statement.start() + drop.start(1))
+    return allowed
+
+
 def check_migrations(migrations_dir: Path) -> list[str]:
     """Return violation strings (empty = pass)."""
     violations: list[str] = []
@@ -296,9 +337,10 @@ def check_migrations(migrations_dir: Path) -> list[str]:
         text = path.read_text(encoding="utf-8")
         stripped, literals = _strip_sql_noise(text)
         initial_revokes = initial_table_revokes(stripped)
+        trigger_replaces = initial_trigger_replaces(stripped, set(created_tables))
         widening_drops = check_widening_drops(
             stripped, literals, check_definitions, created_tables)
-        exempt = {"REVOKE": initial_revokes, "DROP": widening_drops}
+        exempt = {"REVOKE": initial_revokes, "DROP": widening_drops | trigger_replaces}
         hits = [label for label, pattern in CONTRACT_PATTERNS
                 if any(match.start() not in exempt.get(label, ())
                        for match in pattern.finditer(stripped))]
