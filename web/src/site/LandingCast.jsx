@@ -12,6 +12,8 @@ import { loadDemoSolve } from './intakeCache.js'
 import { submitDemandCapture } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
 import { isSignedIn } from '../auth.js'
+import { isAppOnlyHost } from './appHosts.js'
+import { notYetAvailable } from './studioAvailability.js'
 
 export function enterWorkspace() {
   navigate(isSignedIn() ? '/app' : '/try')
@@ -36,6 +38,13 @@ const SHEETS = [
 ]
 
 export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo }) {
+  // Availability manifest (site/studioAvailability.js). On an app-only host
+  // the sheet tabs leave for the marketing hub, whose sheets 02 to 06 are not
+  // drawn yet, so the tabs are disabled with the manifest's sentence instead
+  // of sending the visitor to an index of pages that do not exist. Anywhere
+  // the sheets render locally (every other host) the tabs keep working.
+  const sheetsReason = isAppOnlyHost() ? notYetAvailable('site.sheets') : null
+  const pricingReason = notYetAvailable('site.pricing')
   const [solve, setSolve] = useState(null)
   const [solveError, setSolveError] = useState('')
   const [solveAttempt, setSolveAttempt] = useState(0)
@@ -96,7 +105,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
         </div>
         <div className="lp-cta-row">
           <button type="button" className="lp-cta" onClick={onTryDemo}>Try Branch on the sample rooftop</button>
-          <span className="lp-price">Free to try. Pricing coming soon.</span>
+          <span className="lp-price">{pricingReason ? `Free to try. ${pricingReason}` : 'Free to try.'}</span>
         </div>
         <form onSubmit={registerInterest} aria-label="Register interest">
           <label htmlFor="front-door-email">Want a workspace that uses your own API key?</label>
@@ -147,11 +156,16 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
             key={s.code}
             type="button"
             className="lp-tab"
-            onClick={() => navigate(`/sheets#${s.target}`)}
+            aria-disabled={sheetsReason ? true : undefined}
+            aria-describedby={sheetsReason ? 'lp-sheets-note' : undefined}
+            title={sheetsReason || undefined}
+            data-availability={sheetsReason ? 'unavailable' : undefined}
+            onClick={sheetsReason ? undefined : () => navigate(`/sheets#${s.target}`)}
           >
             {s.label}
           </button>
         ))}
+        {sheetsReason && <span id="lp-sheets-note" className="lp-index-note">{sheetsReason}</span>}
         <span className="lp-index-meta">
           Leaf Automation · drawing set <span className="lp-mono">R2026.07</span> · Columbus, OH
         </span>

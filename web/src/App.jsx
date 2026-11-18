@@ -215,7 +215,7 @@ import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
-import { mountedDrawingSource, createProjectFromDrawing } from './workspace/createProjectFromDrawing.js'
+import { mountedDrawingSource, createProjectFromDrawing, isAccountUploadDrawingId } from './workspace/createProjectFromDrawing.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
@@ -1828,7 +1828,9 @@ export default function App() {
     orgId,
     projectsUnavailable: projectsErr,
     mock,
-  }), [openProjectId, workspace, wsLoading, wsError, currentProjectName, drawingName, orgId, projectsErr, mock])
+    // Only a known non-upload id (the sample drawing) takes the action away.
+    drawingAttachable: drawingState?.drawing_id ? isAccountUploadDrawingId(drawingState.drawing_id) : true,
+  }), [openProjectId, workspace, wsLoading, wsError, currentProjectName, drawingName, orgId, projectsErr, mock, drawingState?.drawing_id])
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
