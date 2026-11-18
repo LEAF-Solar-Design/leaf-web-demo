@@ -17,7 +17,7 @@ Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
      (tolerance = half the median rotated bbox height), and order panels
      serpentine (row 0 left->right, row 1 right->left, ...),
   4. end a continuous run before a step longer than 1.5 median module long
-     edges, then chunk each run into strings of at most
+     edges, then balance each run into the fewest strings of at most
      ``max_modules_per_string``, where that limit comes from the NEC 690.7
      cold-temperature Voc check:
 
@@ -238,17 +238,27 @@ def _bank_serpentine(panels: List[Dict[str, Any]], idxs: List[int],
     return ordered
 
 
+def _balanced_chunks(ordered, max_modules):
+    """Use the fewest strings, with sizes differing by at most one module."""
+    string_count = (len(ordered) + max_modules - 1) // max_modules
+    size, larger_strings = divmod(len(ordered), string_count)
+    offset = 0
+    for index in range(string_count):
+        length = size + (index < larger_strings)
+        yield ordered[offset:offset + length]
+        offset += length
+
+
 def _continuous_chunks(ordered, cents, max_modules, max_step):
-    """Keep the bank walk, but never connect a string across an internal gap."""
-    chunk = []
+    """Balance each continuous bank walk without connecting across a gap."""
+    run = []
     for index in ordered:
-        if chunk and (len(chunk) == max_modules
-                      or math.dist(cents[chunk[-1]], cents[index]) > max_step):
-            yield chunk
-            chunk = []
-        chunk.append(index)
-    if chunk:
-        yield chunk
+        if run and math.dist(cents[run[-1]], cents[index]) > max_step:
+            yield from _balanced_chunks(run, max_modules)
+            run = []
+        run.append(index)
+    if run:
+        yield from _balanced_chunks(run, max_modules)
 
 
 def run(intake: Dict[str, Any], params: Dict[str, Any]):
