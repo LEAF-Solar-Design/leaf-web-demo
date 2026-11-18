@@ -614,3 +614,8 @@ def test_cumulative_share_ledger(prompt, counts):
     assert [(q["layer"], q["numerator"], q["denominator"]) for q in r["cumulative_shares"]] == [
         (l, sum(v for _, v in ordered[:i+1]), sum(counts)) for i, (l, _) in enumerate(ordered)]
     assert "cumulative_shares" not in module.run({}, params)[0]
+
+
+@pytest.mark.parametrize("target,expected", [(80, [["A", "B"]]), (40, [["A"]]), (110, [])])
+def test_minimum_layer_set(target, expected):
+    assert module._coverage({"A": 6, "B": 3, "C": 1}, target)["solutions"] == expected
