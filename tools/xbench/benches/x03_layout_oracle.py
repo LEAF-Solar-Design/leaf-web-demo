@@ -561,6 +561,30 @@ def buckling_quality(rails, end_factors):
     return "PASS"
 
 
+def support_polygon_quality(components, supports):
+    """Test the mass-weighted horizontal projection on the convex support footprint."""
+    from shapely.geometry import MultiPoint, Point
+    if not isinstance(components, list) or not components or not isinstance(supports, list) or len(supports) < 3:
+        return "INCOMPLETE"
+    if not all(isinstance(p, (tuple, list)) and len(p) == 2 and all(map(finite_measure, p)) for p in supports):
+        return "INCOMPLETE"
+    footprint = MultiPoint(supports).convex_hull
+    if footprint.area <= 0:
+        return "INCOMPLETE"
+    mass = moment_x = moment_y = Fraction(0)
+    for part in components:
+        if not isinstance(part, dict) or not finite_measure(part.get("mass")) or part["mass"] <= 0:
+            return "INCOMPLETE"
+        cg = part.get("center")
+        if not isinstance(cg, (tuple, list)) or len(cg) != 3 or not all(map(finite_measure, cg)):
+            return "INCOMPLETE"
+        weight = Fraction(str(part["mass"]))
+        mass += weight
+        moment_x += weight * Fraction(str(cg[0]))
+        moment_y += weight * Fraction(str(cg[1]))
+    return "PASS" if footprint.covers(Point(float(moment_x/mass), float(moment_y/mass))) else "FAIL"
+
+
 def settlement_quality(displacements, spans):
     """For each span compare absolute differential displacement to its distortion limit."""
     if not isinstance(displacements, dict) or not isinstance(spans, list) or not spans:

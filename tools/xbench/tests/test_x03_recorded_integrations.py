@@ -517,6 +517,29 @@ def test_condensation_at_recorded_surface(air,rh,surface,risk):
     assert grade(air,None,surface,rule,risk) == "INCOMPLETE"
 
 
+@pytest.mark.parametrize("primary,condition,slot,part", [("panel","roof","mount","clip"),("drive","wet","seal","gland"),
+                                                        ("rack","tall","brace","strut")])
+def test_conditional_assembly_accessories(primary,condition,slot,part):
+    from benches.x03_catalog_oracle import accessory_quality as grade
+    rules = dict(revision="r1",assemblies={primary:[dict(when={"use":condition},slot=slot,compatible=[part])]})
+    context = {"use":condition}
+    assert grade(rules,"r1",primary,context,{slot:part}) == "PASS"
+    assert grade(rules,"r1",primary,{"use":"other"},{}) == "PASS"
+    assert grade(rules,"r1",primary,context,{}) == "FAIL"
+    assert grade(rules,"r1",primary,context,{slot:"incompatible"}) == "FAIL"
+    assert grade(rules,"r1",primary,{}, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("time,status", [(9,"replayed"), (10,"refused"), (20,"reconciled")])
+def test_retry_before_at_and_after_key_expiry(time,status):
+    from benches.x03_issue_delivery_oracle import retention_retry_quality as grade
+    first = dict(delivery="job",key="K",time=0,expires=10,new_effects=1,status="committed")
+    retry = dict(first,time=time,new_effects=0,status=status)
+    assert grade([first,retry],10) == "PASS"
+    assert grade([first,dict(retry,new_effects=1,status="committed")],10) == "FAIL"
+    assert grade([first,retry],None) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("days,inclusive,install,expected", [(2,True,2,"PASS"),(2,False,2,"FAIL"),(1,True,2,"FAIL")])
 def test_stock_life_at_install(days,inclusive,install,expected):
     from datetime import date,timedelta

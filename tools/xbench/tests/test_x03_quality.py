@@ -721,6 +721,32 @@ def test_substring_bypass_at_series_current(states,expected):
     assert grade(rows,5,"r2",curves,expected) == "INCOMPLETE"
 
 
+@pytest.mark.parametrize("onset,hz,band,trip", [(0,58,(57,59,2,4),2), (10,62,(61,63,1,3),3),
+                                                  (0.5,49,(48,50,0.5,1.5),1)])
+def test_frequency_disturbance_duration(onset,hz,band,trip):
+    from benches.x03_quality import frequency_ride_quality as grade
+    end = onset + band[3] + 2
+    def trace(duration):
+        return [(onset,onset+duration,hz,True),(onset+duration,end,hz,False)]
+    assert grade((onset,end),trace(trip),[band]) == "PASS"
+    assert grade((onset,end),trace(band[2]/2),[band]) == "FAIL"
+    assert grade((onset,end),trace(band[3]+1),[band]) == "FAIL"
+    assert grade((onset,end),trace(trip)[:1],[band]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("source,bus,limit", [(400,395,5), (48,48,0), (650,652,2)])
+def test_main_contactor_requires_precharge_and_equalization(source,bus,limit):
+    from benches.x03_quality import precharge_quality as grade
+    begin = dict(time=0,action="close_precharge")
+    main = dict(time=1,action="close_main",source_v=source,bus_v=bus)
+    end = dict(time=2,action="open_precharge")
+    assert grade([begin,main,end],limit) == "PASS"
+    assert grade([main,end],limit) == "FAIL"
+    assert grade([begin,dict(main,bus_v=source-limit-1),end],limit) == "FAIL"
+    assert grade([begin,dict(main,bus_v=None),end],limit) == "INCOMPLETE"
+    assert grade([begin,main],limit) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("loss,limit", [(0,2), (20,0.5), (100,5)])
 def test_island_clears_by_recorded_deadline(loss,limit):
     from benches.x03_quality import islanding_quality as grade

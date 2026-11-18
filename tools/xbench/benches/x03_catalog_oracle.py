@@ -401,6 +401,33 @@ def certification_scope_quality(certificate, revision, model, conditions):
     return "INCOMPLETE" if unknown or not scopes else "FAIL"
 
 
+def accessory_quality(catalog, revision, primary, conditions, selected):
+    """A matching requirement names one accessory slot and the compatible part IDs."""
+    if not isinstance(catalog, dict) or not revision or not catalog.get("revision"):
+        return "INCOMPLETE"
+    if catalog["revision"] != revision:
+        return "FAIL"
+    rules = catalog.get("assemblies")
+    if not isinstance(rules, dict) or not isinstance(rules.get(primary), list):
+        return "INCOMPLETE"
+    if not isinstance(conditions, dict) or not isinstance(selected, dict):
+        return "INCOMPLETE"
+    for rule in rules[primary]:
+        if not isinstance(rule, dict) or not isinstance(rule.get("when"), dict):
+            return "INCOMPLETE"
+        when = rule["when"]
+        if any(k not in conditions or conditions[k] is None for k in when):
+            return "INCOMPLETE"
+        if any(conditions[k] != v for k,v in when.items()):
+            continue
+        slot, compatible = rule.get("slot"), rule.get("compatible")
+        if not isinstance(slot, str) or not isinstance(compatible, list) or not compatible:
+            return "INCOMPLETE"
+        if slot not in selected or selected[slot] not in compatible:
+            return "FAIL"
+    return "PASS"
+
+
 def shelf_life_quality(manufactured, install_on, rule, revision):
     """Dates are civil days. The pinned policy specifies whether expiry day is usable."""
     from datetime import date

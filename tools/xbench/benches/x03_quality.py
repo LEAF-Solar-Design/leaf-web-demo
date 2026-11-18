@@ -1268,6 +1268,83 @@ def bypass_string_quality(substrings, current, revision, curves, reported_watts)
     return "PASS" if isclose(reported_watts, current * voltage, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"
 
 
+def frequency_ride_quality(window, intervals, envelope):
+    """Grade contiguous [start,end) frequency and connection records from excursion onset.
+
+    Each half-open frequency band specifies minimum and maximum connected seconds
+    per continuous visit. A trip at either time boundary is allowed.
+    """
+    if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(map(finite_measure, window)):
+        return "INCOMPLETE"
+    if not isinstance(intervals, list) or not intervals or not isinstance(envelope, list) or not envelope:
+        return "INCOMPLETE"
+    for band in envelope:
+        if not isinstance(band, (tuple, list)) or len(band) != 4 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        low, high, minimum, maximum = band
+        if low >= high or not 0 <= minimum <= maximum:
+            return "INCOMPLETE"
+    cursor, end = window
+    previous_band = None
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            return "INCOMPLETE"
+        start, stop, hz, connected = row
+        if not all(map(finite_measure, (start, stop, hz))) or type(connected) is not bool:
+            return "INCOMPLETE"
+        if start != cursor or not start < stop <= end:
+            return "INCOMPLETE"
+        matches = [b for b in envelope if b[0] <= hz < b[1]]
+        if len(matches) != 1:
+            return "INCOMPLETE"
+        band = matches[0]
+        if band != previous_band:
+            onset = Fraction(str(start))
+            disconnected = False
+        if connected:
+            if disconnected or Fraction(str(stop)) - onset > Fraction(str(band[3])):
+                return "FAIL"
+        else:
+            if Fraction(str(start)) - onset < Fraction(str(band[2])):
+                return "FAIL"
+            disconnected = True
+        cursor, previous_band = stop, band
+    return "PASS" if cursor == end else "INCOMPLETE"
+
+
+def precharge_quality(events, max_delta_v):
+    """Grade one initially open startup sequence with simultaneous source and bus readings."""
+    if not finite_measure(max_delta_v) or max_delta_v < 0 or not isinstance(events, list):
+        return "INCOMPLETE"
+    previous = None
+    precharging = main_closed = False
+    for event in events:
+        if not isinstance(event, dict) or not finite_measure(event.get("time")):
+            return "INCOMPLETE"
+        time, action = event["time"], event.get("action")
+        if previous is not None and time <= previous:
+            return "INCOMPLETE"
+        previous = time
+        if action == "close_precharge":
+            if precharging or main_closed:
+                return "FAIL"
+            precharging = True
+        elif action == "close_main":
+            source, bus = event.get("source_v"), event.get("bus_v")
+            if not all(map(finite_measure, (source, bus))):
+                return "INCOMPLETE"
+            if main_closed or not precharging or abs(Fraction(str(source))-Fraction(str(bus))) > Fraction(str(max_delta_v)):
+                return "FAIL"
+            main_closed = True
+        elif action == "open_precharge":
+            if not precharging or not main_closed:
+                return "FAIL"
+            precharging = False
+        else:
+            return "INCOMPLETE"
+    return "PASS" if main_closed and not precharging else "INCOMPLETE"
+
+
 def islanding_quality(loss_at, observed_until, clearing_seconds, energized_intervals):
     """Grade contiguous half-open intervals during one recorded grid outage."""
     if not all(map(finite_measure, (loss_at, observed_until, clearing_seconds))):
