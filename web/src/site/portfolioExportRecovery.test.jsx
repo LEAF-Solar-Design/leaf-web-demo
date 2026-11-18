@@ -11,20 +11,69 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 // inert here; the independently built artifact supplies browser geometry proof.
 const template = readFileSync(resolve(process.cwd(), '../platform/portfolio_page_template.py'), 'utf8')
 const source = template.match(/'app\/Gallery\.jsx': b'''([\s\S]*?)'''/)[1]
-const module = { exports: {} }
-const design = Object.fromEntries(['photoStyle', 'photoSpanStyle', 'textStyle', 'galleryStyle'].map((key) => [key, () => ({})]))
+const design = Object.fromEntries(['photoStyle', 'photoSpanStyle', 'textStyle', 'galleryStyle', 'containerStyle'].map((key) => [key, () => ({})]))
 // Compile outside jsdom's typed-array realm, then render using the test's React.
-const compiled = execFileSync(process.execPath, ['-e',
+function loadExport(source, page) {
+ const module = { exports: {} }
+ const compiled = execFileSync(process.execPath, ['-e',
   "const e=require(process.argv[1]);const s=require('node:fs').readFileSync(0,'utf8');process.stdout.write(e.transformSync(s,{loader:'jsx',format:'cjs',jsx:'automatic'}).code)",
   createRequire(resolve(process.cwd(), 'package.json')).resolve('esbuild')], { input: source, encoding: 'utf8', maxBuffer: 1024 * 1024 })
-new Function('require', 'module', 'exports', compiled)(
-  (name) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsxRuntime : design, module, module.exports)
-const Gallery = module.exports.default
+ new Function('require', 'module', 'exports', compiled)(
+  (name) => name === 'react' ? React : name === 'react/jsx-runtime' ? jsxRuntime : name === '../portfolio.json' ? page : design, module, module.exports)
+ return module.exports.default
+}
+const Gallery = loadExport(source)
 const photo = (id, title) => ({ material_id: id, alt: title, title })
 const first = photo('11111111-1111-4111-8111-111111111111', 'Synthetic cake')
 const second = photo('22222222-2222-4222-8222-222222222222', 'Synthetic bread')
 const category = (image, slug = 'cakes') => ({ slug, images: [image] })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+
+describe('actual exported empty gallery lifecycle', () => {
+  it('renders all-empty and mixed home cards with title, description and safe hero access', () => {
+    const homeSource = template.match(/'app\/page\.jsx': b'''([\s\S]*?)'''/)[1]
+    const empty = { slug: 'seasonal', title: 'Seasonal work', description: 'Coming later', hero: 0, images: [] }
+    const populated = { slug: 'cakes', title: 'Cakes', description: 'Recent work', hero: 0, images: [first] }
+    for (const categories of [[empty], [populated, empty]]) {
+      const Home = loadExport(homeSource, { headline: 'Selected work', introduction: 'Made with care', categories })
+      const view = render(<Home />)
+      expect(screen.getByRole('heading', { name: empty.title })).toBeTruthy()
+      expect(screen.getByText(empty.description)).toBeTruthy()
+      expect(screen.getByText('No photos in this gallery yet.').closest('a').getAttribute('href')).toBe('/seasonal')
+      expect(view.container.querySelectorAll('img').length).toBe(categories.length - 1)
+      expect(screen.queryByRole('dialog')).toBeNull()
+      view.unmount()
+    }
+  })
+
+  it('renders zero images and transitions populated to empty to single without a stale dialog', () => {
+    const empty = { slug: 'cakes', images: [] }
+    const view = render(<><nav data-testid="background">Home</nav><Gallery page={{}} category={empty} /></>)
+    expect(screen.getByRole('status').textContent).toBe('No photos in this gallery yet.')
+    expect(screen.queryByRole('button')).toBeNull()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    const show = category => <><nav data-testid="background">Home</nav><Gallery page={{}} category={category} /></>
+    view.rerender(show({ slug: 'cakes', images: [first, second] }))
+    const opener = screen.getByRole('button', { name: 'View Synthetic cake' })
+    fireEvent.click(opener)
+    expect(screen.getByTestId('background').inert).toBe(true)
+    view.rerender(show(empty))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByTestId('background').inert).not.toBe(true)
+    expect(document.activeElement).toBe(screen.getByRole('status'))
+    expect(opener.isConnected).toBe(false)
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    view.rerender(show(category(second)))
+    expect(screen.queryByRole('status')).toBeNull()
+    const next = screen.getByRole('button', { name: 'View Synthetic bread' })
+    fireEvent.click(next)
+    expect(screen.getByRole('dialog', { name: second.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(next)
+  })
+})
 
 describe('exported viewer photo arrow navigation', () => {
   it('keeps image, caption, bounds and opener focus together through repeated arrows', () => {

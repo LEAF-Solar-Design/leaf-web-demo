@@ -891,11 +891,23 @@ describe('portfolio project document', () => {
     await expect(importPortfolio(importFile(bad), PROJECT, {})).rejects.toThrow('Unsupported portfolio fields')
   })
 
-  it('creates a portfolio with required photo guidance, supports resume editing, and clears on logout', async () => {
+  it('saves and reopens an empty portfolio, adds photos and resume entries, and clears on logout', async () => {
     listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO] })
     const onPreview = vi.fn()
     setup({ onPreview })
     fireEvent.click(button('Create a portfolio'))
+    expect(button('Save page').disabled).toBe(false)
+    const empty = onPreview.mock.lastCall[0].document
+    expect(empty.categories[0]).toMatchObject({ hero: 0, images: [] })
+    expect(() => validatePortfolioDocument({ ...empty, categories: [{ ...empty.categories[0], hero: 1 }] })).toThrow()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage.mock.lastCall[1]).toEqual(empty)
+    loadProjectPage.mockResolvedValueOnce({ revision: 1, digest: 'a'.repeat(64), document: empty })
+    fireEvent.click(button('Reload saved page'))
+    await screen.findByLabelText('Name')
+    expect(onPreview.mock.lastCall[0].document).toEqual(empty)
     expect(button('Save page').disabled).toBe(true)
     fireEvent.click(button('Load project photos'))
     await screen.findByRole('option', { name: 'Cake.jpg' })
