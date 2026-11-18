@@ -390,3 +390,23 @@ def wind_dynamic_pressure_quality(pressure_pa, temperature_k, speed_mps, model, 
     if reported < 0:
         return "FAIL"
     return "PASS" if abs(reported - expected) <= max(Fraction("1e-12"), expected / 10**9) else "FAIL"
+
+
+def plane_irradiance_quality(revision, model, dni, dhi, zenith_deg, sun_azimuth_deg, tilt_deg, face_azimuth_deg, reported):
+    """Isotropic sky with ground reflection from horizontal direct-plus-diffuse irradiance."""
+    from math import cos, sin, radians
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(model, dict) or model.get("revision") != revision or model.get("kind") != "isotropic":
+        return "INCOMPLETE"
+    albedo = model.get("ground_albedo")
+    if not all(map(finite_measure, (dni,dhi,zenith_deg,sun_azimuth_deg,tilt_deg,face_azimuth_deg,albedo,reported))):
+        return "INCOMPLETE"
+    if min(dni,dhi) < 0 or not 0 <= zenith_deg <= 90 or not 0 <= tilt_deg <= 180 or not 0 <= albedo <= 1:
+        return "INCOMPLETE"
+    z, tilt = radians(zenith_deg), radians(tilt_deg)
+    azimuth_diff = radians(sun_azimuth_deg % 360 - face_azimuth_deg % 360)
+    projection = cos(z)*cos(tilt) + sin(z)*sin(tilt)*cos(azimuth_diff)
+    sky_view = (1 + cos(tilt)) / 2
+    ground = (dni*cos(z) + dhi) * albedo * (1 - sky_view)
+    expected = dni * max(0, projection) + dhi * sky_view + ground
+    return "PASS" if reported >= 0 and isclose(reported, expected, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"

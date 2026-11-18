@@ -998,3 +998,24 @@ def test_touch_voltage_for_fault_duration(amps,ohms,duration,limit):
     assert grade(amps+1,ohms,duration,bands) == "FAIL"
     assert grade(amps,None,duration,bands) == "INCOMPLETE"
     assert grade(amps,ohms,3,bands) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ask,farads,start,cutoff,watts,seconds", [
+    ("Keep the controller online", 1,10,6,8,4),
+    ("Bridge a DC bus interruption", 0.02,100,80,12,3),
+    ("Hold the relay through transfer", 0.5,24,12,18,6),
+])
+def test_hold_up_until_load_cutoff(ask,farads,start,cutoff,watts,seconds):
+    from benches.x03_quality import capacitor_hold_up_quality as grade
+    assert grade(farads,start,cutoff,watts,seconds) == "PASS"
+    assert grade(farads,start,cutoff,watts,seconds+0.01) == "FAIL"
+    assert grade(farads,start,cutoff,None,seconds) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("hz,x,c,order", [(50,0.1,0.00127,5),(60,0.15,0.00036,7),(50,0.2,0.00177,3)])
+def test_bank_resonance_near_present_harmonic(hz,x,c,order):
+    from benches.x03_quality import bank_resonance_quality as grade
+    source = dict(revision="sc",reference_hz=hz,inductive_reactance_ohm=x)
+    assert grade("sc",source,c,{1:10,order:2},2) == "FAIL"
+    assert grade("sc",source,c,{1:10,order:0},2) == "PASS"
+    assert grade("sc",source,c,None,2) == "INCOMPLETE"

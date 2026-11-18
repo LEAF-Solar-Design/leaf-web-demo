@@ -632,3 +632,31 @@ def corrosion_allowance_quality(revision, catalog, material, exposures, thicknes
             return "INCOMPLETE"
         residual -= Fraction(str(years)) * Fraction(str(rate))
     return "PASS" if residual >= Fraction(str(required_mm)) else "FAIL"
+
+
+def duty_pressure_quality(revision, curve, duty):
+    """Piecewise linear maximum pressure versus temperature. All recorded duty points must qualify."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(curve, dict) or curve.get("revision") != revision:
+        return "INCOMPLETE"
+    points = curve.get("celsius_max_bar")
+    if not isinstance(points, list) or len(points) < 2 or not isinstance(duty, list) or not duty:
+        return "INCOMPLETE"
+    for row in points + duty:
+        if not isinstance(row, (list, tuple)) or len(row) != 2 or not all(map(finite_measure, row)) or row[1] < 0:
+            return "INCOMPLETE"
+    pairs = [(Fraction(str(t)), Fraction(str(p))) for t,p in points]
+    segments = list(zip(pairs,pairs[1:]))
+    if any(left[0] >= right[0] for left,right in segments):
+        return "INCOMPLETE"
+    for temperature, pressure in duty:
+        t, p = Fraction(str(temperature)), Fraction(str(pressure))
+        for (a, pa), (b, pb) in segments:
+            if a <= t <= b:
+                if (p-pa)*(b-a) > (pb-pa)*(t-a):
+                    return "FAIL"
+                break
+        else:
+            return "INCOMPLETE"
+    return "PASS"

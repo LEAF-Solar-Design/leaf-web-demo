@@ -757,3 +757,23 @@ def test_wind_pressure_at_recorded_density(pressure,kelvin,speed,dynamic):
     assert grade(pressure,kelvin,speed,model,dynamic) == "PASS"
     assert grade(pressure,kelvin,speed,model,1.225*speed**2/2) == "FAIL"
     assert grade(pressure,None,speed,model,dynamic) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("zenith,sun,tilt,face,expected", [(60,0,0,90,500), (0,0,90,0,140), (60,180,90,0,100)])
+def test_isotropic_plane_irradiance(zenith,sun,tilt,face,expected):
+    from benches.x03_weather_oracle import plane_irradiance_quality as grade
+    model = dict(kind="isotropic",revision="iso1",ground_albedo=0.2)
+    def check(dni,reported):
+        return grade("iso1",model,dni,100,zenith,sun,tilt,face,reported)
+    assert check(800,expected) == "PASS"
+    assert check(800,expected+1) == "FAIL"
+    assert check(None,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("duty,maximum", [(25,9),(50,8),(75,7)])
+def test_component_operates_within_joint_pressure_temperature_limit(duty,maximum):
+    from benches.x03_catalog_oracle import duty_pressure_quality as grade
+    curve = dict(revision="pt",celsius_max_bar=[(0,10),(50,8),(100,6)])
+    assert grade("pt",curve,[(0,10),(duty,maximum)]) == "PASS"
+    assert grade("pt",curve,[(duty,maximum+0.5)]) == "FAIL"
+    assert grade("pt",{},[(duty,maximum)]) == "INCOMPLETE"
