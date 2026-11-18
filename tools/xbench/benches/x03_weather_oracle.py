@@ -186,3 +186,27 @@ def failover_voltage_quality(priority, online, sample, *, reported, **conditions
         if online[station]:
             return weather_quality(sample, station=station, reported=reported, **conditions)
     return "FAIL"
+
+
+def spatial_voltage_quality(samples, weights, *, reported, **conditions):
+    """Use synchronized observations and the declared normalized station weights."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(weights, dict) or not weights or not isinstance(samples, dict) or samples.keys() != weights.keys():
+        return "INCOMPLETE"
+    if not all(map(finite_measure, weights.values())):
+        return "INCOMPLETE"
+    if min(weights.values()) < 0 or sum(Fraction(str(w)) for w in weights.values()) != 1:
+        return "FAIL"
+    total = 0.0
+    timestamps = set()
+    for station, weight in weights.items():
+        sample = samples[station]
+        voltage = _sample_voltage(sample, station=station, **conditions)
+        if isinstance(voltage, str):
+            return voltage
+        timestamps.add(sample["timestamp"])
+        total += voltage * weight
+    if len(timestamps) != 1:
+        return "INCOMPLETE"
+    return _voltage_verdict(total, reported)

@@ -584,3 +584,32 @@ def queue_balance_quality(opening, admissions, completions, cancellations, closi
     available = start | added
     removed = done | cancelled
     return "PASS" if removed <= available and end == available - removed else "FAIL"
+
+
+def mean_queue_quality(start, end, opening_count, events, reported):
+    """Integrate occupancy over [start, end), grouping simultaneous changes."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not all(map(finite_measure, (start, end))) or end <= start or type(opening_count) is not int or opening_count < 0:
+        return "INCOMPLETE"
+    if not isinstance(events, list) or reported is None:
+        return "INCOMPLETE"
+    changes = Counter()
+    for event in events:
+        if not isinstance(event, (list, tuple)) or len(event) != 2 or not finite_measure(event[0]):
+            return "INCOMPLETE"
+        stamp, action = event
+        if not start <= stamp < end or action not in ("enqueue", "depart"):
+            return "FAIL"
+        changes[Fraction(str(stamp))] += 1 if action == "enqueue" else -1
+    previous = Fraction(str(start))
+    count, area = opening_count, Fraction(0)
+    for when in sorted(changes):
+        area += count * (when - previous)
+        count += changes[when]
+        if count < 0:
+            return "FAIL"
+        previous = when
+    area += count * (Fraction(str(end)) - previous)
+    mean = area / (Fraction(str(end)) - Fraction(str(start)))
+    return "PASS" if finite_measure(reported) and isclose(reported, float(mean), rel_tol=1e-12, abs_tol=1e-12) else "FAIL"

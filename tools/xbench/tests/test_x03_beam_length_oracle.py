@@ -175,3 +175,17 @@ def test_ellipse_arcs_in_metres(ratio, start, end, expected):
     assert beam_length_quality(space, "m", {"0": expected + 1e-7}) == "FAIL"
     entity.dxf.discard("major_axis")
     assert beam_length_quality(space, "m", {"0": expected}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("radius,pitch,turns,ccw,expected", [
+    (0.477464829275686,4,2,True,10), (0.7957747154594767,12,0.5,False,6.5),
+    (1.2732395447351628,15,3,False,51)])
+def test_constant_radius_helix(radius,pitch,turns,ccw,expected):
+    space = pytest.importorskip("ezdxf").new().modelspace()
+    helix = space.add_helix(radius,pitch,turns,ccw=ccw)
+    assert beam_length_quality(space,"m",{"0":expected}) == "PASS"
+    assert beam_length_quality(space,"m",{"0":expected+1}) == "FAIL"
+    points = [point.copy() for point in helix.control_points]
+    points[-1][:2] *= 2
+    helix.control_points = points
+    assert beam_length_quality(space,"m",{"0":expected}) == "INCOMPLETE"

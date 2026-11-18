@@ -492,3 +492,16 @@ def test_adjudicated_acknowledgement(action, effective, at, expected):
     assert grade("other", 5, at, history) == "PASS"
     assert grade("ack", 5, at, dict(history, complete_through=at-1)) == "INCOMPLETE"
     assert grade("ack", 5, at, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("weights,volts", [([0.5,0.5],100), ([0.25,0.75],95), ([0.75,0.25],105)])
+def test_voltage_from_weighted_station_temperatures(weights, volts):
+    from benches.x03_weather_oracle import spatial_voltage_quality as grade
+    samples = {s:dict(station=s, site="roof", unit="C", timezone="UTC", timestamp=5, cell_temp=t)
+               for s,t in [("north",15),("south",35)]}
+    conditions = dict(reported=volts, site="roof", as_of=5, max_age=1, voc_at_25=50, modules=2, coefficient_per_c=-0.01)
+    policy = dict(zip(samples, weights))
+    assert grade(samples, policy, **conditions) == "PASS"
+    assert grade(samples, dict(north=-0.1, south=1.1), **conditions) == "FAIL"
+    assert grade(samples, dict(north=1, south=1), **conditions) == "FAIL"
+    assert grade({"north":samples["north"]}, policy, **conditions) == "INCOMPLETE"

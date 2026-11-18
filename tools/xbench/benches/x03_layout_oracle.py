@@ -511,3 +511,31 @@ def combined_load_quality(loads, combinations, capacity):
         if demand > Fraction(str(capacity)):
             return "FAIL"
     return "PASS"
+
+
+def door_sweep_quality(hinge, tip, opening_degrees, obstacles):
+    """Intersect obstacles with angular wedges and compare exact radial distance."""
+    from math import atan2, ceil, cos, dist, radians, sin
+    from shapely.geometry import Point, Polygon
+    from shapely.geometry.base import BaseGeometry
+    if not all(isinstance(p, (list, tuple)) and len(p) == 2 and all(map(finite_measure, p)) for p in (hinge, tip)):
+        return "INCOMPLETE"
+    if not finite_measure(opening_degrees) or not 0 < abs(opening_degrees) <= 360 or not isinstance(obstacles, list):
+        return "INCOMPLETE"
+    radius = dist(hinge, tip)
+    if radius <= 0 or not all(isinstance(g, BaseGeometry) and g.is_valid and not g.is_empty for g in obstacles):
+        return "INCOMPLETE"
+    origin = Point(hinge)
+    angle = atan2(tip[1] - hinge[1], tip[0] - hinge[0])
+    pieces = ceil(abs(opening_degrees) / 90)
+    step = radians(opening_degrees) / pieces
+    for _ in range(pieces):
+        # The far chord stays outside the disc throughout this <=90 degree wedge.
+        ends = [(hinge[0] + 2*radius*cos(a), hinge[1] + 2*radius*sin(a)) for a in (angle, angle + step)]
+        wedge = Polygon([hinge, *ends])
+        for obstacle in obstacles:
+            clipped = wedge.intersection(obstacle)
+            if not clipped.is_empty and origin.distance(clipped) <= radius:
+                return "FAIL"
+        angle += step
+    return "PASS"
