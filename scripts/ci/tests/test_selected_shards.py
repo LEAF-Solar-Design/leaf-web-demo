@@ -241,8 +241,29 @@ class SelectedShardsTests(unittest.TestCase):
         self.assertEqual(plan["algorithm"], "lpt")
         tier = json.loads(path.with_name("pr-tier.json").read_text(encoding="utf-8"))
         catalog = tier["suite_ids"]
-        self.assertEqual(len(catalog), 119)
+        manifest = json.loads(path.with_name("contract-keep.json").read_text(encoding="utf-8"))
+        self.assert_tier_size(tier, manifest)
         self.assertIn("server-integration-turn-grants-postgres", catalog)
         plan = helper.make_plan(catalog, catalog, 13, 0, path)
         self.assert_exact(plan, catalog)
         self.assertEqual(plan["algorithm"], "lpt")
+
+    def assert_tier_size(self, tier, manifest):
+        # The pre-C1 tier contained 119 suites. Adding a reason to an existing
+        # member does not increase membership.
+        promotions = sum(record["reason"] == "main-broke" and tier["reasons"][record["id"]] == ["main-broke"]
+                         for record in manifest["suites"])
+        self.assertEqual(len(tier["suite_ids"]), 119 + promotions)
+
+    def test_tier_size_detects_loss_of_unrelated_base_member(self):
+        path = Path(helper.__file__).with_name("pr-tier.json")
+        tier = json.loads(path.read_text(encoding="utf-8"))
+        manifest = json.loads(path.with_name("contract-keep.json").read_text(encoding="utf-8"))
+        sid = "platform-static"
+        tier["reasons"][sid].append("main-broke")
+        manifest["suites"].append({"id": sid, "reason": "main-broke"})
+        self.assert_tier_size(tier, manifest)
+        tier["suite_ids"].remove("auth0-action-deploy")
+        del tier["reasons"]["auth0-action-deploy"]
+        with self.assertRaises(AssertionError):
+            self.assert_tier_size(tier, manifest)

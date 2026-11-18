@@ -1,0 +1,94 @@
+{
+  "schema": "leaf.ci.contract-keep.v1",
+  "suites": [
+    {
+      "id": "migration-expand-contract",
+      "reason": "main-broke",
+      "added": "2026-11-18",
+      "evidence": {
+        "pr": 3309,
+        "failure": "migration gate never ran on the PR (tier mode omitted catalog suites outside the tier); production full run 13 on 6494349b went RED on it",
+        "job": 10540,
+        "date": "2026-11-18",
+        "note": "requested by the CI owner 01c45d41 with this evidence"
+      }
+    },
+    {
+      "id": "scripts-proof-string-sizer",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "scripts-solar-w1-studio-autofill-solve",
+      "reason": "main-broke",
+      "added": "2026-11-17",
+      "evidence": {
+        "pr": 3332,
+        "failure": "DISCONTIGUOUS_SOLVE_STRING",
+        "date": "2026-11-17",
+        "note": "added by hand on the CI owner's instruction; no second main failure required for this first entry"
+      }
+    },
+    {
+      "id": "server-capabilities-project-read",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-engine-registry-scripts",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-lab-capability-coverage",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-solar-design-survives-saves",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-solar-tool-solar-string-reports",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-surface-entitlements",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-catalog-gates",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-cloud-solve-probe",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-solve-parity",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1c-solve-proposal",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    }
+  ]
+}

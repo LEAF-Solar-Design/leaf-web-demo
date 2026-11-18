@@ -14,6 +14,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CONTRACT_MANIFEST = ROOT / "scripts/ci/contract-keep.json"
 
 
 def load_module(name, path):
@@ -43,6 +44,10 @@ def row(sid, target=None, cwd="server", kind="pytest", **extra):
                 command=["<PYTHON>", "-m", "pytest", target or ("tests/test_" + sid + ".py")], **extra)
 
 
+def committed_contracts():
+    return json.loads(CONTRACT_MANIFEST.read_text(encoding="utf-8"))["suites"]
+
+
 def inputs():
     proposal = dict(schema="leaf.ci.pr-tier.v1", catchers=["catcher", "removed"],
                     hard_harm_sentinels=[], prerequisites=[], suite_ids=["catcher", "removed"])
@@ -58,12 +63,31 @@ def inputs():
     return proposal, history, ["sentinel"], catalog
 
 
+def contract_record(sid="catcher", **changes):
+    return {"id": sid, "reason": "main-broke", "added": "2026-11-18", "evidence": {"pr": 3332}, **changes}
+
+
+def manifest_text(*records):
+    return json.dumps({"schema": "leaf.ci.contract-keep.v1", "suites": records})
+
+
+@pytest.fixture
+def generation_inputs(generator, tmp_path, monkeypatch):
+    path = tmp_path / "contract-keep.json"
+    legacy = contract_record("server-w1c-solve-proposal", reason="contract-keep", evidence=None)
+    path.write_text(manifest_text(contract_record(), legacy), encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", path)
+    documents = inputs()
+    documents[3]["suites"].append(row(legacy["id"]))
+    return documents
+
+
 def build(generator, documents):
     return generator.build_document(*documents, {name: "b" * 64 for name in ("proposal", "fail30", "sentinels")})
 
 
-def test_generator_is_deterministic_and_keeps_failure_owners(generator):
-    documents = inputs()
+def test_generator_is_deterministic_and_keeps_failure_owners(generator, generation_inputs):
+    documents = generation_inputs
     first = build(generator, documents)
     proposal, history, sentinels, catalog = documents
     catalog["suites"].reverse()
@@ -76,7 +100,8 @@ def test_generator_is_deterministic_and_keeps_failure_owners(generator):
     assert first["suite_ids"] == sorted(first["suite_ids"])
     assert set(first["suite_ids"]) == {
         "catcher", "sentinel", "web-owner", "harness-owner", "unknown",
-        "web-version-restore-proof", "web-build", "harness-tsc-build", "ci-full-run-manifest-certificates"}
+        "web-version-restore-proof", "web-build", "harness-tsc-build", "ci-full-run-manifest-certificates",
+        "server-w1c-solve-proposal"}
     assert first["reasons"]["web-owner"] == ["fail30:web/src/widget.test"]
     assert first["reasons"]["unknown"] == ["unknown-ownership"]
     assert first["generated_from"]["catalog_sha256"] == "a" * 64
@@ -92,24 +117,51 @@ def test_web_path_normalization(runner, path):
     assert not runner.pr_tier_owns(row("server-owner", "tests/widget.test.js"), path)
 
 
-def test_generator_keeps_cross_cutting_contract_suite(generator):
-    documents = inputs()
-    sid = "server-w1c-solve-proposal"
-    documents[3]["suites"].append(row(sid))
-    result = build(generator, documents)
-    assert sid in result["suite_ids"]
-    assert result["reasons"][sid] == ["contract-keep"]
+def test_generator_keeps_cross_cutting_contract_suite_and_proposal_reason(generator, generation_inputs):
+    result = build(generator, generation_inputs)
+    assert result["reasons"]["catcher"] == ["main-broke", "proposal"]
+    assert result["reasons"]["server-w1c-solve-proposal"] == ["contract-keep"]
+
+
+def assert_contract_memberships(policy, records):
+    for record in records:
+        sid = record["id"]
+        assert sid in policy["suite_ids"], sid
+        assert record["reason"] in policy["reasons"][sid], sid
 
 
 def test_committed_pr_tier_keeps_cross_cutting_contract_suites(generator):
     policy = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
-    for sid in generator.CONTRACT_KEEP:
-        assert sid in policy["suite_ids"]
-        assert "contract-keep" in policy["reasons"][sid]
+    records = committed_contracts()
+    assert generator.CONTRACT_KEEP == tuple(record["id"] for record in records)
+    assert_contract_memberships(policy, records)
+    by_id = {record["id"]: record for record in records}
+    for sid in (
+        "scripts-proof-string-sizer", "server-capabilities-project-read", "server-engine-registry-scripts",
+        "server-lab-capability-coverage", "server-solar-design-survives-saves",
+        "server-solar-tool-solar-string-reports", "server-surface-entitlements", "server-w1-catalog-gates",
+        "server-w1-cloud-solve-probe", "server-w1-solve-parity", "server-w1c-solve-proposal",
+    ):
+        assert by_id[sid] == dict(id=sid, reason="contract-keep", added="2026-11-18", evidence=None)
+    sid = "scripts-solar-w1-studio-autofill-solve"
+    assert by_id[sid] == dict(id=sid, reason="main-broke", added="2026-11-17", evidence={
+        "pr": 3332, "failure": "DISCONTIGUOUS_SOLVE_STRING", "date": "2026-11-17",
+        "note": "added by hand on the CI owner's instruction; no second main failure required for this first entry",
+    })
+    migration = by_id["migration-expand-contract"]
+    assert migration["reason"] == "main-broke"
+    assert (migration["evidence"]["pr"], migration["evidence"]["job"]) == (3309, 10540)
 
 
-def test_generator_retains_unknown_new_and_transitive_prerequisites(generator):
-    documents = inputs()
+@pytest.mark.parametrize("sid", ["healthy", "catcher"])
+def test_manifest_only_change_fails_membership_invariant(sid):
+    policy = dict(suite_ids=["catcher"], reasons={"catcher": ["proposal"]})
+    with pytest.raises(AssertionError, match=sid):
+        assert_contract_memberships(policy, [dict(id=sid, reason="main-broke")])
+
+
+def test_generator_retains_unknown_new_and_transitive_prerequisites(generator, generation_inputs):
+    documents = generation_inputs
     proposal, _, _, catalog = documents
     proposal["catalog_suite_ids"] = [r["id"] for r in catalog["suites"]] + ["dep-one", "dep-two"]
     catalog["suites"].extend([row("new-suite"), row("dep-one", prerequisites=["dep-two"]), row("dep-two")])
@@ -128,8 +180,8 @@ def async_author_row(runner):
 
 @pytest.mark.parametrize("reason", [None, "proposal", "hard-harm-sentinel", "fail30",
                                   "prerequisite", "new-catalog-suite"])
-def test_generator_knows_async_browser_owner_and_preserves_other_reasons(generator, runner, reason):
-    documents = inputs()
+def test_generator_knows_async_browser_owner_and_preserves_other_reasons(generator, runner, reason, generation_inputs):
+    documents = generation_inputs
     proposal, history, sentinels, catalog = documents
     owner = async_author_row(runner)
     sid = owner["id"]
@@ -160,8 +212,8 @@ def test_generator_knows_async_browser_owner_and_preserves_other_reasons(generat
 
 
 @pytest.mark.parametrize("bad", ["proposal", "fail30", "sentinels", "catalog", "dependency"])
-def test_generator_refuses_malformed_inputs(generator, bad):
-    documents = list(inputs())
+def test_generator_refuses_malformed_inputs(generator, generation_inputs, bad):
+    documents = list(generation_inputs)
     if bad == "proposal":
         documents[0]["suite_ids"] = ["catcher", 123]
     elif bad == "fail30":
@@ -177,8 +229,8 @@ def test_generator_refuses_malformed_inputs(generator, bad):
 
 
 @pytest.mark.parametrize("malformed", ["{", '{"suite_ids":[],"suite_ids":[]}', "[]"])
-def test_generator_refusal_leaves_existing_output_untouched(generator, tmp_path, monkeypatch, malformed):
-    proposal, history, sentinels, catalog = inputs()
+def test_generator_refusal_leaves_existing_output_untouched(generator, generation_inputs, tmp_path, monkeypatch, malformed):
+    proposal, history, sentinels, catalog = generation_inputs
     paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
     for path, document in zip(paths, (proposal, history, sentinels)):
         path.write_text(json.dumps(document), encoding="utf-8")
@@ -193,8 +245,8 @@ def test_generator_refusal_leaves_existing_output_untouched(generator, tmp_path,
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_generator_cli_requires_explicit_activation(generator, tmp_path, monkeypatch, capsys, enabled):
-    proposal, history, sentinels, catalog = inputs()
+def test_generator_cli_requires_explicit_activation(generator, generation_inputs, tmp_path, monkeypatch, capsys, enabled):
+    proposal, history, sentinels, catalog = generation_inputs
     paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
     for path, document in zip(paths, (proposal, history, sentinels)):
         path.write_text(json.dumps(document), encoding="utf-8")
@@ -210,6 +262,111 @@ def test_generator_cli_requires_explicit_activation(generator, tmp_path, monkeyp
     assert document == generator.generate(*paths, catalog=catalog, enabled=enabled)
     document["enabled"] = False
     assert document == generator.generate(*paths, catalog=catalog)
+
+
+@pytest.mark.parametrize(("contents", "cause"), [
+    (None, "contract-keep.json"),
+    ("{", "Expecting"),
+    ('{"schema":"wrong","suites":[]}', "schema"),
+    ('{"schema":"a","schema":"b"}', "duplicate JSON key: schema"),
+    (manifest_text(), "suites"),
+    (manifest_text({"id": "catcher"}), "added"),
+    (manifest_text(contract_record(extra=True)), "extra"),
+    (manifest_text(contract_record(), contract_record()), "duplicate suites.id: catcher"),
+    (manifest_text(contract_record("catcher/extra")), "catcher/extra"),
+    (manifest_text(contract_record(added="2026-02-29")), "catcher added"),
+    (manifest_text(contract_record(added="20261118")), "catcher added"),
+    (manifest_text(contract_record(reason="keep")), "catcher invalid reason"),
+    (manifest_text(contract_record(reason="contract-keep")), "catcher evidence"),
+    (manifest_text(contract_record(evidence=None)), "catcher evidence"),
+    (manifest_text(contract_record(evidence=[])), "catcher evidence"),
+    (manifest_text(contract_record(evidence={})), "catcher evidence"),
+    (manifest_text(contract_record(evidence={"date": "2026-13-01"})), "catcher evidence.date"),
+    (manifest_text(contract_record("retired")), "live catalog: retired"),
+])
+def test_invalid_manifest_refuses_generation_and_sync(generator, tmp_path, monkeypatch, capsys, contents, cause):
+    proposal, history, sentinels, catalog = inputs()
+    paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
+    for path, document in zip(paths, (proposal, history, sentinels)):
+        path.write_text(json.dumps(document), encoding="utf-8")
+    manifest = tmp_path / "contract-keep.json"
+    if contents is not None:
+        manifest.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", manifest)
+    monkeypatch.setattr(generator, "live_catalog", lambda: catalog)
+    output = tmp_path / "tier.json"
+    previous = (ROOT / "scripts/ci/pr-tier.json").read_bytes()
+    output.write_bytes(previous)
+    for args in (["--proposal", str(paths[0]), "--fail30", str(paths[1]), "--sentinels", str(paths[2])],
+                 ["--sync-contract-keep"]):
+        assert generator.main([*args, "--output", str(output)]) == 2
+        error = capsys.readouterr().err
+        assert "contract-keep.json" in error and cause in error
+        assert output.read_bytes() == previous
+
+
+@pytest.fixture
+def sync_inputs(generator, tmp_path, monkeypatch):
+    manifest = tmp_path / "contract-keep.json"
+    manifest.write_text(manifest_text(contract_record("catcher"), contract_record("healthy")), encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", manifest)
+    monkeypatch.setattr(generator, "ROOT", tmp_path)  # No proposal, fail30 or sentinels on disk.
+    catalog = inputs()[3]
+    monkeypatch.setattr(generator, "live_catalog", lambda: catalog)
+    tier = dict(schema=generator.SCHEMA, enabled=False,
+                catalog_suite_ids=["unknown", "healthy", "catcher"], suite_ids=["unknown", "catcher"],
+                reasons={"unknown": ["z", "a"], "catcher": ["proposal"]},
+                generated_from={"catalog_sha256": "d" * 64}, prerequisites={"unknown": ["catcher"]},
+                extra={"preserved": [3, 2, 1]})
+    path = tmp_path / "tier.json"
+    path.write_text(json.dumps(tier), encoding="utf-8")
+    return path, tier
+
+
+def test_sync_unions_members_and_reasons_offline(generator, sync_inputs, monkeypatch):
+    path, tier = sync_inputs
+    argv = ["--sync-contract-keep", "--output", str(path)]
+    assert generator.main(argv) == 0
+    expected = dict(tier, suite_ids=["catcher", "healthy", "unknown"], reasons={
+        "catcher": ["main-broke", "proposal"], "healthy": ["main-broke"], "unknown": ["a", "z"],
+    })
+    canonical = (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert path.read_bytes() == canonical
+    monkeypatch.setattr(generator.os, "replace", lambda *_: pytest.fail("unchanged file replaced"))
+    assert generator.main(argv) == 0
+    assert path.read_bytes() == canonical
+
+
+@pytest.mark.parametrize(("changes", "cause"), [
+    ({"catalog_suite_ids": ["catcher", "unknown"]}, "catalog_suite_ids: healthy"),
+    ({"schema": "wrong"}, "schema"),
+    ({"enabled": 1}, "enabled"),
+    ({"suite_ids": "catcher"}, "suite_ids"),
+    ({"suite_ids": ["catcher", "catcher"]}, "suite_ids"),
+    ({"suite_ids": ["outside"]}, "catalog_suite_ids"),
+    ({"catalog_suite_ids": ["catcher", "unknown", "unknown"]}, "catalog_suite_ids"),
+    ({"reasons": {"catcher": ["proposal"]}}, "reasons"),
+    ({"reasons": {"unknown": [], "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": "x", "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": ["x", "x"], "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": [3], "catcher": ["proposal"]}}, "unknown"),
+    ({"prerequisites": {"catcher": ["outside"]}}, "prerequisites"),
+])
+def test_sync_refusal_preserves_tier(generator, sync_inputs, capsys, changes, cause):
+    path, tier = sync_inputs
+    previous = json.dumps(dict(tier, **changes)).encode("utf-8")
+    path.write_bytes(previous)
+    assert generator.main(["--sync-contract-keep", "--output", str(path)]) == 2
+    assert cause in capsys.readouterr().err
+    assert path.read_bytes() == previous
+
+
+def test_sync_committed_tier_is_byte_identical(generator, tmp_path):
+    committed = (ROOT / "scripts/ci/pr-tier.json").read_bytes()
+    path = tmp_path / "tier.json"
+    path.write_bytes(committed)
+    assert generator.main(["--sync-contract-keep", "--output", str(path)]) == 0
+    assert path.read_bytes() == committed
 
 
 def stub_suites(runner):
