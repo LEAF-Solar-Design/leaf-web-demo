@@ -637,3 +637,21 @@ def scheduled_throughput_quality(completions, shifts, reported):
     count = sum(any(a <= Fraction(str(t)) < b for a,b in merged) for t in completions.values())
     rate = 3600 * count / sum(b-a for a,b in merged)
     return "PASS" if finite_measure(reported) and isclose(reported, float(rate), rel_tol=1e-12) else "FAIL"
+
+
+def deadline_miss_quality(inventory, due, completed, as_of, reported_misses):
+    """Snapshot missed IDs. An unfinished item becomes overdue strictly after its due time."""
+    from benches.x03_quality import finite_measure
+    if not isinstance(inventory, list) or not all(isinstance(i,str) and i for i in inventory):
+        return "INCOMPLETE"
+    if not isinstance(due, dict) or not isinstance(completed, dict) or not finite_measure(as_of):
+        return "INCOMPLETE"
+    ids = set(inventory)
+    if len(ids) != len(inventory) or due.keys() != ids or not completed.keys() <= ids:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, due.values())) or not all(map(finite_measure, completed.values())):
+        return "INCOMPLETE"
+    missed = {i for i in ids if min(completed.get(i, as_of), as_of) > due[i]}
+    if not isinstance(reported_misses, list) or not all(isinstance(i,str) for i in reported_misses):
+        return "INCOMPLETE"
+    return "PASS" if len(reported_misses) == len(missed) and set(reported_misses) == missed else "FAIL"

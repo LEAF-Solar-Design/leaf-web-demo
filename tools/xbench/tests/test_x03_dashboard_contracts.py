@@ -321,3 +321,13 @@ def test_completions_per_scheduled_hour(shifts,expected):
     assert grade(completions,shifts,expected) == "PASS"
     assert grade(completions,shifts,4.8) == "FAIL"
     assert grade(completions,None,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("as_of,expected", [(5,[]),(6,["late"]),(10,["late","open"])])
+def test_completed_and_unfinished_deadlines(as_of,expected):
+    from benches.x03_dashboard_oracle import deadline_miss_quality as grade
+    due = dict(late=5,exact=5,open=6)
+    done = dict(late=8,exact=5)
+    assert grade(list(due),due,done,as_of,expected) == "PASS"
+    assert grade(list(due),due,done,as_of,expected+["exact"]) == "FAIL"
+    assert grade(list(due),{"late":5},done,as_of,expected) == "INCOMPLETE"
