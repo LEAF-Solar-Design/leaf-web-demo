@@ -268,8 +268,40 @@ def _coverage(counts, percent):
                  if sum(counts[layer] for layer in group) >= required]
     return {"reachable": True, "solutions": solutions}
 
+def _compare_selections(intake, spec):
+    from fractions import Fraction
+
+    result, _ = _run(intake, {})
+    field = spec["by"]
+    if field not in ("block", "set_id"):
+        raise InputValidationError("Choose listed block names or set IDs.")
+    available = {group[field] for group in result["sets"]}
+    operands = []
+    for side in ("before", "after"):
+        requested = set(spec[side])
+        if requested - available:
+            raise InputValidationError("A comparison selection is absent. Check the drawing's listed sets.")
+        ids = [group["set_id"] for group in result["sets"] if group[field] in requested]
+        operand, _ = _run(intake, {"set_ids": ids, "group_by": "layer"})
+        operands.append((operand.get("counts", {}), operand["count"] or 0))
+    (before, first), (after, second) = operands
+    changes = {}
+    for layer in sorted(before.keys() | after.keys()):
+        value = (100 * (Fraction(after.get(layer, 0), second) - Fraction(before.get(layer, 0), first))
+                 if first and second else None)
+        changes[layer] = None if value is None else {"numerator": value.numerator,
+                                                     "denominator": value.denominator}
+    result["share_change"] = {"totals": [first, second], "percentage_points": changes,
+                              "defined": bool(first and second)}
+    result["selection_required"] = False
+    return result, None
+
 def run(intake, params):
     params = params or {}
+    if params.get("compare_selections") is not None:
+        if any(v is not None for k, v in params.items() if k != "compare_selections"):
+            raise InputValidationError("Use the two comparison selections on their own.")
+        return _compare_selections(intake, params["compare_selections"])
     if params.get("rank_windows") is None:
         return _run(intake, params)
     windows = params["rank_windows"]
