@@ -376,6 +376,13 @@ def _replace_frame_strings(before, result, frame, previous, ordered_lists, respo
     members = set(frame["panel_refs"])
     previous_ids = {s["id"] for s in previous}
     panels = {p["id"]: p for p in result["panels"]}
+    if frame["installation_design"] == "Roof":
+        limit = 3 * max(frame["module_width_along_row"], frame["module_height_across_row"])
+        for ordered in ordered_lists:
+            for left, right in zip(ordered, ordered[1:]):
+                distance = math.dist(panels[left]["centre"][:2], panels[right]["centre"][:2])
+                if distance > limit and not math.isclose(distance, limit, rel_tol=1e-9, abs_tol=1e-9):
+                    raise GraphValidationError("DISCONTIGUOUS_SOLVE_STRING", "solve.continuity")
     strings = []
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]

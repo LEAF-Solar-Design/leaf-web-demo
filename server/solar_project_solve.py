@@ -153,6 +153,8 @@ def _derive(job, context, plan, exchange):
         "solver": {"endpoint": cloud.SOLVER_URL, "adapter_version": "1.0.0"},
         "proposal": response.model_dump(), "visited_path": response.original_visited_path(request)}
     candidate = kernel.complete_search(context.graph, plan["binding"], proposal)
+    # Apply the same pure acceptance checks used by split proposals before publication.
+    kernel.accept_candidate(context.graph, candidate, expected_rev=context.graph["rev"])
     scope = {"organization_id": str(context.organization_id), "project_id": str(context.project_id),
         "drawing_id": str(context.drawing_id), "input_version_id": str(context.parent_version_id),
         "parent_intake_sha256": context.intake_sha256, "job_id": str(job["job_id"]),
