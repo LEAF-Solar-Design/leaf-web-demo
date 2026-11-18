@@ -94,3 +94,14 @@ def test_report_window_at_utc_midnight(left, right, ids):
     assert grade(rows, ids) == "PASS"
     assert grade(rows, ids + ["outside"]) == "FAIL"
     assert grade([dict(rows[0], timestamp="2026-01-02T00:00:00"), *rows[1:]], ids) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("spans,elapsed,worker", [
+    ([(1,6),(3,8)],7,10), ([(2,10),(3,4),(12,14)],10,11), ([(0,3),(3,5),(0,3)],5,8),
+])
+def test_concurrent_run_accounting(spans, elapsed, worker):
+    from benches.x03_dashboard_oracle import concurrent_time_quality
+    assert concurrent_time_quality(spans[::-1], elapsed, "elapsed") == "PASS"
+    assert concurrent_time_quality(spans, worker, "worker") == "PASS"
+    assert concurrent_time_quality(spans, worker, "elapsed") == "FAIL"
+    assert concurrent_time_quality(spans, elapsed) == "INCOMPLETE"

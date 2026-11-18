@@ -495,3 +495,37 @@ def inverter_ratio_quality(ac_watts, dc_watts, assignments, bounds):
         if not low <= totals[inverter] / Fraction(str(ac)) <= high:
             return "FAIL"
     return "PASS"
+
+
+def parallel_string_quality(strings, modules, tracker_limits):
+    """Compare series operating voltages within each tracker using its declared voltage tolerance."""
+    if not all(isinstance(x, dict) and x for x in (strings, modules, tracker_limits)):
+        return "INCOMPLETE"
+    voltages = {}
+    for record in strings.values():
+        if not isinstance(record, dict) or any(record.get(k) is None for k in ("tracker", "module", "series_count")):
+            return "INCOMPLETE"
+        tracker, model, count = record["tracker"], record["module"], record["series_count"]
+        if not isinstance(tracker, str) or not isinstance(model, str):
+            return "INCOMPLETE"
+        rating = modules.get(model)
+        if rating is None or tracker_limits.get(tracker) is None:
+            return "INCOMPLETE"
+        if not finite_measure(rating) or rating <= 0 or type(count) is not int or count < 1:
+            return "FAIL"
+        voltages.setdefault(tracker, []).append(count * Fraction(str(rating)))
+    for tracker, values in voltages.items():
+        delta = tracker_limits[tracker]
+        if not finite_measure(delta) or delta < 0 or max(values)-min(values) > Fraction(str(delta)):
+            return "FAIL"
+    return "PASS"
+
+
+def overcurrent_quality(design_amps, device_amps, conductor_ampacity, equipment_limit):
+    """All inputs are recorded design-point ratings in amperes."""
+    values = (design_amps, device_amps, conductor_ampacity, equipment_limit)
+    if None in values:
+        return "INCOMPLETE"
+    if not all(finite_measure(a) and a > 0 for a in values):
+        return "FAIL"
+    return "PASS" if design_amps <= device_amps <= min(conductor_ampacity, equipment_limit) else "FAIL"

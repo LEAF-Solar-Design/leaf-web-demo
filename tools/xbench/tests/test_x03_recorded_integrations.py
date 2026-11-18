@@ -168,3 +168,18 @@ def test_recorded_catalog_cursor_chain(parts):
     assert grade([*pages[:-1], dict(pages[-1], next="1")]) == "FAIL"
     assert grade([*pages[:-1], dict(pages[-1], rows=[dict(part=parts[0], rating=99)])]) == "FAIL"
     assert grade([*pages[:-1], dict(pages[-1], version="v1")]) == "FAIL"
+
+
+@pytest.mark.parametrize("drawing,start,late", [("roof",1,1),("frame",10,9),("duct",4,3)])
+def test_deleted_drawing_requires_explicit_recreation(drawing,start,late):
+    from benches.x03_issue_delivery_oracle import tombstone_replay_quality
+    def event(rev, action):
+        return dict(drawing=drawing, revision=rev, action=action)
+    events = [event(start,"upsert"), event(start+1,"delete"), event(late,"upsert"),
+              event(start+2,"upsert"), event(start+3,"recreate")]
+    snapshots = [[drawing], [], [], [], [drawing]]
+    grants = {(drawing,start+3)}
+    assert tombstone_replay_quality(events, grants, snapshots) == "PASS"
+    assert tombstone_replay_quality(events, set(), snapshots) == "FAIL"
+    assert tombstone_replay_quality(events, grants, [*snapshots[:2], [drawing], *snapshots[3:]]) == "FAIL"
+    assert tombstone_replay_quality(events, None, snapshots) == "INCOMPLETE"

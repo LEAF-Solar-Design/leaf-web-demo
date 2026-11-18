@@ -335,3 +335,26 @@ def test_local_inverter_ratio(ac, ratings, limits):
     assert grade(mapping, dc) == "PASS"
     assert grade({**mapping, 3: "a"}, dc) == "FAIL"
     assert grade(mapping, {**dc, 0: None}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("volt,counts,delta", [(40,(8,9),40), (32,(10,12),64), (25,(9,12),75)])
+def test_string_voltage_mismatch_on_shared_tracker(volt, counts, delta):
+    from benches.x03_quality import parallel_string_quality
+    strings = {i: dict(module="panel", tracker="east", series_count=n) for i,n in enumerate(counts)}
+    def grade(rows, ratings, limit):
+        return parallel_string_quality(rows, ratings, {"east":limit, "west":limit})
+    assert grade(strings, {"panel":volt}, delta) == "PASS"
+    assert grade(strings, {"panel":volt}, delta-1) == "FAIL"
+    split = {**strings, 1:dict(strings[1], tracker="west")}
+    assert grade(split, {"panel":volt}, delta-1) == "PASS"
+    assert grade(strings, {"panel":None}, delta) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("load,device,wire,equipment", [(20,20,30,20), (16,25,25,40), (10,10,10,10)])
+def test_device_coordination(load, device, wire, equipment):
+    from benches.x03_quality import overcurrent_quality
+    assert overcurrent_quality(load, device, wire, equipment) == "PASS"
+    assert overcurrent_quality(load, load-1, wire, equipment) == "FAIL"
+    assert overcurrent_quality(load, device, device-1, equipment) == "FAIL"
+    assert overcurrent_quality(load, device, wire, device-1) == "FAIL"
+    assert overcurrent_quality(load, device, None, equipment) == "INCOMPLETE"

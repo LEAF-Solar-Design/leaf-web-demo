@@ -127,3 +127,23 @@ def test_transformed_block_line_endpoints(scales, delta):
     assert beam_length_quality(space, "m", {"0": 3}) == "FAIL"
     block.add_arc((0, 0), 1, 0, 90)
     assert beam_length_quality(space, "m", {"0": expected}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("normal,u,v", [
+    ((0,0,-1), (-1,0,0), (0,1,0)), ((1,0,0), (0,1,0), (0,0,1)),
+    ((0,1,1), (-1,0,0), (0,-2**-0.5,2**-0.5)),
+])
+def test_arc_in_object_plane(normal, u, v):
+    from math import acos, dist
+    from types import SimpleNamespace
+    from benches.x03_beam_length_oracle import beam_length_quality
+    radius = 3
+    start = [radius*x for x in u]
+    end = [radius*x for x in v]
+    # Measure the angle between the explicitly rotated world-space radius vectors.
+    expected = dist(start, (0,0,0)) * acos(sum(a*b for a,b in zip(start,end))/radius**2)
+    doc = pytest.importorskip("ezdxf").new()
+    arc = doc.modelspace().add_arc((0,0), radius, 0, 90, dxfattribs={"extrusion":normal})
+    assert beam_length_quality([arc], "m", {"0":expected}) == "PASS"
+    bad = SimpleNamespace(dxftype=lambda:"ARC", dxf=SimpleNamespace(layer="0", get={"extrusion":(0,0,0)}.get))
+    assert beam_length_quality([bad], "m", {"0":expected}) == "INCOMPLETE"
