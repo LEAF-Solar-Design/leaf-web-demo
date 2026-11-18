@@ -563,6 +563,12 @@ def _decide(
             ],
         )
 
+    match = re.fullmatch('(?:(?:rank|sort) layers by (?:panel|module) count(?: then name)? and (?:give|show) the cumulative (?:share|percentage)(?: after each layer)?|show the running (?:panel|module) fraction by layer, largest first(?:\\. break ties by layer name)?)[.!?]?', text.strip(), re.I)
+    if match and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        options = {"group_by": "layer", "panel_scope": "all_layers", "cumulative_shares": True}
+        return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                              rationale="Analyze selected physical modules by layer.")
+
     shares = _share_params(text)
     if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
         return Classification(lane=LANE_RUN, tool="count-modules", params=shares,

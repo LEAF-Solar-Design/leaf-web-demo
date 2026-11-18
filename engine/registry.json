@@ -69,6 +69,7 @@
         "properties": {
           "layer_shares": {"type": "boolean", "description": "Return each layer share of the selected physical module total."},
           "layer_names": {"type": ["array", "null"], "default": null, "minItems": 1, "items": {"type": "string"}, "description": "Exact layer names for named panel selection."},
+          "cumulative_shares": {"type": "boolean", "description": "Return running physical fractions in descending count order, ties by literal layer name."},
           "top_layers": {"type": "integer", "minimum": 1, "description": "Rank layers by selected physical module count. Include ties at the requested cutoff."},
           "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
           "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
