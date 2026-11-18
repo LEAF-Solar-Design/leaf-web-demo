@@ -621,3 +621,16 @@ def reverse_current_quality(sources, withstand, protection):
         if reverse > Fraction(str(withstand[string])):
             return "FAIL"
     return "PASS"
+
+
+def interrupting_rating_quality(fault_amps, interrupting_amps):
+    """Compare available fault current and interrupting rating at each device, in amps."""
+    if not all(isinstance(x, dict) and x for x in (fault_amps, interrupting_amps)):
+        return "INCOMPLETE"
+    if fault_amps.keys() != interrupting_amps.keys() or None in (*fault_amps.values(), *interrupting_amps.values()):
+        return "INCOMPLETE"
+    for device, fault in fault_amps.items():
+        rating = interrupting_amps[device]
+        if not finite_measure(fault) or fault < 0 or not finite_measure(rating) or rating <= 0 or fault > rating:
+            return "FAIL"
+    return "PASS"

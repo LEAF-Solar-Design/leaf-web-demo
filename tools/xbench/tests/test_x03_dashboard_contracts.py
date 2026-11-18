@@ -130,3 +130,17 @@ def test_logical_retry_totals(history, counts, expected):
     from benches.x03_dashboard_oracle import retry_dashboard_quality
     attempts = [dict(run=r, attempt=i, outcome=s) for r, i, s in history]
     assert retry_dashboard_quality(attempts, dict(zip(("attempts", "runs", "succeeded", "failed"), counts))) == expected
+
+
+@pytest.mark.parametrize("after, verdict", [
+    ([("b", "failed"), ("a", "passed")], "PASS"),
+    ([("a", "passed"), ("c", "failed")], "FAIL"),
+    ([("a", "passed")], "FAIL"),
+], ids=["credit-reordered-matched-pairs", "reject-new-drawing-mix", "restore-omitted-failure"])
+def test_release_cohort(after, verdict):
+    from benches.x03_dashboard_oracle import paired_release_quality
+    before = [dict(drawing_version=k, outcome="failed") for k in ("a", "b")]
+    after_rows = [dict(drawing_version=k, outcome=v) for k, v in after]
+    report = dict(pairs=2, before_passed=0, after_passed=1, improved=True)
+    assert paired_release_quality(["a", "b"], before, after_rows, report) == verdict
+    assert paired_release_quality(["a", "b"], before, after_rows, dict(report, improved=False)) == "FAIL"

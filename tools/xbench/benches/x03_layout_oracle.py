@@ -195,3 +195,20 @@ def roof_orientation_quality(normal, tilt, azimuth, tilt_tolerance, azimuth_tole
     bearing = degrees(atan2(east, north))
     error = abs((bearing - azimuth + 180) % 360 - 180)
     return "PASS" if error <= azimuth_tolerance or isclose(error, azimuth_tolerance, abs_tol=1e-10, rel_tol=0) else "FAIL"
+
+
+def rail_support_quality(start, end, attachments, max_span, max_cantilever):
+    """Use longitudinal stations measured along one straight rail in one drawing unit."""
+    if not isinstance(attachments, (list, tuple)) or None in (start, end, max_span, max_cantilever, *attachments):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (start, end, max_span, max_cantilever, *attachments))):
+        return "FAIL"
+    start, end, span, overhang = map(lambda v: Fraction(str(v)), (start, end, max_span, max_cantilever))
+    stations = sorted(Fraction(str(v)) for v in attachments)
+    if end <= start or span <= 0 or overhang < 0 or len(set(stations)) < 2:
+        return "FAIL"
+    if stations[0] < start or stations[-1] > end:
+        return "FAIL"
+    if max(stations[0] - start, end - stations[-1]) > overhang:
+        return "FAIL"
+    return "PASS" if all(b - a <= span for a, b in zip(stations, stations[1:])) else "FAIL"

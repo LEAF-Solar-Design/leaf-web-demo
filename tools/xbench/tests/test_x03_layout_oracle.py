@@ -114,3 +114,12 @@ def test_equipment_overhead_clearance(offset, underside, expected):
 def test_roof_normal(normal, tilt, bearing, tol, result):
     from benches.x03_layout_oracle import roof_orientation_quality
     assert roof_orientation_quality(normal, tilt, bearing, tol, tol) == result
+
+
+@pytest.mark.parametrize("stations, span, overhang, verdict", [
+    ([5, 1, 9], 4, 1, "PASS"), ([1, 4, 9], 4, 1, "FAIL"),
+    ([2, 5, 9], 4, 1, "FAIL"), ([1, 5, 9], None, 1, "INCOMPLETE"),
+], ids=["verify-boundary-attachments", "find-unsupported-midspan", "flag-end-cantilever", "missing-span-rule"])
+def test_recorded_rail_stations(stations, span, overhang, verdict):
+    from benches.x03_layout_oracle import rail_support_quality
+    assert rail_support_quality(0, 10, stations, span, overhang) == verdict

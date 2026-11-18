@@ -120,3 +120,34 @@ def batch_ack_quality(expected, acknowledgements, effects):
                     return "INCOMPLETE"
             target.add(key)
     return "PASS" if accepted == committed == wanted else "INCOMPLETE"
+
+
+def predecessor_quality(events, final_revision):
+    """A complete delivery has one explicit root and a single unbroken successor chain."""
+    if not isinstance(events, list) or not events or not isinstance(final_revision, str):
+        return "INCOMPLETE"
+    parents = {}
+    for row in events:
+        if not isinstance(row, dict) or "predecessor" not in row or not isinstance(row.get("revision"), str):
+            return "INCOMPLETE"
+        revision, parent = row["revision"], row["predecessor"]
+        if not revision or (parent is not None and (not isinstance(parent, str) or not parent)):
+            return "FAIL"
+        if revision in parents and parents[revision] != parent:
+            return "FAIL"
+        parents[revision] = parent
+    children = {}
+    for node, parent in parents.items():
+        if parent is not None and parent not in parents:
+            return "INCOMPLETE"
+        if parent in children:
+            return "FAIL"
+        children[parent] = node
+    visited = set()
+    node = None
+    while node in children:
+        node = children[node]
+        if node in visited:
+            return "FAIL"
+        visited.add(node)
+    return "PASS" if visited == parents.keys() and node == final_revision else "FAIL"
