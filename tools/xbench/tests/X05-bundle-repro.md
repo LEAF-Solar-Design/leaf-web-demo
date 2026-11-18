@@ -517,9 +517,13 @@ def fixture_record(fixture, version):
         import_binding=deepcopy(manifest), grid_binding=deepcopy(manifest))
 
 observed = []
-for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4)]:
+for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4), ('HASH_CORRECT_FAIL',1)]:
     record = fixture_record('unit', 'v1')
     if kind == 'FAIL': record['envelope']['import']['normal_user'] = False
+    if kind == 'HASH_CORRECT_FAIL':
+        # Change one saved count, retain the independent oracle, then pin the
+        # changed bytes. Byte integrity must not substitute for reconciliation.
+        record['envelope']['assurance']['evidence']['saved_strings'][0]['optimizers'] = 6
     raw = json.dumps(record, sort_keys=True).encode('ascii')
     member = dict(name='unit/seven.json', fixture='unit', stage='seven_step', design_version='v1',
                   byte_length=len(raw), sha256=sha256(raw).hexdigest())
@@ -535,7 +539,11 @@ for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4)]:
     assert completed.returncode == expected_exit and completed.stderr == b''
     assert len(completed.stdout.splitlines()) == 1
     result = json.loads(completed.stdout)
-    assert result['semantic']['verdict'] == kind and not result['origin_authenticated']
+    assert result['semantic']['verdict'] == ('FAIL' if kind == 'HASH_CORRECT_FAIL' else kind)
+    assert not result['origin_authenticated']
+    if kind == 'HASH_CORRECT_FAIL':
+        assert result['integrity']['integrity_verified']
+        assert result['semantic']['fixtures']['unit']['result']['reconciliation']['steps']['3']['verdict'] == 'FAIL'
     if kind == 'UNREADABLE':
         assert result['integrity']['diagnostic_counts'] == {'PAYLOAD_LENGTH_MISMATCH':1, 'PAYLOAD_SHA256_MISMATCH':1}
     else: assert result['integrity']['integrity_verified']
@@ -548,3 +556,9 @@ Stop on any mismatch. Each child has a 15-second deadline. `subprocess.run`
 kills and waits for a timed-out child. No file extraction, browser, network,
 service or product state is created. A PASS here proves synthetic replay only,
 never live X05 acceptance or origin authentication.
+
+The final `HASH_CORRECT_FAIL` case is a semantic-corruption replay. It changes
+one saved string from five optimizers to six and computes fresh member pins.
+The auditor accepts those bytes, but step 3 fails against the unchanged
+independent synthetic oracle. Expected exits for the extended example are
+`0,1,4,1`. Origin remains unauthenticated in all four cases.
