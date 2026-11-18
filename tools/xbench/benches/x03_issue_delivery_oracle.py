@@ -2,6 +2,35 @@
 import hashlib
 
 
+def dead_letter_quality(exhausted, quarantine, replays, terminal):
+    """Reconcile exhausted delivery IDs to quarantine receipts and recorded replay effects."""
+    if not isinstance(exhausted,list) or not exhausted or not isinstance(quarantine,dict) or not isinstance(replays,list) or not isinstance(terminal,dict):
+        return "INCOMPLETE"
+    if not all(isinstance(job,str) and job for job in exhausted):
+        return "INCOMPLETE"
+    jobs = set(exhausted)
+    if len(jobs) != len(exhausted) or quarantine.keys() != jobs:
+        return "FAIL"
+    if terminal.keys() != jobs or not all(isinstance(r,str) and r for r in quarantine.values()):
+        return "INCOMPLETE"
+    if len(set(quarantine.values())) != len(jobs):
+        return "FAIL"
+    effects = dict.fromkeys(jobs, 0)
+    for replay in replays:
+        if not isinstance(replay,dict) or any(replay.get(k) is None for k in ("delivery","parent_receipt","new_effects")):
+            return "INCOMPLETE"
+        job, parent, count = replay["delivery"], replay["parent_receipt"], replay["new_effects"]
+        if not isinstance(job,str) or job not in jobs or parent != quarantine[job] or type(count) is not int or count not in (0,1):
+            return "FAIL"
+        effects[job] += count
+    for job, count in effects.items():
+        if terminal[job] is None:
+            return "INCOMPLETE"
+        if (terminal[job],count) not in (("quarantined",0),("recovered",1)):
+            return "FAIL"
+    return "PASS"
+
+
 def delivery_quality(attempts, effects, *, revision_order=None, final_state=None):
     wanted, received = {}, {}
     for rows, index, unique in ((attempts, wanted, False), (effects, received, True)):

@@ -248,3 +248,22 @@ def wind_period_quality(speed_mps, observed_seconds, required_seconds, rules, re
         if not finite_measure(factor) or factor <= 0:
             return "INCOMPLETE"
     return "PASS" if isclose(reported_mps,speed_mps*factor,rel_tol=1e-9) else "FAIL"
+
+
+def temperature_unit_voltage_quality(weather, **conditions):
+    """Normalize a recorded temperature before applying the Celsius voltage model."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(weather, dict) or not finite_measure(weather.get("cell_temp")):
+        return "INCOMPLETE"
+    value = Fraction(str(weather["cell_temp"]))
+    unit = weather.get("unit")
+    if unit == "F":
+        value = (value - 32) * 5 / 9
+    elif unit == "K":
+        value -= Fraction("273.15")
+    elif unit != "C":
+        return "INCOMPLETE"
+    if value < Fraction("-273.15"):
+        return "FAIL"
+    return weather_quality(dict(weather, unit="C", cell_temp=float(value)), **conditions)

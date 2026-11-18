@@ -4,6 +4,15 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("force,arm,stiffness,limit", [(100,0.1,500,0.02),(40,-0.2,400,0.02),(150,0.02,100,0.03)])
+def test_rail_twist_at_permitted_bending_load(force,arm,stiffness,limit):
+    from benches.x03_layout_oracle import rail_twist_quality as grade
+    assert force <= 150
+    assert grade(force,arm,stiffness,limit) == "PASS"
+    assert grade(force,arm*1.1,stiffness,limit) == "FAIL"
+    assert grade(force,arm,None,limit) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("span,load,limit", [(100, 3, 0.390625), (200, 3, 6.25), (200, 1.5, 3.125)])
 def test_simple_span_uniform_load(span, load, limit):
     from benches.x03_layout_oracle import rail_deflection_quality
@@ -306,3 +315,14 @@ def test_miner_sum_over_all_stress_bins(low,high,expected):
     assert grade(bins,[20,40],curve,"lot-a","miner-linear") == expected
     assert grade({20:low},[20,40],curve,"lot-a","miner-linear") == "INCOMPLETE"
     assert grade(bins,[20,40],curve,"lot-b","miner-linear") == "FAIL"
+
+
+@pytest.mark.parametrize("zone,position,outside", [((5, 12), 5, 4), ((30, 50), 50, 51), ((70, 75), 72, 76)])
+def test_module_edge_clamp_placement(zone, position, outside):
+    from benches.x03_layout_oracle import clamp_zone_quality
+    rule = dict(revision="mount-v2", zones_mm={"near": zone, "far": (90, 100)})
+    def check(positions):
+        return clamp_zone_quality("mount-v2", rule, positions)
+    assert check({"near": position, "far": 100}) == "PASS"
+    assert check({"near": outside, "far": 100}) == "FAIL"
+    assert check({"near": position}) == "INCOMPLETE"

@@ -5,6 +5,29 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("site,dust,water", [("dust chamber",6,4),("water jet",5,6),("immersion",6,8)])
+def test_installation_requires_both_qualified_ingress_codes(site,dust,water):
+    from benches.x03_catalog_oracle import ingress_quality as grade
+    catalog = dict(revision="sheet",exposures={site:dict(dust=[dust],water=[water])})
+    assert grade(site,dust,water,catalog,"sheet") == "PASS"
+    assert grade(site,dust-1,water,catalog,"sheet") == "FAIL"
+    assert grade(site,dust,water-1,catalog,"sheet") == "FAIL"
+    assert grade("unknown site",dust,water,catalog,"sheet") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("effects,terminal", [([],"quarantined"),([1],"recovered"),([0,1,0],"recovered")])
+def test_exhausted_delivery_quarantine_and_recovery(effects,terminal):
+    from benches.x03_issue_delivery_oracle import dead_letter_quality as grade
+    def replay(n):
+        return dict(delivery="job",parent_receipt="q1",new_effects=n)
+    rows = [replay(n) for n in effects]
+    assert grade(["job"],{"job":"q1"},rows,{"job":terminal}) == "PASS"
+    assert grade(["job"],{},[],{"job":"quarantined"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},[replay(1),replay(1)],{"job":"recovered"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},[dict(replay(1),parent_receipt="other")],{"job":"recovered"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},rows,{}) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("part,pack,minimum,demand,units", [
     ("clips", 4, 10, 1, 12), ("clamps", 5, 5, 14, 15), ("bolts", 12, 0, 24, 24)])
 def test_order_uses_pinned_pack_policy(part, pack, minimum, demand, units):
@@ -582,3 +605,32 @@ def test_only_declared_wind_period_conversions(source,target,factor,expected):
     assert grade(20,source,target,rules,expected+1) == "FAIL"
     assert grade(20,3,600,{},15) == "FAIL"
     assert grade(20,None,target,rules,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("parts", [("rail", "adapter"), ("guard", "lid"), ("clamp", "spacer", "insert")])
+def test_procure_compatible_accessories(parts):
+    from itertools import combinations
+    from benches.x03_catalog_oracle import accessory_compatibility_quality
+    selected = set(parts)
+    compatibility = {frozenset(pair): True for pair in combinations(parts, 2)}
+    assembly = dict(revision="kit-v3", eligible=selected, compatible=compatibility)
+    def grade():
+        return accessory_compatibility_quality("kit-v3", assembly, selected)
+    assert grade() == "PASS"
+    pair = frozenset(parts[:2])
+    compatibility[pair] = False
+    assert grade() == "FAIL"
+    del compatibility[pair]
+    assert grade() == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("unit,value,impossible", [("C", -10, -274), ("F", 14, -460), ("K", 263.15, -1)])
+def test_cold_string_voltage_across_weather_units(unit, value, impossible):
+    from benches.x03_weather_oracle import temperature_unit_voltage_quality
+    sample = dict(site="roof", station="mast", timezone="UTC", timestamp=1, unit=unit, cell_temp=value)
+    def grade(record):
+        return temperature_unit_voltage_quality(record, reported=108.75, site="roof", station="mast",
+                                               as_of=1, max_age=0, voc_at_25=50, coefficient_per_c=-0.0025, modules=2)
+    assert grade(sample) == "PASS"
+    assert grade(dict(sample, cell_temp=impossible)) == "FAIL"
+    assert grade(dict(sample, unit=None)) == "INCOMPLETE"

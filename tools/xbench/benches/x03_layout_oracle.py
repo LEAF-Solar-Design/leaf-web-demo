@@ -4,6 +4,17 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_twist_quality(force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad):
+    """Single elastic rail with a recorded torque per radian stiffness."""
+    values = (force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    force, arm, stiffness, limit = (Fraction(str(x)) for x in values)
+    if stiffness <= 0 or limit < 0:
+        return "INCOMPLETE"
+    return "PASS" if abs(force * arm) <= stiffness * limit else "FAIL"
+
+
 def rail_deflection_quality(rails):
     """Simply supported rails with uniform load. Use N and mm throughout."""
     if not isinstance(rails, list) or not rails:
@@ -624,3 +635,27 @@ def fatigue_quality(cycles, required_bins, curve, revision, rule):
             return "INCOMPLETE"
         damage += count / Fraction(str(life))
     return "PASS" if damage < 1 else "FAIL"
+
+
+def clamp_zone_quality(revision, mounting_rule, positions_mm):
+    """Grade each required clamp's distance along the mounting edge from the pinned datum."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(mounting_rule, dict) or revision != mounting_rule.get("revision"):
+        return "INCOMPLETE"
+    zones = mounting_rule.get("zones_mm")
+    if not isinstance(zones, dict) or not zones or not isinstance(positions_mm, dict):
+        return "INCOMPLETE"
+    if zones.keys() - positions_mm.keys():
+        return "INCOMPLETE"
+    if positions_mm.keys() != zones.keys():
+        return "FAIL"
+    for clamp, bounds in zones.items():
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            return "INCOMPLETE"
+        low, high = bounds
+        position = positions_mm[clamp]
+        if not all(map(finite_measure, (low, high, position))) or low > high:
+            return "INCOMPLETE"
+        if not low <= position <= high:
+            return "FAIL"
+    return "PASS"

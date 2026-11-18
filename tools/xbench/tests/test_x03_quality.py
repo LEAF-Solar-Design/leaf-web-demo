@@ -2,6 +2,30 @@ import pytest
 from benches.x03_quality import inverter_quality, route_quality, string_quality
 
 
+@pytest.mark.parametrize("initial,capacity,intervals,peak", [
+    (20,100,[(10,100,50)],25), (22,200,[(4,150,50),(4,150,50)],26),
+    (24,100,[(10,20,100),(5,150,50)],25)])
+def test_pack_thermal_balance_within_electrical_rating(initial,capacity,intervals,peak):
+    from benches.x03_quality import battery_thermal_quality as grade
+    from benches.x03_quality import battery_power_quality
+    ratings = dict(charge_kw=5, discharge_kw=10)
+    assert battery_power_quality([8], ratings, ratings) == "PASS"
+    assert grade(initial,20,capacity,peak,intervals) == "PASS"
+    assert grade(initial,20,capacity,peak-0.1,intervals) == "FAIL"
+    assert grade(initial,20,capacity,peak,[(5,100,None)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("volts,minimum", [(250,1), (500,5), (1000,100)])
+def test_insulation_resistance_requires_valid_test_voltage(volts,minimum):
+    from benches.x03_quality import insulation_resistance_quality as grade
+    rule = dict(min_volts=volts,max_volts=volts,min_megohms=minimum)
+    reading = dict(volts=volts,megohms=minimum)
+    assert grade(reading,rule) == "PASS"
+    assert grade(dict(reading,megohms=minimum/2),rule) == "FAIL"
+    assert grade(dict(reading,volts=volts/2),rule) == "FAIL"
+    assert grade(dict(volts=volts),rule) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("ask,maximum,adequate", [
     ("Check the PV home run", 980, 1000), ("Check a 48 V storage lead", 60, 60),
     ("Check the AC feeder", 480, 600)])
@@ -784,3 +808,29 @@ def test_transformer_energization_trip_envelope(peak,width,running):
     assert grade([(0,width,peak,True),trace[1]],policy) == "FAIL"
     assert grade([(0,width+0.1,peak,False),(width+0.1,3,running,False)],policy) == "FAIL"
     assert grade(trace[1:],policy) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ask,spectrum,rating", [
+    ("Check the DC link on one switching frequency", {100: 2}, 2),
+    ("Check a rectifier with two recorded harmonics", {120: 3, 240: 4}, 5),
+    ("Size the filter for all three switching bands", {50: 1, 100: 2, 150: 2}, 3),
+])
+def test_recorded_capacitor_ripple(ask, spectrum, rating):
+    from benches.x03_quality import ripple_current_quality
+    bands = set(spectrum)
+    assert ripple_current_quality(bands, spectrum, rating) == "PASS"
+    assert ripple_current_quality(bands, spectrum, rating - 0.1) == "FAIL"
+    assert ripple_current_quality(bands, {}, rating) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("capacities,volts,wh", [
+    ([4, 10], 6, 24), ([8, 6, 9], 10, 60), ([12, 11, 7, 14], 20, 140),
+])
+def test_series_pack_requested_energy_at_first_cutoff(capacities, volts, wh):
+    from benches.x03_quality import series_energy_quality
+    cells = dict(enumerate(capacities))
+    def check(data, required):
+        return series_energy_quality(set(cells), data, "first-cell-cutoff", volts, required)
+    assert check(cells, wh) == "PASS"
+    assert check(cells, wh + 1) == "FAIL"
+    assert check(dict(list(cells.items())[1:]), wh) == "INCOMPLETE"

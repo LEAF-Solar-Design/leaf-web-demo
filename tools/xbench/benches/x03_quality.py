@@ -4,6 +4,39 @@ from fractions import Fraction
 from math import ceil
 
 
+def battery_thermal_quality(initial_c, ambient_c, heat_capacity_j_per_k, maximum_c, intervals):
+    """Lumped thermal store with constant loads per interval and cooling limited at ambient."""
+    inputs = (initial_c, ambient_c, heat_capacity_j_per_k, maximum_c)
+    if not all(map(finite_measure, inputs)) or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    temperature, ambient, capacity, limit = (Fraction(str(v)) for v in inputs)
+    if capacity <= 0 or temperature < ambient:
+        return "INCOMPLETE"
+    if temperature > limit:
+        return "FAIL"
+    for interval in intervals:
+        if not isinstance(interval, (list, tuple)) or len(interval) != 3 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        seconds, heat_w, cooling_w = (Fraction(str(v)) for v in interval)
+        if seconds <= 0 or min(heat_w, cooling_w) < 0:
+            return "INCOMPLETE"
+        temperature = max(ambient, temperature + seconds * (heat_w - cooling_w) / capacity)
+        if temperature > limit:
+            return "FAIL"
+    return "PASS"
+
+
+def insulation_resistance_quality(test, equipment_rule):
+    """Compare a recorded insulation test with the equipment's permitted voltage and resistance."""
+    if not isinstance(test, dict) or not isinstance(equipment_rule, dict):
+        return "INCOMPLETE"
+    volts, resistance = test.get("volts"), test.get("megohms")
+    low, high, minimum = (equipment_rule.get(k) for k in ("min_volts", "max_volts", "min_megohms"))
+    if not all(map(finite_measure, (volts, resistance, low, high, minimum))) or not 0 < low <= high or minimum <= 0:
+        return "INCOMPLETE"
+    return "PASS" if low <= volts <= high and resistance >= minimum else "FAIL"
+
+
 def insulation_quality(circuits, dielectric_volts):
     """Map circuit IDs to (maximum volts, cable IDs) and check every installed cable."""
     if not isinstance(circuits, dict) or not circuits or not isinstance(dielectric_volts, dict):
@@ -1421,3 +1454,33 @@ def inrush_quality(trace, protection):
             return "FAIL"
         cursor = right
     return "PASS" if cursor == start else "INCOMPLETE"
+
+
+def ripple_current_quality(expected_hz, spectrum_rms_a, rating_a):
+    """Compare orthogonal AC components against a recorded broadband RMS rating."""
+    if not isinstance(expected_hz, (set, frozenset)) or not expected_hz:
+        return "INCOMPLETE"
+    if not isinstance(spectrum_rms_a, dict) or spectrum_rms_a.keys() != expected_hz:
+        return "INCOMPLETE"
+    if not all(finite_measure(hz) and hz > 0 for hz in expected_hz):
+        return "INCOMPLETE"
+    if not finite_measure(rating_a) or rating_a <= 0:
+        return "INCOMPLETE"
+    if not all(finite_measure(amps) and amps >= 0 for amps in spectrum_rms_a.values()):
+        return "INCOMPLETE"
+    heating = sum(Fraction(str(amps)) ** 2 for amps in spectrum_rms_a.values())
+    return "PASS" if heating <= Fraction(str(rating_a)) ** 2 else "FAIL"
+
+
+def series_energy_quality(cell_ids, capacities_ah, cutoff_rule, bank_volts, required_wh):
+    """Recorded constant bank voltage, series discharge until the first cell hits cutoff."""
+    if cutoff_rule != "first-cell-cutoff" or not isinstance(cell_ids, (set, frozenset)) or not cell_ids:
+        return "INCOMPLETE"
+    if not isinstance(capacities_ah, dict) or capacities_ah.keys() != cell_ids:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in capacities_ah.values()):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (bank_volts, required_wh))) or bank_volts <= 0 or required_wh < 0:
+        return "INCOMPLETE"
+    available = Fraction(str(min(capacities_ah.values()))) * Fraction(str(bank_volts))
+    return "PASS" if available >= Fraction(str(required_wh)) else "FAIL"

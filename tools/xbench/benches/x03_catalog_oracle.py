@@ -10,6 +10,25 @@ UNITS = {
 }
 
 
+def ingress_quality(exposure, dust_code, water_code, catalog, revision):
+    """Use the pinned exposure's explicitly qualified dust and water codes."""
+    if not isinstance(catalog, dict) or not revision or not catalog.get("revision") or not isinstance(exposure,str):
+        return "INCOMPLETE"
+    if revision != catalog["revision"]:
+        return "FAIL"
+    rules = catalog.get("exposures")
+    rule = rules.get(exposure) if isinstance(rules,dict) else None
+    if not isinstance(rule,dict) or dust_code is None or water_code is None:
+        return "INCOMPLETE"
+    for axis, code in (("dust",dust_code), ("water",water_code)):
+        allowed = rule.get(axis)
+        if not isinstance(allowed,list) or not all(type(x) is int for x in allowed) or type(code) is not int:
+            return "INCOMPLETE"
+        if code not in allowed:
+            return "FAIL"
+    return "PASS"
+
+
 def pack_order_quality(catalog, revision, part, demand, ordered_units):
     """Buy the smallest whole-pack quantity that meets demand and the unit minimum."""
     if not isinstance(catalog, dict) or not revision or not catalog.get("revision"):
@@ -466,3 +485,20 @@ def galvanic_quality(first, second, exposure, isolation, catalog, revision):
     if len(matches) != 1 or not isinstance(matches[0],list):
         return "INCOMPLETE"
     return "PASS" if isolation in matches[0] else "FAIL"
+
+
+def accessory_compatibility_quality(revision, assembly, selected):
+    """Require an explicit compatibility decision for each pair in the selected assembly."""
+    from itertools import combinations
+    if not revision or not isinstance(assembly, dict) or assembly.get("revision") != revision:
+        return "INCOMPLETE"
+    eligible = assembly.get("eligible")
+    pairs = assembly.get("compatible")
+    if not isinstance(eligible, set) or not isinstance(selected, set) or not selected or not isinstance(pairs, dict):
+        return "INCOMPLETE"
+    if not selected <= eligible:
+        return "FAIL"
+    decisions = [pairs.get(frozenset(pair)) for pair in combinations(selected, 2)]
+    if any(value is False for value in decisions):
+        return "FAIL"
+    return "PASS" if all(value is True for value in decisions) else "INCOMPLETE"
