@@ -431,6 +431,42 @@ _GROUPED_PANELS = re.compile(
 )
 
 
+_COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
+_SHARE_WINDOW = re.compile(
+    rf"\b(?:within|inside|in|between)\s+(?:(?:the\s+)?(?:window|region|box)\s+)?"
+    rf"(?:from\s+)?{_PAIR}\s+(?:to|and)\s+{_PAIR}", re.I)
+_SHARE_SELECTION = re.compile(
+    r"(?:^|(?<=[,.?]))\s*(?:select\s+(?:only\s+)?|only\s+|for\s+)(?:the\s+)?"
+    r"(?P<names>[^.?!]+?)\s+(?:(?:panel|module)\s+sets?|layers?)\b", re.I)
+_SHARE_QUERY = re.compile(
+    r"(?:(?:what(?:'s| is)?|show(?: me)?|give me)\s+(?:the\s+)?"
+    r"(?:percentage|fraction|share|%)\s+of\s+(?:(?:all|the selected)\s+)?"
+    r"(?:panels?|modules?|that selection)\s+(?:is\s+)?(?:on each|in each|per|by)\s+layer"
+    r"|how are (?:panels|modules) distributed (?:across|among) layers"
+    r"|(?:show(?: me)?\s+)?(?:the\s+)?(?:per-layer (?:panel |module )?(?:percentage|share)"
+    r"|(?:panel |module )?layer share breakdown))", re.I)
+
+
+def _share_params(text):
+    remaining = text.strip()
+    params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
+    window = _SHARE_WINDOW.search(remaining)
+    if window:
+        params["region"] = [float(value) for value in window.groups()]
+        remaining = remaining[:window.start()] + " " + remaining[window.end():]
+    selection = _SHARE_SELECTION.search(remaining)
+    if selection:
+        params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection["names"], flags=re.I)
+        remaining = remaining[:selection.start()] + " " + remaining[selection.end():]
+    query = remaining.strip(" ,.?!")
+    if not _SHARE_QUERY.fullmatch(query):
+        return None
+    if re.search(r"\b(?:selected|that selection)\b", query, re.I) and not (window or selection):
+        return None
+    return params
+
+
 _LAYER_LEADERS = re.compile(
     r"(?:which|what)\s+(?P<roof>roof(?:top)?\s+)?layers?\s+"
     r"(?:(?:has|have|holds?|contains?)\s+(?:the\s+)?most\s+(?:solar\s+)?(?:modules?|panels?)"
@@ -526,6 +562,12 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
+
+    shares = _share_params(text)
+    if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
+                              confidence=0.95, rationale="Compute each selected layer's share of the physical panel count.")
+
 
     ranking_params = _layer_ranking_params(text)
     if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):

@@ -527,6 +527,21 @@ def test_count_safe_integer_boundary_raises_declared_validation_error():
         module._module_total([limit, 1])
 
 
+def test_layer_shares_use_selected_physical_total():
+    intake = {"inserts": [{"name": "Panel", "layer": layer, "handle": handle, "rows": rows}
+                          for layer, handle, rows in [("Roof", "A", 4), ("Roof", "A", 4),
+                                                       ("Ground", "B", 2)]]}
+    params = {"group_by": "layer", "panel_scope": "all_layers", "layer_shares": True}
+    result, overlay = module.run(intake, params)
+    assert [(row["layer"], row["numerator"], row["denominator"])
+            for row in result["shares"]] == [("Ground", 2, 6), ("Roof", 4, 6)]
+    assert sorted(overlay["highlight_handles"]) == ["A", "B"]
+    selected, _ = module.run(intake, dict(params, layer_names=["Ground"]))
+    assert selected["shares"][0]["percentage"] == 100
+    empty, overlay = module.run({}, params)
+    assert "shares" not in empty and overlay is None
+
+
 @pytest.mark.parametrize("limit,expected", [(1, ["C"]), (2, ["C", "A", "B"]), (8, ["C", "A", "B", "D"])])
 def test_layer_ranking_includes_cutoff_ties(limit, expected):
     intake = {"inserts": [{"handle": h, "layer": h, "name": "Panel", "rows": n}
@@ -554,3 +569,27 @@ def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
                                                         ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
     result, _ = module.run(drawing, route["params"])
     assert [row["layer"] for row in result["ranking"]] == expected
+
+
+@pytest.mark.parametrize("phrase,expected", [
+    ("What percentage of all panels is on each layer?", {"East", "West", "North"}),
+    ("Select only the west, north, and East panel sets. What percentage of that selection is on each layer?",
+     {"East", "West", "North"}),
+    ("Within the window (-1,-1) to (3,2), what percentage of the selected panels is on each layer?", {"West"}),
+    ("How are modules distributed across layers?", {"East", "West", "North"}),
+    ("Show the per-layer panel percentage", {"East", "West", "North"}),
+    ("What % of panels is on each layer inside the box from (-1,-1) to (3,2)?", {"West"}),
+    ("For the West and North layers, show me the layer share breakdown between (-1,-1) and (3,2).", {"West"}),
+])
+def test_share_request_selection_and_window(phrase, expected):
+    import deps
+    import nl_router
+    route = nl_router.classify(phrase, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    d = {"inserts": [dict(name="Panel", layer=layer, handle=h, x=x, y=0)
+                     for layer, h, x in [("West","A",0), ("East","B",10), ("North","C",20)]],
+         "blocks": {"Panel": {"complete": True, "base": [0,0,0],
+                              "children": [{"kind":"LINE","pts":[[0,0,0],[1,1,0]]}]}}}
+    result, _ = module.run(d, route["params"])
+    assert {q["layer"] for q in result["shares"]} == expected
+    assert all(q["numerator"] == 1 and q["denominator"] == len(expected) for q in result["shares"])

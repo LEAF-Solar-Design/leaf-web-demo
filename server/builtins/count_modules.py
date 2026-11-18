@@ -255,6 +255,37 @@ def run(intake, params):
                     raise InputValidationError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
     selected_ids = list(dict.fromkeys(params.get("set_ids") or
         ([params["set_id"]] if params.get("set_id") else [])))
+    shares = params.get("layer_shares", False)
+    names = params.get("layer_names")
+    if type(shares) is not bool or (shares and params.get("group_by") != "layer"):
+        raise InputValidationError("Layer shares require grouping by layer.")
+    if names is not None and (not isinstance(names, list) or not names or
+            not all(isinstance(name, str) and name.strip() for name in names) or
+            selected_ids or not shares or "panel_scope" not in params):
+        raise InputValidationError("Choose named panel layers or explicit module sets.")
+    auto_shares = shares and "panel_scope" in params and not selected_ids
+    if auto_shares:
+        listing, _ = run(intake, {})
+        candidates = listing["sets"]
+        if names is not None:
+            available = {group["layer"] for group in candidates}
+            resolved = set()
+            for name in names:
+                name = name.strip()
+                matches = {label for label in available if label.casefold() == name.casefold()}
+                if name in available:
+                    resolved.add(name)
+                elif len(matches) == 1:
+                    resolved.update(matches)
+                else:
+                    raise InputValidationError("A requested panel layer is absent or ambiguous. Check the layer names.")
+            names = resolved
+            candidates = [group for group in candidates if group["layer"] in names]
+            if {group["layer"] for group in candidates} != set(names):
+                raise InputValidationError("A requested panel layer is absent. Check the layer names.")
+        selected_ids = _named_panel_sets(candidates, params["panel_scope"])
+        if not selected_ids:
+            return listing, None
     if window is not None and not selected_ids:
         raise ValueError("Select module sets before applying a design window region.")
     definitions = intake.get("blocks", {})
@@ -298,7 +329,7 @@ def run(intake, params):
     if not selected_ids and (params.get("group_by") == "layer" or top is not None) and "panel_scope" in params:
         selected_ids = _named_panel_sets(sets, params["panel_scope"])
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
-    if len(selected_sets) != len(selected_ids):
+    if len(selected_sets) != len(selected_ids) and not (auto_shares and window is not None):
         if window is not None:
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
@@ -309,6 +340,14 @@ def run(intake, params):
         breakdown["counts"] = counts
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)
+
+        if shares:
+            total = _module_total(counts.values())
+            breakdown["shares"] = [
+                {"layer": layer, "numerator": count, "denominator": total,
+                 "percentage": 100 * count / total}
+                for layer, count in counts.items()
+            ]
 
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
