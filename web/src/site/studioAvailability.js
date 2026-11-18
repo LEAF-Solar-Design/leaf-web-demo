@@ -248,9 +248,9 @@ export const WALK_OVERRIDE_STORAGE_KEY = 'leaf.availability.walk'
 
 /**
  * Where this code is running: the hostname a row's `hosts` is matched against
- * and whether the walk override is on. Read fresh on every call (it is two
- * property reads), and every reader below takes it as an argument, so a test
- * or a Node walker states its own host instead of faking a window.
+ * and whether the walk override is on. Read fresh when a reader needs it and
+ * was not handed one; every reader below takes it as an optional argument, so
+ * a test or a Node walker states its own host instead of faking a window.
  */
 export function availabilityEnv() {
   if (typeof window === 'undefined') return { hostname: '', walk: false }
@@ -262,10 +262,14 @@ export function availabilityEnv() {
   return { hostname: String(window.location.hostname || '').toLowerCase(), walk }
 }
 
+// `env` is resolved LAZILY: an enabled row and a tool no row names never read
+// the address bar or storage, so a per-tool call in a 67 tool ribbon costs one
+// own-property check for every tool but the one the table speaks for.
 function rowApplies(row, env) {
   if (row.status !== 'unavailable') return false
-  if (env.walk === true) return false
-  return !row.hosts || row.hosts.includes(String(env.hostname || '').toLowerCase())
+  const here = env || availabilityEnv()
+  if (here.walk === true) return false
+  return !row.hosts || row.hosts.includes(String(here.hostname || '').toLowerCase())
 }
 
 /**
@@ -276,19 +280,19 @@ function rowApplies(row, env) {
  * specific gate says. studioAvailability.test.js pins every id a source file
  * names to a real row, so an undeclared read cannot ship by typo.
  */
-export function studioFeature(id, env = availabilityEnv()) {
+export function studioFeature(id, env) {
   const row = Object.prototype.hasOwnProperty.call(STUDIO_AVAILABILITY, id) ? STUDIO_AVAILABILITY[id] : null
   if (!row) return UNDECLARED
   return { id, note: null, ...row, available: !rowApplies(row, env), declared: true }
 }
 
 /** True unless the manifest declares the feature unavailable. */
-export function studioFeatureAvailable(id, env = availabilityEnv()) {
+export function studioFeatureAvailable(id, env) {
   return studioFeature(id, env).available
 }
 
 /** The disclaimer a disabled control shows, or null when the feature is available here. */
-export function notYetAvailable(id, env = availabilityEnv()) {
+export function notYetAvailable(id, env) {
   const feature = studioFeature(id, env)
   return feature.available ? null : feature.disclaimer
 }
@@ -303,13 +307,13 @@ const TOOL_ROWS = Object.freeze(Object.fromEntries(
  * more specific answer; this covers a tool the server lists as runnable and
  * the staging walk proved is not.
  */
-export function catalogToolDisclaimer(toolName, env = availabilityEnv()) {
+export function catalogToolDisclaimer(toolName, env) {
   const id = typeof toolName === 'string' && Object.prototype.hasOwnProperty.call(TOOL_ROWS, toolName) ? TOOL_ROWS[toolName] : null
   return id ? notYetAvailable(id, env) : null
 }
 
 /** An enabled feature's standing prerequisite, or null. Never set on an unavailable row. */
-export function studioFeatureNote(id, env = availabilityEnv()) {
+export function studioFeatureNote(id, env) {
   const feature = studioFeature(id, env)
   return feature.status === 'enabled' ? feature.note : null
 }
@@ -321,14 +325,14 @@ export function studioFeatureNote(id, env = availabilityEnv()) {
  * sentence), the disclaimer as its title, and `data-availability` for the
  * walk. The caller must also refuse the click: see `guardUnavailable`.
  */
-export function availabilityProps(id, env = availabilityEnv()) {
+export function availabilityProps(id, env) {
   const reason = notYetAvailable(id, env)
   if (!reason) return {}
   return { 'aria-disabled': true, title: reason, 'data-availability': 'unavailable', 'data-availability-id': id }
 }
 
 /** Wraps a handler so an unavailable feature never runs it. */
-export function guardUnavailable(id, handler, env = availabilityEnv()) {
+export function guardUnavailable(id, handler, env) {
   if (studioFeatureAvailable(id, env)) return handler
   return (event) => { event?.preventDefault?.() }
 }
