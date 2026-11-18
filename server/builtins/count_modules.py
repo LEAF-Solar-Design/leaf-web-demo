@@ -270,6 +270,37 @@ def _coverage(counts, percent):
 
 def run(intake, params):
     params = params or {}
+    if params.get("rank_windows") is None:
+        return _run(intake, params)
+    windows = params["rank_windows"]
+    if not isinstance(windows, list) or len(windows) != 2 or _selection_region(params) is not None:
+        raise InputValidationError("Choose two windows to compare.")
+    for bounds in windows:
+        if _selection_region({"region": bounds}) is None:
+            raise InputValidationError("Choose two complete windows.")
+    base, overlay = _run(intake, dict(params, group_by="layer"))
+    if not base["selected_sets"]:
+        return base, overlay
+    ids = [s["set_id"] for s in base["selected_sets"]]
+    ranks = []
+    for bounds in windows:
+        scoped, _ = _run(intake, {"region": bounds, "set_ids": ids, "group_by": "layer"},
+                         allow_absent_in_window=True)
+        counts = scoped.get("counts", {})
+        rank_by_layer = {}
+        previous = None
+        for index, (layer, count) in enumerate(sorted(counts.items(), key=lambda item: -item[1]), 1):
+            if count != previous:
+                place = index
+                previous = count
+            rank_by_layer[layer] = place
+        ranks.append(rank_by_layer)
+    base["window_ranks"] = {layer: [rank.get(layer) for rank in ranks]
+                            for layer in sorted(ranks[0].keys() | ranks[1].keys())}
+    return base, overlay
+
+
+def _run(intake, params, *, allow_absent_in_window=False):
     top = params.get("top_layers")
     if "top_layers" in params and (type(top) is not int or top < 1):
         raise InputValidationError("Choose a positive integer for the number of top layers.")
@@ -364,7 +395,8 @@ def run(intake, params):
     if not selected_ids and (params.get("group_by") == "layer" or top is not None) and "panel_scope" in params:
         selected_ids = _named_panel_sets(sets, params["panel_scope"])
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
-    if len(selected_sets) != len(selected_ids) and not (auto_shares and window is not None):
+    if (len(selected_sets) != len(selected_ids) and not allow_absent_in_window
+            and not (auto_shares and window is not None)):
         if window is not None:
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
