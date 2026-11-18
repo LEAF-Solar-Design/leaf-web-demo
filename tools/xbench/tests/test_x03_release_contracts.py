@@ -182,3 +182,20 @@ def test_manifest_inventory_before_content(tmp_path, name):
         archive.writestr(directory, b"")
     assert package_quality(path, dict(members=[], sha256={})) == "INCOMPLETE"
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("change,expected", [
+    ({}, "PASS"), ({"version":"3.11"}, "FAIL"), ({"architecture":"x64"}, "FAIL"),
+    ({"abi":"cp313"}, "FAIL"), ({"abi":None}, "INCOMPLETE"),
+], ids=["pinned-runtime", "wrong-version", "wrong-architecture", "wrong-abi", "undeclared-abi"])
+def test_package_target_runtime(change, expected):
+    from benches.x03_package_oracle import runtime_abi_quality
+    profile = dict(runtime="python", version="3.12", architecture="arm64", abi="cp312")
+    assert runtime_abi_quality(dict(profile, **change), [profile]) == expected
+
+
+def test_runtime_capabilities_must_coexist_on_one_target():
+    from benches.x03_package_oracle import runtime_abi_quality
+    needed = dict(runtime="engine", version="2", architecture="arm64", abi="v2")
+    profiles = [dict(needed, abi="v1"), dict(needed, architecture="x64")]
+    assert runtime_abi_quality(needed, profiles) == "FAIL"

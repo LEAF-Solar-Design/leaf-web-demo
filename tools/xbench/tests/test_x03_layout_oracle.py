@@ -144,3 +144,14 @@ def test_rail_expansion(gap, fixed_left, right_arm, expected):
     rails = [dict(start=0, fixed=fixed_left, end=10, alpha_per_c=0.001),
              dict(start=right, fixed=right+right_arm, end=right+10, alpha_per_c=0.001)]
     assert rail_joint_quality(rails, -20, 80) == expected
+
+
+@pytest.mark.parametrize("x,y,expected", [
+    (1, 1, "PASS"), (9.5, 1, "FAIL"), (4, 0.5, "FAIL"), (-2, 1, "FAIL"),
+], ids=["exact-end-distance", "too-near-far-end", "too-near-side", "outside-support"])
+def test_attachment_member_edges(x, y, expected):
+    from shapely.geometry import Point
+    from benches.x03_layout_oracle import member_edge_quality
+    rows = [dict(member="purlin", point=Point(x, y))]
+    assert member_edge_quality({"purlin": box(0, 0, 10, 2)}, rows, 1) == expected
+    assert member_edge_quality({}, rows, 1) == "INCOMPLETE"

@@ -434,3 +434,25 @@ def test_mating_record(pair, approved, volts, amps, expected):
 def test_apparent_power(p, q, s, expected):
     from benches.x03_quality import apparent_power_quality
     assert apparent_power_quality({"x": p}, {"x": q}, {"x": s}) == expected
+
+
+@pytest.mark.parametrize("current,time,rating,expected", [
+    (200, 0.25, 10000, "PASS"), (100, 0.51, 5000, "FAIL"),
+    (400, 0.025, 4100, "PASS"), (300, None, 9000, "INCOMPLETE"),
+], ids=["at-thermal-limit", "slow-protection-overload", "short-clearing-time", "missing-trip-evidence"])
+def test_conductor_fault_energy(current, time, rating, expected):
+    from benches.x03_quality import short_circuit_withstand_quality
+    assert short_circuit_withstand_quality({"branch":current}, {"branch":time}, {"branch":rating}) == expected
+
+
+@pytest.mark.parametrize("phases,pf,load,r,x,unit,volts", [
+    (1, 1, "lagging", 2, 1, "ohm/km", 4),
+    (3, 0.8, "lagging", 0.002, 0.001, "ohm/m", 3.81051177665153),
+    (1, 0.6, "leading", 1, 2, "ohm/km", -2),
+], ids=["single-phase-resistive", "balanced-three-phase-lagging", "leading-voltage-rise"])
+def test_ac_drop(phases, pf, load, r, x, unit, volts):
+    from benches.x03_quality import ac_voltage_drop_quality
+    args = (phases, 10, 100, pf, load, r, x)
+    assert ac_voltage_drop_quality(*args, unit, volts) == "PASS"
+    assert ac_voltage_drop_quality(*args, unit, volts + 1) == "FAIL"
+    assert ac_voltage_drop_quality(*args, None, volts) == "INCOMPLETE"

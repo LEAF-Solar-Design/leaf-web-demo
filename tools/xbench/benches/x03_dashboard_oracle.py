@@ -242,3 +242,29 @@ def censored_durations_quality(runs, cutoff, policy, completed, censored):
     if not all(type(v) is int for v in (*completed.values(), *censored.values())):
         return "FAIL"
     return "PASS" if (exact, lower) == (completed, censored) else "FAIL"
+
+
+def weighted_rate_quality(cohorts, weights, policy, reported):
+    """Pool weighted successes over weighted exposures. The report is a fraction on [0, 1]."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if policy != "weighted-exposures" or not isinstance(cohorts, dict) or not cohorts or not isinstance(weights, dict):
+        return "INCOMPLETE"
+    if cohorts.keys() != weights.keys() or reported is None:
+        return "INCOMPLETE"
+    numerator = denominator = Fraction(0)
+    for key, row in cohorts.items():
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("successes", "exposures")) or weights[key] is None:
+            return "INCOMPLETE"
+        successes, exposures = row["successes"], row["exposures"]
+        if (type(successes) is not int or type(exposures) is not int or not 0 <= successes <= exposures
+                or not finite_measure(weights[key]) or weights[key] < 0):
+            return "FAIL"
+        weight = Fraction(str(weights[key]))
+        numerator += weight * successes
+        denominator += weight * exposures
+    if not denominator:
+        return "INCOMPLETE"
+    if not finite_measure(reported) or not 0 <= reported <= 1:
+        return "FAIL"
+    return "PASS" if isclose(reported, float(numerator / denominator), abs_tol=1e-12, rel_tol=1e-12) else "FAIL"
