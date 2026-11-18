@@ -1,4 +1,6 @@
 """Grade recorded planar panel footprints in drawing units."""
+from fractions import Fraction
+
 from benches.x03_quality import finite_measure
 
 
@@ -145,3 +147,27 @@ def access_path_quality(paths, entrances, service_points):
                 reached.add(i)
                 pending.append(i)
     return "PASS" if all(any(paths[i].covers(p) for i in reached) for p in service_points) else "FAIL"
+
+
+def overhead_quality(equipment, obstacles, minimum_gap):
+    """Recorded footprints and vertical intervals use the same datum and length unit."""
+    if not isinstance(equipment, list) or not equipment or not isinstance(obstacles, list) or minimum_gap is None:
+        return "INCOMPLETE"
+    if not finite_measure(minimum_gap) or minimum_gap < 0:
+        return "FAIL"
+    for record in [*equipment, *obstacles]:
+        if not isinstance(record, dict) or any(record.get(k) is None for k in ("footprint", "bottom", "top")):
+            return "INCOMPLETE"
+        footprint = record["footprint"]
+        if (getattr(footprint, "geom_type", None) not in ("Polygon", "MultiPolygon") or footprint.is_empty
+                or not footprint.is_valid or not all(finite_measure(record[k]) for k in ("bottom", "top"))
+                or record["bottom"] >= record["top"]):
+            return "FAIL"
+    for unit in equipment:
+        for obstruction in obstacles:
+            if unit["footprint"].intersects(obstruction["footprint"]):
+                gap = max(Fraction(str(obstruction["bottom"])) - Fraction(str(unit["top"])),
+                          Fraction(str(unit["bottom"])) - Fraction(str(obstruction["top"])))
+                if gap < Fraction(str(minimum_gap)):
+                    return "FAIL"
+    return "PASS"

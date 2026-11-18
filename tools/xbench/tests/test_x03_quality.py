@@ -358,3 +358,25 @@ def test_device_coordination(load, device, wire, equipment):
     assert overcurrent_quality(load, device, device-1, equipment) == "FAIL"
     assert overcurrent_quality(load, device, wire, device-1) == "FAIL"
     assert overcurrent_quality(load, device, None, equipment) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ratings, occupancy, verdict", [
+    ({"branch": 8, "trunk": 20}, {"branch": {"dc": 5, "ac": 4}, "trunk": {"dc": 5}}, "FAIL"),
+    ({"east": 10, "west": 4}, {"east": {"a": 6, "b": 4}, "west": {}}, "PASS"),
+    ({"lower": 8, "upper": 6}, {"upper": {"new": 3}}, "INCOMPLETE"),
+], ids=["find-an-overloaded-branch", "fit-two-cables-at-the-limit", "audit-an-unreported-segment"])
+def test_segment_capacity(ratings, occupancy, verdict):
+    from benches.x03_quality import tray_capacity_quality
+    assert tray_capacity_quality(ratings, occupancy) == verdict
+
+
+@pytest.mark.parametrize("links, verdict", [
+    ([("ground", "rack", True)], "FAIL"),
+    ([("ground", "rack", True), ("rack", "frame", False)], "FAIL"),
+    ([("ground", "rack", True), ("rack", "frame", False), ("frame", "ground", True)], "PASS"),
+    ([("ground", "rack", None)], "INCOMPLETE"),
+], ids=["find-isolated-frame", "trace-broken-jumper", "use-redundant-return", "missing-condition"])
+def test_bond_inventory(links, verdict):
+    from benches.x03_quality import bonding_quality
+    records = [dict(a=a, b=b, intact=intact) for a, b, intact in links]
+    assert bonding_quality(["rack", "frame"], "ground", records) == verdict

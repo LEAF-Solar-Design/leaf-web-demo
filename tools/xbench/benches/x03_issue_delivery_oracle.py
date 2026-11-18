@@ -94,3 +94,29 @@ def tombstone_replay_quality(events, recreation_grants, receiver_states):
         if len(snapshot) != len(live) or set(snapshot) != live:
             return "FAIL"
     return "PASS"
+
+
+def batch_ack_quality(expected, acknowledgements, effects):
+    """Match accepted item revisions to independent, unique committed effects across retries."""
+    if not all(isinstance(rows, list) for rows in (expected, acknowledgements, effects)) or not expected:
+        return "INCOMPLETE"
+    wanted, accepted, committed = set(), set(), set()
+    for rows, target in ((expected, wanted), (acknowledgements, accepted), (effects, committed)):
+        for row in rows:
+            if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in ("item", "revision")):
+                return "INCOMPLETE"
+            key = row["item"], row["revision"]
+            if target is not wanted and key not in wanted:
+                return "FAIL"
+            if target is accepted:
+                if row.get("state") in ("pending", "rejected"):
+                    continue
+                if row.get("state") != "accepted":
+                    return "INCOMPLETE"
+            else:
+                if key in target:
+                    return "FAIL"
+                if target is committed and row.get("state") != "committed":
+                    return "INCOMPLETE"
+            target.add(key)
+    return "PASS" if accepted == committed == wanted else "INCOMPLETE"

@@ -140,3 +140,25 @@ def concurrent_time_quality(intervals, reported_seconds, policy=None):
         total += max(0, end-start)
         last_end = end if last_end is None else max(last_end, end)
     return "PASS" if Fraction(str(reported_seconds)) == total else "FAIL"
+
+
+def latency_percentile_quality(samples, percentile, reported, policy=None):
+    """Percentile uses a 0..100 scale and linear interpolation uses rank (n-1)p."""
+    from fractions import Fraction
+    from math import ceil
+    from benches.x03_quality import finite_measure
+    if (policy not in ("nearest-rank", "linear") or not isinstance(samples, (list, tuple)) or not samples
+            or None in samples or percentile is None or reported is None):
+        return "INCOMPLETE"
+    if (not finite_measure(percentile) or not 0 <= percentile <= 100 or not finite_measure(reported)
+            or not all(finite_measure(v) and v >= 0 for v in samples)):
+        return "FAIL"
+    values = sorted(Fraction(str(v)) for v in samples)
+    p = Fraction(str(percentile)) / 100
+    if policy == "nearest-rank":
+        expected = values[max(0, ceil(p*len(values))-1)]
+    else:
+        rank = p * (len(values)-1)
+        index = int(rank)
+        expected = values[index] + (rank-index) * (values[min(index+1, len(values)-1)]-values[index])
+    return "PASS" if Fraction(str(reported)) == expected else "FAIL"

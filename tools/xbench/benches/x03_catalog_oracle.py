@@ -108,3 +108,46 @@ def paginated_catalog_quality(pages, version, expected_parts):
         if cursor is None:
             return "PASS" if len(visited) == len(pages) and parts == set(expected_parts) else "FAIL"
     return "FAIL"
+
+
+def replacement_quality(parts, requested, selected, approvals, rating_bounds):
+    """Follow the declared supersession chain, with approval for every substitution."""
+    if (not isinstance(parts, dict) or not isinstance(approvals, (list, tuple, set))
+            or not isinstance(rating_bounds, dict) or not rating_bounds
+            or not all(isinstance(p, str) and p for p in (requested, selected))):
+        return "INCOMPLETE"
+    approved = set()
+    for pair in approvals:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2 or not all(isinstance(p, str) for p in pair):
+            return "INCOMPLETE"
+        approved.add(tuple(pair))
+    current, seen = requested, set()
+    while current not in seen:
+        seen.add(current)
+        part = parts.get(current)
+        if not isinstance(part, dict) or part.get("status") is None:
+            return "INCOMPLETE"
+        if part["status"] == "active":
+            break
+        if part["status"] not in ("withdrawn", "superseded"):
+            return "FAIL"
+        successor = part.get("replacement")
+        if not isinstance(successor, str) or not successor:
+            return "FAIL" if current == selected else "INCOMPLETE"
+        if (current, successor) not in approved:
+            return "FAIL"
+        current = successor
+    else:
+        return "FAIL"
+    if current != selected:
+        return "FAIL"
+    ratings = part.get("ratings")
+    if not isinstance(ratings, dict):
+        return "INCOMPLETE"
+    from benches.x03_quality import finite_measure
+    for field, bounds in rating_bounds.items():
+        if ratings.get(field) is None or not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, (*bounds, ratings[field]))) or not bounds[0] <= ratings[field] <= bounds[1]:
+            return "FAIL"
+    return "PASS"

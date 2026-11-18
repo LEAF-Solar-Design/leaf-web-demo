@@ -95,3 +95,13 @@ def test_service_access_matches_node_graph(edges):
         assert access_path_quality(paths, [Point(coords[0])], [Point(coords[target])]) == (
             "PASS" if target in reachable else "FAIL")
     assert access_path_quality(paths, None, [Point(coords[target])]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("offset, underside, expected", [
+    (0, 2, "FAIL"), (0, 4, "PASS"), (2, 2, "PASS"), (0, None, "INCOMPLETE"),
+], ids=["catch-beam-intersection", "check-exact-service-gap", "clear-offset-duct", "missing-elevation"])
+def test_equipment_overhead_clearance(offset, underside, expected):
+    from benches.x03_layout_oracle import overhead_quality
+    unit = dict(footprint=box(0, 0, 1, 1), bottom=0, top=3)
+    beam = dict(footprint=box(offset, 0, offset+1, 1), bottom=underside, top=6)
+    assert overhead_quality([unit], [beam], 1) == expected
