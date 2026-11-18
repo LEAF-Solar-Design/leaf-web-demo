@@ -824,6 +824,9 @@
       "fail30:test/operatorLoop.freeze.test.ts",
       "proposal"
     ],
+    "migration-expand-contract": [
+      "main-broke"
+    ],
     "platform": [
       "proposal"
     ],
@@ -843,6 +846,9 @@
     ],
     "scripts-proof-string-sizer": [
       "contract-keep"
+    ],
+    "scripts-solar-w1-studio-autofill-solve": [
+      "main-broke"
     ],
     "scripts-solar-w1-studio-group-delete": [
       "hard-harm-sentinel",
@@ -1281,12 +1287,14 @@
     "harness-tsc-build",
     "harness-tsc-noemit",
     "harness-vitest",
+    "migration-expand-contract",
     "platform",
     "platform-release-manifest",
     "platform-static",
     "platform-tenant-cost-store",
     "production-tenant-header-probe",
     "scripts-proof-string-sizer",
+    "scripts-solar-w1-studio-autofill-solve",
     "scripts-solar-w1-studio-group-delete",
     "scripts-solar-w1-studio-string-delete",
     "server-authored-tenant-isolation",
