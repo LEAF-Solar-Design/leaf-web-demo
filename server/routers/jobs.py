@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -37,6 +38,19 @@ import solar_project_admission
 from solar_design_graph import GraphValidationError
 from text_match import text_matches
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
+
+def _nonfinite_param(value, path="params"):
+    """Return the path of the first number that JSON transport cannot encode."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return path
+    if isinstance(value, (dict, list)):
+        items = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in items:
+            invalid = _nonfinite_param(child, f"{path}/{key}")
+            if invalid:
+                return invalid
+    return None
+
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
     import emf_metrics
@@ -1088,6 +1102,10 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
+    invalid = _nonfinite_param(params)
+    if invalid:
+        return error_response(ErrorCode.BAD_PARAMS, f"{invalid} must be a finite number.",
+                              retryable=False, status_code=400)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
