@@ -579,3 +579,34 @@ def test_retained_battery_energy(age, cycles, required, rule, expected):
 def test_ground_fault_sensing(branches, trip, expected):
     from benches.x03_quality import ground_fault_quality
     assert ground_fault_quality({"east":40,"west":15},[dict(branches=branches,trip_ma=trip)]) == expected
+
+
+@pytest.mark.parametrize("strings,series,amps", [(1, 4, [9]), (2, 2, [6, 8]), (3, 3, [1, 7, 10])])
+def test_bank_voltage_and_individual_current(strings, series, amps):
+    from benches.x03_quality import battery_bank_quality
+    cells, edges, currents = {}, {}, {}
+    for branch in range(strings):
+        nodes = ["neg"] + [f"{branch}/{n}" for n in range(1, series)] + ["pos"]
+        for n, edge in enumerate(zip(nodes, nodes[1:])):
+            cells[branch, n] = (3.2, 10)
+            edges[branch, n] = edge
+        currents[branch, 0] = amps[branch]
+    def check(graph, volts, readings):
+        return battery_bank_quality(cells, graph, ("neg", "pos"), volts, readings)
+    target = {2: 6.4, 3: 9.6, 4: 12.8}[series]
+    assert check(edges, target, currents) == "PASS"
+    assert check(edges, target + 1, currents) == "FAIL"
+    assert check(edges, target, {**currents, (0, 0): 11}) == "FAIL"
+    assert check({**edges, (0, 0): ("neg", "neg")}, target, currents) == "FAIL"
+    assert check({}, target, currents) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("third,ninth,expected", [(4, 0, 12), (0, 3, 9), (4, 3, 15)])
+def test_neutral_rms_with_balanced_fundamental(third, ninth, expected):
+    from benches.x03_quality import neutral_harmonic_quality
+    phases = {phase: {1: (30, angle), 3: (third, 0), 9: (ninth, 0)}
+              for phase, angle in zip("ABC", (0, 120, 240))}
+    assert neutral_harmonic_quality(phases, expected) == "PASS"
+    assert neutral_harmonic_quality(phases, expected - 1) == "FAIL"
+    del phases["C"][3]
+    assert neutral_harmonic_quality(phases, expected) == "INCOMPLETE"

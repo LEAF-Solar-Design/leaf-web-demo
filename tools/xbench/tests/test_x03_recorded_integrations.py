@@ -415,3 +415,16 @@ def test_idempotency_namespace_collisions(changed):
     assert idempotency_collision_quality([row,dict(conflict,receipt="ack")]) == "FAIL"
     assert idempotency_collision_quality([row,dict(conflict,outcome="replayed",receipt="ack")]) == "FAIL"
     assert idempotency_collision_quality([row,dict(conflict,new_effects=1)]) == "FAIL"
+
+
+@pytest.mark.parametrize("raw,offset,corrected", [(11, 1, 12), (24.5, -0.5, 24), (0, 0.25, 0.25)])
+def test_voltage_uses_pinned_valid_calibration(raw, offset, corrected):
+    from benches.x03_weather_oracle import calibrated_voltage_quality
+    record = dict(sensor="meter", revision="v2", start=2, end=10, offset_volts=offset)
+    records = [dict(record, revision="v1", offset_volts=3), record]
+    def check(at, rows, output):
+        return calibrated_voltage_quality("meter", "v2", at, raw, rows, output)
+    assert check(2, records, corrected) == "PASS"
+    assert check(9, records, raw) == "FAIL"
+    assert check(10, records, corrected) == "FAIL"
+    assert check(9, records[:1], corrected) == "INCOMPLETE"
