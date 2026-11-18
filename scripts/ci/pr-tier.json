@@ -858,6 +858,9 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "server-authored-execution-live-gate": [
+      "main-broke"
+    ],
     "server-authored-tenant-isolation": [
       "hard-harm-sentinel",
       "proposal"
@@ -1297,6 +1300,7 @@
     "scripts-solar-w1-studio-autofill-solve",
     "scripts-solar-w1-studio-group-delete",
     "scripts-solar-w1-studio-string-delete",
+    "server-authored-execution-live-gate",
     "server-authored-tenant-isolation",
     "server-broker-tenant-state",
     "server-campaign-capability-job-access",

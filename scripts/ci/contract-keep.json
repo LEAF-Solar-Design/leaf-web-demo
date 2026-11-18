@@ -31,6 +31,18 @@
       }
     },
     {
+      "id": "server-authored-execution-live-gate",
+      "reason": "main-broke",
+      "added": "2026-11-18",
+      "evidence": {
+        "pr": 3346,
+        "failure": "engine/registry.json string-panels drifted from site_demo.SITE_TOOL; the suite never ran on the PR (outside the tier); production full run 14 on 5420d361 went RED on it",
+        "job": 10654,
+        "date": "2026-11-18",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
       "id": "server-capabilities-project-read",
       "reason": "contract-keep",
       "added": "2026-11-18",
