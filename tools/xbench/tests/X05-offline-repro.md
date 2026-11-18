@@ -3509,3 +3509,15 @@ The script uses Fraction to derive signed differences and Decimal to emit exact
 finite values. It reads no customer inputs or transport. These synthetic policy
 records provide comparator evidence. Frozen X05 acceptance still needs the
 admitted live pass and its independently supplied revision record.
+
+### Grid correspondence and fixture exclusions
+
+Run this synthetic replay from the repository root with pytest installed.
+
+    python -P -m pytest tools/xbench/tests/test_x05_reconcile.py -k grid_exclusion_replay -q -o pythonpath=tools/xbench
+
+The six cases check unique panel-group assignments, exact duplicate counts, and
+named unresolved grids. The grouping exclusion retains the observed counts 1 and
+3. The DC exclusion requires both the view and CSV to show the independently
+supplied saved value 9.6 with a blank oracle. The negative scoring replay has
+step 1 PASS, step 2 FAIL, and steps 3 through 7 UNREADABLE.
