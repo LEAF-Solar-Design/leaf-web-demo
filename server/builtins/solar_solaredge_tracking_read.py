@@ -4,7 +4,11 @@ The accept (builtins/solar_solaredge_accept.py) stores one leaf.solar-solaredge-
 graph["extra"]["solaredge_import"] (server/solar_solaredge_tracking.py). This read returns that
 record's provenance, its counts, a check of its references against the graph being read, and one
 bounded page of one section: "strings" (the PDF string rows), "frames" (the frame to PDF grid rows)
-or "unassigned" (framed panels no PDF string covers). The PDF inverter ids and string inputs are
+or "unassigned" (framed panels no PDF string covers). Optional "reference_changes" pages list
+missing frames, missing panels, moved panels and unrecorded framed panels. For panel changes,
+frame_ref is the saved group frame (null for bridge/unassigned); current_frame_ref is current
+membership (null when unframed). Rows follow saved frame/string/panel order, then new panel id
+order, independent of current graph array order. The PDF inverter ids and string inputs are
 labels only: nothing here is a string, inverter, device, route, schedule or Solve state.
 
 Freshness is a reference check, never a digest comparison. record.report.graph_sha256 names the
@@ -22,7 +26,8 @@ A drawing with no record reads accepted false with an empty page. A record that 
 stored shape, or not bound to this drawing's history, is SOLAREDGE_IMPORT_RECORD_INVALID; a
 malformed request is INVALID_SOLAREDGE_TRACKING_READ_REQUEST. Pages hold at most 1,000 items and
 262,144 canonical item bytes (the first item on a page always fits). Linear in the record and graph
-size; its only I/O is one bounded history lookup through the caller's read-only lookup.
+size, plus sorting new panel ids for reference_changes; its only I/O is one bounded history lookup
+through the caller's read-only lookup.
 """
 import copy
 import math
@@ -39,7 +44,7 @@ READS_VERSION_HISTORY = True
 OUTPUT_SCHEMA = "leaf.solar-solaredge-tracking-read.v1"
 INVALID = "INVALID_SOLAREDGE_TRACKING_READ_REQUEST"
 RECORD_INVALID = "SOLAREDGE_IMPORT_RECORD_INVALID"
-SECTIONS = ("strings", "frames", "unassigned")
+SECTIONS = ("strings", "frames", "unassigned", "reference_changes")
 PAGE_ITEMS = 1_000
 PAGE_BYTES = 262_144
 MAX_REF = 100
@@ -78,8 +83,10 @@ def _request(params):
         raise GraphValidationError(INVALID)
     section = params.get("section", "strings")
     offset = params.get("offset", 0)
+    maximum = (2 * tracking.MAX_PANELS + tracking.MAX_FRAMES
+               if section == "reference_changes" else tracking.MAX_PANELS)
     if (type(section) is not str or section not in SECTIONS
-            or not _int(offset, 0, tracking.MAX_PANELS)):
+            or not _int(offset, 0, maximum)):
         raise GraphValidationError(INVALID)
     return section, offset
 
@@ -167,7 +174,7 @@ def _counts(record):
                                     for row in strings})}
 
 
-def _references(graph, record):
+def _references(graph, record, changes=None):
     """Which recorded references still hold on this graph, by identity, never by digest."""
     frame_of = {}
     for frame in graph["frames"]:
@@ -176,6 +183,9 @@ def _references(graph, record):
     frame_ids = {frame["id"] for frame in graph["frames"]}
     panel_ids = {panel["id"] for panel in graph["panels"]}
     missing_frames = sum(1 for row in record["frames"] if row["frame_ref"] not in frame_ids)
+    if changes is not None:
+        changes.extend({"kind": "missing_frame", "frame_ref": row["frame_ref"]}
+                       for row in record["frames"] if row["frame_ref"] not in frame_ids)
     missing = moved = 0
     recorded = set()
     rows = [(row["source"], row["frame_ref"], row["panel_refs"]) for row in record["strings"]]
@@ -185,12 +195,32 @@ def _references(graph, record):
             recorded.add(panel_ref)
             if panel_ref not in panel_ids:
                 missing += 1
+                if changes is not None:
+                    changes.append({"kind": "missing_panel", "panel_ref": panel_ref,
+                                    "frame_ref": frame_ref})
             elif panel_ref not in frame_of or (kind == "group" and frame_of[panel_ref] != frame_ref):
                 moved += 1
+                if changes is not None:
+                    changes.append({"kind": "moved_panel", "panel_ref": panel_ref,
+                                    "frame_ref": frame_ref,
+                                    "current_frame_ref": frame_of.get(panel_ref)})
     unrecorded = sum(1 for panel_ref in frame_of if panel_ref not in recorded)
+    if changes is not None:
+        changes.extend({"kind": "unrecorded_panel", "panel_ref": panel_ref,
+                        "current_frame_ref": frame_of[panel_ref]}
+                       for panel_ref in sorted(frame_of.keys() - recorded))
     return {"current": missing_frames == missing == moved == unrecorded == 0,
             "missing_frames": missing_frames, "missing_panels": missing, "moved_panels": moved,
             "unrecorded_panels": unrecorded}
+
+
+def _section(graph, record, section):
+    changes = [] if section == "reference_changes" else None
+    references = _references(graph, record, changes)
+    items = changes if changes is not None else {
+        "strings": record["strings"], "frames": record["frames"],
+        "unassigned": record["unassigned_panel_refs"]}[section]
+    return items, references
 
 
 def _page(items, offset):
@@ -222,13 +252,12 @@ def run(graph, params, version_graph_sha256=None):
         raise GraphValidationError(RECORD_INVALID) from None
     # Outside the shape guard so the binding's named refusal and the lookup's own limit survive.
     _bound(record, version_graph_sha256)
-    items = {"strings": record["strings"], "frames": record["frames"],
-             "unassigned": record["unassigned_panel_refs"]}[section]
+    items, references = _section(graph, record, section)
     items, page = _page(items, offset)
     # These nine keys are the fixed output contract. The copy keeps the output independent of the
     # graph's objects; it is bounded by one page plus the three provenance blocks.
     return copy.deepcopy({
         "schema": OUTPUT_SCHEMA, "accepted": True, "labels_only": True,
         "provenance": {key: record[key] for key in ("source", "report", "request")},
-        "counts": _counts(record), "references": _references(graph, record),
+        "counts": _counts(record), "references": references,
         "section": section, "page": page, "items": items})
