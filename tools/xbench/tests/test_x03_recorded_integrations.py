@@ -5,6 +5,20 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("part,pack,minimum,demand,units", [
+    ("clips", 4, 10, 1, 12), ("clamps", 5, 5, 14, 15), ("bolts", 12, 0, 24, 24)])
+def test_order_uses_pinned_pack_policy(part, pack, minimum, demand, units):
+    from benches.x03_catalog_oracle import pack_order_quality
+    row = dict(pack_units=pack, minimum_units=minimum, stock_units=units)
+    def check(policy, order, revision="v1"):
+        return pack_order_quality(dict(revision="v1", parts={part: policy}), revision, part, demand, order)
+    assert check(row, units) == "PASS"
+    assert check(row, units - 1) == "FAIL"
+    assert check(dict(row, stock_units=units - 1), units) == "FAIL"
+    assert check(row, units, "v2") == "FAIL"
+    assert check(dict(row, minimum_units=None), units) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("part,unit", [("panel","W"), ("beam","m"), ("fan","rpm")])
 def test_catalog_identity_and_unique_finite_rating(part, unit):
     row = dict(part=part, version="v2", unit=unit, rating=125)

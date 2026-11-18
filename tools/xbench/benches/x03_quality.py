@@ -4,6 +4,38 @@ from fractions import Fraction
 from math import ceil
 
 
+def insulation_quality(circuits, dielectric_volts):
+    """Map circuit IDs to (maximum volts, cable IDs) and check every installed cable."""
+    if not isinstance(circuits, dict) or not circuits or not isinstance(dielectric_volts, dict):
+        return "INCOMPLETE"
+    for circuit in circuits.values():
+        if not isinstance(circuit, (list, tuple)) or len(circuit) != 2:
+            return "INCOMPLETE"
+        maximum, cables = circuit
+        if not finite_measure(maximum) or not isinstance(cables, (list, tuple)) or not cables:
+            return "INCOMPLETE"
+        for cable in cables:
+            if not isinstance(cable, str) or not finite_measure(dielectric_volts.get(cable)):
+                return "INCOMPLETE"
+            if maximum <= 0 or dielectric_volts[cable] < maximum:
+                return "FAIL"
+    return "PASS"
+
+
+def charging_temperature_quality(readings, allowed_ranges, charging):
+    """Every sensor named by the charging policy must be within its inclusive range."""
+    if type(charging) is not bool or not isinstance(readings, dict) or not isinstance(allowed_ranges, dict) or not allowed_ranges:
+        return "INCOMPLETE"
+    for sensor, bounds in allowed_ranges.items():
+        value = readings.get(sensor)
+        if not finite_measure(value) or not isinstance(bounds, (tuple, list)) or len(bounds) != 2 or not all(map(finite_measure, bounds)):
+            return "INCOMPLETE"
+        low, high = bounds
+        if low > high or (charging and not low <= value <= high):
+            return "FAIL"
+    return "PASS"
+
+
 def route_quality(route, aisle, arrays):
     if route is None or aisle is None or arrays is None:
         return "INCOMPLETE"

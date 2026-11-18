@@ -10,6 +10,28 @@ UNITS = {
 }
 
 
+def pack_order_quality(catalog, revision, part, demand, ordered_units):
+    """Buy the smallest whole-pack quantity that meets demand and the unit minimum."""
+    if not isinstance(catalog, dict) or not revision or not catalog.get("revision"):
+        return "INCOMPLETE"
+    if catalog["revision"] != revision:
+        return "FAIL"
+    parts = catalog.get("parts")
+    row = parts.get(part) if isinstance(parts, dict) else None
+    if not isinstance(row, dict):
+        return "INCOMPLETE"
+    pack, minimum, stock = (row.get(k) for k in ("pack_units", "minimum_units", "stock_units"))
+    if None in (pack, minimum, stock, demand, ordered_units):
+        return "INCOMPLETE"
+    if any(type(x) is not int for x in (pack, minimum, stock, demand, ordered_units)):
+        return "FAIL"
+    if pack <= 0 or demand <= 0 or min(minimum, stock) < 0:
+        return "FAIL"
+    needed = max(minimum, demand)
+    units = ((needed + pack - 1) // pack) * pack
+    return "PASS" if units == ordered_units and units <= stock else "FAIL"
+
+
 def catalog_quality(rows, part, version, unit, result):
     if not isinstance(rows, list) or not isinstance(result, dict):
         return "INCOMPLETE"

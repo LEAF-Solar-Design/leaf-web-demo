@@ -4,6 +4,16 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("span,load,limit", [(100, 3, 0.390625), (200, 3, 6.25), (200, 1.5, 3.125)])
+def test_simple_span_uniform_load(span, load, limit):
+    from benches.x03_layout_oracle import rail_deflection_quality
+    rail = dict(support="simply_supported", span_mm=span, load_n_per_mm=load, modulus_mpa=100000,
+                inertia_mm4=100, limit_mm=limit)
+    assert rail_deflection_quality([rail]) == "PASS"
+    assert rail_deflection_quality([rail, dict(rail, limit_mm=limit * 0.9)]) == "FAIL"
+    assert rail_deflection_quality([dict(rail, inertia_mm4=None)]) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("width,setback", [(10, 0), (12, 1), (16, 2)])
 def test_panels_fit_usable_area(width, setback):
     hole = box(5, 5, 7, 7)

@@ -3,6 +3,18 @@ from collections import Counter
 import pytest
 
 
+@pytest.mark.parametrize("eligible,failures,target,remaining", [(10, 1, 0.9, 0), (4, 1, 0.95, -0.8), (20, 0, 0.95, 1)])
+def test_budget_excludes_probes_from_both_counts(eligible, failures, target, remaining):
+    from benches.x03_dashboard_oracle import request_budget_quality
+    rows = [{"id": str(i), "class": "interactive", "success": i >= failures} for i in range(eligible)]
+    rows.append({"id": "probe", "class": "health", "success": False})
+    report = dict(eligible=eligible, failures=failures, remaining=remaining)
+    assert request_budget_quality(rows, ["interactive"], target, report) == "PASS"
+    assert request_budget_quality(rows, ["interactive"], target, dict(report, failures=failures+1)) == "FAIL"
+    assert request_budget_quality(rows, ["interactive"], target, dict(report, remaining=remaining+1)) == "FAIL"
+    assert request_budget_quality(rows, None, target, report) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("extra", ["failed", "complete", "cancelled"])
 def test_failure_totals_reconcile_by_drawing_revision(extra):
     executions = [("drawing-a","r1","failed"), ("drawing-a","r2",extra), ("drawing-b","r1","complete")]

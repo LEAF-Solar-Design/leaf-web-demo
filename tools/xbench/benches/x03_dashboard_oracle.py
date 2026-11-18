@@ -5,6 +5,40 @@ import json
 import re
 
 
+def request_budget_quality(requests, eligible_classes, target, report):
+    """Report allowed minus observed eligible failures, in fractional requests."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(requests, list) or not isinstance(eligible_classes, (list, tuple)) or not eligible_classes:
+        return "INCOMPLETE"
+    if not finite_measure(target) or not 0 < target <= 1:
+        return "INCOMPLETE"
+    seen = set()
+    eligible = failures = 0
+    for request in requests:
+        if not isinstance(request, dict):
+            return "INCOMPLETE"
+        identity, category, success = (request.get(k) for k in ("id", "class", "success"))
+        if not isinstance(identity, str) or not identity or not category or type(success) is not bool:
+            return "INCOMPLETE"
+        if identity in seen:
+            return "INCOMPLETE"
+        seen.add(identity)
+        if category in eligible_classes:
+            eligible += 1
+            failures += int(not success)
+    if not eligible or not isinstance(report, dict):
+        return "INCOMPLETE"
+    remaining = eligible * (1 - Fraction(str(target))) - failures
+    for key, expected in (("eligible", eligible), ("failures", failures), ("remaining", remaining)):
+        value = report.get(key)
+        if value is None:
+            return "INCOMPLETE"
+        if not finite_measure(value) or Fraction(str(value)) != expected:
+            return "FAIL"
+    return "PASS"
+
+
 def dashboard_quality(runs, failures, changes, before, after, *, expected_run_ids=None, summary=None):
     if not before or not after or before == after:
         return "INCOMPLETE"

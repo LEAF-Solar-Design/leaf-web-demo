@@ -4,6 +4,24 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_deflection_quality(rails):
+    """Simply supported rails with uniform load. Use N and mm throughout."""
+    if not isinstance(rails, list) or not rails:
+        return "INCOMPLETE"
+    for rail in rails:
+        if not isinstance(rail, dict) or rail.get("support") != "simply_supported":
+            return "INCOMPLETE"
+        values = [rail.get(k) for k in ("span_mm", "load_n_per_mm", "modulus_mpa", "inertia_mm4", "limit_mm")]
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        span, load, modulus, inertia, limit = map(lambda x: Fraction(str(x)), values)
+        if min(span, modulus, inertia, limit) <= 0 or load < 0:
+            return "FAIL"
+        if 5 * load * span**4 > 384 * modulus * inertia * limit:
+            return "FAIL"
+    return "PASS"
+
+
 def layout_quality(panels, usable_area, setback):
     if usable_area is None or setback is None or not panels:
         return "INCOMPLETE"
