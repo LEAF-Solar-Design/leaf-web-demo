@@ -365,3 +365,129 @@ def test_string_panels_balancing_preserves_gap_and_order_boundaries():
     assert all(math.dist(cents[left], cents[right]) <= 1.5 for chunk in chunks
                for left, right in zip(chunk, chunk[1:]))
     assert (ordered, cents) == before
+
+
+@pytest.mark.parametrize("count,lower,upper,expected", [
+    (20, 9, 11, [10, 10]), (37, 12, 14, [13, 12, 12]),
+])
+def test_constrained_stringing_public_count_variants(count, lower, upper, expected):
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(count)]}
+    result, _ = run(intake, {"min_modules_per_string": lower, "max_modules_per_string": upper})
+    assert result["planning"]["status"] == "complete"
+    assert result["planning"]["minimum_modules"] == lower
+    assert result["planning"]["maximum_modules"] == upper
+    assert [string["modules"] for string in result["strings"]] == expected
+    assert result["stats"]["modules_stringed"] == count
+
+
+def test_constrained_stringing_public_island_refuses_false_success():
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(11)]}
+    result, overlay = run(intake, {"min_modules_per_string": 12, "max_modules_per_string": 14})
+    assert result["planning"]["status"] == "infeasible"
+    assert result["planning"]["reason"] == "component_cardinality"
+    assert result["planning"]["witness"]["panel_count"] == 11
+    assert result["strings"] == [] and overlay["items"] == []
+    assert result["stats"]["modules_stringed"] == 0
+
+
+@pytest.mark.parametrize("scale,mpu", [(1.0, 0.0254), (0.0254, 1.0), (25.4, 0.001)])
+def test_constrained_stringing_equivalent_units(scale, mpu):
+    drawing = {"polylines": [rect(index * 60.0, 40.0, 80.0, scale) for index in range(20)]}
+    result, _ = run(drawing, {"min_modules_per_string": 9, "max_modules_per_string": 11,
+                              "meters_per_unit": mpu})
+    assert result["planning"]["status"] == "complete"
+    assert [item["modules"] for item in result["strings"]] == [10, 10]
+    points = [point for item in result["strings"] for point in item["pts"]]
+    assert sorted(round(point[0] / scale, 3) for point in points) == [i * 60.0 for i in range(20)]
+    assert [item["length_ft"] for item in result["strings"]] == [45.0, 45.0]
+
+
+def test_constrained_stringing_maximum_only_and_electrical_cap():
+    drawing = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(20)]}
+    result, _ = run(drawing, {"max_modules_per_string": 11})
+    assert result["planning"]["minimum_modules"] == 1
+    assert result["planning"]["maximum_modules"] == 11
+    assert [item["modules"] for item in result["strings"]] == [10, 10]
+    capped, _ = run(drawing, {"max_modules_per_string": 100})
+    assert capped["planning"]["maximum_modules"] == 18
+    assert capped["electrical"]["pass"] is True
+    assert max(item["modules"] for item in capped["strings"]) <= 18
+    refused, overlay = run(drawing, {"min_modules_per_string": 19})
+    assert refused["planning"]["reason"] == "electrical_capacity"
+    assert refused["planning"]["status"] == "infeasible"
+    assert refused["strings"] == [] and overlay["items"] == []
+    assert refused["electrical"]["pass"] is None
+
+
+@pytest.mark.parametrize("params", [
+    {"min_modules_per_string": True}, {"min_modules_per_string": 0},
+    {"max_modules_per_string": 2.5}, {"max_modules_per_string": None},
+    {"min_modules_per_string": 12, "max_modules_per_string": 11},
+])
+def test_constrained_stringing_bad_bounds_refused_at_builtin(params):
+    with pytest.raises(ValueError, match="bounds"):
+        run({"polylines": [rect(0, 40, 80)]}, params)
+
+
+def test_constrained_stringing_budget_returns_no_partial_plan(monkeypatch):
+    import solar_string_partition as partition
+    monkeypatch.setattr(partition, "DEFAULT_STATE_BUDGET", 0)
+    result, overlay = run({"polylines": [rect(i * 60, 40, 80) for i in range(20)]},
+                           {"min_modules_per_string": 9, "max_modules_per_string": 11})
+    assert result["planning"]["status"] == "unresolved"
+    assert result["planning"]["reason"] == "search_budget"
+    assert result["strings"] == [] and overlay["items"] == []
+    assert result["stats"]["modules_stringed"] == 0
+    assert result["electrical"]["pass"] is None
+
+
+def test_constrained_stringing_registered_aliases_declare_bounds():
+    for filename, name in ((REPO_DIR / "engine/registry.json", "string-panels"),
+                           (SERVER_DIR / "catalog_tools.json", "autofill-string-targets")):
+        record = next(item for item in json.loads(filename.read_text(encoding="utf-8"))["tools"]
+                      if item["name"] == name)
+        assert tool_validate.validate_params(record, {"min_modules_per_string": 9,
+                                                      "max_modules_per_string": 11}) == []
+        for params in ({"min_modules_per_string": True}, {"max_modules_per_string": 0}):
+            assert tool_validate.validate_params(record, params)
+        assert "planning" in record["returns"]["properties"]
+
+
+@pytest.mark.parametrize("name,filename", [
+    ("string-panels", REPO_DIR / "engine/registry.json"),
+    ("autofill-string-targets", SERVER_DIR / "catalog_tools.json"),
+])
+def test_constrained_stringing_dynamic_registered_entry(name, filename):
+    import tool_loader
+    record = next(item for item in json.loads(filename.read_text(encoding="utf-8"))["tools"]
+                  if item["name"] == name)
+    drawing = {"polylines": [rect(i * 60, 40, 80) for i in range(20)]}
+    before = copy.deepcopy(drawing)
+    envelope = tool_loader.run_tool_dynamic(record, drawing,
+        {"min_modules_per_string": 9, "max_modules_per_string": 11}, aps_live=False)
+    assert envelope["ok"], envelope.get("error")
+    assert envelope["result"]["planning"]["status"] == "complete"
+    assert [item["modules"] for item in envelope["result"]["strings"]] == [10, 10]
+    assert drawing == before
+
+
+def test_constrained_stringing_hole_and_reversed_input():
+    panels = []
+    for row in range(3):
+        for col in range(3):
+            if (row, col) != (1, 1):
+                panel = rect(col * 80, 40, 80)
+                panel["pts"] = [[x, y + row * 80] for x, y in panel["pts"]]
+                panels.append(panel)
+    results = [run({"polylines": order}, {"min_modules_per_string": 4,
+                                        "max_modules_per_string": 4})[0]
+               for order in (panels, list(reversed(panels)))]
+    for result in results:
+        assert result["planning"]["status"] == "complete"
+        assert [item["modules"] for item in result["strings"]] == [4, 4]
+        points = [tuple(point) for item in result["strings"] for point in item["pts"]]
+        assert len(points) == len(set(points)) == 8
+        assert (80.0, 80.0) not in points
+        assert all(math.dist(a, b) <= 120 for item in result["strings"]
+                   for a, b in zip(item["pts"], item["pts"][1:]))
+    assert results[0]["strings"] == results[1]["strings"]
