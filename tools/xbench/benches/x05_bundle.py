@@ -223,8 +223,17 @@ def audit_bundle_bytes(members, payloads, *, expected_fixture_ids, required_stag
                 else:
                     if len(value) != member.get("byte_length"):
                         codes.append("PAYLOAD_LENGTH_MISMATCH")
-                    if sha256(value).hexdigest() != member.get("sha256"):
-                        codes.append("PAYLOAD_SHA256_MISMATCH")
+                    try:
+                        digest = sha256(b"")
+                        digest.update(value)
+                        actual_digest = digest.hexdigest()
+                    except Exception:
+                        # Provider failures are uncertainty, never byte equality.
+                        # Exception text may contain supplied/private material.
+                        codes.append("PAYLOAD_DIGEST_UNREADABLE")
+                    else:
+                        if actual_digest != member.get("sha256"):
+                            codes.append("PAYLOAD_SHA256_MISMATCH")
         for code in codes:
             _error(errors, code, member_index=index)
         results.append({"member_index": original_index, "bytes_equal": not codes})

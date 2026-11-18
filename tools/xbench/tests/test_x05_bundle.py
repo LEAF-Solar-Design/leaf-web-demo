@@ -43,6 +43,171 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+@pytest.mark.parametrize('framing', ['bom', 'double_bom', 'middle_bom', 'concat', 'tail', 'nbsp'])
+def test_json_framing_rejects_before_hashing_allocation_or_semantics(monkeypatch, framing):
+    inventory_text = json_inventory()
+    replay_text = cli_payload().decode()
+    sentinel = 'SYNTHETIC_PRIVATE_FRAMING'
+    def frame(text):
+        return {'bom': '\ufeff' + text, 'double_bom': '\ufeff\ufeff' + text,
+                'middle_bom': text + '\ufeff', 'concat': text + text,
+                'tail': text + sentinel, 'nbsp': '\u00a0' + text}[framing]
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError('invalid framing reached work')
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle, 'sha256', forbidden)
+        patch.setattr(bundle, '_member_bytes_from_hex', forbidden)
+        patch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', forbidden)
+        decoded = bundle.decode_inventory_json(frame(inventory_text))
+        assert codes(decoded) == {'JSON_INVALID': 1} and decoded['inventory'] is None
+        decoded = bundle.decode_replay_json(frame(replay_text))
+        assert codes(decoded) == {'JSON_INVALID': 1} and decoded['envelope'] is None
+        direct = bundle.replay_bundle_json(frame(replay_text))
+        code, raw, errors = in_process_cli(patch, ShortInput(frame(replay_text).encode(), width=8192))
+        assert code == 4 and not errors and json.loads(raw) == direct
+        assert direct['semantic']['verdict'] == 'UNREADABLE'
+        assert codes(direct['integrity']) == {'JSON_INVALID': 1}
+        assert sentinel not in raw.decode() and calls == []
+    assert bundle.decode_inventory_json(inventory_text)['ok']
+    assert bundle.replay_bundle_json(replay_text)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('whitespace', ['', ' ', '\t\r\n', '\r\n \t'])
+def test_json_legal_whitespace_preserves_inventory_replay_and_cli(monkeypatch, whitespace):
+    text = cli_payload().decode()
+    assert bundle.decode_inventory_json(whitespace + json_inventory() + whitespace)['ok']
+    expected = json.loads(bundle.reconciliation.serialize_result(bundle.replay_bundle_json(text)))
+    assert bundle.decode_replay_json(whitespace + text + whitespace)['ok']
+    code, raw, errors = in_process_cli(monkeypatch, ShortInput((whitespace + text + whitespace).encode(), width=8192))
+    assert code == 0 and not errors and json.loads(raw) == expected
+
+
+@pytest.mark.parametrize('failure_stage', ['construction', 'update', 'finalization'])
+def test_digest_provider_failures_are_sanitized_and_recover(monkeypatch, failure_stage):
+    source = reconciliation_bundle()
+    preserved = deepcopy(source)
+    sentinel = 'SYNTHETIC_PRIVATE_DIGEST'
+    calls = []
+    class BrokenDigest:
+        def update(self, data):
+            if failure_stage == 'update': raise OSError(sentinel)
+        def hexdigest(self):
+            raise ValueError(sentinel)
+    def constructor(data):
+        if failure_stage == 'construction': raise RuntimeError(sentinel)
+        return BrokenDigest()
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle, 'sha256', constructor)
+        patch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda **kwargs: calls.append(kwargs))
+        audit_result = bundle.audit_bundle_bytes(source['members'], source['payloads'],
+            expected_fixture_ids=['alpha'], required_stages=source['required_stages'])
+        assert codes(audit_result) == {'PAYLOAD_DIGEST_UNREADABLE': 1}
+        assert audit_result['members'] == [{'member_index': 0, 'bytes_equal': False}]
+        result = bundle.reconcile_bundle(**source)
+        assert result['semantic']['verdict'] == 'UNREADABLE' and calls == []
+        assert sentinel not in json.dumps(result) and len(result['integrity']['diagnostics']) <= bundle.MAX_DIAGNOSTICS
+    assert source == preserved
+    assert bundle.reconcile_bundle(**source)['semantic']['verdict'] == 'PASS'
+
+
+def test_returned_nested_diagnostics_do_not_alias_inputs_siblings_or_next_call():
+    source = reconciliation_bundle(('alpha', 'beta', 'gamma'))
+    source['payloads']['alpha/seven.json'] += b' '
+    source['payloads']['beta/seven.json'] += b' '
+    preserved = deepcopy(source)
+    baseline = bundle.reconcile_bundle(**source)
+    result = bundle.reconcile_bundle(**source)
+    sibling = deepcopy(result['semantic']['fixtures']['beta'])
+    result['integrity']['diagnostics'][0]['code'] = 'MUTATED'
+    result['semantic']['fixtures']['alpha']['result']['reason'] = 'MUTATED'
+    assert result['semantic']['fixtures']['beta'] == sibling
+    assert source == preserved and baseline == bundle.reconcile_bundle(**source)
+    assert 'MUTATED' not in bundle.reconciliation.serialize_result(baseline)
+    members, payloads, references = synthetic_bundle()
+    payloads[members[0]['name']] += b' '
+    before = deepcopy((members, payloads, references))
+    first = audit(members, payloads)
+    expected = deepcopy(first)
+    first['diagnostics'][0]['code'] = 'MUTATED'
+    first['diagnostic_counts'].clear()
+    first['members'][0]['bytes_equal'] = True
+    assert audit(members, payloads) == expected
+    assert (members, payloads, references) == before
+
+
+def test_encoder_metadata_and_byte_work_is_linear_without_hash_or_rejected_hex(monkeypatch):
+    import builtins
+    counts = {'metadata': 0, 'bytes': 0, 'hex': 0}
+    original_name, original_len, original_hex = bundle._name, builtins.len, bundle._encode_member_hex
+    def counted_name(value):
+        counts['metadata'] += 1
+        return original_name(value)
+    def counted_len(value):
+        if type(value) is bytes: counts['bytes'] += 1
+        return original_len(value)
+    def counted_hex(value):
+        counts['hex'] += 1
+        return original_hex(value)
+    def forbidden(*args): raise AssertionError('encoder hashed bytes')
+    monkeypatch.setattr(bundle, '_name', counted_name)
+    monkeypatch.setattr(bundle, 'len', counted_len, raising=False)
+    monkeypatch.setattr(bundle, '_encode_member_hex', counted_hex)
+    monkeypatch.setattr(bundle, 'sha256', forbidden)
+    measured = []
+    for size in (4, 8, 16):
+        stages = ['stage%02d' % i for i in range(size)]
+        members = [dict(name='unit/' + stage, fixture='unit', stage=stage, design_version='v1',
+                        byte_length=1, sha256=REFERENCE_VECTORS[1][1]) for stage in stages]
+        references = [{k: row[k] for k in ('name', 'fixture', 'stage', 'design_version')} for row in members]
+        args = dict(inventory=dict(members=members, expected_fixture_ids=['unit'], required_stages=stages),
+                    references=references, member_bytes={row['name']: b'\x00' for row in members},
+                    expected_fixture_versions={'unit': 'v1'}, evidence_stage=stages[0])
+        for key in counts: counts[key] = 0
+        assert bundle.encode_replay_json(**args)['ok']
+        measured.append(dict(counts))
+        assert counts['hex'] == size and counts['bytes'] == 3 * size
+        for key in counts: counts[key] = 0
+        rejected = bundle.encode_replay_json(**args, max_wire_bytes=0)
+        assert codes(rejected) == {'ENCODER_WIRE_BUDGET_EXCEEDED': 1}
+        assert counts['hex'] == 0 and counts['bytes'] == 2 * size
+    assert measured[1]['metadata'] == 2 * measured[0]['metadata']
+    assert measured[2]['metadata'] == 2 * measured[1]['metadata']
+
+
+def test_concurrent_replays_keep_exact_results_and_decimal_contexts_isolated(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import getcontext, localcontext, ROUND_FLOOR, ROUND_CEILING
+    from threading import Barrier, Event
+    texts = [cli_payload().decode(), exact_decimal_cli_payload(30, 1).decode(), cli_payload('FAIL').decode(), cli_payload('UNREADABLE').decode()]
+    expected = [bundle.reconciliation.serialize_result(bundle.replay_bundle_json(text)) for text in texts]
+    assert [json.loads(raw)['semantic']['verdict'] for raw in expected] == ['PASS', 'FAIL', 'FAIL', 'UNREADABLE']
+    barrier, release = Barrier(4), Event()
+    original = bundle.audit_bundle_bytes
+    def interleaved(*args, **kwargs):
+        result = original(*args, **kwargs)
+        barrier.wait(timeout=10)
+        assert release.wait(timeout=10)
+        return result
+    monkeypatch.setattr(bundle, 'audit_bundle_bytes', interleaved)
+    parent = getcontext().copy()
+    def run(index):
+        with localcontext() as context:
+            context.prec = (7, 18, 40, 60)[index]
+            context.rounding = ROUND_FLOOR if index % 2 else ROUND_CEILING
+            before = (context.prec, context.rounding, dict(context.flags), dict(context.traps))
+            result = bundle.reconciliation.serialize_result(bundle.replay_bundle_json(texts[index]))
+            assert (context.prec, context.rounding, dict(context.flags), dict(context.traps)) == before
+            return result
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(run, i) for i in range(4)]
+        release.set()
+        observed = [future.result(timeout=15) for future in futures]
+    assert observed == expected
+    assert (getcontext().prec, getcontext().rounding, dict(getcontext().flags)) == (parent.prec, parent.rounding, dict(parent.flags))
+
+
 def test_complete_bundle_has_integrity_but_no_origin_authentication_or_grading():
     members, payloads, references = synthetic_bundle()
     before = deepcopy((members, payloads, references, FIXTURES, STAGES, VERSIONS))
