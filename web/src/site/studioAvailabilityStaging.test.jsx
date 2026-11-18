@@ -15,6 +15,7 @@ vi.mock('./intakeCache.js', () => ({ loadDemoSolve: () => new Promise(() => {}) 
 vi.mock('../api.js', async (importOriginal) => ({ ...(await importOriginal()), submitDemandCapture: vi.fn() }))
 
 import AuthorPanel from '../components/AuthorPanel.jsx'
+import RoutePanel from '../components/RoutePanel.jsx'
 import ToolsPanel from '../components/ToolsPanel.jsx'
 import LocalCadConnect from '../localCad/LocalCadConnect.jsx'
 import LandingCast from './LandingCast.jsx'
@@ -83,6 +84,36 @@ describe('the availability manifest on the staging host', () => {
     expect(screen.queryByRole('note')).toBeNull()
     fireEvent.click(open)
     expect(onRequestRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('never confirms a run of a tool the manifest takes away, from any proposal', () => {
+    const onConfirmIntent = vi.fn()
+    const mount = (tool) => render(
+      <RoutePanel
+        route={{ lane: 'run', tool, confidence: 0.99, runIntent: { tool, params: {} } }}
+        tools={[{ name: tool, capabilities: ['drawing.read'], params: { properties: {} } }]}
+        running={false}
+        writeLocked={false}
+        onConfirmIntent={onConfirmIntent}
+        onPickAlternative={vi.fn()}
+        onOpenAuthor={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    )
+    const blocked = mount('arlo-design')
+    const run = screen.getByRole('button', { name: 'Run arlo-design' })
+    expect(run.disabled).toBe(true)
+    expect(run.getAttribute('title')).toBe(sentence('solar.arlo-design'))
+    expect(blocked.container.textContent).toContain(sentence('solar.arlo-design'))
+    expect(blocked.container.textContent).not.toContain('you confirm before it runs')
+    fireEvent.click(run)
+    expect(onConfirmIntent).not.toHaveBeenCalled()
+    blocked.unmount()
+    mount('count-by-layer')
+    const open = screen.getByRole('button', { name: 'Run count-by-layer' })
+    expect(open.disabled).toBe(false)
+    fireEvent.click(open)
+    expect(onConfirmIntent).toHaveBeenCalledTimes(1)
   })
 
   it('lifts every disable for a verification walk', () => {
