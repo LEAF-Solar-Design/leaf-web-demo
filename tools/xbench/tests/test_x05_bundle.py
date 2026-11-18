@@ -43,6 +43,149 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+def test_inventory_diff_reports_exact_change_facts_with_shared_sorted_cap():
+    before = json.loads(json_inventory())
+    after = deepcopy(before)
+    # Every fixture/stage remains covered, while identities and pins change.
+    after['members'][0]['sha256'] = '0' * 64
+    for member in after['members']: member['design_version'] = 'v2'
+    after['members'][0]['fixture'], after['members'][7]['fixture'] = after['members'][7]['fixture'], after['members'][0]['fixture']
+    preserved = deepcopy((before, after))
+    result = bundle.diff_inventories(before, after)
+    assert result['ok'] and not result['inventory_equal']
+    assert result['difference_counts'] == dict(added=0, removed=0, repinned=1, reassigned=14)
+    assert result['difference_total'] == 15 and result['changed_member_total'] == 14
+    assert result['differences'] == sorted(result['differences'], key=lambda row:(row['name'],row['kind']))
+    assert not result['origin_authenticated'] and not result['integrity_verified']
+    assert (before, after) == preserved
+    assert bundle.diff_inventories(before, before)['inventory_equal']
+    after = deepcopy(before)
+    for row in after['members']: row['name'] = 'new/' + row['name']
+    result = bundle.diff_inventories(before, after)
+    assert result['difference_counts'] == dict(added=14, removed=14, repinned=0, reassigned=0)
+    assert result['difference_total'] == 28
+    # Sixteen stages per fixture yield64 facts, capped at32 examples.
+    source = expanded_fixture('unit', ['stage%02d' % i for i in range(16)])
+    large = encoder_args(source)['inventory']
+    large['members'] += [dict(row, name='other/'+row['name'], fixture='other') for row in large['members']]
+    large['expected_fixture_ids'].append('other')
+    changed = deepcopy(large)
+    for row in changed['members']: row['name'] = 'renamed/' + row['name']
+    result = bundle.diff_inventories(large, changed)
+    assert result['difference_total'] == 64 and len(result['differences']) == bundle.MAX_DIAGNOSTICS
+    assert result['difference_counts'] == dict(added=32, removed=32, repinned=0, reassigned=0)
+    changed['members'].reverse(); large['members'].reverse()
+    assert bundle.diff_inventories(large, changed) == result
+
+
+def test_inventory_diff_rejects_ambiguous_inputs_and_normalizes_safe_slashes():
+    source = json.loads(json_inventory())
+    changed = deepcopy(source)
+    for row in changed['members']: row['name'] = row['name'].replace('/', '\\')
+    assert bundle.diff_inventories(source, changed)['inventory_equal']
+    changed['members'].append(deepcopy(changed['members'][0]))
+    result = bundle.diff_inventories(source, changed)
+    assert not result['ok'] and result['difference_total'] is None and not result['differences']
+    assert codes(result) == {'MEMBER_NAME_DUPLICATE':1, 'FIXTURE_STAGE_DUPLICATE':1}
+    assert all(row['side'] == 'after' for row in result['diagnostics'])
+
+
+@pytest.mark.parametrize('kind', ['PASS', 'FAIL', 'UNREADABLE'])
+def test_canonical_encoder_decode_reencode_is_idempotent_and_keeps_supplied_pins(kind):
+    source = reconciliation_bundle(('alpha', 'beta'), failed=('alpha',) if kind == 'FAIL' else ())
+    if kind == 'UNREADABLE': source['payloads']['alpha/seven.json'] += b' '
+    expected = bundle.reconcile_bundle(**source)
+    encoded = bundle.encode_replay_json(**encoder_args(source))
+    original = encoded['text']
+    pins = json.loads(original)['inventory']['members']
+    for _ in range(4):
+        decoded = bundle.decode_replay_json(encoded['text'])
+        assert decoded['ok']
+        encoded = bundle.encode_replay_json(**encoder_args(decoded['envelope']))
+        assert encoded['ok'] and encoded['text'] == original
+        assert json.loads(encoded['text'])['inventory']['members'] == pins
+        assert bundle.replay_bundle_json(encoded['text']) == expected
+        assert not encoded['origin_authenticated']
+
+
+@pytest.mark.parametrize('path,key', [('root','inventory'), ('inventory','members'),
+    ('member','fixture'), ('reference','stage'), ('payload','alpha/seven.json')])
+def test_unicode_escaped_key_collisions_are_rejected_before_work(monkeypatch, path, key):
+    envelope = json.loads(cli_payload())
+    escaped_key = ''.join('\\u%04x' % ord(char) for char in key)
+    encoded_key = json.dumps(key)
+    if path == 'root': target = envelope
+    elif path == 'inventory': target = envelope['inventory']
+    elif path == 'member': target = envelope['inventory']['members'][0]
+    elif path == 'reference': target = envelope['references'][0]
+    else: target = envelope['member_bytes_hex']
+    text = json.dumps(target)
+    text = text.replace(encoded_key + ':', encoded_key + ':null,"' + escaped_key + '":', 1)
+    whole = json.dumps(envelope).replace(json.dumps(target), text, 1)
+    calls = []
+    def forbidden(*args, **kwargs): calls.append(1); raise AssertionError('collision reached work')
+    monkeypatch.setattr(bundle,'sha256',forbidden)
+    monkeypatch.setattr(bundle,'_member_bytes_from_hex',forbidden)
+    monkeypatch.setattr(bundle.reconciliation,'reconcile_bound_seven_steps',forbidden)
+    result = bundle.decode_replay_json(whole)
+    assert codes(result) == {'JSON_DUPLICATE_KEY':1}
+    if path in ('inventory','member'):
+        inventory_text = text if path == 'inventory' else json.dumps(envelope['inventory']).replace(json.dumps(target), text, 1)
+        assert codes(bundle.decode_inventory_json(inventory_text)) == {'JSON_DUPLICATE_KEY':1}
+    code, raw, errors = in_process_cli(monkeypatch, ShortInput(whole.encode(), width=8192))
+    assert code == 4 and not errors and calls == []
+    assert json.loads(raw)['integrity']['diagnostic_counts'] == {'JSON_DUPLICATE_KEY':1}
+    assert escaped_key not in raw.decode()
+
+
+def test_fresh_process_import_has_no_evidence_transport_children_or_output(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = r'''
+import sys, pathlib, socket, subprocess, io, builtins
+root = sys.argv[1]
+sys.path.insert(0, root)
+attempts = []
+def guarded(event, args):
+    if event == 'open':
+        name = args[0]
+        # Python may load trusted module source/bytecode, never evidence.
+        if isinstance(name, (str, bytes)) and str(name).endswith(('.py', '.pyc')):
+            return
+        attempts.append(event)
+        raise AssertionError('unexpected evidence read')
+    if event.startswith(('socket.', 'subprocess.', 'os.system', 'os.spawn')):
+        attempts.append(event)
+        raise AssertionError('unexpected execution or transport')
+sys.addaudithook(guarded)
+from benches import x05_bundle
+assert not attempts
+'''
+    completed = subprocess.run([sys.executable, '-P', '-B', '-c', script,
+        str(Path(bundle.__file__).resolve().parents[1])], cwd=tmp_path, capture_output=True, timeout=20)
+    assert completed.returncode == 0 and completed.stdout == completed.stderr == b''
+
+
+def test_equal_bytes_cannot_substitute_for_explicit_cross_fixture_identity(monkeypatch):
+    source = reconciliation_bundle(('alpha', 'beta'))
+    source['payloads']['beta/seven.json'] = source['payloads']['alpha/seven.json']
+    raw = source['payloads']['alpha/seven.json']
+    source['members'][1].update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    before = deepcopy(source)
+    calls = []
+    original = bundle.reconciliation.reconcile_bound_seven_steps
+    def observed(*args, **kwargs): calls.append(args); return original(*args, **kwargs)
+    monkeypatch.setattr(bundle.reconciliation,'reconcile_bound_seven_steps',observed)
+    result = bundle.reconcile_bundle(**source)
+    assert result['integrity']['integrity_verified'] and len(calls) == 1
+    assert result['semantic']['fixtures']['alpha']['verdict'] == 'PASS'
+    assert result['semantic']['fixtures']['beta']['result']['reason'] == 'bundle_evidence_fixture_conflict'
+    assert source == before and not result['origin_authenticated']
+    repaired = reconciliation_bundle(('alpha', 'beta'))
+    assert bundle.reconcile_bundle(**repaired)['semantic']['verdict'] == 'PASS'
+
+
 def renamed_bundle(source):
     renamed = deepcopy(source)
     mapping = {name: 'renamed/safe_%03d.bin' % index for index, name in enumerate(sorted(source['payloads']))}
