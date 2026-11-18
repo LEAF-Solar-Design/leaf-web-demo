@@ -666,3 +666,29 @@ def test_altitude_limited_inverter(altitude, capacity):
     assert grade(curve, 3001, 1) == "FAIL"
     assert grade(dict(curve, revision="r1"), altitude, capacity) == "FAIL"
     assert grade(None, altitude, capacity) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("start,delay,limit", [(100, 10, 30), (4.5, 0.5, 12), (0, 30, 80)])
+def test_shutdown_deadline_from_recorded_open(start, delay, limit):
+    from benches.x03_quality import rapid_shutdown_quality as grade
+    deadline = start + delay
+    trace = [(start, 200), (deadline, limit), (deadline+1, 0)]
+    assert grade(start, delay, limit, trace) == "PASS"
+    assert grade(start, delay, limit, [(start, 200), (deadline, limit+1), (deadline+1, limit)]) == "FAIL"
+    assert grade(start, delay, limit, trace + [(deadline+2, -limit-1)]) == "FAIL"
+    assert grade(None, delay, limit, trace) == "INCOMPLETE"
+    assert grade(start, delay, limit, [(start, 200), (deadline, None)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cells,limit", [([3.2, 3.3], 0.1), ([3.5, 3.5, 3.5], 0), ([4, 4.02, 4.04], 0.04)])
+def test_cell_spread_with_constant_pack_voltage(cells, limit):
+    from benches.x03_quality import cell_spread_quality as grade
+    ids = [str(i) for i in range(len(cells))]
+    readings = dict(zip(ids, cells))
+    assert grade(ids, readings, limit) == "PASS"
+    readings[ids[0]] -= 0.1
+    readings[ids[-1]] += 0.1
+    assert sum(readings.values()) == pytest.approx(sum(cells))
+    assert grade(ids, readings, limit) == "FAIL"
+    del readings[ids[0]]
+    assert grade(ids, readings, limit) == "INCOMPLETE"

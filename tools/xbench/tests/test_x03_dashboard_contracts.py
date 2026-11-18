@@ -299,3 +299,15 @@ def test_queue_inventory_conservation(opening, added, done, cancelled, end):
     assert grade(opening, added, done, cancelled, []) == "FAIL"
     assert grade(opening, added, done+[end[0]], cancelled+[end[0]], []) == "FAIL"
     assert grade(None, added, done, cancelled, end) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("opening,events,mean,wrong", [
+    (2, [(8,"depart")], 1.8, 1.5),
+    (0, [(0,"enqueue"),(1,"enqueue"),(1,"depart"),(3,"depart")], 0.3, 1),
+    (3, [(9,"enqueue"),(2,"depart")], 2.3, 2.5)])
+def test_time_weighted_queue_length(opening,events,mean,wrong):
+    from benches.x03_dashboard_oracle import mean_queue_quality as grade
+    assert grade(0,10,opening,events,mean) == "PASS"
+    assert grade(0,10,opening,events,wrong) == "FAIL"
+    assert grade(None,10,opening,events,mean) == "INCOMPLETE"
+    assert grade(0,10,None,events,mean) == "INCOMPLETE"

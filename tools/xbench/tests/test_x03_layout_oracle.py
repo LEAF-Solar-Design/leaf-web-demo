@@ -256,3 +256,13 @@ def test_roof_load_combinations(factors, limit):
     assert grade(loads, rules, limit) == "PASS"
     assert grade(loads, rules, limit-1) == "FAIL"
     assert grade(loads, {}, limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("tip,angle,blocked,clear", [
+    ((2,0),90,(1,1),(-1,1)), ((2,0),-90,(1,-1),(1,1)), ((0,2),180,(-1,0),(1,0))])
+def test_hinged_door_obstacle_inside_sweep(tip, angle, blocked, clear):
+    from shapely.geometry import Point
+    from benches.x03_layout_oracle import door_sweep_quality as grade
+    assert grade((0,0), tip, angle, [Point(clear).buffer(0.1)]) == "PASS"
+    assert grade((0,0), tip, angle, [Point(blocked).buffer(0.1)]) == "FAIL"
+    assert grade((0,0), None, angle, []) == "INCOMPLETE"

@@ -1157,3 +1157,47 @@ def altitude_rating_quality(model, revision, curve, elevation_m, required_kw):
     if (curve["model"], curve["revision"]) != (model, revision):
         return "FAIL"
     return temperature_derating_quality(curve.get("elevation_kw"), elevation_m, required_kw, curve.get("interpolation"))
+
+
+def rapid_shutdown_quality(opened_at, seconds_allowed, limit_volts, trace):
+    """Verify measured voltage magnitude by the deadline and through the last sample."""
+    if not all(map(finite_measure, (opened_at, seconds_allowed, limit_volts))) or not isinstance(trace, list):
+        return "INCOMPLETE"
+    if seconds_allowed < 0 or limit_volts < 0:
+        return "FAIL"
+    deadline = Fraction(str(opened_at)) + Fraction(str(seconds_allowed))
+    last = None
+    safe_at_deadline = None
+    for pair in trace:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2 or not all(map(finite_measure, pair)):
+            return "INCOMPLETE"
+        stamp, volts = pair
+        when = Fraction(str(stamp))
+        if last is not None and when <= last:
+            return "INCOMPLETE"
+        last = when
+        if when < Fraction(str(opened_at)):
+            continue
+        if when <= deadline:
+            safe_at_deadline = abs(volts) <= limit_volts
+        if when >= deadline and abs(volts) > limit_volts:
+            return "FAIL"
+    if last is None or last < deadline or safe_at_deadline is None:
+        return "INCOMPLETE"
+    if safe_at_deadline:
+        return "PASS"
+    # Samples bracketing the deadline cannot establish the time of crossing.
+    return "INCOMPLETE"
+
+
+def cell_spread_quality(inventory, readings, max_spread):
+    if not isinstance(inventory, (tuple, list)) or not inventory or not isinstance(readings, dict):
+        return "INCOMPLETE"
+    if not all(isinstance(cell, str) and cell for cell in inventory) or len(set(inventory)) != len(inventory):
+        return "INCOMPLETE"
+    if set(inventory) != readings.keys() or not finite_measure(max_spread) or not all(map(finite_measure, readings.values())):
+        return "INCOMPLETE"
+    volts = [Fraction(str(v)) for v in readings.values()]
+    if min(volts) <= 0 or max_spread < 0:
+        return "FAIL"
+    return "PASS" if max(volts) - min(volts) <= Fraction(str(max_spread)) else "FAIL"

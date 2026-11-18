@@ -87,6 +87,12 @@ def _lengths(entities, units, inherited, active, remaining, mode, transforms=(),
             continue
         if curve_scale is None and entity.dxftype() != "LINE":
             return None
+        if entity.dxftype() == "HELIX":
+            length = _helix_length(entity)
+            if length is None:
+                return None
+            totals[layer] += length * curve_scale * METRES[units]
+            continue
         if entity.dxftype() == "SPLINE":
             length = _rational_spline_length(entity)
             if length is None:
@@ -218,3 +224,33 @@ def _ellipse_length(attrs):
     except ArithmeticError:
         return None
     return a * total
+
+
+def _helix_length(entity):
+    """Use constant-radius DXF parameters; check the accompanying spline for taper."""
+    from math import hypot, tau
+    from ezdxf.math import Vec3
+    attrs = entity.dxf
+    radius, pitch, turns, hand = (attrs.get(k) for k in ("radius", "turn_height", "turns", "handedness"))
+    if not all(type(v) in (int, float) and isfinite(v) for v in (radius, pitch, turns)):
+        return None
+    if radius <= 0 or turns <= 0 or hand not in (0, 1) or not all(attrs.hasattr(k) for k in ("axis_base_point", "axis_vector", "start_point")):
+        return None
+    try:
+        axis = Vec3(attrs.axis_vector).normalize()
+        base = Vec3(attrs.axis_base_point)
+        curve = entity.construction_tool()
+        if len(curve.control_points) > 4096:
+            return None
+        knots = sorted(set(curve.knots()))
+        if not curve.is_clamped:
+            return None
+        params = knots + [(a+b)/2 for a,b in zip(knots, knots[1:])]
+        for point in [attrs.start_point, *curve.points(params)]:
+            measured = (Vec3(point) - base).cross(axis).magnitude
+            # The DXF cubic approximation to a circular quadrant has radial error < 0.03%.
+            if not isclose(measured, radius, rel_tol=0.0003):
+                return None
+    except (ArithmeticError, ValueError, TypeError, IndexError):
+        return None
+    return turns * hypot(tau * radius, pitch)
