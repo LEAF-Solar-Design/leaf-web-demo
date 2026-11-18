@@ -860,3 +860,151 @@ def test_cli_serializes_tiny_deltas_and_large_counts_exactly_without_context_cha
                 and isinstance(row['delta'], (Decimal, int)) and Fraction(row['delta']) == tiny]
     assert matching
     assert any(Fraction(row['saved']) == Fraction(48, 5) + tiny for row in matching if 'saved' in row)
+
+
+def encoder_args(source):
+    return dict(inventory=dict(members=source['members'], expected_fixture_ids=sorted(source['expected_fixture_versions']),
+                               required_stages=source['required_stages']), references=source['references'], member_bytes=source['payloads'],
+                expected_fixture_versions=source['expected_fixture_versions'], evidence_stage=source['evidence_stage'])
+
+
+ENCODER_WIRE_VECTOR = (
+    '{"evidence_stage":"saved","expected_fixture_versions":{"unit":"v1"},'
+    '"inventory":{"expected_fixture_ids":["unit"],"members":[{"byte_length":$length,'
+    '"design_version":"v1","fixture":"unit","name":"unit/saved.bin",'
+    '"sha256":"$digest","stage":"saved"}],"required_stages":["saved"]},'
+    '"member_bytes_hex":{"unit/saved.bin":"$hex"},"references":[{"design_version":"v1",'
+    '"fixture":"unit","name":"unit/saved.bin","stage":"saved"}]}')
+
+
+def literal_encoder_case(data, digest):
+    member = dict(name='unit/saved.bin', fixture='unit', stage='saved', byte_length=len(data), sha256=digest, design_version='v1')
+    return dict(inventory=dict(members=[member], expected_fixture_ids=['unit'], required_stages=['saved']),
+                references=[dict(name=member['name'], fixture='unit', stage='saved', design_version='v1')],
+                member_bytes={member['name']:data}, expected_fixture_versions={'unit':'v1'}, evidence_stage='saved')
+
+
+@pytest.mark.parametrize('data,digest,raw_hex,length', [(data,digest,h,n) for (data,digest),(h,n) in
+    zip(REFERENCE_VECTORS,[('',0),('00',1),('ff',1)])])
+def test_encoder_matches_independent_literal_wire_vectors(data,digest,raw_hex,length,monkeypatch):
+    args = literal_encoder_case(data,digest)
+    before = deepcopy(args)
+    def forbidden(*args): raise AssertionError('encoder recomputed a supplied digest')
+    monkeypatch.setattr(bundle,'sha256',forbidden)
+    expected = ENCODER_WIRE_VECTOR.replace('$length',str(length)).replace('$digest',digest).replace('$hex',raw_hex)
+    result = bundle.encode_replay_json(**args)
+    assert result['ok'] and result['text']==expected and result['wire_bytes']==len(expected.encode('ascii'))
+    assert not result['integrity_verified'] and not result['origin_authenticated']
+    assert json.loads(result['text'])['inventory']['members'][0]['sha256']==digest and args==before
+
+
+def test_encoder_exact_wire_and_backslash_escape_boundaries_precede_output_allocation(monkeypatch):
+    data,digest=REFERENCE_VECTORS[1]
+    args=literal_encoder_case(data,digest)
+    name='unit\\saved.bin'
+    args['inventory']['members'][0]['name']=name;args['references'][0]['name']=name
+    args['member_bytes']={name:data}
+    expected=ENCODER_WIRE_VECTOR.replace('$length','1').replace('$digest',digest).replace('$hex','00').replace('unit/saved.bin',r'unit\\saved.bin')
+    limit=len(expected.encode('ascii'))
+    result=bundle.encode_replay_json(**args,max_wire_bytes=limit)
+    assert result['ok'] and result['text']==expected and result['wire_bytes']==limit
+    def forbidden(*args):raise AssertionError('over-budget encoder allocated output')
+    monkeypatch.setattr(bundle,'_encode_member_hex',forbidden);monkeypatch.setattr(bundle,'_dump_replay',forbidden)
+    result=bundle.encode_replay_json(**args,max_wire_bytes=limit-1)
+    assert codes(result)=={'ENCODER_WIRE_BUDGET_EXCEEDED':1} and result['text'] is None
+    assert result['wire_bytes_lower_bound']==limit
+
+
+@pytest.mark.parametrize('limit',[True,-1,bundle.MAX_STDIN_BYTES+1,None])
+def test_encoder_rejects_invalid_wire_limits(limit):
+    args=literal_encoder_case(*REFERENCE_VECTORS[0])
+    assert codes(bundle.encode_replay_json(**args,max_wire_bytes=limit))=={'ENCODER_WIRE_LIMIT_INVALID':1}
+
+
+@pytest.mark.parametrize('kind,exit_code',[('PASS',0),('FAIL',1),('UNREADABLE',4)])
+def test_encoder_round_trips_real_replay_and_cli_without_changing_pins(tmp_path,kind,exit_code):
+    import subprocess
+    source=reconciliation_bundle(('alpha','beta'),failed=('alpha',) if kind=='FAIL' else ())
+    if kind=='UNREADABLE':source['payloads']['alpha/seven.json']+=b' '
+    args=encoder_args(source);before=deepcopy(args)
+    result=bundle.encode_replay_json(**args)
+    assert result['ok'] and args==before
+    encoded=json.loads(result['text'])
+    assert encoded['inventory']['members']==sorted(source['members'],key=lambda row:row['name'])
+    expected=bundle.reconcile_bundle(**source)
+    assert bundle.replay_bundle_json(result['text'])==expected
+    completed=subprocess.run(cli_command('--replay'),input=result['text'].encode('ascii'),capture_output=True,cwd=tmp_path,timeout=15)
+    assert completed.returncode==exit_code and completed.stderr==b''
+    assert completed.stdout==(bundle.reconciliation.serialize_result(expected)+'\n').encode('ascii')
+    assert not json.loads(completed.stdout)['origin_authenticated']
+    changed=deepcopy(args)
+    changed['inventory']['members'].reverse();changed['inventory']['expected_fixture_ids'].reverse();changed['references'].reverse()
+    changed['member_bytes']=dict(reversed(list(changed['member_bytes'].items())))
+    changed['expected_fixture_versions']=dict(reversed(list(changed['expected_fixture_versions'].items())))
+    assert bundle.encode_replay_json(**changed)['text']==result['text']
+
+
+def test_encoder_preserves_explicitly_mismatched_length_and_digest_without_hashing(monkeypatch):
+    args=literal_encoder_case(b'\x00','0'*64)
+    args['inventory']['members'][0]['byte_length']=9
+    def forbidden(*args):raise AssertionError('encoder replaced an explicit supplied pin')
+    monkeypatch.setattr(bundle,'sha256',forbidden)
+    encoded=bundle.encode_replay_json(**args)
+    assert encoded['ok']
+    member=json.loads(encoded['text'])['inventory']['members'][0]
+    assert member['byte_length']==9 and member['sha256']=='0'*64
+
+
+@pytest.mark.parametrize('mutation,code',[('metadata','MEMBER_FIELDS_INVALID'),('name','MEMBER_NAME_INVALID'),
+    ('payload','PAYLOAD_TYPE_INVALID'),('missing','ENCODER_MEMBER_COVERAGE_INVALID'),
+    ('reference','REFERENCE_DANGLING'),('version','REFERENCE_DESIGN_VERSION_CONFLICT'),
+    ('extra_reference','ENCODER_REFERENCE_FIELDS_INVALID')])
+def test_encoder_failures_are_named_immutable_and_recover(mutation,code,monkeypatch):
+    args=literal_encoder_case(*REFERENCE_VECTORS[1]);original=deepcopy(args)
+    if mutation=='metadata':del args['inventory']['members'][0]['sha256']
+    elif mutation=='name':args['inventory']['members'][0]['name']='../bad'
+    elif mutation=='payload':args['member_bytes']['unit/saved.bin']=None
+    elif mutation=='missing':args['member_bytes'].clear()
+    elif mutation=='reference':args['references'][0]['name']='unit/foreign.bin'
+    elif mutation=='version':args['references'][0]['design_version']='foreign'
+    else:args['references'][0]['extra']='foreign'
+    before=deepcopy(args)
+    with monkeypatch.context() as patch:
+        def forbidden(*args):raise AssertionError('invalid encoder allocated output')
+        patch.setattr(bundle,'_encode_member_hex',forbidden);patch.setattr(bundle,'_dump_replay',forbidden)
+        result=bundle.encode_replay_json(**args)
+    assert not result['ok'] and code in codes(result) and result['text'] is None
+    assert args==before and len(json.dumps(result))<4096
+    args.clear();args.update(original)
+    assert bundle.encode_replay_json(**args)['ok']
+
+
+@pytest.mark.parametrize('bad',['text',[],{},bytearray(b'x')])
+def test_encoder_rejects_nonbinary_payloads_without_consuming_or_mutating_them(bad):
+    args=literal_encoder_case(*REFERENCE_VECTORS[1]);args['member_bytes']['unit/saved.bin']=bad
+    result=bundle.encode_replay_json(**args)
+    assert codes(result)=={'PAYLOAD_TYPE_INVALID':1} and args['member_bytes']['unit/saved.bin'] is bad
+
+
+def test_literal_encoder_vectors_are_stable_across_explicit_hash_profiles(tmp_path):
+    import os,subprocess,sys
+    from pathlib import Path
+    script='''import json,sys
+sys.path.insert(0,sys.argv[1])
+from benches import x05_bundle as b
+d=b.decode_replay_json(sys.stdin.buffer.read().decode('ascii'))['envelope']
+i=dict(members=d['members'],expected_fixture_ids=sorted(d['expected_fixture_versions']),required_stages=d['required_stages'])
+r=b.encode_replay_json(i,d['references'],d['payloads'],expected_fixture_versions=d['expected_fixture_versions'],evidence_stage=d['evidence_stage'])
+assert r['ok'] and not r['origin_authenticated']
+sys.stdout.buffer.write(r['text'].encode('ascii'))
+'''
+    for (data,digest),raw_hex,length in [(REFERENCE_VECTORS[0],'',0),(REFERENCE_VECTORS[1],'00',1),(REFERENCE_VECTORS[2],'ff',1)]:
+        expected=ENCODER_WIRE_VECTOR.replace('$length',str(length)).replace('$digest',digest).replace('$hex',raw_hex)
+        raw=dict(reversed(list(json.loads(expected).items())))
+        raw['inventory']['members'][0]=dict(reversed(list(raw['inventory']['members'][0].items())))
+        for seed in ('0','19'):
+            env={'PYTHONHASHSEED':seed,'PYTHONUTF8':'1','PYTHONIOENCODING':'ascii:strict'}
+            if os.name=='nt':env['SystemRoot']='C:\\Windows'
+            completed=subprocess.run([sys.executable,'-P','-B','-c',script,str(Path(bundle.__file__).resolve().parents[1])],
+                input=json.dumps(raw).encode('ascii'),capture_output=True,cwd=tmp_path,env=env,timeout=15)
+            assert completed.returncode==0 and completed.stderr==b'' and completed.stdout==expected.encode('ascii')

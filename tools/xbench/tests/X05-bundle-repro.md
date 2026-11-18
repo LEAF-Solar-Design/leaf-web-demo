@@ -373,3 +373,73 @@ is retained. Exact-number tests additionally exercise signed DC deltas down to
 aggregate `9007199254740998`. JSON retains exact values and does not change the
 caller's Decimal context. Counts outside the per-string contract remain
 UNREADABLE rather than being reclassified as readable mismatches.
+
+## Deterministic encoder-to-CLI replay
+
+`encode_replay_json` accepts an explicit inventory envelope, references and
+member bytes, with expected fixture versions and an evidence stage. It returns
+compact, sorted, ASCII JSON in `text`, plus its exact `wire_bytes`. Inventory
+and reference arrays use canonical order. Caller objects and supplied length/
+SHA pins remain unchanged. Encoding does not hash payloads or run semantics;
+validly shaped but mismatched pins are intentionally passed to the auditor.
+
+The encoder bounds declared and actual member bytes, then computes exact hex
+and JSON escape expansion before creating hex or output JSON strings. The
+optional `max_wire_bytes` can lower the CLI wire ceiling, never raise it. A
+budget rejection returns `ENCODER_WIRE_BUDGET_EXCEEDED`, `text: null`, and a
+`wire_bytes_lower_bound`, without launching a CLI process. Encoder `ok` proves
+format and resource validity only; `integrity_verified` and
+`origin_authenticated` remain false.
+
+Run this executable example with `python -P -B`, using the same synthetic
+builder/test dependency as the earlier examples. It checks deterministic output,
+unchanged mismatched pins, exact CLI exits `0,1,4`, and producer-side wire-budget
+rejection before a CLI launch.
+
+```python
+from copy import deepcopy
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import reconciliation_bundle, encoder_args, cli_command
+
+observed = []
+for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4)]:
+    source = reconciliation_bundle(('alpha','beta'), failed=('alpha',) if kind == 'FAIL' else ())
+    if kind == 'UNREADABLE': source['payloads']['alpha/seven.json'] += b' '
+    arguments = encoder_args(source)
+    preserved = deepcopy(arguments)
+    encoded = bundle.encode_replay_json(**arguments)
+    assert encoded['ok'] and not encoded['integrity_verified'] and not encoded['origin_authenticated']
+    assert arguments == preserved and len(encoded['text'].encode('ascii')) == encoded['wire_bytes']
+    assert json.loads(encoded['text'])['inventory']['members'] == sorted(source['members'], key=lambda m:m['name'])
+    reordered = deepcopy(arguments)
+    reordered['inventory']['members'].reverse(); reordered['inventory']['expected_fixture_ids'].reverse()
+    reordered['references'].reverse()
+    reordered['member_bytes'] = dict(reversed(list(reordered['member_bytes'].items())))
+    assert bundle.encode_replay_json(**reordered)['text'] == encoded['text']
+    rejected = bundle.encode_replay_json(**arguments, max_wire_bytes=encoded['wire_bytes']-1)
+    assert rejected['diagnostic_counts'] == {'ENCODER_WIRE_BUDGET_EXCEEDED':1} and rejected['text'] is None
+    assert rejected['wire_bytes_lower_bound'] == encoded['wire_bytes']
+    completed = subprocess.run(cli_command('--replay'), input=encoded['text'].encode('ascii'), capture_output=True, timeout=15)
+    result = json.loads(completed.stdout)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1 and not result['origin_authenticated']
+    assert result['semantic']['verdict'] == kind
+    if kind == 'UNREADABLE':
+        assert result['integrity']['diagnostic_counts'] == {'PAYLOAD_LENGTH_MISMATCH':1,'PAYLOAD_SHA256_MISMATCH':1}
+    observed.append(completed.returncode)
+print(json.dumps(dict(cli_exits=observed, deterministic=True, supplied_pins_preserved=True,
+    wire_rejection='ENCODER_WIRE_BUDGET_EXCEEDED', origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. Encoding is pure and launches no process itself. The
+example's three children have 15-second deadlines and terminate before the
+summary. No browser, service, extraction or product state is retained. Pins
+and agreeing claims can all be forged together; this encoder authenticates
+neither evidence origin nor a live X05 result.
