@@ -577,9 +577,40 @@ for stale, expected_exit in [(False,0), (True,4), (False,0)]:
     assert not result['origin_authenticated']
     if stale: assert result['integrity']['diagnostic_counts'] == {'REFERENCE_DANGLING':1}
     renaming_exits.append(completed.returncode)
+identity_exits = []
+for repaired, expected_exit in [(False,4), (True,0)]:
+    members, references, payloads = [], [], {}
+    alpha = json.dumps(fixture_record('alpha', 'v1'), sort_keys=True).encode('ascii')
+    for fixture in ('alpha', 'beta'):
+        # Initially both paths contain exactly the same alpha evidence.
+        raw = (json.dumps(fixture_record('beta', 'v1'), sort_keys=True).encode('ascii')
+               if repaired and fixture == 'beta' else alpha)
+        name = fixture + '/seven.json'
+        member = dict(name=name, fixture=fixture, stage='seven_step', design_version='v1',
+                      byte_length=len(raw), sha256=sha256(raw).hexdigest())
+        members.append(member)
+        references.append({key:member[key] for key in ('name','fixture','stage','design_version')})
+        payloads[name] = raw
+    if not repaired:
+        assert payloads['alpha/seven.json'] == payloads['beta/seven.json']
+        assert members[0]['sha256'] == members[1]['sha256']
+    encoded = bundle.encode_replay_json(
+        dict(members=members, expected_fixture_ids=['alpha','beta'], required_stages=['seven_step']),
+        references, payloads, expected_fixture_versions={'alpha':'v1','beta':'v1'}, evidence_stage='seven_step')
+    assert encoded['ok']
+    completed = subprocess.run([sys.executable, '-P', '-B', str(Path(bundle.__file__).resolve()), '--replay'],
+        input=encoded['text'].encode('ascii'), capture_output=True, timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    result = json.loads(completed.stdout)
+    assert result['integrity']['integrity_verified'] and not result['origin_authenticated']
+    assert result['semantic']['fixtures']['alpha']['verdict'] == 'PASS'
+    if not repaired:
+        assert result['semantic']['fixtures']['beta']['result']['reason'] == 'bundle_evidence_fixture_conflict'
+    else: assert result['semantic']['verdict'] == 'PASS'
+    identity_exits.append(completed.returncode)
 assert not any(name == 'pytest' or name.startswith('tests.') for name in sys.modules)
 print(json.dumps(dict(cli_exits=observed, renaming_cli_exits=renaming_exits,
-    standard_library_builder=True, origin_authenticated=False), sort_keys=True))
+    equal_hash_identity_exits=identity_exits, standard_library_builder=True, origin_authenticated=False), sort_keys=True))
 ```
 
 Stop on any mismatch. Each child has a 15-second deadline. `subprocess.run`
@@ -599,3 +630,9 @@ the original. Leaving the reference at its old path returns named
 `REFERENCE_DANGLING` uncertainty, and restoring the new path recovers PASS.
 Expected renaming exits are `0,4,0`. This is a path-identity test, never archive
 extraction or evidence-origin authentication.
+
+The equal-hash identity replay gives two distinct fixture paths identical
+pinned alpha evidence. Integrity passes for both, while beta returns named
+`bundle_evidence_fixture_conflict` uncertainty. Repairing beta's explicit
+evidence bindings and repinning its bytes recovers PASS. Expected identity
+exits are `4,0`; equal hashes never establish a fixture's identity or origin.

@@ -384,6 +384,37 @@ def decode_inventory_json(text):
     return _inventory_envelope(data)
 
 
+def diff_inventories(before, after):
+    """Compare explicit inventories, never payloads or evidence origins.
+
+    Changes are facts: one member can be both repinned and reassigned. Paths
+    use the auditor's slash normalization. Examples share one bounded cap.
+    """
+    checked = [_inventory_envelope(value) for value in (before, after)]
+    if any(not result['ok'] for result in checked):
+        previous = [{**result, 'diagnostics': [dict(row, side=side) for row in result['diagnostics']]}
+                    for side, result in zip(('before', 'after'), checked)]
+        return _result([], previous=previous, inventory_equal=None,
+                       difference_total=None, difference_counts=None, changed_member_total=None, differences=[])
+    left, right = [{_name(row['name']): row for row in value['members']} for value in (before, after)]
+    differences = []
+    for name in sorted(left.keys() | right.keys()):
+        if name not in left:
+            differences.append(dict(name=name, kind='added'))
+        elif name not in right:
+            differences.append(dict(name=name, kind='removed'))
+        else:
+            if any(left[name][key] != right[name][key] for key in ('byte_length', 'sha256')):
+                differences.append(dict(name=name, kind='repinned'))
+            if any(left[name][key] != right[name][key] for key in ('fixture', 'stage', 'design_version')):
+                differences.append(dict(name=name, kind='reassigned'))
+    differences.sort(key=lambda row: (row['name'], row['kind']))
+    counts = Counter(row['kind'] for row in differences)
+    return _result([], inventory_equal=not differences, difference_total=len(differences),
+                   difference_counts={kind: counts[kind] for kind in ('added', 'removed', 'repinned', 'reassigned')},
+                   changed_member_total=len({row['name'] for row in differences}), differences=differences[:MAX_DIAGNOSTICS])
+
+
 def audit_inventory_json(text, payloads):
     """Strict decoding and full metadata validation precede every byte hash."""
     decoded = decode_inventory_json(text)
