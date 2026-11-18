@@ -150,3 +150,25 @@ def flagged_voltage_quality(sample, allowed_flags, *, reported, **conditions):
     if sample["quality_flag"] not in allowed_flags:
         return "FAIL"
     return weather_quality(sample, reported=reported, **conditions)
+
+
+def calibrated_voltage_quality(sensor, revision, at, raw_volts, records, reported):
+    """Use the pinned additive correction in volts during [start, end)."""
+    from benches.x03_quality import finite_measure
+    if not sensor or not revision or not isinstance(records, list) or not all(map(finite_measure, (at, raw_volts))):
+        return "INCOMPLETE"
+    pinned = [r for r in records if isinstance(r, dict) and r.get("sensor") == sensor and r.get("revision") == revision]
+    if not pinned:
+        return "INCOMPLETE"
+    active = []
+    for record in pinned:
+        start, end, offset = (record.get(k) for k in ("start", "end", "offset_volts"))
+        if not all(map(finite_measure, (start, end, offset))) or end <= start:
+            return "INCOMPLETE"
+        if start <= at < end:
+            active.append(offset)
+    if not active:
+        return "FAIL"
+    if len(active) != 1 or reported is None:
+        return "INCOMPLETE"
+    return "PASS" if finite_measure(reported) and isclose(reported, raw_volts + active[0], rel_tol=0, abs_tol=1e-9) else "FAIL"

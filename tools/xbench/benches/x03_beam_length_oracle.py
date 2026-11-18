@@ -109,6 +109,12 @@ def _lengths(entities, units, inherited, active, remaining, mode, transforms=(),
                 length += chord * factor
             totals[layer] += length * curve_scale * METRES[units]
             continue
+        if entity.dxftype() == "ELLIPSE":
+            length = _ellipse_length(entity.dxf)
+            if length is None:
+                return None
+            totals[layer] += length * curve_scale * METRES[units]
+            continue
         if entity.dxftype() == "ARC":
             # OCS maps the arc plane to world coordinates by an orthonormal
             # basis. Spatial length therefore uses the same radius and sweep.
@@ -170,3 +176,45 @@ def line_measurement_quality(entities, units, reported, *, mode=None):
     if mode not in ("spatial", "plan"):
         return "INCOMPLETE"
     return beam_length_quality(entities, units, reported, _line_mode=mode)
+
+
+def _ellipse_length(attrs):
+    from math import cos, hypot, pi, sin, tau
+    try:
+        major = tuple(attrs.get("major_axis"))
+        ratio, start, end = (attrs.get(k) for k in ("ratio", "start_param", "end_param"))
+        if len(major) != 3 or not all(map(isfinite, (*major, ratio, start, end))):
+            return None
+        a = hypot(*major)
+        if not isfinite(a) or a <= 0 or not 0 < ratio <= 1 or not (0 <= start <= tau and 0 <= end <= tau):
+            return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    span = (end - start) % tau
+    if not span and end != start:
+        span = tau
+    def speed(t):
+        return hypot(sin(t), ratio * cos(t))
+    def integrate(left, right, fl, fm, fr, estimate, tolerance, depth):
+        mid = (left + right) / 2
+        fq, ft = speed((left + mid) / 2), speed((mid + right) / 2)
+        first = (mid - left) * (fl + 4 * fq + fm) / 6
+        last = (right - mid) * (fm + 4 * ft + fr) / 6
+        delta = first + last - estimate
+        if abs(delta) <= 15 * tolerance:
+            return first + last + delta / 15
+        if depth == 0:
+            raise ArithmeticError
+        return (integrate(left, mid, fl, fq, fm, first, tolerance / 2, depth - 1)
+                + integrate(mid, right, fm, ft, fr, last, tolerance / 2, depth - 1))
+    total = 0.0
+    # Split at the axis extrema before adaptive Simpson integration.
+    points = [start] + [n * pi / 2 for n in range(1, 9) if start < n * pi / 2 < start + span] + [start + span]
+    try:
+        for left, right in zip(points, points[1:]):
+            fl, fm, fr = speed(left), speed((left + right) / 2), speed(right)
+            estimate = (right - left) * (fl + 4 * fm + fr) / 6
+            total += integrate(left, right, fl, fm, fr, estimate, (right - left) * 1e-13, 28)
+    except ArithmeticError:
+        return None
+    return a * total

@@ -263,3 +263,14 @@ def test_queue_service_decomposition(times, parts, expected):
     from benches.x03_dashboard_oracle import queue_service_quality
     runs = {"job":dict(zip(("enqueued","started","finished"),times))}
     assert queue_service_quality(runs,{"job":dict(zip(("wait","service"),parts))}) == expected
+
+
+@pytest.mark.parametrize("policy,maintenance,expected", [
+    ("include", [(3, 7)], 3/10), ("exclude", [(3, 7)], 3/6),
+    ("exclude", [(-5, 1), (7, 15)], 0)])
+def test_availability_from_eligible_time(policy, maintenance, expected):
+    from benches.x03_dashboard_oracle import availability_quality
+    outages = [(-2, 4), (3, 7)]
+    assert availability_quality((0, 10), outages, maintenance, policy, expected) == "PASS"
+    assert availability_quality((0, 10), outages, maintenance, policy, 1) == "FAIL"
+    assert availability_quality((0, 10), outages, maintenance, None, expected) == "INCOMPLETE"

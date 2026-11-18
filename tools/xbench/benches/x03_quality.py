@@ -1024,3 +1024,91 @@ def ground_fault_quality(leakage_ma, sensors):
             if branch in leakage_ma and leakage_ma[branch] >= threshold:
                 detected.add(branch)
     return "PASS" if detected == leakage_ma.keys() else "FAIL"
+
+
+def battery_bank_quality(cells, connections, terminals, bank_voltage, branch_currents):
+    """Trace disjoint series strings between common buses using measured branch currents.
+
+    Cell IDs map to (nominal volts, maximum amps). Directed edges map each
+    cell ID to its two nodes. Current measurements are keyed by first cell.
+    """
+    if not all(isinstance(x, dict) for x in (cells, connections, branch_currents)):
+        return "INCOMPLETE"
+    if not cells or cells.keys() - connections.keys() or not finite_measure(bank_voltage):
+        return "INCOMPLETE"
+    if not isinstance(terminals, (tuple, list)) or len(terminals) != 2:
+        return "INCOMPLETE"
+    start, end = terminals
+    if not all(isinstance(n, str) and n for n in terminals) or start == end:
+        return "FAIL"
+    outgoing = {}
+    for cell, edge in connections.items():
+        if not isinstance(edge, (list, tuple)) or len(edge) != 2 or None in edge:
+            return "INCOMPLETE"
+        if cell not in cells or not all(isinstance(n, str) and n for n in edge):
+            return "FAIL"
+        outgoing.setdefault(edge[0], []).append((cell, edge[1]))
+    visited = set()
+    branches = outgoing.get(start, [])
+    if not branches or end in outgoing:
+        return "FAIL"
+    first_cells = {cell for cell, _ in branches}
+    if first_cells - branch_currents.keys():
+        return "INCOMPLETE"
+    if first_cells != branch_currents.keys():
+        return "FAIL"
+    for first, next_node in branches:
+        amps = branch_currents[first]
+        if not finite_measure(amps):
+            return "INCOMPLETE"
+        voltage = Fraction(0)
+        cell = first
+        while True:
+            if cell in visited:
+                return "FAIL"
+            visited.add(cell)
+            rating = cells[cell]
+            if not isinstance(rating, (tuple, list)) or len(rating) != 2 or not all(map(finite_measure, rating)):
+                return "INCOMPLETE"
+            volts, limit = rating
+            if min(volts, limit) <= 0 or abs(amps) > limit:
+                return "FAIL"
+            voltage += Fraction(str(volts))
+            if next_node == end:
+                break
+            choices = outgoing.get(next_node, [])
+            if next_node == start or len(choices) != 1:
+                return "FAIL"
+            cell, next_node = choices[0]
+        if voltage != Fraction(str(bank_voltage)):
+            return "FAIL"
+    return "PASS" if visited == cells.keys() else "FAIL"
+
+
+def neutral_harmonic_quality(spectra, neutral_ampacity):
+    """Use RMS magnitudes and common-reference angles, in degrees, for A/B/C."""
+    from cmath import rect
+    from math import hypot, isclose, radians
+    if not isinstance(spectra, dict) or set(spectra) != {"A", "B", "C"} or not finite_measure(neutral_ampacity):
+        return "INCOMPLETE"
+    if not all(isinstance(s, dict) and 1 in s for s in spectra.values()):
+        return "INCOMPLETE"
+    orders = spectra["A"].keys()
+    if any(s.keys() != orders for s in spectra.values()):
+        return "INCOMPLETE"
+    rms_components = []
+    for order in orders:
+        if type(order) is not int or order < 1:
+            return "FAIL"
+        total = 0j
+        for phase in spectra.values():
+            sample = phase[order]
+            if not isinstance(sample, (list, tuple)) or len(sample) != 2 or not all(map(finite_measure, sample)):
+                return "INCOMPLETE"
+            magnitude, angle = sample
+            if magnitude < 0:
+                return "FAIL"
+            total += rect(magnitude, radians(angle % 360))
+        rms_components.append(abs(total))
+    current = hypot(*rms_components)
+    return "PASS" if neutral_ampacity > 0 and (current <= neutral_ampacity or isclose(current, neutral_ampacity, rel_tol=1e-12)) else "FAIL"

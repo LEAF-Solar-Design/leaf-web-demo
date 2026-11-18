@@ -226,3 +226,14 @@ def test_seismic_shear(acceleration, share, limit, expected):
     from benches.x03_layout_oracle import seismic_anchor_quality
     anchors = {"a":dict(fraction=share,shear_n=limit),"b":dict(fraction=round(1-share,2),shear_n=300)}
     assert seismic_anchor_quality([dict(mass_kg=100,lateral_m_s2=acceleration,anchors=anchors)]) == expected
+
+
+@pytest.mark.parametrize("force,area,limit", [(100, 0.25, 400), (27, 0.3, 90), (2500, 2.5, 1000)])
+def test_bearing_pressure_is_local(force, area, limit):
+    from benches.x03_layout_oracle import pad_pressure_quality
+    reactions = {"corner": force, "interior": force}
+    areas = {"corner": area, "interior": 10 * area}
+    limits = dict.fromkeys(reactions, limit)
+    assert pad_pressure_quality(reactions, areas, limits) == "PASS"
+    assert pad_pressure_quality(reactions, dict(areas, corner=area / 2), limits) == "FAIL"
+    assert pad_pressure_quality(reactions, {"corner": area}, limits) == "INCOMPLETE"

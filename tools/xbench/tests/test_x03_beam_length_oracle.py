@@ -160,3 +160,18 @@ def test_arc_in_object_plane(normal, u, v):
     assert beam_length_quality([arc], "m", {"0":expected}) == "PASS"
     bad = SimpleNamespace(dxftype=lambda:"ARC", dxf=SimpleNamespace(layer="0", get={"extrusion":(0,0,0)}.get))
     assert beam_length_quality([bad], "m", {"0":expected}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ratio,start,end,expected", [
+    (1, 0, 6.283185307179586, 12.566370614359172),
+    (0.5, 0, 1.5707963267948966, 2.422112055136919),
+    (0.5, 4.71238898038469, 1.5707963267948966, 4.844224110273838)])
+def test_ellipse_arcs_in_metres(ratio, start, end, expected):
+    # Radius-2 circumference and independently tabulated complete E(3/4).
+    space = pytest.importorskip("ezdxf").new().modelspace()
+    entity = space.add_ellipse((0, 0), major_axis=(0, 2, 0), ratio=ratio,
+                               start_param=start, end_param=end)
+    assert beam_length_quality(space, "m", {"0": expected}) == "PASS"
+    assert beam_length_quality(space, "m", {"0": expected + 1e-7}) == "FAIL"
+    entity.dxf.discard("major_axis")
+    assert beam_length_quality(space, "m", {"0": expected}) == "INCOMPLETE"

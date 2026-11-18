@@ -501,3 +501,36 @@ def queue_service_quality(runs, reported):
             if not finite_measure(result[k]) or Fraction(str(result[k])) != expected:
                 return "FAIL"
     return "PASS"
+
+
+def availability_quality(window, outages, maintenance, policy, reported):
+    """Fraction of eligible wall-clock time available in a half-open window."""
+    from benches.x03_quality import finite_measure
+    if policy not in ("exclude", "include") or not isinstance(outages, list) or not isinstance(maintenance, list):
+        return "INCOMPLETE"
+    def valid(span):
+        return isinstance(span, (tuple, list)) and len(span) == 2 and all(map(finite_measure, span)) and span[0] < span[1]
+    if not valid(window) or not all(valid(span) for span in outages + maintenance):
+        return "INCOMPLETE"
+    start, end = window
+    events = Counter()
+    # Split at transitions. Multiple overlapping records count only once.
+    changes = {}
+    for kind, spans in enumerate([outages, maintenance if policy == "exclude" else []]):
+        for left, right in spans:
+            left, right = max(start, left), min(end, right)
+            if left < right:
+                for point, delta in ((left, 1), (right, -1)):
+                    changes.setdefault(point, Counter())[kind] += delta
+    eligible = available = 0
+    previous = start
+    for point in sorted(set(changes) | {end}):
+        if events[1] == 0:
+            eligible += point - previous
+            if events[0] == 0:
+                available += point - previous
+        events.update(changes.get(point, {}))
+        previous = point
+    if not eligible or reported is None:
+        return "INCOMPLETE"
+    return "PASS" if finite_measure(reported) and isclose(reported, available / eligible, abs_tol=1e-12) else "FAIL"
