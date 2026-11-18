@@ -177,3 +177,13 @@ def test_downslope_resistance(slope, weight, friction, restraint, expected):
     from benches.x03_layout_oracle import sliding_resistance_quality
     case = dict(slope_deg=slope, weight=weight, friction=friction, restraint=restraint)
     assert sliding_resistance_quality([case]) == expected
+
+
+@pytest.mark.parametrize("mount,zones,expected", [
+    ("edge",["field"],"PASS"), ("edge",["field","drift"],"FAIL"),
+    ("reinforced",["drift"],"PASS"), ("unknown",["field"],"INCOMPLETE"),
+], ids=["field-module","local-drift-overload","reinforced-at-limit","missing-mount-rating"])
+def test_mount_specific_snow_pressure(mount, zones, expected):
+    from benches.x03_layout_oracle import module_snow_quality
+    rows = [dict(model="panel", mount=mount, zones=zones)]
+    assert module_snow_quality(rows, {"field":1.6,"drift":3.2}, {"panel":{"edge":2,"reinforced":3.2}}) == expected

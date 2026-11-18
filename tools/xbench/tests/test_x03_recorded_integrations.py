@@ -317,3 +317,21 @@ def test_quantity_allocations(available, ids, version, expected):
     demand = {"east":dict(part="panel",required=2),"west":dict(part="panel",required=3)}
     rows = [dict(id=i, line=k, lot="warehouse", quantity=v["required"]) for i,(k,v) in zip(ids,demand.items())]
     assert stock_allocation_quality(version, stock, demand, rows) == expected
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("ignore-old","PASS"), ("credit-old","FAIL"), ("retry-new","PASS"), ("missing-generation","INCOMPLETE"),
+], ids=["ignore-delayed-generation","reject-cross-generation-credit","dedupe-recreated-object","missing-identity"])
+def test_recreation_receipt_sequence(case, expected):
+    from benches.x03_issue_delivery_oracle import generation_receipt_quality
+    def event(kind, generation, **kwargs):
+        return dict(kind=kind, drawing="shared-id", generation=generation, **kwargs)
+    events = [event("create","a"),event("receipt","a",effect="export",credited=True),
+              event("delete","a"),event("create","b"),
+              event("receipt","a",effect="late",credited=case=="credit-old"),
+              event("receipt","b",effect="export",credited=True)]
+    if case == "retry-new":
+        events.append(event("receipt","b", effect="export", credited=False))
+    if case == "missing-generation":
+        del events[-1]["generation"]
+    assert generation_receipt_quality(events) == expected

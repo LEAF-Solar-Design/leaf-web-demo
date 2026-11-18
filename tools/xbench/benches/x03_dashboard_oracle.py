@@ -323,3 +323,32 @@ def critical_path_quality(tasks, reported_path, reported_duration):
         return "FAIL"
     actual = sum(durations[t] for t in reported_path)
     return "PASS" if finite_measure(reported_duration) and Fraction(str(reported_duration)) == actual == max(ends.values()) else "FAIL"
+
+
+def peak_memory_quality(tasks, reported, reported_unit):
+    """Sum constant allocations for tasks active in half-open intervals [start, end)."""
+    from collections import defaultdict
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    scales = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+    if not isinstance(tasks, dict) or not tasks or reported is None or reported_unit not in scales:
+        return "INCOMPLETE"
+    if not finite_measure(reported) or reported < 0:
+        return "FAIL"
+    changes = defaultdict(Fraction)
+    for row in tasks.values():
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("start", "end", "allocation", "unit")):
+            return "INCOMPLETE"
+        if row["unit"] not in scales:
+            return "INCOMPLETE"
+        start, end, amount = row["start"], row["end"], row["allocation"]
+        if not all(map(finite_measure, (start, end, amount))) or end < start or amount < 0:
+            return "FAIL"
+        size = Fraction(str(amount)) * scales[row["unit"]]
+        changes[start] += size
+        changes[end] -= size
+    active = peak = 0
+    for time in sorted(changes):
+        active += changes[time]
+        peak = max(peak, active)
+    return "PASS" if peak == Fraction(str(reported)) * scales[reported_unit] else "FAIL"

@@ -493,3 +493,24 @@ def test_prestart_string_voltage(modules, threshold, expected):
     from benches.x03_quality import startup_voltage_quality
     assert startup_voltage_quality({"east":modules,"west":[140]}, threshold) == expected
     assert startup_voltage_quality({"east":modules}, None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("amps,ohms,limits,expected", [
+    (30,[1,2],[20,10],"PASS"), (30,[1,2],[19,20],"FAIL"),
+    (21,[1,2,4],[12,6,3],"PASS"), (30,[1,None],[20,10],"INCOMPLETE"),
+], ids=["unequal-paths-at-limit","low-resistance-overload","three-way-12-6-3-split","missing-resistance"])
+def test_parallel_conductor_sharing(amps, ohms, limits, expected):
+    from benches.x03_quality import parallel_current_quality
+    assert parallel_current_quality(amps, dict(enumerate(ohms)), dict(enumerate(limits))) == expected
+
+
+@pytest.mark.parametrize("upstream,span,expected", [
+    ([(10,4,5),(30,2,3)], [10,30], "PASS"),
+    ([(10,4,5),(20,1.4,2),(30,2,3)], [10,30], "FAIL"),
+    ([(10,4,5),(20,1.5,2),(30,2,3)], [10,30], "FAIL"),
+    ([(15,4,5),(30,2,3)], [10,30], "INCOMPLETE"),
+], ids=["selective-throughout","interior-knot-overlap","touching-envelope","missing-current-range"])
+def test_protection_curve_envelopes(upstream, span, expected):
+    from benches.x03_quality import coordination_quality
+    downstream = [(10,1,2),(30,0.5,1)]
+    assert coordination_quality(downstream, upstream, span) == expected
