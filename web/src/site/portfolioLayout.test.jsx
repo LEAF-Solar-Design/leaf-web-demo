@@ -384,3 +384,28 @@ describe('persisted portfolio photo layout', () => {
     expect(listProjectPhotos).toHaveBeenCalledTimes(3)
   })
 })
+
+
+describe('editor viewer current material reconciliation', () => {
+  it('updates selected metadata across reorder and closes when that material is hidden', () => {
+    const original = fixture()
+    const view = render(<PortfolioPreview document={original} projectId={PROJECT} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Cakes', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'View Cake photograph' }))
+    const dialog = screen.getByRole('dialog'), close = within(dialog).getByRole('button', { name: 'Close image' })
+    close.focus()
+    const edited = fixture(), image = edited.categories[0].images[0]
+    image.title = 'Updated cake caption'; image.alt = 'Updated cake portrait'
+    edited.categories[0].images.reverse()
+    edited.categories.push({ slug: 'seasonal', title: 'Seasonal', description: '', hero: 0, images: [] })
+    edited.categories.reverse()
+    view.rerender(<PortfolioPreview document={edited} projectId={PROJECT} />)
+    expect(screen.getByRole('dialog', { name: image.alt })).toBe(dialog)
+    expect(within(dialog).getByText(image.title)).toBeTruthy()
+    expect(document.activeElement).toBe(close)
+    const hidden = cloneDocument(edited)
+    hidden.categories[1].images.find(item => item.material_id === image.material_id).display = { hidden: true }
+    view.rerender(<PortfolioPreview document={hidden} projectId={PROJECT} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
