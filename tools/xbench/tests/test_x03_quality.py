@@ -414,3 +414,23 @@ def test_reverse_current(currents, rating, cap, expected):
 def test_device_interrupting_ratings(faults, ratings, verdict):
     from benches.x03_quality import interrupting_rating_quality
     assert interrupting_rating_quality(faults, ratings) == verdict
+
+
+@pytest.mark.parametrize("pair, approved, volts, amps, expected", [
+    (["B/socket","A/plug"], True, 600, 20, "PASS"),
+    (["A/plug","B/socket"], False, 400, 10, "FAIL"),
+    (["A/plug","B/socket"], True, 400, 21, "FAIL"),
+    (["A/plug","C/lookalike"], True, 400, 10, "INCOMPLETE"),
+], ids=["approved-cross-brand","explicit-incompatibility","overcurrent","unlisted-lookalike"])
+def test_mating_record(pair, approved, volts, amps, expected):
+    from benches.x03_quality import connector_pair_quality
+    records = [dict(parts=["A/plug","B/socket"], approved=approved, max_volts=600, max_amps=20)]
+    assert connector_pair_quality(pair, records, volts, amps) == expected
+
+
+@pytest.mark.parametrize("p,q,s,expected", [
+    (3,4,5,"PASS"), (8,-6,9.9,"FAIL"), (-12,5,13,"PASS"), (3,4,None,"INCOMPLETE"),
+], ids=["three-four-five-at-limit","leading-vars-overload","reverse-power","missing-nameplate"])
+def test_apparent_power(p, q, s, expected):
+    from benches.x03_quality import apparent_power_quality
+    assert apparent_power_quality({"x": p}, {"x": q}, {"x": s}) == expected

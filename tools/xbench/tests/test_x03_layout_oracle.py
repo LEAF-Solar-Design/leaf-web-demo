@@ -123,3 +123,24 @@ def test_roof_normal(normal, tilt, bearing, tol, result):
 def test_recorded_rail_stations(stations, span, overhang, verdict):
     from benches.x03_layout_oracle import rail_support_quality
     assert rail_support_quality(0, 10, stations, span, overhang) == verdict
+
+
+@pytest.mark.parametrize("areas,rating,expected", [
+    ({"edge": 2}, 6, "PASS"), ({"field": 2, "edge": 1}, 4, "FAIL"),
+    ({"field": 3}, 4, "PASS"), ({"corner": 2}, 20, "INCOMPLETE"),
+], ids=["edge-at-limit","mixed-zone-attachment-overload","interior-support","missing-corner-pressure"])
+def test_wind_zone_tributary(areas, rating, expected):
+    from benches.x03_layout_oracle import wind_uplift_quality
+    assert wind_uplift_quality({"field": 1, "edge": 3}, {"a": areas, "b": {"field": 1}},
+                               {"a": rating, "b": 100}) == expected
+
+
+@pytest.mark.parametrize("gap,fixed_left,right_arm,expected", [
+    (2, 0, 10, "PASS"), (1, 0, 10, "FAIL"), (0, 10, 0, "PASS"), (1, None, 10, "INCOMPLETE"),
+], ids=["two-moving-ends-at-limit","undersized-joint","fixed-at-both-joint-ends","missing-anchor"])
+def test_rail_expansion(gap, fixed_left, right_arm, expected):
+    from benches.x03_layout_oracle import rail_joint_quality
+    right = 10 + gap
+    rails = [dict(start=0, fixed=fixed_left, end=10, alpha_per_c=0.001),
+             dict(start=right, fixed=right+right_arm, end=right+10, alpha_per_c=0.001)]
+    assert rail_joint_quality(rails, -20, 80) == expected

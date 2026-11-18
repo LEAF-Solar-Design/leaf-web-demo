@@ -144,3 +144,14 @@ def test_release_cohort(after, verdict):
     report = dict(pairs=2, before_passed=0, after_passed=1, improved=True)
     assert paired_release_quality(["a", "b"], before, after_rows, report) == verdict
     assert paired_release_quality(["a", "b"], before, after_rows, dict(report, improved=False)) == "FAIL"
+
+
+@pytest.mark.parametrize("end,policy,exact,lower,expected", [
+    (None, "right-censored", {}, {"a": 8}, "PASS"),
+    (11, "right-censored", {"a": 8}, {}, "FAIL"),
+    (10, "right-censored", {"a": 8}, {}, "PASS"),
+    (None, None, {}, {"a": 8}, "INCOMPLETE"),
+], ids=["unfinished-at-cutoff","future-completion-is-censored","completed-at-cutoff","missing-policy"])
+def test_cutoff_duration(end, policy, exact, lower, expected):
+    from benches.x03_dashboard_oracle import censored_durations_quality
+    assert censored_durations_quality({"a": dict(start=2,end=end)}, 10, policy, exact, lower) == expected

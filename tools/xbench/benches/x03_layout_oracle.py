@@ -212,3 +212,54 @@ def rail_support_quality(start, end, attachments, max_span, max_cantilever):
     if max(stations[0] - start, end - stations[-1]) > overhang:
         return "FAIL"
     return "PASS" if all(b - a <= span for a, b in zip(stations, stations[1:])) else "FAIL"
+
+
+def wind_uplift_quality(pressures, areas, resistance):
+    """Positive uplift pressures in kPa times tributary areas in square metres give attachment loads in kN."""
+    if not all(isinstance(v, dict) and v for v in (pressures, areas, resistance)):
+        return "INCOMPLETE"
+    if areas.keys() != resistance.keys():
+        return "INCOMPLETE"
+    for attachment, zones in areas.items():
+        rating = resistance[attachment]
+        if not isinstance(zones, dict) or not zones or rating is None:
+            return "INCOMPLETE"
+        if not finite_measure(rating) or rating <= 0:
+            return "FAIL"
+        load = Fraction(0)
+        for zone, area in zones.items():
+            pressure = pressures.get(zone)
+            if pressure is None or area is None:
+                return "INCOMPLETE"
+            if not finite_measure(pressure) or pressure < 0 or not finite_measure(area) or area <= 0:
+                return "FAIL"
+            load += Fraction(str(pressure)) * Fraction(str(area))
+        if load > Fraction(str(rating)):
+            return "FAIL"
+    return "PASS"
+
+
+def rail_joint_quality(rails, cold_c, hot_c):
+    """Adjacent rail stations and as-cold joint gaps use the same length unit."""
+    if not isinstance(rails, list) or len(rails) < 2 or None in (cold_c, hot_c):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (cold_c, hot_c))) or cold_c > hot_c:
+        return "FAIL"
+    rise = Fraction(str(hot_c)) - Fraction(str(cold_c))
+    previous_end = previous_growth = None
+    for rail in rails:
+        fields = ("start", "fixed", "end", "alpha_per_c")
+        if not isinstance(rail, dict) or any(rail.get(k) is None for k in fields):
+            return "INCOMPLETE"
+        if not all(finite_measure(rail[k]) for k in fields):
+            return "FAIL"
+        start, fixed, end, alpha = (Fraction(str(rail[k])) for k in fields)
+        if not start <= fixed <= end or start == end or alpha < 0:
+            return "FAIL"
+        if previous_end is not None:
+            gap = start - previous_end
+            if gap < previous_growth + (fixed - start) * alpha * rise:
+                return "FAIL"
+        previous_end = end
+        previous_growth = (end - fixed) * alpha * rise
+    return "PASS"

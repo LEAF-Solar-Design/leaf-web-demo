@@ -634,3 +634,46 @@ def interrupting_rating_quality(fault_amps, interrupting_amps):
         if not finite_measure(fault) or fault < 0 or not finite_measure(rating) or rating <= 0 or fault > rating:
             return "FAIL"
     return "PASS"
+
+
+def connector_pair_quality(mated, approvals, volts, amps):
+    """Model IDs identify full manufacturer parts. Ratings belong to the approved pair."""
+    if not isinstance(mated, (list, tuple)) or len(mated) != 2 or not isinstance(approvals, list):
+        return "INCOMPLETE"
+    if not all(isinstance(p, str) and p for p in mated) or None in (volts, amps):
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in (volts, amps)):
+        return "FAIL"
+    matched = False
+    for row in approvals:
+        if not isinstance(row, dict) or not isinstance(row.get("parts"), (list, tuple)):
+            return "INCOMPLETE"
+        if tuple(row["parts"]) not in (tuple(mated), tuple(reversed(mated))):
+            continue
+        if row.get("approved") is None:
+            return "INCOMPLETE"
+        if row["approved"] is not True:
+            return "FAIL"
+        limits = (row.get("max_volts"), row.get("max_amps"))
+        if None in limits:
+            return "INCOMPLETE"
+        if not all(finite_measure(v) and v > 0 for v in limits) or volts > limits[0] or amps > limits[1]:
+            return "FAIL"
+        matched = True
+    return "PASS" if matched else "INCOMPLETE"
+
+
+def apparent_power_quality(kw, kvar, kva):
+    """Compare squared real and reactive power with squared capacity per inverter using recorded kW, kvar and kVA."""
+    if not all(isinstance(v, dict) and v for v in (kw, kvar, kva)) or not kw.keys() == kvar.keys() == kva.keys():
+        return "INCOMPLETE"
+    for inverter in kw:
+        values = (kw[inverter], kvar[inverter], kva[inverter])
+        if None in values:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, values)):
+            return "FAIL"
+        p, q, rating = (Fraction(str(v)) for v in values)
+        if rating <= 0 or p*p + q*q > rating*rating:
+            return "FAIL"
+    return "PASS"

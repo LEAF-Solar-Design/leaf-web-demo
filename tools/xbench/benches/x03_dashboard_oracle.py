@@ -218,3 +218,27 @@ def paired_release_quality(cohort, before, after, reported):
     if expected.keys() - reported.keys():
         return "INCOMPLETE"
     return "PASS" if all(type(reported[k]) is type(v) and reported[k] == v for k, v in expected.items()) else "FAIL"
+
+
+def censored_durations_quality(runs, cutoff, policy, completed, censored):
+    """Separate exact completed durations from observed lower bounds at the cutoff."""
+    if policy != "right-censored" or type(cutoff) is not int or not isinstance(runs, dict) or not runs:
+        return "INCOMPLETE"
+    if not isinstance(completed, dict) or not isinstance(censored, dict):
+        return "INCOMPLETE"
+    exact, lower = {}, {}
+    for key, row in runs.items():
+        if not isinstance(row, dict) or type(row.get("start")) is not int or "end" not in row:
+            return "INCOMPLETE"
+        start, end = row["start"], row["end"]
+        if end is not None and (type(end) is not int or end < start):
+            return "FAIL"
+        if start > cutoff:
+            continue
+        if end is None or end > cutoff:
+            lower[key] = cutoff - start
+        else:
+            exact[key] = end - start
+    if not all(type(v) is int for v in (*completed.values(), *censored.values())):
+        return "FAIL"
+    return "PASS" if (exact, lower) == (completed, censored) else "FAIL"
