@@ -1285,6 +1285,11 @@ export function recordToEnvelope(rec) {
   }
 }
 
+export async function getArloJob(context) {
+  return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}`,
+    { headers: orgHeaders(context.org_id) })
+}
+
 export async function getArloReviews(context) {
   return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}/reviews`,
     { headers: orgHeaders(context.org_id) })
