@@ -384,3 +384,15 @@ def test_local_hole_bearing_even_with_spare_peer_capacity(plate,t,d,allowable,fo
     assert grade({plate:force,"spare":0},holes) == "PASS"
     assert grade({plate:abs(force)+1,"spare":0},holes) == "FAIL"
     assert grade({plate:force},{plate:dict(section,diameter_mm=None)}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("holes,net_width", [
+    ([(0,10,8)],32), ([(0,10,8),(0,30,8)],24),
+    ([(0,10,8),(10,30,8)],25.25),
+])
+def test_plate_capacity_uses_minimum_net_path(holes,net_width):
+    from benches.x03_layout_oracle import net_section_quality as grade
+    capacity = net_width * 2 * 100
+    assert grade(40,2,holes,capacity,100) == "PASS"
+    assert grade(40,2,holes,capacity+1,100) == "FAIL"
+    assert grade(40,2,None,capacity,100) == "INCOMPLETE"

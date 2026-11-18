@@ -971,3 +971,30 @@ def test_insulator_surface_and_air_paths(degree,path,surface,air):
     assert check(surface,air) == "PASS"
     assert check(surface+1,air) == check(surface,air+1) == "FAIL"
     assert check(surface,air,None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ask,magnitude,rotation,error,lower,upper", [
+    ("Check the motor feeder", 230, 0, 10, 5.8, 5.9),
+    ("Check the rotated service reference", 120, 75, 30, 17.7, 17.9),
+    ("Check the inverter output", 277, -20, -60, 37.7, 37.9),
+])
+def test_phase_angle_unbalance_with_equal_rms_magnitudes(ask,magnitude,rotation,error,lower,upper):
+    from benches.x03_quality import voltage_unbalance_quality as grade
+    # For one displaced phase, the ratio is |exp(i*error)-1| / |2+exp(i*error)|.
+    phases = {p:(magnitude,rotation+a) for p,a in zip("ABC",(0,-120,120))}
+    assert grade(phases,0) == "PASS"
+    phases["C"] = (magnitude,rotation+120+error)
+    assert grade(phases,lower) == "FAIL"
+    assert grade(phases,upper) == "PASS"
+    phases["C"] = (magnitude,None)
+    assert grade(phases,upper) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("amps,ohms,duration,limit", [(200,0.4,0.1,80),(1000,0.04,0.5,40),(80,0.25,2,20)])
+def test_touch_voltage_for_fault_duration(amps,ohms,duration,limit):
+    from benches.x03_quality import touch_voltage_quality as grade
+    bands = [(0.1,80),(0.5,40),(2,20)]
+    assert grade(amps,ohms,duration,bands) == "PASS"
+    assert grade(amps+1,ohms,duration,bands) == "FAIL"
+    assert grade(amps,None,duration,bands) == "INCOMPLETE"
+    assert grade(amps,ohms,3,bands) == "INCOMPLETE"

@@ -749,3 +749,36 @@ def hole_bearing_quality(forces_n, holes):
         if abs(Fraction(str(force))) > thickness * diameter * allowable:
             return "FAIL"
     return "PASS"
+
+
+def net_section_quality(width_mm, thickness_mm, holes, tension_n, allowable_mpa):
+    """Minimum net width across straight and staggered paths through circular holes.
+
+    Hole coordinates are longitudinal x and transverse y in mm, followed by effective diameter.
+    """
+    if not all(map(finite_measure, (width_mm, thickness_mm, tension_n, allowable_mpa))):
+        return "INCOMPLETE"
+    if min(width_mm, thickness_mm, allowable_mpa) <= 0 or tension_n < 0 or not isinstance(holes, list):
+        return "INCOMPLETE"
+    width = Fraction(str(width_mm))
+    points = []
+    for hole in holes:
+        if not isinstance(hole, (list, tuple)) or len(hole) != 3 or not all(map(finite_measure, hole)):
+            return "INCOMPLETE"
+        x, y, diameter = (Fraction(str(v)) for v in hole)
+        if diameter <= 0 or y < diameter/2 or width-y < diameter/2:
+            return "INCOMPLETE"
+        for yy, xx, dd in points:
+            if (xx-x)**2 + (yy-y)**2 < ((dd+diameter)/2)**2:
+                return "INCOMPLETE"
+        points.append((y, x, diameter))
+    # Largest net deduction for any path ending at each transverse station.
+    paths = []
+    largest = 0
+    for y, x, diameter in sorted(points):
+        extension = max((loss - (x-px)**2 / (4*(y-py)) for py, px, loss in paths if py < y), default=0)
+        loss = diameter + max(0, extension)
+        paths.append((y, x, loss))
+        largest = max(largest, loss)
+    capacity = (width-largest) * Fraction(str(thickness_mm)) * Fraction(str(allowable_mpa))
+    return "PASS" if capacity > 0 and Fraction(str(tension_n)) <= capacity else "FAIL"

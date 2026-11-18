@@ -736,3 +736,24 @@ def test_weighted_wind_direction_crosses_north(rows,direction,arithmetic):
     assert check(rows,arithmetic) == "FAIL"
     assert check([(90,1),(270,1)],direction) == "INCOMPLETE"
     assert check([(0,2),(90,1)],26.565051) == "PASS"
+
+
+@pytest.mark.parametrize("part,exposures,residual", [
+    ("rail",[("salt",10)],3), ("rack",[("sheltered",10),("salt",5)],3.5),
+    ("liner",[("sheltered",20)],4),
+])
+def test_residual_material_after_recorded_exposure(part,exposures,residual):
+    from benches.x03_catalog_oracle import corrosion_allowance_quality as grade
+    sheet = dict(revision="corrosion",loss_mm_per_year={(part,"salt"):0.2,(part,"sheltered"):0.05})
+    assert grade("corrosion",sheet,part,exposures,5,residual) == "PASS"
+    assert grade("corrosion",sheet,part,exposures,5,residual+0.01) == "FAIL"
+    assert grade("corrosion",sheet,part,[("unknown",1)],5,residual) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("pressure,kelvin,speed,dynamic", [(86100,300,10,50),(71750,250,20,200),(86100,250,5,15)])
+def test_wind_pressure_at_recorded_density(pressure,kelvin,speed,dynamic):
+    from benches.x03_weather_oracle import wind_dynamic_pressure_quality as grade
+    model = dict(method="dry-ideal-gas",specific_r_j_kg_k=287)
+    assert grade(pressure,kelvin,speed,model,dynamic) == "PASS"
+    assert grade(pressure,kelvin,speed,model,1.225*speed**2/2) == "FAIL"
+    assert grade(pressure,None,speed,model,dynamic) == "INCOMPLETE"

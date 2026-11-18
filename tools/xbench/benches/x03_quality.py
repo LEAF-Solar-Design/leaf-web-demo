@@ -1727,3 +1727,51 @@ def insulation_spacing_quality(surface_path_mm, pollution_degree, revision, rule
     surface = fsum(dist(a, b) for a, b in zip(surface_path_mm, surface_path_mm[1:]))
     air = dist(surface_path_mm[0], surface_path_mm[-1])
     return "PASS" if all(v >= m or isclose(v, m, rel_tol=1e-14) for v, m in zip((surface, air), minima)) else "FAIL"
+
+
+def voltage_unbalance_quality(phasors, percent_limit):
+    """ABC phase-to-neutral RMS phasors. Compare the negative to positive sequence amplitude."""
+    from cmath import rect
+    from math import radians, isclose
+    if not isinstance(phasors, dict) or set(phasors) != {"A", "B", "C"}:
+        return "INCOMPLETE"
+    if not finite_measure(percent_limit) or percent_limit < 0:
+        return "INCOMPLETE"
+    measurements = [phasors[p] for p in "ABC"]
+    for row in measurements:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)) or row[0] < 0:
+            return "INCOMPLETE"
+    scale = max(magnitude for magnitude, _ in measurements)
+    if scale == 0:
+        return "INCOMPLETE"
+    va, vb, vc = (rect(magnitude / scale, radians(angle % 360)) for magnitude, angle in measurements)
+    a = rect(1, radians(120))
+    positive = abs(va + a * vb + a.conjugate() * vc)
+    negative = abs(va + a.conjugate() * vb + a * vc)
+    if positive < 1e-14:
+        return "FAIL" if negative >= 1e-14 else "INCOMPLETE"
+    percent = 100 * negative / positive
+    return "PASS" if percent <= percent_limit or isclose(percent, percent_limit, rel_tol=1e-12, abs_tol=1e-12) else "FAIL"
+
+
+def touch_voltage_quality(fault_a, bonding_ohm, duration_s, duration_limits):
+    """Use RMS current through the recorded bonding impedance and the first inclusive time ceiling."""
+    if not all(map(finite_measure, (fault_a, bonding_ohm, duration_s))) or min(fault_a, bonding_ohm) < 0 or duration_s <= 0:
+        return "INCOMPLETE"
+    if not isinstance(duration_limits, list):
+        return "INCOMPLETE"
+    previous = 0
+    applicable = None
+    for band in duration_limits:
+        if not isinstance(band, (tuple, list)) or len(band) != 2 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        through, volts = band
+        if through <= previous or volts < 0:
+            return "INCOMPLETE"
+        if previous < duration_s <= through:
+            applicable = volts
+        previous = through
+    if applicable is None:
+        return "INCOMPLETE"
+    potential = Fraction(str(fault_a)) * Fraction(str(bonding_ohm))
+    return "PASS" if potential <= Fraction(str(applicable)) else "FAIL"
