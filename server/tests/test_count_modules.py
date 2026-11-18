@@ -576,6 +576,10 @@ def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
     ("Select only the west, north, and East panel sets. What percentage of that selection is on each layer?",
      {"East", "West", "North"}),
     ("Within the window (-1,-1) to (3,2), what percentage of the selected panels is on each layer?", {"West"}),
+    ("How are modules distributed across layers?", {"East", "West", "North"}),
+    ("Show the per-layer panel percentage", {"East", "West", "North"}),
+    ("What % of panels is on each layer inside the box from (-1,-1) to (3,2)?", {"West"}),
+    ("For the West and North layers, show me the layer share breakdown between (-1,-1) and (3,2).", {"West"}),
 ])
 def test_share_request_selection_and_window(phrase, expected):
     import deps

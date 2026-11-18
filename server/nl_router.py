@@ -433,27 +433,36 @@ _GROUPED_PANELS = re.compile(
 
 _COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
 _PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
-_SHARE_WINDOW = re.compile(rf"within the window\s+{_PAIR}\s+to\s+{_PAIR},\s*", re.I)
-_SHARE_SELECTION = re.compile(r"select only the (.+?) (?:panel|module) sets?\.\s*", re.I)
+_SHARE_WINDOW = re.compile(
+    rf"\b(?:within|inside|in|between)\s+(?:(?:the\s+)?(?:window|region|box)\s+)?"
+    rf"(?:from\s+)?{_PAIR}\s+(?:to|and)\s+{_PAIR}", re.I)
+_SHARE_SELECTION = re.compile(
+    r"(?:^|(?<=[,.?]))\s*(?:select\s+(?:only\s+)?|only\s+|for\s+)(?:the\s+)?"
+    r"(?P<names>[^.?!]+?)\s+(?:(?:panel|module)\s+sets?|layers?)\b", re.I)
 _SHARE_QUERY = re.compile(
-    r"what (?:percentage|fraction|share) of (?:all (?:panels|modules)|"
-    r"the selected (?:panels|modules)|that selection) is on each layer[?!.]?", re.I)
+    r"(?:(?:what(?:'s| is)?|show(?: me)?|give me)\s+(?:the\s+)?"
+    r"(?:percentage|fraction|share|%)\s+of\s+(?:(?:all|the selected)\s+)?"
+    r"(?:panels?|modules?|that selection)\s+(?:is\s+)?(?:on each|in each|per|by)\s+layer"
+    r"|how are (?:panels|modules) distributed (?:across|among) layers"
+    r"|(?:show(?: me)?\s+)?(?:the\s+)?(?:per-layer (?:panel |module )?(?:percentage|share)"
+    r"|(?:panel |module )?layer share breakdown))", re.I)
 
 
 def _share_params(text):
     remaining = text.strip()
     params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
-    window = _SHARE_WINDOW.match(remaining)
-    selection = _SHARE_SELECTION.match(remaining)
+    window = _SHARE_WINDOW.search(remaining)
     if window:
         params["region"] = [float(value) for value in window.groups()]
-        remaining = remaining[window.end():]
-    elif selection:
-        params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection[1], flags=re.I)
-        remaining = remaining[selection.end():]
-    if not _SHARE_QUERY.fullmatch(remaining):
+        remaining = remaining[:window.start()] + " " + remaining[window.end():]
+    selection = _SHARE_SELECTION.search(remaining)
+    if selection:
+        params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection["names"], flags=re.I)
+        remaining = remaining[:selection.start()] + " " + remaining[selection.end():]
+    query = remaining.strip(" ,.?!")
+    if not _SHARE_QUERY.fullmatch(query):
         return None
-    if not window and not selection and "of all " not in remaining.lower():
+    if re.search(r"\b(?:selected|that selection)\b", query, re.I) and not (window or selection):
         return None
     return params
 
