@@ -276,3 +276,14 @@ def test_weak_axis_buckling(condition,k,below,above):
     assert grade([rail],{condition:k}) == "PASS"
     assert grade([dict(rail,compression_n=above)],{condition:k}) == "FAIL"
     assert grade([rail],{}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ballast,offset,stable", [(3,4,True), (1,4,True), (1,5,False)])
+def test_mass_projection_against_support_triangle(ballast,offset,stable):
+    from benches.x03_layout_oracle import support_polygon_quality as grade
+    # At y=1 the triangular base runs from x=0 to x=2.
+    supports = [(0,0),(4,0),(0,2)]
+    parts = [dict(mass=ballast,center=(0,1,1)),dict(mass=1,center=(offset,1,3))]
+    assert grade(parts,supports) == ("PASS" if stable else "FAIL")
+    assert grade(parts+[dict(mass=10,center=(9,1,0))],supports) == "FAIL"
+    assert grade([dict(mass=3)],supports) == "INCOMPLETE"

@@ -307,3 +307,34 @@ def revocation_quality(receipt, issued_at, as_of, supersessions):
         if when <= as_of:
             return "FAIL"
     return "PASS"
+
+
+def retention_retry_quality(attempts, ttl):
+    """A logical delivery can commit once. Expired retries must reconcile or be refused."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not finite_measure(ttl) or ttl <= 0 or not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    bindings = {}
+    previous = None
+    for row in attempts:
+        if not isinstance(row, dict):
+            return "INCOMPLETE"
+        key, delivery, time, expiry, effects, status = (row.get(k) for k in
+            ("key", "delivery", "time", "expires", "new_effects", "status"))
+        if not all(isinstance(k, str) and k for k in (key, delivery, status)) or not all(map(finite_measure, (time, expiry))) or type(effects) is not int:
+            return "INCOMPLETE"
+        if previous is not None and time < previous:
+            return "INCOMPLETE"
+        previous = time
+        if delivery not in bindings:
+            if status != "committed" or effects != 1 or Fraction(str(expiry)) != Fraction(str(time)) + Fraction(str(ttl)):
+                return "FAIL"
+            bindings[delivery] = (key, expiry)
+        else:
+            if bindings[delivery] != (key, expiry) or effects != 0:
+                return "FAIL"
+            allowed = ("replayed",) if time < expiry else ("reconciled", "refused")
+            if status not in allowed:
+                return "FAIL"
+    return "PASS"
