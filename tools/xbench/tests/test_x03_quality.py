@@ -139,3 +139,125 @@ def test_bounded_route_and_geometry_backed_string(limit):
     assert string_edge_quality("abc",graph,dict(points,c=(limit,limit+1)),limit) == "FAIL"
     del points["a"]
     assert string_edge_quality("abc",graph,points,limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sizes", [(2, 3), (1, 2, 2), (4, 1)])
+def test_every_panel_belongs_to_one_contiguous_string(sizes):
+    from benches.x03_quality import string_partition_quality
+    panels = list(range(sum(sizes)))
+    edges = {p: [n for n in (p-1, p+1) if n in panels] for p in panels}
+    strings = [panels[sum(sizes[:i]):sum(sizes[:i+1])] for i in range(len(sizes))]
+    assert string_partition_quality(strings, panels, edges) == "PASS"
+    assert string_partition_quality(strings[:-1], panels, edges) == "FAIL"
+    assert string_partition_quality(strings + [[panels[-1]]], panels, edges) == "FAIL"
+    assert string_partition_quality(strings, None, edges) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("caps,options", [
+    ([3, 3], [[0], [0], [0], [1]]),
+    ([3, 2], [[0, 1], [0], [1]]),
+    ([2, 2, 1], [[0, 1], [0, 2], [0]]),
+])
+def test_eligible_assignments_against_exhaustive_reference(caps, options):
+    from fractions import Fraction
+    from itertools import product
+    strings = list(range(len(options)))
+    eligibility = dict(enumerate(options))
+    candidates = {}
+    for assignment in product(range(len(caps)), repeat=len(strings)):
+        if any(i not in options[s] for s, i in enumerate(assignment)):
+            continue
+        fills = [Fraction(assignment.count(i), cap) for i, cap in enumerate(caps)]
+        if max(fills) <= 1:
+            candidates[assignment] = max(fills) - min(fills)
+    optimum = min(candidates.values())
+    for assignment in product(range(len(caps)), repeat=len(strings)):
+        groups = [[s for s, slot in enumerate(assignment) if slot == i] for i in range(len(caps))]
+        expected = "PASS" if candidates.get(assignment) == optimum else "FAIL"
+        assert inverter_quality(strings, caps, groups, eligibility=eligibility) == expected
+
+
+@pytest.mark.parametrize("series,parallel,volts,amps,peak_v,total_a", [
+    (3, 2, 40, 9, 120, 18), (5, 1, 32, 8, 160, 8), (2, 4, 50, 2.5, 100, 10),
+])
+def test_series_parallel_limits(series, parallel, volts, amps, peak_v, total_a):
+    from benches.x03_quality import wiring_quality
+    strings = [dict(module="M", series_count=series) for _ in range(parallel)]
+    ratings = {"M": dict(volts=volts, amps=amps)}
+    assert wiring_quality(strings, ratings, peak_v, total_a) == "PASS"
+    assert wiring_quality(strings, ratings, peak_v-1, total_a) == "FAIL"
+    assert wiring_quality(strings, ratings, peak_v, total_a-1) == "FAIL"
+    assert wiring_quality(strings, {"M": {"volts": volts}}, peak_v, total_a) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("amps,slots,limits", [
+    ([4, 6, 2], [1, 2], [6, 8]), ([8, 2], [2, 2], [8, 6]), ([3, 3, 3], [2, 1], [7, 4]),
+])
+def test_tracker_limits_for_all_assignments(amps, slots, limits):
+    from itertools import product
+    from benches.x03_quality import mppt_quality
+    trackers = {i: dict(inputs=n, amps=limits[i]) for i, n in enumerate(slots)}
+    for choice in product(trackers, repeat=len(amps)):
+        ok = all(choice.count(i) <= slots[i] and sum(a for a, j in zip(amps, choice) if j == i) <= limits[i]
+                 for i in trackers)
+        assert mppt_quality(dict(enumerate(amps)), trackers, dict(enumerate(choice))) == ("PASS" if ok else "FAIL")
+
+
+@pytest.mark.parametrize("span,tolerance", [(2, 0), (4, 0.5), (8, 1)])
+def test_all_assigned_terminal_paths(span, tolerance):
+    from shapely.geometry import LineString, Point
+    from benches.x03_quality import terminal_route_quality
+    terminals = {"a": Point(-1-tolerance, 1), "b": Point(-1, -1)}
+    destinations = {"x": Point(span+1, 2), "y": Point(span+1, -2)}
+    assignments = {"a": "x", "b": "y"}
+    paths = {t: LineString([(-1, terminals[t].y), (0, 0), (span, 0), destinations[d].coords[0]])
+             for t, d in assignments.items()}
+    trunk = LineString([(0, 0), (span, 0)])
+    def grade(edges, mapping, shared):
+        return terminal_route_quality(edges, terminals, destinations, mapping, shared, tolerance)
+    assert grade(paths, assignments, trunk) == "PASS"
+    assert grade(paths, assignments, LineString(list(trunk.coords)[::-1])) == "FAIL"
+    assert grade(paths, {"a": "y", "b": "x"}, trunk) == "FAIL"
+    assert grade(paths, assignments, LineString([(0, 4), (span, 4)])) == "FAIL"
+    assert grade(paths, assignments, None) == "INCOMPLETE"
+    assert grade({"a": paths["a"]}, assignments, trunk) == "FAIL"
+
+
+@pytest.mark.parametrize("rated,factors,capacity", [
+    (100, {"heat": 0.8, "bundle": 0.75}, 60),
+    (75, {"ambient": 0.92}, 69),
+    (50, {"ambient": 0.8, "group": 0.8, "installation": 0.5}, 16),
+])
+def test_recorded_ampacity(rated, factors, capacity):
+    from benches.x03_quality import conductor_ampacity_quality
+    names = list(factors)
+    assert conductor_ampacity_quality(rated, capacity, factors, names) == "PASS"
+    assert conductor_ampacity_quality(rated, capacity+0.01, factors, names) == "FAIL"
+    assert conductor_ampacity_quality(rated, capacity, {}, names) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("length,length_unit,resistance,res_unit,amps,volts", [
+    (100, "m", 0.01, "ohm/m", 3, 3), (0.4, "km", 2, "ohm/km", 10, 8),
+    (100, "ft", 0.5, "ohm/km", 10, 0.1524),
+])
+def test_round_trip_drop(length, length_unit, resistance, res_unit, amps, volts):
+    from benches.x03_quality import dc_drop_quality
+    units = dict(length=length_unit, resistance=res_unit, current="A", drop="V")
+    assert dc_drop_quality(length, resistance, amps, volts, units=units) == "PASS"
+    assert dc_drop_quality(length, resistance, amps, volts-0.001, units=units) == "FAIL"
+    del units["resistance"]
+    assert dc_drop_quality(length, resistance, amps, volts, units=units) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("radius,sign,offset", [(2, 1, 0), (3, -1, 7), (4, 1, -3)])
+def test_circular_bend_and_tangent_join(radius, sign, offset):
+    from benches.x03_quality import bend_radius_quality
+    start = (offset, 0)
+    end = (offset+radius, sign*radius)
+    arc = dict(kind="arc", start=start, end=end, center=(offset, sign*radius),
+               direction="ccw" if sign == 1 else "cw")
+    lead = dict(kind="line", start=(offset-1, 0), end=start)
+    assert bend_radius_quality([lead, arc], radius) == "PASS"
+    assert bend_radius_quality([lead, arc], radius+0.01) == "FAIL"
+    assert bend_radius_quality([lead, dict(kind="line", start=start, end=end)], radius) == "FAIL"
+    assert bend_radius_quality([lead, dict(arc, center=None)], radius) == "INCOMPLETE"

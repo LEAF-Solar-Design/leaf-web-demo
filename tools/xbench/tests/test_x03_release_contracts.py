@@ -138,3 +138,47 @@ def test_aggregate_limit_checked_before_read(tmp_path,monkeypatch,count):
     assert package_quality(path,manifest,max_total_bytes=count*2) == "PASS"
     monkeypatch.setattr(ZipFile,"open",lambda *a,**kw:pytest.fail("early content read"))
     assert package_quality(path,manifest,max_total_bytes=count*2-1) == "FAIL"
+
+@pytest.mark.parametrize(("first", "alias", "distinct"), [
+    ("panels/Table.csv", "panels/TABLE.csv", "panels/tables.csv"),
+    ("beams/caf\u00e9.py", "beams/cafe\u0301.py", "beams/cafe.py"),
+    ("ducts/Stra\u00dfe.dat", "ducts/STRASSE.dat", "ducts/strase.dat"),
+])
+def test_canonical_package_collisions(tmp_path, first, alias, distinct):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+
+    package = tmp_path / "package.zip"
+    digest = hashlib.sha256(b"tool").hexdigest()
+
+    def manifest(names):
+        return {"members": list(names), "sha256": dict.fromkeys(names, digest)}
+
+    for second, verdict in ((alias, "FAIL"), (distinct, "PASS")):
+        for names in ((first, second), (second, first)):
+            with ZipFile(package, "w") as archive:
+                for name in names:
+                    archive.writestr(name, b"tool")
+            assert package_quality(package, manifest(names)) == verdict
+            if second == alias:
+                assert package_quality(package, manifest([first])) == "FAIL"
+    assert list(tmp_path.iterdir()) == [package]
+
+
+@pytest.mark.parametrize("name", ["panels/tool.json", "beams/length.csv", "ducts/report.txt"])
+def test_manifest_inventory_before_content(tmp_path, name):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path / "release.zip"
+    directory = name.split("/")[0] + "/"
+    manifest = dict(members=[name], sha256={name: hashlib.sha256(b"data").hexdigest()})
+    for files, verdict in (([directory, name], "PASS"), ([directory], "FAIL"),
+                           ([directory, name, "extra.exe"], "FAIL")):
+        with ZipFile(path, "w") as archive:
+            for member in files:
+                archive.writestr(member, b"" if member.endswith("/") else b"data")
+        assert package_quality(path, manifest) == verdict
+    with ZipFile(path, "w") as archive:
+        archive.writestr(directory, b"")
+    assert package_quality(path, dict(members=[], sha256={})) == "INCOMPLETE"
+    assert list(tmp_path.iterdir()) == [path]

@@ -33,6 +33,11 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
     live = handle_set(inventory.get("live_handles"))
     if live is None:
         return "INCOMPLETE"
+    deleted = handle_set(inventory.get("deleted_handles", []))
+    if deleted is None:
+        return "INCOMPLETE"
+    if live & deleted:
+        return "FAIL"
     if any(not handles.issubset(live) for handles in sets):
         return "FAIL"
     before, after = sets[:2]
@@ -46,11 +51,66 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
     if requested_scope == "full-drawing":
         expected = [live, live]
     elif requested_scope == "visible-only":
-        visible = handle_set(inventory.get("visible_handles"))
-        if visible is None:
+        entities, layers = inventory.get("entities"), inventory.get("layers")
+        if not isinstance(entities, list) or not isinstance(layers, dict):
             return "INCOMPLETE"
-        if not visible.issubset(live):
+        visible, seen = set(), set()
+        for entity in entities:
+            if not isinstance(entity, dict) or type(entity.get("visible")) is not bool:
+                return "INCOMPLETE"
+            handles = handle_set([entity.get("handle")])
+            layer_name = entity.get("layer")
+            layer = layers.get(layer_name) if isinstance(layer_name, str) else None
+            if handles is None or not isinstance(layer, dict) or any(
+                    type(layer.get(k)) is not bool for k in ("on", "frozen")):
+                return "INCOMPLETE"
+            if seen & handles or not handles <= live:
+                return "FAIL"
+            seen.update(handles)
+            if entity["visible"] and layer["on"] and not layer["frozen"]:
+                visible.update(handles)
+        if seen != live:
+            return "INCOMPLETE"
+        if "visible_handles" in inventory and handle_set(inventory["visible_handles"]) != visible:
             return "FAIL"
         expected = [visible, visible]
     return "PASS" if (expected == sets[2:] and after-before == additions
                       and before-after == removals) else "FAIL"
+
+
+def snapshot_roundtrip_quality(saved, exported, expected_handles):
+    """Compare a revision's exported entity snapshots keyed by normalized handle."""
+    import json
+    expected = handle_set(expected_handles)
+    if expected is None or not all(isinstance(s, dict) for s in (saved, exported)):
+        return "INCOMPLETE"
+    for key in ("drawing", "version"):
+        if not all(isinstance(s.get(key), str) and s[key] for s in (saved, exported)):
+            return "INCOMPLETE"
+        if saved[key] != exported[key]:
+            return "FAIL"
+    snapshots = []
+    for record in (saved, exported):
+        if not isinstance(record.get("entities"), list):
+            return "INCOMPLETE"
+        entities = {}
+        for entity in record["entities"]:
+            if not isinstance(entity, dict):
+                return "INCOMPLETE"
+            handles = handle_set([entity.get("handle")])
+            if (not handles or not isinstance(entity.get("geometry"), dict) or not entity["geometry"]
+                    or not isinstance(entity.get("layer"), str) or not entity["layer"]
+                    or not isinstance(entity.get("attributes"), dict)):
+                return "INCOMPLETE"
+            handle = next(iter(handles))
+            if handle in entities or handle not in expected:
+                return "FAIL"
+            try:
+                entities[handle] = json.dumps([entity[k] for k in ("geometry", "layer", "attributes")],
+                                              sort_keys=True, allow_nan=False)
+            except (ValueError, TypeError):
+                return "INCOMPLETE"
+        if entities.keys() != expected:
+            return "INCOMPLETE"
+        snapshots.append(entities)
+    return "PASS" if snapshots[0] == snapshots[1] else "FAIL"

@@ -62,3 +62,20 @@ def test_expected_inventory_prevents_omissions(drawing):
     assert check([],[]) == "FAIL"
     assert check([dict(row,id="unknown")],totals) == "FAIL"
     assert check([row],[]) == "FAIL"
+
+@pytest.mark.parametrize("tool", ["panel", "beam", "duct"])
+def test_dashboard_summary_reconciles_to_runs(tool):
+    from benches.x03_dashboard_oracle import dashboard_quality
+    row = dict(drawing="d", version="v", tool=tool, revision="historic")
+    runs = [dict(row, id="1", status="complete", duration_seconds=3),
+            dict(row, id="2", status="cancelled", duration_seconds=7)]
+    summary = dict(success_rate=0.5, mean_duration_seconds=5, max_duration_seconds=7)
+    def check(rows, report):
+        return dashboard_quality(rows, [], [], "old", "new",
+                                 expected_run_ids=[r["id"] for r in rows], summary=report)
+    assert check(runs, summary) == "PASS"
+    for field in summary:
+        assert check(runs, dict(summary, **{field: 99})) == "FAIL"
+    assert check([], summary) == "INCOMPLETE"
+    for duration in (-1, None, float("nan")):
+        assert check([dict(runs[0], duration_seconds=duration), runs[1]], summary) == "INCOMPLETE"

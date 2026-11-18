@@ -1,10 +1,11 @@
 """Reconcile external failure and output-change rows to revision-bound runs."""
 from collections import Counter
+from math import isclose, isfinite
 import json
 import re
 
 
-def dashboard_quality(runs, failures, changes, before, after, *, expected_run_ids=None):
+def dashboard_quality(runs, failures, changes, before, after, *, expected_run_ids=None, summary=None):
     if not before or not after or before == after:
         return "INCOMPLETE"
     ids, failed, outputs = set(), Counter(), {}
@@ -57,4 +58,26 @@ def dashboard_quality(runs, failures, changes, before, after, *, expected_run_id
         valid = len(totals) == len(failures) and totals == dict(failed) and Counter(claimed) == Counter(expected)
     except (KeyError, TypeError):
         return "INCOMPLETE"
-    return "PASS" if valid else "FAIL"
+    if not valid:
+        return "FAIL"
+    if summary is None:
+        return "PASS"
+    if not isinstance(summary, dict):
+        return "INCOMPLETE"
+    durations = [run.get("duration_seconds") for run in runs]
+    def finite_nonnegative(value):
+        try:
+            return type(value) in (int, float) and isfinite(value) and value >= 0
+        except OverflowError:
+            return False
+    if not all(map(finite_nonnegative, durations)):
+        return "INCOMPLETE"
+    metrics = {
+        "success_rate": sum(run["status"] == "complete" for run in runs) / len(runs),
+        "mean_duration_seconds": sum(value / len(runs) for value in durations),
+        "max_duration_seconds": max(durations),
+    }
+    if not all(key in summary for key in metrics):
+        return "INCOMPLETE"
+    return "PASS" if all(finite_nonnegative(summary[k]) and isclose(summary[k], v)
+                         for k, v in metrics.items()) else "FAIL"

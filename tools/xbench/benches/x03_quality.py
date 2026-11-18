@@ -21,7 +21,7 @@ def route_quality(route, aisle, arrays):
     return "PASS"
 
 
-def inverter_quality(strings, capacities, groups):
+def inverter_quality(strings, capacities, groups, *, eligibility=None):
     if capacities is None or groups is None or strings is None:
         return "INCOMPLETE"
     if (not capacities or len(groups) != len(capacities) or
@@ -33,6 +33,33 @@ def inverter_quality(strings, capacities, groups):
         return "FAIL"
     fills = [Fraction(n, c) for n, c in zip(loads, capacities)]
     spread = max(fills) - min(fills)
+    if eligibility is not None:
+        if not isinstance(eligibility, dict) or set(eligibility) != set(strings):
+            return "INCOMPLETE"
+        for options in eligibility.values():
+            if not isinstance(options, (list, tuple, set)) or any(
+                    type(i) is not int or not 0 <= i < len(groups) for i in options):
+                return "INCOMPLETE"
+        if any(i not in eligibility[s] for i, group in enumerate(groups) for s in group):
+            return "FAIL"
+        if spread == 0:
+            return "PASS"
+        # Each tuple represents one reachable load distribution after this prefix.
+        states = {(0,) * len(groups)}
+        for string in strings:
+            following = set()
+            for state in states:
+                for i in eligibility[string]:
+                    if state[i] < capacities[i]:
+                        following.add(state[:i] + (state[i] + 1,) + state[i+1:])
+                        if len(following) > 100_000:
+                            return "INCOMPLETE"
+            states = following
+        for state in states:
+            fills = [Fraction(n, c) for n, c in zip(state, capacities)]
+            if max(fills) - min(fills) < spread:
+                return "FAIL"
+        return "PASS"
     if spread == 0:
         return "PASS"
     total = len(strings)
@@ -141,3 +168,193 @@ def clearance_quality(route, aisle, arrays, clearance):
     # Distance is the exact buffer-radius test and includes boundary equality.
     distances = [route.distance(aisle.boundary), *(route.distance(a) for a in arrays)]
     return "PASS" if min(distances) >= clearance else "FAIL"
+
+
+def string_partition_quality(strings, inventory, adjacency):
+    """Every inventoried panel must belong to exactly one contiguous string."""
+    if not isinstance(inventory, (list, tuple)) or not inventory or not isinstance(adjacency, dict):
+        return "INCOMPLETE"
+    if not isinstance(strings, (list, tuple)) or any(not isinstance(g, (list, tuple)) for g in strings):
+        return "INCOMPLETE"
+    try:
+        expected = Counter(inventory)
+        actual = Counter(panel for group in strings for panel in group)
+    except TypeError:
+        return "INCOMPLETE"
+    if any(n != 1 for n in expected.values()):
+        return "INCOMPLETE"
+    if actual != expected or any(not group for group in strings):
+        return "FAIL"
+    for group in strings:
+        verdict = string_quality(group, adjacency)
+        if verdict != "PASS":
+            return verdict
+    return "PASS"
+
+
+def wiring_quality(strings, module_ratings, max_voltage, max_current):
+    """Grade parallel strings of identical series modules at the supplied rating point.
+
+    Each record names the module type and series count. Limits and ratings
+    are supplied for the same operating condition.
+    """
+    if not strings or not isinstance(module_ratings, dict) or None in (max_voltage, max_current):
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v > 0 for v in (max_voltage, max_current)):
+        return "FAIL"
+    parallel_current = Fraction(0)
+    for string in strings:
+        if not isinstance(string, dict) or not isinstance(string.get("module"), str):
+            return "INCOMPLETE"
+        rating = module_ratings.get(string["module"])
+        if not isinstance(rating, dict) or any(rating.get(k) is None for k in ("volts", "amps")):
+            return "INCOMPLETE"
+        count = string.get("series_count")
+        if count is None:
+            return "INCOMPLETE"
+        if type(count) is not int or count < 1 or not all(
+                finite_measure(rating[k]) and rating[k] > 0 for k in ("volts", "amps")):
+            return "FAIL"
+        if count * Fraction(str(rating["volts"])) > Fraction(str(max_voltage)):
+            return "FAIL"
+        parallel_current += Fraction(str(rating["amps"]))
+    return "PASS" if parallel_current <= Fraction(str(max_current)) else "FAIL"
+
+
+def mppt_quality(currents, trackers, assignments):
+    """Require exactly one tracker assignment per string and enforce each tracker limit."""
+    if not all(isinstance(x, dict) and x for x in (currents, trackers, assignments)):
+        return "INCOMPLETE"
+    if set(assignments) != set(currents):
+        return "FAIL"
+    loads = Counter()
+    amps = Counter()
+    for string, tracker in assignments.items():
+        if not isinstance(tracker, (str, int)) or tracker not in trackers:
+            return "FAIL"
+        current = currents[string]
+        if current is None:
+            return "INCOMPLETE"
+        if not finite_measure(current) or current <= 0:
+            return "FAIL"
+        loads[tracker] += 1
+        amps[tracker] += Fraction(str(current))
+    for tracker, limits in trackers.items():
+        if not isinstance(limits, dict) or any(limits.get(k) is None for k in ("inputs", "amps")):
+            return "INCOMPLETE"
+        count, current = limits["inputs"], limits["amps"]
+        if type(count) is not int or count < 0 or not finite_measure(current) or current < 0:
+            return "FAIL"
+        if loads[tracker] > count or amps[tracker] > Fraction(str(current)):
+            return "FAIL"
+    return "PASS"
+
+
+def terminal_route_quality(routes, terminals, destinations, assignments, trunk, tolerance):
+    """Check complete directed planar paths including their declared common trunk."""
+    from shapely.geometry import Point
+    if not all(isinstance(x, dict) and x for x in (routes, terminals, destinations, assignments)):
+        return "INCOMPLETE"
+    if trunk is None or tolerance is None:
+        return "INCOMPLETE"
+    if (trunk.geom_type != "LineString" or trunk.is_empty or not trunk.is_valid
+            or not finite_measure(tolerance) or tolerance < 0):
+        return "FAIL"
+    if set(routes) != set(terminals) or set(assignments) != set(terminals):
+        return "FAIL"
+    for terminal, route in routes.items():
+        start = terminals[terminal]
+        end = destinations.get(assignments[terminal])
+        if any(p is None or p.is_empty for p in (start, end, route)):
+            return "INCOMPLETE"
+        if (start.geom_type != "Point" or end.geom_type != "Point" or route.geom_type != "LineString"
+                or not route.is_valid or not route.is_simple or not route.covers(trunk)
+                or Point(route.coords[0]).distance(start) > tolerance
+                or Point(route.coords[-1]).distance(end) > tolerance):
+            return "FAIL"
+        # A simple route has a unique position for every point on the trunk.
+        if route.project(Point(trunk.coords[0])) >= route.project(Point(trunk.coords[-1])):
+            return "FAIL"
+    return "PASS"
+
+
+def conductor_ampacity_quality(rated_amps, required_amps, factors, required_factors):
+    """Compare recorded load to base ampacity times every declared derating factor."""
+    if rated_amps is None or required_amps is None or not isinstance(factors, dict):
+        return "INCOMPLETE"
+    if not isinstance(required_factors, (tuple, list)) or not all(
+            isinstance(name, str) and name for name in required_factors):
+        return "INCOMPLETE"
+    if len(set(required_factors)) != len(required_factors) or set(required_factors) != factors.keys():
+        return "INCOMPLETE"
+    if not finite_measure(rated_amps) or rated_amps <= 0 or not finite_measure(required_amps) or required_amps < 0:
+        return "FAIL"
+    capacity = Fraction(str(rated_amps))
+    for factor in factors.values():
+        if factor is None:
+            return "INCOMPLETE"
+        if not finite_measure(factor) or not 0 < factor <= 1:
+            return "FAIL"
+        capacity *= Fraction(str(factor))
+    return "PASS" if capacity >= Fraction(str(required_amps)) else "FAIL"
+
+
+def dc_drop_quality(round_trip_length, resistance_per_length, current, max_drop, *, units=None):
+    """Use the full conductor loop length once. The drop limit is in volts."""
+    if not isinstance(units, dict) or any(units.get(k) is None for k in ("length", "resistance", "current", "drop")):
+        return "INCOMPLETE"
+    lengths = {"m": 1, "km": 1000, "ft": Fraction(381, 1250)}
+    resistance_lengths = {"ohm/" + unit: scale for unit, scale in lengths.items()}
+    if (not all(isinstance(v, str) for v in units.values()) or units["length"] not in lengths
+            or units["resistance"] not in resistance_lengths or units["current"] != "A" or units["drop"] != "V"):
+        return "FAIL"
+    values = (round_trip_length, resistance_per_length, current, max_drop)
+    if None in values:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in values):
+        return "FAIL"
+    length, resistance, amps, limit = (Fraction(str(v)) for v in values)
+    drop = amps * length * lengths[units["length"]] * resistance / resistance_lengths[units["resistance"]]
+    return "PASS" if drop <= limit else "FAIL"
+
+
+def bend_radius_quality(segments, min_radius):
+    """Grade directed planar line and circular arc centerlines, including their joins."""
+    from math import dist, hypot, isclose
+    if not isinstance(segments, (tuple, list)) or not segments or min_radius is None:
+        return "INCOMPLETE"
+    if not finite_measure(min_radius) or min_radius <= 0:
+        return "FAIL"
+    previous_end = previous_tangent = None
+    for segment in segments:
+        if not isinstance(segment, dict) or segment.get("kind") not in ("line", "arc"):
+            return "INCOMPLETE"
+        arc = segment["kind"] == "arc"
+        keys = ("start", "end", "center") if arc else ("start", "end")
+        if any(not isinstance(segment.get(k), (tuple, list)) or len(segment[k]) != 2
+               or not all(map(finite_measure, segment[k])) for k in keys):
+            return "INCOMPLETE"
+        start, end = tuple(segment["start"]), tuple(segment["end"])
+        if start == end or (previous_end is not None and start != previous_end):
+            return "FAIL"
+        if arc:
+            center = segment["center"]
+            radius = dist(start, center)
+            if not finite_measure(radius) or radius < min_radius or not isclose(dist(end, center), radius, rel_tol=1e-12):
+                return "FAIL"
+            if segment.get("direction") not in ("cw", "ccw"):
+                return "INCOMPLETE"
+            sign = 1 if segment["direction"] == "ccw" else -1
+            tangents = [(sign*(center[1]-p[1]), sign*(p[0]-center[0])) for p in (start, end)]
+        else:
+            tangents = [(end[0]-start[0], end[1]-start[1])] * 2
+        normalized = []
+        for dx, dy in tangents:
+            norm = hypot(dx, dy)
+            if not finite_measure(norm) or norm == 0:
+                return "FAIL"
+            normalized.append((dx/norm, dy/norm))
+        if previous_tangent is not None and dist(previous_tangent, normalized[0]) > 1e-9:
+            return "FAIL"
+        previous_end, previous_tangent = end, normalized[1]
+    return "PASS"

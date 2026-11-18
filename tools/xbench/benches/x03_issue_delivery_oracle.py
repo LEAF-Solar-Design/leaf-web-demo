@@ -18,6 +18,16 @@ def delivery_quality(attempts, effects, *, revision_order=None, final_state=None
                 return "INCOMPLETE"
             if hashlib.sha256(payload).hexdigest() != digest:
                 return "FAIL"
+            if unique:
+                # Legacy effects are committed receiver records. Explicit lifecycle
+                # events count only once the receiver attests application.
+                if "http_status" in row and "state" not in row:
+                    return "INCOMPLETE"
+                state = row.get("state", "applied")
+                if state in ("accepted", "pending"):
+                    continue
+                if state != "applied":
+                    return "INCOMPLETE"
             if key in index and (unique or index[key] != digest):
                 return "FAIL"
             index[key] = digest

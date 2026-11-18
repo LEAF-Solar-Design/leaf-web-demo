@@ -42,8 +42,52 @@ def test_selections_require_live_handle_in_pinned_inventory(handle):
 def test_export_scope(scope,handles):
     row = dict(drawing="d",version="1",rule_revision="r",handles=["A"])
     inv = dict(drawing="d",version="1",live_handles=["A","B","C"],visible_handles=["A","B"])
+    inv.update(entities=[dict(handle=h, layer="base", visible=h != "C") for h in inv["live_handles"]],
+               layers={"base": dict(on=True, frozen=False)})
     def check(export):
         return selection_quality(row,row,[export,export],[],[],inventory=inv,requested_scope=scope)
     assert check(dict(row,scope=scope,handles=handles)) == "PASS"
     assert check(dict(row,scope=scope,handles=[])) == "FAIL"
     assert check(row) == "INCOMPLETE"
+
+@pytest.mark.parametrize("scope", ["selected-only", "visible-only", "full-drawing"])
+def test_conflicting_handle_states(scope):
+    row = dict(drawing="d", version="v", rule_revision="r", handles=["AB"], scope=scope)
+    for live in (["AB", "00ab"], ["00ab", "AB"]):
+        inv = dict(drawing="d", version="v", live_handles=live, visible_handles=["ab"])
+        inv.update(entities=[dict(handle="AB", layer="base", visible=True)],
+                   layers={"base": dict(on=True, frozen=False)})
+        for deleted, verdict in ((["CD"], "PASS"), (["CD", "0Ab"], "FAIL"), (["0Ab", "CD"], "FAIL")):
+            assert selection_quality(row, row, [row, row], [], [], requested_scope=scope,
+                                     inventory=dict(inv, deleted_handles=deleted)) == verdict
+
+
+@pytest.mark.parametrize("entity_visible,on,frozen", [(False, True, False), (True, False, False), (True, True, True)])
+def test_versioned_visibility(entity_visible, on, frozen):
+    row = dict(drawing="d", version="1", rule_revision="r", handles=["A"])
+    entities = [dict(handle="A", visible=True, layer="base"), dict(handle="B", visible=entity_visible, layer="roof")]
+    layers = {"base": dict(on=True, frozen=False), "roof": dict(on=on, frozen=frozen)}
+    inv = dict(drawing="d", version="1", live_handles=["A", "B"], entities=entities, layers=layers)
+    def check(inventory, handles):
+        export = dict(row, handles=handles, scope="visible-only")
+        return selection_quality(row, row, [export, export], [], [], inventory=inventory, requested_scope="visible-only")
+    assert check(inv, ["A"]) == "PASS"
+    assert check(inv, ["A", "B"]) == "FAIL"
+    assert check(dict(inv, layers={}), ["A"]) == "INCOMPLETE"
+    assert check(dict(inv, version="2"), ["A"]) == "FAIL"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("geometry", {"point": [2, 1]}), ("layer", "hidden"), ("attributes", {"serial": "other"}),
+])
+def test_saved_entities_survive_export(field, value):
+    from benches.x03_selection_oracle import snapshot_roundtrip_quality
+    entity = dict(handle="0a", geometry={"point": [1, 2]}, layer="base", attributes={"serial": "initial"})
+    before = dict(drawing="roof", version="7", entities=[entity])
+    after = dict(entity, handle="A")
+    def grade(rows):
+        return snapshot_roundtrip_quality(before, dict(before, entities=rows), ["000A"])
+    assert grade([after]) == "PASS"
+    assert grade([dict(after, **{field: value})]) == "FAIL"
+    assert grade([{k: v for k, v in after.items() if k != field}]) == "INCOMPLETE"
+    assert grade([]) == "INCOMPLETE"
