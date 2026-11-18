@@ -1,4 +1,4 @@
-"""Public-site demo solve (marketing site backend) — uses the packaged §2
+"""Public-site demo solve (marketing site backend) — owns the inline §2
 "string-panels" tool package and the cached demo solve it produces.
 
 Execution path: the SAME broker chokepoint as every other tool run —
@@ -45,18 +45,93 @@ SITE_TENANT = "site-demo"
 SITE_RUN_GENERATION = "r3"
 SITE_DWG = "rooftop_demo"
 
-# Use the immutable platform package as the single schema and version source.
-# Keeping another literal here can make the demo fail production trust checks
-# after a registry-only schema change. Missing or duplicate packages fail closed.
-def _site_tool() -> Dict[str, Any]:
-    registry = json.loads((SERVER_DIR.parent / "engine" / "registry.json").read_text(encoding="utf-8"))
-    packages = [tool for tool in registry["tools"] if tool.get("name") == "string-panels"]
-    if len(packages) != 1:
-        raise ValueError("Public demo requires one packaged string-panels tool")
-    return packages[0]
-
-
-SITE_TOOL: Dict[str, Any] = _site_tool()
+# Inline §2 tool package. Entry resolves via tool_loader.resolve_local_file
+# (server-dir-relative), so the broker executes server/builtins/string_panels.py.
+# Electrical defaults are MARKETING-DEMO values (public Q.Peak 425-class
+# datasheet ballpark) pending operator blessing — see builtins/string_panels.py.
+SITE_TOOL: Dict[str, Any] = {
+    "name": "string-panels",
+    "version": "1.2.0",
+    "description": ("Bank-clustered, rotation-aware serpentine DC string routing "
+                    "over the Panels layer with an NEC 690.7 cold-temperature "
+                    "string-size check."),
+    "kind": "script",
+    "engine_op": "string_panels",
+    "entry": "builtins/string_panels.py",
+    "offline_only": True,
+    "params": {
+        "type": "object",
+        "properties": {
+            "min_modules_per_string": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional minimum modules per string. Enables bounded adjacency planning.",
+            },
+            "max_modules_per_string": {
+                "type": "integer",
+                "minimum": 1,
+                "description": ("Optional maximum modules per string, capped by the cold Voc limit. "
+                                "Enables bounded adjacency planning with minimum 1 when supplied alone."),
+            },
+            "module_model": {
+                "type": "string",
+                "default": "Q.Peak DUO XL-G11.7 / 425",
+                "description": "Module model label (marketing-demo default).",
+            },
+            "voc": {
+                "type": "number",
+                "default": 48.5,
+                "description": "Module open-circuit voltage at STC, volts (demo default).",
+            },
+            "temp_coeff_pct_per_c": {
+                "type": "number",
+                "default": -0.27,
+                "description": "Voc temperature coefficient, %/degC (demo default).",
+            },
+            "design_min_temp_c": {
+                "type": "number",
+                "default": -25.0,
+                "description": "Design minimum ambient temperature, degC (demo default).",
+            },
+            "max_system_voltage": {
+                "type": "number",
+                "default": 1000.0,
+                "description": ("NEC 690.7 maximum system voltage, volts "
+                                "(commercial-rooftop demo default)."),
+            },
+            "panel_layer": {
+                "type": "string",
+                "default": "Panels",
+                "description": "Intake layer carrying the closed panel polylines.",
+            },
+            "cluster_radius_factor": {
+                "type": "number",
+                "default": 3.0,
+                "description": ("Bank clustering radius as a multiple of the median "
+                                "nearest-neighbor panel distance; strings never "
+                                "cross bank gaps."),
+            },
+        },
+        "required": [],
+    },
+    "returns": {
+        "type": "object",
+        "properties": {
+            "planning": {
+                "type": "object",
+                "description": ("Present for explicit module bounds. Status is complete, infeasible with a proof "
+                                "witness, or unresolved when the deterministic search budget is exhausted. "
+                                "Unsuccessful plans contain no strings."),
+            },
+            "module": {"type": "object"},
+            "electrical": {"type": "object"},
+            "strings": {"type": "array"},
+            "stats": {"type": "object"},
+        },
+    },
+    "capabilities": ["drawing.read"],
+    "provenance": {"author": "site-demo-lane", "created": "2026-07-20T00:00:00Z"},
+}
 
 # Marketing framing constants for the public site (not tool output).
 DRAFTING_HOURS = 25
