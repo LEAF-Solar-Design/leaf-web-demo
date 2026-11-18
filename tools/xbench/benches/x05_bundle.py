@@ -11,7 +11,16 @@ import json
 import math
 import re
 
-from . import x05_reconcile as reconciliation
+if __package__:
+    from . import x05_reconcile as reconciliation
+else:
+    # Direct script execution with -P must not depend on the caller's cwd or
+    # mutate its import path. Load only this trusted peer source module.
+    import importlib.util
+    from pathlib import Path
+    _spec = importlib.util.spec_from_file_location("x05_bundle_reconciliation", Path(__file__).with_name("x05_reconcile.py"))
+    reconciliation = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(reconciliation)
 
 MAX_MEMBERS = 128
 MAX_MEMBER_BYTES = 1_048_576
@@ -20,6 +29,7 @@ MAX_DIAGNOSTICS = 32
 MAX_JSON_CHARS = 262_144
 MAX_JSON_DEPTH = 16
 MAX_REPLAY_JSON_CHARS = 2 * MAX_TOTAL_BYTES + MAX_JSON_CHARS
+MAX_STDIN_BYTES = MAX_REPLAY_JSON_CHARS
 _MEMBER_FIELDS = {"name", "fixture", "stage", "byte_length", "sha256", "design_version"}
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -530,3 +540,78 @@ def replay_bundle_json(text):
     if not decoded["ok"]:
         return _adapter_result(decoded, _result([{"code": "REPLAY_NOT_DECODED"}]), {})
     return reconcile_bundle(**decoded["envelope"])
+
+
+def _cli_unknown(code):
+    return _adapter_result(_result([{"code": code}]), _result([{"code": "REPLAY_NOT_DECODED"}]), {})
+
+
+def _read_stdin(stream):
+    data, size = bytearray(), 0
+    while size <= MAX_STDIN_BYTES:
+        requested = min(8192, MAX_STDIN_BYTES + 1 - size)
+        chunk = stream.read(requested)
+        if type(chunk) is not bytes or len(chunk) > requested:
+            raise ValueError("stdin_unreadable")
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        size += len(chunk)
+    return None
+
+
+def _write_all(stream, payload):
+    offset = 0
+    while offset < len(payload):
+        piece = payload[offset:offset + 8192]
+        count = stream.write(piece)
+        if type(count) is not int or not 0 < count <= len(piece):
+            raise ValueError("stdout_unreadable")
+        offset += count
+    stream.flush()
+
+
+def _mute_failed_stdout():
+    # Prevent interpreter shutdown from retrying a real broken stdout pipe.
+    import os
+    import sys
+    try:
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+    except Exception:
+        pass
+
+
+def main(argv=None):
+    """Stdin-only CLI. Exits:0 PASS,1 FAIL,2 usage,4 UNREADABLE,5 output failure."""
+    import argparse
+    import sys
+    parser = argparse.ArgumentParser(prog="x05_bundle", description="Offline audited X05 bundle replay from stdin; no origin authentication.",
+        epilog="Exits: 0 PASS; 1 FAIL; 2 usage; 4 UNREADABLE; 5 output failure.")
+    parser.add_argument("--replay", action="store_true", help="audit and reconcile one stdin envelope (default)")
+    try:
+        parser.parse_args(argv)
+    except (OSError, UnicodeError, ValueError):
+        _mute_failed_stdout()
+        return 5
+    try:
+        raw = _read_stdin(sys.stdin.buffer)
+        result = _cli_unknown("CLI_INPUT_TOO_LARGE") if raw is None else replay_bundle_json(raw.decode("utf-8", errors="strict"))
+    except Exception:
+        result = _cli_unknown("CLI_INPUT_UNREADABLE")
+    try:
+        output = reconciliation.serialize_result(result)
+    except Exception:
+        result = _cli_unknown("CLI_RESULT_UNREADABLE")
+        output = json.dumps(result, sort_keys=True, ensure_ascii=True, allow_nan=False)
+    try:
+        binary = getattr(sys.stdout, "buffer", None)
+        _write_all(sys.stdout, output + "\n") if binary is None else _write_all(binary, output.encode("ascii") + b"\n")
+    except Exception:
+        _mute_failed_stdout()
+        return 5
+    return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["semantic"]["verdict"]]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
