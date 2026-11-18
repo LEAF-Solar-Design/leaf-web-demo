@@ -338,3 +338,35 @@ def retention_retry_quality(attempts, ttl):
             if status not in allowed:
                 return "FAIL"
     return "PASS"
+
+
+def fencing_quality(events):
+    """Replay ordered lease grants and receiver decisions for each independently fenced resource."""
+    if not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    active = {}
+    previous = None
+    saw_decision = False
+    for event in events:
+        if not isinstance(event, dict):
+            return "INCOMPLETE"
+        seq, resource, worker, epoch = (event.get(k) for k in ("seq", "resource", "worker", "epoch"))
+        if type(seq) is not int or type(epoch) is not int or epoch < 0 or not all(isinstance(k,str) and k for k in (resource,worker)):
+            return "INCOMPLETE"
+        if previous is not None and seq <= previous:
+            return "INCOMPLETE"
+        previous = seq
+        if event.get("kind") == "grant":
+            if resource in active and epoch <= active[resource][0]:
+                return "FAIL"
+            active[resource] = (epoch,worker)
+        elif event.get("kind") == "receive":
+            committed = event.get("committed")
+            if resource not in active or type(committed) is not bool:
+                return "INCOMPLETE"
+            if committed and active[resource] != (epoch,worker):
+                return "FAIL"
+            saw_decision = True
+        else:
+            return "INCOMPLETE"
+    return "PASS" if saw_decision else "INCOMPLETE"

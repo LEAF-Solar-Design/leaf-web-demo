@@ -287,3 +287,12 @@ def test_mass_projection_against_support_triangle(ballast,offset,stable):
     assert grade(parts,supports) == ("PASS" if stable else "FAIL")
     assert grade(parts+[dict(mass=10,center=(9,1,0))],supports) == "FAIL"
     assert grade([dict(mass=3)],supports) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("left,right,span,ratio", [(2,6,1000,0.004),(-2,3,2000,0.0025),(8,8,500,0)])
+def test_differential_settlement(left,right,span,ratio):
+    from benches.x03_layout_oracle import settlement_quality as grade
+    rule = [("A","B",span,ratio)]
+    assert grade({"A":left,"B":right},rule) == "PASS"
+    assert grade({"A":left,"B":right+0.1},rule) == "FAIL"
+    assert grade({"A":left},rule) == "INCOMPLETE"

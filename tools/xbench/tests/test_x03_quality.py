@@ -745,3 +745,22 @@ def test_main_contactor_requires_precharge_and_equalization(source,bus,limit):
     assert grade([begin,dict(main,bus_v=source-limit-1),end],limit) == "FAIL"
     assert grade([begin,dict(main,bus_v=None),end],limit) == "INCOMPLETE"
     assert grade([begin,main],limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("loss,limit", [(0,2), (20,0.5), (100,5)])
+def test_island_clears_by_recorded_deadline(loss,limit):
+    from benches.x03_quality import islanding_quality as grade
+    due, end = loss+limit, loss+limit+2
+    ok = [(loss,due,True),(due,end,False)]
+    assert grade(loss,end,limit,ok) == "PASS"
+    assert grade(loss,end,limit,[(loss,due+1,True),(due+1,end,False)]) == "FAIL"
+    assert grade(loss,end,limit,[(loss,due,True),(due,due+1,False),(due+1,end,True)]) == "FAIL"
+    assert grade(loss,end,limit,ok[:1]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("clamp,lead,rating", [(900,100,1000),(1200,250,1450),(600,0,600)])
+def test_installed_surge_protection(clamp,lead,rating):
+    from benches.x03_quality import surge_coordination_quality as grade
+    assert grade(clamp,lead,rating) == "PASS"
+    assert grade(clamp,lead+1,rating) == "FAIL"
+    assert grade(clamp,lead,None) == "INCOMPLETE"

@@ -583,3 +583,24 @@ def support_polygon_quality(components, supports):
         moment_x += weight * Fraction(str(cg[0]))
         moment_y += weight * Fraction(str(cg[1]))
     return "PASS" if footprint.covers(Point(float(moment_x/mass), float(moment_y/mass))) else "FAIL"
+
+
+def settlement_quality(displacements, spans):
+    """For each span compare absolute differential displacement to its distortion limit."""
+    if not isinstance(displacements, dict) or not isinstance(spans, list) or not spans:
+        return "INCOMPLETE"
+    for span in spans:
+        if not isinstance(span, (tuple, list)) or len(span) != 4:
+            return "INCOMPLETE"
+        a, b, length, limit = span
+        if not all(isinstance(k, str) and k for k in (a,b)) or a == b:
+            return "INCOMPLETE"
+        values = (displacements.get(a), displacements.get(b), length, limit)
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        left, right, distance, ratio = (Fraction(str(v)) for v in values)
+        if distance <= 0 or ratio < 0:
+            return "INCOMPLETE"
+        if abs(left-right) > distance * ratio:
+            return "FAIL"
+    return "PASS"

@@ -655,3 +655,28 @@ def deadline_miss_quality(inventory, due, completed, as_of, reported_misses):
     if not isinstance(reported_misses, list) or not all(isinstance(i,str) for i in reported_misses):
         return "INCOMPLETE"
     return "PASS" if len(reported_misses) == len(missed) and set(reported_misses) == missed else "FAIL"
+
+
+def little_law_quality(metrics, steady_state, tolerance):
+    """Compare L to lambda times W, in jobs, jobs/second and seconds respectively."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if steady_state is not True or not finite_measure(tolerance) or tolerance < 0 or not isinstance(metrics, dict):
+        return "INCOMPLETE"
+    boundaries = []
+    values = []
+    for metric in ("mean_jobs", "jobs_per_second", "mean_seconds"):
+        row = metrics.get(metric)
+        if not isinstance(row, dict) or not isinstance(row.get("population"), str) or not row["population"]:
+            return "INCOMPLETE"
+        start, end, value = (row.get(k) for k in ("start", "end", "value"))
+        if not all(map(finite_measure, (start,end,value))) or end <= start:
+            return "INCOMPLETE"
+        if value < 0:
+            return "FAIL"
+        boundaries.append((row["population"],start,end))
+        values.append(Fraction(str(value)))
+    if len(set(boundaries)) != 1:
+        return "FAIL"
+    jobs, rate, seconds = values
+    return "PASS" if abs(jobs-rate*seconds) <= Fraction(str(tolerance)) else "FAIL"
