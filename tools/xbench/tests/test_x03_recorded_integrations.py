@@ -364,3 +364,30 @@ def test_retry_schedule(sent, budget, delay, expected):
     from benches.x03_issue_delivery_oracle import retry_schedule_quality
     rows = [dict(sent=0,received=2,status=429,retry_after_seconds=delay), dict(sent=sent,received=sent+1,status=200)]
     assert retry_schedule_quality(rows,budget) == expected
+
+
+@pytest.mark.parametrize("flag,allowed,expected", [
+    ("invalid",["good"],"FAIL"), ("suspect",["good"],"FAIL"), ("suspect",["good","suspect"],"PASS"),
+    ("good",["good"],"PASS"), ("good",None,"INCOMPLETE"),
+], ids=["fresh-invalid","suspect-disallowed","suspect-explicitly-approved","approved-reading","missing-policy"])
+def test_weather_flag_voltage(flag, allowed, expected):
+    from benches.x03_weather_oracle import flagged_voltage_quality
+    sample = dict(timestamp=5,unit="C",cell_temp=25,timezone="UTC",site="roof",station="north",quality_flag=flag)
+    assert flagged_voltage_quality(sample,allowed,reported=100,site="roof",station="north",as_of=5,max_age=1,
+                                  voc_at_25=50,modules=2,coefficient_per_c=-0.004) == expected
+
+
+@pytest.mark.parametrize("at,duplicate,policy,expected", [
+    (10,False,True,"FAIL"), (20,False,True,"PASS"), (9,False,True,"PASS"),
+    (12,True,True,"FAIL"), (20,False,False,"INCOMPLETE"),
+], ids=["active-hold-shortage","expired-at-boundary","future-hold","repeated-reservation","missing-expiry-policy"])
+def test_expiring_stock(at, duplicate, policy, expected):
+    from benches.x03_catalog_oracle import reserved_stock_quality
+    inventory = dict(version="v2", lots={"rack":dict(part="module",available=10)})
+    hold = dict(id="h",lot="rack",quantity=3,start=10,expiry=20)
+    holds = [hold, hold.copy()] if duplicate else [hold]
+    quantity = 1 if duplicate else 8
+    assert reserved_stock_quality("v2", inventory, {"roof":dict(part="module",required=quantity)},
+                                  [dict(id="new",lot="rack",line="roof",quantity=quantity)], holds, at,
+                                  "start-inclusive-expiry-exclusive" if policy else None) == expected
+    assert inventory["lots"]["rack"]["available"] == 10

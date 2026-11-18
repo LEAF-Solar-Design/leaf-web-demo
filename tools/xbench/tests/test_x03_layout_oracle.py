@@ -197,3 +197,13 @@ def test_ballast_moments(centroid, side, expected):
     from benches.x03_layout_oracle import overturning_quality
     wind = [dict(force_n=40,arm_m=2),dict(force_n=20,arm_m=1)]
     assert overturning_quality(wind,[dict(weight_n=50,centroid_m=centroid)],10,side) == expected
+
+
+@pytest.mark.parametrize("depth,capacity,expected", [
+    (0.1,5,"PASS"), (0.2,6,"FAIL"), (0,3,"PASS"), (None,10,"INCOMPLETE"),
+], ids=["local-support-at-limit","local-overload-with-spare-roof-capacity","dry-first-patch","missing-water-depth"])
+def test_ponding_on_tributary_areas(depth, capacity, expected):
+    from benches.x03_layout_oracle import ponding_quality
+    areas = {"west":[dict(depth_m=depth,area_m2=2),dict(depth_m=0.1,area_m2=3)],
+             "east":[dict(depth_m=0,area_m2=8)]}
+    assert ponding_quality(areas, {"west":capacity,"east":100},10) == expected

@@ -395,3 +395,49 @@ def usage_cost_quality(usage, tariff, version, currency, charges, reported_total
     if seen != usage.keys() or not finite_measure(reported_total):
         return "FAIL"
     return "PASS" if total == Fraction(str(reported_total)) else "FAIL"
+
+
+def capacity_utilization_quality(start, end, capacities, busy, reported):
+    """Integrate occupied and available slot-time over one half-open integer time window."""
+    from collections import defaultdict
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(capacities, list) or not capacities or not isinstance(busy, list) or None in (start, end, reported):
+        return "INCOMPLETE"
+    if type(start) is not int or type(end) is not int or end <= start or not finite_measure(reported):
+        return "FAIL"
+    levels = {}
+    for row in capacities:
+        if not isinstance(row, dict) or row.get("at") is None or row.get("slots") is None:
+            return "INCOMPLETE"
+        at, slots = row["at"], row["slots"]
+        if type(at) is not int or type(slots) is not int or slots < 0 or at in levels:
+            return "FAIL"
+        levels[at] = slots
+    prior = [at for at in levels if at <= start]
+    if not prior:
+        return "INCOMPLETE"
+    capacity = levels[max(prior)]
+    changes = defaultdict(int)
+    for row in busy:
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("start", "end", "slots")):
+            return "INCOMPLETE"
+        left, right, slots = row["start"], row["end"], row["slots"]
+        if not all(type(v) is int for v in (left, right, slots)) or right < left or slots <= 0:
+            return "FAIL"
+        left, right = max(left, start), min(right, end)
+        if left < right:
+            changes[left] += slots
+            changes[right] -= slots
+    boundaries = sorted({start, end, *changes, *(at for at in levels if start < at < end)})
+    occupied = used_time = available_time = 0
+    for left, right in zip(boundaries, boundaries[1:]):
+        occupied += changes[left]
+        capacity = levels.get(left, capacity)
+        if occupied > capacity:
+            return "FAIL"
+        used_time += occupied * (right-left)
+        available_time += capacity * (right-left)
+    if not available_time:
+        return "INCOMPLETE"
+    return "PASS" if 0 <= reported <= 1 and isclose(reported, float(Fraction(used_time, available_time)), rel_tol=1e-12, abs_tol=1e-12) else "FAIL"
