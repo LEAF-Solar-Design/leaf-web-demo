@@ -33,7 +33,7 @@ def test_reconcile_external_dashboard_rows(tool):
     totals = [dict(drawing="d",version="r",count=1)]
     delta = [dict(drawing="d",version="r",tool=tool,before="old",after="new")]
     def grade(runs, changes):
-        return dashboard_quality(runs,totals,changes,"old","new")
+        return dashboard_quality(runs,totals,changes,"old","new",expected_run_ids=["1","2","3"])
     assert grade(receipts,delta) == "PASS"
     assert grade(receipts+[failed],delta) == "FAIL"
     assert grade([first,dict(next_run,version=None),failed],delta) == "INCOMPLETE"
@@ -49,3 +49,16 @@ def test_dashboard_rejects_unreadable_receipts(bad):
     valid = dict(id="1",drawing="d",version="v",tool="t",revision="old",status="cancelled")
     row = dict(valid, **bad) if isinstance(bad,dict) else bad
     assert dashboard_quality([row],[],[],"old","new") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("drawing", ["roof","shed","office"])
+def test_expected_inventory_prevents_omissions(drawing):
+    from benches.x03_dashboard_oracle import dashboard_quality
+    row = dict(id="one",drawing=drawing,version="v",tool="t",revision="old",status="failed")
+    totals = [dict(drawing=drawing,version="v",count=1)]
+    def check(rows,report):
+        return dashboard_quality(rows,report,[],"old","new",expected_run_ids=["one"])
+    assert check([row],totals) == "PASS"
+    assert check([],[]) == "FAIL"
+    assert check([dict(row,id="unknown")],totals) == "FAIL"
+    assert check([row],[]) == "FAIL"

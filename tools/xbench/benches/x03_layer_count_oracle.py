@@ -1,8 +1,11 @@
 """Count model-space panel INSERTs and reject ambiguous entity identities."""
-def _count(entities, layer, block, inherited, active):
+def _count(entities, layer, block, inherited, active, budget, instances):
     seen = {}
     total = 0
     for entity in entities:
+        budget[0] -= instances
+        if budget[0] < 0 or len(active) >= 128:
+            return None
         kind = entity.dxftype()
         attrs = entity.dxf
         handle = attrs.get("handle")
@@ -28,15 +31,20 @@ def _count(entities, layer, block, inherited, active):
         definition = doc.blocks.get(name) if doc is not None else None
         if definition is None or name in active:
             return None
-        nested = _count(definition, layer, block, effective, active | {name})
+        child_instances = instances * rows * cols
+        if child_instances > budget[0] + instances:
+            return None
+        nested = _count(definition, layer, block, effective, active | {name}, budget, child_instances)
         if nested is None:
             return None
         total += rows * cols * (nested + int(name == block and effective == layer))
     return total
 
 
-def layer_count_quality(entities, layer, block, reported):
-    total = _count(entities, layer.casefold(), block.casefold(), "0", set())
+def layer_count_quality(entities, layer, block, reported, *, expansion_budget=100000):
+    if type(expansion_budget) is not int or expansion_budget < 1:
+        return "INCOMPLETE"
+    total = _count(entities, layer.casefold(), block.casefold(), "0", set(), [expansion_budget], 1)
     if total is None:
         return "INCOMPLETE"
     return "PASS" if type(reported) is int and reported == total else "FAIL"

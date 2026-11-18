@@ -2,7 +2,7 @@
 from math import isfinite, isclose
 
 
-def weather_quality(weather, *, site=None, station=None, as_of, max_age, voc_at_25, coefficient_per_c, modules, reported):
+def weather_quality(weather, *, site=None, station=None, clock_skew=0, as_of, max_age, voc_at_25, coefficient_per_c, modules, reported):
     if not isinstance(weather, dict) or any(weather.get(k) is None for k in ("unit","cell_temp","timestamp")):
         return "INCOMPLETE"
     location = (weather.get("site"), weather.get("station"))
@@ -10,14 +10,18 @@ def weather_quality(weather, *, site=None, station=None, as_of, max_age, voc_at_
         return "INCOMPLETE"
     if location != (site, station):
         return "FAIL"
-    values = (weather["timestamp"], weather["cell_temp"], as_of, max_age, voc_at_25, coefficient_per_c, reported)
+    if weather.get("timezone") is None:
+        return "INCOMPLETE"
+    if weather["timezone"] != "UTC":
+        return "FAIL"
+    values = (clock_skew, weather["timestamp"], weather["cell_temp"], as_of, max_age, voc_at_25, coefficient_per_c, reported)
     try:
         values = tuple(float(x) if type(x) in (float, int) else float("nan") for x in values)
     except OverflowError:
         return "FAIL"
     if any(type(x) not in (float, int) or not isfinite(x) for x in values):
         return "FAIL"
-    if weather["unit"] != "C" or not 0 <= as_of-weather["timestamp"] <= max_age:
+    if weather["unit"] != "C" or clock_skew < 0 or not -clock_skew <= as_of-weather["timestamp"] <= max_age:
         return "FAIL"
     if type(modules) is not int or modules <= 0 or voc_at_25 <= 0:
         return "FAIL"

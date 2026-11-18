@@ -10,7 +10,7 @@ def handle_set(items):
     return {int(h, 16) for h in items}
 
 
-def selection_quality(saved, reverted, exports, added, removed, *, inventory=None):
+def selection_quality(saved, reverted, exports, added, removed, *, inventory=None, requested_scope=None):
     if not isinstance(exports, (list, tuple)) or len(exports) != 2:
         return "INCOMPLETE"
     rows = [saved, reverted, *exports]
@@ -36,5 +36,21 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
     if any(not handles.issubset(live) for handles in sets):
         return "FAIL"
     before, after = sets[:2]
-    return "PASS" if (sets[:2] == sets[2:] and after-before == additions
+    if requested_scope not in ("selected-only", "visible-only", "full-drawing"):
+        return "INCOMPLETE"
+    if any(not row.get("scope") for row in exports):
+        return "INCOMPLETE"
+    if any(row["scope"] != requested_scope for row in exports):
+        return "FAIL"
+    expected = sets[:2]
+    if requested_scope == "full-drawing":
+        expected = [live, live]
+    elif requested_scope == "visible-only":
+        visible = handle_set(inventory.get("visible_handles"))
+        if visible is None:
+            return "INCOMPLETE"
+        if not visible.issubset(live):
+            return "FAIL"
+        expected = [visible, visible]
+    return "PASS" if (expected == sets[2:] and after-before == additions
                       and before-after == removals) else "FAIL"

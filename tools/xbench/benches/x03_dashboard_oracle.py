@@ -4,7 +4,7 @@ import json
 import re
 
 
-def dashboard_quality(runs, failures, changes, before, after):
+def dashboard_quality(runs, failures, changes, before, after, *, expected_run_ids=None):
     if not before or not after or before == after:
         return "INCOMPLETE"
     ids, failed, outputs = set(), Counter(), {}
@@ -40,6 +40,13 @@ def dashboard_quality(runs, failures, changes, before, after):
             if not isinstance(digest, str) or not digest or pair.get(run["revision"], digest) != digest:
                 return "INCOMPLETE"
             pair[run["revision"]] = digest
+    if expected_run_ids is None:
+        return "INCOMPLETE"
+    if (not isinstance(expected_run_ids, (list, tuple)) or not expected_run_ids
+            or not all(isinstance(i, str) and i for i in expected_run_ids)):
+        return "INCOMPLETE"
+    if len(set(expected_run_ids)) != len(expected_run_ids) or ids != set(expected_run_ids):
+        return "FAIL"
     expected = [(*key, before, after) for key, pair in outputs.items()
                 if before in pair and after in pair and pair[before] != pair[after]]
     try:

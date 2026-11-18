@@ -123,3 +123,18 @@ def test_windows_invalid_members(tmp_path,name):
         z.writestr(name,b"")
     manifest = {"members":[name],"sha256":{name:hashlib.sha256(b"").hexdigest()}}
     assert package_quality(path,manifest) == "FAIL"
+
+
+@pytest.mark.parametrize("count", [2,4,8])
+def test_aggregate_limit_checked_before_read(tmp_path,monkeypatch,count):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path/"tools.zip"
+    names = [str(i) for i in range(count)]
+    with ZipFile(path,"w") as z:
+        for name in names:
+            z.writestr(name,b"ab")
+    manifest = dict(members=names,sha256={n:hashlib.sha256(b"ab").hexdigest() for n in names})
+    assert package_quality(path,manifest,max_total_bytes=count*2) == "PASS"
+    monkeypatch.setattr(ZipFile,"open",lambda *a,**kw:pytest.fail("early content read"))
+    assert package_quality(path,manifest,max_total_bytes=count*2-1) == "FAIL"

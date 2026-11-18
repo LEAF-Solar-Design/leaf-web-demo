@@ -30,14 +30,14 @@ def test_receiver_effect_after_timeout_retry(drawing):
 
 @pytest.mark.parametrize("temp,modules,expected", [(-25,10,460),(0,5,215),(50,2,74)])
 def test_voltage_reference(temp, modules, expected):
-    weather = dict(site="roof",station="local",cell_temp=temp,unit="C",timestamp=90)
+    weather = dict(site="roof",station="local",timezone="UTC",cell_temp=temp,unit="C",timestamp=90)
     def check(data, result):
         return weather_quality(data,site="roof",station="local",as_of=100,max_age=10,voc_at_25=40,
                               coefficient_per_c=-0.003,modules=modules,reported=result)
     assert check(weather,expected) == "PASS"
     assert check(weather,expected+1) == "FAIL"
     assert check({},expected) == "INCOMPLETE"
-    for changes in (dict(timestamp=89), dict(unit="F"), dict(site="roof",station="local",cell_temp=float("nan"))):
+    for changes in (dict(timestamp=89), dict(unit="F"), dict(site="roof",station="local",timezone="UTC",cell_temp=float("nan"))):
         assert check(dict(weather,**changes),expected) == "FAIL"
 
 
@@ -53,12 +53,12 @@ def test_missing_requested_catalog_identity(field,bad):
 def test_voltage_arithmetic_fails_closed(overrides):
     args = dict(site="roof",station="local",as_of=10,max_age=5,voc_at_25=50,modules=5,coefficient_per_c=-0.003,reported=250)
     args.update(overrides)
-    assert weather_quality(dict(site="roof",station="local",cell_temp=0,unit="C",timestamp=10),**args) == "FAIL"
+    assert weather_quality(dict(site="roof",station="local",timezone="UTC",cell_temp=0,unit="C",timestamp=10),**args) == "FAIL"
 
 
 @pytest.mark.parametrize("site", ["roof","yard","hangar"])
 def test_weather_location_and_delivery_destination(site):
-    weather = dict(site=site,station="s1",cell_temp=25,unit="C",timestamp=5)
+    weather = dict(site=site,station="s1",timezone="UTC",cell_temp=25,unit="C",timestamp=5)
     def check(data):
         return weather_quality(data,site=site,station="s1",as_of=5,max_age=1,voc_at_25=40,
                                coefficient_per_c=-0.003,modules=2,reported=80)
@@ -81,3 +81,20 @@ def test_receiver_bytes_must_match_label(case):
     assert delivery_quality([row,row],[row]) == "PASS"
     assert delivery_quality([row],[dict(row,payload_bytes=data+b"!")]) == "FAIL"
     assert delivery_quality([row],[dict(row,payload_bytes=None)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("site", ["roof","shed","office"])
+def test_clock_skew_and_latest_revision(site):
+    args = dict(site=site,station="s",as_of=100,max_age=5,clock_skew=2,
+                voc_at_25=5,modules=1,coefficient_per_c=0,reported=5)
+    sample = dict(site=site,station="s",unit="C",cell_temp=25,timestamp=102,timezone="UTC")
+    assert weather_quality(sample,**args) == "PASS"
+    assert weather_quality(dict(sample,timestamp=103),**args) == "FAIL"
+    assert weather_quality(dict(sample,timezone=None),**args) == "INCOMPLETE"
+    old = dict(drawing=site,destination="receiver",revision="one",payload_bytes=b"old",payload_digest=hashlib.sha256(b"old").hexdigest())
+    new = dict(old,revision="two",payload_bytes=b"new",payload_digest=hashlib.sha256(b"new").hexdigest())
+    def check(state):
+        return delivery_quality([old,new,old],[new,old],revision_order=["one","two"],final_state=state)
+    assert check([new]) == "PASS"
+    assert check([old]) == "FAIL"
+    assert check(None) == "INCOMPLETE"

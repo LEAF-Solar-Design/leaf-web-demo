@@ -44,6 +44,8 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
             entries = archive.infolist()
             if len(entries) > max_members:
                 return "FAIL"
+            if sum(entry.file_size for entry in entries) > max_total_bytes:
+                return "FAIL"
             for entry in entries:
                 if entry.flag_bits & 1:
                     return "INCOMPLETE"

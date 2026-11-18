@@ -47,3 +47,19 @@ def test_nested_panel_layer_inheritance(query,count):
     assert layer_count_quality(space,query,"panel",count) == "INCOMPLETE"
     ref.dxf.name = "missing"
     assert layer_count_quality(space,query,"panel",count) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("depth", [5,12,140])
+def test_deep_expansion_stops_at_budget(depth):
+    doc = pytest.importorskip("ezdxf").new()
+    doc.blocks.new("panel")
+    name = "panel"
+    for i in range(depth):
+        node = doc.blocks.new(f"nested{i}")
+        node.add_blockref(name,(0,0)).grid((2,1),(1,1))
+        name = node.name
+    space = doc.modelspace()
+    space.add_blockref(name,(0,0))
+    assert layer_count_quality(space,"0","panel",2**depth,expansion_budget=4) == "INCOMPLETE"
+    if depth < 128:
+        assert layer_count_quality(space,"0","panel",2**depth,expansion_budget=2**(depth+2)) == "PASS"
