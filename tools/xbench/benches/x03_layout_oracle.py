@@ -732,3 +732,20 @@ def rail_bending_stress_quality(moments_nm, section_moduli_m3, allowable_pa):
         if abs(Fraction(str(moment))) > Fraction(str(modulus)) * Fraction(str(limit)):
             return "FAIL"
     return "PASS"
+
+
+def hole_bearing_quality(forces_n, holes):
+    """Compare each recorded in-plane bearing force with its plate's projected contact capacity."""
+    if not isinstance(forces_n, dict) or not forces_n or not isinstance(holes, dict) or forces_n.keys() != holes.keys():
+        return "INCOMPLETE"
+    for hole, force in forces_n.items():
+        section = holes[hole]
+        if not isinstance(section, dict) or not finite_measure(force):
+            return "INCOMPLETE"
+        values = [section.get(k) for k in ("thickness_mm", "diameter_mm", "allowable_mpa")]
+        if not all(finite_measure(v) and v > 0 for v in values):
+            return "INCOMPLETE"
+        thickness, diameter, allowable = (Fraction(str(v)) for v in values)
+        if abs(Fraction(str(force))) > thickness * diameter * allowable:
+            return "FAIL"
+    return "PASS"

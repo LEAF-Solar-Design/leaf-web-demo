@@ -1689,3 +1689,41 @@ def recharge_deadline_quality(revision, curve, capacity_kwh, initial_soc, target
     if cursor != target:
         return "INCOMPLETE"
     return "PASS" if not stalled and elapsed <= Fraction(str(hours)) else "FAIL"
+
+
+def grid_closure_quality(differences, limits):
+    """Check simultaneous signed differences at a recorded grid closure."""
+    if not isinstance(differences, dict) or not isinstance(limits, dict):
+        return "INCOMPLETE"
+    fields = ("angle_deg", "frequency_hz", "voltage_v")
+    if any(not finite_measure(record.get(key)) for record in (differences, limits) for key in fields):
+        return "INCOMPLETE"
+    if any(limits[key] < 0 for key in fields) or limits["angle_deg"] > 180:
+        return "INCOMPLETE"
+    angle = Fraction(str(differences["angle_deg"])) % 360
+    within = min(angle, 360-angle) <= Fraction(str(limits["angle_deg"]))
+    for key in ("frequency_hz", "voltage_v"):
+        within = within and abs(differences[key]) <= limits[key]
+    return "PASS" if within else "FAIL"
+
+
+def insulation_spacing_quality(surface_path_mm, pollution_degree, revision, rules):
+    """Grade a recorded shortest surface polyline and unobstructed air gap between its endpoints."""
+    from math import dist, fsum, isclose
+    if not revision or not isinstance(rules, dict) or revision != rules.get("revision"):
+        return "INCOMPLETE"
+    degrees = rules.get("degrees")
+    if not isinstance(degrees, dict) or type(pollution_degree) is not int:
+        return "INCOMPLETE"
+    thresholds = degrees.get(pollution_degree)
+    if not isinstance(thresholds, dict) or not isinstance(surface_path_mm, list) or len(surface_path_mm) < 2:
+        return "INCOMPLETE"
+    minima = [thresholds.get(key) for key in ("surface_mm", "air_mm")]
+    if not all(finite_measure(v) and v > 0 for v in minima):
+        return "INCOMPLETE"
+    for point in surface_path_mm:
+        if not isinstance(point, (tuple, list)) or len(point) != 3 or not all(map(finite_measure, point)):
+            return "INCOMPLETE"
+    surface = fsum(dist(a, b) for a, b in zip(surface_path_mm, surface_path_mm[1:]))
+    air = dist(surface_path_mm[0], surface_path_mm[-1])
+    return "PASS" if all(v >= m or isclose(v, m, rel_tol=1e-14) for v, m in zip((surface, air), minima)) else "FAIL"

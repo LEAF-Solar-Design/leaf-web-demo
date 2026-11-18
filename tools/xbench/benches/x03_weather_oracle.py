@@ -349,3 +349,27 @@ def wind_height_quality(revision, terrain, sensor_m, target_m, speed_mps, report
     if not finite_measure(adjusted):
         return "INCOMPLETE"
     return "PASS" if isclose(adjusted, reported_mps, rel_tol=1e-9, abs_tol=1e-12) else "FAIL"
+
+
+def circular_wind_quality(rows, policy, reported_deg, tolerance_deg):
+    """Use recorded weights and compare the shortest angular distance to the vector mean."""
+    from math import atan2, cos, degrees, fsum, hypot, radians, sin
+    from benches.x03_quality import finite_measure
+    if policy != "weighted-vector-mean" or not isinstance(rows, list) or not rows:
+        return "INCOMPLETE"
+    if not finite_measure(reported_deg) or not finite_measure(tolerance_deg) or not 0 <= tolerance_deg <= 180:
+        return "INCOMPLETE"
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)) or row[1] < 0:
+            return "INCOMPLETE"
+    scale = max(weight for _, weight in rows)
+    if not scale:
+        return "INCOMPLETE"
+    weights = [weight / scale for _, weight in rows]
+    angles = [radians(direction % 360) for direction, _ in rows]
+    x = fsum(w*cos(a) for w, a in zip(weights, angles))
+    y = fsum(w*sin(a) for w, a in zip(weights, angles))
+    if hypot(x, y) <= 1e-14 * fsum(weights):
+        return "INCOMPLETE"
+    error = abs((degrees(atan2(y, x)) - reported_deg + 180) % 360 - 180)
+    return "PASS" if error <= tolerance_deg or isclose(error, tolerance_deg, abs_tol=1e-12) else "FAIL"

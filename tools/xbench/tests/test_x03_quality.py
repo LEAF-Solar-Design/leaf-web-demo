@@ -940,3 +940,34 @@ def test_recharge_before_deadline_with_soc_taper(capacity,start,target,power,dea
     assert grade(deadline) == "PASS"
     assert grade(shortcut) == "FAIL"
     assert grade(deadline,dict(curve,soc_bands=[(0,0.5,10)])) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ask,angle,hz,volts,field", [
+    ("Reconnect across north wrap", 358, -0.1, 4, "angle_deg"),
+    ("Close after frequency settles", -2, 0.1, -4, "frequency_hz"),
+    ("Transfer at matched voltage", 362, 0, 4, "voltage_v"),
+])
+def test_grid_closure_at_simultaneous_limits(ask, angle, hz, volts, field):
+    from benches.x03_quality import grid_closure_quality as grade
+    limits = dict(angle_deg=2, frequency_hz=0.1, voltage_v=4)
+    observed = dict(angle_deg=angle, frequency_hz=hz, voltage_v=volts)
+    assert grade(observed, limits) == "PASS"
+    observed[field] = -(limits[field] + 0.01)
+    assert grade(observed, limits) == "FAIL"
+    del observed[field]
+    assert grade(observed, limits) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("degree,path,surface,air", [
+    (1, [(0,0,0),(3,0,0),(3,4,0)], 7, 5),
+    (2, [(1,0,2),(1,5,2),(13,5,2)], 17, 13),
+    (3, [(0,0,0),(0,0,8),(0,15,8)], 23, 17),
+])
+def test_insulator_surface_and_air_paths(degree,path,surface,air):
+    from benches.x03_quality import insulation_spacing_quality as grade
+    def check(surface_min, air_min, pollution=degree):
+        rule = dict(revision="sheet", degrees={degree:dict(surface_mm=surface_min,air_mm=air_min)})
+        return grade(path,pollution,"sheet",rule)
+    assert check(surface,air) == "PASS"
+    assert check(surface+1,air) == check(surface,air+1) == "FAIL"
+    assert check(surface,air,None) == "INCOMPLETE"

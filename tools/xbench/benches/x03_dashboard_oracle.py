@@ -853,3 +853,32 @@ def counter_throughput_quality(epochs, modulus, reported):
             previous = stamp, value
         last_end = previous[0]
     return "PASS" if reported == total else "FAIL"
+
+
+def admission_limit_quality(required_ids, starts, terminals, limit_changes):
+    """Closed cohort. Releases and new limits take effect before starts at the same instant."""
+    from collections import Counter
+    from benches.x03_quality import finite_measure
+    if not isinstance(required_ids, set) or not all(isinstance(v, dict) for v in (starts, terminals, limit_changes)):
+        return "INCOMPLETE"
+    if starts.keys() != required_ids or terminals.keys() != required_ids or not limit_changes:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (*starts.values(), *terminals.values(), *limit_changes.keys()))):
+        return "INCOMPLETE"
+    if any(type(limit) is not int or limit < 0 for limit in limit_changes.values()):
+        return "INCOMPLETE"
+    if any(terminals[k] <= starts[k] for k in required_ids):
+        return "INCOMPLETE"
+    arrivals, releases = Counter(starts.values()), Counter(terminals.values())
+    active = 0
+    limit = None
+    for stamp in sorted(arrivals.keys() | releases.keys() | limit_changes.keys()):
+        active -= releases[stamp]
+        limit = limit_changes.get(stamp, limit)
+        if arrivals[stamp]:
+            if limit is None:
+                return "INCOMPLETE"
+            active += arrivals[stamp]
+            if active > limit:
+                return "FAIL"
+    return "PASS"

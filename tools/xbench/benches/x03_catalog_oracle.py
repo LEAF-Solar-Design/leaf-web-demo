@@ -568,3 +568,42 @@ def mating_life_quality(revision, catalog, part, opening_cycles, history, planne
             return "INCOMPLETE"
         total += cycles
     return "PASS" if total <= rating else "FAIL"
+
+
+def vibration_qualification_quality(revision, sheet, mount, operating_band, acceleration_g):
+    """Check an operating band against recorded continuous qualification bands at one mount."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    mounts = sheet.get("mounts")
+    if not isinstance(mounts, dict) or not isinstance(mount, str) or not mount:
+        return "INCOMPLETE"
+    if mount not in mounts:
+        return "FAIL" if sheet.get("complete_mount_list") is True else "INCOMPLETE"
+    bands = mounts[mount]
+    if not isinstance(bands, list) or not bands or not finite_measure(acceleration_g) or acceleration_g < 0:
+        return "INCOMPLETE"
+    if not isinstance(operating_band, (tuple, list)) or len(operating_band) != 2 or not all(map(finite_measure, operating_band)):
+        return "INCOMPLETE"
+    low, high = operating_band
+    if not 0 < low < high:
+        return "INCOMPLETE"
+    cursor = low
+    previous = None
+    exceeded = False
+    for band in bands:
+        if not isinstance(band, (tuple, list)) or len(band) != 3 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        start, end, rating = band
+        if not 0 < start < end or rating < 0 or (previous is not None and start < previous):
+            return "INCOMPLETE"
+        previous = end
+        if end <= low or start >= high:
+            continue
+        if start > cursor:
+            return "INCOMPLETE"
+        exceeded = exceeded or acceleration_g > rating
+        cursor = min(end, high)
+    if cursor != high:
+        return "INCOMPLETE"
+    return "FAIL" if exceeded else "PASS"
