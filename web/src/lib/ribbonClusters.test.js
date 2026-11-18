@@ -1592,7 +1592,7 @@ describe('solar refusal copy', () => {
       for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) found.add(match[1])
       // A registered hook may reuse another registered builtin's readiness.
       // Follow that literal dependency instead of inventing codes for the wrapper.
-      for (const match of source.matchAll(/return\s+solar_local_graph\._load_builtin\(["']([a-z0-9-]+)["']\)\.input_readiness\(graph\)/g)) {
+      for (const match of source.matchAll(/return\s+solar_local_graph\._load_builtin\([\x22\x27]([a-z0-9-]+)[\x22\x27]\)\.input_readiness\(graph\)/g)) {
         const target = registry.find((row) => row.name === match[1] && row.readiness?.kind === 'hook')
         if (!target) {
           missingDynamic.push(builtin)
