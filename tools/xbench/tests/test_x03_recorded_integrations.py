@@ -684,3 +684,12 @@ def test_time_weighted_site_readings(first, last, split, mean):
     assert grade(rows, (first+last)/2) == "FAIL"
     for offset in (-0.5,0.5):
         assert grade([(0,split,first),(split+offset,10,last)], mean) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("stamp,near,far,skew", [(10,11,20,1), (20,18,29,2), (1.2,1.3,2,0.1)])
+def test_pair_voltage_with_nearby_temperature_not_unrelated_extreme(stamp,near,far,skew):
+    from benches.x03_weather_oracle import voltage_temperature_alignment_quality as grade
+    temp = {near:20,far:-15}
+    assert grade({stamp:47},temp,skew,{stamp:near}) == "PASS"
+    assert grade({stamp:47},temp,skew,{stamp:far}) == "FAIL"
+    assert grade({stamp:47},{far:-15},skew,{stamp:far}) == "INCOMPLETE"

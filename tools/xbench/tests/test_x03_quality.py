@@ -888,3 +888,24 @@ def test_break_dc_load_under_recorded_conditions(category, v, a):
     assert grade("r", device, category, v, a+1) == "FAIL"
     assert grade("r", dict(device, load_break=False), category, v, a) == "FAIL"
     assert grade("r", dict(device, dc_ratings={}), category, v, a) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("steps,loss,shortcut", [
+    ([(1,2)], 0.4, 0.1), ([(2,3)], 0.9, 0.3), ([(1,1),(3,1),(5,2)], 1, 0.7),
+])
+def test_inverter_interval_energy_losses(steps, loss, shortcut):
+    from benches.x03_quality import conversion_loss_quality as grade
+    curve = dict(revision="r4", dc_kw_efficiency=[(1,0.8),(3,0.9),(5,0.95)])
+    assert grade("r4",curve,steps,loss) == "PASS"
+    assert grade("r4",curve,steps,shortcut) == "FAIL"
+    assert grade("r4",curve,steps+[(6,1)],loss) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("steps,energy", [([(3,12)],0.01), ([(2,9),(4,9)],0.015), ([(5,3),(5,6),(1,9)],0.015)])
+def test_energize_battery_controls_before_main_supply(steps, energy):
+    from benches.x03_quality import black_start_quality as grade
+    assert grade(steps,2,5,12,energy) == "PASS"
+    assert grade(steps,2,5,12,energy/2) == "FAIL"
+    assert grade(steps+[(6,1)],2,5,12,10) == "FAIL"
+    assert grade([(4,8),(3,5)],2,5,12,10) == "FAIL"
+    assert grade(None,2,5,12,energy) == "INCOMPLETE"
