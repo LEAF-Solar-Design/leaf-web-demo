@@ -329,3 +329,15 @@ def test_filtered_layer_prompt_counts_physical_panel_handles(prompt, block, laye
     ambiguous = {"name": "*U1", "layer": layers[0], "handle": "F0"}
     result, overlay = counter.run({"inserts": rows + outlines + [ambiguous]}, route["params"])
     assert result["selection_required"] and result["count"] is None and overlay is None
+
+
+@pytest.mark.parametrize("prompt", [
+    "Compare GroupA against GroupB in percentage points by layer",
+    "Show percentage-point change by layer between the GroupA blocks and the GroupB blocks.",
+    "Show changes in percentage points per layer from GroupA to GroupB.",
+])
+def test_share_change_preserves_operand_direction(prompt):
+    result = _c(prompt)
+    assert result.tool == "count-modules"
+    assert result.params["compare_selections"] == {
+        "by": "block", "before": ["GroupA"], "after": ["GroupB"]}

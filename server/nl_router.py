@@ -457,6 +457,28 @@ _CUMULATIVE_SHARE_QUERY = re.compile(
 )
 
 
+def _share_change_params(text):
+    if not (re.search(r"\bpercentage[ -]points?\b", text, re.I)
+            and re.search(r"\blayers?\b", text, re.I)):
+        return None
+    match = re.search(r"\b(?:compare\s+|between\s+|from\s+)(.+?)\s+"
+                      r"(?:against|with|versus|and|to)\s+(.+)", text, re.I)
+    if not match:
+        return None
+    sides = []
+    for side in match.groups():
+        name_list = re.split(r"[,;.!?]|\s+(?:(?:in|as)\s+percentage[ -]points?"
+                             r"|(?:by|per)\s+layer)\b", side, maxsplit=1, flags=re.I)[0]
+        names = []
+        for name in re.split(r"\s+plus\s+", name_list, flags=re.I):
+            cleaned = re.sub(r"^the\s+(.+?)\s+blocks?$", r"\1", name.strip(), flags=re.I)
+            if not cleaned:
+                return None
+            names.append(cleaned)
+        sides.append(names)
+    return {"by": "block", "before": sides[0], "after": sides[1]}
+
+
 def _share_params(text):
     remaining = text.strip()
     params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
@@ -594,11 +616,9 @@ def _decide(
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Compare physical module counts by layer in two drawing windows.")
 
-    share_change = re.search(r"\bpercentage[ -]points?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
-    match = re.search(r"\bcompare\s+(.+?)\s+(?:against|with|versus)\s+([^.;!?]+)", text, re.I) if share_change else None
-    if match and any(doc.tool.get("name") == "count-modules" for doc in docs):
-        before, after = (re.split(r"\s+plus\s+", side.strip(), flags=re.I) for side in match.groups())
-        options = {"compare_selections": {"by": "block", "before": before, "after": after}}
+    comparison = _share_change_params(text)
+    if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        options = {"compare_selections": comparison}
         return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                               rationale="Analyze selected physical modules by layer.")
 

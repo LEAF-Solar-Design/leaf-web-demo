@@ -630,3 +630,19 @@ def test_empty_selection_has_no_percentage_point_delta():
     d = {"inserts": [{"layer": "W", "name": "Module", "handle": "A"}]}
     r, _ = module.run(d, {"compare_selections": {"by": "block", "before": [], "after": ["Module"]}})
     assert r["share_change"] == {"totals": [0, 1], "percentage_points": {"W": None}, "defined": False}
+
+
+@pytest.mark.parametrize("left,right,expected", [
+    ({"A": 1}, {"B": 2}, {"A": (-100, 1), "B": (100, 1)}),
+    ({"A": 1, "B": 2}, {"A": 1, "C": 1}, {"A": (50, 3), "B": (-200, 3), "C": (50, 1)}),
+    ({"W": 3, "w": 1}, {"W": 1, "w": 1}, {"W": (-25, 1), "w": (25, 1)}),
+])
+def test_share_change_by_literal_layer(left, right, expected):
+    inserts = []
+    for name, counts in (("Before", left), ("After", right)):
+        for layer, count in counts.items():
+            inserts.append({"handle": str(len(inserts) + 1), "name": name, "layer": layer, "rows": count})
+    result, _ = module.run({"inserts": inserts}, {"compare_selections": {
+        "by": "block", "before": ["Before"], "after": ["After"]}})
+    changes = result["share_change"]["percentage_points"]
+    assert {k: (v["numerator"], v["denominator"]) for k, v in changes.items()} == expected
