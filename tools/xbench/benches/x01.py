@@ -14,6 +14,8 @@ from xbench_studio import StudioClient, StudioError, disposable_project, new_ide
 
 
 LIMITS = "X01: original and export both come from Studio's own DWG conversion (version 1 vs head after manifest-driven tools); step 3 requires recorded stringing settings; the plot is an ezdxf render, not an AutoCAD plot."
+_RESUMABLE_TOOLS = frozenset({"solar-settings", "solar-panels-from-drawing",
+                              "solar-panel-groups", "solar-string-add", "xbench-string-tags"})
 
 
 def _row(fixture):
@@ -267,6 +269,10 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                 return result
 
             def call(tool, params, *, receipt=None):
+                nonlocal stage
+                if stop_after is not None and (tool != stop_after or "stopped_after" in row):
+                    stage = f"run:{tool}"
+                    raise ValueError(f"unadmitted tool {tool}: scope ends at {stop_after}")
                 tracked = receipt if receipt is not None else {"run_id": None}
                 try:
                     result = execute(tool, params, receipt=tracked if stop_after is not None else receipt)
@@ -412,6 +418,10 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                               row["evidence"]["1"] + "; source unchanged, export unavailable")
                 except OSError:
                     _mark(row, 1, "FAIL", "source fixture unavailable after run")
+        if stop_after is not None and "stopped_after" not in row:
+            row["stopped_after"] = {"tool": stop_after, "outcome": "not_reached",
+                                    "http_status": None, "job_status": None}
+            _mark(row, 1, "FAIL", "stop_after tool not reached")
     return rows
 
 
@@ -459,9 +469,13 @@ def run(ctx):
     options = getattr(ctx, "options", {})
     resume_keys = ("resume_project", "resume_drawing", "resume_version", "resume_fixture")
     resume = None
-    if "resume_stop_after" in options and (not options["resume_stop_after"] or
-                                           not all(options.get(key) for key in resume_keys)):
-        raise SystemExit(EXIT_USAGE)
+    if "resume_stop_after" in options:
+        stop_after = options["resume_stop_after"]
+        if (not isinstance(stop_after, str) or
+                re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", stop_after) is None or
+                stop_after not in _RESUMABLE_TOOLS or
+                not all(options.get(key) for key in resume_keys)):
+            raise SystemExit(EXIT_USAGE)
     if any(key in options for key in resume_keys):
         if not all(options.get(key) for key in resume_keys):
             raise SystemExit(EXIT_USAGE)

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from benches import x01
+from xbench_core import EXIT_USAGE
 import make_synthetic_metres as metres
 import x01_geometry as geometry
 from xbench_studio import StudioClient, StudioError
@@ -1298,6 +1299,76 @@ def test_stop_after_without_complete_resume_refuses(monkeypatch, mask):
     with pytest.raises(SystemExit) as raised:
         x01.run(SimpleNamespace(options=options))
     assert raised.value.code == 5
+
+
+@pytest.mark.parametrize("stop_after", ["solar-setting", "", "Solar-settings", "solar_settings",
+                                       " solar-settings", "a" * 65, None, 1])
+def test_invalid_stop_after_refuses_before_client_calls(monkeypatch, stop_after):
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        pytest.fail("invalid stop-after attempted sign-in or client creation")
+
+    monkeypatch.setattr(x01.xbench_session, "signed_in", forbidden)
+    monkeypatch.setattr(x01, "StudioClient", forbidden)
+    options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",
+               "resume_fixture": "synthetic", "resume_stop_after": stop_after}
+    with pytest.raises(SystemExit) as raised:
+        x01.run(SimpleNamespace(options=options))
+    assert raised.value.code == EXIT_USAGE
+    assert calls == []
+
+
+@pytest.mark.parametrize("stop_after", ["solar-panels-from-drawing", "solar-panel-groups",
+                                       "solar-string-add", "xbench-string-tags"])
+def test_resume_stop_after_later_tool_refuses_first_run(fixture, tmp_path, monkeypatch, stop_after):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    fixture["stringing"] = deepcopy(STRINGING)
+
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        yield "page", {}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unadmitted tool reached client.run")
+
+    monkeypatch.setattr(StudioClient, "run", forbidden)
+    monkeypatch.setattr(x01.xbench_session, "signed_in", signed_in)
+    monkeypatch.setattr(x01, "_transport", lambda page, **kwargs: wire.transport)
+    options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",
+               "resume_fixture": fixture["id"], "resume_stop_after": stop_after}
+    ctx = SimpleNamespace(options=options, manifest={"fixtures": [fixture]},
+                          base="https://example.test", source_sha="b" * 40, out_dir=tmp_path / "evidence")
+    assert len(x01.run(ctx)) == 7
+    row = json.loads((ctx.out_dir / "fixtures.json").read_text())[fixture["id"]]
+    assert row["failed_stage"] == "run:solar-settings"
+    assert f"ValueError: unadmitted tool solar-settings: scope ends at {stop_after}" in row["evidence"]["2"]
+    assert row["stopped_after"] == {"tool": stop_after, "outcome": "not_reached",
+                                    "http_status": None, "job_status": None}
+    assert row["steps"]["1"] == "FAIL"
+    assert row["evidence"]["1"] == "stop_after tool not reached"
+    assert row["completed_calls"] == ["checkout", "context"]
+    assert row["export_version_id"] is None
+    assert wire.released and not wire.deleted
+    assert not any(path == "/api/run" or path.endswith("/dxf") for _, path, _ in wire.calls)
+    assert sum("/context?" in path for _, path, _ in wire.calls) == 1
+
+
+def test_resume_stop_after_not_reached_on_checkout_failure(fixture, monkeypatch):
+    client = StudioClient(lambda *args, **kwargs: pytest.fail("unexpected client call"))
+
+    def fail(*args, **kwargs):
+        raise StudioError(503, "UNAVAILABLE", "checkout unavailable")
+
+    monkeypatch.setattr(client, "checkout", fail)
+    row = x01.grade_files(client, project=PROJECT, fixtures=[fixture],
+                          resume={"fixture": fixture["id"], "drawing": "d", "version": "v1",
+                                  "stop_after": "solar-settings"})[fixture["id"]]
+    assert row["failed_stage"] == "checkout"
+    assert row["stopped_after"]["outcome"] == "not_reached"
+    assert row["steps"]["1"] == "FAIL"
+    assert row["evidence"]["1"] == "stop_after tool not reached"
 
 
 @pytest.mark.parametrize("fixture_id", ["synthetic", "unknown"])
