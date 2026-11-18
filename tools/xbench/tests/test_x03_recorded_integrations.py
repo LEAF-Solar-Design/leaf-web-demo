@@ -5,6 +5,20 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("part,pack,minimum,demand,units", [
+    ("clips", 4, 10, 1, 12), ("clamps", 5, 5, 14, 15), ("bolts", 12, 0, 24, 24)])
+def test_order_uses_pinned_pack_policy(part, pack, minimum, demand, units):
+    from benches.x03_catalog_oracle import pack_order_quality
+    row = dict(pack_units=pack, minimum_units=minimum, stock_units=units)
+    def check(policy, order, revision="v1"):
+        return pack_order_quality(dict(revision="v1", parts={part: policy}), revision, part, demand, order)
+    assert check(row, units) == "PASS"
+    assert check(row, units - 1) == "FAIL"
+    assert check(dict(row, stock_units=units - 1), units) == "FAIL"
+    assert check(row, units, "v2") == "FAIL"
+    assert check(dict(row, minimum_units=None), units) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("part,unit", [("panel","W"), ("beam","m"), ("fan","rpm")])
 def test_catalog_identity_and_unique_finite_rating(part, unit):
     row = dict(part=part, version="v2", unit=unit, rating=125)
@@ -428,3 +442,14 @@ def test_voltage_uses_pinned_valid_calibration(raw, offset, corrected):
     assert check(9, records, raw) == "FAIL"
     assert check(10, records, corrected) == "FAIL"
     assert check(9, records[:1], corrected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("lead,deadline,expected", [(1, 5, "FAIL"), (2, 9, "PASS"), (0, 4, "PASS")])
+def test_procurement_delivery_deadline(lead, deadline, expected):
+    from datetime import date
+    from benches.x03_catalog_oracle import procurement_deadline_quality as grade
+    days = [date(2026, 12, d) for d in (4, 8, 8, 9)]
+    args = (8, 8, lead, days[0], date(2026, 12, deadline))
+    assert grade(*args, days) == expected
+    assert grade(7, *args[1:], days) == "FAIL"
+    assert grade(*args, None) == "INCOMPLETE"

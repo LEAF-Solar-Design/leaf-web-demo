@@ -4,6 +4,16 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("span,load,limit", [(100, 3, 0.390625), (200, 3, 6.25), (200, 1.5, 3.125)])
+def test_simple_span_uniform_load(span, load, limit):
+    from benches.x03_layout_oracle import rail_deflection_quality
+    rail = dict(support="simply_supported", span_mm=span, load_n_per_mm=load, modulus_mpa=100000,
+                inertia_mm4=100, limit_mm=limit)
+    assert rail_deflection_quality([rail]) == "PASS"
+    assert rail_deflection_quality([rail, dict(rail, limit_mm=limit * 0.9)]) == "FAIL"
+    assert rail_deflection_quality([dict(rail, inertia_mm4=None)]) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("width,setback", [(10, 0), (12, 1), (16, 2)])
 def test_panels_fit_usable_area(width, setback):
     hole = box(5, 5, 7, 7)
@@ -227,3 +237,12 @@ def test_bearing_pressure_is_local(force, area, limit):
     assert pad_pressure_quality(reactions, areas, limits) == "PASS"
     assert pad_pressure_quality(reactions, dict(areas, corner=area / 2), limits) == "FAIL"
     assert pad_pressure_quality(reactions, {"corner": area}, limits) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("equation,tension,shear", [("linear", 25, 75), ("quadratic", 60, 80), ("quadratic", 80, 60)])
+def test_combined_anchor_utilization(equation, tension, shear):
+    from benches.x03_layout_oracle import anchor_interaction_quality as grade
+    anchor = dict(tension=tension, shear=shear, tension_rating=100, shear_rating=100)
+    assert grade([anchor], equation) == "PASS"
+    assert grade([anchor, dict(anchor, shear=shear+1)], equation) == "FAIL"
+    assert grade([anchor], None) == "INCOMPLETE"

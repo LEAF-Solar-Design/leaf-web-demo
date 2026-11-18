@@ -5,6 +5,59 @@ from math import atan, dist, isclose, isfinite, radians
 METRES = {"m": 1, "mm": 0.001, "ft": 0.3048}
 
 
+def _rational_spline_length(entity):
+    """Bound each clamped positive-weight Bezier span by its chord and control polygon."""
+    from collections import Counter
+    from ezdxf.math import BSpline
+    degree = entity.dxf.degree
+    points, weights, knots = list(entity.control_points), list(entity.weights), list(entity.knots)
+    if not 1 <= degree <= 10 or not degree < len(points) <= 256 or len(points) != len(weights):
+        return None
+    if len(knots) != len(points) + degree + 1 or not all(map(isfinite, knots)):
+        return None
+    if not all(len(p) == 3 and all(map(isfinite, p)) for p in points):
+        return None
+    if not all(isfinite(w) and w > 0 for w in weights) or knots != sorted(knots):
+        return None
+    counts = Counter(knots)
+    if len(counts) < 2 or counts.pop(knots[0]) != degree + 1 or counts.pop(knots[-1]) != degree + 1:
+        return None
+    if any(count > degree for count in counts.values()):
+        return None
+    width = knots[-1] - knots[0]
+    try:
+        curve = BSpline(points, degree + 1, [(t - knots[0]) / width for t in knots], weights)
+        for knot, count in counts.items():
+            for _ in range(degree - count):
+                curve = curve.insert_knot((knot - knots[0]) / width)
+        controls = [(*[v*w for v in p], w) for p, w in zip(curve.control_points, curve.weights())]
+        spans = [controls[i:i+degree+1] for i in range(0, len(controls)-1, degree)]
+        total = 0.0
+        subdivisions = 0
+        while spans:
+            poly = spans.pop()
+            xyz = [tuple(v / p[3] for v in p[:3]) for p in poly]
+            upper = sum(dist(a, b) for a, b in zip(xyz, xyz[1:]))
+            lower = dist(xyz[0], xyz[-1])
+            if not isfinite(upper):
+                return None
+            if upper - lower <= upper * 1e-9:
+                total += (upper + lower) / 2
+                continue
+            subdivisions += 1
+            if subdivisions > 200000:
+                return None
+            left, right = [poly[0]], [poly[-1]]
+            while len(poly) > 1:
+                poly = [tuple(a/2 + b/2 for a, b in zip(p, q)) for p, q in zip(poly, poly[1:])]
+                left.append(poly[0])
+                right.append(poly[-1])
+            spans.extend((left, right[::-1]))
+        return total
+    except (ArithmeticError, ValueError, IndexError):
+        return None
+
+
 def _lengths(entities, units, inherited, active, remaining, mode, transforms=(), curve_scale=1):
     totals = defaultdict(float)
     for entity in entities:
@@ -34,6 +87,12 @@ def _lengths(entities, units, inherited, active, remaining, mode, transforms=(),
             continue
         if curve_scale is None and entity.dxftype() != "LINE":
             return None
+        if entity.dxftype() == "SPLINE":
+            length = _rational_spline_length(entity)
+            if length is None:
+                return None
+            totals[layer] += length * curve_scale * METRES[units]
+            continue
         if entity.dxftype() == "LWPOLYLINE":
             vertices = list(entity.get_points("xyb"))
             if len(vertices) < 2 or not all(all(map(isfinite, v)) for v in vertices):

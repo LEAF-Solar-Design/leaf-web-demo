@@ -2,6 +2,19 @@ import pytest
 from benches.x03_beam_length_oracle import beam_length_quality
 
 
+@pytest.mark.parametrize("points,weights,degree,knots,length", [
+    ([(0,0,0), (3,4,0), (3,4,2)], [1,2,1], 1, [0,0,1,2,2], 7),
+    ([(1,0,0), (1,1,0), (0,1,0)], [1,2**-0.5,1], 2, [0,0,0,1,1,1], 1.5707963267948966),
+    ([(0,0,0), (1,0,0), (3,0,0), (6,0,0)], [1,3,2,1], 2, [0,0,0,1,2,2,2], 6)])
+def test_rational_spline_spatial_length(points, weights, degree, knots, length):
+    space = pytest.importorskip("ezdxf").new().modelspace()
+    spline = space.add_rational_spline(points, weights, degree=degree, knots=knots)
+    assert beam_length_quality(space, "m", {"0": length}) == "PASS"
+    assert beam_length_quality(space, "m", {"0": length + 1e-6}) == "FAIL"
+    spline.weights = []
+    assert beam_length_quality(space, "m", {"0": length}) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("units,factor", [("m",1), ("mm",0.001), ("ft",0.3048)])
 def test_grouped_lengths_in_metres(units, factor):
     doc = pytest.importorskip("ezdxf").new()

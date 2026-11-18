@@ -4,6 +4,24 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_deflection_quality(rails):
+    """Simply supported rails with uniform load. Use N and mm throughout."""
+    if not isinstance(rails, list) or not rails:
+        return "INCOMPLETE"
+    for rail in rails:
+        if not isinstance(rail, dict) or rail.get("support") != "simply_supported":
+            return "INCOMPLETE"
+        values = [rail.get(k) for k in ("span_mm", "load_n_per_mm", "modulus_mpa", "inertia_mm4", "limit_mm")]
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        span, load, modulus, inertia, limit = map(lambda x: Fraction(str(x)), values)
+        if min(span, modulus, inertia, limit) <= 0 or load < 0:
+            return "FAIL"
+        if 5 * load * span**4 > 384 * modulus * inertia * limit:
+            return "FAIL"
+    return "PASS"
+
+
 def layout_quality(panels, usable_area, setback):
     if usable_area is None or setback is None or not panels:
         return "INCOMPLETE"
@@ -453,5 +471,24 @@ def pad_pressure_quality(reactions, areas, roof_limits):
         if not all(map(finite_measure, (reaction, area, limit))):
             return "INCOMPLETE"
         if reaction < 0 or min(area, limit) <= 0 or Fraction(str(reaction)) > Fraction(str(area)) * Fraction(str(limit)):
+            return "FAIL"
+    return "PASS"
+
+
+def anchor_interaction_quality(anchors, equation):
+    """Use recorded nonnegative force magnitudes and capacities in matching units."""
+    if equation not in ("linear", "quadratic") or not isinstance(anchors, list) or not anchors:
+        return "INCOMPLETE"
+    exponent = 1 if equation == "linear" else 2
+    for anchor in anchors:
+        if not isinstance(anchor, dict):
+            return "INCOMPLETE"
+        values = [anchor.get(k) for k in ("tension", "shear", "tension_rating", "shear_rating")]
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        tension, shear, tr, sr = (Fraction(str(v)) for v in values)
+        if min(tension, shear) < 0 or min(tr, sr) <= 0:
+            return "FAIL"
+        if (tension / tr)**exponent + (shear / sr)**exponent > 1:
             return "FAIL"
     return "PASS"

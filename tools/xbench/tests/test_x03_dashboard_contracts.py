@@ -3,6 +3,18 @@ from collections import Counter
 import pytest
 
 
+@pytest.mark.parametrize("eligible,failures,target,remaining", [(10, 1, 0.9, 0), (4, 1, 0.95, -0.8), (20, 0, 0.95, 1)])
+def test_budget_excludes_probes_from_both_counts(eligible, failures, target, remaining):
+    from benches.x03_dashboard_oracle import request_budget_quality
+    rows = [{"id": str(i), "class": "interactive", "success": i >= failures} for i in range(eligible)]
+    rows.append({"id": "probe", "class": "health", "success": False})
+    report = dict(eligible=eligible, failures=failures, remaining=remaining)
+    assert request_budget_quality(rows, ["interactive"], target, report) == "PASS"
+    assert request_budget_quality(rows, ["interactive"], target, dict(report, failures=failures+1)) == "FAIL"
+    assert request_budget_quality(rows, ["interactive"], target, dict(report, remaining=remaining+1)) == "FAIL"
+    assert request_budget_quality(rows, None, target, report) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("extra", ["failed", "complete", "cancelled"])
 def test_failure_totals_reconcile_by_drawing_revision(extra):
     executions = [("drawing-a","r1","failed"), ("drawing-a","r2",extra), ("drawing-b","r1","complete")]
@@ -262,3 +274,17 @@ def test_availability_from_eligible_time(policy, maintenance, expected):
     assert availability_quality((0, 10), outages, maintenance, policy, expected) == "PASS"
     assert availability_quality((0, 10), outages, maintenance, policy, 1) == "FAIL"
     assert availability_quality((0, 10), outages, maintenance, None, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("older,recent,thresholds,rates,alert", [
+    ([True, True], [True, False], (2, 1), (2, 1), True),
+    ([True, True], [True, False], (2, 2), (2, 1), False),
+    ([False, False], [True, True], (1, 2), (0, 2), False)])
+def test_multiwindow_slo_burn(older, recent, thresholds, rates, alert):
+    from benches.x03_dashboard_oracle import burn_window_quality as grade
+    events = list(zip([5, 6, 9, 10], older + recent))
+    windows = dict(zip([2, 6], thresholds))
+    report = dict(rates=dict(zip([2, 6], rates)), alert=alert)
+    assert grade(events, (4, 10), 10, windows, 0.75, report) == "PASS"
+    assert grade(events, (4, 10), 10, windows, 0.75, dict(report, alert=not alert)) == "FAIL"
+    assert grade(events, (5, 10), 10, windows, 0.75, report) == "INCOMPLETE"

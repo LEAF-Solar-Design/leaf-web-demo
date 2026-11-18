@@ -5,6 +5,40 @@ import json
 import re
 
 
+def request_budget_quality(requests, eligible_classes, target, report):
+    """Report allowed minus observed eligible failures, in fractional requests."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(requests, list) or not isinstance(eligible_classes, (list, tuple)) or not eligible_classes:
+        return "INCOMPLETE"
+    if not finite_measure(target) or not 0 < target <= 1:
+        return "INCOMPLETE"
+    seen = set()
+    eligible = failures = 0
+    for request in requests:
+        if not isinstance(request, dict):
+            return "INCOMPLETE"
+        identity, category, success = (request.get(k) for k in ("id", "class", "success"))
+        if not isinstance(identity, str) or not identity or not category or type(success) is not bool:
+            return "INCOMPLETE"
+        if identity in seen:
+            return "INCOMPLETE"
+        seen.add(identity)
+        if category in eligible_classes:
+            eligible += 1
+            failures += int(not success)
+    if not eligible or not isinstance(report, dict):
+        return "INCOMPLETE"
+    remaining = eligible * (1 - Fraction(str(target))) - failures
+    for key, expected in (("eligible", eligible), ("failures", failures), ("remaining", remaining)):
+        value = report.get(key)
+        if value is None:
+            return "INCOMPLETE"
+        if not finite_measure(value) or Fraction(str(value)) != expected:
+            return "FAIL"
+    return "PASS"
+
+
 def dashboard_quality(runs, failures, changes, before, after, *, expected_run_ids=None, summary=None):
     if not before or not after or before == after:
         return "INCOMPLETE"
@@ -500,3 +534,35 @@ def availability_quality(window, outages, maintenance, policy, reported):
     if not eligible or reported is None:
         return "INCOMPLETE"
     return "PASS" if finite_measure(reported) and isclose(reported, available / eligible, abs_tol=1e-12) else "FAIL"
+
+
+def burn_window_quality(outcomes, coverage, as_of, windows, target, report):
+    """All declared windows must meet their inclusive threshold to alert. Times are seconds."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(outcomes, list) or not isinstance(windows, dict) or not windows:
+        return "INCOMPLETE"
+    if not isinstance(coverage, (list, tuple)) or len(coverage) != 2 or not all(map(finite_measure, coverage)):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (as_of, target))) or not 0 < target < 1 or coverage[1] < as_of:
+        return "INCOMPLETE"
+    for event in outcomes:
+        if not isinstance(event, (tuple, list)) or len(event) != 2 or not finite_measure(event[0]) or type(event[1]) is not bool:
+            return "INCOMPLETE"
+    rates = {}
+    alert = True
+    for width, threshold in windows.items():
+        if not all(map(finite_measure, (width, threshold))) or width <= 0 or threshold < 0 or coverage[0] > as_of - width:
+            return "INCOMPLETE"
+        samples = [ok for t, ok in outcomes if as_of - width < t <= as_of]
+        if not samples:
+            return "INCOMPLETE"
+        rate = Fraction(samples.count(False), len(samples)) / (1 - Fraction(str(target)))
+        rates[width] = rate
+        alert = alert and rate >= Fraction(str(threshold))
+    if not isinstance(report, dict) or not isinstance(report.get("rates"), dict) or "alert" not in report:
+        return "INCOMPLETE"
+    if rates.keys() != report["rates"].keys() or report["alert"] is not alert:
+        return "FAIL"
+    return "PASS" if all(finite_measure(report["rates"][w]) and isclose(report["rates"][w], float(r), rel_tol=1e-12)
+                         for w, r in rates.items()) else "FAIL"

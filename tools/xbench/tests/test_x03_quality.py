@@ -2,6 +2,31 @@ import pytest
 from benches.x03_quality import inverter_quality, route_quality, string_quality
 
 
+@pytest.mark.parametrize("ask,maximum,adequate", [
+    ("Check the PV home run", 980, 1000), ("Check a 48 V storage lead", 60, 60),
+    ("Check the AC feeder", 480, 600)])
+def test_dielectric_rating_independent_of_ampacity(ask, maximum, adequate):
+    from benches.x03_quality import conductor_ampacity_quality, insulation_quality
+    assert conductor_ampacity_quality(100, 50, {"ambient": 1}, ["ambient"]) == "PASS"
+    circuits = {ask: (maximum, ["lead", "tail"])}
+    assert insulation_quality(circuits, {"lead": adequate, "tail": adequate}) == "PASS"
+    assert insulation_quality(circuits, {"lead": adequate, "tail": maximum - 1}) == "FAIL"
+    assert insulation_quality(circuits, {"lead": adequate}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sensor,limits,value", [("cold rack", (0, 45), 0), ("hot rack", (5, 40), 40),
+                                                  ("pack core", (-5, 35), 19)])
+def test_prevent_charging_outside_recorded_range(sensor, limits, value):
+    from benches.x03_quality import charging_temperature_quality as grade
+    policy = {sensor: limits}
+    assert grade({sensor: value}, policy, True) == "PASS"
+    for unsafe in (limits[0] - 1, limits[1] + 1):
+        assert grade({sensor: unsafe}, policy, True) == "FAIL"
+        assert grade({sensor: unsafe}, policy, False) == "PASS"
+    assert grade({}, policy, True) == "INCOMPLETE"
+    assert grade({sensor: value}, None, True) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("bounds,obstacles,clear,crossing", [
     ((0,0,8,3), [(3,1,5,2)], [(0,.5),(8,.5)], [(0,1.5),(8,1.5)]),
     ((0,0,3,9), [(1,2,2,4),(1,6,2,8)], [(.5,0),(.5,9)], [(1.5,0),(1.5,9)]),
@@ -610,3 +635,20 @@ def test_neutral_rms_with_balanced_fundamental(third, ninth, expected):
     assert neutral_harmonic_quality(phases, expected - 1) == "FAIL"
     del phases["C"][3]
     assert neutral_harmonic_quality(phases, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("start,end,dt,rise,fall", [(10, 40, 3, 10, 5), (50, 30, 4, 2, 5), (-5, 5, 0.5, 20, 2)])
+def test_recorded_ramp_rate(start, end, dt, rise, fall):
+    from benches.x03_quality import inverter_ramp_quality as grade
+    assert max(abs(start), abs(end)) <= 50
+    assert grade([(0, start), (dt, end)], rise, fall) == "PASS"
+    assert grade([(0, start), (dt/2, end), (dt, end)], rise, fall) == "FAIL"
+    assert grade([(0, start), (None, end)], rise, fall) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("initial,hours,retention,expected", [(100, 2, 0.9, 81), (40, 0.5, 0.81, 36), (12, 3, 0.5, 1.5)])
+def test_idle_storage_reserve(initial, hours, retention, expected):
+    from benches.x03_quality import idle_reserve_quality as grade
+    assert grade(initial, 4, 4 + hours, retention, expected) == "PASS"
+    assert grade(initial, 4, 4 + hours, retention, initial) == "FAIL"
+    assert grade(initial, 4, 4 + hours, None, expected) == "INCOMPLETE"
