@@ -43,6 +43,151 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+@pytest.mark.parametrize('kind,exit_code', [('PASS',0), ('FAIL',1), ('UNREADABLE',4), ('malformed',4), ('duplicate',4)])
+def test_inventory_diff_cli_strict_verdicts_and_sanitized_single_result(tmp_path, kind, exit_code):
+    import subprocess
+    before = json.loads(json_inventory())
+    after = deepcopy(before)
+    if kind == 'FAIL': after['members'][0]['sha256'] = '0' * 64
+    if kind == 'UNREADABLE': after['members'][0]['sha256'] = 'SYNTHETIC_PRIVATE_DIFF'
+    text = json.dumps(dict(before=before, after=after))
+    if kind == 'malformed': text = '{"private":"SYNTHETIC_PRIVATE_DIFF'
+    if kind == 'duplicate': text = '{"before":{},"\\u0062efore":{},"after":{}}'
+    completed = subprocess.run(cli_command('--inventory-diff'), input=text.encode(), capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == exit_code and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1 and completed.stdout.isascii()
+    result = json.loads(completed.stdout)
+    assert result == bundle.diff_inventory_json(text)
+    assert result['verdict'] == ('UNREADABLE' if kind in ('malformed','duplicate') else kind)
+    assert 'SYNTHETIC_PRIVATE_DIFF' not in completed.stdout.decode()
+    assert not result['origin_authenticated']
+
+
+def test_inventory_diff_cli_modes_are_exclusive_and_delivery_failure_wins(monkeypatch, tmp_path):
+    import io
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    completed = subprocess.run(cli_command('--inventory-diff','--replay'), input=b'private', capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == 2 and completed.stdout == b'' and b'private' not in completed.stderr
+    source = json.loads(json_inventory())
+    for kind in ('PASS','FAIL','UNREADABLE'):
+        after = deepcopy(source)
+        if kind == 'FAIL': after['members'][0]['sha256'] = '0' * 64
+        if kind == 'UNREADABLE': after = None
+        raw = json.dumps(dict(before=source,after=after)).encode()
+        class FailedOutput:
+            def write(self, value): raise OSError('SYNTHETIC_PRIVATE_OUTPUT')
+            def fileno(self): raise OSError('memory stream')
+        with monkeypatch.context() as patch:
+            patch.setattr(sys,'stdin',SimpleNamespace(buffer=io.BytesIO(raw)))
+            patch.setattr(sys,'stdout',FailedOutput())
+            assert bundle.main(['--inventory-diff']) == 5
+    with monkeypatch.context() as patch:
+        output = io.BytesIO()
+        patch.setattr(sys,'stdin',SimpleNamespace(buffer=ShortInput(b'', failure=ValueError)))
+        patch.setattr(sys,'stdout',SimpleNamespace(buffer=output))
+        assert bundle.main(['--inventory-diff']) == 4
+        assert json.loads(output.getvalue())['diagnostic_counts'] == {'CLI_INPUT_UNREADABLE':1}
+
+
+def test_inventory_diff_reversal_identity_and_input_permutations():
+    before = json.loads(json_inventory())
+    after = deepcopy(before)
+    after['members'][0]['sha256'] = '0' * 64
+    after['members'][1]['design_version'] = 'v2'
+    after['members'][2]['name'] = 'renamed/member.bin'
+    preserved = deepcopy((before,after))
+    forward = bundle.diff_inventories(before,after)
+    reverse = bundle.diff_inventories(after,before)
+    assert forward['difference_total'] == reverse['difference_total'] == 4
+    exchanged = [dict(row, kind={'added':'removed','removed':'added'}.get(row['kind'],row['kind'])) for row in forward['differences']]
+    assert reverse['differences'] == sorted(exchanged,key=lambda row:(row['name'],row['kind']))
+    for side in (before,after):
+        identity = bundle.diff_inventories(side,deepcopy(side))
+        assert identity['difference_total'] == identity['changed_member_total'] == 0
+        assert identity['differences'] == [] and identity['inventory_equal']
+    for left_reverse in (False,True):
+        for right_reverse in (False,True):
+            left,right = deepcopy(before),deepcopy(after)
+            if left_reverse: left['members'].reverse(); left['expected_fixture_ids'].reverse(); left['required_stages'].reverse()
+            if right_reverse: right['members'].reverse(); right['expected_fixture_ids'].reverse(); right['required_stages'].reverse()
+            assert bundle.diff_inventories(left,right) == forward
+    assert (before,after) == preserved
+
+
+def test_inventory_diff_linear_index_work_and_bounded_storage_without_io(monkeypatch):
+    import builtins
+    counts = []
+    original = bundle._name
+    accesses = []
+    def counted(value): accesses.append(value); return original(value)
+    def forbidden(*args,**kwargs): raise AssertionError('diff attempted payload work')
+    for size in (4,8,16):
+        source = expanded_fixture('unit',['stage%02d' % index for index in range(size)])
+        before = encoder_args(source)['inventory']
+        after = deepcopy(before)
+        for row in after['members']: row['sha256'] = '0' * 64; row['design_version'] = 'v2'
+        accesses.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(bundle,'_name',counted)
+            patch.setattr(bundle,'sha256',forbidden)
+            patch.setattr(builtins,'open',forbidden)
+            result = bundle.diff_inventories(before,after)
+        counts.append(len(accesses))
+        assert result['difference_total'] == 2 * size
+        assert len(result['differences']) == min(2 * size,bundle.MAX_DIAGNOSTICS)
+    assert counts[0] > 0 and counts[1] == 2 * counts[0] and counts[2] == 2 * counts[1]
+
+
+@pytest.mark.parametrize('side',['before','after'])
+@pytest.mark.parametrize('mutation',['fields','member','count','coverage'])
+def test_inventory_diff_malformed_side_is_bounded_sanitized_and_recovers(side,mutation):
+    source = json.loads(json_inventory())
+    pair = dict(before=deepcopy(source),after=deepcopy(source))
+    if mutation == 'fields': pair[side] = {'SYNTHETIC_PRIVATE_SIDE':True}
+    elif mutation == 'member': pair[side]['members'][0]['sha256'] = 'SYNTHETIC_PRIVATE_SIDE'
+    elif mutation == 'count': pair[side]['members'][0]['byte_length'] = True
+    else: pair[side]['members'].pop()
+    preserved = deepcopy(pair)
+    result = bundle.diff_inventories(**pair)
+    assert not result['ok'] and result['difference_total'] is None and result['differences'] == []
+    assert 1 <= result['diagnostic_total'] and len(result['diagnostics']) <= bundle.MAX_DIAGNOSTICS
+    assert {row['side'] for row in result['diagnostics']} == {side}
+    assert 'SYNTHETIC_PRIVATE_SIDE' not in json.dumps(result) and pair == preserved
+    assert bundle.diff_inventory_json(json.dumps(pair))['verdict'] == 'UNREADABLE'
+    assert bundle.diff_inventories(source,deepcopy(source))['inventory_equal']
+
+
+def test_concurrent_inventory_diffs_keep_returned_diagnostics_and_inputs_isolated(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier,Event
+    pairs = []
+    for fixture in ('alpha','beta'):
+        before = encoder_args(expanded_fixture(fixture,['saved']))['inventory']
+        after = deepcopy(before)
+        after['members'][0]['sha256'] = 'invalid'
+        pairs.append(dict(before=before,after=after))
+    preserved = deepcopy(pairs)
+    expected = [bundle.diff_inventories(**pair) for pair in pairs]
+    barrier,release = Barrier(2),Event()
+    original = bundle._inventory_envelope
+    def coordinated(value):
+        result = original(value)
+        barrier.wait(timeout=10)
+        assert release.wait(timeout=10)
+        return result
+    monkeypatch.setattr(bundle,'_inventory_envelope',coordinated)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(bundle.diff_inventories,**pair) for pair in pairs]
+        release.set()
+        results = [future.result(timeout=15) for future in futures]
+    assert results == expected
+    results[0]['diagnostics'][0]['code'] = 'MUTATED'
+    results[0]['diagnostic_counts'].clear()
+    assert results[1] == expected[1] and pairs == preserved
+
+
 def test_inventory_diff_reports_exact_change_facts_with_shared_sorted_cap():
     before = json.loads(json_inventory())
     after = deepcopy(before)
