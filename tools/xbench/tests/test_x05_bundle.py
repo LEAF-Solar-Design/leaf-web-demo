@@ -43,6 +43,146 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+def renamed_bundle(source):
+    renamed = deepcopy(source)
+    mapping = {name: 'renamed/safe_%03d.bin' % index for index, name in enumerate(sorted(source['payloads']))}
+    for member in renamed['members']: member['name'] = mapping[member['name']]
+    for reference in renamed['references']: reference['name'] = mapping[reference['name']]
+    renamed['payloads'] = {mapping[name]: raw for name, raw in source['payloads'].items()}
+    return renamed
+
+
+@pytest.mark.parametrize('kind', ['PASS', 'FAIL', 'UNREADABLE'])
+def test_bijective_member_renaming_preserves_replay_and_stale_reference_is_unreadable(monkeypatch, kind):
+    source = reconciliation_bundle(('alpha', 'beta'), failed=('alpha',) if kind == 'FAIL' else ())
+    if kind == 'UNREADABLE': source['payloads']['alpha/seven.json'] += b' '
+    before = deepcopy(source)
+    expected = bundle.reconciliation.serialize_result(bundle.reconcile_bundle(**source))
+    renamed = renamed_bundle(source)
+    assert bundle.reconciliation.serialize_result(bundle.reconcile_bundle(**renamed)) == expected
+    encoded = bundle.encode_replay_json(**encoder_args(renamed))
+    assert encoded['ok']
+    assert bundle.reconciliation.serialize_result(bundle.replay_bundle_json(encoded['text'])) == expected
+    renamed['references'][0]['name'] = source['references'][0]['name']
+    stale = bundle.reconcile_bundle(**renamed)
+    assert stale['semantic']['verdict'] == 'UNREADABLE'
+    assert codes(stale['bindings']) == {'REFERENCE_DANGLING': 1}
+    assert source == before
+
+
+def expanded_fixture(fixture, stages, *, failed=False, corrupt=False):
+    source = reconciliation_bundle((fixture,), failed=(fixture,) if failed else ())
+    raw = source['payloads'][fixture + '/seven.json']
+    source['members'], source['references'], source['payloads'] = [], [], {}
+    source['required_stages'], source['evidence_stage'] = list(stages), stages[0]
+    for stage in stages:
+        name = fixture + '/' + stage + '.json'
+        source['members'].append(dict(name=name, fixture=fixture, stage=stage, design_version='design-' + fixture,
+            byte_length=len(raw), sha256=sha256(raw).hexdigest()))
+        source['references'].append(dict(name=name, fixture=fixture, stage=stage, design_version='design-' + fixture))
+        source['payloads'][name] = raw + (b' ' if corrupt else b'')
+    return source
+
+
+@pytest.mark.parametrize('beyond_cap', [False, True])
+def test_disjoint_bundle_union_has_additive_conflicts_and_independent_semantics(beyond_cap):
+    from collections import Counter
+    stages = ['stage%02d' % i for i in range(16 if beyond_cap else 1)]
+    components = [expanded_fixture('alpha', stages, corrupt=True),
+                  expanded_fixture('beta', stages, failed=True, corrupt=beyond_cap),
+                  expanded_fixture('gamma', stages)]
+    individual = [bundle.reconcile_bundle(**component) for component in components]
+    union = dict(members=sum((component['members'] for component in components), []),
+                 references=sum((component['references'] for component in components), []),
+                 payloads={k:v for component in components for k,v in component['payloads'].items()},
+                 expected_fixture_versions={k:v for component in components for k,v in component['expected_fixture_versions'].items()},
+                 required_stages=stages, evidence_stage=stages[0])
+    before = deepcopy(union)
+    result = bundle.reconcile_bundle(**union)
+    expected_counts = Counter()
+    for item in individual: expected_counts.update(codes(item['integrity']))
+    assert codes(result['integrity']) == expected_counts
+    assert result['integrity']['diagnostic_total'] == sum(item['integrity']['diagnostic_total'] for item in individual)
+    assert len(result['integrity']['diagnostics']) == min(sum(expected_counts.values()), bundle.MAX_DIAGNOSTICS)
+    if beyond_cap: assert result['integrity']['diagnostic_total'] > bundle.MAX_DIAGNOSTICS
+    for fixture, item in zip(('alpha', 'beta', 'gamma'), individual):
+        assert result['semantic']['fixtures'][fixture] == item['semantic']['fixtures'][fixture]
+    assert result['semantic']['fixtures']['gamma']['verdict'] == 'PASS'
+    assert result['semantic']['verdict'] == 'UNREADABLE' and union == before
+
+
+@pytest.mark.parametrize('raw,reason', [
+    (b'\xe2\x82', 'bundle_evidence_utf8_unreadable'),
+    (b'\xc0\xaf', 'bundle_evidence_utf8_unreadable'),
+    ('{"private":"SYNTHETIC_PRIVATE_TEXT"}'.encode('utf-16'), 'bundle_evidence_utf8_unreadable'),
+    (b'{"private":"SYNTHETIC_PRIVATE_TEXT\x00"}', 'json_malformed')])
+def test_hash_correct_text_decode_failures_are_sanitized_and_repairable(monkeypatch, raw, reason):
+    source = reconciliation_bundle()
+    repaired = deepcopy(source)
+    source['payloads']['alpha/seven.json'] = raw
+    source['members'][0].update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    calls = []
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda *args: calls.append(1))
+        result = bundle.reconcile_bundle(**source)
+        assert result['integrity']['integrity_verified'] and calls == []
+        semantic = result['semantic']['fixtures']['alpha']['result']
+        assert semantic['verdict'] == 'UNREADABLE' and semantic['reason'] == reason
+        assert 'SYNTHETIC_PRIVATE_TEXT' not in bundle.reconciliation.serialize_result(result)
+    assert bundle.reconcile_bundle(**repaired)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('size', [0, 1, 8191, 8192, 8193, 65537])
+def test_byte_audit_hashes_every_valid_byte_once_in_bounded_chunks(monkeypatch, size):
+    raw = bytes(index % 251 for index in range(size))
+    member = dict(name='unit/evidence.bin', fixture='unit', stage='evidence', design_version='v1',
+                  byte_length=size, sha256=sha256(raw).hexdigest())
+    updates, finalized = [], []
+    class Digest:
+        def __init__(self, initial):
+            assert initial == b''
+            self.inner = sha256(initial)
+        def update(self, chunk): updates.append(chunk); self.inner.update(chunk)
+        def hexdigest(self): finalized.append(1); return self.inner.hexdigest()
+    monkeypatch.setattr(bundle, 'sha256', Digest)
+    result = bundle.audit_bundle_bytes([member], {member['name']:raw}, expected_fixture_ids=['unit'], required_stages=['evidence'])
+    assert result['integrity_verified'] and b''.join(updates) == raw and finalized == [1]
+    assert all(0 < len(chunk) <= bundle.DIGEST_CHUNK_BYTES for chunk in updates)
+    assert len(updates) == (size + bundle.DIGEST_CHUNK_BYTES - 1) // bundle.DIGEST_CHUNK_BYTES
+    calls = []
+    source = dict(members=[dict(member, sha256='0' * 64)], payloads={member['name']:raw},
+        references=[{key:member[key] for key in ('name', 'fixture', 'stage', 'design_version')}],
+        expected_fixture_versions={'unit':'v1'}, required_stages=['evidence'], evidence_stage='evidence')
+    monkeypatch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda *args: calls.append(1))
+    failed = bundle.reconcile_bundle(**source)
+    assert failed['semantic']['verdict'] == 'UNREADABLE' and calls == []
+    assert codes(failed['integrity']) == {'PAYLOAD_SHA256_MISMATCH': 1}
+
+
+def test_stage_completion_lattice_requires_all_references_and_retains_byte_errors():
+    from itertools import combinations, permutations
+    source = expanded_fixture('alpha', ['import', 'grid', 'assurance'])
+    references = deepcopy(source['references'])
+    for count in range(4):
+        for selected in combinations(range(3), count):
+            for order in permutations([index for index in range(3) if index not in selected]):
+                current = dict(source, references=[deepcopy(references[index]) for index in selected])
+                for restored in (None,) + order:
+                    if restored is not None: current['references'].append(deepcopy(references[restored]))
+                    before = deepcopy(current)
+                    result = bundle.reconcile_bundle(**current)
+                    missing = 3 - len(current['references'])
+                    assert result['semantic']['verdict'] == ('UNREADABLE' if missing else 'PASS')
+                    assert codes(result['bindings']) == ({'REFERENCE_STAGE_MISSING': missing} if missing else {})
+                    assert current == before
+                    corrupt = deepcopy(current)
+                    corrupt['payloads']['alpha/import.json'] += b' '
+                    damaged = bundle.reconcile_bundle(**corrupt)
+                    assert damaged['semantic']['verdict'] == 'UNREADABLE'
+                    assert codes(damaged['integrity']) == {'PAYLOAD_LENGTH_MISMATCH':1, 'PAYLOAD_SHA256_MISMATCH':1}
+                    assert damaged['bindings'] == result['bindings']
+
+
 @pytest.mark.parametrize('mutation', ['hash', 'length', 'fixture', 'stage', 'reference_name', 'reference_version', 'payload', 'missing_payload'])
 def test_one_field_mutations_agree_across_direct_wire_and_cli(monkeypatch, mutation):
     source = reconciliation_bundle()
