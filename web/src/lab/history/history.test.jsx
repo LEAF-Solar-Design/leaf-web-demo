@@ -908,6 +908,64 @@ describe('Strategy revision ledger', () => {
 
 
 describe('original export response text', () => {
+  it.each(['numeric tokens', 'larger multilingual report'])('preserves producer text for %s', async variant => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    producer.result.candidates[1].score = -0
+    if (variant === 'larger multilingual report') {
+      producer.result.reasons = ['策略 🌱, 15 分钟, 250 mV, توقيت UTC. '.repeat(2000)]
+    }
+    const producerText = canonicalJSON(producer.result)
+      .replace('"score":2', '"score":2e0')
+      .replace('"score":0', '"score":-0.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = '\n  ' + canonicalJSON(bundle)
+      .replace(canonicalJSON(producer.result), producerText) + '\n'
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: async () => serverText })
+
+    const exported = await client.exportBundle('strategy', 1, { preserveText: true })
+
+    expect(exported.ok).toBe(true)
+    expect(new TextEncoder().encode(exported.text)).toEqual(new TextEncoder().encode(serverText))
+    expect(verifyLabBundle(JSON.parse(exported.text))).toEqual(bundle)
+    expect(exported.text).toContain(producerText)
+    expect(createHash('sha256').update(producerText + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][1].method).toBe('GET')
+  })
+
+  it('retains the current export when the previous document response finishes last', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const older = deferred()
+    const newer = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => older.promise })
+    const oldExport = client.exportBundle('strategy', 1, { preserveText: true })
+    client.setDocId('other')
+    const otherBundle = copy(bundle)
+    otherBundle.parts.identity.doc_id = 'other'
+    otherBundle.parts.evaluations[0].run.doc_id = 'other'
+    otherBundle.manifest.parts.identity = hash(otherBundle.parts.identity)
+    otherBundle.manifest.parts.evaluations = hash(otherBundle.parts.evaluations)
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => newer.promise })
+    const newExport = client.exportBundle('other', 1, { preserveText: true })
+    const newerText = JSON.stringify(otherBundle)
+    newer.resolve(newerText)
+    const currentResult = await newExport
+    expect(currentResult).toMatchObject({ ok: true, text: newerText })
+
+    older.resolve(JSON.stringify(bundle))
+    const staleResult = await oldExport
+
+    expect(staleResult.ok).toBe(false)
+    expect(staleResult).not.toHaveProperty('text')
+    expect(currentResult.text).toBe(newerText)
+    expect(currentResult.bundle.parts.identity.doc_id).toBe('other')
+    expect(client.state.openedBundle).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  })
+
   it('downloads the verified response bytes with the producer numeric spelling intact', async () => {
     const { bundle, client, fetchImpl } = exportFixture()
     const producer = bundle.parts.evaluations[0].complete_results['job-1']
