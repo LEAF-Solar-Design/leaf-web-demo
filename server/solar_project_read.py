@@ -3,6 +3,7 @@ from copy import deepcopy
 from hashlib import sha256
 from uuid import UUID
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 import deps
 import entitlements
@@ -29,7 +30,7 @@ SUPPORTED_READ_TOOLS = frozenset((
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
-    "solar-solaredge-tracking-read", "solar-takeoff",
+    "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report",
 ))
 
 
@@ -82,6 +83,34 @@ def _trusted(tenant, name, catalog_digest):
             or (local._reads_version_history(module) and name != "solar-solaredge-tracking-read")):
         _fail("SIP_R6_TOOL_UNSUPPORTED")
     return trusted
+
+
+def assignment_report_catalog_availability(tool, tenant, *, project_id, drawing_id, input_version_id):
+    """Use read authority and the existing hook on the exact verified project graph."""
+    name = "solar-assignment-report"
+    trusted = False
+    try:
+        _trusted(tenant, name, deps.catalog_tool_digest(tool))
+        trusted = True
+    except (GraphValidationError, ValueError, TypeError, UnicodeError, RecursionError):
+        pass
+    state = policy.project_drawing_tool_availability(
+        tool, tenant, read_tool=trusted, exact_version=bool(input_version_id))
+    if not state["runnable"]:
+        return state
+    try:
+        verified = project.resolve_context(tenant, UUID(str(project_id)), UUID(str(input_version_id)),
+                                           drawing_id=UUID(str(drawing_id)), write=False)
+        context = graph_adapter.resolve_project_graph_context(verified)
+        if context.graph is None:
+            _fail("GRAPH_NOT_EMBEDDED")
+        readiness = local._load_builtin(name).input_readiness(context.graph)
+        reason = None if readiness["input_ready"] else readiness["input_reason"]
+    except (HTTPException, project.ProjectContextError, GraphValidationError, ValueError, TypeError, AttributeError):
+        reason = "invalid_drawing_context"
+    if reason:
+        state.update(input_ready=False, input_reason=reason, refusal_reasons=[reason], runnable=False)
+    return state
 
 
 def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name, params, *,

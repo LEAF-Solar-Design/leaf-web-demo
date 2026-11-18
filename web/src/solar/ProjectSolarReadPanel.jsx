@@ -84,7 +84,7 @@ export function projectSolarWorkspaceReason(code) {
   }
 }
 
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read', 'solar-assignment-report']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const REASON_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype

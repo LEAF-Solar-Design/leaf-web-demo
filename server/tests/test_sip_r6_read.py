@@ -21,13 +21,14 @@ import test_sip_r3b_tools as tools_cases
 import test_sip_r3b_chain as chain_cases
 import test_sip_r5_routes as catalog_cases
 from test_sip_r5_routes import lane as catalog_lane  # noqa: F401
+from test_w1_design_graph import graph  # noqa: F401
 
 SAFE = frozenset((
     "solar-select-by-zone", "solar-design-presets-list", "solar-autofill-plan",
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
-    "solar-solaredge-tracking-read", "solar-takeoff"))
+    "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report"))
 NEC = {
     "solar-nec-ampacity-correction": dict(base_ampacity=100, temp_factor=.91, conduit_factor=.8),
     "solar-nec-ac-voltage-drop": dict(current_a=100, one_way_length_ft=100,
@@ -77,7 +78,7 @@ def blocked(*args, **kwargs):
 
 
 def test_sip_r6_exact_read_population(lane, monkeypatch):
-    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 15
+    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 16
     for declaration in solar_tools.entries():
         if declaration["name"] not in SAFE:
             refused("SIP_R6_TOOL_UNSUPPORTED", lambda: run(lane, declaration["name"], {}))
@@ -571,3 +572,95 @@ def test_estimate_manifest_flag_and_unavailable_read_are_not_empty(estimate_lane
     assert response.status_code == 503 and b'"saved":false' not in response.body
     assert response.headers["cache-control"] == "no-store"
     assert len(s.publications) == before
+
+
+@pytest.mark.parametrize("collectors", [True, False])
+def test_project_assignment_report_uses_real_kernel_without_mutation(lane, monkeypatch, collectors):
+    from solar_design_graph import validate_graph
+    from solar_solve_results import sync_assignments
+    g = deepcopy(lane.ctx.graph)
+    for string in g["strings"]:
+        string["inverter_ref"] = string["to_ref"] = None
+    for inverter in g["inverters"]:
+        inverter["input_assignments"] = []
+    if not collectors:
+        g["inverters"] = []
+    sync_assignments(g)
+    g = validate_graph(g)
+    lane.set_parent(tools_cases.embedded(g))
+    before = deepcopy((lane.versions, lane.blobs, lane.writes, lane.head))
+    # Setup publication calls retain the Memory store itself; keep their identity.
+    calls_before = list(lane.calls)
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+    params = {"expected_rev": g["rev"], "accept_excess_capacity": True}
+    tool = "solar-assignment-report"
+    if collectors:
+        result = run(lane, tool, params, version=lane.parent.version_id)["result"]
+        assert result["drawing_changed"] is False
+        assert result["input_version_id"] == str(lane.parent.version_id)
+        assert result["output"] == local._load_builtin(tool).run(deepcopy(g), params)
+        assert result["output"]["committed"] is False
+        assert result["output"]["status"] == "complete"
+        assert result["output"]["remaining_string_refs"] == []
+        assert {item["string_ref"] for item in result["output"]["candidate_assignments"]} == {
+            string["id"] for string in g["strings"]}
+        refused("STALE_GRAPH_REVISION", lambda: run(lane, tool, dict(params, expected_rev=g["rev"] + 1),
+                                                   version=lane.parent.version_id))
+    else:
+        assert local._load_builtin(tool).input_readiness(g) == {
+            "input_ready": False, "input_reason": "string_collectors_required"}
+        refused("NO_STRING_COLLECTORS", lambda: run(lane, tool, params, version=lane.parent.version_id))
+    assert (lane.versions, lane.blobs, lane.writes, lane.head) == before
+    assert lane.calls == calls_before
+
+
+def test_project_assignment_report_catalog_has_synchronous_read_authority(catalog_lane, monkeypatch, graph):
+    import entitlements
+    s = catalog_lane
+    import test_solar_tool_solar_assign_strings as assignment_cases
+    g = assignment_cases.variant(graph, "U")
+    s.s.set_parent(tools_cases.embedded(g))
+    s.tools["solar-assignment-report"] = solar_tools.trusted_record("solar-assignment-report")
+    granted = entitlements.entitlements_for
+    monkeypatch.setattr(entitlements, "entitlements_for",
+                        lambda *args, **kwargs: {**granted(*args, **kwargs), "run_read": True})
+    query = {"project_id": str(s.s.project), "drawing_id": str(s.s.drawing),
+             "input_version_id": str(s.s.parent.version_id)}
+    def unavailable(*args, **kwargs):
+        pytest.fail("read catalog must not require native worker admission")
+    monkeypatch.setattr(read.policy, "project_tool_admission", unavailable)
+    response = s.client.get("/api/capabilities", params=query, headers=catalog_cases.headers(s))
+    state = catalog_cases.states(response)["solar-assignment-report"]
+    assert state["runnable"] is True and state["project_read"] is True
+    assert state["admission_checked"] is False
+
+    assert state["engine_ready"] is True
+    baseline = catalog_cases.states(response)["solar-settings"]
+    g["inverters"] = []
+    from solar_solve_results import sync_assignments
+    sync_assignments(g)
+    s.s.set_parent(tools_cases.embedded(g))
+    response = s.client.get("/api/capabilities", params=query, headers=catalog_cases.headers(s))
+    states = catalog_cases.states(response)
+    assert states["solar-assignment-report"]["input_reason"] == "string_collectors_required"
+    assert states["solar-assignment-report"]["runnable"] is False
+    assert states["solar-settings"] == baseline
+
+
+def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkeypatch):
+    from types import SimpleNamespace
+    # Reproduce the retained context-only producer used by the demo tenancy matrix.
+    version = lane.parent
+    incomplete = SimpleNamespace(**{key: value for key, value in vars(version).items()
+                                    if key != "created_at"})
+    assert not hasattr(incomplete, "created_at")
+    lane.versions[version.version_id] = incomplete
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+    state = read.assignment_report_catalog_availability(
+        solar_tools.trusted_record("solar-assignment-report"), lane.tenant,
+        project_id=lane.project, drawing_id=lane.drawing, input_version_id=version.version_id)
+    assert state["runnable"] is False and state["input_ready"] is False
+    assert state["input_reason"] == "invalid_drawing_context"
+    assert state["refusal_reasons"] == ["invalid_drawing_context"]
