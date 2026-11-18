@@ -153,3 +153,18 @@ def test_catalog_constraints_share_one_part(field):
     assert grade(dict(good, ratings=other["ratings"])) == "FAIL"
     assert grade(dict(good, version="1")) == "FAIL"
     assert catalog_selection_quality([good], "2", {field: (0, 1)}, good) == "FAIL"
+
+
+@pytest.mark.parametrize("parts", [("module", "rack"), ("relay", "fuse", "fan"), ("duct", "tee", "cap", "bend")])
+def test_recorded_catalog_cursor_chain(parts):
+    from benches.x03_catalog_oracle import paginated_catalog_quality
+    pages = [dict(cursor=None if i == 0 else str(i), next=str(i+1) if i+1 < len(parts) else None,
+                  rows=[dict(part=part, rating=i+1)], version="v2") for i, part in enumerate(parts)]
+    def grade(records):
+        return paginated_catalog_quality(records, "v2", list(parts))
+    assert grade(pages[::-1]) == "PASS"
+    assert grade(pages[:-1]) == "INCOMPLETE"
+    assert grade(pages + [pages[-1]]) == "FAIL"
+    assert grade([*pages[:-1], dict(pages[-1], next="1")]) == "FAIL"
+    assert grade([*pages[:-1], dict(pages[-1], rows=[dict(part=parts[0], rating=99)])]) == "FAIL"
+    assert grade([*pages[:-1], dict(pages[-1], version="v1")]) == "FAIL"

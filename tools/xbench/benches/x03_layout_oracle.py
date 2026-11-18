@@ -101,3 +101,26 @@ def zone_load_quality(panel_loads, ballast_loads, supports, zones):
         if totals[zone] > Fraction(str(area)) * Fraction(str(limit)):
             return "FAIL"
     return "PASS"
+
+
+def shade_exclusion_quality(panels, shade, *, drawing, revision, boundary_policy):
+    """Check panel footprints against exclusions from one drawing revision."""
+    if not drawing or not revision or not isinstance(shade, dict) or not panels:
+        return "INCOMPLETE"
+    if any(not shade.get(k) for k in ("drawing", "revision")) or boundary_policy is None:
+        return "INCOMPLETE"
+    if (shade["drawing"], shade["revision"]) != (drawing, revision) or boundary_policy not in ("allow-touch", "exclude-touch"):
+        return "FAIL"
+    polygons = shade.get("polygons")
+    if not isinstance(polygons, list):
+        return "INCOMPLETE"
+    for geometry in (*panels, *polygons):
+        if geometry is None or getattr(geometry, "is_empty", True):
+            return "INCOMPLETE"
+        if geometry.geom_type not in ("Polygon", "MultiPolygon") or not geometry.is_valid:
+            return "FAIL"
+    for panel in panels:
+        for zone in polygons:
+            if panel.intersects(zone) and (boundary_policy == "exclude-touch" or not panel.touches(zone)):
+                return "FAIL"
+    return "PASS"

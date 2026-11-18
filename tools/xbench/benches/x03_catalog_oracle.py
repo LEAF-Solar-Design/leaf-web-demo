@@ -71,3 +71,40 @@ def catalog_selection_quality(rows, version, constraints, result):
         if values[0] != values[1] or (bounds and not bounds[0] <= values[0] <= bounds[1]):
             return "FAIL"
     return "PASS"
+
+
+def paginated_catalog_quality(pages, version, expected_parts):
+    """Follow a recorded cursor chain from the initial request to the terminal page."""
+    if not isinstance(pages, list) or not pages or not isinstance(version, str) or not version:
+        return "INCOMPLETE"
+    if not isinstance(expected_parts, list) or not all(isinstance(p, str) and p for p in expected_parts):
+        return "INCOMPLETE"
+    if len(set(expected_parts)) != len(expected_parts):
+        return "FAIL"
+    indexed = {}
+    for page in pages:
+        if not isinstance(page, dict) or any(k not in page for k in ("cursor", "next", "version", "rows")):
+            return "INCOMPLETE"
+        if page["version"] != version or not isinstance(page["rows"], list):
+            return "FAIL"
+        if any(c is not None and (not isinstance(c, str) or not c) for c in (page["cursor"], page["next"])):
+            return "FAIL"
+        if page["cursor"] in indexed:
+            return "FAIL"
+        indexed[page["cursor"]] = page
+    cursor, visited, parts = None, set(), set()
+    while cursor not in visited:
+        if cursor not in indexed:
+            return "INCOMPLETE"
+        visited.add(cursor)
+        page = indexed[cursor]
+        for row in page["rows"]:
+            if not isinstance(row, dict) or not isinstance(row.get("part"), str) or not row["part"]:
+                return "INCOMPLETE"
+            if row.get("version", version) != version or row["part"] in parts:
+                return "FAIL"
+            parts.add(row["part"])
+        cursor = page["next"]
+        if cursor is None:
+            return "PASS" if len(visited) == len(pages) and parts == set(expected_parts) else "FAIL"
+    return "FAIL"

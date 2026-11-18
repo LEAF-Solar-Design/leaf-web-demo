@@ -453,3 +453,45 @@ def circuit_separation_quality(routes, circuits, rules, junctions):
                 if crossing.geom_type != "Point" or crossing.is_empty or not any(crossing.equals(p) for p in allowed):
                     return "FAIL"
     return "PASS"
+
+
+def conduit_fill_quality(internal_area, conductor_areas, allowed_fraction):
+    """Compare occupied and permitted cross-sectional area in the same unit."""
+    if internal_area is None or allowed_fraction is None or not isinstance(conductor_areas, (list, tuple)):
+        return "INCOMPLETE"
+    if any(area is None for area in conductor_areas):
+        return "INCOMPLETE"
+    if (not finite_measure(allowed_fraction) or not 0 < allowed_fraction <= 1
+            or not all(finite_measure(a) and a > 0 for a in (internal_area, *conductor_areas))):
+        return "FAIL"
+    occupied = sum(Fraction(str(a)) for a in conductor_areas)
+    permitted = Fraction(str(internal_area)) * Fraction(str(allowed_fraction))
+    return "PASS" if occupied <= permitted else "FAIL"
+
+
+def inverter_ratio_quality(ac_watts, dc_watts, assignments, bounds):
+    """Reconcile rated DC watts to each inverter's own inclusive ratio bounds."""
+    if not all(isinstance(m, dict) and m for m in (ac_watts, dc_watts, assignments, bounds)):
+        return "INCOMPLETE"
+    if assignments.keys() != dc_watts.keys() or bounds.keys() != ac_watts.keys():
+        return "INCOMPLETE"
+    totals = dict.fromkeys(ac_watts, Fraction(0))
+    for source, inverter in assignments.items():
+        if not isinstance(inverter, str) or inverter not in totals:
+            return "FAIL"
+        rating = dc_watts[source]
+        if rating is None:
+            return "INCOMPLETE"
+        if not finite_measure(rating) or rating <= 0:
+            return "FAIL"
+        totals[inverter] += Fraction(str(rating))
+    for inverter, ac in ac_watts.items():
+        limits = bounds[inverter]
+        if ac is None or not isinstance(limits, (tuple, list)) or len(limits) != 2 or None in limits:
+            return "INCOMPLETE"
+        if not finite_measure(ac) or ac <= 0 or not all(finite_measure(v) and v >= 0 for v in limits):
+            return "FAIL"
+        low, high = map(lambda x: Fraction(str(x)), limits)
+        if not low <= totals[inverter] / Fraction(str(ac)) <= high:
+            return "FAIL"
+    return "PASS"

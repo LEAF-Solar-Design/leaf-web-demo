@@ -81,3 +81,38 @@ def dashboard_quality(runs, failures, changes, before, after, *, expected_run_id
         return "INCOMPLETE"
     return "PASS" if all(finite_nonnegative(summary[k]) and isclose(summary[k], v)
                          for k, v in metrics.items()) else "FAIL"
+
+
+def window_coverage_quality(runs, reported_ids, start, end, *, include_start, include_end):
+    """Recompute report membership from the complete recorded run inventory."""
+    from datetime import datetime, timezone
+
+    def utc(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            stamp = datetime.fromisoformat(value)
+            return stamp.astimezone(timezone.utc) if stamp.tzinfo is not None else None
+        except (OverflowError, ValueError):
+            return None
+
+    start, end = utc(start), utc(end)
+    if start is None or end is None or any(type(flag) is not bool for flag in (include_start, include_end)):
+        return "INCOMPLETE"
+    if not isinstance(runs, list) or not isinstance(reported_ids, list):
+        return "INCOMPLETE"
+    if start >= end or not all(isinstance(i, str) and i for i in reported_ids):
+        return "FAIL"
+    seen, expected = set(), set()
+    for row in runs:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            return "INCOMPLETE"
+        stamp = utc(row.get("timestamp"))
+        if stamp is None:
+            return "INCOMPLETE"
+        if row["id"] in seen:
+            return "FAIL"
+        seen.add(row["id"])
+        if start < stamp < end or (include_start and stamp == start) or (include_end and stamp == end):
+            expected.add(row["id"])
+    return "PASS" if len(reported_ids) == len(set(reported_ids)) and expected == set(reported_ids) else "FAIL"
