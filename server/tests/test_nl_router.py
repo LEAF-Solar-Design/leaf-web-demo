@@ -338,6 +338,6 @@ def test_filtered_layer_prompt_counts_physical_panel_handles(prompt, block, laye
 ])
 def test_share_change_preserves_operand_direction(prompt):
     result = _c(prompt)
-    assert result.tool == "count-modules"
-    assert result.params["compare_selections"] == {
+    assert result["tool"] == "count-modules"
+    assert result["params"]["compare_selections"] == {
         "by": "block", "before": ["GroupA"], "after": ["GroupB"]}
