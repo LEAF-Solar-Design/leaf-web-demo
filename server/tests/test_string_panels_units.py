@@ -28,7 +28,7 @@ def _load_string_panels():
 
 
 string_panels = _load_string_panels()
-INCH_DIGEST = "3386b2716961c5ca0ec1c2b10c6c4e75dfb73e4bae5f6d10a0f366d9d247cbef"
+INCH_DIGEST = "ea1d6371cf45ad84b99e7b51b3f4cd18c0ce1e973b8a986ad3b7b6a3d0b8f9f9"
 PARAM_ERROR = "meters_per_unit must be a finite number greater than 0 and at most 1000"
 GRAPH_ERROR = (
     "the drawing's Solar design does not declare a usable meters_per_unit; "
@@ -122,10 +122,10 @@ def test_string_panels_units_inch_continuity_result(intake, baseline):
     result = baseline[0]
     assert result["stats"]["bank_count"] == 11
     assert result["stats"]["string_count"] == 169
-    assert result["stats"]["full_string_count"] == 95
-    assert result["stats"]["total_wire_ft"] == 13903.5
-    assert result["strings"][0]["length_ft"] == 115.7
-    assert result["strings"][0]["modules"] == 18
+    assert result["stats"]["full_string_count"] == 20
+    assert result["stats"]["total_wire_ft"] == 13916.3
+    assert result["strings"][0]["length_ft"] == 94.2
+    assert result["strings"][0]["modules"] == 15
 
 
 @pytest.mark.parametrize("f,mpu", SCALES)
@@ -142,7 +142,7 @@ def test_string_panels_units_explicit_scale_matches_inch(intake, baseline, f, mp
 
 def test_string_panels_units_today_was_wrong(intake):
     metres = run(scaled(intake, 0.0254), {"meters_per_unit": 0.0254})[0]
-    assert metres["stats"]["total_wire_ft"] == 351.2
+    assert metres["stats"]["total_wire_ft"] == 352.8
     millimetres = run(scaled(intake, 25.4), {"meters_per_unit": 0.0254})[0]
     assert millimetres["stats"]["string_count"] == 2345
     assert millimetres["stats"]["total_wire_ft"] == 0.0
@@ -333,3 +333,35 @@ def test_string_panels_continuity_adjacent_slot_boundary(gap, modules):
     result, _ = run(drawing, {})
     assert result["stats"]["bank_count"] == 1
     assert [string["modules"] for string in result["strings"]] == modules
+
+
+@pytest.mark.parametrize("count", [18, 19, 20, 35, 36, 37])
+def test_string_panels_balances_contiguous_run_without_short_remainder(count):
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(count)]}
+    result, _ = run(intake, {})
+    sizes = [string["modules"] for string in result["strings"]]
+    maximum = result["electrical"]["max_modules_per_string"]
+    assert maximum == 18
+    assert len(sizes) == math.ceil(count / maximum)
+    assert max(sizes) - min(sizes) <= 1
+    assert sum(sizes) == count
+    assert max(sizes) <= maximum
+    assert result["electrical"]["pass"] is True
+    points = [tuple(point) for string in result["strings"] for point in string["pts"]]
+    assert len(points) == len(set(points)) == count
+    assert set(points) == {(index * 60.0, 0.0) for index in range(count)}
+    assert all(math.dist(left, right) <= 120.0 for string in result["strings"]
+               for left, right in zip(string["pts"], string["pts"][1:]))
+
+
+def test_string_panels_balancing_preserves_gap_and_order_boundaries():
+    positions = list(range(20)) + list(range(100, 119))
+    cents = [(float(x), 0.0) for x in positions]
+    ordered = list(range(len(cents)))
+    before = copy.deepcopy((ordered, cents))
+    chunks = list(string_panels._continuous_chunks(ordered, cents, 18, 1.5))
+    assert [len(chunk) for chunk in chunks] == [10, 10, 10, 9]
+    assert [index for chunk in chunks for index in chunk] == ordered
+    assert all(math.dist(cents[left], cents[right]) <= 1.5 for chunk in chunks
+               for left, right in zip(chunk, chunk[1:]))
+    assert (ordered, cents) == before
