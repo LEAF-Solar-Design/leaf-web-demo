@@ -28,7 +28,7 @@ def _load_string_panels():
 
 
 string_panels = _load_string_panels()
-INCH_DIGEST = "781f04e8187c3badeae9b01063be46b923f9172fa3ae6efadaedca85fcf46e7f"
+INCH_DIGEST = "3386b2716961c5ca0ec1c2b10c6c4e75dfb73e4bae5f6d10a0f366d9d247cbef"
 PARAM_ERROR = "meters_per_unit must be a finite number greater than 0 and at most 1000"
 GRAPH_ERROR = (
     "the drawing's Solar design does not declare a usable meters_per_unit; "
@@ -121,9 +121,9 @@ def test_string_panels_units_inch_continuity_result(intake, baseline):
         assert digest(run(drawing, params)) == INCH_DIGEST
     result = baseline[0]
     assert result["stats"]["bank_count"] == 11
-    assert result["stats"]["string_count"] == 162
-    assert result["stats"]["full_string_count"] == 103
-    assert result["stats"]["total_wire_ft"] == 14046.3
+    assert result["stats"]["string_count"] == 169
+    assert result["stats"]["full_string_count"] == 95
+    assert result["stats"]["total_wire_ft"] == 13903.5
     assert result["strings"][0]["length_ft"] == 115.7
     assert result["strings"][0]["modules"] == 18
 
@@ -142,7 +142,7 @@ def test_string_panels_units_explicit_scale_matches_inch(intake, baseline, f, mp
 
 def test_string_panels_units_today_was_wrong(intake):
     metres = run(scaled(intake, 0.0254), {"meters_per_unit": 0.0254})[0]
-    assert metres["stats"]["total_wire_ft"] == 354.9
+    assert metres["stats"]["total_wire_ft"] == 351.2
     millimetres = run(scaled(intake, 25.4), {"meters_per_unit": 0.0254})[0]
     assert millimetres["stats"]["string_count"] == 2345
     assert millimetres["stats"]["total_wire_ft"] == 0.0
@@ -193,7 +193,7 @@ def test_string_panels_units_bounds_accepted(intake):
         assert stats["bank_count"] == 2345
         assert stats["total_wire_ft"] == 0.0
     tiny = run(intake, {"meters_per_unit": 5e-324})
-    assert tiny[0]["stats"]["string_count"] == 162
+    assert tiny[0]["stats"]["string_count"] == 169
     assert tiny[0]["stats"]["bank_count"] == 11
     # Not the inch reading: every length collapses and every point returns to the origin.
     assert tiny[0]["stats"]["total_wire_ft"] == 0.0
@@ -208,7 +208,7 @@ def test_string_panels_units_overflow_refused(intake):
                  if pl.get("layer") == "Panels" and pl.get("closed"))
     first["pts"][0][0] = 1e308
     assert_refused(drawing, {"meters_per_unit": 1000}, OVERFLOW_ERROR)
-    assert run(drawing, {})[0]["stats"]["string_count"] == 163
+    assert run(drawing, {})[0]["stats"]["string_count"] == 171
 
 
 def test_string_panels_units_result_overflow_refused():
@@ -293,8 +293,8 @@ def test_string_panels_units_no_panels_message_unchanged():
 
 
 def test_string_panels_continuity_inside_connected_bank():
-    # A full lower row connects both sides of the upper row's large hole.
-    centres = [(80 * x, 0) for x in range(11)] + [(80 * x, 40) for x in (0, 1, 9, 10)]
+    # A full lower row connects both sides of the upper row's empty slot.
+    centres = [(80 * x, 0) for x in range(11)] + [(80 * x, 40) for x in (0, 1, 3, 4)]
     drawing = {"polylines": [{"layer": "Panels", "closed": True,
         "pts": [[x - 38.5, y - 19.25], [x + 38.5, y - 19.25],
                 [x + 38.5, y + 19.25], [x - 38.5, y + 19.25]]}
@@ -305,7 +305,7 @@ def test_string_panels_continuity_inside_connected_bank():
     assert sorted(points) == sorted(centres)
     assert len(points) == len(set(points)) == 15
     assert all(1 <= string["modules"] <= 18 for string in result["strings"])
-    assert all(math.dist(a, b) <= 3 * 77 for string in result["strings"]
+    assert all(math.dist(a, b) <= 1.5 * 77 for string in result["strings"]
                for a, b in zip(string["pts"], string["pts"][1:]))
 
 
@@ -323,5 +323,13 @@ def test_string_panels_continuity_actual_demo_rooftop(intake):
                for string in result["strings"])
     assert overlay["items"] == [{"id": s["id"], "pts": s["pts"]} for s in result["strings"]]
     # Independent dimensional oracle from the repo demo's 77-inch module edge.
-    assert all(math.dist(a, b) <= 3 * 77 + 0.002 for string in result["strings"]
+    assert all(math.dist(a, b) <= 1.5 * 77 + 0.002 for string in result["strings"]
                for a, b in zip(string["pts"], string["pts"][1:]))
+
+
+@pytest.mark.parametrize("gap,modules", [(115.5, [2]), (115.501, [1, 1])])
+def test_string_panels_continuity_adjacent_slot_boundary(gap, modules):
+    drawing = {"polylines": [rect(x, 77, 38.5) for x in (0.0, gap)]}
+    result, _ = run(drawing, {})
+    assert result["stats"]["bank_count"] == 1
+    assert [string["modules"] for string in result["strings"]] == modules

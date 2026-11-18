@@ -16,7 +16,7 @@ Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
      rotate into the bank frame, band centroids into rows by frame-y
      (tolerance = half the median rotated bbox height), and order panels
      serpentine (row 0 left->right, row 1 right->left, ...),
-  4. end a continuous run before a step longer than three median module long
+  4. end a continuous run before a step longer than 1.5 median module long
      edges, then chunk each run into strings of at most
      ``max_modules_per_string``, where that limit comes from the NEC 690.7
      cold-temperature Voc check:
@@ -56,7 +56,7 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 INCHES_PER_FOOT = 12.0
-MAX_STEP_MODULE_LENGTHS = 3.0
+MAX_STEP_MODULE_LENGTHS = 1.5
 METERS_PER_INCH = 0.0254
 MAX_METERS_PER_UNIT = 1000.0
 SCALE_INVALID = "meters_per_unit must be a finite number greater than 0 and at most 1000"
