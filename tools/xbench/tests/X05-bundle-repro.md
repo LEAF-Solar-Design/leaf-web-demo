@@ -292,3 +292,84 @@ Stop on any mismatch. Each subprocess has a 15-second deadline; the standard
 runner terminates and waits for an expired child. No child, browser, service,
 extraction or product mutation is retained. The live grader and its source-bound
 admission remain separate from these offline CLI verdicts.
+
+## Borrowed stream failure and recovery replay
+
+The CLI rejects `None`, text, `bytearray` and overreported read chunks, including
+after a complete valid prefix, without replaying that prefix. Zero, negative,
+boolean, absent and overreported write counts stop with exit 5. Interrupted
+reads return sanitized exit 4; interrupted writes/flushes return 5 without
+restarting output or semantics. The CLI never closes caller-owned stream or
+buffer objects. A caller can invoke it again with working streams.
+
+The following executable uses the same synthetic builder dependency as the
+prior examples. Run it with `python -P -B` after saving it outside git. It
+checks failure exits `4,5,5`, then recovery exit `0`, exact partial prefixes,
+one replay per deliverable invocation and no CLI stream closure. The caller
+closes its own memory streams only after those assertions.
+
+```python
+from io import BytesIO
+from pathlib import Path
+import json
+import sys
+from pytest import MonkeyPatch
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from tests.test_x05_bundle import cli_payload
+
+raw = cli_payload()
+original = bundle.replay_bundle_json
+expected = (bundle.reconciliation.serialize_result(original(raw.decode())) + '\n').encode('ascii')
+calls, owned, observed = [], [], []
+class Buffer(BytesIO):
+    def __init__(self, data=b'', mode='clean'):
+        super().__init__(data); self.mode, self.writes, self.closes = mode, 0, 0
+    def read(self, count):
+        if self.mode == 'invalid_read' and self.tell() == len(raw): return None
+        return super().read(min(7, count))
+    def write(self, data):
+        self.writes += 1
+        if self.mode in ('zero_write', 'interrupted_write'):
+            if self.writes == 1: return super().write(data[:7])
+            if self.mode == 'zero_write': return 0
+            raise InterruptedError('synthetic interrupted delivery')
+        return super().write(data)
+    def close(self): self.closes += 1; super().close()
+class Stream:
+    def __init__(self, buffer): self.buffer, self.closes = buffer, 0
+    def write(self, text): return len(text)
+    def flush(self): pass
+    def fileno(self): raise OSError('memory stream has no descriptor')
+    def close(self): self.closes += 1; self.buffer.close()
+def replayed(text): calls.append(text); return original(text)
+with MonkeyPatch.context() as patch:
+    patch.setattr(bundle, 'replay_bundle_json', replayed)
+    for mode, expected_exit in [('invalid_read',4), ('zero_write',5), ('interrupted_write',5), ('clean',0)]:
+        incoming = Stream(Buffer(raw, mode))
+        outgoing = Stream(Buffer(mode=mode))
+        errors = Stream(Buffer())
+        owned.extend((incoming, outgoing, errors))
+        patch.setattr(sys, 'stdin', incoming); patch.setattr(sys, 'stdout', outgoing); patch.setattr(sys, 'stderr', errors)
+        code = bundle.main(['--replay'])
+        output = outgoing.buffer.getvalue()
+        assert code == expected_exit and all(s.closes == 0 and s.buffer.closes == 0 for s in owned)
+        if mode == 'invalid_read':
+            assert calls == [] and json.loads(output)['integrity']['diagnostic_counts'] == {'CLI_INPUT_UNREADABLE':1}
+        elif mode != 'clean': assert output == expected[:7]
+        else: assert output == expected and len(calls) == 3
+        observed.append(code)
+assert all(not s.buffer.closed for s in owned)
+for stream in owned: stream.close()  # Caller cleanup, after ownership checks.
+print(json.dumps(dict(exits=observed, semantic_calls=len(calls), cli_closed_streams=0, origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. The monkeypatch context restores interpreter streams and
+the replay function even on failure. No child, browser, service or product state
+is retained. Exact-number tests additionally exercise signed DC deltas down to
+`1e-60`, the maximum supported per-string count `9007199254740991`, and its
+aggregate `9007199254740998`. JSON retains exact values and does not change the
+caller's Decimal context. Counts outside the per-string contract remain
+UNREADABLE rather than being reclassified as readable mismatches.

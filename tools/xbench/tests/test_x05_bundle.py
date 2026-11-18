@@ -697,3 +697,166 @@ def test_cli_is_byte_identical_across_explicit_encoding_and_hash_profiles(tmp_pa
                 assert not json.loads(result.stdout)['origin_authenticated']
                 outputs.append(result.stdout)
     assert len(set(outputs)) == 1
+
+
+@pytest.mark.parametrize('invalid', ['none', 'text', 'bytearray', 'oversized'])
+def test_stdin_return_contract_after_complete_valid_prefix_and_clean_recovery(monkeypatch, invalid):
+    raw = cli_payload()
+    class InvalidReturn(ShortInput):
+        def read(self, count):
+            if self.pos < len(self.data): return super().read(count)
+            self.requests.append(count)
+            return {'none': None, 'text': 'synthetic private stdin text',
+                    'bytearray': bytearray(b'x'), 'oversized': b'x' * (count + 1)}[invalid]
+    calls, original = [], bundle.replay_bundle_json
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    reader = InvalidReturn(raw)
+    code, output, errors = in_process_cli(monkeypatch, reader)
+    assert code == 4 and not errors and calls == [] and reader.pos == len(raw)
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+    assert b'synthetic private' not in output and len(output.splitlines()) == 1
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and calls == [raw.decode('utf-8')]
+    assert json.loads(output)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('reported', [0, -1, True, None, 'overreported'])
+@pytest.mark.parametrize('binary', [False, True])
+def test_stdout_invalid_progress_after_prefix_stops_once(monkeypatch, reported, binary):
+    from types import SimpleNamespace
+    raw = cli_payload()
+    expected = bundle.reconciliation.serialize_result(bundle.replay_bundle_json(raw.decode())) + '\n'
+    class InvalidProgress:
+        def __init__(self): self.parts, self.calls, self.flushes = [], 0, 0
+        def write(self, data):
+            self.calls += 1
+            if self.calls == 1: self.parts.append(data[:7]); return 7
+            return len(data) + 1 if reported == 'overreported' else reported
+        def flush(self): self.flushes += 1
+    sink = InvalidProgress()
+    code, _, errors = in_process_cli(monkeypatch, ShortInput(raw), SimpleNamespace(buffer=sink) if binary else sink)
+    delivered = b''.join(sink.parts).decode('ascii') if binary else ''.join(sink.parts)
+    assert code == 5 and not errors and sink.calls == 2 and sink.flushes == 0
+    assert delivered == expected[:7]
+
+
+def borrowed_cli(monkeypatch, raw, *, args=('--replay',), fail_write=False):
+    import io
+    import sys
+    class Buffer(io.BytesIO):
+        closes = 0
+        def close(self): self.closes += 1; super().close()
+        def write(self, data):
+            if fail_write: raise OSError('synthetic interrupted borrowed output')
+            return super().write(data)
+    class Stream:
+        def __init__(self, data=b''): self.buffer, self.closes, self.text = Buffer(data), 0, []
+        def write(self, value): self.text.append(value); return len(value)
+        def flush(self): pass
+        def close(self): self.closes += 1; self.buffer.close()
+        def fileno(self): raise OSError('borrowed memory stream has no descriptor')
+    incoming, outgoing, errors = Stream(raw), Stream(), Stream()
+    monkeypatch.setattr(sys, 'stdin', incoming); monkeypatch.setattr(sys, 'stdout', outgoing); monkeypatch.setattr(sys, 'stderr', errors)
+    try:
+        code = bundle.main(list(args))
+    except SystemExit as stopped:
+        code = stopped.code
+    assert all(s.closes == 0 and s.buffer.closes == 0 and not s.buffer.closed for s in (incoming, outgoing, errors))
+    return code, outgoing.buffer.getvalue(), incoming, outgoing, errors
+
+
+@pytest.mark.parametrize('kind,expected', [('PASS', 0), ('malformed', 4), ('delivery', 5), ('help', 0), ('usage', 2)])
+def test_cli_never_closes_borrowed_streams_or_buffers(monkeypatch, kind, expected):
+    args = ('--help',) if kind == 'help' else ('--unknown',) if kind == 'usage' else ('--replay',)
+    code, output, incoming, outgoing, errors = borrowed_cli(monkeypatch,
+        cli_payload('malformed' if kind == 'malformed' else 'PASS'), args=args, fail_write=kind == 'delivery')
+    assert code == expected
+    if kind in ('help', 'usage'): assert incoming.buffer.tell() == 0 and output == b''
+    if kind == 'PASS': assert json.loads(output)['semantic']['verdict'] == 'PASS'
+    if kind == 'malformed': assert codes(json.loads(output)['integrity']) == {'JSON_INVALID': 1}
+
+
+def test_interrupted_stdin_after_partial_progress_is_sanitized_and_recovers(monkeypatch):
+    raw = cli_payload()
+    calls, original = [], bundle.replay_bundle_json
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw[:len(raw)//2], failure=InterruptedError))
+    assert code == 4 and not errors and calls == []
+    assert codes(json.loads(output)['integrity']) == {'CLI_INPUT_UNREADABLE': 1}
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and len(calls) == 1 and json.loads(output)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('stage', ['write', 'flush'])
+@pytest.mark.parametrize('binary', [False, True])
+def test_interrupted_delivery_does_not_repeat_prefix_or_replay(monkeypatch, stage, binary):
+    from types import SimpleNamespace
+    raw = cli_payload()
+    calls, original = [], bundle.replay_bundle_json
+    expected = bundle.reconciliation.serialize_result(original(raw.decode())) + '\n'
+    def replayed(text): calls.append(text); return original(text)
+    monkeypatch.setattr(bundle, 'replay_bundle_json', replayed)
+    class Interrupted:
+        def __init__(self): self.parts, self.writes, self.flushes = [], 0, 0
+        def write(self, data):
+            self.writes += 1
+            if stage == 'write' and self.writes == 2: raise InterruptedError('synthetic private interrupted write')
+            piece = data[:7]; self.parts.append(piece); return len(piece)
+        def flush(self): self.flushes += 1; raise InterruptedError('synthetic private interrupted flush')
+    sink = Interrupted()
+    code, _, errors = in_process_cli(monkeypatch, ShortInput(raw), SimpleNamespace(buffer=sink) if binary else sink)
+    delivered = b''.join(sink.parts).decode('ascii') if binary else ''.join(sink.parts)
+    assert code == 5 and not errors and len(calls) == 1
+    assert delivered == (expected[:7] if stage == 'write' else expected)
+    assert sink.flushes == (0 if stage == 'write' else 1)
+    code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+    assert code == 0 and not errors and len(calls) == 2 and output.decode('ascii') == expected
+
+
+def exact_decimal_cli_payload(exponent, direction):
+    source = reconciliation_bundle()
+    member = source['members'][0]
+    record = json.loads(source['payloads'][member['name']])
+    record['envelope']['assurance']['evidence']['saved_strings'][0]['optimizers'] = 9007199254740991
+    record['envelope']['grid']['dc_power'][0]['kw_dc'] = (
+        '4.' + '0' * (exponent - 1) + '1' if direction > 0 else '3.' + '9' * exponent)
+    raw = json.dumps(record, sort_keys=True).encode()
+    source['payloads'][member['name']] = raw
+    member.update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    return json.dumps(replay_envelope(source)).encode()
+
+
+@pytest.mark.parametrize('exponent', [18, 30, 60])
+@pytest.mark.parametrize('direction', [-1, 1])
+def test_cli_serializes_tiny_deltas_and_large_counts_exactly_without_context_changes(monkeypatch, exponent, direction):
+    from decimal import Decimal, getcontext, localcontext, ROUND_FLOOR
+    from fractions import Fraction
+    raw = exact_decimal_cli_payload(exponent, direction)
+    def context_state(ctx):
+        return (ctx.prec, ctx.rounding, ctx.Emin, ctx.Emax, ctx.capitals, ctx.clamp, dict(ctx.flags), dict(ctx.traps))
+    prior = context_state(getcontext())
+    with localcontext() as ctx:
+        ctx.prec = 7; ctx.rounding = ROUND_FLOOR; ctx.clear_flags()
+        before = context_state(ctx)
+        code, output, errors = in_process_cli(monkeypatch, ShortInput(raw))
+        assert context_state(getcontext()) == before
+    assert context_state(getcontext()) == prior
+    result = json.loads(output, parse_float=Decimal)
+    assert code == 1 and not errors and result['integrity']['integrity_verified']
+    assert result['semantic']['verdict'] == 'FAIL' and not result['origin_authenticated']
+    def nodes(value):
+        yield value
+        if isinstance(value, dict):
+            for child in value.values(): yield from nodes(child)
+        elif isinstance(value, list):
+            for child in value: yield from nodes(child)
+    observed = list(nodes(result))
+    assert any(type(value) is int and value == 9007199254740991 for value in observed)
+    assert any(type(value) is int and value == 9007199254740998 for value in observed)
+    tiny = Fraction(direction, 10**exponent)
+    matching = [row for row in observed if isinstance(row, dict) and 'delta' in row
+                and isinstance(row['delta'], (Decimal, int)) and Fraction(row['delta']) == tiny]
+    assert matching
+    assert any(Fraction(row['saved']) == Fraction(48, 5) + tiny for row in matching if 'saved' in row)
