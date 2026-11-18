@@ -84,15 +84,20 @@ const APP_HOSTS = Object.freeze([...APP_ONLY_HOSTS])
 //              project | ask | shared
 //   label      the visible name of the control or panel
 //   evidence   audit:<path> under EVIDENCE_ROOTS.audit, capability:<gap key or
-//              class> under EVIDENCE_ROOTS.capability, or source:<file> for a
-//              control the code itself has always shipped disabled
+//              class> under EVIDENCE_ROOTS.capability, or source:<the control>
+//              for one the code itself has always shipped disabled
 //   hosts      the hostnames an UNAVAILABLE row applies on; absent = everywhere
 //   tool       the catalog tool name this row speaks for (catalogToolDisclaimer)
 //   note       an ENABLED feature's standing prerequisite, shown as a hint
-//   adopted    the source file (under web/) that already spells this exact
-//              sentence on its own disabled control. The manifest lists the
-//              feature and the test pins the two equal; the control keeps its
-//              own gate, because flipping such a row cannot build the feature.
+//   adopted    true when the control already shows this exact sentence on its
+//              own disabled state. The manifest lists the feature, and the
+//              test (which knows the file) pins the two equal; the control
+//              keeps its own gate, because flipping such a row cannot build
+//              the feature.
+//
+// NO SOURCE PATH MAY APPEAR IN A VALUE BELOW. This module ships in the
+// production bundle, and the element source fence refuses any readable source
+// path there. The test owns the map from an adopted row to its file.
 export const STUDIO_AVAILABILITY = freezeDeep({
   // -- site (the landing an emailed Studio link opens) -----------------------
   'site.sample-rooftop': {
@@ -217,24 +222,24 @@ export const STUDIO_AVAILABILITY = freezeDeep({
     label: 'Print',
     status: 'unavailable',
     disclaimer: "Printing isn't available yet",
-    adopted: 'src/App.jsx',
-    evidence: 'source:web/src/App.jsx',
+    adopted: true,
+    evidence: 'source:quick bar Print control',
   },
   'cad.model-tab': {
     workspace: 'cad',
     label: 'Model',
     status: 'unavailable',
     disclaimer: '3D modelling is not in this engine yet',
-    adopted: 'src/lib/ribbonTabs.data.js',
-    evidence: 'source:web/src/lib/ribbonTabs.data.js',
+    adopted: true,
+    evidence: 'source:ribbon tab table, Model tab',
   },
   'cad.snap-and-polar': {
     workspace: 'cad',
     label: 'Snap mode and Polar tracking',
     status: 'unavailable',
     disclaimer: 'not in the browser viewer yet',
-    adopted: 'src/site/DrawingCockpit.jsx',
-    evidence: 'source:web/src/site/DrawingCockpit.jsx',
+    adopted: true,
+    evidence: 'source:drawing status bar toggles',
   },
 })
 

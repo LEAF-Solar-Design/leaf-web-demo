@@ -29,6 +29,13 @@ const WEB_ROOT = process.cwd()
 const SRC_ROOT = join(WEB_ROOT, 'src')
 const WORKSPACES = ['site', 'sign-in', 'browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'project', 'ask', 'shared']
 const rows = Object.entries(STUDIO_AVAILABILITY)
+// Where each adopted row's sentence lives. Kept HERE, never in the manifest:
+// a source path in a shipped module trips the production bundle's source fence.
+const ADOPTED_SOURCES = {
+  'cad.print': 'src/App.jsx',
+  'cad.model-tab': 'src/lib/ribbonTabs.data.js',
+  'cad.snap-and-polar': 'src/site/DrawingCockpit.jsx',
+}
 const unavailable = rows.filter(([, row]) => row.status === 'unavailable')
 
 // Copy law for anything a visitor reads: no em or en dash, the company name in
@@ -95,9 +102,24 @@ describe('STUDIO_AVAILABILITY', () => {
   it.each(unavailable.filter(([, row]) => row.adopted))('%s adopts the exact sentence its own control shows', (id, row) => {
     // The control keeps its own gate; this pin stops the manifest and the
     // control from telling two different stories about the same feature.
-    const source = readFileSync(join(WEB_ROOT, row.adopted), 'utf8')
+    expect(row.adopted).toBe(true)
+    expect(ADOPTED_SOURCES[id], `${id} has no source file in ADOPTED_SOURCES`).toBeTruthy()
+    const source = readFileSync(join(WEB_ROOT, ADOPTED_SOURCES[id]), 'utf8')
     expect(source).toContain(row.disclaimer)
-    expect(row.evidence).toBe(`source:web/${row.adopted}`)
+    expect(row.evidence).toMatch(/^source:/)
+  })
+
+  it('ships no readable source path, because this module is in the production bundle', () => {
+    // The element source fence (src/cadedit/elementSourceFence.test.js) refuses
+    // these in the built output; this is the same rule, checked without a build.
+    for (const [id, row] of rows) {
+      for (const value of Object.values(row).flat()) {
+        if (typeof value !== 'string') continue
+        expect(value, id).not.toMatch(/src\/[\w./-]+\.(?:jsx?|mjs|css)/)
+        expect(value, id).not.toMatch(/src\/site\//)
+      }
+    }
+    expect(Object.keys(ADOPTED_SOURCES).sort()).toEqual(unavailable.filter(([, row]) => row.adopted).map(([id]) => id).sort())
   })
 
   it('keeps every visitor-facing string inside the copy law', () => {

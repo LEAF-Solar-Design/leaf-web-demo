@@ -30,7 +30,7 @@ A lane fixing an unavailable feature has to walk it on staging before it may fli
 
 ## Rows that adopt an existing sentence
 
-Some controls already shipped disabled with their own honest reason (Print, the Model tab, Snap mode and Polar tracking). Those rows carry `adopted` and repeat the control's sentence byte for byte; the test pins the two equal. The control keeps its own gate, because flipping such a row cannot build the feature.
+Some controls already shipped disabled with their own honest reason (Print, the Model tab, Snap mode and Polar tracking). Those rows carry `adopted: true` and repeat the control's sentence byte for byte; the test knows each file and pins the two equal. No source path goes in the manifest itself, because it ships in the production bundle. The control keeps its own gate, because flipping such a row cannot build the feature.
 
 ## Evidence
 
