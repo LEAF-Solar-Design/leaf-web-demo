@@ -187,3 +187,13 @@ def test_mount_specific_snow_pressure(mount, zones, expected):
     from benches.x03_layout_oracle import module_snow_quality
     rows = [dict(model="panel", mount=mount, zones=zones)]
     assert module_snow_quality(rows, {"field":1.6,"drift":3.2}, {"panel":{"edge":2,"reinforced":3.2}}) == expected
+
+
+@pytest.mark.parametrize("centroid,side,expected", [
+    (12,"positive","PASS"), (11.9,"positive","FAIL"), (8,"negative","PASS"),
+    (9,"positive","FAIL"), (None,"positive","INCOMPLETE"),
+], ids=["exact-stability","short-ballast-arm","opposite-tipping-edge","destabilizing-ballast","missing-centroid"])
+def test_ballast_moments(centroid, side, expected):
+    from benches.x03_layout_oracle import overturning_quality
+    wind = [dict(force_n=40,arm_m=2),dict(force_n=20,arm_m=1)]
+    assert overturning_quality(wind,[dict(weight_n=50,centroid_m=centroid)],10,side) == expected

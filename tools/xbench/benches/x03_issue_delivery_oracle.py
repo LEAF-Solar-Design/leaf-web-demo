@@ -221,3 +221,32 @@ def generation_receipt_quality(events):
         else:
             return "INCOMPLETE"
     return "PASS" if receipts else "INCOMPLETE"
+
+
+def retry_schedule_quality(attempts, retry_budget):
+    """Use a single request's ordered attempts, with Retry-After seconds measured from response."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if retry_budget is None or not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    if type(retry_budget) is not int or retry_budget < 0 or len(attempts) - 1 > retry_budget:
+        return "FAIL"
+    earliest = None
+    for index, row in enumerate(attempts):
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("sent", "received", "status")):
+            return "INCOMPLETE"
+        sent, received = row["sent"], row["received"]
+        if not all(map(finite_measure, (sent, received))) or received < sent or type(row["status"]) is not int:
+            return "FAIL"
+        if earliest is not None and Fraction(str(sent)) < earliest:
+            return "FAIL"
+        if index < len(attempts) - 1:
+            if row["status"] not in (429, 503):
+                return "FAIL"
+            delay = row.get("retry_after_seconds")
+            if delay is None:
+                return "INCOMPLETE"
+            if not finite_measure(delay) or delay < 0:
+                return "FAIL"
+            earliest = Fraction(str(received)) + Fraction(str(delay))
+    return "PASS"

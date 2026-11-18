@@ -352,3 +352,46 @@ def peak_memory_quality(tasks, reported, reported_unit):
         active += changes[time]
         peak = max(peak, active)
     return "PASS" if peak == Fraction(str(reported)) * scales[reported_unit] else "FAIL"
+
+
+def usage_cost_quality(usage, tariff, version, currency, charges, reported_total):
+    """Reconcile exact synthetic line charges in a single currency with no intermediate rounding."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(usage, dict) or not usage or not isinstance(charges, list) or not isinstance(tariff, dict):
+        return "INCOMPLETE"
+    if not all(isinstance(v, str) and v for v in (version, currency, tariff.get("version"), tariff.get("currency"))):
+        return "INCOMPLETE"
+    if (version, currency) != (tariff["version"], tariff["currency"]):
+        return "FAIL"
+    if not isinstance(tariff.get("rates"), dict) or reported_total is None:
+        return "INCOMPLETE"
+    seen = set()
+    total = Fraction(0)
+    for charge in charges:
+        if not isinstance(charge, dict) or not isinstance(charge.get("usage_id"), str):
+            return "INCOMPLETE"
+        key = charge["usage_id"]
+        if key in seen or key not in usage:
+            return "FAIL"
+        seen.add(key)
+        row = usage[key]
+        if not isinstance(row, dict) or not isinstance(row.get("meter"), str):
+            return "INCOMPLETE"
+        rate = tariff["rates"].get(row["meter"])
+        if not isinstance(rate, dict) or any(v is None for v in (rate.get("unit"), row.get("unit"), charge.get("currency"))):
+            return "INCOMPLETE"
+        if row["unit"] != rate["unit"] or charge["currency"] != currency:
+            return "FAIL"
+        values = (row.get("quantity"), rate.get("unit_price"), charge.get("amount"))
+        if None in values:
+            return "INCOMPLETE"
+        if not all(finite_measure(v) and v >= 0 for v in values):
+            return "FAIL"
+        quantity, price, amount = (Fraction(str(v)) for v in values)
+        if amount != quantity * price:
+            return "FAIL"
+        total += amount
+    if seen != usage.keys() or not finite_measure(reported_total):
+        return "FAIL"
+    return "PASS" if total == Fraction(str(reported_total)) else "FAIL"

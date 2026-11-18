@@ -514,3 +514,25 @@ def test_protection_curve_envelopes(upstream, span, expected):
     from benches.x03_quality import coordination_quality
     downstream = [(10,1,2),(30,0.5,1)]
     assert coordination_quality(downstream, upstream, span) == expected
+
+
+@pytest.mark.parametrize("segments,expected", [
+    ([(0.5,20,0,20)], "PASS"),
+    ([(0.5,20,0,21),(0.5,20,90,65)], "FAIL"),
+    ([(0.5,20,0,21),(0.5,20,90,66)], "PASS"),
+    ([(0.5,20,None,100)], "INCOMPLETE"),
+], ids=["straight-at-limit","cumulative-bend-above-65N","same-pull-below-66N","missing-bend"])
+def test_pull_sequence(segments, expected):
+    from benches.x03_quality import pulling_tension_quality
+    rows = [dict(friction=mu, normal_force_n=n, bend_degrees=a, limit_n=limit) for mu,n,a,limit in segments]
+    assert pulling_tension_quality(10, rows) == expected
+
+
+@pytest.mark.parametrize("initial,steps,expected", [
+    (6, [(2,1,3.5)], "PASS"), (6, [(-2,1,7),(4,1,2)], "PASS"),
+    (6, [(4,1,1),(-4,1,3)], "FAIL"), (6,[(-2,1,8)], "FAIL"), (None, [(2,1,3.5)], "INCOMPLETE"),
+], ids=["discharge-loss","charge-then-discharge-at-reserve","intermediate-reserve-violation","idealized-charge","missing-start"])
+def test_storage_energy(initial, steps, expected):
+    from benches.x03_quality import battery_energy_quality
+    rows = [dict(load_kw=p,hours=t,stored_kwh=e) for p,t,e in steps]
+    assert battery_energy_quality(initial, 10, 2, 0.5, 0.8, rows) == expected
