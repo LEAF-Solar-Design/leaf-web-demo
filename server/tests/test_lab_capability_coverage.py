@@ -18,7 +18,7 @@ from lab_registry import KASHBOT_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT / "contract/lab-capability-coverage.v1.json"
-COVERAGE_SHA256 = "929e2dcf059dd10d65ed103e47973fe18dc3ac3af38898405d48d08666eea718"
+COVERAGE_SHA256 = "183c9c0600e9ecb8fcf727a1bc8ff0a09684ac907719b16c285c0f91bbbd546b"
 STATUSES = {"runnable", "readable", "explicit-handoff", "unavailable-with-reason"}
 
 
