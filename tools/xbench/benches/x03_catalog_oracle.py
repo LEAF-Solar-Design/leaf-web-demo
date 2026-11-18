@@ -607,3 +607,28 @@ def vibration_qualification_quality(revision, sheet, mount, operating_band, acce
     if cursor != high:
         return "INCOMPLETE"
     return "FAIL" if exceeded else "PASS"
+
+
+def corrosion_allowance_quality(revision, catalog, material, exposures, thickness_mm, required_mm):
+    """Accumulate pinned total wall-thickness loss per exposure-year across recorded intervals."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(catalog, dict) or catalog.get("revision") != revision:
+        return "INCOMPLETE"
+    rates = catalog.get("loss_mm_per_year")
+    if not isinstance(rates, dict) or not isinstance(material, str) or not isinstance(exposures, list) or not exposures:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (thickness_mm, required_mm))) or min(thickness_mm, required_mm) <= 0:
+        return "INCOMPLETE"
+    residual = Fraction(str(thickness_mm))
+    for interval in exposures:
+        if not isinstance(interval, (tuple, list)) or len(interval) != 2:
+            return "INCOMPLETE"
+        environment, years = interval
+        if not isinstance(environment, str) or not finite_measure(years) or years < 0:
+            return "INCOMPLETE"
+        rate = rates.get((material, environment))
+        if not finite_measure(rate) or rate < 0:
+            return "INCOMPLETE"
+        residual -= Fraction(str(years)) * Fraction(str(rate))
+    return "PASS" if residual >= Fraction(str(required_mm)) else "FAIL"

@@ -373,3 +373,20 @@ def circular_wind_quality(rows, policy, reported_deg, tolerance_deg):
         return "INCOMPLETE"
     error = abs((degrees(atan2(y, x)) - reported_deg + 180) % 360 - 180)
     return "PASS" if error <= tolerance_deg or isclose(error, tolerance_deg, abs_tol=1e-12) else "FAIL"
+
+
+def wind_dynamic_pressure_quality(pressure_pa, temperature_k, speed_mps, model, reported_pa):
+    """Compute dynamic pressure using absolute dry-air pressure and a declared specific gas constant."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(model, dict) or model.get("method") != "dry-ideal-gas":
+        return "INCOMPLETE"
+    gas_constant = model.get("specific_r_j_kg_k")
+    values = (pressure_pa, temperature_k, speed_mps, gas_constant, reported_pa)
+    if not all(map(finite_measure, values)) or min(pressure_pa, temperature_k, gas_constant) <= 0 or speed_mps < 0:
+        return "INCOMPLETE"
+    pressure, kelvin, speed, specific_r, reported = (Fraction(str(v)) for v in values)
+    expected = pressure * speed**2 / (2 * specific_r * kelvin)
+    if reported < 0:
+        return "FAIL"
+    return "PASS" if abs(reported - expected) <= max(Fraction("1e-12"), expected / 10**9) else "FAIL"

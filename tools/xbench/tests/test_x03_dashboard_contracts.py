@@ -430,3 +430,17 @@ def test_admission_limit_at_release_or_limit_change(end,begin,limits):
     assert grade(ids,starts,terminals,limits) == "PASS"
     assert grade(ids,{"a":0,"b":1},terminals,{0:1,2:3}) == "FAIL"
     assert grade(ids,starts,{"a":end},limits) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("worker,start,ack,stop,elapsed", [
+    ("export",10,11,15,5), ("analysis",3,3,4,1), ("publish",2.1,2.2,2.6,0.5),
+])
+def test_cancellation_ends_at_worker_stop(worker,start,ack,stop,elapsed):
+    from benches.x03_dashboard_oracle import cancellation_latency_quality as grade
+    def check(stops,reported,limit):
+        return grade({worker:start},{worker:ack},stops,{worker:reported},limit)
+    terminal = {worker:stop}
+    assert check(terminal,elapsed,elapsed) == "PASS"
+    assert check(terminal,ack-start,elapsed) == "FAIL"
+    assert check(terminal,elapsed,elapsed/2) == "FAIL"
+    assert check({},elapsed,elapsed) == "INCOMPLETE"

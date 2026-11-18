@@ -882,3 +882,26 @@ def admission_limit_quality(required_ids, starts, terminals, limit_changes):
             if active > limit:
                 return "FAIL"
     return "PASS"
+
+
+def cancellation_latency_quality(requests, acknowledgements, stops, reported_latencies, max_seconds):
+    """Verify per-worker request-to-stop latency, including the interval after acknowledgement."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    records = (requests, acknowledgements, stops, reported_latencies)
+    if not all(isinstance(record, dict) for record in records) or not requests:
+        return "INCOMPLETE"
+    if not finite_measure(max_seconds) or max_seconds < 0:
+        return "INCOMPLETE"
+    if any(record.keys() != requests.keys() for record in records[1:]):
+        return "INCOMPLETE"
+    if not all(finite_measure(v) for record in records for v in record.values()):
+        return "INCOMPLETE"
+    for worker in requests:
+        request, ack, stop, reported = (Fraction(str(record[worker])) for record in records)
+        if not request <= ack <= stop:
+            return "FAIL"
+        latency = stop - request
+        if reported != latency or latency > Fraction(str(max_seconds)):
+            return "FAIL"
+    return "PASS"
