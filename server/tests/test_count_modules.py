@@ -535,3 +535,22 @@ def test_layer_ranking_includes_cutoff_ties(limit, expected):
     assert [row["layer"] for row in result["ranking"]] == expected
     assert all(row["count"] == result["counts"][row["layer"]] for row in result["ranking"])
     assert result["count"] == 11 and set(overlay["highlight_handles"]) == set("ABCD")
+
+
+@pytest.mark.parametrize("prompt,expected", [
+    ("Which roof layer has the most panels?", ["Roof A", "Roof C"]),
+    ("Which roof layers are tied for the largest module count?", ["Roof A", "Roof C"]),
+    ("Rank the top three roof layers by panel count, highest first.", ["Roof A", "Roof C", "Roof B"]),
+    ("Show top 2 layers by module count.", ["Ground", "Roof A", "Roof C"]),
+])
+def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    drawing = {"inserts": [{"name": "Panel", "layer": layer, "rows": count, "handle": handle}
+                           for layer, count, handle in [("Ground", 99, "A"), ("Roof A", 7, "B"),
+                                                        ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
+    result, _ = module.run(drawing, route["params"])
+    assert [row["layer"] for row in result["ranking"]] == expected
