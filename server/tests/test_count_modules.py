@@ -525,3 +525,18 @@ def test_count_safe_integer_boundary_raises_declared_validation_error():
     assert module._module_total([limit - 1, 1]) == limit
     with pytest.raises(module.InputValidationError, match="split the drawing"):
         module._module_total([limit, 1])
+
+
+def test_layer_shares_use_selected_physical_total():
+    intake = {"inserts": [{"name": "Panel", "layer": layer, "handle": handle, "rows": rows}
+                          for layer, handle, rows in [("Roof", "A", 4), ("Roof", "A", 4),
+                                                       ("Ground", "B", 2)]]}
+    params = {"group_by": "layer", "panel_scope": "all_layers", "layer_shares": True}
+    result, overlay = module.run(intake, params)
+    assert [(row["layer"], row["numerator"], row["denominator"])
+            for row in result["shares"]] == [("Ground", 2, 6), ("Roof", 4, 6)]
+    assert sorted(overlay["highlight_handles"]) == ["A", "B"]
+    selected, _ = module.run(intake, dict(params, layer_names=["Ground"]))
+    assert selected["shares"][0]["percentage"] == 100
+    empty, overlay = module.run({}, params)
+    assert "shares" not in empty and overlay is None

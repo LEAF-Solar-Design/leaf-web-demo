@@ -245,6 +245,24 @@ def run(intake, params):
                     raise InputValidationError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
     selected_ids = list(dict.fromkeys(params.get("set_ids") or
         ([params["set_id"]] if params.get("set_id") else [])))
+    shares = params.get("layer_shares", False)
+    names = params.get("layer_names")
+    if type(shares) is not bool or (shares and params.get("group_by") != "layer"):
+        raise InputValidationError("Layer shares require grouping by layer.")
+    if names is not None and (not isinstance(names, list) or not names or
+            not all(isinstance(name, str) and name.strip() for name in names) or
+            selected_ids or not shares or "panel_scope" not in params):
+        raise InputValidationError("Choose named panel layers or explicit module sets.")
+    if shares and "panel_scope" in params and not selected_ids:
+        listing, _ = run(intake, {})
+        candidates = listing["sets"]
+        if names is not None:
+            candidates = [group for group in candidates if group["layer"] in names]
+            if {group["layer"] for group in candidates} != set(names):
+                raise InputValidationError("A requested panel layer is absent. Check the layer names.")
+        selected_ids = _named_panel_sets(candidates, params["panel_scope"])
+        if not selected_ids:
+            return listing, None
     if window is not None and not selected_ids:
         raise ValueError("Select module sets before applying a design window region.")
     definitions = intake.get("blocks", {})
@@ -296,12 +314,22 @@ def run(intake, params):
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
+    summary = {}
+    if selected_sets and params.get("group_by") == "layer":
+        counts = _selected_layer_counts(selected_sets, multiplicities)
+        summary["counts"] = counts
+        if shares:
+            total = _module_total(counts.values())
+            summary["shares"] = [
+                {"layer": layer, "numerator": count, "denominator": total,
+                 "percentage": 100 * count / total}
+                for layer, count in counts.items()
+            ]
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
              "selection_required": not selected_sets,
-             **({"counts": _selected_layer_counts(selected_sets, multiplicities)}
-                if selected_sets and params.get("group_by") == "layer" else {}),
+             **summary,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]

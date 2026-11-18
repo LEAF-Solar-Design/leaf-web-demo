@@ -431,6 +431,33 @@ _GROUPED_PANELS = re.compile(
 )
 
 
+_COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
+_SHARE_WINDOW = re.compile(rf"within the window\s+{_PAIR}\s+to\s+{_PAIR},\s*", re.I)
+_SHARE_SELECTION = re.compile(r"select only the (.+?) (?:panel|module) sets?\.\s*", re.I)
+_SHARE_QUERY = re.compile(
+    r"what (?:percentage|fraction|share) of (?:all (?:panels|modules)|"
+    r"the selected (?:panels|modules)|that selection) is on each layer[?!.]?", re.I)
+
+
+def _share_params(text):
+    remaining = text.strip()
+    params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
+    window = _SHARE_WINDOW.match(remaining)
+    selection = _SHARE_SELECTION.match(remaining)
+    if window:
+        params["region"] = [float(value) for value in window.groups()]
+        remaining = remaining[window.end():]
+    elif selection:
+        params["layer_names"] = re.split(r",\s*|\s+and\s+", selection[1], flags=re.I)
+        remaining = remaining[selection.end():]
+    if not _SHARE_QUERY.fullmatch(remaining):
+        return None
+    if not window and not selection and "of all " not in remaining.lower():
+        return None
+    return params
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -498,6 +525,11 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
+
+    shares = _share_params(text)
+    if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
+                              confidence=0.95, rationale="Compute each selected layer's share of the physical panel count.")
 
     grouped = _GROUPED_PANELS.fullmatch(text.strip())
     if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):
