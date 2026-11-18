@@ -216,6 +216,7 @@ def test_all_assigned_terminal_paths(span, tolerance):
     def grade(edges, mapping, shared):
         return terminal_route_quality(edges, terminals, destinations, mapping, shared, tolerance)
     assert grade(paths, assignments, trunk) == "PASS"
+    assert grade(paths, assignments, LineString(list(trunk.coords)[::-1])) == "FAIL"
     assert grade(paths, {"a": "y", "b": "x"}, trunk) == "FAIL"
     assert grade(paths, assignments, LineString([(0, 4), (span, 4)])) == "FAIL"
     assert grade(paths, assignments, None) == "INCOMPLETE"

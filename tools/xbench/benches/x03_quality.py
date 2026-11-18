@@ -268,8 +268,11 @@ def terminal_route_quality(routes, terminals, destinations, assignments, trunk, 
         if any(p is None or p.is_empty for p in (start, end, route)):
             return "INCOMPLETE"
         if (start.geom_type != "Point" or end.geom_type != "Point" or route.geom_type != "LineString"
-                or not route.is_valid or not route.covers(trunk)
+                or not route.is_valid or not route.is_simple or not route.covers(trunk)
                 or Point(route.coords[0]).distance(start) > tolerance
                 or Point(route.coords[-1]).distance(end) > tolerance):
+            return "FAIL"
+        # A simple route has a unique position for every point on the trunk.
+        if route.project(Point(trunk.coords[0])) >= route.project(Point(trunk.coords[-1])):
             return "FAIL"
     return "PASS"
