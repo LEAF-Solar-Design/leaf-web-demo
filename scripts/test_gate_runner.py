@@ -875,6 +875,7 @@ def test_unprivileged_named_gates_preserve_contract(monkeypatch, tmp_path):
         ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
         ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
         ("server-project-drawing-write", "tests/test_project_drawing_write.py", 9, True),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
     ):
         # The launcher must accept every target the registry routes through it (job 18101).
         launched = runner._py_pytest(target)[2:]
@@ -1339,6 +1340,170 @@ def test_failed_log_retention_tail_and_total_budget(tmp_path):
         assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
     assert all(entry["status"] == "budget_exhausted" and entry["truncated"]
                for entry in manifest["files"][8:])
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_failed_log_retention_window_without_marker(tmp_path, monkeypatch, oversized):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    # Marker-like text inside a line must not select a failure window.
+    content = b"prefix FAIL: not a marker\n" * (400 if oversized else 4) + b"final summary\n"
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied == content[-helper.FILE_LIMIT:]
+    entry = manifest["files"][0]
+    assert entry["truncated"] is oversized
+    assert entry["source_sha256"] == hashlib.sha256(content).hexdigest()
+    assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"================ ERRORS ================\n",
+    b"FAIL: test_x\n",
+    b"ERROR: test_x\n",
+    b"Traceback (most recent call last):\n",
+])
+def test_failed_log_retention_failure_window(tmp_path, monkeypatch, marker):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup output\n" * 400 + marker
+               + b"Traceback (most recent call last):\nAssertionError: Roles confirmed\n"
+               + b"0.00s call test_x\n" * 3000 + b"1 failed, 3000 passed\n")
+    (logs / "red.log").write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    assert copied.startswith(marker)
+    assert b"AssertionError: Roles confirmed\n" in copied
+    assert b"\n[device CI: middle of log omitted]\n" in copied
+    assert copied.endswith(b"1 failed, 3000 passed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+    assert manifest["files"][0]["truncated"] is True
+    assert manifest["files"][0]["source_sha256"] == hashlib.sha256(content).hexdigest()
+
+
+@pytest.mark.parametrize("limit", [16 * 1024, 64 * 1024])
+def test_failed_log_retention_guarantees_head_after_marker_with_long_line(tmp_path, monkeypatch, limit):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n____ test_x ____\n"
+               + b"E   AssertionError: boom\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000
+               + b"1 failed\n")
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    assert notice
+    assert head == failure[:head_budget]
+    assert head.startswith(marker)
+    assert len(head) >= min(32 * 1024, head_budget)
+    assert tail.endswith(b"1 failed\n")
+    assert len(copied) <= limit
+
+
+@pytest.mark.parametrize("newline_offset", [32 * 1024 - 1, 32 * 1024, 32 * 1024 + 1])
+def test_failed_log_retention_head_newline_guarantee_boundary(tmp_path, monkeypatch, newline_offset):
+    helper = _failed_log_retention_helper()
+    limit = 64 * 1024
+    monkeypatch.setattr(helper, "FILE_LIMIT", limit)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    failure = (marker + b"x" * (newline_offset - len(marker)) + b"\n"
+               + b"y" * (100 * 1024) + b"\n"
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 3000)
+    (logs / "red.log").write_bytes(failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    head_budget = limit - min(32 * 1024, limit // 4) - len(notice)
+    # Trimming is allowed only at or beyond the guaranteed window.
+    expected_length = newline_offset + 1 if newline_offset >= 32 * 1024 else head_budget
+    assert head == failure[:expected_length]
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= limit
+
+
+def test_failed_log_retention_default_limit_keeps_traceback_after_long_line(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    marker = b"================ FAILURES ================\n"
+    traceback = b"____ test_x ____\nE   AssertionError: boom\n"
+    failure = (marker + b"x" * (100 * 1024) + b"\n" + traceback
+               + b"0.84s call tests/test_x.py::test_error_path\n" * 10000)
+    (logs / "red.log").write_bytes(b"setup output\n" * 100 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    assert head.startswith(failure[:32 * 1024])
+    assert traceback in head
+    assert tail.startswith(b"0.84s call ")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+@pytest.mark.parametrize("marker", [
+    b"================ FAILURES ================\n",
+    b"FAIL: test_x\n",
+    b"Traceback (most recent call last):\n",
+    b"=" * 65536 + b" ERRORS =\n",
+])
+def test_failed_log_retention_marker_crosses_digest_chunk(tmp_path, monkeypatch, marker):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 8192)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"x" * (65536 - 5) + b"\n" + marker + b"AssertionError: boundary\n"
+               + b"0.00s call test_x\n" * 1000 + b"1 failed\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    if len(marker) < helper.FILE_LIMIT:
+        assert copied.startswith(marker)
+        assert b"AssertionError: boundary\n" in copied
+    else:
+        # An unbounded banner must still be detected with bounded scanner memory.
+        # The guaranteed head now keeps banner bytes even without a newline.
+        assert copied.startswith(b"=" * 1024)
+        assert b"\n[device CI: middle of log omitted]\n" in copied
+    assert copied.endswith(b"1 failed\n")
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_tail_drops_partial_line(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    content = (b"setup\n" * 1000 + b"FAIL: test_x\nAssertionError: failure\n"
+               + b"timing row\n" * 1000 + b"credential=" + b"s" * 1500
+               + b"\ncomplete final line\n")
+    (logs / "red.log").write_bytes(content)
+    helper.retain_failed_logs(result, logs, output)
+    copied = (output / "red.log").read_bytes()
+    head, notice, tail = copied.partition(b"\n[device CI: middle of log omitted]\n")
+    assert notice
+    # The guaranteed head may end mid-line; only the tail must be line-aligned.
+    assert head.startswith(b"FAIL: test_x\nAssertionError: failure\n")
+    assert tail == b"complete final line\n"
+    assert len(copied) <= helper.FILE_LIMIT
+
+
+def test_failed_log_retention_window_overlapping_tail(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    monkeypatch.setattr(helper, "FILE_LIMIT", 4096)
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    failure = b"FAIL: test_x\nAssertionError: failure\n" + b"timing row\n" * 100 + b"1 failed\n"
+    (logs / "red.log").write_bytes(b"setup\n" * 1000 + failure)
+    helper.retain_failed_logs(result, logs, output)
+    assert (output / "red.log").read_bytes() == failure
 
 
 def test_failed_log_retention_count_cap_and_result_cap(tmp_path):
@@ -1911,6 +2076,35 @@ def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
         _evidence_result(g, log)])
 
 
+@pytest.mark.parametrize("preferred, other", [
+    ("E   AssertionError: real", "FAILED tests/test_x.py::test_x\nnot ok 1 - real"),
+    ("FAILED tests/test_x.py::test_x", "not ok 1 - real"),
+    ("not ok 1 - real", ""),
+])
+def test_failed_suite_evidence_prefers_failure_lines_over_durations(tmp_path, preferred, other):
+    g = _load_runner()
+    log = tmp_path / "durations.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "error: earlier generic diagnostic\n" + other + "\n" + preferred + "\n",
+        encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + preferred
+
+
+@pytest.mark.parametrize("cause", ["Connection refused", None])
+def test_failed_suite_evidence_generic_first_error_skips_durations(tmp_path, cause):
+    g = _load_runner()
+    log = tmp_path / "generic.log"
+    log.write_text(
+        "0.84s call tests/test_x.py::test_error_path\n"
+        "  2s setup tests/test_x.py::test_fatal_path\n"
+        "0.01s teardown tests/test_x.py::test_exception_path\n"
+        + (cause + "\n" if cause else "ordinary output\n"), encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + (cause or "none matched")
+
+
 @pytest.mark.parametrize("marker", ["\u2718 26", "x 26", "1)"])
 def test_failed_suite_evidence_playwright_failure_beats_passing_policy_title(tmp_path, marker):
     g = _load_runner()
@@ -2403,7 +2597,7 @@ def test_w4g7b_contract_v3_server_suites_are_registered_with_measured_floors():
         "server-w4g7c-01s": 19,
         "server-w4g7c-02s": 25,
         "server-w4g7c-03s": 37,
-        "server-w4g7b-01s": 49,
+        "server-w4g7b-01s": 58,
         "server-w4g7b-02s": 64,
         "server-w4g7b-03s": 40,
         "server-w4g7b-04s": 57,
@@ -3660,6 +3854,142 @@ def test_npm_audit_real_advisory_report_counts_only_at_or_above_the_configured_l
     assert "1 advisories at/above high (2 total across all severities)" in note
 
 
+@pytest.fixture
+def picomatch_audit_report_and_lock():
+    report = {
+        "vulnerabilities": {
+            "picomatch": {"severity": "high", "via": [{
+                "severity": "high",
+                "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+            }]},
+            "fdir": {"severity": "high", "via": ["picomatch"]},
+            "tinyglobby": {"severity": "high", "via": ["fdir", "picomatch"]},
+            "vite": {"severity": "high", "via": ["tinyglobby"]},
+            "vitest": {"severity": "high", "via": ["vite"]},
+        },
+        "metadata": {"vulnerabilities": {"high": 5, "total": 5}},
+    }
+    lock = {"packages": {
+        f"node_modules/{name}": {"dev": True}
+        for name in report["vulnerabilities"]
+    }}
+    return report, lock
+
+
+def test_npm_audit_dev_picomatch_exception_passes(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    status, note = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "PASS"
+    assert "EXCEPTED" in note and "GHSA-fc5q-39xc-vjpf" in note
+    assert "5 high/critical finding(s)" in note and "until 2026-12-01" in note
+
+
+def test_npm_audit_picomatch_exception_expires(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 12, 1))
+    assert status == "FAIL"
+
+
+@pytest.mark.parametrize("entry", [{"dev": False}, {}])
+@pytest.mark.parametrize("path", ["node_modules/picomatch",
+                                  "node_modules/other/node_modules/picomatch"])
+def test_npm_audit_picomatch_exception_rejects_production_or_unknown_dev(
+        picomatch_audit_report_and_lock, entry, path):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    lock["packages"][path] = entry
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_rejects_unrelated_high(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["other"] = {"severity": "high", "via": [{
+        "severity": "high", "url": "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz",
+    }]}
+    lock["packages"]["node_modules/other"] = {"dev": True}
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_ignores_moderate_leaf(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["vite"]["via"].append({
+        "severity": "moderate", "url": "https://github.com/advisories/GHSA-8g5g-mxqh-grgj",
+    })
+    status, note = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "PASS" and "EXCEPTED" in note
+
+
+def test_npm_audit_picomatch_exception_requires_lock(picomatch_audit_report_and_lock):
+    g = _load_runner()
+    report, _ = picomatch_audit_report_and_lock
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=None, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+def test_npm_audit_picomatch_exception_rejects_leafless_cycle():
+    g = _load_runner()
+    report = {"vulnerabilities": {
+        "a": {"severity": "high", "via": ["b"]},
+        "b": {"severity": "high", "via": ["a"]},
+    }}
+    lock = {"packages": {"node_modules/a": {"dev": True},
+                         "node_modules/b": {"dev": True}}}
+    status, _ = g._classify_npm_audit(
+        1, json.dumps(report), "", False, lock=lock, today=g.date(2026, 11, 20))
+    assert status == "FAIL"
+
+
+@pytest.mark.parametrize("via", [["unknown"], [{"severity": "high"}],
+                                 [{"severity": "high", "url": "https://["}]])
+def test_npm_audit_picomatch_exception_rejects_unknown_leaves(
+        picomatch_audit_report_and_lock, via):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+    report["vulnerabilities"]["picomatch"]["via"] = via
+    excepted, note = g._excepted_high_findings(report, lock, g.date(2026, 11, 20))
+    assert not excepted and "picomatch" in note
+
+
+@pytest.mark.parametrize("suite_id,lock_state,expected", [
+    ("harness-audit-high", "dev", "PASS"),
+    ("another-audit", "dev", "FAIL"),
+    ("harness-audit-high", "missing", "FAIL"),
+    ("harness-audit-high", "invalid", "FAIL"),
+])
+def test_npm_audit_exception_runner_scope_and_lock_loading(
+        tmp_path, monkeypatch, picomatch_audit_report_and_lock, suite_id, lock_state, expected):
+    g = _load_runner()
+    report, lock = picomatch_audit_report_and_lock
+
+    class FixedDate(g.date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 20)
+
+    monkeypatch.setattr(g, "date", FixedDate)
+    monkeypatch.setattr(g, "_run_npm_audit_attempt",
+                        lambda *args, **kwargs: (1, json.dumps(report), "", False, None))
+    if lock_state != "missing":
+        (tmp_path / "package-lock.json").write_text(
+            json.dumps(lock) if lock_state == "dev" else "invalid JSON", encoding="utf-8")
+    suite = g.Suite(suite_id, "audit stub", "npm-audit", tmp_path, ["npm"], None)
+    result = g.run_npm_audit_suite(suite, tmp_path / "audit.log")
+    assert result.status == expected
+    assert ("EXCEPTED" in result.note) == (expected == "PASS")
+
+
 def test_npm_audit_bare_5xx_digit_in_unrelated_text_does_not_mask_a_real_failure():
     """The exact repro that caught round-1 blocker 1: a whole-blob
     `re.search(r'\\b5\\d\\d\\b')` classified ANY bare 500-599 number as a
@@ -4449,6 +4779,34 @@ def test_partition_keeps_catalog_order_within_a_shard():
     for shard in g.partition_suites(suites, 8):
         indexes = [order[s.id] for s in shard]
         assert indexes == sorted(indexes)
+
+
+def test_pr_tier_three_shard_memory_rebalance():
+    g = _load_runner()
+    suites = g.build_suites()
+    moves = {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }
+    assert set(moves) <= {s.id for s in suites}
+    # Exercise the real catalog and selections that omit some or all moved IDs.
+    for selection in (suites,
+                      [s for s in suites if s.id != "web-studio-panels-proof"],
+                      [s for s in suites if s.id not in moves]):
+        ordinary = g.partition_suites(selection, 3)
+        partitions = g.partition_pr_tier_suites(selection, 3)
+        placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+        baseline = {s.id: i for i, shard in enumerate(ordinary) for s in shard}
+        assert placement == {sid: moves.get(sid, i) for sid, i in baseline.items()}
+        union = [s.id for shard in partitions for s in shard]
+        assert Counter(union) == Counter(s.id for s in selection)
+        for i, shard in enumerate(partitions):
+            assert shard == [s for s in selection if placement[s.id] == i]
+        for count in (1, 2, 4, 8):
+            assert g.partition_pr_tier_suites(selection, count) == \
+                   g.partition_suites(selection, count)
 
 
 def test_partition_separates_all_three_web_vitest_suites():
@@ -5431,23 +5789,25 @@ def _wellformed_reused_from():
     }
 
 
-def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     data.update(mode="reused", reused_from=_wellformed_reused_from())
     out.write_text(json.dumps(data), encoding="utf-8")
 
-    assert g.verify_gate_proof(out, tree) == 0
+    assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
     assert "VERIFIED mode: reused from 3 CI builds" in capsys.readouterr().out
 
 
-def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys):
+@pytest.mark.parametrize("allow_device", [False, True])
+def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys, allow_device):
     g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
     for explicit_mode in (False, True):
         if explicit_mode:
             data["mode"] = "run"
         out.write_text(json.dumps(data), encoding="utf-8")
 
-        assert g.verify_gate_proof(out, tree) == 0
+        assert g.verify_gate_proof(out, tree, allow_device_verdict=allow_device) == 0
         output = capsys.readouterr().out
         assert "VERIFIED: gate proof binds tree" in output
         assert "VERIFIED mode: run" in output
@@ -5511,6 +5871,122 @@ def test_reused_from_problem_never_raises(reused_from):
     assert isinstance(problem, str) and problem
 
 
+def _device_verdict_gate_proof():
+    return {
+        "schema": 2, "kind": "leaf-gate-proof", "tree": "b" * 40,
+        "mode": "device-verdict", "coverage": "selected",
+        "device_verdict": {
+            "bucket": "device-verdicts", "version_id": "version-1", "sha256": "c" * 64,
+            "key": "forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/"
+                   + "a" * 40 + "/dv-0123456789abcdef.json",
+            "repository": "LEAF-Solar-Design/leaf-web-demo", "head_sha": "a" * 40,
+            "run_id": "dv-0123456789abcdef", "verdict_schema": "leaf.forge-ci.device-verdict.v1",
+            "mode": "selected", "state": "success", "shard_total": 2,
+            "shards": [{"shard": i, "run_id": f"dv-{i:016x}", "state": "success"}
+                       for i in range(2)],
+        },
+    }
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypatch, capsys, allowed):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--verify-gate-proof", str(proof),
+                                    "--expect-tree", data["tree"]]
+                        + (["--allow-device-verdict"] if allowed else []))
+    # Device proofs must never depend on or imply the suite catalog's results.
+    monkeypatch.setattr(g, "build_suites", lambda: pytest.fail("device proof consulted catalog"))
+    assert g.main() == (0 if allowed else 1)
+    output = capsys.readouterr().out
+    if allowed:
+        assert output == "VERIFIED mode: device-verdict coverage=selected\n"
+    else:
+        assert output == "NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted\n"
+
+
+@pytest.mark.parametrize("path,value,reason", [
+    (("schema",), 2.0, "schema"),
+    (("kind",), "other", "schema-2"),
+    (("tree",), "c" * 40, "bound to tree"),
+    (("tree",), 42, "40-hex tree"),
+    (("coverage",), "full", "coverage"),
+    (("device_verdict",), [], "object"),
+    (("device_verdict", "extra"), "unknown", "extra"),
+    (("extra",), "unknown", "extra"),
+    (("audit_suites",), [], "audit_suites"),
+    (("total_suites",), 1, "total_suites"),
+    (("results",), [], "results"),
+    (("suites",), [], "suites"),
+    (("reused_from",), {}, "reused_from"),
+    (("device_verdict", "bucket"), "", "bucket"),
+    (("device_verdict", "version_id"), None, "version_id"),
+    (("device_verdict", "sha256"), "z" * 64, "sha256"),
+    (("device_verdict", "key"), "wrong/path", "key"),
+    (("device_verdict", "repository"), "other/repo", "repository"),
+    (("device_verdict", "head_sha"), "d" * 40, "head_sha"),
+    (("device_verdict", "run_id"), "dv-ffffffffffffffff", "run_id"),
+    (("device_verdict", "verdict_schema"), "other", "verdict_schema"),
+    (("device_verdict", "mode"), "full", "mode"),
+    (("device_verdict", "state"), "failure", "state"),
+    (("device_verdict", "shard_total"), 3, "shard_total"),
+    (("device_verdict", "shard_total"), 0, "shard_total"),
+    (("device_verdict", "shard_total"), True, "shard_total"),
+    (("device_verdict", "shard_total"), 2.0, "shard_total"),
+    (("device_verdict", "shards"), [], "shard_total"),
+    (("device_verdict", "shards"), {}, "shards"),
+    (("device_verdict", "shards", 1), None, "entry"),
+    (("device_verdict", "shards", 1, "shard"), 0, "indices"),
+    (("device_verdict", "shards", 1, "shard"), 2, "indices"),
+    (("device_verdict", "shards", 1, "shard"), True, "indices"),
+    (("device_verdict", "shards", 1, "state"), "failure", "success"),
+    (("device_verdict", "shards", 1, "run_id"), "bad", "run_id"),
+    (("device_verdict", "shards", 1, "extra"), True, "entry"),
+])
+def test_device_verdict_gate_proof_refuses_mutations(tmp_path, capsys, path, value, reason):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    output = capsys.readouterr().out
+    assert output.startswith("NOT VERIFIED: ") and reason in output
+
+
+@pytest.mark.parametrize("section,key", [
+    *[((), key) for key in _device_verdict_gate_proof()],
+    *[(("device_verdict",), key) for key in _device_verdict_gate_proof()["device_verdict"]],
+    *[(("device_verdict", "shards", 0), key) for key in ("shard", "run_id", "state")],
+])
+def test_device_verdict_gate_proof_refuses_missing_fields(tmp_path, capsys, section, key):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    target = data
+    for part in section:
+        target = target[part]
+    del target[key]
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, "b" * 40, allow_device_verdict=True) == 1
+    assert capsys.readouterr().out.startswith("NOT VERIFIED: ")
+
+
+def test_device_verdict_gate_proof_refuses_missing_shard(tmp_path, capsys):
+    g = _load_runner()
+    data = _device_verdict_gate_proof()
+    data["device_verdict"]["shards"].pop()
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, data["tree"], allow_device_verdict=True) == 1
+    assert "shard_total" in capsys.readouterr().out
+
+
 def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     """Same silence class as the shard CLI guards: each of these would
     otherwise answer a different question than the one typed. All must exit 2
@@ -5518,6 +5994,7 @@ def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     proof = tmp_path / "gate-proof.json"
     proof.write_text("{}", encoding="utf-8")
     cases = (
+        ["--allow-device-verdict"],
         ["--verify-gate-proof", str(proof)],                      # no tree
         ["--expect-tree", "0" * 40],                              # no proof
         ["--emit-proof", str(tmp_path / "out.json")],             # no fan-in
@@ -5916,6 +6393,19 @@ def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
     g = _load_runner()
     suite = next(suite for suite in g.build_suites() if suite.id == sid)
     assert sid not in g._WEB_SOURCE_READERS
+    if sid == "web-studio-panels-proof":
+        expected = [g._npx(), "--no-install", "playwright", "test", "--config",
+                    "playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
+                    "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
+                    "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
+                    "e2e/project-page-editor.spec.mjs", "--workers=2"]
+        assert suite.argv == expected
+        assert g._BROWSER_DIRECT_PROOFS[sid] == expected[5:]
+        assert g.isolated_browser_suite(suite)
+        drifted = g.replace(suite, argv=[*expected[:-1], "--workers=3"])
+        assert not g.isolated_browser_suite(drifted)
+        assert g.browser_suite_env(drifted) == {}
+        assert g.serial_suite_reason(drifted) == "browser resource declaration drift"
     if g.isolated_browser_suite(suite):
         assert g.browser_suite_env(suite) == {"LEAF_GATE_BROWSER_SUITE": sid}
         resources = g.conflict_resources(suite)
@@ -6445,6 +6935,41 @@ def test_server_test_targets_count_only_real_targets(tmp_path):
         SimpleNamespace(cwd=server, argv=["python", "-m", "pytest", "tests/test_f.py::test_one"]),
     ]
     assert _server_test_targets(suites, tests) == {"test_a.py"}
+
+
+def test_x07_role_product_wrapper_registered_with_thirteen_cases():
+    g = _load_runner()
+    suite = next(suite for suite in g.build_suites() if suite.id == 'server-x07-offline')
+    target = (Path('..') / 'tools' / 'xbench' / 'tests' / 'test_x07_role_product_journeys.py').as_posix()
+    assert suite.argv.count(target) == 1
+    assert suite.expected >= 432
+    assert suite.allowed_skip_reasons == (
+        r'X07 actual JSX dependency set unavailable on this host; Node-prepared replay required',)
+
+
+def test_string_tag_suites_registered():
+    runner = _load_runner()
+    suites = runner.build_suites()
+    for sid, target, floor, database in (
+        ("server-solar-string-tags", "tests/test_solar_string_tags.py", 82, False),
+        ("server-project-string-tags", "tests/test_project_string_tags.py", 48, True),
+    ):
+        rows = [suite for suite in suites if suite.id == sid]
+        assert len(rows) == 1
+        suite = rows[0]
+        assert suite.kind == "pytest" and suite.cwd == runner.SERVER
+        assert suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert not suite.opt_in_env and not suite.db_deferred
+        assert suite.allowed_skip_reasons == () and suite.database_skip_reasons == ()
+        if database:
+            assert suite.argv == runner._unprivileged_pytest(target)
+            launched = runner._py_pytest(target)[2:]
+            assert _unprivileged_helper().validate_args(launched) == launched
+        else:
+            assert suite.argv == runner._py_pytest(target)
+    registered = _server_test_targets(suites, runner.SERVER / "tests")
+    assert {"test_solar_string_tags.py", "test_project_string_tags.py"} <= registered
 
 
 def test_every_server_test_file_is_registered_or_named():

@@ -48,4 +48,16 @@ describe('SSD1-24C directional geometry', () => {
     const polys = Array.from({ length: 2345 }, (_, i) => line(String(i), [[1, 1], [3, 1]]))
     expect(marqueeHandles(polys, rect, 'window')).toEqual(polys.map(p => p.handle))
   })
+  it('requires every visible projected piece of a block inside a window', () => {
+    const polys = [line('10', [[1, 1], [2, 1]]), line('20', [[3, 3], [4, 3]]),
+      line('10', [[9, 9], [12, 9]])]
+    expect(marqueeHandles(polys, rect, 'window')).toEqual(['20'])
+    expect(marqueeHandles(polys, rect, 'crossing')).toEqual(['10', '20'])
+    expect(marqueeHandles([...polys].reverse(), rect, 'window')).toEqual(['20'])
+  })
+  it('ignores hidden pieces when containing a visible entity', () => {
+    const polys = [{ ...line('10', [[1, 1], [2, 1]]), layer: 'shown' },
+      { ...line('10', [[9, 9], [12, 9]]), layer: 'hidden' }]
+    expect(marqueeHandles(polys, rect, 'window', p => p.layer !== 'hidden')).toEqual(['10'])
+  })
 })

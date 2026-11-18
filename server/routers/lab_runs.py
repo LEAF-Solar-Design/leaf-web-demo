@@ -258,6 +258,16 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
     return {key: value for key, value in row.items() if key not in {"lease_owner", "lease_fence", 'corpus_authority_json'}}
 
 
+@router.get("/{run_id}/recovery-plan")
+def recovery_plan(run_id: str, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    def operation():
+        import lab_corpus_recovery
+        return lab_corpus_recovery.prepare(str(tenant), run_id,
+            authorize=lambda row: _authorize_corpus_run(tenant, row))
+    return _call(operation)
+
+
 def _public_event(event):
     payload_fields = {
         "failed": ("reason",),

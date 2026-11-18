@@ -228,6 +228,7 @@ function lifecycleMessage(error) {
 
 export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
   const [desc, setDesc] = useState('')
+  const [recoveryId, setRecoveryId] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [err, setErr] = useState(null)
@@ -490,6 +491,28 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
+      {stageActivity?.lookupRequest && !stageActivity.pointer && !authored && (
+        <div className="customization-state author-request-recovery">
+          <label>Existing authoring request ID
+            <input value={recoveryId} onChange={(event) => setRecoveryId(event.target.value)} />
+          </label>
+          <button type="button" disabled={!recoveryId.trim() || authorLocked || !buildEntitled
+            || stageActivity.enabled === false || stageActivity.recoveredRequest?.busy}
+            onClick={() => stageActivity.lookupRequest(recoveryId.trim())}>Check existing request</button>
+          {stageActivity.recoveredRequest?.busy && <p role="status">Checking request...</p>}
+          {stageActivity.recoveredRequest?.message && <p role="status">{stageActivity.recoveredRequest.message}</p>}
+          {stageActivity.recoveredRequest?.job && <p role="status">
+            Request <code>{stageActivity.recoveredRequest.job.change_set_id}</code>: {stageActivity.recoveredRequest.job.status}.
+            {' '}Attempt {stageActivity.recoveredRequest.job.attempt ?? 'unknown'}. No new request was started.
+          </p>}
+          {stageActivity.recoveredRequest?.job?.status === 'failed'
+            && stageActivity.recoveredRequest.job.error?.retryable === true && (
+              <button type="button" disabled={authorLocked || !buildEntitled
+                || stageActivity.enabled === false || stageActivity.recoveredRequest.busy}
+                onClick={() => stageActivity.retryRequest?.()}>Retry this request</button>
+            )}
+        </div>
+      )}
       {draftMessage && <div role="status">{draftMessage}</div>}
       {stageActivity?.previousStagedReceipt && (
         <div className="customization-state" role="status">

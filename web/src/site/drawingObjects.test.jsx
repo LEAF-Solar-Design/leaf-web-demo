@@ -323,7 +323,7 @@ it('KEYS-E06 an edit to the same drawing hides an open list, and Enter and the F
       expect(screen.getAllByRole('option')).toHaveLength(2)
       const before = h.probe.objects.index
       act(() => h.worker.emit({ type: 'editApplied', op: 'deleteEntity', ok: true,
-        entities: entities.filter((entity) => entity.id !== '42'), entityCount: entities.length - 1, byteLength: 1 }))
+        entities: entities.filter((entity) => entity.id !== '42'), entityCount: entities.length - 1, bytes: new Uint8Array([48]), byteLength: 1 }))
       expect(h.probe.objects.index).not.toBe(before)
       expect(h.probe.objects.index.drawingKey).toBe(before.drawingKey)
       expect(screen.queryAllByRole('option')).toHaveLength(0)

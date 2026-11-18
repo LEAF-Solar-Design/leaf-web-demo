@@ -122,6 +122,12 @@
       "host": "production"
     },
     {
+      "source": "studio-tool:count-modules",
+      "status": "runnable",
+      "adapter_owner": "server.lab_tool_manifests",
+      "host": "production"
+    },
+    {
       "source": "studio-tool:delete-marked-panel",
       "status": "explicit-handoff",
       "adapter_owner": "server.deps",
@@ -149,6 +155,12 @@
       "source": "studio-tool:qa-sleep-count",
       "status": "readable",
       "adapter_owner": "server.deps",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-add-all-inverters",
+      "status": "explicit-handoff",
+      "adapter_owner": "solar_tools",
       "host": "production"
     },
     {
@@ -449,6 +461,12 @@
       "source": "studio-tool:solar-string-swap",
       "status": "explicit-handoff",
       "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
+      "source": "studio-tool:solar-string-tags",
+      "status": "explicit-handoff",
+      "adapter_owner": "server.deps",
       "host": "production"
     },
     {

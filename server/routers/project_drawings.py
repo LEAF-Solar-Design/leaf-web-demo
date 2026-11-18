@@ -19,7 +19,7 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -131,7 +131,9 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
         identity.update(input_version_id=str(binding.input_version_id),
                         head_version_id=str(binding.head_version_id), is_head=binding.is_head,
                         intake_sha256=context.intake_sha256)
-        result = {"context": identity, "intake": context.intake}
+        from solar_drawing_roles import discover_roles
+        result = {"context": identity, "intake": context.intake,
+                  "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
             result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
@@ -599,3 +601,7 @@ def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, cur
             return Response(content=b"", status_code=304, headers=headers)
         return Response(content=content, media_type=meta["media_type"], headers=headers)
     return _output_dispatch(operation)
+
+
+from routers.project_estimates import router as estimate_router
+router.include_router(estimate_router)

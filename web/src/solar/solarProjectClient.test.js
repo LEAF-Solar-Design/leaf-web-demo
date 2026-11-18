@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSolarProjectClient } from './solarProjectClient.js'
 import { createRunSubmissionRequest } from '../runIntent.js'
+import { webcrypto } from 'node:crypto'
+import { engineeringTotalsPath, createEngineeringTotalsRecord } from './projectReconciliation.js'
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
@@ -33,6 +35,265 @@ function setup(data = contextData, status = 200, options = {}) {
 }
 afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.useRealTimers() })
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
+
+describe('scope-bound engineering project files', () => {
+  const graphSha256 = 'a'.repeat(64), drafts = ['002', '0', '01', '1', '00.8000']
+  const record = () => createEngineeringTotalsRecord(binding, graphSha256, drafts)
+  const content = () => JSON.stringify(record())
+  const path = engineeringTotalsPath(binding)
+  const save = { graphSha256, drafts, expectedRevision: 2, idempotencyKey: 'engineering-1' }
+  const sha = async (text) => Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(text))),
+    (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const file = async (changes = {}) => ({ file_id: J, path, media_type: 'application/json',
+    content: content(), revision: 3, content_sha256: await sha(content()), ...changes })
+  const loaded = async (changes = {}) => ({ organization_id: O, project_id: P, can_write: true, file: await file(), ...changes })
+  const saved = async (changes = {}) => ({ file: await file(), receipt: { project_id: P, action: 'file_put' }, replayed: false, ...changes })
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('loads only the targeted file and hashes its exact UTF-8 content', async () => {
+    const digest = vi.fn((...args) => webcrypto.subtle.digest(...args))
+    vi.stubGlobal('crypto', { subtle: { digest } })
+    const { client, fetchImpl } = setup(await loaded({ can_write: false }))
+    expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: true, status: 200,
+      data: { record: record(), revision: 3, canWrite: false } })
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/files/by-path?path=${encodeURIComponent(path)}`)
+    expect(init(fetchImpl).method).toBe('GET')
+    expect(init(fetchImpl).headers).toMatchObject({ 'X-Org-Id': O, 'X-Project-Id': P })
+    expect(init(fetchImpl)).not.toHaveProperty('body')
+    expect(digest).toHaveBeenCalledWith('SHA-256', new TextEncoder().encode(content()))
+    expect(fetchImpl).toHaveBeenCalledOnce()
+  })
+
+  it('loads absence and read-only access without requiring hashing', async () => {
+    vi.stubGlobal('crypto', undefined)
+    for (const can_write of [true, false]) {
+      const { client } = setup(await loaded({ file: null, can_write }))
+      expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: true, status: 200,
+        data: { record: null, revision: 0, canWrite: can_write } })
+    }
+  })
+
+  it('PUTs canonical content, CAS revision and caller idempotency key and accepts replay', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const replayed of [false, true]) {
+      const data = await saved({ replayed }); delete data.file.content
+      const { client, fetchImpl } = setup(data)
+      expect(await client.saveEngineeringTotals(save)).toEqual({ ok: true, status: 200,
+        data: { record: record(), revision: 3, canWrite: true } })
+      expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/files`)
+      expect(init(fetchImpl).method).toBe('PUT')
+      expect(init(fetchImpl).headers).toMatchObject({ 'Idempotency-Key': 'engineering-1', 'Content-Type': 'application/json' })
+      expect(JSON.parse(init(fetchImpl).body)).toEqual({ path, media_type: 'application/json', content: content(), expected_revision: 2 })
+    }
+  })
+
+  it('round-trips blank and zero DC and accepts the boundary CAS revisions', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const [expectedRevision, dc] of [[0, ''], [2147483646, '0']]) {
+      const values = [...drafts.slice(0, 4), dc]
+      const boundRecord = createEngineeringTotalsRecord(binding, graphSha256, values)
+      const text = JSON.stringify(boundRecord)
+      const stored = await file({ content: text, content_sha256: await sha(text), revision: expectedRevision + 1 })
+      const { client, fetchImpl } = setup(await saved({ file: stored }))
+      expect((await client.saveEngineeringTotals({ ...save, drafts: values, expectedRevision })).data)
+        .toEqual({ record: boundRecord, revision: expectedRevision + 1, canWrite: true })
+      fetchImpl.mockResolvedValueOnce(response(await loaded({ file: stored })))
+      expect((await client.loadEngineeringTotals({ graphSha256 })).data.record.values[4]).toBe(dc)
+    }
+  })
+
+  it('rejects malformed outer scopes, files, records and integrity hashes without leaking content', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup()
+    const wrongBinding = { ...binding, project_id: J }
+    const foreignContent = JSON.stringify(createEngineeringTotalsRecord(wrongBinding, graphSha256, drafts))
+    const noncanonical = content() + '\n'
+    const invalid = [await loaded({ organization_id: J }), await loaded({ project_id: J }),
+      await loaded({ can_write: 1 }), await loaded({ file: undefined })]
+    for (const changes of [{ file_id: 'bad' }, { path: 'other.json' }, { media_type: 'text/plain' },
+      { revision: 0 }, { revision: true }, { revision: 2147483648 }, { content_sha256: 'b'.repeat(64) },
+      { content: foreignContent, content_sha256: await sha(foreignContent) },
+      { content: noncanonical, content_sha256: await sha(noncanonical) }]) invalid.push(await loaded({ file: await file(changes) }))
+    for (const data of invalid) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect(await client.loadEngineeringTotals({ graphSha256 })).toEqual({ ok: false, status: null,
+        reason: 'SIP_R7_RESPONSE_INVALID', envelope: null })
+    }
+  })
+
+  it('requires strict CAS receipts with matching file metadata, hash and next revision', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup()
+    const invalid = [await saved({ receipt: { project_id: J, action: 'file_put' } }),
+      await saved({ receipt: { project_id: P, action: 'file_delete' } }), await saved({ replayed: 0 })]
+    for (const changes of [{ path: 'other' }, { media_type: 'text/plain' }, { file_id: 'bad' },
+      { revision: 2 }, { revision: 4 }, { content_sha256: 'b'.repeat(64) }]) invalid.push(await saved({ file: await file(changes) }))
+    for (const data of invalid) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.saveEngineeringTotals(save)).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+    const envelope = refusal('revision_conflict')
+    fetchImpl.mockResolvedValueOnce(response(envelope, 409))
+    expect(await client.saveEngineeringTotals(save)).toEqual({ ok: false, status: 409, reason: 'revision_conflict', envelope })
+  })
+
+  it('validates inputs locally and derives ownership from the captured scope', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const { client, fetchImpl } = setup(await saved())
+    for (const expectedRevision of [-1, true, '2', 2.5, NaN, 2147483647]) {
+      expect((await client.saveEngineeringTotals({ ...save, expectedRevision })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    for (const idempotencyKey of ['', ' ', 'é'.repeat(129), token()]) {
+      expect((await client.saveEngineeringTotals({ ...save, idempotencyKey })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect((await client.loadEngineeringTotals({ graphSha256: 'bad' })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect((await client.saveEngineeringTotals({ ...save, drafts: [] })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect((await client.saveEngineeringTotals({ ...save, binding: { ...binding, project_id: J } })).ok).toBe(true)
+    expect(JSON.parse(JSON.parse(init(fetchImpl).body).content).binding.project_id).toBe(P)
+  })
+
+  it('never bypasses missing or failed SubtleCrypto for an existing record or PUT', async () => {
+    const readData = await loaded(), writeData = await saved()
+    for (const crypto of [undefined, { subtle: { digest: async () => { throw Error('unavailable') } } }]) {
+      vi.stubGlobal('crypto', crypto)
+      const { client, fetchImpl } = setup(readData)
+      expect((await client.loadEngineeringTotals({ graphSha256 })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+      fetchImpl.mockResolvedValueOnce(response(writeData))
+      expect((await client.saveEngineeringTotals(save)).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+  })
+
+  it('discards late GET and PUT responses across authority and binding ABA changes', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    for (const write of [false, true]) for (const authority of [false, true]) {
+      const { client, fetchImpl } = setup()
+      const old = deferred(); fetchImpl.mockReturnValueOnce(old.promise)
+      const pending = write ? client.saveEngineeringTotals(save) : client.loadEngineeringTotals({ graphSha256 })
+      const signal = init(fetchImpl).signal
+      client.setScope(authority ? binding : { ...binding, input_version_id: J }, authority ? 'session-2' : 'session-1')
+      client.setScope(binding, 'session-1')
+      expect(signal.aborted).toBe(true)
+      old.resolve(response(write ? await saved() : await loaded()))
+      expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    }
+  })
+
+  it('aborts pending responses and hashing and discards late digest results after scope revocation', async () => {
+    for (const write of [false, true]) {
+      const data = write ? await saved() : await loaded()
+      for (const changeScope of [false, true]) {
+        const hashing = deferred(), started = deferred()
+        vi.stubGlobal('crypto', { subtle: { digest: vi.fn(() => { started.resolve(); return hashing.promise }) } })
+        const { client } = setup(data), controller = new AbortController()
+        const pending = write ? client.saveEngineeringTotals({ ...save, signal: controller.signal })
+          : client.loadEngineeringTotals({ graphSha256, signal: controller.signal })
+        await started.promise
+        if (changeScope) {
+          client.setScope(binding, 'session-2'); client.setScope(binding, 'session-1')
+        } else controller.abort()
+        expect((await pending).reason).toBe(changeScope ? 'SIP_R7_SCOPE_STALE' : 'SIP_R7_ABORTED')
+        hashing.resolve(await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode(content())))
+      }
+      const { client, fetchImpl } = setup(data), controller = new AbortController(), old = deferred()
+      fetchImpl.mockReturnValueOnce(old.promise)
+      const pending = write ? client.saveEngineeringTotals({ ...save, signal: controller.signal })
+        : client.loadEngineeringTotals({ graphSha256, signal: controller.signal })
+      controller.abort()
+      expect((await pending).reason).toBe('SIP_R7_ABORTED')
+      old.resolve(response(data))
+    }
+  })
+})
+
+const estimateCard = { schema: 'leaf.solar-estimate-rate-card.v1', label: 'TEST RATES', currency: 'USD',
+  version: 'TEST-1', rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] }
+function estimateFixture() {
+  const line = { line_id: 'panels', category: 'equipment', description: 'Panels', unit: 'ea', quantity: '2.000',
+    status: 'computed', reason: null, priceable: true, source: {} }
+  return { schema: 'leaf.solar-estimate.v1', label: 'TEST RATES', currency: 'USD', rate_version: 'TEST-1',
+    complete: true, priced_subtotal: '2.01', unpriced_count: 0, content_sha256: 'a'.repeat(64),
+    takeoff_sha256: 'b'.repeat(64), rate_card_sha256: 'c'.repeat(64),
+    source_binding: { ...identity, input_version_id: V, graph_sha256: 'd'.repeat(64), intake_sha256: 'e'.repeat(64) },
+    takeoff: { schema: 'leaf.solar-takeoff.v1', complete: true, source: { project_id: P, drawing_id: D,
+      graph_sha256: 'd'.repeat(64), drawing_version: 1 }, lines: [line] }, rate_card: estimateCard,
+    lines: [{ ...line, rate: '1.005', amount: '2.01', pricing_reason: null }] }
+}
+function estimateReceipt() {
+  return { result: { schema: 'leaf.project-estimate.v1', saved: true, content_sha256: 'a'.repeat(64),
+    estimate: estimateFixture(), publication: { ...identity, parent_version_id: V, request_id: J,
+      drawing_version: { version_id: J, org_id: O, project_id: P, drawing_id: D } } } }
+}
+
+describe('canonical estimate custody', () => {
+  const save = { requestId: J, rateCard: estimateCard, catalogDigest: digest }
+  it('requires a held checkout, then forwards only the copied rate card and catalog with private proof', async () => {
+    const h = setup(acquired())
+    expect(await h.client.saveEstimate(save)).toMatchObject({ ok: false, reason: 'SIP_R7_CHECKOUT_NOT_HELD' })
+    expect(h.fetchImpl).not.toHaveBeenCalled()
+    await h.client.acquireCheckout()
+    h.fetchImpl.mockResolvedValueOnce(response(estimateReceipt()))
+    expect((await h.client.saveEstimate(save)).ok).toBe(true)
+    expect(url(h.fetchImpl)).toContain(`/versions/${V}/estimates`)
+    expect(init(h.fetchImpl)).toMatchObject({ method: 'POST', cache: 'no-store', headers: {
+      Authorization: 'Bearer synthetic', 'X-Org-Id': O, 'X-Project-Id': P,
+      'X-Checkout-Capability': token(), 'Idempotency-Key': J } })
+    expect(JSON.parse(init(h.fetchImpl).body)).toEqual({ rate_card: estimateCard, catalog_digest: digest })
+    expect(await h.client.saveEstimate({ ...save, requestId: 'not-a-uuid' })).toMatchObject({ ok: false })
+    expect(await h.client.saveEstimate({ ...save, rateCard: { ...estimateCard, version: 'x'.repeat(262144) } })).toMatchObject({ ok: false })
+  })
+  it.each(['parent', 'request', 'child', 'organization', 'digest', 'source'])('refuses a mismatching %s receipt', async (field) => {
+    const h = setup(acquired())
+    await h.client.acquireCheckout()
+    const receipt = estimateReceipt(), r = receipt.result
+    if (field === 'parent') r.publication.parent_version_id = J
+    if (field === 'request') r.publication.request_id = V
+    if (field === 'child') r.publication.drawing_version.version_id = V
+    if (field === 'organization') r.publication.drawing_version.org_id = J
+    if (field === 'digest') r.content_sha256 = 'f'.repeat(64)
+    if (field === 'source') r.estimate.source_binding.input_version_id = J
+    h.fetchImpl.mockResolvedValueOnce(response(receipt))
+    expect(await h.client.saveEstimate(save)).toMatchObject({ ok: false, reason: 'SIP_R7_RESPONSE_INVALID' })
+  })
+  it('binds reads to the selected successor while retaining the origin parent', async () => {
+    const result = { ...estimateReceipt().result, ...identity, input_version_id: J }
+    const h = setup({ result })
+    h.client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    expect((await h.client.readEstimate()).ok).toBe(true)
+    h.client.setScope(binding, 'session-1')
+    expect((await h.client.readEstimate()).ok).toBe(false)
+    h.fetchImpl.mockResolvedValueOnce(response({ result: { schema: 'leaf.project-estimate.v1', saved: false,
+      ...identity, input_version_id: V } }))
+    expect(await h.client.readEstimate()).toMatchObject({ ok: true, data: { result: { saved: false } } })
+  })
+  it('refuses late save success after a source switch', async () => {
+    const h = setup(acquired()), pending = deferred()
+    await h.client.acquireCheckout()
+    h.fetchImpl.mockReturnValueOnce(pending.promise)
+    const saving = h.client.saveEstimate(save)
+    h.client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    pending.resolve(response(estimateReceipt()))
+    expect(await saving).toMatchObject({ ok: false, reason: 'SIP_R7_SCOPE_STALE' })
+  })
+  it('exports exact UTF8 bytes with a quoted matching ETag without checkout', async () => {
+    const h = setup(), raw = ' \n' + JSON.stringify(estimateFixture()) + '\n'
+    h.fetchImpl.mockResolvedValueOnce(new Response(raw, { headers: { ETag: '"' + 'a'.repeat(64) + '"' } }))
+    const outcome = await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })
+    expect(outcome.ok).toBe(true)
+    expect(new TextDecoder().decode(outcome.data.bytes)).toBe(raw)
+    expect(init(h.fetchImpl).headers['X-Checkout-Capability']).toBeUndefined()
+  })
+  it('cancels oversized export streams and refuses changed caller guards and ETags', async () => {
+    const h = setup(), cancel = vi.fn()
+    h.fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ ETag: '"' + 'a'.repeat(64) + '"' }),
+      body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(262145)) }, cancel }) })
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })).ok).toBe(false)
+    expect(cancel).toHaveBeenCalled()
+    h.fetchImpl.mockResolvedValueOnce(new Response(JSON.stringify(estimateFixture()), { headers: { ETag: '"wrong"' } }))
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64) })).ok).toBe(false)
+    expect((await h.client.exportEstimate({ contentSha256: 'a'.repeat(64), isCurrent: () => false })).ok).toBe(false)
+  })
+})
 
 it('requests opt-in frame preparation and rejects mismatched frame/revision metadata', async () => {
   const prepared = { ...contextData, intake: { solar_design_graph: { rev: 4 }, solar_design_graph_sha256: 'a'.repeat(64) },

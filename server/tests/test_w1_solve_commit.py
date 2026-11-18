@@ -924,3 +924,91 @@ def test_export_rechecks_upstream_edits_from_existing_settings_builtin(case):
     edited = settings.run(solved, {"expected_rev": 1, "changes": {"optimizer_ratio": 2}})
     with pytest.raises(GraphValidationError, match="SOLAR_OUTPUT_NOT_CURRENT"):
         solve.require_current_export(edited)
+
+
+def roof_continuity_case(case, *, step=1.0):
+    """Bound saved dimensions and geometry to the returned order, with a distant string reset."""
+    graph, request, response = case
+    frame = graph["frames"][0]
+    frame.update(module_width_along_row=2.0, module_height_across_row=1.0)
+    cells = sorted((cell for row in response["data"]["final_grid"]["Rows"]
+                    for cell in row["Panels"] if cell["Code"] == 1), key=lambda cell: cell["Seq"])
+    positions = {cell["Id"]: [(index % 12) * step + (1000.0 if index >= 12 else 0.0), 0.0]
+                 for index, cell in enumerate(cells)}
+    for panel in graph["panels"]:
+        panel["centre"] = positions[panel["id"]][:]
+    for row in frame["matrix"]:
+        for cell in row:
+            if cell["panel_ref"]:
+                cell["x"], cell["y"] = positions[cell["panel_ref"]]
+    for grid in (request["grid"], response["data"]["final_grid"]):
+        for row in grid["Rows"]:
+            for cell in row["Panels"]:
+                if cell["Code"] == 1:
+                    cell["X"], cell["Y"] = positions[cell["Id"]]
+    response["data"]["best_result"]["info"]["visited_path"].reverse()
+    return case
+
+
+@pytest.mark.parametrize("step,refused", [(1.0, False), (6.0, False),
+    (6.0 + 1e-10, False), (6.0 + 1e-6, True), (40.0, True)])
+def test_roof_continuity_final_order_threshold_and_string_reset(case, step, refused):
+    graph, _, response = roof_continuity_case(case, step=step)
+    proposal = candidate(case)
+    before = copy.deepcopy((graph, proposal))
+    if refused:
+        with pytest.raises(GraphValidationError) as caught:
+            solve.accept_candidate(graph, proposal, expected_rev=0)
+        assert caught.value.code == "DISCONTIGUOUS_SOLVE_STRING"
+        assert caught.value.path == "solve.continuity"
+    else:
+        result = solve.accept_candidate(graph, proposal, expected_rev=0)
+        expected = [cell["Id"] for cell in sorted(
+            (cell for row in response["data"]["final_grid"]["Rows"] for cell in row["Panels"]),
+            key=lambda cell: cell["Seq"])]
+        assert [ref for string in result["strings"] for ref in string["ordered_panel_refs"]] == expected
+        assert [string["module_count"] for string in result["strings"]] == [12, 12]
+        assert result["extra"]["solve_coverage"] == {
+            "duplicate_panel_refs": [], "unassigned_panel_refs": []}
+    assert (graph, proposal) == before
+
+
+def test_roof_continuity_dimension_change_invalidates_saved_candidate(case):
+    graph, _, _ = roof_continuity_case(case)
+    proposal = candidate(case)
+    graph["frames"][0]["module_width_along_row"] = 20.0
+    before = copy.deepcopy(graph)
+    with pytest.raises(GraphValidationError, match="STALE_SOLVE_RESULT"):
+        solve.accept_candidate(graph, proposal, expected_rev=0)
+    assert graph == before
+
+
+def test_roof_continuity_does_not_change_ground_contract(case):
+    graph, _, _ = roof_continuity_case(case, step=40.0)
+    frame = graph["frames"][0]
+    graph["project"]["installation_design"] = frame["installation_design"] = "Ground"
+    frame["tracker"] = {"tracker_model": "single_axis_tracker", "axis_start": [0.0, 0.0],
+        "axis_end": [1.0, 0.0], "axis_units": "drawing", "module_slots": frame["module_slots"],
+        "row_index": 0, "length_m": 1.0, "rail_overhang_m": 0.0, "cross_axis_width_m": None,
+        "max_tilt_deg": None, "source": {"entity_kind": "tracker", "handle": None,
+            "layer": None, "block_name": None, "source_command": None}}
+    result = solve.accept_candidate(graph, candidate(case), expected_rev=0)
+    assert [string["module_count"] for string in result["strings"]] == [12, 12]
+
+
+def test_plugin_parity_preserves_long_steps_without_enabling_public_bypass(case):
+    graph, _, response = roof_continuity_case(case, step=40.0)
+    proposal = candidate(case)
+    before = copy.deepcopy((graph, proposal))
+    replayed = commit.commit_solve(graph, {"expected_rev": 0}, candidate=proposal,
+                                  plugin_parity=True)
+    expected = [cell["Id"] for cell in sorted(
+        (cell for row in response["data"]["final_grid"]["Rows"] for cell in row["Panels"]),
+        key=lambda cell: cell["Seq"])]
+    assert [ref for string in replayed["strings"] for ref in string["ordered_panel_refs"]] == expected
+    assert [string["module_count"] for string in replayed["strings"]] == [12, 12]
+    with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+        commit.run(graph, {"expected_rev": 0}, candidate=proposal)
+    with pytest.raises(GraphValidationError, match="INVALID_COMMIT_REQUEST"):
+        commit.run(graph, {"expected_rev": 0, "plugin_parity": True}, candidate=proposal)
+    assert (graph, proposal) == before

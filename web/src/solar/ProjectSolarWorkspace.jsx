@@ -5,12 +5,16 @@ import { canOpenSolarSettingsForm } from './solarSettingsWire.js'
 import ProjectSolarReadPanel, { PROJECT_SOLAR_WORKSPACE_LABELS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview.jsx'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
+import ProjectGroundEstimatePanel from './ProjectGroundEstimatePanel.jsx'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
+import DrawingRoleProposal from './DrawingRoleProposal.jsx'
+import X07ProjectProfileReview from './X07ProjectProfileReview.jsx'
+import ProjectReconciliationPanel from './ProjectReconciliationPanel.jsx'
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
 const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read', 'solar-takeoff']
 const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const TOOL_NAME = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
@@ -25,6 +29,20 @@ const workspaceRefusal = (name) => Promise.resolve({ ok: false, status: null,
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const current = (predicate) => {
   try { return typeof predicate === 'function' && predicate() === true } catch { return false }
+}
+
+function FocusTrackedEditor({ bindingKey, toolName, onFocusedUnmount, children }) {
+  const container = useRef(null)
+  useLayoutEffect(() => {
+    const node = container.current
+    return () => {
+      const document = node?.ownerDocument
+      if (document?.hasFocus() && node.contains(document.activeElement)) {
+        onFocusedUnmount({ bindingKey, toolName, document })
+      }
+    }
+  }, [bindingKey, toolName, onFocusedUnmount])
+  return <div ref={container} className="project-solar-workspace-editor">{children}</div>
 }
 // A dense array: only `length` beside the indices, and every index an own data property.
 function denseArray(value) {
@@ -177,6 +195,9 @@ export default function ProjectSolarWorkspace(props) {
   const presentation = useRef({ row: openTool, retired: false, generation: 0, drafts: new Map() })
   const [, repaint] = useState(0)
   const notifications = useRef([])
+  const focusedRemoval = useRef(null)
+  const recoveryStatus = useRef(null)
+  const recordFocusedRemoval = useRef((removed) => { focusedRemoval.current = removed }).current
   const retainedProposal = useRef(null)
   const [discardedProposal, discardProposal] = useState(null)
   const committed = scopeRef.current
@@ -202,6 +223,8 @@ export default function ProjectSolarWorkspace(props) {
   }
   if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1, drafts: new Map() }
   const currentRow = owner.rows.find((row) => row.name === openTool?.name)
+  const writeAccessDenied = !owner.reason && currentRow?.availability?.entitled === false &&
+    ['solar-panel-groups', 'solar-solaredge-accept'].includes(openTool?.name)
   // Value snapshots survive a stale scope without keeping its editor mounted or authorizing a run.
   const keptDraft = view.drafts.get(currentRow?.name)
   if (keptDraft && (!sameOwner(keptDraft, owner) || keptDraft.schemaKey !== schemaDeclaration(currentRow))) {
@@ -338,9 +361,12 @@ export default function ProjectSolarWorkspace(props) {
     projectOutcome={projectOutcome} submissionSignal={submissionSignal} />
   if (host === 'solaredge') editor = <ProjectSolarEdgePanel {...shared} isCurrent={scope.isCurrent}
     submissionSignal={submissionSignal} />
-  if (host === 'read') editor = <ProjectSolarReadPanel tool={editorRow} solarBinding={owner.binding}
-    authorityKey={owner.authorityKey} projectClient={owner.projectClient} projectCatalog={owner.projectCatalog}
-    isCurrent={scope.isCurrent} busy={busy} />
+  const readProps = { tool: editorRow, solarBinding: owner.binding, authorityKey: owner.authorityKey,
+    projectClient: owner.projectClient, projectCatalog: owner.projectCatalog, isCurrent: scope.isCurrent, busy }
+  if (host === 'read') editor = editorRow?.name === 'solar-takeoff'
+    ? <ProjectGroundEstimatePanel {...readProps} onEstimatePublished={props.onEstimatePublished}
+      newProjectIntentKey={newProjectIntentKey} />
+    : <ProjectSolarReadPanel {...readProps} />
   const solveRow = owner.rows.find((row) => row.name === 'solar-solve-proposal')
   const commitRow = owner.rows.find((row) => row.name === 'solar-commit-solve')
   if (host === 'solve') {
@@ -375,7 +401,27 @@ export default function ProjectSolarWorkspace(props) {
   const inspectionRows = owner.rows.filter((row, index, rows) =>
     (GRAPH_TOOLS.includes(row.name) || READ_TOOLS.includes(row.name) || row.name === 'solar-solaredge-accept') &&
       rows.findIndex((item) => item.name === row.name) === index)
+  useLayoutEffect(() => {
+    const removed = focusedRemoval.current
+    focusedRemoval.current = null
+    if (!removed?.bindingKey || removed.bindingKey !== owner.bindingKey
+        || !['solar-panel-groups', 'solar-solaredge-accept'].includes(removed.toolName)
+        || !['scope_stale', 'client_unavailable'].includes(reason)) return
+    const document = removed.document
+    if (!document.hasFocus() || (document.activeElement && document.activeElement !== document.body)) return
+    recoveryStatus.current?.focus()
+    recoveryStatus.current?.scrollIntoView?.({ block: 'nearest' })
+  })
   return <section className="project-solar-workspace">
+    {(!owner.reason || owner.reason === 'catalog_unavailable') && <DrawingRoleProposal
+      projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
+    {(!owner.reason || owner.reason === 'catalog_unavailable') && <X07ProjectProfileReview
+      projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={props.isCurrent} />}
+    {!owner.reason && <ProjectReconciliationPanel projectClient={owner.projectClient} solarBinding={owner.binding}
+      authorityKey={owner.authorityKey} isCurrent={scope.isCurrent} busy={busy} />}
+    {writeAccessDenied && <p role="status">{projectSolarWorkspaceReason('write_access_required')}</p>}
     {FlowRail && <FlowRail solarBinding={owner.binding} authorityKey={owner.authorityKey} projectClient={owner.projectClient}
       projectCatalog={owner.reason ? null : owner.projectCatalog} projectRunMemory={projectRunMemory}
       projectPending={projectPending} busy={busy} openName={editor ? selected.name : null}
@@ -385,10 +431,12 @@ export default function ProjectSolarWorkspace(props) {
       disabled={!opening || busy || hostFor(row, props) === 'host_unavailable'} onClick={() => open(row)}>
       {typeof row.label === 'string' && row.label ? row.label : row.name}
     </button>)}
-    {(reason || busy) && <p role="status">{projectSolarWorkspaceReason(reason || 'busy')}</p>}
-    {editor && <div key={generation} className="project-solar-workspace-editor">
+    {(reason || busy) && <p ref={recoveryStatus} tabIndex={-1} role="status"
+      data-testid="project-solar-workspace-recovery">{projectSolarWorkspaceReason(reason || 'busy')}</p>}
+    {editor && <FocusTrackedEditor key={generation} bindingKey={owner.bindingKey} toolName={selected.name}
+      onFocusedUnmount={recordFocusedRemoval}>
       <fieldset disabled={!!reason || (host !== 'read' && (busy || !canWrite))}>{editor}</fieldset>
       {(host === 'read' || reason || busy || !canWrite) && <button type="button" onClick={() => retire()}>Close</button>}
-    </div>}
+    </FocusTrackedEditor>}
   </section>
 }

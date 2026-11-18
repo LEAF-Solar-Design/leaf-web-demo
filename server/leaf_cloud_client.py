@@ -281,6 +281,9 @@ class PieceStringerResponse(StringerResponse):
     def original_visited_path(self, request: StringerRequest) -> list[list[int]]:
         """Full answers keep every single-frame check; a partial beam has no path, lengths or
         grid_id, so it keeps the final_grid echo and yields no path."""
+        if any(panel.Code == 1 and panel.Seq <= 0
+               for row in self.data.final_grid.Rows for panel in row.Panels):
+            raise ValueError("required piece panel has no sequence")
         if self.partial_beam:
             self.check_grid_echo(request)
             return []

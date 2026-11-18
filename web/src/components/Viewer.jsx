@@ -1,3 +1,4 @@
+import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
 import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
@@ -222,7 +223,7 @@ const Viewer = forwardRef(function Viewer(
     selectedHandle, onSelectEntity, pendingEdit,
     marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady, solarOverlay = null,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, engineObservationBinding = null, onSceneReady, solarOverlay = null,
     onIntakeOverride,
   },
   ref,
@@ -318,6 +319,8 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  const observationBindingRef = useRef(null)
+  observationBindingRef.current = { binding: engineObservationBinding, parentDrawingKey: drawingKey }
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
 
   // Bumped at the end of each scene build so the dynamic-overlay effects
@@ -1100,7 +1103,8 @@ const Viewer = forwardRef(function Viewer(
             if (visible) rows.get(handle)[entry.field] += count
           }
         }
-        return { drawingKey: sceneDrawingKey, handles: [...rows.values()],
+        return { drawingKey: observationDrawingKey(sceneDrawingKey, activeIntake,
+          observationBindingRef.current.binding, observationBindingRef.current.parentDrawingKey), handles: [...rows.values()],
           omitted: { blocks: blocks.truncated, activeIntake: activeIntake.truncated || 0 },
           selections: observation.history.map(record => ({ ...record,
             selected_handles: [...record.selected_handles], requested_handles: [...record.requested_handles] })) }
@@ -1359,10 +1363,12 @@ const Viewer = forwardRef(function Viewer(
     // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
-    setHighlight: (ids) => {
-      setGroupHighlight(Array.from(ids || [], (id) => {
+    setHighlight: (ids, { nativeHandles = false, additive = false } = {}) => {
+      const handles = Array.from(ids || [], (id) => {
+        if (nativeHandles) return String(id)
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
-      }))
+      })
+      setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
     },
     // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
     // unknown kind or a bad point or size draws nothing.

@@ -101,11 +101,11 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
       const token = ++operation.current
       setPending(true)
       try {
-        const result = await client.exportBundle(docId, revision)
+        const result = await client.exportBundle(docId, revision, { preserveText: true })
         if (!valid(token)) return
         if (!result.ok) { setStatus(`Export failed: ${result.detail}`); return }
         const urlApi = URL
-        const url = urlApi.createObjectURL(new Blob([JSON.stringify(result.bundle)], { type: 'application/json' }))
+        const url = urlApi.createObjectURL(new Blob([result.text], { type: 'application/json' }))
         const link = document.createElement('a')
         try {
           link.href = url

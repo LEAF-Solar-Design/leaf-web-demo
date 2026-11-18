@@ -88,6 +88,19 @@ class StudioClient:
             raise StudioError(409, "PROJECT_NAME_REUSED", "Project name already exists")
         return body["project"]
 
+    def project(self, project_id):
+        # platform/api.py exposes the Studio project listing under /api.
+        _, body = self._request("GET", "/api/projects")
+        projects = body.get("projects") if isinstance(body, dict) else None
+        if not isinstance(projects, list):
+            raise StudioError(502, "INVALID_PROJECT_RESPONSE", "Expected a project listing")
+        for project in projects:
+            if isinstance(project, dict) and project.get("project_id") == project_id:
+                if not project.get("org_id"):
+                    raise StudioError(502, "INVALID_PROJECT_RESPONSE", "Project organization missing")
+                return project
+        raise StudioError(404, "PROJECT_NOT_FOUND", "Project not found in Studio listing")
+
     def delete_project(self, project_id):
         return self._request("DELETE", f"/api/projects/{_id(project_id)}",
                              headers={"Idempotency-Key": new_idempotency_key()})[1]

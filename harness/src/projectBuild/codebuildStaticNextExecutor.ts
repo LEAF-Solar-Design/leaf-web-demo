@@ -31,7 +31,7 @@ const protocol = "leaf.static-next.v1" as const;
 const uuid = (v: unknown): v is string => typeof v === "string" &&
   /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(v);
 const sha = (v: unknown, size = 64): v is string => typeof v === "string" &&
-  new RegExp(`^[0-9a-f]{${size}}$`).test(v);
+  v.length === size && new RegExp(`^[0-9a-f]{${size}}$`).test(v);
 const hash = (v: Buffer | string) => createHash("sha256").update(v).digest("hex");
 const fail = (code: string): never => { throw new NextBuildError(code); };
 const terminal = (state: StaticNextBuildState) =>
@@ -49,10 +49,24 @@ function copyScope(s: NextBuildScope): NextBuildScope {
   return { tenantId: s.tenantId, organizationId: s.organizationId, projectId: s.projectId,
     repoKey: s.repoKey, jobId: s.jobId, sourceCommit: s.sourceCommit, sourceTree: s.sourceTree };
 }
-function mapping(bytes: Buffer, executionId: string, code: string): string {
+function mapping(bytes: Buffer, executionId: string, code: string, bundleSha256?: string): string {
   const value = object(bytes, code);
   if (value.executionId !== executionId || typeof value.buildId !== "string" || !value.buildId.trim()) fail(code);
+  if (bundleSha256 !== undefined && value.bundleSha256 !== undefined && value.bundleSha256 !== bundleSha256) fail(code);
   return value.buildId as string;
+}
+
+/** Resolve durable bundle custody without admitting or changing an execution. */
+export function createStaticNextBundleResolver(store: StaticNextObjectStore) {
+  return async function resolveStaticNextBundle(executionId: string): Promise<string | null> {
+    if (!sha(executionId)) return null;
+    const bytes = await store.get(`map/${executionId}.json`);
+    if (bytes === null) return null;
+    try {
+      const value = object(bytes, "job_conflict");
+      return value.executionId === executionId && sha(value.bundleSha256) ? value.bundleSha256 : null;
+    } catch { return null; }
+  };
 }
 function receipt(bytes: Buffer, input: StaticNextJobInput, state: StaticNextBuildState): StaticNextJobResult {
   const value = object(bytes, "producer_conflict");
@@ -139,16 +153,17 @@ export function createCodeBuildStaticNextExecutor(options: CodeBuildStaticNextEx
         const mapKey = `map/${input.executionId}.json`;
         const prior = await store.get(mapKey);
         let buildId: string;
-        if (prior !== null) buildId = mapping(prior, input.executionId, "job_conflict");
+        if (prior !== null) buildId = mapping(prior, input.executionId, "job_conflict", input.bundleSha256);
         else {
           buildId = await provider.start(input.executionId);
           if (typeof buildId !== "string" || !buildId.trim()) fail("build_failed");
           try {
-            const mapped = await store.putIfAbsent(mapKey, Buffer.from(JSON.stringify({ executionId: input.executionId, buildId })));
+            const mapped = await store.putIfAbsent(mapKey, Buffer.from(JSON.stringify({ executionId: input.executionId,
+              buildId, bundleSha256: input.bundleSha256, admittedAt: new Date(now()).toISOString() })));
             if (mapped === "exists") {
               const stored = await store.get(mapKey);
               if (stored === null) fail("job_conflict");
-              const winner = mapping(stored!, input.executionId, "job_conflict");
+              const winner = mapping(stored!, input.executionId, "job_conflict", input.bundleSha256);
               if (winner !== buildId) await provider.stop(buildId);
               buildId = winner;
             } else if (mapped !== "created") fail("job_conflict");

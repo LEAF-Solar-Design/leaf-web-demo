@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import json
-from threading import Lock
+from threading import Event, Lock
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -110,6 +110,31 @@ def refused(code, operation):
     assert getattr(exc.value, "code", getattr(exc.value, "reason_code", None)) == code
 
 
+@pytest.mark.parametrize("code,candidates,action", [
+    ("SOLAREDGE_GRID_UNMATCHED", [], "redraw_frame"),
+    ("SOLAREDGE_GRID_AMBIGUOUS", [0, 1], "pick_candidate"),
+])
+def test_typed_grid_refusal_preserves_validated_identity(code, candidates, action):
+    error = se.SolarEdgeGridRefusal(code, "leaf:frame:group-1", candidates, action)
+    assert isinstance(error, GraphValidationError)
+    assert (error.code, error.frame_ref, error.candidate_ids, error.action) == (
+        code, "leaf:frame:group-1", candidates, action)
+    candidates.append(7)
+    assert 7 not in error.candidate_ids
+
+
+@pytest.mark.parametrize("changes", [
+    {"code": "REPORT_INVALID"}, {"frame_ref": "bad\nframe"}, {"frame_ref": "x" * 129},
+    {"candidate_ids": [True]}, {"candidate_ids": []}, {"candidate_ids": [0, 0]},
+    {"candidate_ids": list(range(21))}, {"action": "retry_private_action"},
+])
+def test_typed_grid_refusal_rejects_invalid_diagnostics(changes):
+    args = dict(code="SOLAREDGE_GRID_AMBIGUOUS", frame_ref="leaf:frame:group-1",
+                candidate_ids=[0, 1], action="pick_candidate")
+    args.update(changes)
+    refused(se.tracking.REPORT_INVALID, lambda: se.SolarEdgeGridRefusal(**args))
+
+
 def read(s, context=None, **params):
     ctx = context or s.ctx
     return reads.run_project_read(s.tenant, s.project, s.drawing, ctx.parent_version_id,
@@ -174,8 +199,10 @@ def test_unresolved_review_build_reload_and_reuse_refuses_acceptance(review_lane
     assert report(s) == result
     assert len(s.parses) == 1
     refused(se.tracking.REPORT_INVALID, lambda: se._record(s.ctx, meta, stored))
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, result)))
-    refused(se.tracking.REPORT_INVALID, lambda: tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx))
+    refused("SOLAREDGE_GRID_UNMATCHED" if case == "unmatched" else "SOLAREDGE_GRID_AMBIGUOUS",
+            lambda: se.accept(s.ctx, params(s, result)))
+    refused("SOLAREDGE_GRID_UNMATCHED" if case == "unmatched" else "SOLAREDGE_GRID_AMBIGUOUS",
+            lambda: tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx))
     assert (s.head, len(s.versions), len(s.calls), s.ctx.graph) == before
 
 
@@ -270,7 +297,7 @@ def test_explicit_association_review_reuse_reset_and_canonical_acceptance(review
     automatic = report(s, source, selection_order="unknown")
     partial = report(s, source, selection_order="unknown", associations={refs[0]: 1})
     assert partial["counts"]["matched_frames"] == 1
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, partial)))
     choices = {refs[1]: 0, refs[0]: 1}
     resolved = report(s, source, selection_order="unknown", associations=choices)
     meta, stored = se._load_report(s.ctx, resolved["report"]["artifact_id"])
@@ -308,7 +335,7 @@ def test_explicit_bridge_review_accepts_complete_choices_without_electrical_enti
     assert partial["counts"]["matched_frames"] == 1
     assert partial["counts"]["bridge_strings"] == 0
     assert partial["counts"]["unassigned_panels"] == 4
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, partial)))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, partial)))
     assert (s.head, len(s.versions), s.ctx.graph) == before
     choices = {refs[0]: 0, refs[1]: 1}
     complete = report(s, selection_order="unknown", associations=choices)
@@ -615,7 +642,7 @@ def test_http_current_review_report_download_is_readable_without_acceptance(http
     refused_flag = http.client.post(http.prefix + "/report", json={**request, "review": True})
     assert refused_flag.status_code == 400
     assert refused_flag.json()["error"]["reason_code"] == "REPORT_REQUEST_INVALID"
-    refused(se.tracking.REPORT_INVALID, lambda: se.accept(s.ctx, params(s, response.json())))
+    refused("SOLAREDGE_GRID_AMBIGUOUS", lambda: se.accept(s.ctx, params(s, response.json())))
     assert (s.head, len(s.versions), s.ctx.graph) == before
 
 
@@ -671,3 +698,94 @@ def test_real_pdf_parser_matching_and_historical_tracking(lane, monkeypatch):
     assert output["counts"]["assigned_panels"] == 3526
     assert output["counts"]["strings"] == 116
     assert output["references"]["current"] is True
+
+
+# Synthetic intake-phase diagnostics share this registered producer suite.
+PHASES = ("authorization", "inspection", "artifact_prepare", "authority_recheck",
+          "slot_reservation", "artifact_finish", "artifact_commit")
+
+
+def records(capfd):
+    return [json.loads(line) for line in capfd.readouterr().err.splitlines()
+            if '"event":"solar_pdf_intake_phase"' in line]
+
+
+def test_source_phase_sequence_is_correlated_and_contains_no_request_data(lane, capfd):
+    before = lane.head, len(lane.versions), len(lane.calls)
+    result = upload(lane)
+    events = records(capfd)
+    assert [(e["phase"], e["state"]) for e in events] == [
+        (phase, state) for phase in PHASES for state in ("started", "completed")]
+    attempts = {e["attempt_id"] for e in events}
+    assert len(attempts) == 1
+    UUID(attempts.pop())
+    for event in events:
+        assert set(event) == {"event", "schema", "attempt_id", "phase", "state", "elapsed_ms"}
+        assert event["schema"] == "leaf.solar-pdf-intake-phase.v1"
+        assert type(event["elapsed_ms"]) is int and event["elapsed_ms"] >= 0
+    text = json.dumps(events)
+    for value in (str(lane.org), str(lane.project), str(lane.drawing),
+                  str(lane.ctx.parent_version_id), result["source"]["content_sha256"]):
+        assert value not in text
+    assert (lane.head, len(lane.versions), len(lane.calls)) == before
+    assert result["schema"] == se.SOURCE_SCHEMA
+
+
+def test_inspection_failure_keeps_refusal_and_does_not_log_exception_text(lane, monkeypatch, capfd):
+    before = dict(lane.blobs)
+    def fail(_data):
+        raise se.sources.ImportSourceError("IMPORT_PDF_MALFORMED")
+    monkeypatch.setattr(se.sources, "inspect_solaredge_pdf", fail)
+    with pytest.raises(GraphValidationError) as exc:
+        upload(lane)
+    assert exc.value.code == "IMPORT_PDF_MALFORMED"
+    events = records(capfd)
+    assert [(e["phase"], e["state"]) for e in events] == [
+        ("authorization", "started"), ("authorization", "completed"),
+        ("inspection", "started"), ("inspection", "failed")]
+    assert "IMPORT_PDF_MALFORMED" not in json.dumps(events)
+    assert lane.blobs == before
+
+
+def test_pending_inspection_is_observable_before_it_finishes(lane, monkeypatch, capfd):
+    entered, release = Event(), Event()
+    original = se.sources.inspect_solaredge_pdf
+    def pending(data):
+        entered.set()
+        assert release.wait(5), "synthetic supervisor deadline"
+        return original(data)
+    monkeypatch.setattr(se.sources, "inspect_solaredge_pdf", pending)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(upload, lane)
+        try:
+            assert entered.wait(5)
+            early = records(capfd)
+            assert early[-1]["phase"] == "inspection" and early[-1]["state"] == "started"
+            assert not future.done()
+        finally:
+            release.set()
+        future.result(timeout=5)
+    late = records(capfd)
+    assert late[0]["phase"] == "inspection" and late[0]["state"] == "completed"
+    assert early[-1]["attempt_id"] == late[0]["attempt_id"]
+
+
+def test_observer_failure_cannot_break_success_or_denial(lane, monkeypatch):
+    class BrokenStream:
+        def write(self, _value):
+            raise OSError("synthetic private diagnostic canary")
+        def flush(self):
+            raise OSError("synthetic private diagnostic canary")
+    monkeypatch.setattr(se, "_IMPORT_TRACE_STREAM", BrokenStream())
+    assert upload(lane)["schema"] == se.SOURCE_SCHEMA
+    denial = {"denied": True}
+    monkeypatch.setattr(se, "_authorized", lambda *args: (None, denial))
+    assert upload(lane) is denial
+
+
+def test_separate_attempts_get_distinct_correlation_ids(lane, capfd):
+    upload(lane)
+    first = records(capfd)
+    upload(lane)
+    second = records(capfd)
+    assert first[0]["attempt_id"] != second[0]["attempt_id"]

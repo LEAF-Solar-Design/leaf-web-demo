@@ -1,5 +1,7 @@
 """Raw customer DWG intake acceptance, using the Studio product routes."""
 
+import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -12,7 +14,7 @@ import xbench_session
 from xbench_studio import StudioClient, StudioError, disposable_project
 
 
-LIMITS = "X04 slice 1: competing-set pick (step 6) and the in-browser render check are not built; step 4 is graded from the extracted intake."
+LIMITS = "The in-browser render check is not built; step 4 is graded from the extracted intake. When count-modules not live, step 5 uses count-by-layer (per-file limits in files.json)."
 
 
 def build_multipart(filename, content):
@@ -65,7 +67,8 @@ def forbidden_tokens(fixture):
 
 def _dependency_present(report, dep):
     """Require the inventory name and a disposition in the same report record."""
-    dispositions = {"bound", "detached", "font remapped", "image omitted"}
+    dispositions = {"bound", "detached", "font remapped", "image omitted",
+                    "underlay omitted", "proxy omitted"}
 
     def visit(obj):
         if isinstance(obj, dict):
@@ -85,16 +88,265 @@ def _dependency_present(report, dep):
     return visit(report)
 
 
-def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
+def _module_catalog(transport):
+    status, body = transport("GET", "/api/tools")
+    if status != 200:
+        raise ValueError("catalog HTTP status")
+    tools = body.get("tools") if isinstance(body, dict) else None
+    if not isinstance(tools, list) or any(
+            not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+            or not tool["name"].strip() for tool in tools):
+        raise ValueError("catalog tools")
+    matches = [tool for tool in tools if tool["name"] == "count-modules"]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("catalog tools.name duplicate count-modules")
+    tool = matches[0]
+    if not isinstance(tool.get("version"), str) or not tool["version"].strip():
+        raise ValueError("catalog version")
+    if not isinstance(tool.get("catalog_digest"), str) or not re.fullmatch(
+            r"(?:sha256:)?[0-9a-fA-F]{64}", tool["catalog_digest"]):
+        raise ValueError("catalog catalog_digest")
+    return {key: tool[key] for key in ("name", "version", "catalog_digest")}
+
+
+def _module_sets(value, field):
+    if not isinstance(value, list):
+        raise ValueError(field)
+    sets = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(field + " item")
+        for key in ("set_id", "layer", "block", "entity_type"):
+            if not isinstance(item.get(key), str):
+                raise ValueError(field + "." + key)
+        if not item["set_id"].strip() or item["set_id"] in sets:
+            raise ValueError(field + ".set_id")
+        if item["entity_type"] not in ("INSERT", "LWPOLYLINE"):
+            raise ValueError(field + ".entity_type")
+        if type(item.get("count")) is not int or not 0 <= item["count"] <= 2**53 - 1:
+            raise ValueError(field + ".count")
+        sets[item["set_id"]] = {key: item[key] for key in (
+            "set_id", "layer", "block", "entity_type", "count")}
+    return sets
+
+
+def _module_result(transport, project, adoption, tool, selector):
+    # The picker reruns the same tool with set_ids; wait=1 returns its envelope.
+    status, body = transport(
+        "POST", "/api/run?wait=1",
+        headers={"X-Org-Id": project["org_id"], "X-Project-Id": project["project_id"]},
+        json_body={"tool": tool["name"], "catalog_digest": tool["catalog_digest"],
+                   "dwg": adoption["version_id"],
+                   "params": {"drawing_id": adoption["drawing_id"], **selector}})
+    if status in (404, 405, 501) and not selector:
+        raise ValueError("module-set picker not live")
+    if "region" in selector and (status != 200 or (
+            isinstance(body, dict) and body.get("ok") is False)):
+        message = body.get("error") if isinstance(body, dict) else None
+        if isinstance(message, dict):
+            message = message.get("message")
+        if not message and isinstance(body, dict):
+            message = body.get("message") or body.get("detail")
+        message = message or f"count-modules HTTP {status} or ok false"
+        raise ValueError("X04_DESIGN_SUBSET_SELECTION_MISSING: "
+                         + xbench_session.redact(str(message))[:300])
+    if status != 200:
+        raise ValueError("count-modules HTTP status")
+    if not isinstance(body, dict) or body.get("ok") is not True:
+        raise ValueError("count-modules ok")
+    if "error" not in body or body["error"] is not None:
+        raise ValueError("count-modules error")
+    for key in ("tool", "version"):
+        if body.get(key) != tool["name" if key == "tool" else key]:
+            raise ValueError("count-modules " + key)
+    result = body.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("count-modules result")
+    return result
+
+
+def set_evidence(intake, set_id):
+    """Summarize matching intake rows without exposing geometry or changing counts."""
+    try:
+        identity = json.loads(set_id) if isinstance(set_id, str) else set_id
+        if (not isinstance(identity, (list, tuple)) or len(identity) != 3
+                or any(not isinstance(value, str) for value in identity)):
+            raise ValueError("set_id must be a JSON triple of strings")
+        entity_type, layer, block = identity
+        if entity_type not in ("INSERT", "LWPOLYLINE"):
+            raise ValueError("unsupported set_id entity_type")
+        if not isinstance(intake, dict):
+            raise ValueError("intake must be an object")
+        key = "inserts" if entity_type == "INSERT" else "polylines"
+        entries = intake.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"intake {key} must be a list")
+        total, duplicates = 0, 0
+        handles, samples, multiplicity, spaces = set(), [], {}, {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"intake {key} row must be an object")
+            for field in ("layer", "name", "handle", "space", "layout"):
+                if field in entry and not isinstance(entry[field], str):
+                    raise ValueError(f"intake {key} {field} must be a string")
+            if (entry.get("layer") or "0") != layer:
+                continue
+            if entity_type == "INSERT" and entry.get("name") != block:
+                continue
+            total += 1
+            handle = (entry.get("handle") or "").strip().upper().removeprefix("0X")
+            if handle and all(char in "0123456789ABCDEF" for char in handle):
+                handle = handle.lstrip("0") or "0"
+            if handle:
+                if handle in handles:
+                    duplicates += 1
+                else:
+                    handles.add(handle)
+                    if len(samples) < 10:
+                        samples.append(handle)
+            if entity_type == "INSERT":
+                dimensions = (entry.get("rows", 1), entry.get("columns", 1))
+                if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
+                    raise ValueError("intake inserts rows and columns must be positive UInt16 integers")
+                multiplicity[dimensions] = multiplicity.get(dimensions, 0) + 1
+            location = (entry.get("space") or "model", entry.get("layout") or "Model")
+            spaces[location] = spaces.get(location, 0) + 1
+        return {"rows_total": total, "distinct_handles": len(handles),
+                "duplicate_handle_rows": duplicates,
+                "multiplicity": [[*pair, n] for pair, n in sorted(multiplicity.items())],
+                "space_layout": [[*pair, n] for pair, n in sorted(spaces.items())],
+                "sample_handles": samples}
+    except (TypeError, ValueError) as exc:
+        return {"error": str(exc)}
+
+
+def _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake):
+    field = "count-modules candidate response"
+    try:
+        listing = _module_result(transport, project, adoption, tool, {})
+        candidates = _module_sets(listing.get("sets"), "sets")
+        if not candidates:
+            raise ValueError("sets empty")
+        for key, expected in (("selection_required", True), ("selected_sets", []),
+                              ("selected_set", None), ("count", None)):
+            if key not in listing or type(listing[key]) is not type(expected) or listing[key] != expected:
+                raise ValueError("candidate " + key)
+        row["candidate_sets"] = sorted(
+            candidates.values(), key=lambda item: (-item["count"], item["set_id"]))[:50]
+        selector = fixture.get("module_set")
+        if selector is None:
+            top = "; ".join(
+                f"{item['set_id']} ({item['layer']}/{item['block']}, {item['count']})"
+                for item in row["candidate_sets"][:3])
+            reason = f"no module_set bound in manifest; {len(candidates)} candidates; top three: {top}"
+            mark(5, "UNREADABLE", reason)
+            mark(6, "UNREADABLE" if len(candidates) > 1 else "PASS",
+                 reason if len(candidates) > 1 else "nothing to pick")
+            return
+        field = "manifest module_set"
+        if not isinstance(selector, dict) or not selector or set(selector) - {"set_id", "set_ids"}:
+            raise ValueError(field)
+        if "set_id" in selector and not isinstance(selector["set_id"], str):
+            raise ValueError("module_set.set_id")
+        if "set_ids" in selector and (not isinstance(selector["set_ids"], list) or any(
+                not isinstance(value, str) or not value.strip() for value in selector["set_ids"])):
+            raise ValueError("module_set.set_ids")
+        ids = selector.get("set_ids") or ([selector["set_id"]] if selector.get("set_id") else [])
+        if not ids or any(value not in candidates for value in ids):
+            raise ValueError("module_set set_id absent from sets")
+        # Match the picker callback even for the schema's singular set_id form.
+        ids = list(dict.fromkeys(ids))
+        subset = fixture.get("design_subset", {})
+        window = subset.get("window")
+        if window is None and subset.get("required") is True:
+            mark(5, "FAIL", "X04_DESIGN_SUBSET_SELECTION_MISSING: design window not bound")
+            mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
+            return
+        if window is not None and (not isinstance(window, list) or len(window) != 4 or any(
+                type(value) not in (int, float) or not math.isfinite(value) for value in window)):
+            raise ValueError("design_subset.window")
+        selection = {"set_ids": ids}
+        if window is not None:
+            selection["region"] = window
+            row["design_window"] = window
+        field = "count-modules selection response"
+        result = _module_result(transport, project, adoption, tool, selection)
+        if _module_sets(result.get("sets"), "sets") != candidates:
+            raise ValueError("sets changed during selection")
+        selected = _module_sets(result.get("selected_sets"), "selected_sets")
+        if selected != {key: candidates[key] for key in ids}:
+            raise ValueError("selected_sets do not match module_set")
+        expected_single = next(iter(selected.values())) if len(selected) == 1 else None
+        if "selected_set" not in result:
+            raise ValueError("selected_set")
+        if expected_single is None:
+            if result["selected_set"] is not None:
+                raise ValueError("selected_set")
+        elif _module_sets([result["selected_set"]], "selected_set") != selected:
+            raise ValueError("selected_set")
+        if result.get("selection_required") is not False:
+            raise ValueError("selection_required")
+        count = result.get("count")
+        if type(count) is not int or not 0 <= count <= 2**53 - 1:
+            raise ValueError("count")
+        # Sets can overlap; the total is a union, not necessarily their sum.
+        minimum = 0 if window is not None else max(item["count"] for item in selected.values())
+        if not minimum <= count <= sum(
+                item["count"] for item in selected.values()):
+            raise ValueError("count inconsistent with selected_sets")
+        row["set_evidence"] = {set_id: set_evidence(intake, set_id) for set_id in ids}
+        row["counts"].append(count)
+        row["module_set"] = {"set_ids": ids}
+        mark(6, "PASS", "module_set selected" if len(candidates) > 1 else "nothing to pick")
+        mark(5, "PASS" if count == fixture["modules"] else "FAIL",
+             f"count {count}, oracle {fixture['modules']}")
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ValueError) else field + " unavailable"
+        mark(5, "FAIL" if reason.startswith("X04_DESIGN_SUBSET_SELECTION_MISSING: ")
+             else "UNREADABLE", reason)
+        mark(6, "UNREADABLE", reason)
+
+
+def grade_files(client, transport, *, project, fixtures, clock=time.monotonic,
+                stop_on_5xx=False):
     rows = {}
+    stopped = None
+
+    def record_status(status):
+        nonlocal stopped
+        if stop_on_5xx and status >= 500 and stopped is None:
+            stopped = f"not attempted: pass stopped after HTTP {status} on {fid}"
+
+    def record_error(exc):
+        if isinstance(exc, StudioError):
+            record_status(exc.status)
+
+    if stop_on_5xx:
+        original_transport = transport
+
+        def transport(*args, **kwargs):
+            try:
+                status, body = original_transport(*args, **kwargs)
+            except StudioError as exc:
+                record_error(exc)
+                raise
+            record_status(status)
+            return status, body
+
     for fixture in fixtures:
         fid = fixture["id"]
-        row = {"id": fid, "timings": {}, "statuses": {}, "counts": [],
+        row = {"id": fid, "timings": {}, "statuses": {}, "counts": [], "limits": [],
+               "missing_deps": [], "dependency_report": None,
                "steps": {str(n): "UNREADABLE" for n in range(1, 7)},
                "evidence": {str(n): "upload unavailable" for n in range(1, 7)},
                "insert_fixture": fixture.get("module_entity") == "INSERT" and
                                  bool(fixture.get("module_blocks"))}
         rows[fid] = row
+        if stopped is not None:
+            row["evidence"] = {str(n): stopped for n in range(1, 7)}
+            continue
 
         def mark(n, verdict, evidence):
             row["steps"][str(n)] = verdict
@@ -116,6 +368,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                 continue
             mark(1, "PASS", "ready within deadline")
         except Exception as exc:
+            record_error(exc)
             if isinstance(exc, StudioError):
                 row["statuses"]["upload_error"] = exc.status
             mark(1, "FAIL", "upload failed or timed out")
@@ -129,6 +382,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             intake = client.drawing_context(project["project_id"], adoption["version_id"],
                                             adoption["drawing_id"])["intake"]
         except Exception as exc:
+            record_error(exc)
             message = xbench_session.redact(str(exc))
             if isinstance(exc, StudioError):
                 code = exc.reason_code or exc.error_code
@@ -141,20 +395,24 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
 
         provenance = adoption.get("provenance", {})
         report = find_dependency_report(upload, provenance, intake)
+        row["dependency_report"] = report
         if report is None:
             mark(2, "FAIL", "no dependency report exposed")
         elif "deps" not in fixture:
             mark(2, "UNREADABLE", "dependency inventory unavailable")
         else:
-            ok = all(_dependency_present(report, dep) for dep in fixture["deps"])
+            missing = [dep for dep in fixture["deps"] if not _dependency_present(report, dep)]
+            row["missing_deps"] = [{"kind": dep["kind"], "name": dep["name"]} for dep in missing]
+            ok = not missing
             mark(2, "PASS" if ok else "FAIL", "dependency dispositions complete" if ok else
-                 "dependency missing or without disposition")
+                 f"dependency missing or without disposition: {len(missing)} of {len(fixture['deps'])} missing: "
+                 + "; ".join(f"{dep['kind']}:{dep['name']}" for dep in missing[:20]))
         retained = find_sha(provenance, fixture["sha256"]) or find_sha(upload, fixture["sha256"])
         mark(3, "PASS" if retained else "FAIL", "original SHA-256 exposed" if retained else
              "original SHA-256 not exposed")
         whole = fixture.get("design_is_whole_layer") is True
         mark(6, "PASS" if whole else "UNREADABLE", "nothing to pick" if whole else
-             "competing-set pick needs the UI, not built")
+             "module-set picker not live")
         if intake is None:
             continue
         if not row["insert_fixture"]:
@@ -180,6 +438,18 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             if matched and any(name.startswith("*") for name in fixture["module_blocks"]):
                 evidence += "; matched blocks: " + ", ".join(matched[:5])
             mark(4, "FAIL" if missing else "PASS", evidence)
+        try:
+            tool = _module_catalog(transport)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "catalog tools unavailable"
+            mark(5, "UNREADABLE", reason)
+            mark(6, "UNREADABLE", reason)
+            continue
+        if tool is not None:
+            row["tool"] = tool
+            _grade_modules(transport, project, adoption, fixture, tool, row, mark, intake)
+            continue
+        row["limits"].append("count-modules not live")
         layers = list(dict.fromkeys(fixture.get("module_layers", [])))
         if not layers:
             mark(5, "UNREADABLE", "module layers unavailable")
@@ -190,6 +460,7 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
                                           project_id=project["project_id"], version_id=adoption["version_id"],
                                           params={"drawing_id": adoption["drawing_id"], "layer": layer})
                 row["statuses"].setdefault("count", []).append(status)
+                record_status(status)
                 if status != 200:
                     raise ValueError("count not inline")
                 count = body["result"]["counts"][layer]
@@ -200,7 +471,8 @@ def grade_files(client, transport, *, project, fixtures, clock=time.monotonic):
             verdict = "PASS" if total == fixture["modules"] else "FAIL" if whole else "UNREADABLE"
             mark(5, verdict, f"count {total}, oracle {fixture['modules']}" if whole or verdict == "PASS"
                  else "competing-set pick needs the UI, not built")
-        except Exception:
+        except Exception as exc:
+            record_error(exc)
             mark(5, "UNREADABLE", "layer count unavailable")
     return rows
 
@@ -262,7 +534,8 @@ def run(ctx):
         transport = _transport(page, origin=ctx.base)
         client = StudioClient(transport)
         with disposable_project(client, f"XBench X04 {ctx.source_sha[:8]} {utc_now()}") as project:
-            rows = grade_files(client, transport, project=project, fixtures=fixtures)
+            rows = grade_files(client, transport, project=project, fixtures=fixtures,
+                               stop_on_5xx=(getattr(ctx, "options", {}).get("stop_on_5xx") == "1"))
             write_json_atomic(Path(ctx.out_dir) / "files.json", rows)
     tokens = [token for fixture in fixtures for token in forbidden_tokens(fixture)]
     step7 = scan_source(ctx.manifest.get("source_repo", "D:/GitHub/leaf-web-demo"), ctx.source_sha, tokens)
