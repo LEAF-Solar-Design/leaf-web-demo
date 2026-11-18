@@ -391,3 +391,27 @@ def test_expiring_stock(at, duplicate, policy, expected):
                                   [dict(id="new",lot="rack",line="roof",quantity=quantity)], holds, at,
                                   "start-inclusive-expiry-exclusive" if policy else None) == expected
     assert inventory["lots"]["rack"]["available"] == 10
+
+
+@pytest.mark.parametrize("lot,serial,revision,expected", [
+    ("A",10,"r2","FAIL"), ("A",21,"r2","PASS"), ("B",15,"r2","PASS"),
+    ("A",20,"r2","FAIL"), ("A",21,"r1","FAIL"), (None,12,"r2","INCOMPLETE"),
+], ids=["first-recalled-serial","adjacent-clear-serial","same-serial-different-lot","last-recalled-unit","stale-bulletin","missing-lot"])
+def test_serial_recall(lot, serial, revision, expected):
+    from benches.x03_catalog_oracle import lot_recall_quality
+    bulletin = dict(revision="r2",ranges=[dict(part="module",lot="A",first=10,last=20)])
+    assert lot_recall_quality([dict(part="module",lot=lot,serial=serial)],bulletin,revision) == expected
+
+
+@pytest.mark.parametrize("changed", ["payload_digest", "destination", "revision"])
+def test_idempotency_namespace_collisions(changed):
+    from benches.x03_issue_delivery_oracle import idempotency_collision_quality
+    row = dict(key="reserved",payload_digest="digest-a",destination="inbox-a",revision="r1",
+               outcome="committed",receipt="ack",new_effects=1)
+    conflict = dict(row, outcome="conflict",receipt=None,new_effects=0)
+    conflict[changed] = "other"
+    replay = dict(row,outcome="replayed",new_effects=0)
+    assert idempotency_collision_quality([row,conflict,replay]) == "PASS"
+    assert idempotency_collision_quality([row,dict(conflict,receipt="ack")]) == "FAIL"
+    assert idempotency_collision_quality([row,dict(conflict,outcome="replayed",receipt="ack")]) == "FAIL"
+    assert idempotency_collision_quality([row,dict(conflict,new_effects=1)]) == "FAIL"

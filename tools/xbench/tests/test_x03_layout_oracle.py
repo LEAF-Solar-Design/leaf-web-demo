@@ -207,3 +207,12 @@ def test_ponding_on_tributary_areas(depth, capacity, expected):
     areas = {"west":[dict(depth_m=depth,area_m2=2),dict(depth_m=0.1,area_m2=3)],
              "east":[dict(depth_m=0,area_m2=8)]}
     assert ponding_quality(areas, {"west":capacity,"east":100},10) == expected
+
+
+@pytest.mark.parametrize("acceleration,share,limit,expected", [
+    (2,0.5,100,"PASS"), (2,0.75,120,"FAIL"), (1.5,0.8,120,"PASS"), (None,0.5,100,"INCOMPLETE"),
+], ids=["equal-shear-limit","local-anchor-overload","asymmetric-limit","missing-site-acceleration"])
+def test_seismic_shear(acceleration, share, limit, expected):
+    from benches.x03_layout_oracle import seismic_anchor_quality
+    anchors = {"a":dict(fraction=share,shear_n=limit),"b":dict(fraction=round(1-share,2),shear_n=300)}
+    assert seismic_anchor_quality([dict(mass_kg=100,lateral_m_s2=acceleration,anchors=anchors)]) == expected

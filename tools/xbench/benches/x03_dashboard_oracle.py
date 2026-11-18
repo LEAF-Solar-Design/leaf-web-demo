@@ -441,3 +441,29 @@ def capacity_utilization_quality(start, end, capacities, busy, reported):
     if not available_time:
         return "INCOMPLETE"
     return "PASS" if 0 <= reported <= 1 and isclose(reported, float(Fraction(used_time, available_time)), rel_tol=1e-12, abs_tol=1e-12) else "FAIL"
+
+
+def queue_service_quality(runs, reported):
+    """Reconcile each completed run in one clock domain. Both durations use timestamp units."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(runs, dict) or not runs or not isinstance(reported, dict):
+        return "INCOMPLETE"
+    if reported.keys() != runs.keys():
+        return "FAIL"
+    for key, row in runs.items():
+        fields = ("enqueued", "started", "finished")
+        if not isinstance(row, dict) or any(row.get(k) is None for k in fields):
+            return "INCOMPLETE"
+        if not all(finite_measure(row[k]) for k in fields):
+            return "FAIL"
+        queued, started, finished = (Fraction(str(row[k])) for k in fields)
+        if not queued <= started <= finished:
+            return "FAIL"
+        result = reported[key]
+        if not isinstance(result, dict) or any(result.get(k) is None for k in ("wait","service")):
+            return "INCOMPLETE"
+        for k, expected in (("wait",started-queued), ("service",finished-started)):
+            if not finite_measure(result[k]) or Fraction(str(result[k])) != expected:
+                return "FAIL"
+    return "PASS"
