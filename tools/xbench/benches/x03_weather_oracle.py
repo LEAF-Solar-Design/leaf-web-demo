@@ -102,3 +102,40 @@ def uncertain_voltage_quality(weather, bounds_c, limit_volts, **conditions):
         if reference * factor > Fraction(str(limit_volts)):
             return "FAIL"
     return "PASS"
+
+
+def filled_voltage_quality(samples, timestamp, reported, *, interpolation, extrapolation, max_gap, **conditions):
+    """Use observed samples, bounded linear interpolation, or explicitly bounded endpoint holds."""
+    from bisect import bisect_left
+    from benches.x03_quality import finite_measure
+    if (not isinstance(samples, list) or not samples or interpolation not in ("none", "linear")
+            or extrapolation not in ("none", "hold") or None in (timestamp, max_gap)):
+        return "INCOMPLETE"
+    if not finite_measure(timestamp) or not finite_measure(max_gap) or max_gap < 0:
+        return "FAIL"
+    by_time = {}
+    for sample in samples:
+        checked = _sample_voltage(sample, **conditions)
+        if isinstance(checked, str):
+            return checked
+        t = sample["timestamp"]
+        if t in by_time:
+            return "FAIL"
+        by_time[t] = sample
+    times = sorted(by_time)
+    if timestamp in by_time:
+        return weather_quality(by_time[timestamp], reported=reported, **conditions)
+    index = bisect_left(times, timestamp)
+    if index == 0 or index == len(times):
+        endpoint = times[0] if index == 0 else times[-1]
+        if extrapolation != "hold" or abs(timestamp - endpoint) > max_gap:
+            return "FAIL"
+        temperature = by_time[endpoint]["cell_temp"]
+    else:
+        left, right = times[index-1:index+1]
+        if interpolation != "linear" or right-left > max_gap:
+            return "FAIL"
+        first = by_time[left]["cell_temp"]
+        temperature = first + (by_time[right]["cell_temp"]-first) * (timestamp-left) / (right-left)
+    filled = dict(samples[0], timestamp=timestamp, cell_temp=temperature)
+    return weather_quality(filled, reported=reported, **conditions)

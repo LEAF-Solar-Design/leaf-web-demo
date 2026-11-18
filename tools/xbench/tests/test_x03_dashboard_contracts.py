@@ -168,3 +168,14 @@ def test_dashboard_weighted_exposure(weights, reported, expected):
     assert weighted_rate_quality(rows, weights, "weighted-exposures", reported) == expected
     rows["a"].pop("exposures")
     assert weighted_rate_quality(rows, weights, "weighted-exposures", reported) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("policy,counts,expected", [
+    ("left-closed", [1,2,2], "PASS"), ("right-closed", [2,2,1], "PASS"),
+    ("left-closed", [1,2,1], "FAIL"), ("right-closed", [2,3,1], "FAIL"),
+], ids=["lower-edges-inclusive", "upper-edges-inclusive", "omitted-overflow", "double-counted-edge"])
+def test_duration_histogram_bins(policy, counts, expected):
+    from benches.x03_dashboard_oracle import duration_histogram_quality
+    runs = dict(enumerate([1, 5, 6, 10, 12]))
+    assert duration_histogram_quality(runs, [5,10], policy, counts) == expected
+    assert duration_histogram_quality(runs, [5,10], None, counts) == "INCOMPLETE"

@@ -199,3 +199,19 @@ def test_runtime_capabilities_must_coexist_on_one_target():
     needed = dict(runtime="engine", version="2", architecture="arm64", abi="v2")
     profiles = [dict(needed, abi="v1"), dict(needed, architecture="x64")]
     assert runtime_abi_quality(needed, profiles) == "FAIL"
+
+
+@pytest.mark.parametrize("case,expected", [
+    ("shared", "PASS"), ("missing", "INCOMPLETE"), ("conflict", "FAIL"), ("cycle", "FAIL"),
+], ids=["resolve-shared-transitive-library", "missing-transitive-pin", "incompatible-versions", "cycle-in-lock"])
+def test_dependency_inventory(case, expected):
+    from benches.x03_package_oracle import dependency_closure_quality
+    inventory = {"a": dict(version="1", requires={"lib":"2"}), "b": dict(version="1", requires={"lib":"2"}),
+                 "lib": dict(version="2", requires={})}
+    if case == "missing":
+        del inventory["lib"]
+    if case == "conflict":
+        inventory["b"]["requires"]["lib"] = "1"
+    if case == "cycle":
+        inventory["lib"]["requires"]["a"] = "1"
+    assert dependency_closure_quality({"a":"1", "b":"1"}, inventory) == expected

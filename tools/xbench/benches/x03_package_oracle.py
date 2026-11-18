@@ -104,3 +104,29 @@ def runtime_abi_quality(requirements, target_profiles):
         if all(profile[key] == requirements[key] for key in fields):
             return "PASS"
     return "INCOMPLETE" if incomplete else "FAIL"
+
+
+def dependency_closure_quality(required, lock):
+    """Resolve exact version pins. This package contract requires an acyclic dependency graph."""
+    from graphlib import CycleError, TopologicalSorter
+    if not isinstance(required, dict) or not isinstance(lock, dict):
+        return "INCOMPLETE"
+    pending = list(required.items())
+    graph = {}
+    while pending:
+        name, version = pending.pop()
+        if not all(isinstance(value, str) and value.strip() for value in (name, version)):
+            return "INCOMPLETE"
+        record = lock.get(name)
+        if not isinstance(record, dict) or not record.get("version") or not isinstance(record.get("requires"), dict):
+            return "INCOMPLETE"
+        if record["version"] != version:
+            return "FAIL"
+        if name not in graph:
+            graph[name] = tuple(record["requires"])
+            pending.extend(record["requires"].items())
+    try:
+        TopologicalSorter(graph).prepare()
+    except CycleError:
+        return "FAIL"
+    return "PASS"

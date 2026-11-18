@@ -456,3 +456,14 @@ def test_ac_drop(phases, pf, load, r, x, unit, volts):
     assert ac_voltage_drop_quality(*args, unit, volts) == "PASS"
     assert ac_voltage_drop_quality(*args, unit, volts + 1) == "FAIL"
     assert ac_voltage_drop_quality(*args, None, volts) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("currents,limit,expected", [
+    ([8,8,8], 0, "PASS"), ([8,12], 0.2, "PASS"), ([8,12], 0.19, "FAIL"),
+    ([5,None], 0.2, "INCOMPLETE"),
+], ids=["uniform-string", "exact-twenty-percent-loss", "excess-loss-within-current-limits", "missing-module"])
+def test_recorded_string_loss(currents, limit, expected):
+    from benches.x03_quality import mismatch_loss_quality
+    strings = {"roof": dict(enumerate(currents)), "annex": {"a": 10, "b": 10}}
+    assert mismatch_loss_quality(strings, limit, "equal-voltage-min-current") == expected
+    assert mismatch_loss_quality(strings, limit, None) == "INCOMPLETE"
