@@ -34,20 +34,31 @@
         },
         "section": {
           "type": "string",
+          "description": "reference_changes lists missing frames, missing panels, moved panels with saved and current frame references, and new framed panels.",
           "enum": [
             "strings",
             "frames",
-            "unassigned"
+            "unassigned",
+            "reference_changes"
           ],
           "default": "strings"
         },
         "offset": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 200000,
+          "maximum": 410000,
           "default": 0
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "required": ["section"],
+            "properties": {"section": {"const": "reference_changes"}}
+          },
+          "else": {"properties": {"offset": {"maximum": 200000}}}
+        }
+      ],
       "required": [],
       "additionalProperties": false
     },

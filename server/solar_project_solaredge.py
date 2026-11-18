@@ -651,12 +651,11 @@ def read_tracking(tenant, context, params):
     except (project.ProjectContextError, ValueError, TypeError,
             KeyError, IndexError, AttributeError):
         _fail("SOLAREDGE_IMPORT_RECORD_INVALID")
-    page_items = {"strings": record["strings"], "frames": record["frames"],
-                  "unassigned": record["unassigned_panel_refs"]}[section]
+    page_items, references = module._section(context.graph, record, section)
     items, page = module._page(page_items, offset)
     output = {"schema": READ_SCHEMA, "accepted": True, "labels_only": True,
         "provenance": {key: record[key] for key in ("source", "report", "request")},
-        "counts": module._counts(record), "references": module._references(context.graph, record),
+        "counts": module._counts(record), "references": references,
         "section": section, "page": page, "items": items}
     if "optimizer_measurement" in record:
         measured = deepcopy(record["optimizer_measurement"])
