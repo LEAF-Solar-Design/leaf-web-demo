@@ -327,17 +327,18 @@ def _build_report_request(request):
     return req
 
 
-def _request_sha(req, source_meta):
-    return sha256(canonical_bytes({"schema": "leaf.solar-project-solaredge-report-request.v1",
+def _request_sha(req, source_meta, *, legacy=False):
+    schema = "leaf.solar-project-solaredge-report-request.v1" if legacy else "leaf.solar-project-solaredge-report-request.v2"
+    return sha256(canonical_bytes({"schema": schema,
         **req, "source_content_sha256": source_meta["content_sha256"]})).hexdigest()
 
 
-def _bounded_source_matrices(content):
+def _bounded_source_matrices(content, *, legacy=False):
     if not reports._PARSE_SLOTS.acquire(blocking=False):
         _fail("REPORT_BUSY")
     try:
         try:
-            return reports.parse_source(content)
+            return reports.parse_source(content, legacy=True) if legacy else reports.parse_source(content)
         except reports.SolarEdgeReportError as error:
             _fail(error.code)
     finally:
@@ -407,7 +408,7 @@ def _decode_report(context, meta, content):
                 or source_meta["request_sha256"] != source_meta["content_sha256"]):
             _fail(tracking.REPORT_CORRUPT)
         req = _report_request({"source_artifact_id": source_meta["artifact_id"], **report["request"]})
-        if meta["request_sha256"] != _request_sha(req, source_meta):
+        if meta["request_sha256"] not in (_request_sha(req, source_meta), _request_sha(req, source_meta, legacy=True)):
             _fail(tracking.REPORT_CORRUPT)
         _record(context, meta, report, review=True)
     except GraphValidationError:
@@ -444,8 +445,9 @@ def _recover_missing_report(context, record):
         ("artifact_id", "content_sha256", "byte_length")}
         and source_meta["request_sha256"] == source_meta["content_sha256"], tracking.REPORT_CORRUPT)
     req = _report_request({"source_artifact_id": source_meta["artifact_id"], **record["request"]})
-    _check(meta["request_sha256"] == _request_sha(req, source_meta), tracking.REPORT_CORRUPT)
-    matrices = _bounded_source_matrices(source_bytes)
+    legacy = meta["request_sha256"] == _request_sha(req, source_meta, legacy=True)
+    _check(legacy or meta["request_sha256"] == _request_sha(req, source_meta), tracking.REPORT_CORRUPT)
+    matrices = _bounded_source_matrices(source_bytes, legacy=legacy)
     core = reports.report_from_matrices(context.graph, matrices,
         alignment_tolerance=req["alignment_tolerance"], selection_order=req["selection_order"],
         associations=req.get("associations"),
@@ -488,7 +490,8 @@ def _record(context, meta, report, *, review=False):
 
 
 def _validated_record(context, meta, report, *, review=False):
-    _check(type(report) is dict and set(report) == _REPORT_KEYS and report["schema"] == REPORT_SCHEMA)
+    _check(type(report) is dict and set(report) in (_REPORT_KEYS, _REPORT_KEYS | {"optimizer_measurement"})
+           and report["schema"] == REPORT_SCHEMA)
     _check(all(report[key] == value for key, value in _identity(context).items()), tracking.REPORT_STALE)
     graph = context.graph
     _check(type(report["row_angle"]) in (int, float)
@@ -579,7 +582,9 @@ def _validated_record(context, meta, report, *, review=False):
         "group_strings": sum(row["source"] == "group" for row in strings),
         "bridge_strings": sum(row["source"] == "bridge" for row in strings)}
     _check(all(counts[key] == value for key, value in expected_counts.items()))
-    return {"schema": STORE_SCHEMA, "source": deepcopy(report["source"]),
+    measurement = ({"optimizer_measurement": tracking.optimizer_measurement(graph, report)}
+                   if "optimizer_measurement" in report else {})
+    return {"schema": STORE_SCHEMA, **measurement, "source": deepcopy(report["source"]),
         "report": {**{key: meta[key] for key in ("artifact_id", "content_sha256", "byte_length")},
                    **_identity(context)}, "request": deepcopy(report["request"]),
         "frames": frame_rows, "strings": rows, "unassigned_panel_refs": list(unassigned)}
@@ -653,6 +658,11 @@ def read_tracking(tenant, context, params):
         "provenance": {key: record[key] for key in ("source", "report", "request")},
         "counts": module._counts(record), "references": module._references(context.graph, record),
         "section": section, "page": page, "items": items}
+    if "optimizer_measurement" in record:
+        measured = deepcopy(record["optimizer_measurement"])
+        if measured["graph_rev"] != context.graph["rev"] or not output["references"]["current"]:
+            measured.update(complete=False, total_count=None, string_counts=None)
+        output["optimizer_measurement"] = measured
     if matched_only:
         output["acceptance"] = {"mode": "matched-only", "status": choice["status"],
                                 "unresolved_groups": len(choice["unresolved_frame_refs"])}

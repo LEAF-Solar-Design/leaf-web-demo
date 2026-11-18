@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getArloReviews, saveArloReview } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
+import { canonicalExportJson } from './arloCanonicalExport.js'
 import './ArloProposalReview.css'
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -34,7 +35,7 @@ function RoutePreview({ proposal }) {
   </figure>
 }
 
-export default function ArloProposalReview({ envelope, context, currentProject }) {
+export default function ArloProposalReview({ envelope, canonicalJson, context, currentProject }) {
   const result = envelope?.solver_result
   const storedProposals = Array.isArray(result?.proposals) ? result.proposals : []
   const malformedProposals = storedProposals.some(p => !p || typeof p !== 'object' || Array.isArray(p)
@@ -58,6 +59,7 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const [saved, setSaved] = useState('')
   const [historyRetry, setHistoryRetry] = useState(0)
   const [exportError, setExportError] = useState('')
+  const [verifiedExport, setVerifiedExport] = useState(null)
   const alive = useRef(false)
   const attempts = useRef(new Map())
   const pendingExports = useRef(new Map())
@@ -74,16 +76,30 @@ export default function ArloProposalReview({ envelope, context, currentProject }
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
     && ['organization_id','project_id','input_version_id'].every((k, i) => envelope?.solver_input?.[k] === context?.[['org_id','project_id','input_version_id'][i]])
   // Retained job context cannot establish which project the caller currently has open.
-  const exportReason = !result || envelope?.solver !== 'arlo-design' || !/^[a-f0-9]{64}$/i.test(envelope?.result_sha256 || '')
+  const scopeReason = !result || envelope?.solver !== 'arlo-design' || !/^[a-f0-9]{64}$/i.test(envelope?.result_sha256 || '')
     ? 'No stored result is available to export.'
     : !['orgId','projectId'].every(k => uuid.test(currentProject?.[k] || ''))
       ? "Open this result from the project's Jobs to export it"
       : !bound || currentProject.orgId !== context.org_id || currentProject.projectId !== context.project_id
         ? 'Export unavailable: this stored result does not match the current project job. Reopen it from its project.' : ''
-  // Keep the stored envelope intact, including every proposal and its original hashes.
-  // Product guidance is separate so it cannot be mistaken for solver evidence.
+  const exportScope = JSON.stringify([context?.org_id, context?.project_id, context?.job_id, context?.input_version_id,
+    currentProject?.orgId, currentProject?.projectId])
+  const verified = verifiedExport?.envelope === envelope && verifiedExport?.canonicalJson === canonicalJson
+    && verifiedExport?.scope === exportScope ? verifiedExport : null
+  const exportReason = scopeReason || verified?.error || (!verified?.json ? 'Export unavailable: verifying producer JSON and hashes.' : '')
+  useEffect(() => {
+    let cancelled = false
+    if (!scopeReason) canonicalExportJson(envelope, canonicalJson, context, productDisclaimer).then(json => {
+      if (!cancelled) setVerifiedExport({ envelope, canonicalJson, scope: exportScope, json })
+    }).catch(cause => {
+      if (!cancelled) setVerifiedExport({ envelope, canonicalJson, scope: exportScope,
+        error: `Export unavailable: ${humanizeError(cause)}` })
+    })
+    return () => { cancelled = true }
+  }, [envelope, canonicalJson, exportScope, scopeReason])
+  // Inspection remains available even when producer verification refuses export.
   const exportDocument = { job_context: context ?? null, envelope, product_disclaimer: productDisclaimer }
-  const exportJson = JSON.stringify(exportDocument, null, 2)
+  const exportJson = verified?.json || JSON.stringify(exportDocument, null, 2)
   const exportResult = () => {
     if (exportReason) return
     let url, link
