@@ -515,3 +515,27 @@ def test_condensation_at_recorded_surface(air,rh,surface,risk):
     assert grade(air,rh,surface,rule,risk) == "PASS"
     assert grade(air,rh,surface,rule,not risk) == "FAIL"
     assert grade(air,None,surface,rule,risk) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("days,inclusive,install,expected", [(2,True,2,"PASS"),(2,False,2,"FAIL"),(1,True,2,"FAIL")])
+def test_stock_life_at_install(days,inclusive,install,expected):
+    from datetime import date,timedelta
+    from benches.x03_catalog_oracle import shelf_life_quality as grade
+    made = date(2024,2,28)
+    rule = dict(revision="r2",life_days=days,expiry_day_usable=inclusive)
+    assert grade(made,made+timedelta(days=install),rule,"r2") == expected
+    assert grade(made,made,rule,"other") == "FAIL"
+    assert grade(made,made,dict(rule,expiry_day_usable=None),"r2") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("old,new,worker", [(1,2,"B"),(5,9,"A"),(20,30,"C")])
+def test_fence_after_worker_reassignment(old,new,worker):
+    from benches.x03_issue_delivery_oracle import fencing_quality as grade
+    original = dict(seq=1,kind="grant",resource="job",worker="A",epoch=old)
+    granted = dict(original,seq=2,worker=worker,epoch=new)
+    stale = dict(original,seq=3,kind="receive",committed=False)
+    current = dict(granted,seq=4,kind="receive",committed=True)
+    assert grade([original,granted,stale,current]) == "PASS"
+    assert grade([original,granted,dict(stale,committed=True)]) == "FAIL"
+    assert grade([original,dict(granted,epoch=old),current]) == "FAIL"
+    assert grade([original,granted,dict(current,epoch=None)]) == "INCOMPLETE"

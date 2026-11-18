@@ -399,3 +399,21 @@ def certification_scope_quality(certificate, revision, model, conditions):
             return "PASS"
         unknown = True
     return "INCOMPLETE" if unknown or not scopes else "FAIL"
+
+
+def shelf_life_quality(manufactured, install_on, rule, revision):
+    """Dates are civil days. The pinned policy specifies whether expiry day is usable."""
+    from datetime import date
+    if type(manufactured) is not date or type(install_on) is not date or not isinstance(rule, dict):
+        return "INCOMPLETE"
+    if not revision or not rule.get("revision"):
+        return "INCOMPLETE"
+    if rule["revision"] != revision:
+        return "FAIL"
+    days, inclusive = rule.get("life_days"), rule.get("expiry_day_usable")
+    if type(days) is not int or days < 0 or type(inclusive) is not bool:
+        return "INCOMPLETE"
+    age = (install_on - manufactured).days
+    if age < 0:
+        return "FAIL"
+    return "PASS" if age < days or (inclusive and age == days) else "FAIL"

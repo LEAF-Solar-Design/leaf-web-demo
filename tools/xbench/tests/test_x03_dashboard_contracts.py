@@ -321,3 +321,14 @@ def test_completions_per_scheduled_hour(shifts,expected):
     assert grade(completions,shifts,expected) == "PASS"
     assert grade(completions,shifts,4.8) == "FAIL"
     assert grade(completions,None,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("population,jobs,rate,seconds", [("waiting",2,0.5,4),("in-system",6,2,3),("priority",0.75,0.25,3)])
+def test_littles_law_matched_cohort(population,jobs,rate,seconds):
+    from benches.x03_dashboard_oracle import little_law_quality as grade
+    values = dict(mean_jobs=jobs,jobs_per_second=rate,mean_seconds=seconds)
+    rows = {k:dict(population=population,start=0,end=60,value=v) for k,v in values.items()}
+    assert grade(rows,True,0) == "PASS"
+    for mismatch in (dict(population="other"),dict(end=61),dict(value=seconds+1)):
+        assert grade(dict(rows,mean_seconds=dict(rows["mean_seconds"],**mismatch)),True,0) == "FAIL"
+    assert grade(rows,None,0) == "INCOMPLETE"

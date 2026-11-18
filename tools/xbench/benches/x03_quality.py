@@ -1266,3 +1266,37 @@ def bypass_string_quality(substrings, current, revision, curves, reported_watts)
         else:
             return "INCOMPLETE"
     return "PASS" if isclose(reported_watts, current * voltage, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"
+
+
+def islanding_quality(loss_at, observed_until, clearing_seconds, energized_intervals):
+    """Grade contiguous half-open intervals during one recorded grid outage."""
+    if not all(map(finite_measure, (loss_at, observed_until, clearing_seconds))):
+        return "INCOMPLETE"
+    if observed_until <= loss_at or clearing_seconds < 0 or not isinstance(energized_intervals, list):
+        return "INCOMPLETE"
+    deadline = Fraction(str(loss_at)) + Fraction(str(clearing_seconds))
+    cursor = loss_at
+    for row in energized_intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        start, stop, energized = row
+        if not all(map(finite_measure, (start, stop))) or type(energized) is not bool:
+            return "INCOMPLETE"
+        if start != cursor or not start < stop <= observed_until:
+            return "INCOMPLETE"
+        if energized and Fraction(str(stop)) > deadline:
+            return "FAIL"
+        cursor = stop
+    if cursor != observed_until or Fraction(str(cursor)) <= deadline:
+        return "INCOMPLETE"
+    return "PASS"
+
+
+def surge_coordination_quality(residual_v, lead_rise_v, impulse_rating_v):
+    """Compare installed protective voltage, including the leads, to equipment withstand."""
+    if not all(map(finite_measure, (residual_v, lead_rise_v, impulse_rating_v))):
+        return "INCOMPLETE"
+    if min(residual_v, lead_rise_v) < 0 or impulse_rating_v <= 0:
+        return "FAIL"
+    installed = Fraction(str(residual_v)) + Fraction(str(lead_rise_v))
+    return "PASS" if installed <= Fraction(str(impulse_rating_v)) else "FAIL"

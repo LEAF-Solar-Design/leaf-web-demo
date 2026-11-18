@@ -276,3 +276,12 @@ def test_weak_axis_buckling(condition,k,below,above):
     assert grade([rail],{condition:k}) == "PASS"
     assert grade([dict(rail,compression_n=above)],{condition:k}) == "FAIL"
     assert grade([rail],{}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("left,right,span,ratio", [(2,6,1000,0.004),(-2,3,2000,0.0025),(8,8,500,0)])
+def test_differential_settlement(left,right,span,ratio):
+    from benches.x03_layout_oracle import settlement_quality as grade
+    rule = [("A","B",span,ratio)]
+    assert grade({"A":left,"B":right},rule) == "PASS"
+    assert grade({"A":left,"B":right+0.1},rule) == "FAIL"
+    assert grade({"A":left},rule) == "INCOMPLETE"
