@@ -312,7 +312,7 @@ def finish_mutation(before, after, tool):
     return advance(after, changed, tool)
 
 
-def accept_candidate(graph, candidate, *, expected_rev):
+def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """Build one graph version; publication remains the write owner's job."""
     before = checked_graph(graph, expected_rev)
     _bounded_json(candidate)
@@ -353,7 +353,7 @@ def accept_candidate(graph, candidate, *, expected_rev):
         ordered_lists.append(refs[offset:offset + length])
         offset += length
     _replace_frame_strings(before, result, frame, previous, ordered_lists,
-                           verified["proof"]["response_sha256"])
+                           verified["proof"]["response_sha256"], plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
@@ -371,12 +371,17 @@ def _previous_frame_strings(result, frame):
     return previous
 
 
-def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256):
+def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           *, plugin_parity=False):
     """Replace the frame's strings with ordered panel lists; shared by both commit paths."""
     members = set(frame["panel_refs"])
     previous_ids = {s["id"] for s in previous}
     panels = {p["id"]: p for p in result["panels"]}
-    if frame["installation_design"] == "Roof":
+    if type(plugin_parity) is not bool:
+        raise GraphValidationError("INVALID_PLUGIN_PARITY_MODE")
+    # Faithful Branch replay keeps the recorded order, including native gap hops.
+    # Normal Studio publication retains its physical step guard.
+    if frame["installation_design"] == "Roof" and not plugin_parity:
         limit = 3 * max(frame["module_width_along_row"], frame["module_height_across_row"])
         for ordered in ordered_lists:
             for left, right in zip(ordered, ordered[1:]):
@@ -567,7 +572,7 @@ def _sequence_counts(responses):
             "repeated_positive_sequences": len(positive) - len(set(positive))}
 
 
-def accept_split_candidate(graph, candidate, *, expected_rev):
+def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """The plugin's split commit: restitch the pieces, cut strings in final-grid Seq
     order (StringPlacement), then the same graph mutation as accept_candidate."""
     before = checked_graph(graph, expected_rev)
@@ -615,7 +620,8 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
         raise failure
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
-    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)
+    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
