@@ -1630,3 +1630,62 @@ def black_start_quality(steps, continuous_kw, surge_kw, surge_seconds, available
             return "FAIL"
         energy_kws += load * seconds
     return "PASS" if energy_kws <= Fraction(str(available_kwh)) * 3600 else "FAIL"
+
+
+def phase_sequence_quality(source_order, terminal_order, mapping, required_rotation):
+    """Read the source phases at equipment terminals in the maker's declared order."""
+    for order in (source_order, terminal_order):
+        if not isinstance(order, (tuple, list)) or len(order) != 3:
+            return "INCOMPLETE"
+        if not all(isinstance(name, str) and name for name in order) or len(set(order)) != 3:
+            return "INCOMPLETE"
+    if required_rotation not in ("forward", "reverse") or not isinstance(mapping, dict):
+        return "INCOMPLETE"
+    if any(not isinstance(mapping.get(t), str) or not mapping[t] for t in terminal_order):
+        return "INCOMPLETE"
+    actual = [mapping[t] for t in terminal_order]
+    if set(actual) != set(source_order):
+        return "FAIL"
+    order = list(source_order)
+    if required_rotation == "reverse":
+        order.reverse()
+    offset = order.index(actual[0])
+    return "PASS" if actual == order[offset:] + order[:offset] else "FAIL"
+
+
+def recharge_deadline_quality(revision, curve, capacity_kwh, initial_soc, target_soc, available_kw, hours):
+    """Integrate a pinned stepwise charge-acceptance curve over the requested SOC range."""
+    numbers = (capacity_kwh, initial_soc, target_soc, available_kw, hours)
+    if not all(map(finite_measure, numbers)) or not revision or not isinstance(curve, dict):
+        return "INCOMPLETE"
+    if curve.get("revision") != revision or curve.get("method") != "step-kw":
+        return "INCOMPLETE"
+    bands = curve.get("soc_bands")
+    if not isinstance(bands, list) or not 0 <= initial_soc <= target_soc <= 1 or capacity_kwh <= 0 or min(available_kw, hours) < 0:
+        return "INCOMPLETE"
+    cursor = Fraction(str(initial_soc))
+    target = Fraction(str(target_soc))
+    elapsed = Fraction(0)
+    previous = None
+    stalled = False
+    for row in bands:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        low, high, kw = (Fraction(str(value)) for value in row)
+        if not 0 <= low < high <= 1 or kw < 0 or (previous is not None and low < previous):
+            return "INCOMPLETE"
+        previous = high
+        if cursor >= target or high <= cursor:
+            continue
+        if low > cursor:
+            return "INCOMPLETE"
+        end = min(high, target)
+        power = min(kw, Fraction(str(available_kw)))
+        if power:
+            elapsed += Fraction(str(capacity_kwh)) * (end - cursor) / power
+        else:
+            stalled = True
+        cursor = end
+    if cursor != target:
+        return "INCOMPLETE"
+    return "PASS" if not stalled and elapsed <= Fraction(str(hours)) else "FAIL"

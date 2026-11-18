@@ -330,3 +330,22 @@ def voltage_temperature_alignment_quality(voltages, temperatures, max_skew, repo
     if expected.keys() - reported_pairs.keys():
         return "INCOMPLETE"
     return "PASS" if expected == reported_pairs and all(map(finite_measure, reported_pairs.values())) else "FAIL"
+
+
+def wind_height_quality(revision, terrain, sensor_m, target_m, speed_mps, reported_mps):
+    """Apply the pinned terrain power-law exponent between recorded positive heights."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(terrain, dict) or terrain.get("revision") != revision or terrain.get("model") != "power-law":
+        return "INCOMPLETE"
+    exponent = terrain.get("exponent")
+    if not all(map(finite_measure, (sensor_m, target_m, speed_mps, reported_mps, exponent))):
+        return "INCOMPLETE"
+    if min(sensor_m, target_m) <= 0 or min(exponent, speed_mps) < 0:
+        return "INCOMPLETE"
+    try:
+        adjusted = speed_mps * (target_m / sensor_m) ** exponent
+    except OverflowError:
+        return "INCOMPLETE"
+    if not finite_measure(adjusted):
+        return "INCOMPLETE"
+    return "PASS" if isclose(adjusted, reported_mps, rel_tol=1e-9, abs_tol=1e-12) else "FAIL"

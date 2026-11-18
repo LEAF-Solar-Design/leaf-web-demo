@@ -693,3 +693,23 @@ def test_pair_voltage_with_nearby_temperature_not_unrelated_extreme(stamp,near,f
     assert grade({stamp:47},temp,skew,{stamp:near}) == "PASS"
     assert grade({stamp:47},temp,skew,{stamp:far}) == "FAIL"
     assert grade({stamp:47},{far:-15},skew,{stamp:far}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("part,rating,opening,history,remaining", [
+    ("plug",100,70,[(1,12),(2,8)],10), ("coupler",50,40,[(1,9)],1), ("socket",200,150,[(1,30),(2,20)],0),
+])
+def test_remaining_connector_cycles(part,rating,opening,history,remaining):
+    from benches.x03_catalog_oracle import mating_life_quality as grade
+    catalog = dict(revision="v1",cycle_ratings={part:rating})
+    assert grade("v1",catalog,part,opening,history,remaining) == "PASS"
+    assert grade("v1",catalog,part,opening,history,remaining+1) == "FAIL"
+    assert grade("v1",catalog,part,opening,None,remaining) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sensor,target,speed,alpha,expected", [(10,40,5,0.5,10), (80,5,8,0.25,4), (3,24,6,1/3,12)])
+def test_adjust_wind_reading_for_terrain_and_height(sensor,target,speed,alpha,expected):
+    from benches.x03_weather_oracle import wind_height_quality as grade
+    model = dict(revision="terrain",model="power-law",exponent=alpha)
+    assert grade("terrain",model,sensor,target,speed,expected) == "PASS"
+    assert grade("terrain",model,sensor,target,speed,speed) == "FAIL"
+    assert grade("terrain",dict(model,exponent=None),sensor,target,speed,expected) == "INCOMPLETE"
