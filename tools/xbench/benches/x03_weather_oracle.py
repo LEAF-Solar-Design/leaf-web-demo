@@ -139,3 +139,14 @@ def filled_voltage_quality(samples, timestamp, reported, *, interpolation, extra
         temperature = first + (by_time[right]["cell_temp"]-first) * (timestamp-left) / (right-left)
     filled = dict(samples[0], timestamp=timestamp, cell_temp=temperature)
     return weather_quality(filled, reported=reported, **conditions)
+
+
+def flagged_voltage_quality(sample, allowed_flags, *, reported, **conditions):
+    """Only observations with an explicitly accepted quality flag can support voltage credit."""
+    if not isinstance(allowed_flags, (list, tuple)) or not all(isinstance(v, str) and v for v in allowed_flags):
+        return "INCOMPLETE"
+    if not isinstance(sample, dict) or not isinstance(sample.get("quality_flag"), str) or not sample["quality_flag"]:
+        return "INCOMPLETE"
+    if sample["quality_flag"] not in allowed_flags:
+        return "FAIL"
+    return weather_quality(sample, reported=reported, **conditions)

@@ -899,3 +899,38 @@ def battery_energy_quality(initial_kwh, capacity_kwh, reserve_kwh, charge_effici
         if energy != recorded or not reserve <= energy <= capacity:
             return "FAIL"
     return "PASS"
+
+
+def battery_power_quality(power_kw, inverter, battery):
+    """Both directional nameplates and signed step powers use the same reference terminal."""
+    if not isinstance(power_kw, list) or not power_kw or None in power_kw:
+        return "INCOMPLETE"
+    for ratings in (inverter, battery):
+        if not isinstance(ratings, dict) or any(ratings.get(k) is None for k in ("charge_kw", "discharge_kw")):
+            return "INCOMPLETE"
+        if not all(finite_measure(ratings[k]) and ratings[k] >= 0 for k in ("charge_kw", "discharge_kw")):
+            return "FAIL"
+    for power in power_kw:
+        if not finite_measure(power):
+            return "FAIL"
+        direction = "charge_kw" if power < 0 else "discharge_kw"
+        if abs(power) > min(inverter[direction], battery[direction]):
+            return "FAIL"
+    return "PASS"
+
+
+def sidewall_pressure_quality(bends):
+    """Single cable. Tension in N divided by bend radius in m gives lateral load in N/m."""
+    if not isinstance(bends, list) or not bends:
+        return "INCOMPLETE"
+    for bend in bends:
+        fields = ("tension_n", "radius_m", "limit_n_per_m")
+        if not isinstance(bend, dict) or any(bend.get(k) is None for k in fields):
+            return "INCOMPLETE"
+        values = tuple(bend[k] for k in fields)
+        if not all(map(finite_measure, values)):
+            return "FAIL"
+        tension, radius, limit = (Fraction(str(v)) for v in values)
+        if tension < 0 or radius <= 0 or limit <= 0 or tension > radius * limit:
+            return "FAIL"
+    return "PASS"

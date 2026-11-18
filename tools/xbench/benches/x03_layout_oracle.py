@@ -383,3 +383,31 @@ def overturning_quality(wind, ballast, pivot_m, restoring_side):
                 arm = position - Fraction(str(pivot_m))
                 resistance += force * (arm if restoring_side == "positive" else -arm)
     return "PASS" if resistance >= demand else "FAIL"
+
+
+def ponding_quality(areas, residual_kn, water_kn_per_m3):
+    """Sum depth times tributary area times water unit weight for each roof support."""
+    if not isinstance(areas, dict) or not areas or not isinstance(residual_kn, dict) or water_kn_per_m3 is None:
+        return "INCOMPLETE"
+    if areas.keys() != residual_kn.keys() or None in residual_kn.values():
+        return "INCOMPLETE"
+    if not finite_measure(water_kn_per_m3) or water_kn_per_m3 <= 0:
+        return "FAIL"
+    unit_weight = Fraction(str(water_kn_per_m3))
+    for support, patches in areas.items():
+        if not isinstance(patches, list) or not patches:
+            return "INCOMPLETE"
+        capacity = residual_kn[support]
+        if not finite_measure(capacity) or capacity < 0:
+            return "FAIL"
+        volume = Fraction(0)
+        for patch in patches:
+            if not isinstance(patch, dict) or patch.get("depth_m") is None or patch.get("area_m2") is None:
+                return "INCOMPLETE"
+            depth, area = patch["depth_m"], patch["area_m2"]
+            if not all(map(finite_measure, (depth, area))) or depth < 0 or area <= 0:
+                return "FAIL"
+            volume += Fraction(str(depth)) * Fraction(str(area))
+        if volume * unit_weight > Fraction(str(capacity)):
+            return "FAIL"
+    return "PASS"

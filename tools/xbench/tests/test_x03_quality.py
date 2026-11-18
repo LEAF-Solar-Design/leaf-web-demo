@@ -536,3 +536,28 @@ def test_storage_energy(initial, steps, expected):
     from benches.x03_quality import battery_energy_quality
     rows = [dict(load_kw=p,hours=t,stored_kwh=e) for p,t,e in steps]
     assert battery_energy_quality(initial, 10, 2, 0.5, 0.8, rows) == expected
+
+
+@pytest.mark.parametrize("power,inv,bat,expected", [
+    ([4,-3], (3,5), (4,4), "PASS"), ([5], (3,6), (4,4), "FAIL"),
+    ([-4], (3,6), (5,7), "FAIL"), ([1], (3,5), (4,None), "INCOMPLETE"),
+], ids=["both-directions-at-limit","battery-discharge-overload","inverter-charge-overload","missing-rating"])
+def test_storage_instantaneous_limits(power, inv, bat, expected):
+    from benches.x03_quality import battery_energy_quality, battery_power_quality
+    # Each step has ample energy headroom over a tenth of an hour.
+    energy = 50
+    steps = []
+    for p in power:
+        energy = round(energy - p/10, 2)
+        steps.append(dict(load_kw=p,hours=0.1,stored_kwh=energy))
+    assert battery_energy_quality(50, 100, 10, 1, 1, steps) == "PASS"
+    assert battery_power_quality(power,dict(charge_kw=inv[0],discharge_kw=inv[1]),
+                                 dict(charge_kw=bat[0],discharge_kw=bat[1])) == expected
+
+
+@pytest.mark.parametrize("radius,tension,limit,expected", [
+    (0.5,100,200,"PASS"), (0.25,75,299,"FAIL"), (2,200,101,"PASS"), (None,80,200,"INCOMPLETE"),
+], ids=["bend-at-limit","tight-bend-overload","wide-bend","missing-radius"])
+def test_bend_sidewall_load(radius, tension, limit, expected):
+    from benches.x03_quality import sidewall_pressure_quality
+    assert sidewall_pressure_quality([dict(radius_m=radius,tension_n=tension,limit_n_per_m=limit)]) == expected

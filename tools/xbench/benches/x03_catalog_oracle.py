@@ -271,3 +271,32 @@ def assembly_interface_quality(version, catalog, connections):
         if any(link["protocol"] not in port["protocols"] for port in ports):
             return "FAIL"
     return "PASS"
+
+
+def reserved_stock_quality(version, inventory, demand, allocations, reservations, as_of, policy):
+    """Subtract prior holds from gross lot stock during [start, expiry), then grade new allocations."""
+    if policy != "start-inclusive-expiry-exclusive" or type(as_of) is not int or not isinstance(reservations, list):
+        return "INCOMPLETE"
+    if not isinstance(inventory, dict) or not isinstance(inventory.get("lots"), dict):
+        return "INCOMPLETE"
+    lots = {}
+    for key, record in inventory["lots"].items():
+        if not isinstance(record, dict) or record.get("available") is None:
+            return "INCOMPLETE"
+        if type(record["available"]) is not int or record["available"] < 0:
+            return "FAIL"
+        lots[key] = dict(record)
+    seen = set()
+    for reservation in reservations:
+        fields = ("id", "lot", "start", "expiry", "quantity")
+        if not isinstance(reservation, dict) or any(reservation.get(k) is None for k in fields):
+            return "INCOMPLETE"
+        identifier, lot, start, expiry, quantity = (reservation[k] for k in fields)
+        if not all(isinstance(k, str) and k for k in (identifier, lot)) or not all(type(n) is int for n in (start, expiry, quantity)):
+            return "FAIL"
+        if identifier in seen or lot not in lots or expiry <= start or quantity <= 0:
+            return "FAIL"
+        seen.add(identifier)
+        if start <= as_of < expiry:
+            lots[lot]["available"] -= quantity
+    return stock_allocation_quality(version, dict(inventory, lots=lots), demand, allocations)

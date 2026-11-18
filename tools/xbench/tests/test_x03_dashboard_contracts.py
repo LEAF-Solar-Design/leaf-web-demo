@@ -229,3 +229,15 @@ def test_synthetic_cost_report(case, expected):
         del rates["storage"]
     tariff = dict(version="v1",currency="USD",rates=rates)
     assert usage_cost_quality(rows,tariff,"v1","USD",charges,0.6 if case=="wrong-total" else 0.7) == expected
+
+
+@pytest.mark.parametrize("busy,reported,expected", [
+    ([(0,5,1)],0.25,"PASS"), ([(0,5,1)],0.5,"FAIL"), ([(0,5,1),(5,10,3)],1,"PASS"),
+    ([],0,"PASS"), ([(0,6,2)],0.6,"FAIL"),
+], ids=["capacity-weighted-idle-period","reject-mean-of-percentages","exact-changeover","all-idle","early-overcapacity"])
+def test_time_integrated_capacity(busy, reported, expected):
+    from benches.x03_dashboard_oracle import capacity_utilization_quality
+    schedule = [dict(at=0,slots=1),dict(at=5,slots=3)]
+    tasks = [dict(start=s,end=e,slots=n) for s,e,n in busy]
+    assert capacity_utilization_quality(0,10,schedule,tasks,reported) == expected
+    assert capacity_utilization_quality(0,10,schedule[1:],tasks,reported) == "INCOMPLETE"
