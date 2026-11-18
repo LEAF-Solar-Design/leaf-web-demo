@@ -12,10 +12,14 @@ import math
 MAX_EXACT_COUNT = 2**53 - 1
 
 
+class InputValidationError(ValueError):
+    """An actionable input diagnostic safe to return through the tool API."""
+
+
 def _module_total(weights):
     total = sum(weights)
     if total > MAX_EXACT_COUNT:
-        raise ValueError("Module count exceeds the JavaScript safe integer limit; select fewer sets or split the drawing.")
+        raise InputValidationError("Module count exceeds the JavaScript safe integer limit; select fewer sets or split the drawing.")
     return total
 
 
@@ -219,7 +223,7 @@ def _selected_layer_counts(selected_sets, multiplicities):
     counts = {}
     for layer, keys in sorted(by_layer.items()):
         if assigned.intersection(keys):
-            raise ValueError("A selected entity belongs to more than one layer. Check the drawing before counting by layer.")
+            raise InputValidationError("A selected entity belongs to more than one layer. Check the drawing before counting by layer.")
         assigned.update(keys)
         counts[layer] = _module_total(multiplicities[key][0] * multiplicities[key][1] for key in keys)
     return counts
@@ -229,16 +233,16 @@ def run(intake, params):
     params = params or {}
     window = _selection_region(params)
     if not isinstance(intake, dict):
-        raise ValueError("Saved intake must be an object; re-import the drawing.")
+        raise InputValidationError("Saved intake must be an object; re-import the drawing.")
     for key in ("inserts", "polylines"):
         if key in intake and not isinstance(intake[key], list):
-            raise ValueError(f"Saved intake {key} must be an array; re-import the drawing.")
+            raise InputValidationError(f"Saved intake {key} must be an array; re-import the drawing.")
         for row in intake.get(key, []):
             if not isinstance(row, dict) or (key == "polylines" and not isinstance(row.get("pts"), list)):
-                raise ValueError(f"Saved intake {key} has an incompatible candidate row; re-import the drawing.")
+                raise InputValidationError(f"Saved intake {key} has an incompatible candidate row; re-import the drawing.")
             for field in ("layer", "name", "handle", "space", "layout"):
                 if field in row and not isinstance(row[field], str):
-                    raise ValueError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
+                    raise InputValidationError(f"Saved intake {key} candidate {field} must be a string; re-import the drawing.")
     selected_ids = list(dict.fromkeys(params.get("set_ids") or
         ([params["set_id"]] if params.get("set_id") else [])))
     if window is not None and not selected_ids:
@@ -262,7 +266,7 @@ def run(intake, params):
             entity_key = ("handle", handle) if handle else ("row", key, index)
             dimensions = (entity.get("rows", 1), entity.get("columns", 1)) if key == "inserts" else (1, 1)
             if any(type(value) is not int or not 1 <= value <= 65535 for value in dimensions):
-                raise ValueError(f"INSERT {handle or index} has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
+                raise InputValidationError("INSERT has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
             selected = json.dumps(identity, ensure_ascii=True, separators=(",", ":")) in selected_ids
             if (window is not None and selected
                     and not _within_region(entity, key, window, dimensions, definitions, geometry_cache)):
@@ -270,7 +274,7 @@ def run(intake, params):
             group = groups.setdefault(identity, {"entity_type": entity_type,
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
             if entity_key in multiplicities and multiplicities[entity_key] != dimensions:
-                raise ValueError(f"INSERT {handle or index} has conflicting array multiplicity; re-import the drawing.")
+                raise InputValidationError("INSERT has conflicting array multiplicity; re-import the drawing.")
             multiplicities[entity_key] = dimensions
             if entity_key not in group["_keys"]:
                 group["_keys"].add(entity_key)

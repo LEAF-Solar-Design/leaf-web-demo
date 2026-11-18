@@ -1383,6 +1383,10 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         try:
             ret = mod.run(intake, params)
         except Exception as exc:  # noqa: BLE001
+            # Only a platform-owned reader may declare a user-facing validation error.
+            if trusted_read_builtin and isinstance(exc, getattr(mod, "InputValidationError", ())):
+                return err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                    tool=name, version=version, timing_ms=_ms())
             return err_envelope(ErrorCode.INTERNAL,
                                 f"tool {name!r} raised {type(exc).__name__}: {exc}",
                                 retryable=False, tool=name, version=version, timing_ms=_ms())

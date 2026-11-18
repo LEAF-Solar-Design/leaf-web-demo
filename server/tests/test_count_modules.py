@@ -499,3 +499,29 @@ def test_named_roles_keep_competing_blocks_unselected():
     assert listing["selection_required"] and overlay is None
     result, _ = module.run(intake, {**request, "set_id": listing["sets"][0]["set_id"]})
     assert result["counts"] == {"Roof A": 1}
+
+@pytest.mark.parametrize("field", ["layer", "name", "handle"])
+def test_invalid_count_metadata_classified_as_user_input(field):
+    import tool_loader
+
+    tool = next(t for t in json.loads((PATH.parents[2] / "engine/registry.json").read_text())["tools"]
+                if t["name"] == "count-modules")
+    entity = {"layer": "East", "name": "Panel", "handle": "A"}
+    params = {"group_by": "layer", "panel_scope": "all_layers"}
+    invalid = {**entity, field: ["private fixture value"]}
+    refused = tool_loader.run_tool_dynamic(tool, {"inserts": [invalid]}, params, aps_live=False)
+    assert refused["result"] is None and refused["overlay"] is None
+    error = refused["error"]
+    assert error["error_code"] == "BAD_PARAMS" and error["actor"] == "user"
+    assert field in error["message"] and "re-import" in error["message"]
+    assert "private fixture value" not in str(refused)
+    recovered = tool_loader.run_tool_dynamic(tool, {"inserts": [entity]}, params, aps_live=False)
+    assert recovered["result"]["counts"] == {"East": 1}
+    assert recovered["overlay"]["highlight_handles"] == ["A"]
+
+
+def test_count_safe_integer_boundary_raises_declared_validation_error():
+    limit = 2**53 - 1
+    assert module._module_total([limit - 1, 1]) == limit
+    with pytest.raises(module.InputValidationError, match="split the drawing"):
+        module._module_total([limit, 1])
