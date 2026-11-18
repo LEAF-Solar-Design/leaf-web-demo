@@ -12,7 +12,6 @@ import { loadDemoSolve } from './intakeCache.js'
 import { submitDemandCapture } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
 import { isSignedIn } from '../auth.js'
-import { isAppOnlyHost } from './appHosts.js'
 import { notYetAvailable } from './studioAvailability.js'
 
 export function enterWorkspace() {
@@ -43,7 +42,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
   // drawn yet, so the tabs are disabled with the manifest's sentence instead
   // of sending the visitor to an index of pages that do not exist. Anywhere
   // the sheets render locally (every other host) the tabs keep working.
-  const sheetsReason = isAppOnlyHost() ? notYetAvailable('site.sheets') : null
+  const sheetsReason = notYetAvailable('site.sheets')
   const pricingReason = notYetAvailable('site.pricing')
   const [solve, setSolve] = useState(null)
   const [solveError, setSolveError] = useState('')

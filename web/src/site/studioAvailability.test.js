@@ -7,12 +7,16 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import { APP_ONLY_HOSTS } from './appHosts.js'
 import {
   AVAILABILITY_STATUSES,
   NOT_YET_AVAILABLE,
+  STAGING_HOST,
   STUDIO_AVAILABILITY,
   STUDIO_AVAILABILITY_SCHEMA,
+  availabilityEnv,
   availabilityProps,
+  catalogToolDisclaimer,
   guardUnavailable,
   listStudioAvailability,
   notYetAvailable,
@@ -64,6 +68,8 @@ describe('STUDIO_AVAILABILITY', () => {
   it.each(rows.filter(([, row]) => row.status === 'enabled'))('%s is enabled and carries no disclaimer', (id, row) => {
     expect(row.disclaimer).toBeNull()
     expect(row.adopted).toBeUndefined()
+    expect(row.hosts).toBeUndefined()
+    expect(row.tool).toBeUndefined()
     // An enabled row is proven by a staging walk, never by the source alone.
     expect(row.evidence).toMatch(/^(audit|capability):/)
   })
@@ -75,6 +81,11 @@ describe('STUDIO_AVAILABILITY', () => {
     expect(row.disclaimer).not.toMatch(/\b(TODO|TBD|FIXME)\b|\?\?\?/i)
     // An unavailable feature has no standing prerequisite to hint at.
     expect(row.note).toBeUndefined()
+    // A row speaks only for hosts this product is served from.
+    if (row.hosts) {
+      expect(row.hosts.length).toBeGreaterThan(0)
+      for (const host of row.hosts) expect(APP_ONLY_HOSTS.has(host)).toBe(true)
+    }
     if (row.adopted) return
     expect(row.disclaimer.toLowerCase()).toContain(NOT_YET_AVAILABLE)
     expect(row.disclaimer).toMatch(/^[A-Z]/)
@@ -117,52 +128,119 @@ describe('STUDIO_AVAILABILITY', () => {
   })
 })
 
+const STAGING = Object.freeze({ hostname: STAGING_HOST, walk: false })
+const PRODUCTION = Object.freeze({ hostname: 'platform.leafdesign.ai', walk: false })
+const LOCAL = Object.freeze({ hostname: 'localhost', walk: false })
+const WALKING = Object.freeze({ hostname: STAGING_HOST, walk: true })
+
 describe('reading the manifest', () => {
-  it('reports an enabled feature as available with no disclaimer', () => {
-    expect(studioFeatureAvailable('site.sample-rooftop')).toBe(true)
-    expect(notYetAvailable('site.sample-rooftop')).toBeNull()
-    expect(availabilityProps('site.sample-rooftop')).toEqual({})
+  it('reports an enabled feature as available with no disclaimer on every host', () => {
+    for (const env of [STAGING, PRODUCTION, LOCAL, WALKING]) {
+      expect(studioFeatureAvailable('site.sample-rooftop', env)).toBe(true)
+      expect(notYetAvailable('site.sample-rooftop', env)).toBeNull()
+      expect(availabilityProps('site.sample-rooftop', env)).toEqual({})
+    }
   })
 
-  it('reports an unavailable feature with its disclaimer and disabled props', () => {
+  it('takes an unavailable feature away with its disclaimer and disabled props', () => {
     const disclaimer = STUDIO_AVAILABILITY['site.sheets'].disclaimer
-    expect(studioFeatureAvailable('site.sheets')).toBe(false)
-    expect(notYetAvailable('site.sheets')).toBe(disclaimer)
-    expect(availabilityProps('site.sheets')).toEqual({
+    expect(studioFeatureAvailable('site.sheets', STAGING)).toBe(false)
+    expect(notYetAvailable('site.sheets', STAGING)).toBe(disclaimer)
+    expect(availabilityProps('site.sheets', STAGING)).toEqual({
       'aria-disabled': true, title: disclaimer, 'data-availability': 'unavailable', 'data-availability-id': 'site.sheets',
     })
   })
 
+  it('applies a row only on the hosts its evidence speaks for', () => {
+    // Staging evidence disables on staging and nowhere else: a later
+    // production promotion must not inherit a staging-only finding.
+    expect(notYetAvailable('shared.author-tool', STAGING)).toBe(STUDIO_AVAILABILITY['shared.author-tool'].disclaimer)
+    expect(notYetAvailable('shared.author-tool', PRODUCTION)).toBeNull()
+    expect(notYetAvailable('shared.author-tool', LOCAL)).toBeNull()
+    // The sheets hub leaves every app host, so that row covers all of them.
+    expect(notYetAvailable('site.sheets', PRODUCTION)).toBe(STUDIO_AVAILABILITY['site.sheets'].disclaimer)
+    expect(notYetAvailable('site.sheets', LOCAL)).toBeNull()
+    // A row with no hosts is decided by the code itself and holds everywhere.
+    for (const env of [STAGING, PRODUCTION, LOCAL]) {
+      expect(notYetAvailable('project.create-from-sample-drawing', env))
+        .toBe(STUDIO_AVAILABILITY['project.create-from-sample-drawing'].disclaimer)
+    }
+    // Host matching ignores case.
+    expect(notYetAvailable('shared.author-tool', { hostname: 'PLATFORM-STAGING.LEAFDESIGN.AI', walk: false })).not.toBeNull()
+  })
+
+  it('lifts every disable for a verification walk, and for nothing else', () => {
+    for (const [id, row] of unavailable) {
+      expect(studioFeatureAvailable(id, WALKING), id).toBe(true)
+      expect(notYetAvailable(id, WALKING), id).toBeNull()
+      // The table still states the truth while the override is on.
+      expect(studioFeature(id, WALKING).status).toBe('unavailable')
+      expect(studioFeature(id, WALKING).disclaimer).toBe(row.disclaimer)
+    }
+    expect(notYetAvailable('site.sheets', { hostname: STAGING_HOST, walk: 'yes' })).not.toBeNull()
+    expect(notYetAvailable('site.sheets', { hostname: STAGING_HOST })).not.toBeNull()
+  })
+
+  it('reads the override from the address bar or storage, and nothing by default', () => {
+    expect(availabilityEnv()).toEqual({ hostname: window.location.hostname, walk: false })
+    window.localStorage.setItem('leaf.availability.walk', '1')
+    try {
+      expect(availabilityEnv().walk).toBe(true)
+      window.localStorage.setItem('leaf.availability.walk', 'true')
+      expect(availabilityEnv().walk).toBe(false)
+    } finally { window.localStorage.removeItem('leaf.availability.walk') }
+    const before = window.location.href
+    window.history.replaceState({}, '', '/app?availability=walk')
+    try { expect(availabilityEnv().walk).toBe(true) } finally { window.history.replaceState({}, '', before) }
+    window.history.replaceState({}, '', '/app?availability=1')
+    try { expect(availabilityEnv().walk).toBe(false) } finally { window.history.replaceState({}, '', before) }
+  })
+
   it('treats an undeclared id as no opinion, never as off', () => {
-    const feature = studioFeature('cad.no-such-feature')
+    const feature = studioFeature('cad.no-such-feature', STAGING)
     expect(feature.declared).toBe(false)
     expect(feature.available).toBe(true)
-    expect(notYetAvailable('cad.no-such-feature')).toBeNull()
+    expect(notYetAvailable('cad.no-such-feature', STAGING)).toBeNull()
     // Object.prototype keys are not rows.
-    expect(studioFeature('constructor').declared).toBe(false)
-    expect(studioFeature('__proto__').declared).toBe(false)
+    expect(studioFeature('constructor', STAGING).declared).toBe(false)
+    expect(studioFeature('__proto__', STAGING).declared).toBe(false)
+  })
+
+  it('maps a catalog tool to its row, and only a tool a row names', () => {
+    const disclaimer = STUDIO_AVAILABILITY['solar.arlo-design'].disclaimer
+    expect(catalogToolDisclaimer('arlo-design', STAGING)).toBe(disclaimer)
+    expect(catalogToolDisclaimer('arlo-design', LOCAL)).toBeNull()
+    expect(catalogToolDisclaimer('arlo-design', WALKING)).toBeNull()
+    expect(catalogToolDisclaimer('count-by-layer', STAGING)).toBeNull()
+    for (const name of ['constructor', '__proto__', '', null, undefined, 7]) expect(catalogToolDisclaimer(name, STAGING)).toBeNull()
+    // Every `tool` names one row, so two rows can never fight over a tool.
+    const tools = rows.filter(([, row]) => row.tool).map(([, row]) => row.tool)
+    expect(new Set(tools).size).toBe(tools.length)
   })
 
   it('hands an enabled feature its prerequisite note and an unavailable one none', () => {
-    expect(studioFeatureNote('cad.connect-autocad')).toBe(STUDIO_AVAILABILITY['cad.connect-autocad'].note)
-    expect(studioFeatureNote('site.sheets')).toBeNull()
-    expect(studioFeatureNote('site.sample-rooftop')).toBeNull()
+    expect(studioFeatureNote('cad.connect-autocad', STAGING)).toBe(STUDIO_AVAILABILITY['cad.connect-autocad'].note)
+    expect(studioFeatureNote('site.sheets', STAGING)).toBeNull()
+    expect(studioFeatureNote('site.sheets', WALKING)).toBeNull()
+    expect(studioFeatureNote('site.sample-rooftop', STAGING)).toBeNull()
   })
 
   it('never runs a handler for an unavailable feature', () => {
     let ran = 0
     let prevented = 0
     const handler = () => { ran += 1 }
-    guardUnavailable('site.sheets', handler)({ preventDefault: () => { prevented += 1 } })
+    guardUnavailable('site.sheets', handler, STAGING)({ preventDefault: () => { prevented += 1 } })
     expect(ran).toBe(0)
     expect(prevented).toBe(1)
-    expect(guardUnavailable('site.sample-rooftop', handler)).toBe(handler)
+    expect(guardUnavailable('site.sample-rooftop', handler, STAGING)).toBe(handler)
+    expect(guardUnavailable('site.sheets', handler, LOCAL)).toBe(handler)
   })
 
-  it('lists every row once, in table order, for the capability measure', () => {
+  it('lists every row once, in table order, as the table states it', () => {
     const list = listStudioAvailability()
     expect(list.map((feature) => feature.id)).toEqual(Object.keys(STUDIO_AVAILABILITY))
     expect(list.every((feature) => feature.declared)).toBe(true)
+    // The list is the table, on no host: a staging-only row still reads unavailable.
     expect(list.filter((feature) => !feature.available).length).toBe(unavailable.length)
   })
 })

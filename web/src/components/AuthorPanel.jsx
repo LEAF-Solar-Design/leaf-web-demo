@@ -1,3 +1,4 @@
+import { notYetAvailable } from '../site/studioAvailability.js'
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
@@ -226,7 +227,13 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled: buildEntitledByPolicy = true }) {
+  // Availability manifest (site/studioAvailability.js): where the staging walk
+  // proved authoring fails, the panel says so and takes Generate away, on the
+  // same rung the entitlement gate already uses. Recovery of an existing
+  // request stays disabled with it, exactly as it is for an unentitled account.
+  const authorNotYet = notYetAvailable('shared.author-tool')
+  const buildEntitled = buildEntitledByPolicy && !authorNotYet
   const [desc, setDesc] = useState('')
   const [recoveryId, setRecoveryId] = useState('')
   const [busy, setBusy] = useState(false)
@@ -533,7 +540,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             title={stageActivity?.pointer ? 'Finish or discard the current request before cancelling the revision.' : undefined}>Cancel revision</button>
         </div>
       )}
-      {!buildEntitled && !buildGate && <div className="author-gate" role="status">Tool authoring is unavailable for this account or site. Contact your administrator for access.</div>}
+      {!buildEntitled && !buildGate && <div className="author-gate" role="status" data-availability={authorNotYet ? 'unavailable' : undefined}>{authorNotYet || 'Tool authoring is unavailable for this account or site. Contact your administrator for access.'}</div>}
       {buildGate
         ? <BuildGate />
         : quotaGate
