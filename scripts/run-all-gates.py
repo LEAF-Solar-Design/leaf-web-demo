@@ -1471,6 +1471,10 @@ def build_suites() -> List[Suite]:
         Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
               # LD1a's boundary matrix plus LD1d2's three W1 route contracts.
               SERVER, _py_pytest("tests/test_demo_sessions.py"), 271),
+        Suite("server-investor-demo", "server staging investor identity and route boundaries", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo.py"), 23),
+        Suite("server-investor-demo-postgres", "server investor workspace provisioning and revocation", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo_postgres.py"), 8, db_gated=True),
         Suite("server-demo-policy", "server local W1 demo execution policy", "pytest",
               SERVER, _py_pytest("tests/test_demo_policy.py"), 27),
         Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",

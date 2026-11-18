@@ -531,3 +531,52 @@ revocation or a `role_revision` bump denies the subject's next request. The
 §11.2 tier vocabulary, §11.3 capability vocabulary, and §11.5 role overlay
 gain no operator member — that absence is itself freeze-gated. Freeze gate:
 `server/tests/test_operator_vocab_freeze.py`.
+
+## 12. Investor demo identity (staging only)
+
+Leaf Automation can share one view-only staging workspace with investor link
+holders. Startup provisions only a dedicated demo org and its read-only
+identity binding. The workspace opens the bundled `rooftop_demo` drawing.
+
+All four settings must pass on each exchange and session verification.
+
+* `LEAF_INVESTOR_DEMO_ENABLED` equals `1`.
+* `LEAF_RUNTIME_ENV` equals `staging` exactly.
+* `LEAF_AUTH_LIVE` equals `1`.
+* `LEAF_INVESTOR_DEMO_SECRET` is the canonical unpadded base64url encoding of
+  32 to 64 bytes and differs from the configured dispatch, browser session,
+  guest, harness, broker, ops and per-visitor demo secrets.
+
+The link has the form `v1.<kid>.<iat>.<exp>.<mac>`. The key ID has eight
+lowercase hex digits. The timestamps each have ten decimal digits and no
+leading zero. The MAC has 43 canonical unpadded base64url characters.
+HMAC-SHA256 binds the fields to the link purpose, staging origin, fixed org
+and role. A link lasts at most 31 days. Send it in the JSON body of
+`POST /api/site/investor-demo/session`. Every exchange response is `no-store`.
+The exchange performs no database work before the link verifies, then makes
+exactly one read-only binding check. On success it returns `session`,
+`expires_at`, `org_id` and `drawing`.
+
+The session is a compact JWT with three base64url segments. Its header carries
+only `alg=HS256` and `typ=JWT`. HKDF-SHA256 derives separate link, session
+and key ID subkeys. The session binds the staging issuer, platform audience,
+fixed subject, tenant, org and restricted tier with issue time, expiry and a
+random session ID. It expires after two hours or at link expiry, whichever is
+earlier. The reserved issuer and subject never go to the Auth0 key resolver.
+
+The Host must be exactly `platform-staging.leafdesign.ai`. An Origin on the
+exchange must equal `https://platform-staging.leafdesign.ai`. For a session,
+only GET requests to these eight dispatched route templates can pass.
+
+* `/api/session/identity` and `/api/session`
+* `/api/tools`, `/api/capabilities` and `/api/entitlements`
+* `/api/orgs/{org_id}`, `/api/projects` and `/api/jobs`
+
+Every other route, including a new read or stream, is denied by default. Each verified
+request checks for exactly one active, unrevoked read-only binding to the
+fixed active, restricted demo org. The drawing view reads the bundled rooftop
+intake. Tool runs, uploads, authoring, telemetry writes and solve are closed.
+
+Rotate the secret or turn the flag off to revoke links and sessions. Deactivate
+the org to refuse the next authenticated request. This identity adds no tier,
+capability, role or claim-namespace vocabulary.

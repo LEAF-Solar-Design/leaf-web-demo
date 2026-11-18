@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 import broker_client
 import deps
 import drawing_identity
+import investor_demo
 from envelopes import ErrorCode, error_response, with_envelope_fields
 
 router = APIRouter()
@@ -52,6 +53,11 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
     runs. The app process never calls the APS client or reads its credential.
     """
     identity = drawing_identity.curated_identity(dwg)
+    if investor_demo.is_investor_context(tenant):
+        if identity is not drawing_identity.CURATED_DEMO:
+            return error_response(ErrorCode.BAD_PARAMS, "drawing unavailable",
+                                  retryable=False, status_code=404)
+        return _cached_intake(tenant)
     store_dwg = drawing_identity.store_id(dwg)
     source_dwg = drawing_identity.source_id(dwg)
     if deps.APS_LIVE:
@@ -117,6 +123,10 @@ def session(dwg: str = "rooftop_demo", tenant=Depends(deps.require_active_tenant
             return error_response(ErrorCode.BAD_PARAMS, f"drawing unavailable: {exc}",
                                   retryable=False, status_code=404)
         return deps.tenant_echo(with_envelope_fields({"intake": intake}), tenant)
+    return _cached_intake(tenant)
+
+
+def _cached_intake(tenant):
     if not deps.DATA_FILE.exists():
         return error_response(ErrorCode.INTERNAL, f"cached intake not found: {deps.DATA_FILE}",
                               retryable=False, status_code=404)

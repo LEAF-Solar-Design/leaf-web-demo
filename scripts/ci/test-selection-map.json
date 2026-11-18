@@ -6,6 +6,9 @@
   "merge_gate": "github-merge-queue",
   "minimum_full_runs": 3,
   "force_full_rules": [
+    "server/investor_demo.py",
+    "server/routers/investor_demo.py",
+    "server/tests/test_investor_demo*.py",
     "server/demo_sessions.py",
     "server/demo_provisioning.py",
     "server/demo_actor.py",
@@ -83,6 +86,8 @@
     "server-integration-turn-grants-postgres",
     "server-integration-project-turn-postgres",
     "server-demo-sessions",
+    "server-investor-demo",
+    "server-investor-demo-postgres",
     "server-demo-policy",
     "server-demo-sessions-postgres",
     "server-demo-provisioning-postgres",
