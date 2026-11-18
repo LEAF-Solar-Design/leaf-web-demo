@@ -241,3 +241,13 @@ def test_time_integrated_capacity(busy, reported, expected):
     tasks = [dict(start=s,end=e,slots=n) for s,e,n in busy]
     assert capacity_utilization_quality(0,10,schedule,tasks,reported) == expected
     assert capacity_utilization_quality(0,10,schedule[1:],tasks,reported) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("times,parts,expected", [
+    ((0,4,10),(4,6),"PASS"), ((2,2,5),(0,3),"PASS"), ((0,4,10),(6,4),"FAIL"),
+    ((5,3,8),(-2,5),"FAIL"), ((0,3,None),(3,0),"INCOMPLETE"),
+], ids=["separate-wait-and-work","immediate-start","swapped-same-total","start-before-enqueue","no-finish"])
+def test_queue_service_decomposition(times, parts, expected):
+    from benches.x03_dashboard_oracle import queue_service_quality
+    runs = {"job":dict(zip(("enqueued","started","finished"),times))}
+    assert queue_service_quality(runs,{"job":dict(zip(("wait","service"),parts))}) == expected

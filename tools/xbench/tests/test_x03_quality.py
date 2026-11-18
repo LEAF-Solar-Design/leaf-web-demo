@@ -561,3 +561,21 @@ def test_storage_instantaneous_limits(power, inv, bat, expected):
 def test_bend_sidewall_load(radius, tension, limit, expected):
     from benches.x03_quality import sidewall_pressure_quality
     assert sidewall_pressure_quality([dict(radius_m=radius,tension_n=tension,limit_n_per_m=limit)]) == expected
+
+
+@pytest.mark.parametrize("age,cycles,required,rule,expected", [
+    (5,500,72,"product","PASS"), (5,500,80,"product","FAIL"),
+    (5,500,80,"minimum","PASS"), (11,500,50,"product","INCOMPLETE"), (5,None,50,"minimum","INCOMPLETE"),
+], ids=["aged-exact-boundary","new-capacity-overstates-usable-energy","declared-minimum-model","outside-curve","unknown-cycles"])
+def test_retained_battery_energy(age, cycles, required, rule, expected):
+    from benches.x03_quality import retained_energy_quality
+    assert retained_energy_quality(100,required,age,cycles,[(0,1),(10,0.8)],[(0,1),(1000,0.6)],rule) == expected
+
+
+@pytest.mark.parametrize("branches,trip,expected", [
+    (["east","west"],15,"PASS"), (["east"],15,"FAIL"), (["east","west"],16,"FAIL"),
+    (None,15,"INCOMPLETE"), (["west"],None,"INCOMPLETE"),
+], ids=["exact-trip-current","uncovered-return","below-sensitivity","missing-coverage","unknown-threshold"])
+def test_ground_fault_sensing(branches, trip, expected):
+    from benches.x03_quality import ground_fault_quality
+    assert ground_fault_quality({"east":40,"west":15},[dict(branches=branches,trip_ma=trip)]) == expected

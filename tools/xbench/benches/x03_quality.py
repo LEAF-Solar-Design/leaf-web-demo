@@ -934,3 +934,61 @@ def sidewall_pressure_quality(bends):
         if tension < 0 or radius <= 0 or limit <= 0 or tension > radius * limit:
             return "FAIL"
     return "PASS"
+
+
+def retained_energy_quality(new_kwh, required_kwh, age_years, cycles, age_curve, cycle_curve, combination):
+    """Interpolate each retention fraction within its recorded range using the declared combination."""
+    if combination not in ("minimum", "product") or None in (new_kwh, required_kwh, age_years, cycles):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (new_kwh, required_kwh, age_years))) or type(cycles) is not int:
+        return "FAIL"
+    if new_kwh <= 0 or min(required_kwh, age_years, cycles) < 0:
+        return "FAIL"
+    factors = []
+    for curve, value in ((age_curve, age_years), (cycle_curve, cycles)):
+        if not isinstance(curve, list) or not curve:
+            return "INCOMPLETE"
+        points = []
+        for point in curve:
+            if not isinstance(point, (tuple, list)) or len(point) != 2 or None in point:
+                return "INCOMPLETE"
+            if not all(map(finite_measure, point)) or point[0] < 0 or not 0 <= point[1] <= 1:
+                return "FAIL"
+            x, y = (Fraction(str(v)) for v in point)
+            if points and (x <= points[-1][0] or y > points[-1][1]):
+                return "FAIL"
+            points.append((x,y))
+        v = Fraction(str(value))
+        if not points[0][0] <= v <= points[-1][0]:
+            return "INCOMPLETE"
+        factor = points[0][1]
+        for (a, left), (b, right) in zip(points, points[1:]):
+            if a <= v <= b:
+                factor = left + (right-left) * (v-a) / (b-a)
+                break
+        factors.append(factor)
+    retained = min(factors) if combination == "minimum" else factors[0] * factors[1]
+    return "PASS" if Fraction(str(new_kwh)) * retained >= Fraction(str(required_kwh)) else "FAIL"
+
+
+def ground_fault_quality(leakage_ma, sensors):
+    """Each branch is a separate single-fault scenario. Any covering sensor may trip."""
+    if not isinstance(leakage_ma, dict) or not leakage_ma or not isinstance(sensors, list):
+        return "INCOMPLETE"
+    if None in leakage_ma.values():
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v > 0 for v in leakage_ma.values()):
+        return "FAIL"
+    detected = set()
+    for sensor in sensors:
+        if not isinstance(sensor, dict) or not isinstance(sensor.get("branches"), list) or sensor.get("trip_ma") is None:
+            return "INCOMPLETE"
+        if not all(isinstance(k, str) for k in sensor["branches"]):
+            return "INCOMPLETE"
+        threshold = sensor["trip_ma"]
+        if not finite_measure(threshold) or threshold <= 0:
+            return "FAIL"
+        for branch in sensor["branches"]:
+            if branch in leakage_ma and leakage_ma[branch] >= threshold:
+                detected.add(branch)
+    return "PASS" if detected == leakage_ma.keys() else "FAIL"

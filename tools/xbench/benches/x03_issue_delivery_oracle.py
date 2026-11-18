@@ -250,3 +250,32 @@ def retry_schedule_quality(attempts, retry_budget):
                 return "FAIL"
             earliest = Fraction(str(received)) + Fraction(str(delay))
     return "PASS"
+
+
+def idempotency_collision_quality(attempts):
+    """In one key namespace, bind the first successful request and receipt to its complete identity."""
+    if not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    bindings, issued = {}, set()
+    for row in attempts:
+        fields = ("key", "payload_digest", "destination", "revision", "outcome")
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
+            return "INCOMPLETE"
+        if "receipt" not in row or type(row.get("new_effects")) is not int:
+            return "INCOMPLETE"
+        key = row["key"]
+        identity = (row["payload_digest"], row["destination"], row["revision"])
+        receipt = row["receipt"]
+        if key not in bindings:
+            if row["outcome"] != "committed" or row["new_effects"] != 1:
+                return "FAIL"
+            if not isinstance(receipt,str) or not receipt or receipt in issued:
+                return "FAIL"
+            bindings[key] = identity, receipt
+            issued.add(receipt)
+        else:
+            original, original_receipt = bindings[key]
+            expected = ("replayed", original_receipt) if identity == original else ("conflict", None)
+            if (row["outcome"], receipt) != expected or row["new_effects"] != 0:
+                return "FAIL"
+    return "PASS"

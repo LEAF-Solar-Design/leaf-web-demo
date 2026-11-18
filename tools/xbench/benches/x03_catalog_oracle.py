@@ -300,3 +300,34 @@ def reserved_stock_quality(version, inventory, demand, allocations, reservations
         if start <= as_of < expiry:
             lots[lot]["available"] -= quantity
     return stock_allocation_quality(version, dict(inventory, lots=lots), demand, allocations)
+
+
+def lot_recall_quality(selected, bulletin, revision):
+    """Serial intervals in the pinned bulletin are inclusive and specific to a part and lot."""
+    if not isinstance(selected, list) or not selected or not isinstance(bulletin, dict) or not revision:
+        return "INCOMPLETE"
+    if bulletin.get("revision") is None or not isinstance(bulletin.get("ranges"), list):
+        return "INCOMPLETE"
+    if bulletin["revision"] != revision:
+        return "FAIL"
+    recalls = {}
+    for row in bulletin["ranges"]:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k),str) and row[k] for k in ("part","lot")):
+            return "INCOMPLETE"
+        lo, hi = row.get("first"), row.get("last")
+        if lo is None or hi is None:
+            return "INCOMPLETE"
+        if type(lo) is not int or type(hi) is not int or not 0 <= lo <= hi:
+            return "FAIL"
+        recalls.setdefault((row["part"],row["lot"]), []).append((lo,hi))
+    for unit in selected:
+        if not isinstance(unit,dict) or not all(isinstance(unit.get(k),str) and unit[k] for k in ("part","lot")):
+            return "INCOMPLETE"
+        serial = unit.get("serial")
+        if serial is None:
+            return "INCOMPLETE"
+        if type(serial) is not int or serial < 0:
+            return "FAIL"
+        if any(lo <= serial <= hi for lo,hi in recalls.get((unit["part"],unit["lot"]), [])):
+            return "FAIL"
+    return "PASS"

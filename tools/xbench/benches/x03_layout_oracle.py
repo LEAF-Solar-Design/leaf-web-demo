@@ -411,3 +411,32 @@ def ponding_quality(areas, residual_kn, water_kn_per_m3):
         if volume * unit_weight > Fraction(str(capacity)):
             return "FAIL"
     return "PASS"
+
+
+def seismic_anchor_quality(equipment):
+    """For each item distribute m*a shear by recorded fractions across its anchor group."""
+    if not isinstance(equipment, list) or not equipment:
+        return "INCOMPLETE"
+    for item in equipment:
+        if not isinstance(item, dict) or any(item.get(k) is None for k in ("mass_kg", "lateral_m_s2", "anchors")):
+            return "INCOMPLETE"
+        mass, acceleration, anchors = item["mass_kg"], item["lateral_m_s2"], item["anchors"]
+        if not isinstance(anchors, dict) or not anchors:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, (mass, acceleration))) or mass <= 0 or acceleration < 0:
+            return "FAIL"
+        force = Fraction(str(mass)) * Fraction(str(acceleration))
+        total = Fraction(0)
+        for anchor in anchors.values():
+            if not isinstance(anchor, dict) or any(anchor.get(k) is None for k in ("fraction", "shear_n")):
+                return "INCOMPLETE"
+            share, rating = anchor["fraction"], anchor["shear_n"]
+            if not all(map(finite_measure, (share,rating))) or not 0 <= share <= 1 or rating <= 0:
+                return "FAIL"
+            fraction = Fraction(str(share))
+            if force * fraction > Fraction(str(rating)):
+                return "FAIL"
+            total += fraction
+        if total != 1:
+            return "FAIL"
+    return "PASS"
