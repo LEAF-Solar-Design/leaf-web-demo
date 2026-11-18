@@ -440,3 +440,18 @@ def seismic_anchor_quality(equipment):
         if total != 1:
             return "FAIL"
     return "PASS"
+
+
+def pad_pressure_quality(reactions, areas, roof_limits):
+    """Check each support reaction in N against its contact area and N/m^2 limit."""
+    if not all(isinstance(x, dict) and x for x in (reactions, areas, roof_limits)):
+        return "INCOMPLETE"
+    if reactions.keys() != areas.keys() or reactions.keys() != roof_limits.keys():
+        return "INCOMPLETE"
+    for pad, reaction in reactions.items():
+        area, limit = areas[pad], roof_limits[pad]
+        if not all(map(finite_measure, (reaction, area, limit))):
+            return "INCOMPLETE"
+        if reaction < 0 or min(area, limit) <= 0 or Fraction(str(reaction)) > Fraction(str(area)) * Fraction(str(limit)):
+            return "FAIL"
+    return "PASS"
