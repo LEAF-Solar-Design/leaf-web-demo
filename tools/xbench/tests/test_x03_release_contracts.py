@@ -251,3 +251,26 @@ def test_reproducible_content_zip(tmp_path, change, ignore, expected):
             if index and change == "comment":
                 archive.comment = b"changed"
     assert reproducible_zip_quality(*paths, ignore) == expected
+
+
+@pytest.mark.parametrize("name,size", [("drawing",8),("schedule",32),("catalog",128)])
+def test_zip_ratio_gate_before_any_member_read(tmp_path,monkeypatch,name,size):
+    from hashlib import sha256
+    from zipfile import ZipFile, ZIP_STORED, ZIP_DEFLATED
+    from benches.x03_package_oracle import compression_ratio_quality as grade
+    path = tmp_path / "fixture.zip"
+    data = b"x" * size
+    with ZipFile(path,"w",ZIP_STORED if size == 8 else ZIP_DEFLATED) as archive:
+        archive.writestr("empty", b"")
+        archive.writestr(name,data)
+    manifest = {"members":["empty",name],"sha256":{"empty":sha256(b"").hexdigest(),name:sha256(data).hexdigest()}}
+    with ZipFile(path) as archive:
+        packed = archive.getinfo(name).compress_size
+    from math import ceil
+    assert grade(path,manifest,ceil(size/packed)) == "PASS"
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("content opened before checking every member ratio")
+    monkeypatch.setattr(ZipFile,"open",unexpected_read)
+    assert grade(path,manifest,(size-1)/packed) == "FAIL"
+    for limit in (None,0,False,float("nan")):
+        assert grade(path,manifest,limit) == "INCOMPLETE"

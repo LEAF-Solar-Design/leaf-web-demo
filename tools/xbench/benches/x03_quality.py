@@ -1201,3 +1201,68 @@ def cell_spread_quality(inventory, readings, max_spread):
     if min(volts) <= 0 or max_spread < 0:
         return "FAIL"
     return "PASS" if max(volts) - min(volts) <= Fraction(str(max_spread)) else "FAIL"
+
+
+def relay_trace_quality(trace, trip, reset, reset_delay, initially_tripped=False):
+    """Replay a sampled high-trip relay with inclusive pickup and dropout thresholds."""
+    if not isinstance(trace, list) or not trace or type(initially_tripped) is not bool:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (trip, reset, reset_delay))) or reset >= trip or reset_delay < 0:
+        return "INCOMPLETE"
+    previous = below_since = None
+    active = initially_tripped
+    for row in trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        stamp, signal, recorded = row
+        if not all(map(finite_measure, (stamp, signal))) or type(recorded) is not bool:
+            return "INCOMPLETE"
+        when = Fraction(str(stamp))
+        if previous is not None and when <= previous:
+            return "INCOMPLETE"
+        previous = when
+        if signal >= trip:
+            active = True
+        if active and signal <= reset:
+            if below_since is None:
+                below_since = when
+            if when - below_since >= Fraction(str(reset_delay)):
+                active = False
+        else:
+            below_since = None
+        if recorded != active:
+            return "FAIL"
+    return "PASS"
+
+
+def bypass_string_quality(substrings, current, revision, curves, reported_watts):
+    """At one common series current clamp each substring to its diode's forward drop."""
+    from math import isclose
+    if not isinstance(substrings, dict) or not substrings or not isinstance(curves, dict) or not revision:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (current, reported_watts))) or current < 0 or not curves.get("revision"):
+        return "INCOMPLETE"
+    if revision != curves["revision"]:
+        return "FAIL"
+    tables = curves.get("volts_by_current")
+    if not isinstance(tables, dict):
+        return "INCOMPLETE"
+    voltage = 0
+    for record in substrings.values():
+        if not isinstance(record, dict) or not isinstance(record.get("shading"), str):
+            return "INCOMPLETE"
+        drop = record.get("diode_drop")
+        table = tables.get(record["shading"])
+        if not finite_measure(drop) or drop < 0 or not isinstance(table, list) or len(table) < 2:
+            return "INCOMPLETE"
+        if not all(isinstance(p, (tuple, list)) and len(p) == 2 and all(map(finite_measure, p)) for p in table):
+            return "INCOMPLETE"
+        if any(a[0] >= b[0] for a,b in zip(table, table[1:])):
+            return "INCOMPLETE"
+        for (lo, vl), (hi, vh) in zip(table, table[1:]):
+            if lo <= current <= hi:
+                voltage += max(-drop, vl + (vh-vl) * (current-lo)/(hi-lo))
+                break
+        else:
+            return "INCOMPLETE"
+    return "PASS" if isclose(reported_watts, current * voltage, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"

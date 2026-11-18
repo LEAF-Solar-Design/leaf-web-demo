@@ -210,3 +210,21 @@ def spatial_voltage_quality(samples, weights, *, reported, **conditions):
     if len(timestamps) != 1:
         return "INCOMPLETE"
     return _voltage_verdict(total, reported)
+
+
+def condensation_quality(air_c, humidity_pct, surface_c, rule, reported_risk):
+    """Magnus dew point over water using caller-declared coefficients. Equality is at risk."""
+    from math import log
+    from benches.x03_quality import finite_measure
+    if not isinstance(rule, dict) or rule.get("method") != "magnus-water" or type(reported_risk) is not bool:
+        return "INCOMPLETE"
+    a, b = rule.get("a"), rule.get("b_c")
+    if not all(map(finite_measure, (air_c, humidity_pct, surface_c, a, b))):
+        return "INCOMPLETE"
+    if not 0 < humidity_pct <= 100 or min(a,b) <= 0 or air_c <= -b:
+        return "INCOMPLETE"
+    gamma = log(humidity_pct/100) + a * air_c / (b + air_c)
+    if gamma >= a:
+        return "INCOMPLETE"
+    dew_c = air_c if humidity_pct == 100 else b * gamma / (a-gamma)
+    return "PASS" if reported_risk == (surface_c <= dew_c) else "FAIL"

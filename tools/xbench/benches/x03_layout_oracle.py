@@ -539,3 +539,23 @@ def door_sweep_quality(hinge, tip, opening_degrees, obstacles):
                 return "FAIL"
         angle += step
     return "PASS"
+
+
+def buckling_quality(rails, end_factors):
+    """Euler elastic buckling in N and mm with effective length K times unsupported length."""
+    from math import pi
+    if not isinstance(rails, list) or not rails or not isinstance(end_factors, dict):
+        return "INCOMPLETE"
+    for rail in rails:
+        if not isinstance(rail, dict) or not isinstance(rail.get("end_condition"), str):
+            return "INCOMPLETE"
+        k = end_factors.get(rail["end_condition"])
+        values = [rail.get(key) for key in ("length_mm", "modulus_mpa", "weak_inertia_mm4", "compression_n")]
+        if not all(map(finite_measure, [k, *values])):
+            return "INCOMPLETE"
+        length, modulus, inertia, force = values
+        if min(length, modulus, inertia, k) <= 0 or force < 0:
+            return "FAIL"
+        if force > pi**2 * modulus * inertia / (k * length)**2:
+            return "FAIL"
+    return "PASS"
