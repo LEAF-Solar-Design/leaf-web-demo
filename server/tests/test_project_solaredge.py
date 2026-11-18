@@ -700,6 +700,71 @@ def test_real_pdf_parser_matching_and_historical_tracking(lane, monkeypatch):
     assert output["references"]["current"] is True
 
 
+@pytest.mark.parametrize("variant,expected", [("one-to-one", 6), ("paired", 4), ("bridge", 6)])
+def test_explicit_optimizer_measurement_saved_and_read(lane, monkeypatch, variant, expected):
+    s = lane
+    matrices = [samples.two_block_grid()] if variant == "bridge" else deepcopy(samples.GRIDS)
+    marker = 0
+    for matrix in matrices:
+        positions = [[r, c] for r, row in enumerate(matrix["Rows"])
+                     for c, cell in enumerate(row["Panels"]) if cell["Code"] == 1]
+        groups = [positions[:2], positions[2:]] if variant == "paired" else [[pos] for pos in positions]
+        matrix["Optimizers"] = []
+        for cells in groups:
+            marker += 1
+            matrix["Optimizers"].append({"id": f"pdf-optimizer-{marker}",
+                "vendor_label": "42", "cells": cells})  # Printed labels need not be unique.
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    result = report(s)
+    _, _, accepted = accept(s, result)
+    record = accepted.graph["extra"][se.tracking.STORE_KEY]
+    measurement = record["optimizer_measurement"]
+    assert measurement["complete"] is True
+    assert measurement["total_count"] == expected
+    assert sum(measurement["string_counts"]) == expected
+    assert len({row["id"] for row in measurement["optimizers"]}) == expected
+    assert measurement["graph_rev"] == accepted.graph["rev"]
+    handles = {p["id"]: p["provenance"]["source_handle"].upper() for p in accepted.graph["panels"]}
+    assert {ref for row in measurement["optimizers"] for ref in row["panel_refs"]} == set(handles)
+    for opt in measurement["optimizers"]:
+        assert [handles[ref] for ref in opt["panel_refs"]] == opt["panel_handles"]
+        assert set(opt["panel_refs"]) <= set(record["strings"][opt["string_index"]]["panel_refs"])
+    assert read(s, accepted)["output"]["optimizer_measurement"] == measurement
+    later_graph = deepcopy(accepted.graph)
+    later_graph["rev"] += 1
+    later_intake = accepted.intake
+    later_intake["solar_design_graph"] = later_graph
+    later_intake["solar_design_graph_sha256"] = graphs.local.digest(later_graph)
+    later_bytes = canonical_bytes(later_intake)
+    later = replace(accepted, intake_bytes=later_bytes, intake_sha256=sha256(later_bytes).hexdigest())
+    stale = se.read_tracking(s.tenant, later, {})["optimizer_measurement"]
+    assert stale["complete"] is False and stale["total_count"] is None and stale["string_counts"] is None
+
+
+@pytest.mark.parametrize("negative", ["missing-panel", "duplicate-id", "unmapped", "cross-string"])
+def test_incomplete_optimizer_measurement_never_supplies_counts(lane, monkeypatch, negative):
+    matrices = deepcopy(samples.GRIDS)
+    for index, matrix in enumerate(matrices):
+        matrix["Optimizers"] = [{"id": f"pdf-optimizer-{index * 3 + c}", "vendor_label": None,
+                                 "cells": [[0, c]]} for c in range(3)]
+    if negative == "missing-panel":
+        matrices[0]["Optimizers"].pop()
+    elif negative == "duplicate-id":
+        matrices[1]["Optimizers"][0]["id"] = matrices[0]["Optimizers"][0]["id"]
+    elif negative == "unmapped":
+        matrices[0]["Optimizers"][0]["cells"] = []
+    else:
+        matrices[0]["Sequences"] = [1, 2]
+        matrices[0]["Optimizers"] = [{"id": "pdf-optimizer-99", "vendor_label": None,
+                                      "cells": [[0, 0], [0, 1], [0, 2]]}]
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    _, _, accepted = accept(lane, report(lane))
+    measured = accepted.graph["extra"][se.tracking.STORE_KEY]["optimizer_measurement"]
+    assert measured["complete"] is False
+    assert measured["total_count"] is None and measured["string_counts"] is None
+    assert read(lane, accepted)["output"]["optimizer_measurement"]["total_count"] is None
+
+
 # Synthetic intake-phase diagnostics share this registered producer suite.
 PHASES = ("authorization", "inspection", "artifact_prepare", "authority_recheck",
           "slot_reservation", "artifact_finish", "artifact_commit")
@@ -789,3 +854,28 @@ def test_separate_attempts_get_distinct_correlation_ids(lane, capfd):
     upload(lane)
     second = records(capfd)
     assert first[0]["attempt_id"] != second[0]["attempt_id"]
+
+
+def test_missing_v1_report_replays_original_matrix_protocol(lane, monkeypatch):
+    s = lane
+    original_hash = se._request_sha
+    with monkeypatch.context() as historic:
+        historic.setattr(se, "_request_sha", lambda req, source, **kw: original_hash(req, source, legacy=True))
+        result = report(s)
+        _, _, ctx = accept(s, result)
+    record = ctx.graph["extra"][se.tracking.STORE_KEY]
+    meta, _ = se.artifacts.read_project_artifact(str(s.org), s.project, s.drawing,
+                                                result["report"]["artifact_id"])
+    scope = {key: meta[key] for key in ("organization_id", "project_id", "drawing_id")}
+    monkeypatch.delitem(s.blobs, se.artifacts._key(scope, meta["content_sha256"], blob=True))
+    modes = []
+
+    def replay(content, *, legacy=False):
+        modes.append(legacy)
+        return deepcopy(samples.GRIDS)
+
+    monkeypatch.setattr(se.reports, "parse_source", replay)
+    restored = read(s, ctx, section="strings")["output"]
+    assert restored["accepted"] and restored["report_download"]["available"] is False
+    assert restored["provenance"]["report"]["content_sha256"] == record["report"]["content_sha256"]
+    assert modes == [True]

@@ -41,15 +41,17 @@ def _refusal_bytes(reason=REFUSAL):
                       separators=(",", ":")).encode("utf-8")
 
 
-def verdict_bytes(data):
+def verdict_bytes(data, *, legacy=False):
     """The encoded verdict for one PDF. Never raises for a parser failure: every one is the refusal."""
     if not isinstance(data, (bytes, bytearray)) or len(data) > MAX_INPUT_BYTES:
         return _refusal_bytes()
     try:
         import solar_solaredge_pdf
         import solar_solaredge_parse
-        matrices = solar_solaredge_parse.parse_primitives(
-            solar_solaredge_pdf.extract_primitives(bytes(data)), PARSE_BASE_NAME)[1]
+        parsed = solar_solaredge_parse.SolarEdgeParse(solar_solaredge_pdf.extract_primitives(bytes(data)))
+        matrices = (parsed.generate_matrix_jsons(PARSE_BASE_NAME) if legacy
+                    else parsed.identity_matrices(PARSE_BASE_NAME))
+        _validate_identities(matrices)
         payload = json.dumps({"schema": VERDICT_SCHEMA, "matrices": matrices},
                              separators=(",", ":")).encode("utf-8")
     except (ValueError, LookupError, TypeError, ArithmeticError, RecursionError, MemoryError) as error:
@@ -113,8 +115,47 @@ def decode_verdict(returncode, out):
     if value is None:
         return None
     if set(value) == {"schema", "matrices"} and type(value["matrices"]) is list:
+        try:
+            _validate_identities(value["matrices"])
+        except (ValueError, TypeError, KeyError, IndexError):
+            return None
         return value["matrices"]
     return None
+
+
+def _validate_identities(matrices):
+    """Bound the additive identity data without changing the historical matrix protocol."""
+    import re
+    count = cells = 0
+    for matrix in matrices:
+        if type(matrix) is not dict or "Optimizers" not in matrix:
+            continue
+        items = matrix["Optimizers"]
+        if type(items) is not list:
+            raise ValueError("invalid optimizer list")
+        count += len(items)
+        if count > 100_000:
+            raise ValueError("optimizer limit")
+        for item in items:
+            if (type(item) is not dict or set(item) != {"id", "vendor_label", "cells"}
+                    or type(item["id"]) is not str
+                    or re.fullmatch(r"pdf-optimizer-[0-9]{1,10}", item["id"]) is None
+                    or (item["vendor_label"] is not None and
+                        (type(item["vendor_label"]) is not str or
+                         re.fullmatch(r"[0-9]{1,32}", item["vendor_label"]) is None))
+                    or type(item["cells"]) is not list):
+                raise ValueError("invalid optimizer")
+            cells += len(item["cells"])
+            if cells > 200_000:
+                raise ValueError("optimizer panel limit")
+            for pos in item["cells"]:
+                if (type(pos) is not list or len(pos) != 2
+                        or any(type(n) is not int or n < 0 for n in pos)):
+                    raise ValueError("invalid optimizer cell")
+                r, c = pos
+                rows = matrix["Rows"]
+                if r >= len(rows) or c >= len(rows[r]["Panels"]) or rows[r]["Panels"][c]["Code"] != 1:
+                    raise ValueError("optimizer cell is not a panel")
 
 
 def decode_refusal(returncode, out):
@@ -126,12 +167,12 @@ def decode_refusal(returncode, out):
     return None
 
 
-def main():
+def main(*, legacy=False):
     data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    sys.stdout.buffer.write(verdict_bytes(data))
+    sys.stdout.buffer.write(verdict_bytes(data, legacy=legacy))
     sys.stdout.buffer.flush()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(legacy=sys.argv[1:] == ["--legacy-matrices"]))
