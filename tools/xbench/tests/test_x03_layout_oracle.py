@@ -296,3 +296,13 @@ def test_differential_settlement(left,right,span,ratio):
     assert grade({"A":left,"B":right},rule) == "PASS"
     assert grade({"A":left,"B":right+0.1},rule) == "FAIL"
     assert grade({"A":left},rule) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("low,high,expected", [(100,25,"PASS"),(500,50,"FAIL"),(800,50,"FAIL")])
+def test_miner_sum_over_all_stress_bins(low,high,expected):
+    from benches.x03_layout_oracle import fatigue_quality as grade
+    curve = dict(revision="lot-a",cycles_to_failure={20:1000,40:100})
+    bins = {20:low,40:high}
+    assert grade(bins,[20,40],curve,"lot-a","miner-linear") == expected
+    assert grade({20:low},[20,40],curve,"lot-a","miner-linear") == "INCOMPLETE"
+    assert grade(bins,[20,40],curve,"lot-b","miner-linear") == "FAIL"

@@ -342,3 +342,16 @@ def test_littles_law_matched_cohort(population,jobs,rate,seconds):
     for mismatch in (dict(population="other"),dict(end=61),dict(value=seconds+1)):
         assert grade(dict(rows,mean_seconds=dict(rows["mean_seconds"],**mismatch)),True,0) == "FAIL"
     assert grade(rows,None,0) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("limit,dispatch,expected", [(5,None,["low"]), (4,4,[]), (3,4,["low"])])
+def test_aging_of_eligible_work_amid_fast_dispatches(limit,dispatch,expected):
+    from benches.x03_dashboard_oracle import starvation_quality as grade
+    ready = [("low","batch",0,None)] + [(str(i),"urgent",i,i+1) for i in range(5)]
+    events = {(str(i),i):i for i in range(5)}
+    if dispatch is not None:
+        events["low",0] = dispatch
+    policy = {"batch":limit,"urgent":1}
+    assert grade(ready,events,6,policy,expected) == "PASS"
+    assert grade(ready,events,6,policy,[] if expected else ["low"]) == "FAIL"
+    assert grade(ready,events,6,None,expected) == "INCOMPLETE"
