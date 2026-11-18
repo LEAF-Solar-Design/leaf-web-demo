@@ -638,6 +638,38 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
 
     assigned = {h for s in strings + bridge_strings for h in s["panels"]}
     unassigned = sorted(set(grouped) - assigned, key=lambda h: int(h, 16))
-    return {"matches": matches, "strings": strings, "bridge_strings": bridge_strings,
+    result = {"matches": matches, "strings": strings, "bridge_strings": bridge_strings,
             "unassigned": unassigned, "matchable_count": len(grids),
             "bridge_grid_count": len(bridge_data)}
+    if any("Optimizers" in matrix for matrix in matrices):
+        # Coordinates, never parser-local hex panel IDs, establish the correspondence.
+        positions = {}
+        for match in matches:
+            if match["grid_index"] is None:
+                continue
+            original_index = match["original_index"]
+            original = matrices[original_index]
+            row_offset = col_offset = 0
+            allowed = None
+            if match["sub_grid_id"] != -1:
+                sub = next(sg for sg in original["SubGrids"] if sg["Id"] == match["sub_grid_id"])
+                allowed = _json_cells(sub, len(original["Rows"]), len(original["Rows"][0]["Panels"]))
+                row_offset = min(r for r, _ in allowed)
+                col_offset = min(c for _, c in allowed)
+            for r, row in enumerate(match["merged"]["Rows"]):
+                for c, cell in enumerate(row["Panels"]):
+                    pos = (r + row_offset, c + col_offset)
+                    if cell["Code"] == 1 and cell["Id"] and (allowed is None or pos in allowed):
+                        positions.setdefault((original_index, *pos), set()).add(cell["Id"])
+        optimizers = []
+        complete = all("Optimizers" in matrix for matrix in matrices)
+        for index, matrix in enumerate(matrices):
+            for opt in matrix.get("Optimizers", []):
+                handles = []
+                for r, c in opt["cells"]:
+                    found = positions.get((index, r, c), set())
+                    handles.append(next(iter(found)) if len(found) == 1 else None)
+                optimizers.append({"id": opt["id"], "vendor_label": opt["vendor_label"],
+                                   "pdf_matrix": index, "panel_handles": handles})
+        result["optimizer_measurement"] = {"complete": complete, "optimizers": optimizers}
+    return result

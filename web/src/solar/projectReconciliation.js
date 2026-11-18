@@ -100,6 +100,76 @@ function uniqueIds(items, kind) {
   return ids
 }
 
+export function savedOptimizerMeasurement(graph) {
+  try {
+    const record = graph?.extra?.solaredge_import, measurement = record?.optimizer_measurement
+    const hash = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+    const index = value => Number.isSafeInteger(value) && value >= 0 && value <= 1000000
+    if (record?.schema !== 'leaf.solar-project-solaredge-import.v1' ||
+        measurement?.schema !== 'leaf.solaredge-optimizer-measurement.v1' ||
+        measurement.complete !== true || !Number.isSafeInteger(graph.rev) ||
+        measurement.graph_rev !== graph.rev ||
+        !Array.isArray(measurement.optimizers) || measurement.optimizers.length > 100000 ||
+        !Array.isArray(measurement.string_counts) || !Array.isArray(record.strings) ||
+        !Array.isArray(record.frames) || !Array.isArray(record.unassigned_panel_refs) ||
+        record.unassigned_panel_refs.length ||
+        !hash(record.source?.artifact_id) || !hash(record.source?.content_sha256) ||
+        !hash(record.report?.artifact_id) || !hash(record.report?.content_sha256) || !hash(record.report?.graph_sha256) ||
+        (record.acceptance && record.acceptance.status !== 'complete') ||
+        !Array.isArray(graph.panels) || !Array.isArray(graph.frames)) return null
+    const panels = uniqueIds(graph.panels, 'panel'), frames = uniqueIds(graph.frames, 'frame')
+    if (!panels || !frames || record.frames.length !== frames.size ||
+        record.strings.length !== measurement.string_counts.length) return null
+    const panelHandles = new Map(graph.panels.map(p => [p.id, p.provenance?.source_handle?.toUpperCase()]))
+    const frameOf = new Map(), matched = new Set()
+    for (const frame of graph.frames) {
+      if (!Array.isArray(frame.panel_refs) || frame.ground_slots) return null
+      for (const ref of frame.panel_refs) {
+        if (!panels.has(ref) || frameOf.has(ref)) return null
+        frameOf.set(ref, frame.id)
+      }
+    }
+    if (frameOf.size !== panels.size) return null
+    for (const frame of record.frames) {
+      if (!frames.has(frame?.frame_ref) || matched.has(frame.frame_ref) ||
+          !index(frame.pdf_matrix) || !index(frame.pdf_grid)) return null
+      matched.add(frame.frame_ref)
+    }
+    const owner = new Map(), counts = record.strings.map(() => 0)
+    for (const [index, row] of record.strings.entries()) {
+      if (row?.index !== index || row.partial !== false || !Number.isSafeInteger(row.pdf_matrix) || row.pdf_matrix < 0 ||
+          !Array.isArray(row.panel_refs) || !row.panel_refs.length ||
+          !['group', 'bridge'].includes(row.source) ||
+          (row.source === 'group' && !matched.has(row.frame_ref))) return null
+      for (const ref of row.panel_refs) {
+        if (!panels.has(ref) || owner.has(ref) ||
+            (row.source === 'group' && frameOf.get(ref) !== row.frame_ref)) return null
+        owner.set(ref, index)
+      }
+    }
+    const ids = new Set(), covered = new Set()
+    for (const opt of measurement.optimizers) {
+      if (typeof opt?.id !== 'string' || !/^pdf-optimizer-[0-9]{1,10}$/.test(opt.id) || ids.has(opt.id) ||
+          !(opt.vendor_label === null || typeof opt.vendor_label === 'string' && /^[0-9]{1,32}$/.test(opt.vendor_label)) ||
+          !Array.isArray(opt.panel_refs) || !opt.panel_refs.length || !Array.isArray(opt.panel_handles) ||
+          opt.panel_refs.length !== opt.panel_handles.length || !Number.isSafeInteger(opt.string_index) ||
+          opt.string_index < 0 || opt.string_index >= counts.length ||
+          opt.pdf_matrix !== record.strings[opt.string_index].pdf_matrix) return null
+      ids.add(opt.id)
+      for (const [index, ref] of opt.panel_refs.entries()) {
+        if (!panels.has(ref) || covered.has(ref) || owner.get(ref) !== opt.string_index ||
+            typeof opt.panel_handles[index] !== 'string' || !/^[0-9A-F]{1,32}$/.test(opt.panel_handles[index]) ||
+            panelHandles.get(ref) !== opt.panel_handles[index]) return null
+        covered.add(ref)
+      }
+      counts[opt.string_index]++
+    }
+    if (covered.size !== panels.size || owner.size !== panels.size || measurement.total_count !== ids.size ||
+        counts.some((count, index) => count !== measurement.string_counts[index])) return null
+    return { total_count: ids.size, string_counts: counts }
+  } catch { return null }
+}
+
 export function savedReconciliationValues(graph) {
   const unavailable = (reason) => ({ value: null, reason })
   const values = RECONCILIATION_METRICS.map(() => unavailable('Read a valid saved design first.'))
@@ -159,6 +229,8 @@ export function savedReconciliationValues(graph) {
   }
   values[4] = dcValid && covered.size === panels.size ? available(total)
     : unavailable('DC needs complete, unique frame coverage and positive supported module watts for every panel.')
+  const optimizers = savedOptimizerMeasurement(graph)
+  if (optimizers) values[1] = available(BigInt(optimizers.total_count) * SCALE)
   return values
 }
 

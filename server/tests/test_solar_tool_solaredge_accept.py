@@ -111,7 +111,7 @@ def builtin():
 
 
 def parse_with(monkeypatch, matrices):
-    monkeypatch.setattr(report, "parse_source", lambda content: copy.deepcopy(matrices))
+    monkeypatch.setattr(report, "parse_source", lambda content, *, legacy=False: copy.deepcopy(matrices))
 
 
 def seeded(tmp_path, monkeypatch, graph=None, matrices=None, order="recorded", tolerance=1):

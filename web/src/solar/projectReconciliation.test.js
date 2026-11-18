@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseReconciliationNumber, reconciliationRows, reconciliationRowsFromValues, savedReconciliationValues, validReconciliationResponse, reconciliationCsv,
-  engineeringTotalsPath, createEngineeringTotalsRecord, parseEngineeringTotalsRecord } from './projectReconciliation.js'
+  engineeringTotalsPath, createEngineeringTotalsRecord, parseEngineeringTotalsRecord, savedOptimizerMeasurement } from './projectReconciliation.js'
 
 describe('private engineering totals records', () => {
   const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
@@ -60,6 +60,69 @@ function graph() {
     { id: id('inverter', 2), equipment_type: 'central_inverter' },
     { id: id('inverter', 3), equipment_type: 'combiner_box' }], settings: { optimizer_ratio: 1 } }
 }
+
+describe('explicit saved optimizer measurements', () => {
+  function measured(paired = false, bridge = false) {
+    const refs = [1, 2, 3, 4].map(n => id('panel', n))
+    const saved = { rev: 7, panels: refs.map((ref, index) => ({ id: ref,
+      provenance: { source_handle: `A${index}` } })),
+    frames: [1, 2].map((n, index) => ({ id: id('frame', n),
+      panel_refs: refs.slice(index * 2, index * 2 + 2), module_power_watts: 400 })), strings: [], inverters: [] }
+    const strings = bridge ? [{ index: 0, source: 'bridge', frame_ref: null, pdf_matrix: 0,
+      partial: false, panel_refs: refs }] : saved.frames.map((frame, index) => ({ index, source: 'group',
+      frame_ref: frame.id, pdf_matrix: 0, partial: false, panel_refs: frame.panel_refs }))
+    const groups = paired ? [refs.slice(0, 2), refs.slice(2)] : refs.map(ref => [ref])
+    const optimizers = groups.map((panel_refs, index) => ({ id: `pdf-optimizer-${index}`,
+      vendor_label: '42', pdf_matrix: 0, panel_refs, panel_handles: panel_refs.map(ref => `A${refs.indexOf(ref)}`),
+      string_index: bridge ? 0 : Math.floor(refs.indexOf(panel_refs[0]) / 2) }))
+    const string_counts = strings.map(row => optimizers.filter(opt => opt.string_index === row.index).length)
+    saved.extra = { solaredge_import: { schema: 'leaf.solar-project-solaredge-import.v1',
+      source: { artifact_id: 'a'.repeat(64), content_sha256: 'b'.repeat(64) },
+      report: { artifact_id: 'c'.repeat(64), content_sha256: 'd'.repeat(64), graph_sha256: 'e'.repeat(64) },
+      frames: saved.frames.map((frame, pdf_grid) => ({ frame_ref: frame.id, pdf_matrix: 0, pdf_grid })),
+      strings, unassigned_panel_refs: [],
+      optimizer_measurement: { schema: 'leaf.solaredge-optimizer-measurement.v1', graph_rev: 7,
+        complete: true, total_count: optimizers.length, string_counts, optimizers } } }
+    return saved
+  }
+  it.each([[false, false, 4, [2, 2]], [true, false, 2, [1, 1]], [true, true, 2, [2]]])(
+    'counts distinct markers with paired=%s bridge=%s', (paired, bridge, total, strings) => {
+      const saved = measured(paired, bridge), before = structuredClone(saved)
+      expect(savedOptimizerMeasurement(saved)).toEqual({ total_count: total, string_counts: strings })
+      expect(reconciliationRows(saved, ['4', String(total), '0', '0', '1.6'])[1])
+        .toMatchObject({ studio: String(total), delta: '0', verdict: 'PASS' })
+      expect(saved).toEqual(before)
+    })
+  it.each([
+    g => { g.rev++ },
+    g => { delete g.extra.solaredge_import.optimizer_measurement },
+    g => { delete g.extra.solaredge_import.report },
+    g => { g.extra.solaredge_import.optimizer_measurement.complete = false },
+    g => { g.extra.solaredge_import.optimizer_measurement.total_count++ },
+    g => { g.extra.solaredge_import.optimizer_measurement.string_counts[0]++ },
+    g => { g.extra.solaredge_import.optimizer_measurement.optimizers[1].id = 'pdf-optimizer-0' },
+    g => { g.extra.solaredge_import.optimizer_measurement.optimizers[0].panel_refs[0] = id('panel', 99) },
+    g => { g.extra.solaredge_import.optimizer_measurement.optimizers[0].string_index = 1 },
+    g => { g.extra.solaredge_import.optimizer_measurement.optimizers[0].panel_handles[0] = 'BAD' },
+    g => { g.extra.solaredge_import.strings[0].partial = true },
+    g => { g.extra.solaredge_import.frames.pop() },
+    g => { g.extra.solaredge_import.unassigned_panel_refs = [id('panel', 1)] },
+  ])('keeps stale, partial, missing or mismatched measurements unreadable', mutate => {
+    const saved = measured(); mutate(saved)
+    expect(savedOptimizerMeasurement(saved)).toBeNull()
+    expect(reconciliationRows(saved, ['4', '0', '0', '0', '1.6'])[1])
+      .toMatchObject({ studio: '', delta: '', verdict: 'UNREADABLE' })
+  })
+  it('distinguishes explicit complete zero from missing measurement', () => {
+    const saved = measured(), record = saved.extra.solaredge_import
+    saved.panels = []; saved.frames = []
+    record.frames = []; record.strings = []
+    Object.assign(record.optimizer_measurement, { total_count: 0, string_counts: [], optimizers: [] })
+    expect(reconciliationRows(saved, ['0', '0', '0', '0', ''])[1].verdict).toBe('PASS')
+    delete record.optimizer_measurement
+    expect(reconciliationRows(saved, ['0', '0', '0', '0', ''])[1].verdict).toBe('UNREADABLE')
+  })
+})
 
 describe('saved engineering reconciliation', () => {
   it('equates explicit panels and genuine compact slots under an explicit typed ID mapping', () => {
