@@ -10,6 +10,25 @@ UNITS = {
 }
 
 
+def ingress_quality(exposure, dust_code, water_code, catalog, revision):
+    """Use the pinned exposure's explicitly qualified dust and water codes."""
+    if not isinstance(catalog, dict) or not revision or not catalog.get("revision") or not isinstance(exposure,str):
+        return "INCOMPLETE"
+    if revision != catalog["revision"]:
+        return "FAIL"
+    rules = catalog.get("exposures")
+    rule = rules.get(exposure) if isinstance(rules,dict) else None
+    if not isinstance(rule,dict) or dust_code is None or water_code is None:
+        return "INCOMPLETE"
+    for axis, code in (("dust",dust_code), ("water",water_code)):
+        allowed = rule.get(axis)
+        if not isinstance(allowed,list) or not all(type(x) is int for x in allowed) or type(code) is not int:
+            return "INCOMPLETE"
+        if code not in allowed:
+            return "FAIL"
+    return "PASS"
+
+
 def pack_order_quality(catalog, revision, part, demand, ordered_units):
     """Buy the smallest whole-pack quantity that meets demand and the unit minimum."""
     if not isinstance(catalog, dict) or not revision or not catalog.get("revision"):

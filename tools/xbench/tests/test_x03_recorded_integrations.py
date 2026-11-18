@@ -5,6 +5,29 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("site,dust,water", [("dust chamber",6,4),("water jet",5,6),("immersion",6,8)])
+def test_installation_requires_both_qualified_ingress_codes(site,dust,water):
+    from benches.x03_catalog_oracle import ingress_quality as grade
+    catalog = dict(revision="sheet",exposures={site:dict(dust=[dust],water=[water])})
+    assert grade(site,dust,water,catalog,"sheet") == "PASS"
+    assert grade(site,dust-1,water,catalog,"sheet") == "FAIL"
+    assert grade(site,dust,water-1,catalog,"sheet") == "FAIL"
+    assert grade("unknown site",dust,water,catalog,"sheet") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("effects,terminal", [([],"quarantined"),([1],"recovered"),([0,1,0],"recovered")])
+def test_exhausted_delivery_quarantine_and_recovery(effects,terminal):
+    from benches.x03_issue_delivery_oracle import dead_letter_quality as grade
+    def replay(n):
+        return dict(delivery="job",parent_receipt="q1",new_effects=n)
+    rows = [replay(n) for n in effects]
+    assert grade(["job"],{"job":"q1"},rows,{"job":terminal}) == "PASS"
+    assert grade(["job"],{},[],{"job":"quarantined"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},[replay(1),replay(1)],{"job":"recovered"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},[dict(replay(1),parent_receipt="other")],{"job":"recovered"}) == "FAIL"
+    assert grade(["job"],{"job":"q1"},rows,{}) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("part,pack,minimum,demand,units", [
     ("clips", 4, 10, 1, 12), ("clamps", 5, 5, 14, 15), ("bolts", 12, 0, 24, 24)])
 def test_order_uses_pinned_pack_policy(part, pack, minimum, demand, units):

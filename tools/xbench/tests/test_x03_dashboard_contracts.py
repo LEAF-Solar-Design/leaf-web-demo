@@ -3,6 +3,18 @@ from collections import Counter
 import pytest
 
 
+@pytest.mark.parametrize("p,method,expected", [(50,"nearest-rank",5),(100,"nearest-rank",12),(75,"linear",8.5)])
+def test_cutoff_percentile_uses_pending_population(p,method,expected):
+    from benches.x03_dashboard_oracle import pending_age_quality as grade
+    opening = {"old":-2}
+    admissions = {"slow":5,"new":9,"done":7,"future":12}
+    departures = {"done":10,"slow":11}
+    # At cutoff 10 the ages are 1, 5 and 12. Completed-only age is 3.
+    assert grade(0,10,opening,admissions,departures,p,expected,method) == "PASS"
+    assert grade(0,10,opening,admissions,departures,p,3,method) == "FAIL"
+    assert grade(0,10,{"old":None},admissions,departures,p,expected,method) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("eligible,failures,target,remaining", [(10, 1, 0.9, 0), (4, 1, 0.95, -0.8), (20, 0, 0.95, 1)])
 def test_budget_excludes_probes_from_both_counts(eligible, failures, target, remaining):
     from benches.x03_dashboard_oracle import request_budget_quality

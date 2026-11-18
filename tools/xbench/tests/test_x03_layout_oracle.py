@@ -4,6 +4,15 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("force,arm,stiffness,limit", [(100,0.1,500,0.02),(40,-0.2,400,0.02),(150,0.02,100,0.03)])
+def test_rail_twist_at_permitted_bending_load(force,arm,stiffness,limit):
+    from benches.x03_layout_oracle import rail_twist_quality as grade
+    assert force <= 150
+    assert grade(force,arm,stiffness,limit) == "PASS"
+    assert grade(force,arm*1.1,stiffness,limit) == "FAIL"
+    assert grade(force,arm,None,limit) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("span,load,limit", [(100, 3, 0.390625), (200, 3, 6.25), (200, 1.5, 3.125)])
 def test_simple_span_uniform_load(span, load, limit):
     from benches.x03_layout_oracle import rail_deflection_quality

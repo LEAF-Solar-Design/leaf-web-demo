@@ -5,6 +5,24 @@ import json
 import re
 
 
+def pending_age_quality(start, cutoff, opening, admissions, departures, percentile, reported, policy):
+    """Age all work still pending at the inclusive cutoff using original enqueue times."""
+    from benches.x03_quality import finite_measure
+    if not all(map(finite_measure, (start,cutoff))) or start > cutoff:
+        return "INCOMPLETE"
+    if not all(isinstance(table,dict) for table in (opening,admissions,departures)):
+        return "INCOMPLETE"
+    if not all(finite_measure(t) for table in (opening,admissions,departures) for t in table.values()):
+        return "INCOMPLETE"
+    if opening.keys() & admissions.keys() or any(t > start for t in opening.values()) or any(t < start for t in admissions.values()):
+        return "FAIL"
+    entered = {**opening, **admissions}
+    if not departures.keys() <= entered.keys() or any(t < max(start,entered[k]) for k,t in departures.items()):
+        return "FAIL"
+    ages = [cutoff-t for k,t in entered.items() if t <= cutoff and (k not in departures or departures[k] > cutoff)]
+    return latency_percentile_quality(ages, percentile, reported, policy)
+
+
 def request_budget_quality(requests, eligible_classes, target, report):
     """Report allowed minus observed eligible failures, in fractional requests."""
     from fractions import Fraction

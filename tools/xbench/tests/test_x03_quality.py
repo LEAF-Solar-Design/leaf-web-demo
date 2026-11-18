@@ -2,6 +2,30 @@ import pytest
 from benches.x03_quality import inverter_quality, route_quality, string_quality
 
 
+@pytest.mark.parametrize("initial,capacity,intervals,peak", [
+    (20,100,[(10,100,50)],25), (22,200,[(4,150,50),(4,150,50)],26),
+    (24,100,[(10,20,100),(5,150,50)],25)])
+def test_pack_thermal_balance_within_electrical_rating(initial,capacity,intervals,peak):
+    from benches.x03_quality import battery_thermal_quality as grade
+    from benches.x03_quality import battery_power_quality
+    ratings = dict(charge_kw=5, discharge_kw=10)
+    assert battery_power_quality([8], ratings, ratings) == "PASS"
+    assert grade(initial,20,capacity,peak,intervals) == "PASS"
+    assert grade(initial,20,capacity,peak-0.1,intervals) == "FAIL"
+    assert grade(initial,20,capacity,peak,[(5,100,None)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("volts,minimum", [(250,1), (500,5), (1000,100)])
+def test_insulation_resistance_requires_valid_test_voltage(volts,minimum):
+    from benches.x03_quality import insulation_resistance_quality as grade
+    rule = dict(min_volts=volts,max_volts=volts,min_megohms=minimum)
+    reading = dict(volts=volts,megohms=minimum)
+    assert grade(reading,rule) == "PASS"
+    assert grade(dict(reading,megohms=minimum/2),rule) == "FAIL"
+    assert grade(dict(reading,volts=volts/2),rule) == "FAIL"
+    assert grade(dict(volts=volts),rule) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("ask,maximum,adequate", [
     ("Check the PV home run", 980, 1000), ("Check a 48 V storage lead", 60, 60),
     ("Check the AC feeder", 480, 600)])

@@ -4,6 +4,17 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_twist_quality(force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad):
+    """Single elastic rail with a recorded torque per radian stiffness."""
+    values = (force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    force, arm, stiffness, limit = (Fraction(str(x)) for x in values)
+    if stiffness <= 0 or limit < 0:
+        return "INCOMPLETE"
+    return "PASS" if abs(force * arm) <= stiffness * limit else "FAIL"
+
+
 def rail_deflection_quality(rails):
     """Simply supported rails with uniform load. Use N and mm throughout."""
     if not isinstance(rails, list) or not rails:

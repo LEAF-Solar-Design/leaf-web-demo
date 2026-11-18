@@ -4,6 +4,39 @@ from fractions import Fraction
 from math import ceil
 
 
+def battery_thermal_quality(initial_c, ambient_c, heat_capacity_j_per_k, maximum_c, intervals):
+    """Lumped thermal store with constant loads per interval and cooling limited at ambient."""
+    inputs = (initial_c, ambient_c, heat_capacity_j_per_k, maximum_c)
+    if not all(map(finite_measure, inputs)) or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    temperature, ambient, capacity, limit = (Fraction(str(v)) for v in inputs)
+    if capacity <= 0 or temperature < ambient:
+        return "INCOMPLETE"
+    if temperature > limit:
+        return "FAIL"
+    for interval in intervals:
+        if not isinstance(interval, (list, tuple)) or len(interval) != 3 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        seconds, heat_w, cooling_w = (Fraction(str(v)) for v in interval)
+        if seconds <= 0 or min(heat_w, cooling_w) < 0:
+            return "INCOMPLETE"
+        temperature = max(ambient, temperature + seconds * (heat_w - cooling_w) / capacity)
+        if temperature > limit:
+            return "FAIL"
+    return "PASS"
+
+
+def insulation_resistance_quality(test, equipment_rule):
+    """Compare a recorded insulation test with the equipment's permitted voltage and resistance."""
+    if not isinstance(test, dict) or not isinstance(equipment_rule, dict):
+        return "INCOMPLETE"
+    volts, resistance = test.get("volts"), test.get("megohms")
+    low, high, minimum = (equipment_rule.get(k) for k in ("min_volts", "max_volts", "min_megohms"))
+    if not all(map(finite_measure, (volts, resistance, low, high, minimum))) or not 0 < low <= high or minimum <= 0:
+        return "INCOMPLETE"
+    return "PASS" if low <= volts <= high and resistance >= minimum else "FAIL"
+
+
 def insulation_quality(circuits, dielectric_volts):
     """Map circuit IDs to (maximum volts, cable IDs) and check every installed cable."""
     if not isinstance(circuits, dict) or not circuits or not isinstance(dielectric_volts, dict):
