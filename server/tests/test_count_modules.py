@@ -593,3 +593,24 @@ def test_share_request_selection_and_window(phrase, expected):
     result, _ = module.run(d, route["params"])
     assert {q["layer"] for q in result["shares"]} == expected
     assert all(q["numerator"] == 1 and q["denominator"] == len(expected) for q in result["shares"])
+
+
+@pytest.mark.parametrize("prompt, counts", [
+    ("Rank layers by panel count and give the cumulative share after each layer.", (6, 3, 1)),
+    ("Show the running module fraction by layer, largest first.", (4, 4, 2)),
+    ("Report cumulative panel percentage per layer.", (2, 2, 2)),
+])
+def test_cumulative_share_ledger(prompt, counts):
+    import deps
+    import nl_router
+
+    labels = ["East", "West", "North"]
+    drawing = {"inserts": [dict(layer=l, name="Panel", rows=n) for l, n in zip(labels, counts)]}
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    params = route["params"]
+    r, _ = module.run(drawing, params)
+    ordered = sorted(zip(labels, counts), key=lambda row: (-row[1], row[0]))
+    assert [(q["layer"], q["numerator"], q["denominator"]) for q in r["cumulative_shares"]] == [
+        (l, sum(v for _, v in ordered[:i+1]), sum(counts)) for i, (l, _) in enumerate(ordered)]
+    assert "cumulative_shares" not in module.run({}, params)[0]
