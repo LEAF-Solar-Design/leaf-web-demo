@@ -151,3 +151,36 @@ def predecessor_quality(events, final_revision):
             return "FAIL"
         visited.add(node)
     return "PASS" if visited == parents.keys() and node == final_revision else "FAIL"
+
+
+def atomic_batch_quality(manifests, previous, target, events):
+    """Read a recorded stream of commit markers and consumer-visible snapshots."""
+    import re
+    if not isinstance(manifests, dict) or not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    for revision in (previous, target):
+        members = manifests.get(revision)
+        if not isinstance(members, dict) or not members:
+            return "INCOMPLETE"
+        if not all(isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v) for v in members.values()):
+            return "FAIL"
+    visible = previous
+    committed = observed = False
+    for event in events:
+        if not isinstance(event, dict) or not event.get("kind"):
+            return "INCOMPLETE"
+        if event["kind"] == "commit":
+            if event.get("revision") is None:
+                return "INCOMPLETE"
+            if event["revision"] != target:
+                return "FAIL"
+            visible, committed = target, True
+        elif event["kind"] == "snapshot":
+            if not isinstance(event.get("members"), dict) or event.get("revision") is None:
+                return "INCOMPLETE"
+            if event["revision"] != visible or event["members"] != manifests[visible]:
+                return "FAIL"
+            observed |= committed
+        else:
+            return "FAIL"
+    return "PASS" if observed else "INCOMPLETE"

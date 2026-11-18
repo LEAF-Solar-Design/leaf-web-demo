@@ -265,3 +265,19 @@ def test_temperature_interval(bounds, coefficient, limit, expected):
     weather = dict(unit="C", cell_temp=25, timestamp=10, site="roof", station="local", timezone="UTC")
     assert uncertain_voltage_quality(weather, bounds, limit, site="roof", station="local", as_of=10,
                                      max_age=0, voc_at_25=50, coefficient_per_c=coefficient, modules=2) == expected
+
+
+@pytest.mark.parametrize("sequence,expected", [
+    (["old","commit","new"], "PASS"), (["old","mixed","commit","new"], "FAIL"),
+    (["old"], "INCOMPLETE"), (["old","commit"], "INCOMPLETE"), (["new","commit","new"], "FAIL"),
+], ids=["resume-and-commit","torn-read-before-commit","interrupted-before-marker",
+        "interrupted-before-readback","premature-publication"])
+def test_atomic_artifact_visibility(sequence, expected):
+    from benches.x03_issue_delivery_oracle import atomic_batch_quality
+    old = {"panels": "1"*64, "report": "2"*64}
+    new = {"panels": "3"*64, "report": "4"*64}
+    events = {"old": dict(kind="snapshot", revision="old", members=old),
+              "new": dict(kind="snapshot", revision="new", members=new),
+              "mixed": dict(kind="snapshot", revision="old", members=dict(old, panels=new["panels"])),
+              "commit": dict(kind="commit", revision="new")}
+    assert atomic_batch_quality({"old": old, "new": new}, "old", "new", [events[s] for s in sequence]) == expected
