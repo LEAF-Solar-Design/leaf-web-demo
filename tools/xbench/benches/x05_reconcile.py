@@ -419,6 +419,7 @@ def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, req
         return _out("UNREADABLE", "grid_evidence_unreadable")
     expected_set, group_set = set(expected_grid_ids), set(saved_group_ids)
     indexed, used, error_counts, count = {}, set(), {}, 0
+    unresolved = []
     def issue(reason):
         nonlocal count
         count += 1
@@ -446,15 +447,19 @@ def compare_grid_correspondence(expected_grid_ids, saved_group_ids, rows, *, req
                 used.add(group)
         elif cause not in ("SOLAREDGE_GRID_UNMATCHED", "SOLAREDGE_GRID_AMBIGUOUS"):
             return _out("UNREADABLE", "grid_cause_unreadable")
-        elif require_all_matched:
-            issue("required_grid_unmatched")
+        else:
+            unresolved.append((key, cause))
+            if require_all_matched:
+                issue("required_grid_unmatched")
     for key in expected_set - indexed.keys():
         issue("missing_grid")
     errors = []
     for reason in sorted(error_counts):
         errors.extend([reason] * min(error_counts[reason], MAX_ENVELOPE_EXAMPLES - len(errors)))
     return _out("FAIL" if count else "PASS", "grid_correspondence_mismatch" if count else "grid_correspondence_equal",
-                error_count=count, errors=errors)
+                error_count=count, errors=errors, unresolved_count=len(unresolved),
+                unresolved=[dict(grid_id=key, cause=cause) for key, cause in
+                            nsmallest(MAX_ENVELOPE_EXAMPLES, unresolved)])
 
 
 def _seven_step_inputs(import_evidence, grid_evidence):
@@ -1079,10 +1084,7 @@ def aggregate_fixtures(expected_ids, fixtures):
     return _out(verdict, "offline_fixture_reconciliation", fixtures=results)
 
 
-def compare_recommendations(report_grid_count, recommendations, *, no_recommendations_shown=False):
-    """Check every supplied shown recommendation against an independent count."""
-    if type(report_grid_count) is not int or not 1 <= report_grid_count <= 2**53 - 1:
-        return _out("UNREADABLE", "report_grid_count_unreadable")
+def _recommendation_counts(recommendations, no_recommendations_shown):
     if not isinstance(recommendations, list):
         return _out("UNREADABLE", "recommendations_unreadable")
     if type(no_recommendations_shown) is not bool:
@@ -1091,11 +1093,66 @@ def compare_recommendations(report_grid_count, recommendations, *, no_recommenda
         return _out("UNREADABLE", "recommendation_absence_unverified")
     if recommendations and no_recommendations_shown is True:
         return _out("UNREADABLE", "recommendation_presence_conflict")
-    mismatches, mismatch_count = [], 0
-    for index, row in enumerate(recommendations):
+    counts = []
+    for row in recommendations:
         count = row.get("group_count") if isinstance(row, dict) else None
         if type(count) is not int or not 1 <= count <= 2**53 - 1:
             return _out("UNREADABLE", "recommendation_count_unreadable")
+        counts.append(count)
+    return counts
+
+
+def compare_fixture_grouping(fixture_id, policy, recommendations, *, no_recommendations_shown=False):
+    """Use the fixture's frozen report reference or record an explicit exclusion."""
+    if (type(policy) is not dict or type(fixture_id) is not str or not fixture_id.strip()
+            or policy.get("fixture_id") != fixture_id or "expected_grids" not in policy):
+        return _out("UNREADABLE", "grouping_policy_unreadable")
+    excluded = policy.get("grid_count_excluded", False)
+    if type(excluded) is not bool or (excluded and policy["expected_grids"] is not None):
+        return _out("UNREADABLE", "grouping_policy_conflict")
+    if not excluded:
+        return compare_recommendations(policy["expected_grids"], recommendations,
+                                       no_recommendations_shown=no_recommendations_shown)
+    counts = _recommendation_counts(recommendations, no_recommendations_shown)
+    if isinstance(counts, dict):
+        return counts
+    return _out("EXCLUDED", "no_report_grid_reference", observed_group_counts=counts)
+
+
+def check_excluded_dc_row(fixture_id, policy, view_rows, csv_text, saved_kw_dc):
+    """Verify both visible DC rows against the separately supplied saved value."""
+    if (type(fixture_id) is not str or not fixture_id.strip() or type(policy) is not dict
+            or policy.get("fixture_id") != fixture_id or policy.get("reconciliation_exclusions") != ["kw_dc"]
+            or "expected_kw_dc" not in policy or policy["expected_kw_dc"] is not None):
+        return _out("UNREADABLE", "dc_exclusion_policy_unreadable")
+    saved = _numeric(saved_kw_dc)
+    if saved is None or type(csv_text) is not str or len(csv_text) > MAX_CSV_CHARS:
+        return _out("UNREADABLE", "dc_evidence_unreadable")
+    csv_rows, error = _csv_rows(csv_text)
+    if error:
+        return _out("UNREADABLE", error)
+    for source, rows in (("view", view_rows), ("csv", csv_rows)):
+        if type(rows) is not list or any(type(row) is not dict for row in rows):
+            return _out("UNREADABLE", "dc_row_unreadable", source=source)
+        dc = [row for row in rows if row.get("metric") == "kw_dc"]
+        if len(dc) != 1 or set(dc[0]) != set(TABLE_COLUMNS):
+            return _out("UNREADABLE", "dc_row_unreadable", source=source)
+        row = dc[0]
+        if (_numeric(row["studio"]) != saved or row["oracle"] != "" or row["delta"] != ""
+                or row["verdict"] != "UNREADABLE"):
+            return _out("FAIL", "excluded_dc_row_mismatch", source=source)
+    return _out("EXCLUDED", "saved_dc_visible_without_oracle")
+
+
+def compare_recommendations(report_grid_count, recommendations, *, no_recommendations_shown=False):
+    """Check every supplied shown recommendation against an independent count."""
+    if type(report_grid_count) is not int or not 1 <= report_grid_count <= 2**53 - 1:
+        return _out("UNREADABLE", "report_grid_count_unreadable")
+    counts = _recommendation_counts(recommendations, no_recommendations_shown)
+    if isinstance(counts, dict):
+        return counts
+    mismatches, mismatch_count = [], 0
+    for index, count in enumerate(counts):
         if count != report_grid_count:
             mismatch_count += 1
             if len(mismatches) < MAX_RECOMMENDATION_EXAMPLES:

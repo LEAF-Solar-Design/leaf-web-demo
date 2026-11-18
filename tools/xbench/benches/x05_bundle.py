@@ -415,6 +415,69 @@ def diff_inventories(before, after):
                    changed_member_total=len({row['name'] for row in differences}), differences=differences[:MAX_DIAGNOSTICS])
 
 
+def diff_stage_references(before, after):
+    """Compare claimed bindings. Checking a target against inventory is a separate operation."""
+    sides = []
+    errors = []
+    for side, rows in (("before", before), ("after", after)):
+        indexed = {}
+        sides.append(indexed)
+        if type(rows) is not list or len(rows) > MAX_MEMBERS:
+            _error(errors, "REFERENCES_UNREADABLE", side=side)
+            continue
+        for row in rows:
+            if (type(row) is not dict or set(row) != {"fixture", "stage", "name", "design_version"}
+                    or any(not _token(row[key]) for key in ("fixture", "stage", "design_version"))
+                    or _name(row["name"]) is None):
+                _error(errors, "REFERENCE_INVALID", side=side)
+                continue
+            key = row["fixture"], row["stage"]
+            if key in indexed:
+                _error(errors, "REFERENCE_STAGE_DUPLICATE", side=side)
+            indexed[key] = dict(name=_name(row["name"]), design_version=row["design_version"])
+    if errors:
+        return _result(errors, references_equal=None, difference_total=None,
+                       difference_counts=None, differences=[])
+
+    left, right = sides
+    counts = dict(added=0, removed=0, retargeted=0)
+    examples = []
+    for key in sorted(left.keys() | right.keys()):
+        old, new = left.get(key), right.get(key)
+        if old == new:
+            continue
+        kind = "added" if old is None else "removed" if new is None else "retargeted"
+        counts[kind] += 1
+        if len(examples) < MAX_DIAGNOSTICS:
+            examples.append(dict(fixture=key[0], stage=key[1], kind=kind, before=old, after=new))
+    total = sum(counts.values())
+    return _result([], references_equal=total == 0, difference_total=total,
+                   difference_counts=counts, differences=examples)
+
+
+
+def _diff_unknown(code):
+    return _result([dict(code=code)], verdict='UNREADABLE', inventory_equal=None,
+                   difference_total=None, difference_counts=None, changed_member_total=None, differences=[])
+
+
+def diff_inventory_json(text):
+    """Strict stdin envelope containing explicit before and after inventories."""
+    data, error = _decode_json(text, 2 * MAX_JSON_CHARS)
+    if error:
+        return _diff_unknown(error)
+    if type(data) is not dict or set(data) != {'before', 'after'}:
+        return _diff_unknown('INVENTORY_DIFF_FIELDS_INVALID')
+    result = diff_inventories(data['before'], data['after'])
+    if not result['ok']:
+        verdict = 'UNREADABLE'
+    elif result['inventory_equal']:
+        verdict = 'PASS'
+    else:
+        verdict = 'FAIL'
+    return dict(result, verdict=verdict)
+
+
 def audit_inventory_json(text, payloads):
     """Strict decoding and full metadata validation precede every byte hash."""
     decoded = decode_inventory_json(text)
@@ -735,21 +798,25 @@ def main(argv=None):
     import sys
     parser = argparse.ArgumentParser(prog="x05_bundle", description="Offline audited X05 bundle replay from stdin; no origin authentication.",
         epilog="Exits: 0 PASS; 1 FAIL; 2 usage; 4 UNREADABLE; 5 output failure.")
-    parser.add_argument("--replay", action="store_true", help="audit and reconcile one stdin envelope (default)")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--replay", action="store_true", help="audit and reconcile one stdin envelope (default)")
+    modes.add_argument("--inventory-diff", action="store_true", help="compare explicit before/after inventories from stdin")
     try:
-        parser.parse_args(argv)
+        options = parser.parse_args(argv)
     except (OSError, UnicodeError, ValueError):
         _mute_failed_stdout()
         return 5
+    unknown = _diff_unknown if options.inventory_diff else _cli_unknown
+    decode = diff_inventory_json if options.inventory_diff else replay_bundle_json
     try:
         raw = _read_stdin(sys.stdin.buffer)
-        result = _cli_unknown("CLI_INPUT_TOO_LARGE") if raw is None else replay_bundle_json(raw.decode("utf-8", errors="strict"))
+        result = unknown("CLI_INPUT_TOO_LARGE") if raw is None else decode(raw.decode("utf-8", errors="strict"))
     except Exception:
-        result = _cli_unknown("CLI_INPUT_UNREADABLE")
+        result = unknown("CLI_INPUT_UNREADABLE")
     try:
         output = reconciliation.serialize_result(result)
     except Exception:
-        result = _cli_unknown("CLI_RESULT_UNREADABLE")
+        result = unknown("CLI_RESULT_UNREADABLE")
         output = json.dumps(result, sort_keys=True, ensure_ascii=True, allow_nan=False)
     try:
         binary = getattr(sys.stdout, "buffer", None)
@@ -757,7 +824,8 @@ def main(argv=None):
     except Exception:
         _mute_failed_stdout()
         return 5
-    return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["semantic"]["verdict"]]
+    verdict = result['verdict'] if options.inventory_diff else result['semantic']['verdict']
+    return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[verdict]
 
 
 if __name__ == "__main__":

@@ -43,6 +43,437 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+def test_reference_diff_counts_targets_and_caps_sorted_examples():
+    def ref(i):
+        return dict(fixture="unit", stage=f"s{i:02}", name=f"old/{i}", design_version="v1")
+    before = [ref(i) for i in range(40)]
+    after = [dict(ref(i), name=f"new/{i}") for i in range(1, 41)]
+    expected = []
+    for i in range(41):
+        old = dict(name=f"old/{i}", design_version="v1") if i < 40 else None
+        new = dict(name=f"new/{i}", design_version="v1") if i else None
+        kind = "removed" if i == 0 else "added" if i == 40 else "retargeted"
+        expected.append(dict(fixture="unit", stage=f"s{i:02}", kind=kind, before=old, after=new))
+    original = deepcopy((before, after))
+    for left, right in [(before, after), (before[::-1], after[::-1])]:
+        result = bundle.diff_stage_references(left, right)
+        assert result["ok"] and result["references_equal"] is False
+        assert result["difference_counts"] == dict(removed=1, added=1, retargeted=39)
+        assert result["difference_total"] == 41 and result["differences"] == expected[:bundle.MAX_DIAGNOSTICS]
+    assert (before, after) == original
+    assert bundle.diff_stage_references([ref(0)], [dict(ref(0), name=r"old\0")])["references_equal"]
+    assert bundle.diff_stage_references([ref(0)], [dict(ref(0), design_version="v2")])["difference_total"] == 1
+    for invalid in ([ref(1), ref(1)], [dict(ref(0), name="../private")], None):
+        result = bundle.diff_stage_references(invalid, [])
+        assert not result["ok"] and result["difference_total"] is None and result["differences"] == []
+
+
+def test_identical_inventory_reference_retarget_replay():
+    before = reconciliation_bundle(("alpha", "beta"))
+    after = deepcopy(before)
+    after["references"][0]["name"] = after["references"][1]["name"]
+    inventory = bundle.diff_inventories(encoder_args(before)["inventory"], encoder_args(after)["inventory"])
+    bindings = bundle.diff_stage_references(before["references"], after["references"])
+    assert inventory["inventory_equal"] and bindings["difference_counts"] == dict(added=0, removed=0, retargeted=1)
+    original, redirected = [bundle.reconcile_bundle(**source) for source in (before, after)]
+    assert original["semantic"]["verdict"] == "PASS" and redirected["semantic"]["verdict"] == "UNREADABLE"
+    assert redirected["integrity"]["integrity_verified"]
+    assert "REFERENCE_CROSS_FIXTURE" in redirected["bindings"]["diagnostic_counts"]
+
+
+def projection_inventories(omit=None):
+    stages = [f"s{i:02}" for i in range(16)]
+    def inventory(fixtures):
+        return dict(expected_fixture_ids=fixtures, required_stages=stages, members=[
+            dict(name=f"{f}/{stage}", fixture=f, stage=stage, design_version="v1",
+                 sha256="0"*64, byte_length=0) for f in fixtures for stage in stages])
+    left = inventory(["both"] if omit == "removed" else ["both", "old"])
+    right = inventory(["both"] if omit == "added" else ["both", "new"])
+    for row in right["members"]:
+        if row["fixture"] == "both":
+            if omit != "repinned":
+                row["sha256"] = "1"*64
+            if omit != "reassigned":
+                row["design_version"] = "v2"
+    return left, right
+
+
+@pytest.mark.parametrize("omit", [None, "added", "removed", "repinned", "reassigned"])
+def test_inventory_projection_preserves_independent_facts(omit):
+    result = bundle.diff_inventories(*projection_inventories(omit))
+    facts = sorted((f"{prefix}/s{i:02}", kind)
+                   for prefix, kind in [("new", "added"), ("old", "removed"),
+                                        ("both", "repinned"), ("both", "reassigned")]
+                   if kind != omit for i in range(16))
+    assert result["difference_counts"] == {
+        kind: 0 if kind == omit else 16 for kind in ("added", "removed", "repinned", "reassigned")}
+    assert result["difference_total"] == len(facts)
+    assert result["changed_member_total"] == len({name for name, _ in facts})
+    assert [(r["name"], r["kind"]) for r in result["differences"]] == facts[:bundle.MAX_DIAGNOSTICS]
+
+
+def test_inventory_renaming_equivariance_changes_example_order():
+    before = small_diff_inventory()
+    after = deepcopy(before)
+    after["members"][0].update(sha256="1"*64, design_version="v2")
+    after["members"][1]["name"] = "fresh/member"
+    original = bundle.diff_inventories(before, after)
+    names = sorted({r["name"] for side in (before, after) for r in side["members"]})
+    rename = dict(zip(names, reversed(names)))
+    for side in (before, after):
+        for row in side["members"]:
+            row["name"] = rename[row["name"]]
+    renamed = bundle.diff_inventories(before, after)
+    assert renamed["difference_counts"] == original["difference_counts"] == dict(
+        added=1, removed=1, repinned=1, reassigned=1)
+    assert renamed["changed_member_total"] == original["changed_member_total"] == 3
+    assert [(r["name"], r["kind"]) for r in renamed["differences"]] == sorted(
+        (rename[r["name"]], r["kind"]) for r in original["differences"])
+
+
+@pytest.mark.parametrize("unicode_name", [False, True])
+def test_inventory_diff_partition_and_truncation(monkeypatch, unicode_name):
+    import io
+    import sys
+    from types import SimpleNamespace
+
+    before = small_diff_inventory()
+    after = deepcopy(before)
+    after["members"][0]["sha256"] = "1"*64
+    if unicode_name:
+        after["members"][0]["name"] = "private-\u00e9"
+    wire = json.dumps(dict(before=before, after=after), ensure_ascii=False).replace('"before"', r'"b\u0065fore"').encode()
+    boundaries = [1, wire.index(b"\\u") + 1, wire.index(b"0065") + 2, len(wire) - 1]
+    if unicode_name:
+        boundaries.append(wire.index(b"\xc3") + 1)
+    def run(parts):
+        reader = iter([*parts, b""])
+        out = io.BytesIO()
+        monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=SimpleNamespace(read=lambda size: next(reader))))
+        monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=out))
+        return bundle.main(["--inventory-diff"]), json.loads(out.getvalue())
+    expected = bundle.diff_inventory_json(wire.decode())
+    for cut in boundaries:
+        assert run([wire[:cut], wire[cut:]]) == (4 if unicode_name else 1, expected)
+        code, result = run([wire[:cut]])
+        assert code == 4 and result["verdict"] == "UNREADABLE" and "private" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("args,code", [(["--inventory-diff", "--help"], 0),
+    (["--inventory-diff", "--wrong"], 2), (["--inventory-diff", "--replay"], 2)])
+def test_inventory_diff_argument_precedence(monkeypatch, args, code):
+    import sys
+    from types import SimpleNamespace
+
+    def forbidden(*args):
+        pytest.fail("argument handling reached input or diff")
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=SimpleNamespace(read=forbidden)))
+    monkeypatch.setattr(bundle, "diff_inventories", forbidden)
+    monkeypatch.setattr(bundle, "diff_inventory_json", forbidden)
+    with pytest.raises(SystemExit) as stopped:
+        bundle.main(args)
+    assert stopped.value.code == code
+
+
+
+def small_diff_inventory():
+    fixtures = ['a', 'b', 'c']
+    return dict(expected_fixture_ids=fixtures, required_stages=['saved'],
+        members=[dict(name=fixture+'/saved.bin',fixture=fixture,stage='saved',design_version='v1',
+            byte_length=0,sha256='0'*64) for fixture in fixtures])
+
+
+def test_exhaustive_overlapping_diff_facts_match_independent_reference():
+    from itertools import product
+    for states in product(range(4), repeat=3):
+        before = small_diff_inventory()
+        after = deepcopy(before)
+        expected = []
+        for index, state in enumerate(states):
+            row = after['members'][index]
+            if state & 1:
+                row['sha256'] = '1'*64
+                expected.append(dict(name=row['name'],kind='repinned'))
+            if state & 2:
+                row['design_version'] = 'v2'
+                expected.append(dict(name=row['name'],kind='reassigned'))
+        preserved = deepcopy((before,after))
+        result = bundle.diff_inventories(before,after)
+        expected.sort(key=lambda row:(row['name'],row['kind']))
+        assert result['ok'] and result['differences'] == expected
+        assert result['difference_total'] == sum(state.bit_count() for state in states)
+        assert result['changed_member_total'] == sum(state != 0 for state in states)
+        assert result['difference_counts'] == dict(added=0,removed=0,
+            repinned=sum(state in (1,3) for state in states), reassigned=sum(state in (2,3) for state in states))
+        assert (before,after) == preserved
+
+
+@pytest.mark.parametrize('total',[31,32,33])
+def test_diff_cap_boundaries_mix_categories_and_unchanged_members(total):
+    from collections import Counter
+    fixtures = ['f%d' % i for i in range(4)]
+    stages = ['s%02d' % i for i in range(16)]
+    before = dict(expected_fixture_ids=fixtures,required_stages=stages,members=[
+        dict(name='members/%03d.bin' % i,fixture=fixtures[i//16],stage=stages[i%16],
+             design_version='v1',byte_length=0,sha256='0'*64) for i in range(64)])
+    after = deepcopy(before)
+    expected = [dict(name=before['members'][0]['name'],kind='removed'),dict(name='new/member.bin',kind='added')]
+    after['members'][0]['name'] = 'new/member.bin'
+    remaining = total - 2
+    for index in range(remaining//2):
+        row = after['members'][2*(index+1)]
+        row.update(sha256='1'*64,design_version='v2')
+        expected.extend([dict(name=row['name'],kind='repinned'),dict(name=row['name'],kind='reassigned')])
+    if remaining % 2:
+        row = after['members'][32]
+        row['byte_length'] = 1
+        expected.append(dict(name=row['name'],kind='repinned'))
+    expected.sort(key=lambda row:(row['name'],row['kind']))
+    result = bundle.diff_inventories(before,after)
+    assert result['ok'] and result['difference_total'] == total
+    assert result['differences'] == expected[:bundle.MAX_DIAGNOSTICS]
+    assert result['difference_counts'] == Counter(row['kind'] for row in expected)
+    assert result['changed_member_total'] == len({row['name'] for row in expected})
+    unchanged = [i for i in range(64) if before['members'][i] == after['members'][i]]
+    assert len(unchanged) > 30 and all(i in unchanged for i in range(1,32,2))
+    before['members'].reverse(); after['members'].reverse()
+    assert bundle.diff_inventories(before,after) == result
+
+
+def test_diff_all_metadata_coordinates_and_overlap_count_members_once():
+    from itertools import product
+    coordinates = [('byte_length',1,'repinned'),('sha256','1'*64,'repinned'),
+        ('fixture','new','reassigned'),('stage','new','reassigned'),('design_version','v2','reassigned')]
+    for selected in product((False,True),repeat=5):
+        before = dict(expected_fixture_ids=['unit'],required_stages=['saved'],members=[dict(
+            name='unit/saved.bin',fixture='unit',stage='saved',design_version='v1',byte_length=0,sha256='0'*64)])
+        after = deepcopy(before)
+        categories = set()
+        for enabled,(field,value,category) in zip(selected,coordinates):
+            if enabled:
+                after['members'][0][field] = value
+                categories.add(category)
+        after['expected_fixture_ids'] = [after['members'][0]['fixture']]
+        after['required_stages'] = [after['members'][0]['stage']]
+        result = bundle.diff_inventories(before,after)
+        assert result['ok'] and result['difference_total'] == len(categories)
+        assert result['changed_member_total'] == int(any(selected))
+        assert result['differences'] == [dict(name='unit/saved.bin',kind=category) for category in sorted(categories)]
+
+
+@pytest.mark.parametrize('framing',['duplicate_before','duplicate_after','concatenated','trailing'])
+def test_diff_cli_framing_rejects_before_comparison(monkeypatch,framing):
+    import io
+    import sys
+    from types import SimpleNamespace
+    pair = json.dumps(dict(before=small_diff_inventory(),after=small_diff_inventory()))
+    if framing.startswith('duplicate_'):
+        key = framing.removeprefix('duplicate_')
+        escaped = ''.join('\\u%04x' % ord(char) for char in key)
+        text = pair.replace('"'+key+'":','"'+key+'":null,"'+escaped+'":',1)
+        expected = 'JSON_DUPLICATE_KEY'
+    else:
+        text = pair + (pair if framing == 'concatenated' else 'SYNTHETIC_PRIVATE_TRAILING')
+        expected = 'JSON_INVALID'
+    calls = []
+    def forbidden(*args,**kwargs): calls.append(1); raise AssertionError('framing reached comparison')
+    monkeypatch.setattr(bundle,'diff_inventories',forbidden)
+    output = io.BytesIO()
+    monkeypatch.setattr(sys,'stdin',SimpleNamespace(buffer=ShortInput(text.encode(),width=8192)))
+    monkeypatch.setattr(sys,'stdout',SimpleNamespace(buffer=output))
+    assert bundle.main(['--inventory-diff']) == 4 and calls == []
+    raw = output.getvalue()
+    assert len(raw.splitlines()) == 1 and b'SYNTHETIC_PRIVATE_TRAILING' not in raw
+    assert json.loads(raw)['diagnostic_counts'] == {expected:1}
+
+
+@pytest.mark.parametrize('kind',['PASS','FAIL','UNREADABLE'])
+@pytest.mark.parametrize('failure',['partial_write','flush'])
+def test_diff_delivery_failures_override_verdict_without_retry(monkeypatch,kind,failure):
+    import io
+    import sys
+    from types import SimpleNamespace
+    before = small_diff_inventory()
+    after = deepcopy(before)
+    if kind == 'FAIL': after['members'][0]['sha256'] = '1'*64
+    if kind == 'UNREADABLE': after = None
+    text = json.dumps(dict(before=before,after=after))
+    original = bundle.diff_inventory_json
+    expected = (bundle.reconciliation.serialize_result(original(text))+'\n').encode('ascii')
+    calls = []
+    def observed(value): calls.append(value); return original(value)
+    class Sink:
+        def __init__(self): self.parts=[]; self.writes=0; self.flushes=0
+        def write(self,data):
+            self.writes += 1
+            if failure == 'partial_write':
+                if self.writes == 1:
+                    self.parts.append(data[:7])
+                    return 7
+                raise OSError('SYNTHETIC_PRIVATE_DELIVERY')
+            self.parts.append(data)
+            return len(data)
+        def flush(self):
+            self.flushes += 1
+            raise OSError('SYNTHETIC_PRIVATE_FLUSH')
+    sink = Sink()
+    errors = io.StringIO()
+    monkeypatch.setattr(bundle,'diff_inventory_json',observed)
+    monkeypatch.setattr(sys,'stdin',SimpleNamespace(buffer=io.BytesIO(text.encode())))
+    monkeypatch.setattr(sys,'stdout',SimpleNamespace(buffer=sink))
+    monkeypatch.setattr(sys,'stderr',errors)
+    assert bundle.main(['--inventory-diff']) == 5 and calls == [text]
+    assert b''.join(sink.parts) == (expected[:7] if failure == 'partial_write' else expected)
+    assert sink.writes == (2 if failure == 'partial_write' else 1)
+    assert sink.flushes == (0 if failure == 'partial_write' else 1)
+    assert errors.getvalue() == ''
+
+
+@pytest.mark.parametrize('kind,exit_code', [('PASS',0), ('FAIL',1), ('UNREADABLE',4), ('malformed',4), ('duplicate',4)])
+def test_inventory_diff_cli_strict_verdicts_and_sanitized_single_result(tmp_path, kind, exit_code):
+    import subprocess
+    before = json.loads(json_inventory())
+    after = deepcopy(before)
+    if kind == 'FAIL': after['members'][0]['sha256'] = '0' * 64
+    if kind == 'UNREADABLE': after['members'][0]['sha256'] = 'SYNTHETIC_PRIVATE_DIFF'
+    text = json.dumps(dict(before=before, after=after))
+    if kind == 'malformed': text = '{"private":"SYNTHETIC_PRIVATE_DIFF'
+    if kind == 'duplicate': text = '{"before":{},"\\u0062efore":{},"after":{}}'
+    completed = subprocess.run(cli_command('--inventory-diff'), input=text.encode(), capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == exit_code and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1 and completed.stdout.isascii()
+    result = json.loads(completed.stdout)
+    assert result == bundle.diff_inventory_json(text)
+    assert result['verdict'] == ('UNREADABLE' if kind in ('malformed','duplicate') else kind)
+    assert 'SYNTHETIC_PRIVATE_DIFF' not in completed.stdout.decode()
+    assert not result['origin_authenticated']
+
+
+def test_inventory_diff_cli_modes_are_exclusive_and_delivery_failure_wins(monkeypatch, tmp_path):
+    import io
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    completed = subprocess.run(cli_command('--inventory-diff','--replay'), input=b'private', capture_output=True, cwd=tmp_path, timeout=20)
+    assert completed.returncode == 2 and completed.stdout == b'' and b'private' not in completed.stderr
+    source = json.loads(json_inventory())
+    for kind in ('PASS','FAIL','UNREADABLE'):
+        after = deepcopy(source)
+        if kind == 'FAIL': after['members'][0]['sha256'] = '0' * 64
+        if kind == 'UNREADABLE': after = None
+        raw = json.dumps(dict(before=source,after=after)).encode()
+        class FailedOutput:
+            def write(self, value): raise OSError('SYNTHETIC_PRIVATE_OUTPUT')
+            def fileno(self): raise OSError('memory stream')
+        with monkeypatch.context() as patch:
+            patch.setattr(sys,'stdin',SimpleNamespace(buffer=io.BytesIO(raw)))
+            patch.setattr(sys,'stdout',FailedOutput())
+            assert bundle.main(['--inventory-diff']) == 5
+    with monkeypatch.context() as patch:
+        output = io.BytesIO()
+        patch.setattr(sys,'stdin',SimpleNamespace(buffer=ShortInput(b'', failure=ValueError)))
+        patch.setattr(sys,'stdout',SimpleNamespace(buffer=output))
+        assert bundle.main(['--inventory-diff']) == 4
+        assert json.loads(output.getvalue())['diagnostic_counts'] == {'CLI_INPUT_UNREADABLE':1}
+
+
+def test_inventory_diff_reversal_identity_and_input_permutations():
+    before = json.loads(json_inventory())
+    after = deepcopy(before)
+    after['members'][0]['sha256'] = '0' * 64
+    after['members'][1]['design_version'] = 'v2'
+    after['members'][2]['name'] = 'renamed/member.bin'
+    preserved = deepcopy((before,after))
+    forward = bundle.diff_inventories(before,after)
+    reverse = bundle.diff_inventories(after,before)
+    assert forward['difference_total'] == reverse['difference_total'] == 4
+    exchanged = [dict(row, kind={'added':'removed','removed':'added'}.get(row['kind'],row['kind'])) for row in forward['differences']]
+    assert reverse['differences'] == sorted(exchanged,key=lambda row:(row['name'],row['kind']))
+    for side in (before,after):
+        identity = bundle.diff_inventories(side,deepcopy(side))
+        assert identity['difference_total'] == identity['changed_member_total'] == 0
+        assert identity['differences'] == [] and identity['inventory_equal']
+    for left_reverse in (False,True):
+        for right_reverse in (False,True):
+            left,right = deepcopy(before),deepcopy(after)
+            if left_reverse: left['members'].reverse(); left['expected_fixture_ids'].reverse(); left['required_stages'].reverse()
+            if right_reverse: right['members'].reverse(); right['expected_fixture_ids'].reverse(); right['required_stages'].reverse()
+            assert bundle.diff_inventories(left,right) == forward
+    assert (before,after) == preserved
+
+
+def test_inventory_diff_linear_index_work_and_bounded_storage_without_io(monkeypatch):
+    import builtins
+    counts = []
+    original = bundle._name
+    accesses = []
+    def counted(value): accesses.append(value); return original(value)
+    def forbidden(*args,**kwargs): raise AssertionError('diff attempted payload work')
+    for size in (4,8,16):
+        source = expanded_fixture('unit',['stage%02d' % index for index in range(size)])
+        before = encoder_args(source)['inventory']
+        after = deepcopy(before)
+        for row in after['members']: row['sha256'] = '0' * 64; row['design_version'] = 'v2'
+        accesses.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(bundle,'_name',counted)
+            patch.setattr(bundle,'sha256',forbidden)
+            patch.setattr(builtins,'open',forbidden)
+            result = bundle.diff_inventories(before,after)
+        counts.append(len(accesses))
+        assert result['difference_total'] == 2 * size
+        assert len(result['differences']) == min(2 * size,bundle.MAX_DIAGNOSTICS)
+    assert counts[0] > 0 and counts[1] == 2 * counts[0] and counts[2] == 2 * counts[1]
+
+
+@pytest.mark.parametrize('side',['before','after'])
+@pytest.mark.parametrize('mutation',['fields','member','count','coverage'])
+def test_inventory_diff_malformed_side_is_bounded_sanitized_and_recovers(side,mutation):
+    source = json.loads(json_inventory())
+    pair = dict(before=deepcopy(source),after=deepcopy(source))
+    if mutation == 'fields': pair[side] = {'SYNTHETIC_PRIVATE_SIDE':True}
+    elif mutation == 'member': pair[side]['members'][0]['sha256'] = 'SYNTHETIC_PRIVATE_SIDE'
+    elif mutation == 'count': pair[side]['members'][0]['byte_length'] = True
+    else: pair[side]['members'].pop()
+    preserved = deepcopy(pair)
+    result = bundle.diff_inventories(**pair)
+    assert not result['ok'] and result['difference_total'] is None and result['differences'] == []
+    assert 1 <= result['diagnostic_total'] and len(result['diagnostics']) <= bundle.MAX_DIAGNOSTICS
+    assert {row['side'] for row in result['diagnostics']} == {side}
+    assert 'SYNTHETIC_PRIVATE_SIDE' not in json.dumps(result) and pair == preserved
+    assert bundle.diff_inventory_json(json.dumps(pair))['verdict'] == 'UNREADABLE'
+    assert bundle.diff_inventories(source,deepcopy(source))['inventory_equal']
+
+
+def test_concurrent_inventory_diffs_keep_returned_diagnostics_and_inputs_isolated(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier,Event
+    pairs = []
+    for fixture in ('alpha','beta'):
+        before = encoder_args(expanded_fixture(fixture,['saved']))['inventory']
+        after = deepcopy(before)
+        after['members'][0]['sha256'] = 'invalid'
+        pairs.append(dict(before=before,after=after))
+    preserved = deepcopy(pairs)
+    expected = [bundle.diff_inventories(**pair) for pair in pairs]
+    barrier,release = Barrier(2),Event()
+    original = bundle._inventory_envelope
+    def coordinated(value):
+        result = original(value)
+        barrier.wait(timeout=10)
+        assert release.wait(timeout=10)
+        return result
+    monkeypatch.setattr(bundle,'_inventory_envelope',coordinated)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(bundle.diff_inventories,**pair) for pair in pairs]
+        release.set()
+        results = [future.result(timeout=15) for future in futures]
+    assert results == expected
+    results[0]['diagnostics'][0]['code'] = 'MUTATED'
+    results[0]['diagnostic_counts'].clear()
+    assert results[1] == expected[1] and pairs == preserved
+
+
 def test_inventory_diff_reports_exact_change_facts_with_shared_sorted_cap():
     before = json.loads(json_inventory())
     after = deepcopy(before)

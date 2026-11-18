@@ -9619,3 +9619,76 @@ def test_discrepancy_covariance_zero_deltas_still_validate_policy_records(mutati
     assert result["reason"] == ("duplicate_discrepancy_record" if mutation == "duplicate" else "discrepancy_record_unreadable")
     assert records == before
     assert check_discrepancies("synthetic", deltas, [record], "2026-11-15T13:00:00Z")["verdict"] == "PASS"
+
+@pytest.mark.parametrize("size", [2, MAX_ENVELOPE_EXAMPLES + 3])
+def test_grid_exclusion_replay_correspondence(size):
+    grids = [f"g{i}" for i in range(size)]
+    groups = [f"p{i}" for i in range(size)]
+    rows = [dict(grid_id=g, matches=[p], cause=None) for g, p in zip(grids, groups)]
+    assert compare_grid_correspondence(grids, groups, rows)["verdict"] == "PASS"
+    for row in rows:
+        row["matches"] = [groups[0]]
+    rows[-1]["grid_id"] = "foreign"
+    original = deepcopy((grids, groups, rows))
+    problems = sorted(["duplicate_group_match"] * (size - 1) + ["foreign_grid", "missing_grid"])
+    for ordered in [rows, rows[::-1]]:
+        answer = compare_grid_correspondence(grids, groups, ordered)
+        assert answer["verdict"] == "FAIL"
+        assert answer["error_count"] == len(problems)
+        assert answer["errors"] == problems[:MAX_ENVELOPE_EXAMPLES]
+    assert (grids, groups, rows) == original
+    causes = ["SOLAREDGE_GRID_AMBIGUOUS", "SOLAREDGE_GRID_UNMATCHED"]
+    unresolved = [dict(grid_id=g, matches=[], cause=causes[i % 2]) for i, g in enumerate(grids)]
+    observed = compare_grid_correspondence(grids, groups, unresolved[::-1])
+    assert observed["unresolved_count"] == size
+    assert observed["unresolved"] == sorted(
+        [dict(grid_id=r["grid_id"], cause=r["cause"]) for r in unresolved],
+        key=lambda r: r["grid_id"])[:MAX_ENVELOPE_EXAMPLES]
+
+
+def test_grid_exclusion_replay_group_observations():
+    from benches.x05_reconcile import compare_fixture_grouping
+
+    policy = dict(fixture_id="synthetic", expected_grids=None, grid_count_excluded=True)
+    rows = [dict(group_count=n) for n in [1, 3]]
+    def check(p, observed=rows):
+        return compare_fixture_grouping("synthetic", p, observed)
+    assert check(policy) == dict(verdict="EXCLUDED", reason="no_report_grid_reference",
+                                 observed_group_counts=[1, 3])
+    for invalid in (dict(policy, fixture_id="other"), dict(policy, expected_grids=3),
+                    dict(policy, grid_count_excluded=False), {"fixture_id": "synthetic"}):
+        assert check(invalid)["verdict"] == "UNREADABLE"
+    assert check(policy, [{}])["verdict"] == "UNREADABLE"
+    assert check(dict(policy, expected_grids=3, grid_count_excluded=False))["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("source", ["view", "csv"])
+def test_grid_exclusion_replay_dc_visibility(source):
+    from benches.x05_reconcile import check_excluded_dc_row
+
+    policy = dict(fixture_id="synthetic", reconciliation_exclusions=["kw_dc"], expected_kw_dc=None)
+    saved, rows = table_fixture()
+    dc = next(row for row in rows if row["metric"] == "kw_dc")
+    dc.update(oracle="", delta="", verdict="UNREADABLE")
+
+    def check(changed, value=saved["kw_dc"]):
+        view, export = (changed, rows) if source == "view" else (rows, changed)
+        return check_excluded_dc_row("synthetic", policy, view, csv_fixture(export), value)
+
+    assert check(rows)["verdict"] == "EXCLUDED"
+    assert check(rows, None)["verdict"] == "UNREADABLE"
+    assert check(rows, "9.7")["verdict"] == "FAIL"
+    assert check([row for row in rows if row is not dc]) == dict(
+        verdict="UNREADABLE", reason="dc_row_unreadable", source=source)
+    for change in (dict(oracle="0"), dict(studio="9.61"), dict(delta="0"), dict(verdict="PASS")):
+        changed = [dict(row, **change) if row is dc else row for row in rows]
+        assert check(changed) == dict(verdict="FAIL", reason="excluded_dc_row_mismatch", source=source)
+
+
+def test_grid_exclusion_replay_material_failure():
+    from .test_x05 import observation, score
+
+    project, observed = observation()
+    observed["report"]["matches"][0].update(status="unmatched", pdf_grid=None)
+    assert [step.verdict for step in score([project], [observed])] == [
+        "PASS", "FAIL", "UNREADABLE", "UNREADABLE", "UNREADABLE", "UNREADABLE", "UNREADABLE"]

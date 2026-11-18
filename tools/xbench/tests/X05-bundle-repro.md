@@ -636,3 +636,124 @@ pinned alpha evidence. Integrity passes for both, while beta returns named
 `bundle_evidence_fixture_conflict` uncertainty. Repairing beta's explicit
 evidence bindings and repinning its bytes recovers PASS. Expected identity
 exits are `4,0`; equal hashes never establish a fixture's identity or origin.
+
+## Offline inventory comparison
+
+Run this standard-library-only example with `python -P -B`. The helper counts
+change facts and changed members separately. A member with both new pins and
+new ownership contributes two facts. Examples share one sorted cap of 32.
+The CLI accepts a strict JSON object with explicit `before` and `after`
+inventory envelopes through `--inventory-diff`. It returns exit 0 for equal
+inventories, 1 for readable differences, 4 for unreadable input and 5 for an
+output-delivery failure. `--replay` and `--inventory-diff` are exclusive.
+
+```python
+from copy import deepcopy
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+
+def inventory(fixtures):
+    members = [dict(name=fixture + '/saved.bin', fixture=fixture, stage='saved',
+        design_version='v1', byte_length=1, sha256='0' * 64) for fixture in fixtures]
+    return dict(members=members, expected_fixture_ids=list(fixtures), required_stages=['saved'])
+
+before = inventory(['alpha', 'beta', 'removed'])
+after = inventory(['alpha', 'beta', 'added'])
+after['members'][0]['sha256'] = '1' * 64
+after['members'][1]['design_version'] = 'v2'
+preserved = deepcopy((before, after))
+result = bundle.diff_inventories(before, after)
+assert result['ok'] and result['difference_total'] == result['changed_member_total'] == 4
+assert result['difference_counts'] == dict(added=1, removed=1, repinned=1, reassigned=1)
+assert result['differences'] == [dict(name='added/saved.bin', kind='added'),
+    dict(name='alpha/saved.bin', kind='repinned'), dict(name='beta/saved.bin', kind='reassigned'),
+    dict(name='removed/saved.bin', kind='removed')]
+assert (before, after) == preserved
+assert not result['integrity_verified'] and not result['origin_authenticated']
+equal = bundle.diff_inventories(before, deepcopy(before))
+assert equal['inventory_equal'] and equal['difference_total'] == 0
+assert not equal['origin_authenticated']
+observed = []
+for pair, expected_exit, verdict in [(dict(before=before, after=before), 0, 'PASS'),
+    (dict(before=before, after=after), 1, 'FAIL'),
+    (dict(before=before, after={'SYNTHETIC_PRIVATE_DIFF':True}), 4, 'UNREADABLE')]:
+    completed = subprocess.run([sys.executable, '-P', '-B', str(Path(bundle.__file__).resolve()), '--inventory-diff'],
+        input=json.dumps(pair).encode('ascii'), capture_output=True, timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1
+    decoded = json.loads(completed.stdout)
+    assert decoded['verdict'] == verdict and not decoded['origin_authenticated']
+    assert b'SYNTHETIC_PRIVATE_DIFF' not in completed.stdout
+    observed.append(completed.returncode)
+print(json.dumps(dict(change_total=result['difference_total'], cli_exits=observed, origin_authenticated=False), sort_keys=True))
+```
+
+Inventory equality compares caller-supplied metadata. Authenticating its
+producer requires independently trusted source evidence. Stop on any mismatch.
+Each child has a 15-second deadline and terminates before the summary. The
+example retains its caller inputs and creates no service or browser state.
+
+## A-to-B-to-A inventory replay
+
+This standard-library-only example records both hops and the endpoint
+comparison. Run with `python -P -B`.
+
+```python
+from copy import deepcopy
+from pathlib import Path
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+
+a = dict(expected_fixture_ids=['unit'], required_stages=['saved'], members=[dict(
+    name='unit/saved.bin', fixture='unit', stage='saved', design_version='v1', byte_length=0, sha256='0'*64)])
+b = deepcopy(a)
+b['members'][0].update(sha256='1'*64, design_version='v2')
+returned_a = deepcopy(a)
+preserved = deepcopy((a,b,returned_a))
+totals, exits = [], []
+for before, after, expected_total, expected_exit in [(a,b,2,1),(b,returned_a,2,1),(a,returned_a,0,0)]:
+    result = bundle.diff_inventories(before,after)
+    assert result['ok'] and result['difference_total'] == expected_total
+    assert result['changed_member_total'] == int(expected_total > 0)
+    assert result['difference_counts'] == dict(added=0,removed=0,
+        repinned=int(expected_total > 0),reassigned=int(expected_total > 0))
+    assert not result['origin_authenticated']
+    completed = subprocess.run([sys.executable,'-P','-B',str(Path(bundle.__file__).resolve()),'--inventory-diff'],
+        input=json.dumps(dict(before=before,after=after)).encode('ascii'),capture_output=True,timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1
+    decoded = json.loads(completed.stdout)
+    assert decoded['difference_total'] == expected_total and not decoded['origin_authenticated']
+    totals.append(result['difference_total'])
+    exits.append(completed.returncode)
+assert (a,b,returned_a) == preserved
+print(json.dumps(dict(change_totals=totals,cli_exits=exits,origin_authenticated=False),sort_keys=True))
+```
+
+Endpoint equality establishes matching caller-supplied metadata. History and
+origin require independently trusted records. The intermediate B inventory
+records the repin and reassignment on each hop. Stop on any mismatch. Each
+child has a 15-second deadline and terminates before the summary.
+
+### Identical inventories with a redirected stage reference
+
+From the repository root, run this offline replay with pytest installed.
+
+    python -P -m pytest tools/xbench/tests/test_x05_bundle.py::test_identical_inventory_reference_retarget_replay -q -o pythonpath=tools/xbench
+
+Both synthetic fixtures start with readable evidence. The replay redirects
+alpha's stage reference to beta's existing member. All inventory pins and
+payload bytes stay fixed, so the inventory diff reports zero changes and the
+byte audit succeeds. The reference diff reports one retarget. Replay changes
+from PASS to UNREADABLE because the target belongs to another fixture.
