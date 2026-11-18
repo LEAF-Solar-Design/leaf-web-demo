@@ -1225,6 +1225,81 @@ def test_partial_resume_options_refuse_before_sign_in(monkeypatch, mask):
     assert raised.value.code == 5
 
 
+@pytest.mark.parametrize("outcome", ["success", "http_failure", "job_failure", "job_success", "error"])
+def test_resume_stop_after_first_settings_outcome(fixture, tmp_path, monkeypatch, outcome):
+    wire = Wire(Path(fixture["path"]).read_bytes())
+    transport = wire.transport
+
+    def scripted(method, path, **kwargs):
+        if path == "/api/run":
+            wire.calls.append((method, path, deepcopy(kwargs)))
+            assert kwargs["json_body"]["tool"] == "solar-settings"
+            if outcome == "error":
+                raise ConnectionError("offline")
+            if outcome == "http_failure":
+                return 503, {"error": {"error_code": "UNAVAILABLE", "message": "unavailable"}}
+            if outcome.startswith("job_"):
+                return 202, {"job_id": "settings"}
+            return 200, {"ok": True}
+        if path == "/api/jobs/settings" and outcome == "job_failure":
+            wire.calls.append((method, path, deepcopy(kwargs)))
+            return 200, {"status": "failed", "error": {"error_code": "TOOL_FAILED",
+                                                        "message": "settings failed"}}
+        return transport(method, path, **kwargs)
+
+    @contextmanager
+    def signed_in(*args, **kwargs):
+        yield "page", {}
+
+    monkeypatch.setattr(x01.xbench_session, "signed_in", signed_in)
+    monkeypatch.setattr(x01, "_transport", lambda page, **kwargs: scripted)
+    options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",
+               "resume_fixture": fixture["id"], "resume_stop_after": "solar-settings"}
+    ctx = SimpleNamespace(options=options, manifest={"fixtures": [fixture]},
+                          base="https://example.test", source_sha="b" * 40, out_dir=tmp_path / "evidence")
+    assert len(x01.run(ctx)) == 7
+    row = json.loads((ctx.out_dir / "fixtures.json").read_text())[fixture["id"]]
+    success = outcome in ("success", "job_success")
+    assert row["completed_calls"] == ["checkout", "context"] + (["run:solar-settings"] if success else [])
+    assert row["stopped_after"] == {
+        "tool": "solar-settings", "outcome": "success" if success else "failure",
+        "http_status": {"success": 200, "http_failure": 503, "job_failure": 202,
+                        "job_success": 202, "error": None}[outcome],
+        "job_status": {"job_failure": "failed", "job_success": "complete"}.get(outcome)}
+    # The existing finally releases on every exit; all other calls end at this outcome.
+    assert wire.released and wire.calls[-1][:2] == ("DELETE", "/api/projects/p/drawings/d/checkout")
+    calls = wire.calls[:-1]
+    assert calls[-1][1] == ("/api/jobs/settings" if outcome.startswith("job_") else "/api/run")
+    assert [kw["json_body"]["tool"] for _, path, kw in calls if path == "/api/run"] == ["solar-settings"]
+    assert sum("/context?" in path for _, path, _ in calls) == 1
+    assert not any(path.endswith("/dxf") for _, path, _ in calls)
+    assert row["export_version_id"] is None
+    if success:
+        assert row["failed_stage"] is None
+        assert all(value == "UNREADABLE" for value in row["steps"].values())
+        assert all("not run: stopped after solar-settings per admitted scope" in value
+                   for value in row["evidence"].values())
+    else:
+        assert row["failed_stage"] == "run:solar-settings"
+        if outcome != "error":
+            assert row["product_error"]["stage"] == "run:solar-settings"
+
+
+@pytest.mark.parametrize("mask", range(15))
+def test_stop_after_without_complete_resume_refuses(monkeypatch, mask):
+    keys = ("resume_project", "resume_drawing", "resume_version", "resume_fixture")
+    options = {key: "value" for index, key in enumerate(keys) if mask & (1 << index)}
+    options["resume_stop_after"] = "solar-settings"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid stop-after attempted sign-in")
+
+    monkeypatch.setattr(x01.xbench_session, "signed_in", forbidden)
+    with pytest.raises(SystemExit) as raised:
+        x01.run(SimpleNamespace(options=options))
+    assert raised.value.code == 5
+
+
 @pytest.mark.parametrize("fixture_id", ["synthetic", "unknown"])
 def test_invalid_resume_options_refuse_before_sign_in(monkeypatch, fixture_id):
     options = {"resume_project": "p", "resume_drawing": "d", "resume_version": "v1",

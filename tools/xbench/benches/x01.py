@@ -170,12 +170,20 @@ def _source_hash(path):
     return digest.hexdigest()
 
 
+class _StoppedAfter(Exception):
+    """Leave the fixture after an admitted tool succeeds, retaining cleanup."""
+
+
 def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
     rows = {}
     for fixture in fixtures:
         if resume is not None and fixture["id"] != resume["fixture"]:
             continue
         row = _row(fixture)
+        stop_after = resume.get("stop_after") if resume is not None else None
+        completed = []
+        if stop_after is not None:
+            row["completed_calls"] = completed
         rows[fixture["id"]] = row
         capability, did, source = None, None, None
         stage = "upload"
@@ -218,20 +226,24 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                 row["dxf_sha256"]["original"] = hashlib.sha256(original).hexdigest()
             stage = "checkout"
             capability, _ = client.checkout(pid, did, ttl_s=900)
+            completed.append(stage)
             stage = "context"
             context = client.drawing_context(pid, version, did)
+            completed.append(stage)
             rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", 0)
 
             def refresh():
                 nonlocal version, rev, context, stage
                 stage = "refresh_context"
                 context = client.drawing_context(pid, version, did)
+                completed.append(stage)
                 version = context["context"]["head_version_id"]
                 stage = "refresh_context"
                 context = client.drawing_context(pid, version, did)
+                completed.append(stage)
                 rev = context.get("intake", {}).get("solar_design_graph", {}).get("rev", rev + 1)
 
-            def call(tool, params, *, receipt=None):
+            def execute(tool, params, *, receipt=None):
                 nonlocal stage
                 stage = f"run:{tool}"
                 status, body = client.run(tool, org_id=project["org_id"], project_id=pid,
@@ -252,6 +264,25 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                     receipt["status"] = body.get("status", "complete")
                     receipt["run_id"] = receipt["run_id"] or body.get("run_id") or body.get("job_id")
                 result = _tool_result(body)
+                return result
+
+            def call(tool, params, *, receipt=None):
+                tracked = receipt if receipt is not None else {"run_id": None}
+                try:
+                    result = execute(tool, params, receipt=tracked if stop_after is not None else receipt)
+                except Exception as exc:
+                    if tool == stop_after:
+                        row["stopped_after"] = {
+                            "tool": tool, "outcome": "failure",
+                            "http_status": tracked.get("http_status", getattr(exc, "status", None)),
+                            "job_status": tracked.get("status") if tracked.get("http_status") == 202 else None}
+                    raise
+                completed.append(stage)
+                if tool == stop_after:
+                    row["stopped_after"] = {
+                        "tool": tool, "outcome": "success", "http_status": tracked["http_status"],
+                        "job_status": tracked.get("status") if tracked["http_status"] == 202 else None}
+                    raise _StoppedAfter()
                 refresh()
                 return result
 
@@ -292,7 +323,11 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                                 reported = [reported]
                             if isinstance(reported, list) and all(isinstance(layer, str) for layer in reported):
                                 row["tag_layers"] = reported
+                except _StoppedAfter:
+                    raise
                 except Exception as exc:
+                    if "stopped_after" in row:
+                        raise
                     name = receipt["name"] if receipt else "stringing configuration"
                     error_body = exc.body if isinstance(exc, StudioError) and isinstance(exc.body, dict) else {}
                     code = (exc.reason_code or error_body.get("reason_code") or exc.error_code or "TOOL_FAILED"
@@ -332,6 +367,9 @@ def grade_files(client, *, project, fixtures, out_dir=None, resume=None):
                     row["plot"] = plot.name
                 except Exception as exc:
                     row["plot_note"] = f"evidence plot unavailable: {type(exc).__name__}"
+        except _StoppedAfter:
+            for n in range(1, 6):
+                _mark(row, n, "UNREADABLE", f"not run: stopped after {stop_after} per admitted scope")
         except Exception as exc:
             row["failed_stage"] = stage
             verdict = "FAIL" if _product_refusal(exc) else "UNREADABLE"
@@ -421,10 +459,15 @@ def run(ctx):
     options = getattr(ctx, "options", {})
     resume_keys = ("resume_project", "resume_drawing", "resume_version", "resume_fixture")
     resume = None
+    if "resume_stop_after" in options and (not options["resume_stop_after"] or
+                                           not all(options.get(key) for key in resume_keys)):
+        raise SystemExit(EXIT_USAGE)
     if any(key in options for key in resume_keys):
         if not all(options.get(key) for key in resume_keys):
             raise SystemExit(EXIT_USAGE)
         resume = {key.removeprefix("resume_"): options[key] for key in resume_keys}
+        if "resume_stop_after" in options:
+            resume["stop_after"] = options["resume_stop_after"]
         if not any(fixture["id"] == resume["fixture"] for fixture in ctx.manifest["fixtures"]):
             raise SystemExit(EXIT_USAGE)
     repo = Path(__file__).resolve().parents[3]
