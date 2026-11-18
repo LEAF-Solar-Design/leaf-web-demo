@@ -37,6 +37,7 @@ LAB_PATHS = [
     "/api/lab/runs",
     "/api/lab/runs",
     "/api/lab/runs/{run_id}",
+    "/api/lab/runs/{run_id}/recovery-plan",
     "/api/lab/runs/{run_id}/events",
     "/api/lab/runs/{run_id}/cancel",
     "/api/lab/runs/worker/pause",

@@ -52,6 +52,7 @@ RUN_CASES = [
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
     pytest.param("GET", "/corpus-options", None, id="corpus-options"),
+    pytest.param("GET", "/private-run/recovery-plan", None, id="recovery-plan"),
 ]
 ACTIVATION_CASES = [
     ("POST", "", {"doc_id": DOC, "interval_s": 60}),
@@ -221,6 +222,7 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/runs"),
         ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
+        ("GET", "/api/lab/runs/{run_id}/recovery-plan"),
         ("GET", "/api/lab/runs/{run_id}/events"),
         ("POST", "/api/lab/runs/{run_id}/cancel"),
         ("POST", "/api/lab/runs/worker/pause"),
@@ -315,7 +317,7 @@ def test_runs_admission_precedes_storage(client, monkeypatch, method, suffix, bo
     assert MARKER not in response.text
 
 
-@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5])
+@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5] + [RUN_CASES[-1]])
 def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     row = run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
                            "b" * 64, "lab-worker.v1", "abc1234")

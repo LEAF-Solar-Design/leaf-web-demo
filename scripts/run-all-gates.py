@@ -1650,7 +1650,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_activation.py"), 49, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_surface.py"), 36),
+              _py_pytest("tests/test_lab_surface.py") + ["tests/test_lab_corpus_recovery.py"], 36),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
