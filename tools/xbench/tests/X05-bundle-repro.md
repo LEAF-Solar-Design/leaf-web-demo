@@ -443,3 +443,122 @@ example's three children have 15-second deadlines and terminate before the
 summary. No browser, service, extraction or product state is retained. Pins
 and agreeing claims can all be forged together; this encoder authenticates
 neither evidence origin nor a live X05 result.
+
+## Standalone seven-step fixture and replay
+
+This example needs only Python's standard library and the two product helper
+modules in this checkout. It does not import pytest or any test module. All
+values, IDs and input bytes below are synthetic. Run with `python -P -B`.
+The builder supplies explicit independent claims for this small fixture;
+agreement between those claims does not authenticate their origin.
+
+```python
+from copy import deepcopy
+from hashlib import sha256
+from io import StringIO
+from pathlib import Path
+import csv
+import json
+import subprocess
+import sys
+
+repo = Path('D:/GitHub/xbench-x05-late-subscribers')
+sys.path.insert(0, str(repo / 'tools/xbench'))
+from benches import x05_bundle as bundle
+from benches import x05_reconcile as reconciliation
+
+def fixture_record(fixture, version):
+    strings = [dict(string_id='A', optimizers=5), dict(string_id='B', optimizers=7)]
+    panels = [dict(string_id='A', panels=10), dict(string_id='B', panels=14)]
+    power = [dict(string_id='A', kw_dc='4'), dict(string_id='B', kw_dc='5.6')]
+    owners = [dict(string_id=key, grid_id='g') for key in ('A', 'B')]
+    inverters = [dict(inverter_id='INV-A', grid_id='g')]
+    connections = [dict(string_id=key, inverter_id='INV-A') for key in ('A', 'B')]
+    values = dict(panels=24, optimizers=12, inverters=1, strings=2, kw_dc='9.6')
+    rows = [dict(metric=key, studio=value, oracle=value, delta=0, verdict='PASS') for key, value in values.items()]
+    output = StringIO(newline='')
+    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+    columns = ('metric', 'studio', 'oracle', 'delta', 'verdict')
+    writer.writerow(columns)
+    writer.writerows([row[key] for key in columns] for row in rows)
+    hashes = reconciliation.canonical_snapshot(strings, rows)
+    evidence = dict(oracle_strings=deepcopy(strings), saved_strings=deepcopy(strings),
+        report_grid_count=2, recommendations=[dict(group_count=2)], view_rows=rows,
+        saved_values=deepcopy(values), oracle_values=deepcopy(values), fixture_id=fixture,
+        discrepancy_records=[], run_started_at='2026-11-15T13:00:00Z', before=deepcopy(hashes),
+        reopened=deepcopy(hashes), csv_text=output.getvalue(),
+        before_rows=dict(strings=deepcopy(strings), table_rows=deepcopy(rows)),
+        reopened_rows=dict(strings=deepcopy(strings), table_rows=deepcopy(rows)),
+        oracle_inverter_ids=['INV-A'], oracle_inverter_owners=deepcopy(inverters),
+        oracle_string_owners=deepcopy(owners), oracle_panels=deepcopy(panels), oracle_dc_power=deepcopy(power),
+        inverter_loads=dict(strings={'INV-A':2}, optimizers={'INV-A':12}, panels={'INV-A':24}, kw_dc={'INV-A':'9.6'}))
+    for field in ('saved_inverters', 'before_inverters', 'reopened_inverters'):
+        evidence[field] = deepcopy(inverters)
+    for field in ('oracle_assignments', 'saved_assignments', 'before_assignments', 'reopened_assignments'):
+        evidence[field] = deepcopy(connections)
+    inputs = dict(dwg=b'synthetic drawing', report=b'synthetic report', bom=b'synthetic BOM')
+    manifest = dict(fixture_id=fixture, inputs={key:sha256(raw).hexdigest() for key, raw in inputs.items()})
+    identity = dict(project_id='project', version_id=version)
+    assurance = dict(evidence=evidence, manifest=deepcopy(manifest),
+        bindings={key:deepcopy(manifest) for key in reconciliation.PROVENANCE_STAGES},
+        inputs_hex={key:raw.hex() for key, raw in inputs.items()}, identity=identity,
+        stage_identities={key:deepcopy(identity) for key in reconciliation.IDENTITY_STAGES})
+    grid = dict(expected_grid_ids=['g'], saved_group_ids=['p'],
+        rows=[dict(grid_id='g', matches=['p'], cause=None)], require_all_matched=True,
+        optimizer_totals={'g':12}, panel_totals={'g':24}, string_totals={'g':2},
+        inverter_totals={'g':1}, dc_totals={'g':'9.6'})
+    for prefix in ('', 'before_', 'reopened_'):
+        grid[prefix + 'string_assignments'] = deepcopy(owners)
+        grid[prefix + 'panel_counts'] = deepcopy(panels)
+        grid[prefix + 'dc_power'] = deepcopy(power)
+    envelope = dict(assurance=assurance, grid=grid,
+        **{'import':dict(normal_user=True, dwg_imported=True, report_imported=True)})
+    return dict(envelope=envelope, manifest=manifest,
+        import_binding=deepcopy(manifest), grid_binding=deepcopy(manifest))
+
+observed = []
+for kind, expected_exit in [('PASS',0), ('FAIL',1), ('UNREADABLE',4), ('HASH_CORRECT_FAIL',1)]:
+    record = fixture_record('unit', 'v1')
+    if kind == 'FAIL': record['envelope']['import']['normal_user'] = False
+    if kind == 'HASH_CORRECT_FAIL':
+        # Change one saved count, retain the independent oracle, then pin the
+        # changed bytes. Byte integrity must not substitute for reconciliation.
+        record['envelope']['assurance']['evidence']['saved_strings'][0]['optimizers'] = 6
+    raw = json.dumps(record, sort_keys=True).encode('ascii')
+    member = dict(name='unit/seven.json', fixture='unit', stage='seven_step', design_version='v1',
+                  byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    reference = {key:member[key] for key in ('name', 'fixture', 'stage', 'design_version')}
+    # Retain the original pins while changing the delivered bytes.
+    if kind == 'UNREADABLE': raw += b' '
+    encoded = bundle.encode_replay_json(
+        dict(members=[member], expected_fixture_ids=['unit'], required_stages=['seven_step']),
+        [reference], {member['name']:raw}, expected_fixture_versions={'unit':'v1'}, evidence_stage='seven_step')
+    assert encoded['ok'] and not encoded['integrity_verified'] and not encoded['origin_authenticated']
+    completed = subprocess.run([sys.executable, '-P', '-B', str(Path(bundle.__file__).resolve()), '--replay'],
+        input=encoded['text'].encode('ascii'), capture_output=True, timeout=15)
+    assert completed.returncode == expected_exit and completed.stderr == b''
+    assert len(completed.stdout.splitlines()) == 1
+    result = json.loads(completed.stdout)
+    assert result['semantic']['verdict'] == ('FAIL' if kind == 'HASH_CORRECT_FAIL' else kind)
+    assert not result['origin_authenticated']
+    if kind == 'HASH_CORRECT_FAIL':
+        assert result['integrity']['integrity_verified']
+        assert result['semantic']['fixtures']['unit']['result']['reconciliation']['steps']['3']['verdict'] == 'FAIL'
+    if kind == 'UNREADABLE':
+        assert result['integrity']['diagnostic_counts'] == {'PAYLOAD_LENGTH_MISMATCH':1, 'PAYLOAD_SHA256_MISMATCH':1}
+    else: assert result['integrity']['integrity_verified']
+    observed.append(completed.returncode)
+assert not any(name == 'pytest' or name.startswith('tests.') for name in sys.modules)
+print(json.dumps(dict(cli_exits=observed, standard_library_builder=True, origin_authenticated=False), sort_keys=True))
+```
+
+Stop on any mismatch. Each child has a 15-second deadline. `subprocess.run`
+kills and waits for a timed-out child. No file extraction, browser, network,
+service or product state is created. A PASS here proves synthetic replay only,
+never live X05 acceptance or origin authentication.
+
+The final `HASH_CORRECT_FAIL` case is a semantic-corruption replay. It changes
+one saved string from five optimizers to six and computes fresh member pins.
+The auditor accepts those bytes, but step 3 fails against the unchanged
+independent synthetic oracle. Expected exits for the extended example are
+`0,1,4,1`. Origin remains unauthenticated in all four cases.

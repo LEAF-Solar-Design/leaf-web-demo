@@ -43,6 +43,317 @@ def codes(result):
     return result["diagnostic_counts"]
 
 
+@pytest.mark.parametrize('mutation', ['hash', 'length', 'fixture', 'stage', 'reference_name', 'reference_version', 'payload', 'missing_payload'])
+def test_one_field_mutations_agree_across_direct_wire_and_cli(monkeypatch, mutation):
+    source = reconciliation_bundle()
+    member, reference = source['members'][0], source['references'][0]
+    if mutation == 'hash': member['sha256'] = '0' * 64
+    elif mutation == 'length': member['byte_length'] += 1
+    elif mutation == 'fixture': member['fixture'] = 'foreign'
+    elif mutation == 'stage': member['stage'] = 'foreign'
+    elif mutation == 'reference_name': reference['name'] = 'alpha/missing.json'
+    elif mutation == 'reference_version': reference['design_version'] = 'foreign'
+    elif mutation == 'payload': source['payloads'][member['name']] += b' '
+    else: source['payloads'].clear()
+    before = deepcopy(source)
+    direct = bundle.reconcile_bundle(**source)
+    encoded = bundle.encode_replay_json(**encoder_args(source))
+    # Deliberately invalid producer inputs cannot be encoded by the safe API.
+    # Use the existing wire schema to exercise the consumer's rejection too.
+    wire = encoded['text'] if encoded['ok'] else json.dumps(replay_envelope(source))
+    replayed = bundle.replay_bundle_json(wire)
+    exit_code, raw, errors = in_process_cli(monkeypatch, ShortInput(wire.encode(), width=8192))
+    assert exit_code == 4 and not errors
+    assert json.loads(raw) == json.loads(bundle.reconciliation.serialize_result(replayed))
+    assert direct['semantic']['verdict'] == replayed['semantic']['verdict'] == 'UNREADABLE'
+    if mutation in ('fixture', 'stage'):
+        section = direct['integrity']
+    elif mutation.startswith('reference_'):
+        section = direct['bindings']
+    else:
+        section = direct['integrity']
+    observed = replayed['integrity']
+    assert codes(section) == codes(observed)
+    assert section['diagnostics'] == observed['diagnostics']
+    if mutation not in ('fixture', 'stage', 'reference_name', 'reference_version'):
+        assert direct == replayed
+    assert source == before
+
+
+def test_small_inventory_coverage_matches_independent_multiset_reference():
+    from itertools import product
+    expected_stages = ['one', 'two', 'three']
+    for counts in product(range(3), repeat=3):
+        for foreign in (0, 1):
+            members = []
+            for stage, count in zip(expected_stages + ['foreign'], counts + (foreign,)):
+                for ordinal in range(count):
+                    members.append(dict(name='unit/%s%d' % (stage, ordinal), fixture='unit', stage=stage,
+                        design_version='v1', byte_length=0, sha256=REFERENCE_VECTORS[0][1]))
+            expected = {}
+            missing = sum(count == 0 for count in counts)
+            duplicate = sum(max(0, count - 1) for count in counts)
+            for key, count in [('FIXTURE_STAGE_MISSING', missing), ('FIXTURE_STAGE_DUPLICATE', duplicate), ('MEMBER_STAGE_INVALID', foreign)]:
+                if count: expected[key] = count
+            before = deepcopy(members)
+            result = bundle.validate_inventory(members, expected_fixture_ids=['unit'], required_stages=expected_stages)
+            assert codes(result) == expected and result['diagnostic_total'] == missing + duplicate + foreign
+            assert result['ok'] == (not expected)
+            assert result == bundle.validate_inventory(list(reversed(members)), expected_fixture_ids=['unit'], required_stages=expected_stages)
+            assert members == before
+
+
+@pytest.mark.parametrize('lexeme', ['lower', 'upper', 'mixed', 'odd', 'space', 'newline', 'fullwidth', 'cyrillic'])
+def test_hex_lexemes_have_explicit_support_and_rejection_before_semantics(monkeypatch, lexeme):
+    envelope = json.loads(cli_payload())
+    key = next(iter(envelope['member_bytes_hex']))
+    text = envelope['member_bytes_hex'][key]
+    transforms = dict(lower=text.lower(), upper=text.upper(),
+        mixed=''.join(char.upper() if index % 2 else char for index, char in enumerate(text)),
+        odd=text[:-1], space=text[:2] + '  ' + text[2:], newline=text[:2] + '\n\n' + text[2:],
+        fullwidth='ａ０' + text[2:], cyrillic='а0' + text[2:])
+    envelope['member_bytes_hex'][key] = transforms[lexeme]
+    calls = []
+    original = bundle.reconciliation.reconcile_bound_seven_steps
+    def observed(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', observed)
+    result = bundle.replay_bundle_json(json.dumps(envelope))
+    if lexeme in ('lower', 'upper', 'mixed'):
+        assert result['semantic']['verdict'] == 'PASS' and calls == [1]
+    else:
+        assert result['semantic']['verdict'] == 'UNREADABLE' and calls == []
+        assert codes(result['integrity']) == {'MEMBER_HEX_INVALID': 1}
+
+
+@pytest.mark.parametrize('location', ['malformed_member', 'foreign_payload'])
+def test_private_payloads_never_escape_audit_replay_or_cli(monkeypatch, location):
+    source = reconciliation_bundle()
+    sentinel = b'SYNTHETIC_PRIVATE_PAYLOAD_739'
+    if location == 'malformed_member':
+        raw = b'{"private":"' + sentinel
+        source['payloads']['alpha/seven.json'] = raw
+        source['members'][0].update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    else:
+        source['payloads']['foreign/private.bin'] = sentinel
+    audit_result = bundle.audit_bundle_bytes(source['members'], source['payloads'],
+        expected_fixture_ids=['alpha'], required_stages=source['required_stages'])
+    direct = bundle.reconcile_bundle(**source)
+    wire = json.dumps(replay_envelope(source))
+    replayed = bundle.replay_bundle_json(wire)
+    code, raw, errors = in_process_cli(monkeypatch, ShortInput(wire.encode(), width=8192))
+    assert code == 4 and not errors and direct == replayed
+    for result in (audit_result, direct, replayed, json.loads(raw)):
+        serialized = bundle.reconciliation.serialize_result(result)
+        assert sentinel.decode() not in serialized and sentinel.hex() not in serialized
+        assert len(serialized) < 32768
+    assert direct['semantic']['verdict'] == 'UNREADABLE'
+
+
+@pytest.mark.parametrize('left,right', [('import', 'grid'), ('import', 'assurance'), ('grid', 'assurance')])
+def test_hash_correct_stage_reference_substitutions_are_named_before_semantics(monkeypatch, left, right):
+    source = reconciliation_bundle()
+    raw = source['payloads']['alpha/seven.json']
+    source['required_stages'] = ['import', 'grid', 'assurance']
+    source['evidence_stage'] = 'assurance'
+    source['members'], source['references'], source['payloads'] = [], [], {}
+    for stage in source['required_stages']:
+        name = 'alpha/' + stage + '.json'
+        source['payloads'][name] = raw
+        source['members'].append(dict(name=name, fixture='alpha', stage=stage,
+            design_version='design-alpha', byte_length=len(raw), sha256=sha256(raw).hexdigest()))
+        source['references'].append(dict(name=name, fixture='alpha', stage=stage, design_version='design-alpha'))
+    assert bundle.reconcile_bundle(**source)['semantic']['verdict'] == 'PASS'
+    a, b = [next(ref for ref in source['references'] if ref['stage'] == stage) for stage in (left, right)]
+    a['name'], b['name'] = b['name'], a['name']
+    calls = []
+    monkeypatch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda *args: calls.append(1))
+    result = bundle.reconcile_bundle(**source)
+    assert result['integrity']['integrity_verified'] and not calls
+    assert result['semantic']['fixtures']['alpha']['result']['reason'] == 'bundle_stage_references_unreadable'
+    assert codes(result['bindings']) == {'REFERENCE_STAGE_CONFLICT': 2}
+
+
+@pytest.mark.parametrize('role', ['import', 'grid', 'assurance'])
+def test_hash_correct_wrong_role_evidence_cannot_be_a_seven_step_record(monkeypatch, role):
+    source = reconciliation_bundle()
+    record = json.loads(source['payloads']['alpha/seven.json'])
+    raw = json.dumps(record['envelope'][role]).encode()
+    source['payloads']['alpha/seven.json'] = raw
+    source['members'][0].update(byte_length=len(raw), sha256=sha256(raw).hexdigest())
+    calls = []
+    monkeypatch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda *args: calls.append(1))
+    result = bundle.reconcile_bundle(**source)
+    assert result['integrity']['integrity_verified'] and not calls
+    assert result['semantic']['fixtures']['alpha']['result']['reason'] == 'bundle_evidence_binding_unreadable'
+
+
+@pytest.mark.parametrize('framing', ['bom', 'double_bom', 'middle_bom', 'concat', 'tail', 'nbsp'])
+def test_json_framing_rejects_before_hashing_allocation_or_semantics(monkeypatch, framing):
+    inventory_text = json_inventory()
+    replay_text = cli_payload().decode()
+    sentinel = 'SYNTHETIC_PRIVATE_FRAMING'
+    def frame(text):
+        return {'bom': '\ufeff' + text, 'double_bom': '\ufeff\ufeff' + text,
+                'middle_bom': text + '\ufeff', 'concat': text + text,
+                'tail': text + sentinel, 'nbsp': '\u00a0' + text}[framing]
+    calls = []
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError('invalid framing reached work')
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle, 'sha256', forbidden)
+        patch.setattr(bundle, '_member_bytes_from_hex', forbidden)
+        patch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', forbidden)
+        decoded = bundle.decode_inventory_json(frame(inventory_text))
+        assert codes(decoded) == {'JSON_INVALID': 1} and decoded['inventory'] is None
+        decoded = bundle.decode_replay_json(frame(replay_text))
+        assert codes(decoded) == {'JSON_INVALID': 1} and decoded['envelope'] is None
+        direct = bundle.replay_bundle_json(frame(replay_text))
+        code, raw, errors = in_process_cli(patch, ShortInput(frame(replay_text).encode(), width=8192))
+        assert code == 4 and not errors and json.loads(raw) == direct
+        assert direct['semantic']['verdict'] == 'UNREADABLE'
+        assert codes(direct['integrity']) == {'JSON_INVALID': 1}
+        assert sentinel not in raw.decode() and calls == []
+    assert bundle.decode_inventory_json(inventory_text)['ok']
+    assert bundle.replay_bundle_json(replay_text)['semantic']['verdict'] == 'PASS'
+
+
+@pytest.mark.parametrize('whitespace', ['', ' ', '\t\r\n', '\r\n \t'])
+def test_json_legal_whitespace_preserves_inventory_replay_and_cli(monkeypatch, whitespace):
+    text = cli_payload().decode()
+    assert bundle.decode_inventory_json(whitespace + json_inventory() + whitespace)['ok']
+    expected = json.loads(bundle.reconciliation.serialize_result(bundle.replay_bundle_json(text)))
+    assert bundle.decode_replay_json(whitespace + text + whitespace)['ok']
+    code, raw, errors = in_process_cli(monkeypatch, ShortInput((whitespace + text + whitespace).encode(), width=8192))
+    assert code == 0 and not errors and json.loads(raw) == expected
+
+
+@pytest.mark.parametrize('failure_stage', ['construction', 'update', 'finalization'])
+def test_digest_provider_failures_are_sanitized_and_recover(monkeypatch, failure_stage):
+    source = reconciliation_bundle()
+    preserved = deepcopy(source)
+    sentinel = 'SYNTHETIC_PRIVATE_DIGEST'
+    calls = []
+    class BrokenDigest:
+        def update(self, data):
+            if failure_stage == 'update': raise OSError(sentinel)
+        def hexdigest(self):
+            raise ValueError(sentinel)
+    def constructor(data):
+        if failure_stage == 'construction': raise RuntimeError(sentinel)
+        return BrokenDigest()
+    with monkeypatch.context() as patch:
+        patch.setattr(bundle, 'sha256', constructor)
+        patch.setattr(bundle.reconciliation, 'reconcile_bound_seven_steps', lambda **kwargs: calls.append(kwargs))
+        audit_result = bundle.audit_bundle_bytes(source['members'], source['payloads'],
+            expected_fixture_ids=['alpha'], required_stages=source['required_stages'])
+        assert codes(audit_result) == {'PAYLOAD_DIGEST_UNREADABLE': 1}
+        assert audit_result['members'] == [{'member_index': 0, 'bytes_equal': False}]
+        result = bundle.reconcile_bundle(**source)
+        assert result['semantic']['verdict'] == 'UNREADABLE' and calls == []
+        assert sentinel not in json.dumps(result) and len(result['integrity']['diagnostics']) <= bundle.MAX_DIAGNOSTICS
+    assert source == preserved
+    assert bundle.reconcile_bundle(**source)['semantic']['verdict'] == 'PASS'
+
+
+def test_returned_nested_diagnostics_do_not_alias_inputs_siblings_or_next_call():
+    source = reconciliation_bundle(('alpha', 'beta', 'gamma'))
+    source['payloads']['alpha/seven.json'] += b' '
+    source['payloads']['beta/seven.json'] += b' '
+    preserved = deepcopy(source)
+    baseline = bundle.reconcile_bundle(**source)
+    result = bundle.reconcile_bundle(**source)
+    sibling = deepcopy(result['semantic']['fixtures']['beta'])
+    result['integrity']['diagnostics'][0]['code'] = 'MUTATED'
+    result['semantic']['fixtures']['alpha']['result']['reason'] = 'MUTATED'
+    assert result['semantic']['fixtures']['beta'] == sibling
+    assert source == preserved and baseline == bundle.reconcile_bundle(**source)
+    assert 'MUTATED' not in bundle.reconciliation.serialize_result(baseline)
+    members, payloads, references = synthetic_bundle()
+    payloads[members[0]['name']] += b' '
+    before = deepcopy((members, payloads, references))
+    first = audit(members, payloads)
+    expected = deepcopy(first)
+    first['diagnostics'][0]['code'] = 'MUTATED'
+    first['diagnostic_counts'].clear()
+    first['members'][0]['bytes_equal'] = True
+    assert audit(members, payloads) == expected
+    assert (members, payloads, references) == before
+
+
+def test_encoder_metadata_and_byte_work_is_linear_without_hash_or_rejected_hex(monkeypatch):
+    import builtins
+    counts = {'metadata': 0, 'bytes': 0, 'hex': 0}
+    original_name, original_len, original_hex = bundle._name, builtins.len, bundle._encode_member_hex
+    def counted_name(value):
+        counts['metadata'] += 1
+        return original_name(value)
+    def counted_len(value):
+        if type(value) is bytes: counts['bytes'] += 1
+        return original_len(value)
+    def counted_hex(value):
+        counts['hex'] += 1
+        return original_hex(value)
+    def forbidden(*args): raise AssertionError('encoder hashed bytes')
+    monkeypatch.setattr(bundle, '_name', counted_name)
+    monkeypatch.setattr(bundle, 'len', counted_len, raising=False)
+    monkeypatch.setattr(bundle, '_encode_member_hex', counted_hex)
+    monkeypatch.setattr(bundle, 'sha256', forbidden)
+    measured = []
+    for size in (4, 8, 16):
+        stages = ['stage%02d' % i for i in range(size)]
+        members = [dict(name='unit/' + stage, fixture='unit', stage=stage, design_version='v1',
+                        byte_length=1, sha256=REFERENCE_VECTORS[1][1]) for stage in stages]
+        references = [{k: row[k] for k in ('name', 'fixture', 'stage', 'design_version')} for row in members]
+        args = dict(inventory=dict(members=members, expected_fixture_ids=['unit'], required_stages=stages),
+                    references=references, member_bytes={row['name']: b'\x00' for row in members},
+                    expected_fixture_versions={'unit': 'v1'}, evidence_stage=stages[0])
+        for key in counts: counts[key] = 0
+        assert bundle.encode_replay_json(**args)['ok']
+        measured.append(dict(counts))
+        assert counts['hex'] == size and counts['bytes'] == 3 * size
+        for key in counts: counts[key] = 0
+        rejected = bundle.encode_replay_json(**args, max_wire_bytes=0)
+        assert codes(rejected) == {'ENCODER_WIRE_BUDGET_EXCEEDED': 1}
+        assert counts['hex'] == 0 and counts['bytes'] == 2 * size
+    assert measured[1]['metadata'] == 2 * measured[0]['metadata']
+    assert measured[2]['metadata'] == 2 * measured[1]['metadata']
+
+
+def test_concurrent_replays_keep_exact_results_and_decimal_contexts_isolated(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import getcontext, localcontext, ROUND_FLOOR, ROUND_CEILING
+    from threading import Barrier, Event
+    texts = [cli_payload().decode(), exact_decimal_cli_payload(30, 1).decode(), cli_payload('FAIL').decode(), cli_payload('UNREADABLE').decode()]
+    expected = [bundle.reconciliation.serialize_result(bundle.replay_bundle_json(text)) for text in texts]
+    assert [json.loads(raw)['semantic']['verdict'] for raw in expected] == ['PASS', 'FAIL', 'FAIL', 'UNREADABLE']
+    barrier, release = Barrier(4), Event()
+    original = bundle.audit_bundle_bytes
+    def interleaved(*args, **kwargs):
+        result = original(*args, **kwargs)
+        barrier.wait(timeout=10)
+        assert release.wait(timeout=10)
+        return result
+    monkeypatch.setattr(bundle, 'audit_bundle_bytes', interleaved)
+    parent = getcontext().copy()
+    def run(index):
+        with localcontext() as context:
+            context.prec = (7, 18, 40, 60)[index]
+            context.rounding = ROUND_FLOOR if index % 2 else ROUND_CEILING
+            before = (context.prec, context.rounding, dict(context.flags), dict(context.traps))
+            result = bundle.reconciliation.serialize_result(bundle.replay_bundle_json(texts[index]))
+            assert (context.prec, context.rounding, dict(context.flags), dict(context.traps)) == before
+            return result
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(run, i) for i in range(4)]
+        release.set()
+        observed = [future.result(timeout=15) for future in futures]
+    assert observed == expected
+    assert (getcontext().prec, getcontext().rounding, dict(getcontext().flags)) == (parent.prec, parent.rounding, dict(parent.flags))
+
+
 def test_complete_bundle_has_integrity_but_no_origin_authentication_or_grading():
     members, payloads, references = synthetic_bundle()
     before = deepcopy((members, payloads, references, FIXTURES, STAGES, VERSIONS))
