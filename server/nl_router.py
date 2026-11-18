@@ -419,6 +419,18 @@ def classify(
     return result.to_dict()
 
 
+# Only a complete grouped panel request can preselect a role. Extra constraints
+# must remain on the ordinary confirmation path.
+_GROUPED_PANELS = re.compile(
+    r"(?:please\s+)?(?:count|tally|how many|give me the number of)\s+"
+    r"(?:(?P<only>only|just)\s+)?(?:the\s+)?(?:solar\s+|pv\s+|photovoltaic\s+)?"
+    r"(?:panels?|modules?)\s+(?:are\s+)?(?:on each|in each|for each|per|by)\s+"
+    r"(?P<roof>roof(?:top)?\s+)?layers?"
+    r"(?P<exclude>\s*(?:,|and)?\s*(?:excluding|without|leaving out|leave out|ignoring)"
+    r"\s+(?:the\s+)?(?:roof\s+)?outlines?)?[.!?]?", re.I,
+)
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -486,6 +498,16 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
+
+    grouped = _GROUPED_PANELS.fullmatch(text.strip())
+    if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):
+        if any(doc.tool.get("name") == "count-modules" for doc in docs):
+            scope = "roof_layers" if grouped["roof"] else "all_layers"
+            return Classification(
+                lane=LANE_RUN, tool="count-modules",
+                params={"group_by": "layer", "panel_scope": scope}, confidence=0.95,
+                rationale="Count identified panel sets by layer; unclear sets require a selection.",
+            )
 
     # 3. RUN lane — a catalog match (possibly low confidence).
     if best is not None and _confidence(best) >= MIN_RUN_MATCH_CONF:
