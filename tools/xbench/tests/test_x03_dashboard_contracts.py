@@ -79,3 +79,18 @@ def test_dashboard_summary_reconciles_to_runs(tool):
     assert check([], summary) == "INCOMPLETE"
     for duration in (-1, None, float("nan")):
         assert check([dict(runs[0], duration_seconds=duration), runs[1]], summary) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("left,right,ids", [(True, False, ["s", "m"]), (False, True, ["m", "e"]),
+                                         (True, True, ["s", "m", "e"])])
+def test_report_window_at_utc_midnight(left, right, ids):
+    from benches.x03_dashboard_oracle import window_coverage_quality
+    rows = [dict(id="s", timestamp="2026-01-01T18:00:00-06:00"),
+            dict(id="m", timestamp="2026-01-02T00:30:00Z"),
+            dict(id="e", timestamp="2026-01-02T02:00:00+01:00")]
+    def grade(records, reported):
+        return window_coverage_quality(records, reported, "2026-01-02T00:00:00Z", "2026-01-02T01:00:00Z",
+                                       include_start=left, include_end=right)
+    assert grade(rows, ids) == "PASS"
+    assert grade(rows, ids + ["outside"]) == "FAIL"
+    assert grade([dict(rows[0], timestamp="2026-01-02T00:00:00"), *rows[1:]], ids) == "INCOMPLETE"

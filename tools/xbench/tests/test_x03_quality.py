@@ -310,3 +310,28 @@ def test_circuit_clearance_and_declared_junctions(gap):
     assert check(LineString([(-10, gap), (10, gap)]), {}) == "PASS"
     assert check(LineString([(-10, gap/2), (10, gap/2)]), {}) == "FAIL"
     assert check(crossing, junction, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("area,wires,fraction", [
+    (100, [14, 16, 10], 0.4), (12, [6], 0.5), (2, [0.15, 0.25], 0.2),
+])
+def test_declared_conduit_fill(area, wires, fraction):
+    from benches.x03_quality import conduit_fill_quality
+    assert conduit_fill_quality(area, wires, fraction) == "PASS"
+    assert conduit_fill_quality(area, wires+[0.001], fraction) == "FAIL"
+    assert conduit_fill_quality(area, wires+[None], fraction) == "INCOMPLETE"
+    assert conduit_fill_quality(None, wires, fraction) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ac,ratings,limits", [
+    (100, [60, 60], (0.6, 1.2)), (200, [100, 80], (0.8, 1)), (80, [70, 30], (1, 1.25)),
+])
+def test_local_inverter_ratio(ac, ratings, limits):
+    from benches.x03_quality import inverter_ratio_quality
+    dc = dict(enumerate(ratings*2))
+    mapping = {0: "a", 1: "a", 2: "b", 3: "b"}
+    def grade(assign, watts):
+        return inverter_ratio_quality({"a": ac, "b": ac}, watts, assign, dict.fromkeys(("a", "b"), limits))
+    assert grade(mapping, dc) == "PASS"
+    assert grade({**mapping, 3: "a"}, dc) == "FAIL"
+    assert grade(mapping, {**dc, 0: None}) == "INCOMPLETE"

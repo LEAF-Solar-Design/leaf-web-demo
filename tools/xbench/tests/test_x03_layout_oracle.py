@@ -59,3 +59,19 @@ def test_roof_load_on_individual_zones(panel, ballast, share, local_mass):
     zones["edge"]["limit"] -= 0.01
     assert check(zones, {"rack": ballast}) == "FAIL"
     assert check(zones, {}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("offset", [-4, 0, 12])
+def test_versioned_shade_masks(offset):
+    from benches.x03_layout_oracle import shade_exclusion_quality
+    panel = box(offset, 1, offset+2, 2)
+    def grade(polygons, policy, revision="v2"):
+        shade = dict(drawing="site", revision=revision, polygons=polygons)
+        return shade_exclusion_quality([panel], shade, drawing="site", revision="v2", boundary_policy=policy)
+    edge = box(offset+2, 0, offset+3, 3)
+    assert grade([edge], "allow-touch") == "PASS"
+    assert grade([edge], "exclude-touch") == "FAIL"
+    assert grade([box(offset+1, 0, offset+3, 3)], "allow-touch") == "FAIL"
+    assert grade([], "exclude-touch") == "PASS"
+    assert grade(None, "allow-touch") == "INCOMPLETE"
+    assert grade([], "allow-touch", "v1") == "FAIL"
