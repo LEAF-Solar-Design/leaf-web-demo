@@ -619,3 +619,8 @@ def test_cumulative_share_ledger(prompt, counts):
 @pytest.mark.parametrize("target,expected", [(80, [["A", "B"]]), (40, [["A"]]), (110, [])])
 def test_minimum_layer_set(target, expected):
     assert module._coverage({"A": 6, "B": 3, "C": 1}, target)["solutions"] == expected
+
+
+def test_region_rank_comparison_requires_two_windows():
+    with pytest.raises(ValueError, match="two windows"):
+        module.run({}, {"rank_windows": []})
