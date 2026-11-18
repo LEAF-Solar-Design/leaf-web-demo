@@ -21,7 +21,7 @@ def route_quality(route, aisle, arrays):
     return "PASS"
 
 
-def inverter_quality(strings, capacities, groups):
+def inverter_quality(strings, capacities, groups, *, eligibility=None):
     if capacities is None or groups is None or strings is None:
         return "INCOMPLETE"
     if (not capacities or len(groups) != len(capacities) or
@@ -33,6 +33,33 @@ def inverter_quality(strings, capacities, groups):
         return "FAIL"
     fills = [Fraction(n, c) for n, c in zip(loads, capacities)]
     spread = max(fills) - min(fills)
+    if eligibility is not None:
+        if not isinstance(eligibility, dict) or set(eligibility) != set(strings):
+            return "INCOMPLETE"
+        for options in eligibility.values():
+            if not isinstance(options, (list, tuple, set)) or any(
+                    type(i) is not int or not 0 <= i < len(groups) for i in options):
+                return "INCOMPLETE"
+        if any(i not in eligibility[s] for i, group in enumerate(groups) for s in group):
+            return "FAIL"
+        if spread == 0:
+            return "PASS"
+        # Each tuple represents one reachable load distribution after this prefix.
+        states = {(0,) * len(groups)}
+        for string in strings:
+            following = set()
+            for state in states:
+                for i in eligibility[string]:
+                    if state[i] < capacities[i]:
+                        following.add(state[:i] + (state[i] + 1,) + state[i+1:])
+                        if len(following) > 100_000:
+                            return "INCOMPLETE"
+            states = following
+        for state in states:
+            fills = [Fraction(n, c) for n, c in zip(state, capacities)]
+            if max(fills) - min(fills) < spread:
+                return "FAIL"
+        return "PASS"
     if spread == 0:
         return "PASS"
     total = len(strings)
@@ -141,3 +168,25 @@ def clearance_quality(route, aisle, arrays, clearance):
     # Distance is the exact buffer-radius test and includes boundary equality.
     distances = [route.distance(aisle.boundary), *(route.distance(a) for a in arrays)]
     return "PASS" if min(distances) >= clearance else "FAIL"
+
+
+def string_partition_quality(strings, inventory, adjacency):
+    """Every inventoried panel must belong to exactly one contiguous string."""
+    if not isinstance(inventory, (list, tuple)) or not inventory or not isinstance(adjacency, dict):
+        return "INCOMPLETE"
+    if not isinstance(strings, (list, tuple)) or any(not isinstance(g, (list, tuple)) for g in strings):
+        return "INCOMPLETE"
+    try:
+        expected = Counter(inventory)
+        actual = Counter(panel for group in strings for panel in group)
+    except TypeError:
+        return "INCOMPLETE"
+    if any(n != 1 for n in expected.values()):
+        return "INCOMPLETE"
+    if actual != expected or any(not group for group in strings):
+        return "FAIL"
+    for group in strings:
+        verdict = string_quality(group, adjacency)
+        if verdict != "PASS":
+            return verdict
+    return "PASS"

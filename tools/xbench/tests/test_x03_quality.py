@@ -139,3 +139,39 @@ def test_bounded_route_and_geometry_backed_string(limit):
     assert string_edge_quality("abc",graph,dict(points,c=(limit,limit+1)),limit) == "FAIL"
     del points["a"]
     assert string_edge_quality("abc",graph,points,limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sizes", [(2, 3), (1, 2, 2), (4, 1)])
+def test_every_panel_belongs_to_one_contiguous_string(sizes):
+    from benches.x03_quality import string_partition_quality
+    panels = list(range(sum(sizes)))
+    edges = {p: [n for n in (p-1, p+1) if n in panels] for p in panels}
+    strings = [panels[sum(sizes[:i]):sum(sizes[:i+1])] for i in range(len(sizes))]
+    assert string_partition_quality(strings, panels, edges) == "PASS"
+    assert string_partition_quality(strings[:-1], panels, edges) == "FAIL"
+    assert string_partition_quality(strings + [[panels[-1]]], panels, edges) == "FAIL"
+    assert string_partition_quality(strings, None, edges) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("caps,options", [
+    ([3, 3], [[0], [0], [0], [1]]),
+    ([3, 2], [[0, 1], [0], [1]]),
+    ([2, 2, 1], [[0, 1], [0, 2], [0]]),
+])
+def test_eligible_assignments_against_exhaustive_reference(caps, options):
+    from fractions import Fraction
+    from itertools import product
+    strings = list(range(len(options)))
+    eligibility = dict(enumerate(options))
+    candidates = {}
+    for assignment in product(range(len(caps)), repeat=len(strings)):
+        if any(i not in options[s] for s, i in enumerate(assignment)):
+            continue
+        fills = [Fraction(assignment.count(i), cap) for i, cap in enumerate(caps)]
+        if max(fills) <= 1:
+            candidates[assignment] = max(fills) - min(fills)
+    optimum = min(candidates.values())
+    for assignment in product(range(len(caps)), repeat=len(strings)):
+        groups = [[s for s, slot in enumerate(assignment) if slot == i] for i in range(len(caps))]
+        expected = "PASS" if candidates.get(assignment) == optimum else "FAIL"
+        assert inverter_quality(strings, caps, groups, eligibility=eligibility) == expected

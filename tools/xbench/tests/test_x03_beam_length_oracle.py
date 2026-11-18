@@ -92,3 +92,19 @@ def test_block_expansion_budget(layer):
     assert beam_length_quality(space, "m", {layer: 1}, max_entities=100) == "INCOMPLETE"
     ref.dxf.name = block.name
     assert beam_length_quality(space, "m", {layer: 1}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("end,plan,spatial", [((3, 4, 12), 5, 13), ((8, 0, 15), 8, 17),
+                                          ((0, 0, 7), 0, 7)])
+def test_line_modes_require_evidence(end, plan, spatial):
+    from types import SimpleNamespace
+    from benches.x03_beam_length_oracle import line_measurement_quality
+    def line(start, finish):
+        points = {"start": start, "end": finish}
+        return SimpleNamespace(dxftype=lambda: "LINE", dxf=SimpleNamespace(layer="L", get=points.get))
+    entities = [line((0, 0, 0), end)]
+    assert line_measurement_quality(entities, "m", {"L": plan}, mode="plan") == "PASS"
+    assert line_measurement_quality(entities, "m", {"L": spatial}, mode="spatial") == "PASS"
+    assert line_measurement_quality(entities, "m", {"L": plan}, mode="spatial") == "FAIL"
+    assert line_measurement_quality(entities, "m", {"L": spatial}) == "INCOMPLETE"
+    assert line_measurement_quality([line((0, 0), end[:2])], "m", {"L": plan}, mode="spatial") == "INCOMPLETE"

@@ -124,3 +124,32 @@ def test_ack_before_receiver_commit(drawing):
     assert delivery_quality(requests, events) != "PASS"
     assert delivery_quality(requests, events + [dict(row, state="applied")]) == "PASS"
     assert delivery_quality(requests, [dict(row, state="unknown")]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("temps,coefficient,worst", [
+    ([-25, 25, 0], -0.002, 440), ([0, 25, 50], 0.002, 420), ([20, 10, 25], -0.005, 430),
+])
+def test_series_requires_every_interval(temps, coefficient, worst):
+    from benches.x03_weather_oracle import series_voltage_quality
+    samples = [dict(site="plant", station="S", timezone="UTC", unit="C", timestamp=t, cell_temp=temp)
+               for t, temp in enumerate(temps)]
+    def check(rows, voltage):
+        return series_voltage_quality(rows, [0, 1, 2], reported=voltage, site="plant", station="S",
+                                     as_of=2, max_age=2, modules=10, voc_at_25=40, coefficient_per_c=coefficient)
+    assert check(samples[::-1], worst) == "PASS"
+    assert check(samples, 400) == "FAIL"
+    assert check(samples[1:], worst) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("field", ["voltage_V", "current_A", "power_W"])
+def test_catalog_constraints_share_one_part(field):
+    from benches.x03_catalog_oracle import catalog_selection_quality
+    bounds = {"voltage_V": (40, 50), "current_A": (8, 12), "power_W": (350, 500)}
+    good = dict(part="P", version="2", ratings=dict(voltage_V=45, current_A=10, power_W=450))
+    other = dict(part="Q", version="2", ratings=dict(good["ratings"], **{field: bounds[field][0]}))
+    def grade(result):
+        return catalog_selection_quality([good, other], "2", bounds, result)
+    assert grade(good) == "PASS"
+    assert grade(dict(good, ratings=other["ratings"])) == "FAIL"
+    assert grade(dict(good, version="1")) == "FAIL"
+    assert catalog_selection_quality([good], "2", {field: (0, 1)}, good) == "FAIL"
