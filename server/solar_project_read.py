@@ -106,7 +106,7 @@ def assignment_report_catalog_availability(tool, tenant, *, project_id, drawing_
             _fail("GRAPH_NOT_EMBEDDED")
         readiness = local._load_builtin(name).input_readiness(context.graph)
         reason = None if readiness["input_ready"] else readiness["input_reason"]
-    except (HTTPException, project.ProjectContextError, GraphValidationError, ValueError, TypeError):
+    except (HTTPException, project.ProjectContextError, GraphValidationError, ValueError, TypeError, AttributeError):
         reason = "invalid_drawing_context"
     if reason:
         state.update(input_ready=False, input_reason=reason, refusal_reasons=[reason], runnable=False)

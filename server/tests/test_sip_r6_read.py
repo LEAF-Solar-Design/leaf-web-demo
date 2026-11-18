@@ -646,3 +646,21 @@ def test_project_assignment_report_catalog_has_synchronous_read_authority(catalo
     assert states["solar-assignment-report"]["input_reason"] == "string_collectors_required"
     assert states["solar-assignment-report"]["runnable"] is False
     assert states["solar-settings"] == baseline
+
+
+def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkeypatch):
+    from types import SimpleNamespace
+    # Reproduce the retained context-only producer used by the demo tenancy matrix.
+    version = lane.parent
+    incomplete = SimpleNamespace(**{key: value for key, value in vars(version).items()
+                                    if key != "created_at"})
+    assert not hasattr(incomplete, "created_at")
+    lane.versions[version.version_id] = incomplete
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+    state = read.assignment_report_catalog_availability(
+        solar_tools.trusted_record("solar-assignment-report"), lane.tenant,
+        project_id=lane.project, drawing_id=lane.drawing, input_version_id=version.version_id)
+    assert state["runnable"] is False and state["input_ready"] is False
+    assert state["input_reason"] == "invalid_drawing_context"
+    assert state["refusal_reasons"] == ["invalid_drawing_context"]
