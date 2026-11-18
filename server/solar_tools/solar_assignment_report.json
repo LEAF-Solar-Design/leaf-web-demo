@@ -1,0 +1,58 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-assignment-report",
+  "builtin": "builtins/solar_assignment_report.py",
+  "family": "stringing",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_STRING_ASSIGNMENT_REQUEST",
+  "readiness": {"kind": "hook"},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-assignment-report",
+    "version": "1.0.0",
+    "description": "Preview string-to-collector assignments and name every remaining string without committing. Candidate assignments are tentative; a partial plan still refuses the atomic assignment command.",
+    "kind": "script",
+    "family_id": "stringing",
+    "engine_op": "solar_assignment_report",
+    "entry": "builtins/solar_assignment_report.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {"type": "string", "maxLength": 128},
+        "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+        "accept_excess_capacity": {"type": "boolean"}
+      },
+      "required": ["expected_rev", "accept_excess_capacity"],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object",
+      "required": ["schema", "expected_rev", "status", "committed", "commit_refusal_code", "eligible_string_refs", "candidate_assignments", "remaining_string_refs", "counts"],
+      "properties": {
+        "schema": {"const": "leaf.solar-assignment-report.v1"},
+        "expected_rev": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["complete", "partial", "unassigned"]},
+        "committed": {"const": false},
+        "commit_refusal_code": {"type": ["string", "null"]},
+        "eligible_string_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "remaining_string_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "candidate_assignments": {"type": "array", "items": {"type": "object"}},
+        "counts": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["assign-strings"],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 2,
+  "order": 83,
+  "scenario": "w2-rooftop"
+}

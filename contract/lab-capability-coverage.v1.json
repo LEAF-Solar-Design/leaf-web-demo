@@ -176,6 +176,12 @@
       "host": "production"
     },
     {
+      "source": "studio-tool:solar-assignment-report",
+      "status": "readable",
+      "adapter_owner": "solar_tools",
+      "host": "production"
+    },
+    {
       "source": "studio-tool:solar-autofill",
       "status": "explicit-handoff",
       "adapter_owner": "solar_tools",

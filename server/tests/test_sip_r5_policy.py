@@ -134,7 +134,7 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 55
+    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 56
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})
@@ -600,7 +600,7 @@ def test_sip_r5_legacy_projection_unchanged(monkeypatch):
     assert snapshot() == before
     assert shared_tables() == shared_before
     assert legacy == original and tools == tools_before
-    assert solar_tools.manifest() == manifest and len(manifest) == 55
+    assert solar_tools.manifest() == manifest and len(manifest) == 56
     assert {name: deps.catalog_tool_digest(tool) for name, tool in solar_tools.trusted_snapshot().items()} == digests
 
 

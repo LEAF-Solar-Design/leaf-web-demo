@@ -537,6 +537,7 @@ def test_sip_r3e_readiness(monkeypatch):
     baseline = w1.graph.__wrapped__()
     reasons = {name: row["input_reason"] for name, row in availability.w1_graph_readiness(baseline).items()}
     assert reasons.pop("solar-add-all-inverters") == "valid_settings_required"
+    assert reasons.pop("solar-assignment-report") == reasons["solar-assign-strings"]
     assert local.digest(reasons) == "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
     ground = deepcopy(ctx.graph)
     ground["project"]["installation_design"] = "Ground"

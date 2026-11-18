@@ -259,6 +259,8 @@ def test_ground_equipment_plain_graph_never_imports_the_codec(graph, monkeypatch
     assert cloud.sizing_basis(w1) == W1_BASIS
     assert cloud.sizing_targets(w1, "global") == {w1["settings"]["id"]: w1["settings"]}
     readiness = reasons(w1)
+    assert len(readiness) == 56
+    assert readiness.pop("solar-assignment-report") == readiness["solar-assign-strings"]
     assert len(readiness) == 55
     assert lsha(readiness) == W1_READINESS_SHA
     # X02 #3197 adds one hook-backed entry. Its guard still requires settings.
