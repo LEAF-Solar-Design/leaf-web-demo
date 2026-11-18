@@ -43,6 +43,26 @@ def _components(ordered, neighbors):
         yield component
 
 
+def _anchor_reachable(remaining, last, anchor, slots, neighbors):
+    """Can an unused-panel suffix reach the required anchor within its hop limit?"""
+    if last == anchor:
+        return True
+    reached = {last}
+    frontier = {last}
+    for _ in range(slots):
+        following = set()
+        for node in frontier:
+            following.update(neighbors[node] & remaining)
+        following.difference_update(reached)
+        if anchor in following:
+            return True
+        if not following:
+            return False
+        reached.update(following)
+        frontier = following
+    return False
+
+
 def _search(component, neighbors, rank, minimum, maximum, budget):
     """Enumerate path partitions with a lazy stack, without Python recursion.
 
@@ -58,6 +78,11 @@ def _search(component, neighbors, rank, minimum, maximum, budget):
                 len(neighbors[node] & remaining), rank[node]))
             for node in starts:
                 yield remaining - {node}, (node,), completed, anchor
+            return
+        # Every completion of this prefix must visit the anchor without
+        # reusing a panel or exceeding the current string's maximum size.
+        if anchor not in path and not _anchor_reachable(
+                remaining, path[-1], anchor, maximum - len(path), neighbors):
             return
         total = len(remaining) + len(path)
         string_count = (total + maximum - 1) // maximum

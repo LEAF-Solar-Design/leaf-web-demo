@@ -593,3 +593,71 @@ def test_anchor_may_be_inside_a_string_and_empty_component_is_complete():
     assert found["paths"][0][1] == 0
     empty = plan_partition([], [], 1, 2, 1.0)
     assert empty["status"] == "complete" and empty["paths"] == []
+
+
+@pytest.mark.parametrize("scale,reverse", [(1.0, False), (25.4, False), (1.0, True)])
+def test_anchor_actual_roof_component_completes_within_existing_budget(intake, scale, reverse):
+    import statistics
+    from solar_string_partition import DEFAULT_STATE_BUDGET
+    # Bank discovery consumes normalized inches, as the public builtin does.
+    panels = [panel for panel in intake["polylines"]
+              if panel.get("layer") == "Panels" and panel.get("closed") and panel.get("pts")]
+    if reverse:
+        panels.reverse()
+    points = [string_panels._centroid(panel) for panel in panels]
+    banks = string_panels._cluster_banks(points, string_panels.DEFAULTS["cluster_radius_factor"])
+    bank = next(group for group in banks if len(group) == 123)
+    order = string_panels._bank_serpentine(panels, bank, points)
+    module_length = statistics.median(max(math.dist(a[:2], b[:2]) for a, b in zip(
+        panels[index]["pts"], panels[index]["pts"][1:] + panels[index]["pts"][:1]))
+        for index in bank)
+    max_step = string_panels.MAX_STEP_MODULE_LENGTHS * module_length * scale
+    points = [(x * scale, y * scale) for x, y in points]
+    before = copy.deepcopy((order, points))
+    result = plan_partition(order, points, 12, 14, max_step)
+    assert result["status"] == "complete"
+    assert result["searched_states"] <= DEFAULT_STATE_BUDGET == 50_000
+    validate_partition(order, points, result["paths"], 12, 14, max_step)
+    assert len({index for path in result["paths"] for index in path}) == 123
+    assert all(12 <= len(path) <= 14 for path in result["paths"])
+    assert (order, points) == before
+
+
+
+def _simple_suffix_oracle(neighbors, remaining, last, anchor, slots):
+    for length in range(min(slots, len(remaining)) + 1):
+        for suffix in itertools.permutations(sorted(remaining), length):
+            path = (last,) + suffix
+            if path[-1] == anchor and all(right in neighbors[left]
+                                         for left, right in zip(path, path[1:])):
+                return True
+    return False
+
+
+@pytest.mark.parametrize("edges", [
+    [(0, 1), (1, 2), (2, 3)],
+    [(0, 1), (1, 3), (0, 2), (2, 3)],
+    [(0, 1), (1, 2), (2, 0), (2, 3)],
+    [(0, 1), (2, 3)],
+])
+@pytest.mark.parametrize("remaining", [{1, 2, 3}, {2, 3}, {3}])
+@pytest.mark.parametrize("slots", [0, 1, 2, 3])
+def test_anchor_reachability_matches_independent_simple_suffix_oracle(edges, remaining, slots):
+    from solar_string_partition import _anchor_reachable
+    neighbors = {index: set() for index in range(4)}
+    for left, right in edges:
+        neighbors[left].add(right)
+        neighbors[right].add(left)
+    before = copy.deepcopy((neighbors, remaining))
+    assert _anchor_reachable(remaining, 0, 3, slots, neighbors) == _simple_suffix_oracle(
+        neighbors, remaining, 0, 3, slots)
+    assert (neighbors, remaining) == before
+
+
+def test_anchor_reachability_preserves_unused_alternative_and_zero_hop_anchor():
+    from solar_string_partition import _anchor_reachable
+    neighbors = {0: {1, 3}, 1: {0, 2}, 2: {1, 3}, 3: {0, 2}}
+    assert not _anchor_reachable({2}, 0, 2, 2, neighbors)
+    assert _anchor_reachable({2, 3}, 0, 2, 2, neighbors)
+    assert not _anchor_reachable({2, 3}, 0, 2, 1, neighbors)
+    assert _anchor_reachable({1, 2, 3}, 0, 0, 0, neighbors)
