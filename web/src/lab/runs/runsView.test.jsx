@@ -122,7 +122,7 @@ const expectRecoveryGets = fetchImpl => {
 
 describe('Runs recovery options preview', () => {
   it('reviews a frozen three-node plan only on explicit clicks and retains completed verdict fail', async () => {
-    authority.headers = { Authorization: 'Bearer synthetic-reviewer' }
+    authority.headers = { Authorization: 'one' }
     const fetchImpl = vi.fn().mockImplementation(async () => recoveryResponse(smallRecoveryPlan))
     render(<RunsView store={recoveryStore(smallRecoveryPlan)} fetchImpl={fetchImpl} mock />)
     expect(fetchImpl).not.toHaveBeenCalled()
@@ -133,7 +133,7 @@ describe('Runs recovery options preview', () => {
     const [url, options] = fetchImpl.mock.calls[0]
     expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan`)
     expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
-      headers: { Authorization: 'Bearer synthetic-reviewer', 'X-Tenant-Id': config.tenant, accept: 'application/json' } })
+      headers: { Authorization: 'one', 'X-Tenant-Id': config.tenant, accept: 'application/json' } })
     expect(preview.getByText('Source document: original-document · revision 7')).toBeVisible()
     expect(preview.getByText(`Graph digest: ${smallRecoveryPlan.source.graph_sha256}`)).toBeVisible()
     expect(preview.getByText(`Plan digest: ${smallRecoveryPlan.digest}`)).toBeVisible()
@@ -268,7 +268,7 @@ describe('Runs recovery options preview', () => {
     reviewRecovery()
     await waitFor(() => expect(response.reader.read).toHaveBeenCalledTimes(1))
     if (kind === 'account') authority.account = 'account-two'
-    if (kind === 'auth') authority.headers = { Authorization: 'Bearer changed-synthetic-reviewer' }
+    if (kind === 'auth') authority.headers = { Authorization: 'two' }
     if (kind === 'api') config.apiBase = '/another-api'
     if (kind === 'tenant') config.tenant = 'another-tenant'
     await act(async () => { gate.resolve() })
