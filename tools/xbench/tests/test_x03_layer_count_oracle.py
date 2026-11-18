@@ -15,3 +15,17 @@ def test_counts_only_matching_block_instances(layer, expected):
     entities.append(entities[0])
     assert layer_count_quality(entities, layer, "panel", expected) == "PASS"
     assert layer_count_quality(entities, layer, "panel", expected+1) == "FAIL"
+
+
+@pytest.mark.parametrize("change", [{"layer":"other"}, {"column_count":0}, {"row_count":-2}])
+def test_ambiguous_count_in_either_order(change):
+    from types import SimpleNamespace
+    class Attr(dict):
+        __getattr__ = dict.__getitem__
+    def entity(**override):
+        attrs = dict(layer="roof", name="panel", handle="a")
+        attrs.update(override)
+        return SimpleNamespace(dxftype=lambda:"INSERT", dxf=Attr(attrs))
+    entities = [entity(), entity(**change)]
+    assert layer_count_quality(entities,"roof","panel",1) == "INCOMPLETE"
+    assert layer_count_quality(reversed(entities),"roof","panel",1) == "INCOMPLETE"

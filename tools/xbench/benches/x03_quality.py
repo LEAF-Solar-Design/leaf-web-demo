@@ -70,3 +70,25 @@ def string_quality(members, adjacency):
             reached.add(member)
             pending.extend(neighbors[member] - reached)
     return "PASS" if reached == selected else "FAIL"
+
+
+def bundled_route_quality(routes, endpoints, trunk, *, min_shared, max_detour):
+    """Require each branch to follow the common trunk and meet its detour ceiling."""
+    if routes is None or endpoints is None or trunk is None or len(routes) != len(endpoints):
+        return "INCOMPLETE"
+    if len(routes) < 2 or min_shared <= 0 or max_detour < 1:
+        return "FAIL"
+    common = trunk
+    for route, ends in zip(routes, endpoints):
+        if ends is None or len(ends) != 2 or any(p is None or p.is_empty for p in ends):
+            return "INCOMPLETE"
+        if route is None or route.is_empty:
+            return "INCOMPLETE"
+        if route.geom_type != "LineString" or not route.is_valid or not route.is_simple:
+            return "FAIL"
+        start, end = ends
+        if (tuple(start.coords[0]) != route.coords[0] or tuple(end.coords[0]) != route.coords[-1]
+                or route.length > max_detour * start.distance(end)):
+            return "FAIL"
+        common = common.intersection(route)
+    return "PASS" if common.length >= min_shared else "FAIL"

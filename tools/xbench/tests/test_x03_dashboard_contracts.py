@@ -20,3 +20,21 @@ def test_changed_outputs_pair_only_on_identical_input(tool):
     after = {(tool,"drawing-a:r1"):"hash-c", (tool,"drawing-b:r1"):"hash-b", (tool,"drawing-a:r2"):"hash-d"}
     changes = {(key, "tool:v1", "tool:v2") for key in before.keys() & after.keys() if before[key] != after[key]}
     assert changes == {((tool,"drawing-a:r1"), "tool:v1", "tool:v2")}
+
+
+@pytest.mark.parametrize("tool", ["catalog", "counts", "schedule"])
+def test_reconcile_external_dashboard_rows(tool):
+    from benches.x03_dashboard_oracle import dashboard_quality
+    first = dict(id="1",drawing="d",version="r",tool=tool,revision="old",output="aa",status="complete")
+    next_run = dict(first,id="2",revision="new",output="bb")
+    failed = dict(first,id="3",status="failed")
+    receipts = [first,next_run,failed]
+    totals = [dict(drawing="d",version="r",count=1)]
+    delta = [dict(drawing="d",version="r",tool=tool,before="old",after="new")]
+    def grade(runs, changes):
+        return dashboard_quality(runs,totals,changes,"old","new")
+    assert grade(receipts,delta) == "PASS"
+    assert grade(receipts+[failed],delta) == "FAIL"
+    assert grade([first,dict(next_run,version=None),failed],delta) == "INCOMPLETE"
+    assert grade([first,failed],delta) == "FAIL"
+    assert grade(receipts,[]) == "FAIL"

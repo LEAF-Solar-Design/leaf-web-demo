@@ -23,3 +23,26 @@ def test_package_target_and_rollback_pair(tmp_path, tool):
     assert restored(dict(before))
     for key in before:
         assert not restored(dict(before, **{key:"mismatch"}))
+
+
+@pytest.mark.parametrize("tool", ["panels","beams","routes"])
+def test_package_members_checked_without_extraction(tmp_path, tool):
+    import stat
+    from zipfile import ZipFile, ZipInfo
+    from benches.x03_package_oracle import package_quality
+    package = tmp_path / "candidate.zip"
+    filename = tool+"/tool.json"
+    manifest = {"members":[filename]}
+    for bad in ("clean", "parent", "link", "alias"):
+        with ZipFile(package, "w") as archive:
+            archive.writestr(filename, "{}")
+            if bad == "link":
+                entry = ZipInfo(tool+"/ref")
+                entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(entry, "../other")
+            elif bad == "alias":
+                archive.writestr(tool.upper()+"/./tool.json", "{}")
+            elif bad == "parent":
+                archive.writestr(tool+"/../other", "")
+        assert package_quality(package,manifest) == ("PASS" if bad == "clean" else "FAIL")
+    assert list(tmp_path.iterdir()) == [package]

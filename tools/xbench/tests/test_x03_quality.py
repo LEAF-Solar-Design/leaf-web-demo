@@ -92,3 +92,20 @@ def test_large_feasible_optimum_has_bounded_work(monkeypatch, devices, cap):
     assert 0 < calls <= 2 * devices * (min(cap,len(strings))+1)
     groups[0].append(groups[-1].pop())
     assert inverter_quality(strings,[cap]*devices,groups) == "FAIL"
+
+
+@pytest.mark.parametrize("length", [2,4,8])
+def test_shared_trunk_and_detour(length):
+    from shapely.geometry import Point, LineString
+    from benches.x03_quality import bundled_route_quality
+    start, fork = (0,0), (length,0)
+    tips = [(length+1,1),(length+1,-1)]
+    ends = [(Point(start),Point(tip)) for tip in tips]
+    trunk = LineString([start,fork])
+    paths = [LineString([start,fork,tip]) for tip in tips]
+    def check(routes, endpoints):
+        return bundled_route_quality(routes,endpoints,trunk,min_shared=length,max_detour=1.5)
+    assert check(paths,ends) == "PASS"
+    assert check([LineString([start,tip]) for tip in tips], ends) == "FAIL"
+    assert check([LineString([start,fork,(length+10,0),tips[0]]),paths[1]],ends) == "FAIL"
+    assert check(paths,[None,ends[1]]) == "INCOMPLETE"
