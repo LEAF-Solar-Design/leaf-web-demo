@@ -48,3 +48,47 @@ def layer_count_quality(entities, layer, block, reported, *, expansion_budget=10
     if total is None:
         return "INCOMPLETE"
     return "PASS" if type(reported) is int and reported == total else "FAIL"
+
+
+def referenced_layer_count_quality(drawings, root, revision, layer, block, reported):
+    """Each revision records local entities and one reference per external placement."""
+    if not isinstance(drawings, dict):
+        return "INCOMPLETE"
+    totals = {}
+    active = set()
+
+    def resolve(key, expected_revision):
+        drawing = drawings.get(key)
+        if not isinstance(drawing, dict) or drawing.get("revision") is None or expected_revision is None:
+            return None
+        if drawing["revision"] != expected_revision:
+            raise ValueError("conflicting reference revision")
+        if key in active or len(active) >= 128:
+            return None
+        if key in totals:
+            return totals[key]
+        entities, references = drawing.get("entities"), drawing.get("references")
+        if entities is None or not isinstance(references, list):
+            return None
+        total = _count(entities, layer.casefold(), block.casefold(), "0", set(), [100000], 1)
+        if total is None:
+            return None
+        active.add(key)
+        for ref in references:
+            if not isinstance(ref, dict) or not isinstance(ref.get("drawing"), str):
+                return None
+            count = resolve(ref["drawing"], ref.get("revision"))
+            if count is None:
+                return None
+            total += count
+        active.remove(key)
+        totals[key] = total
+        return total
+
+    try:
+        count = resolve(root, revision)
+    except ValueError:
+        return "FAIL"
+    if count is None:
+        return "INCOMPLETE"
+    return "PASS" if type(reported) is int and reported == count else "FAIL"

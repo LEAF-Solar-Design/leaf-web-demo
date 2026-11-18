@@ -171,3 +171,27 @@ def overhead_quality(equipment, obstacles, minimum_gap):
                 if gap < Fraction(str(minimum_gap)):
                     return "FAIL"
     return "PASS"
+
+
+def roof_orientation_quality(normal, tilt, azimuth, tilt_tolerance, azimuth_tolerance):
+    """Use an upward east/north/up normal and azimuth clockwise from north."""
+    from math import atan2, degrees, hypot, isclose
+    if not isinstance(normal, (tuple, list)) or len(normal) != 3:
+        return "INCOMPLETE"
+    fields = (*normal, tilt, azimuth, tilt_tolerance, azimuth_tolerance)
+    if None in fields:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, fields)) or not 0 <= tilt <= 90 or min(tilt_tolerance, azimuth_tolerance) < 0:
+        return "FAIL"
+    east, north, up = normal
+    horizontal = hypot(east, north)
+    if up < 0 or (horizontal == 0 and up == 0):
+        return "FAIL"
+    tilt_error = abs(degrees(atan2(horizontal, up)) - tilt)
+    if tilt_error > tilt_tolerance and not isclose(tilt_error, tilt_tolerance, abs_tol=1e-10, rel_tol=0):
+        return "FAIL"
+    if horizontal == 0:
+        return "PASS" if azimuth_tolerance >= 180 else "INCOMPLETE"
+    bearing = degrees(atan2(east, north))
+    error = abs((bearing - azimuth + 180) % 360 - 180)
+    return "PASS" if error <= azimuth_tolerance or isclose(error, azimuth_tolerance, abs_tol=1e-10, rel_tol=0) else "FAIL"

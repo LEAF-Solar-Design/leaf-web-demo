@@ -574,3 +574,50 @@ def bonding_quality(equipment, reference, bonds):
         reached.update(unseen)
         pending.extend(unseen)
     return "PASS" if reached == network.keys() else "FAIL"
+
+
+def phase_balance_quality(assignments, nameplate_amps, phase_limits, max_spread):
+    """Nameplate amps are per connected phase. Limits and spread are in amps."""
+    if not all(isinstance(x, dict) and x for x in (assignments, nameplate_amps, phase_limits)):
+        return "INCOMPLETE"
+    if nameplate_amps.keys() != assignments.keys() or max_spread is None:
+        return "INCOMPLETE"
+    if None in phase_limits.values() or None in nameplate_amps.values():
+        return "INCOMPLETE"
+    if not finite_measure(max_spread) or max_spread < 0:
+        return "FAIL"
+    if not all(finite_measure(v) and v > 0 for v in (*nameplate_amps.values(), *phase_limits.values())):
+        return "FAIL"
+    loads = dict.fromkeys(phase_limits, Fraction(0))
+    for inverter, phases in assignments.items():
+        if not isinstance(phases, list) or not phases or None in phases:
+            return "INCOMPLETE"
+        if not all(isinstance(p, str) and p in loads for p in phases) or len(set(phases)) != len(phases):
+            return "FAIL"
+        for phase in phases:
+            loads[phase] += Fraction(str(nameplate_amps[inverter]))
+    if any(loads[p] > Fraction(str(limit)) for p, limit in phase_limits.items()):
+        return "FAIL"
+    return "PASS" if max(loads.values()) - min(loads.values()) <= Fraction(str(max_spread)) else "FAIL"
+
+
+def reverse_current_quality(sources, withstand, protection):
+    """Other strings feed the fault. A numeric cap is a recorded let-through bound."""
+    if not all(isinstance(x, dict) and x for x in (sources, withstand, protection)):
+        return "INCOMPLETE"
+    if sources.keys() != withstand.keys() or sources.keys() != protection.keys():
+        return "INCOMPLETE"
+    if any(v is None for v in (*sources.values(), *withstand.values(), *protection.values())):
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v > 0 for v in (*sources.values(), *withstand.values())):
+        return "FAIL"
+    total = sum(Fraction(str(v)) for v in sources.values())
+    for string, cap in protection.items():
+        reverse = total - Fraction(str(sources[string]))
+        if cap != "unprotected":
+            if not finite_measure(cap) or cap <= 0:
+                return "FAIL"
+            reverse = min(reverse, Fraction(str(cap)))
+        if reverse > Fraction(str(withstand[string])):
+            return "FAIL"
+    return "PASS"

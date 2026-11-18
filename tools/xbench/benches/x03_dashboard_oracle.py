@@ -162,3 +162,31 @@ def latency_percentile_quality(samples, percentile, reported, policy=None):
         index = int(rank)
         expected = values[index] + (rank-index) * (values[min(index+1, len(values)-1)]-values[index])
     return "PASS" if Fraction(str(reported)) == expected else "FAIL"
+
+
+def retry_dashboard_quality(attempts, reported):
+    """Grade settled runs from ordered per-run attempt numbers, starting at one."""
+    if not isinstance(attempts, list) or not attempts or not isinstance(reported, dict):
+        return "INCOMPLETE"
+    runs = {}
+    for row in attempts:
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("run", "attempt", "outcome")):
+            return "INCOMPLETE"
+        run, index, outcome = row["run"], row["attempt"], row["outcome"]
+        if not isinstance(run, str) or not run or type(index) is not int or index < 1 or outcome not in ("failed", "succeeded"):
+            return "FAIL"
+        history = runs.setdefault(run, {})
+        if index in history:
+            return "FAIL"
+        history[index] = outcome
+    succeeded = 0
+    for history in runs.values():
+        if max(history) != len(history):
+            return "INCOMPLETE"
+        if any(history[i] == "succeeded" for i in range(1, len(history))):
+            return "FAIL"
+        succeeded += history[len(history)] == "succeeded"
+    expected = dict(attempts=len(attempts), runs=len(runs), succeeded=succeeded, failed=len(runs)-succeeded)
+    if expected.keys() - reported.keys():
+        return "INCOMPLETE"
+    return "PASS" if all(type(reported[k]) is int and reported[k] == v for k, v in expected.items()) else "FAIL"

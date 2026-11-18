@@ -220,3 +220,12 @@ def test_batch_item_delivery(scenario, expected):
     if scenario == "duplicate-effect":
         effects.append(effects[1].copy())
     assert batch_ack_quality(items, acks, effects) == expected
+
+
+@pytest.mark.parametrize("samples, step, expected", [
+    ([0, 10, 10, 30], 10, "FAIL"), ([0, 9, 20, 30], 10, "FAIL"),
+    ([30, 10, 0, 20], 10, "PASS"), ([0, 10, 20, 30], None, "INCOMPLETE"),
+], ids=["flag-duplicate-temperature", "find-irregular-voltage-window", "reconcile-reordered-samples", "missing-policy"])
+def test_voltage_series_cadence(samples, step, expected):
+    from benches.x03_weather_oracle import weather_cadence_quality
+    assert weather_cadence_quality(samples, 0, 30, step) == expected
