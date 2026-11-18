@@ -67,6 +67,7 @@
       "params": {
         "type": "object",
         "properties": {
+          "top_layers": {"type": "integer", "minimum": 1, "description": "Rank layers by selected physical module count. Include ties at the requested cutoff."},
           "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
           "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
           "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},

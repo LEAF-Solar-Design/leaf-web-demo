@@ -525,3 +525,13 @@ def test_count_safe_integer_boundary_raises_declared_validation_error():
     assert module._module_total([limit - 1, 1]) == limit
     with pytest.raises(module.InputValidationError, match="split the drawing"):
         module._module_total([limit, 1])
+
+
+@pytest.mark.parametrize("limit,expected", [(1, ["C"]), (2, ["C", "A", "B"]), (8, ["C", "A", "B", "D"])])
+def test_layer_ranking_includes_cutoff_ties(limit, expected):
+    intake = {"inserts": [{"handle": h, "layer": h, "name": "Panel", "rows": n}
+                          for h, n in [("B", 3), ("D", 1), ("C", 4), ("A", 3)]]}
+    result, overlay = module.run(intake, {"top_layers": limit, "panel_scope": "all_layers"})
+    assert [row["layer"] for row in result["ranking"]] == expected
+    assert all(row["count"] == result["counts"][row["layer"]] for row in result["ranking"])
+    assert result["count"] == 11 and set(overlay["highlight_handles"]) == set("ABCD")
