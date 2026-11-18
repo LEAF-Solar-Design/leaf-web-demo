@@ -25,7 +25,8 @@ def test_changed_outputs_pair_only_on_identical_input(tool):
 @pytest.mark.parametrize("tool", ["catalog", "counts", "schedule"])
 def test_reconcile_external_dashboard_rows(tool):
     from benches.x03_dashboard_oracle import dashboard_quality
-    first = dict(id="1",drawing="d",version="r",tool=tool,revision="old",output="aa",status="complete")
+    first = dict(id="1",drawing="d",version="r",tool=tool,revision="old",output="aa",status="complete",
+                 input_sha256="a"*64, parameters={"scale":1})
     next_run = dict(first,id="2",revision="new",output="bb")
     failed = dict(first,id="3",status="failed")
     receipts = [first,next_run,failed]
@@ -38,3 +39,5 @@ def test_reconcile_external_dashboard_rows(tool):
     assert grade([first,dict(next_run,version=None),failed],delta) == "INCOMPLETE"
     assert grade([first,failed],delta) == "FAIL"
     assert grade(receipts,[]) == "FAIL"
+    for mismatch in ({"input_sha256":None}, {"input_sha256":"b"*64}, {"parameters":None}, {"parameters":{"scale":2}}):
+        assert grade([first,dict(next_run,**mismatch),failed],delta) == "INCOMPLETE"

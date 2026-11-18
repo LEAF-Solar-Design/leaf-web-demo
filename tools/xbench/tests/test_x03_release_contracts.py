@@ -32,7 +32,7 @@ def test_package_members_checked_without_extraction(tmp_path, tool):
     from benches.x03_package_oracle import package_quality
     package = tmp_path / "candidate.zip"
     filename = tool+"/tool.json"
-    manifest = {"members":[filename]}
+    manifest = {"members":[filename], "sha256":{filename:hashlib.sha256(b"{}").hexdigest()}}
     for bad in ("clean", "parent", "link", "alias"):
         with ZipFile(package, "w") as archive:
             archive.writestr(filename, "{}")
@@ -46,3 +46,23 @@ def test_package_members_checked_without_extraction(tmp_path, tool):
                 archive.writestr(tool+"/../other", "")
         assert package_quality(package,manifest) == ("PASS" if bad == "clean" else "FAIL")
     assert list(tmp_path.iterdir()) == [package]
+
+
+@pytest.mark.parametrize("name", ["panels","beams","ducts"])
+def test_bounded_member_hash_and_crc(tmp_path, name):
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    package = tmp_path / "tool.zip"
+    data = b"synthetic member payload"
+    manifest = {"members":[name], "sha256":{name:hashlib.sha256(data).hexdigest()}}
+    with ZipFile(package, "w") as archive:
+        archive.writestr(name, data)
+    assert package_quality(package,manifest) == "PASS"
+    assert package_quality(package,manifest,max_member_bytes=len(data)-1) == "FAIL"
+    assert package_quality(package,manifest,max_total_bytes=len(data)-1) == "FAIL"
+    raw = package.read_bytes()
+    package.write_bytes(raw.replace(data,b"X"+data[1:],1))
+    assert package_quality(package,manifest) == "FAIL"
+    with ZipFile(package, "w") as archive:
+        archive.writestr(name,data+b"changed")
+    assert package_quality(package,manifest) == "FAIL"

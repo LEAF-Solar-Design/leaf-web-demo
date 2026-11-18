@@ -1,11 +1,14 @@
 """Reconcile external failure and output-change rows to revision-bound runs."""
 from collections import Counter
+import json
+import re
 
 
 def dashboard_quality(runs, failures, changes, before, after):
     if not before or not after or before == after:
         return "INCOMPLETE"
     ids, failed, outputs = set(), Counter(), {}
+    inputs = {}
     for run in runs:
         keys = ("id", "drawing", "version", "tool", "revision", "status")
         if not all(isinstance(run.get(k), str) and run[k] for k in keys):
@@ -18,6 +21,16 @@ def dashboard_quality(runs, failures, changes, before, after):
             failed[drawing] += 1
         elif run["status"] == "complete" and run["revision"] in (before, after):
             key = (*drawing, run["tool"])
+            input_digest = run.get("input_sha256")
+            params = run.get("parameters")
+            if not isinstance(input_digest, str) or not re.fullmatch("[0-9a-f]{64}", input_digest) or not isinstance(params, dict):
+                return "INCOMPLETE"
+            try:
+                identity = input_digest, json.dumps(params, sort_keys=True, allow_nan=False)
+            except (ValueError, TypeError):
+                return "INCOMPLETE"
+            if inputs.setdefault(key, identity) != identity:
+                return "INCOMPLETE"
             pair = outputs.setdefault(key, {})
             digest = run.get("output")
             if not isinstance(digest, str) or not digest or pair.get(run["revision"], digest) != digest:
