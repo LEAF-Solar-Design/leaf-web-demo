@@ -127,7 +127,7 @@ it('main keeps telemetry first and installs the proof bridge once after render u
   const body = parseJs(source, { sourceType: 'module', plugins: ['jsx'] }).program.body
   const imports = body.filter((node) => node.type === 'ImportDeclaration')
   assert.equal(imports[0].source.value, './telemetry.js')
-  assert.match(source, /const link = typeof window !== 'undefined' \? takeInvestorLink\(\) : undefined\s*const siteRootPromise = bootstrapServiceAuth\(\)\s*\.then\(\(\) => bootstrapInvestorLink\(\{ link, apiBase:[^\n]+\)\)\s*\.then\(\(\) => import\('\.\/site\/SiteRoot\.jsx'\)\)/)
+  assert.match(source, /const link = typeof window !== 'undefined' \? takeInvestorLink\(\) : undefined\s*const siteRootPromise = bootstrapServiceAuth\(\)\s*\.then\(\(\) => bootstrapInvestorLink\(\x7b link, apiBase:[^\n]+\)\)\s*\.then\(\(\) => import\('\.\/site\/SiteRoot\.jsx'\)\)/)
   const bridgeImport = imports.find((node) => node.source.value === './proofBridge.js')
   assert.ok(bridgeImport, 'main imports the proof bridge installer')
   assert.deepEqual(bridgeImport.specifiers.map((node) => [node.imported?.name, node.local.name]), [
