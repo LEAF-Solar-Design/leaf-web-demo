@@ -67,3 +67,15 @@ def series_voltage_quality(samples, required_times, *, reported, **conditions):
     if voltages.keys() != set(required_times):
         return "FAIL"
     return _voltage_verdict(max(voltages.values()), reported)
+
+
+def weather_cadence_quality(timestamps, start, end, step):
+    """Check an inclusive UTC sample window in integer ticks, regardless of input order."""
+    if not isinstance(timestamps, list) or any(v is None for v in (start, end, step)) or None in timestamps:
+        return "INCOMPLETE"
+    if any(type(v) is not int for v in (start, end, step, *timestamps)) or step <= 0 or end < start:
+        return "FAIL"
+    intervals, remainder = divmod(end - start, step)
+    if remainder or len(timestamps) != intervals + 1 or len(set(timestamps)) != len(timestamps):
+        return "FAIL"
+    return "PASS" if all(start <= t <= end and (t-start) % step == 0 for t in timestamps) else "FAIL"

@@ -105,3 +105,12 @@ def test_equipment_overhead_clearance(offset, underside, expected):
     unit = dict(footprint=box(0, 0, 1, 1), bottom=0, top=3)
     beam = dict(footprint=box(offset, 0, offset+1, 1), bottom=underside, top=6)
     assert overhead_quality([unit], [beam], 1) == expected
+
+
+@pytest.mark.parametrize("normal, tilt, bearing, tol, result", [
+    ((0, 1, 1), 45, 359, 1, "PASS"), ((1, 0, 1), 45, 0, 10, "FAIL"),
+    ((0, -1, 1), 40, 180, 2, "FAIL"), ((None, 1, 1), 45, 0, 1, "INCOMPLETE"),
+], ids=["north-wraparound", "reject-east-facing-plane", "reject-excess-pitch", "missing-normal"])
+def test_roof_normal(normal, tilt, bearing, tol, result):
+    from benches.x03_layout_oracle import roof_orientation_quality
+    assert roof_orientation_quality(normal, tilt, bearing, tol, tol) == result

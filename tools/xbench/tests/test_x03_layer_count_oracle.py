@@ -63,3 +63,30 @@ def test_deep_expansion_stops_at_budget(depth):
     assert layer_count_quality(space,"0","panel",2**depth,expansion_budget=4) == "INCOMPLETE"
     if depth < 128:
         assert layer_count_quality(space,"0","panel",2**depth,expansion_budget=2**(depth+2)) == "PASS"
+
+
+@pytest.mark.parametrize("case, expected", [
+    ("repeat-placement", "PASS"), ("nested", "PASS"), ("conflict", "FAIL"),
+    ("missing", "INCOMPLETE"), ("cycle", "INCOMPLETE"),
+])
+def test_external_panel_counts(case, expected):
+    from benches.x03_layer_count_oracle import referenced_layer_count_quality
+    doc = pytest.importorskip("ezdxf").new()
+    doc.blocks.new("Panel")
+    doc.modelspace().add_blockref("Panel", (0, 0), dxfattribs={"layer": "roof"})
+    leaf = dict(drawing="leaf", revision="2")
+    parent = dict(drawing="parent", revision="1")
+    records = {
+        "parent": dict(revision="1", entities=[], references=[leaf, leaf]),
+        "leaf": dict(revision="2", entities=list(doc.modelspace()), references=[]),
+    }
+    if case == "nested":
+        records["mid"] = dict(revision="3", entities=[], references=[leaf, leaf])
+        records["parent"]["references"] = [dict(drawing="mid", revision="3")]
+    if case == "conflict":
+        records["parent"]["references"][1] = dict(leaf, revision="1")
+    if case == "missing":
+        del records["leaf"]
+    if case == "cycle":
+        records["leaf"]["references"] = [parent]
+    assert referenced_layer_count_quality(records, "parent", "1", "roof", "Panel", 2) == expected

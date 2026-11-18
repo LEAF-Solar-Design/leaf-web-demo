@@ -380,3 +380,26 @@ def test_bond_inventory(links, verdict):
     from benches.x03_quality import bonding_quality
     records = [dict(a=a, b=b, intact=intact) for a, b, intact in links]
     assert bonding_quality(["rack", "frame"], "ground", records) == verdict
+
+
+@pytest.mark.parametrize("phases, currents, limit, spread, expected", [
+    ([["A"], ["A"], ["B"]], [6, 6, 4], 10, 20, "FAIL"),
+    ([["A", "B", "C"], ["B"], ["C"]], [4, 2, 2], 6, 2, "PASS"),
+    ([["A"], ["B"], ["C"]], [8, 5, 5], 10, 2, "FAIL"),
+    ([["A"], None, ["C"]], [4, 4, 4], 4, 0, "INCOMPLETE"),
+], ids=["audit-hidden-feeder-overload", "balance-three-phase-and-single-phase", "limit-leg-spread", "missing-phase"])
+def test_phase_balance(phases, currents, limit, spread, expected):
+    from benches.x03_quality import phase_balance_quality
+    assert phase_balance_quality(dict(enumerate(phases)), dict(enumerate(currents)),
+                                 dict.fromkeys("ABC", limit), spread) == expected
+
+
+@pytest.mark.parametrize("currents, rating, cap, expected", [
+    ([4, 6, 8], 14, "unprotected", "PASS"), ([3, 7, 8], 14, "unprotected", "FAIL"),
+    ([3, 7, 8], 14, 12, "PASS"), ([3, 7, 8], 14, None, "INCOMPLETE"),
+], ids=["check-exact-module-limit", "locate-backfed-branch", "apply-recorded-let-through", "missing-protection"])
+def test_reverse_current(currents, rating, cap, expected):
+    from benches.x03_quality import reverse_current_quality
+    sources = dict(enumerate(currents))
+    assert reverse_current_quality(sources, {0: rating, 1: 20, 2: 20},
+                                   {0: cap, 1: "unprotected", 2: "unprotected"}) == expected

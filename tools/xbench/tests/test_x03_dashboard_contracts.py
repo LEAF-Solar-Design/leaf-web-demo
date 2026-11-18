@@ -118,3 +118,15 @@ def test_concurrent_run_accounting(spans, elapsed, worker):
 def test_latency_percentiles(samples, percentile, policy, reported, verdict):
     from benches.x03_dashboard_oracle import latency_percentile_quality
     assert latency_percentile_quality(samples, percentile, reported, policy) == verdict
+
+
+@pytest.mark.parametrize("history, counts, expected", [
+    ([("a", 2, "succeeded"), ("a", 1, "failed")], (2, 1, 1, 0), "PASS"),
+    ([("b", 1, "failed"), ("c", 1, "succeeded")], (2, 2, 1, 1), "PASS"),
+    ([("a", 1, "failed"), ("a", 2, "succeeded")], (2, 2, 2, 0), "FAIL"),
+    ([("a", 2, "succeeded")], (1, 1, 1, 0), "INCOMPLETE"),
+], ids=["reconcile-retry-success", "split-two-logical-runs", "reject-inflated-dashboard", "missing-first-attempt"])
+def test_logical_retry_totals(history, counts, expected):
+    from benches.x03_dashboard_oracle import retry_dashboard_quality
+    attempts = [dict(run=r, attempt=i, outcome=s) for r, i, s in history]
+    assert retry_dashboard_quality(attempts, dict(zip(("attempts", "runs", "succeeded", "failed"), counts))) == expected
