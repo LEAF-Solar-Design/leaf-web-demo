@@ -735,3 +735,25 @@ def starvation_quality(ready, dispatches, as_of, aging_limits, reported):
     if not dispatches.keys() <= seen or not isinstance(reported,list) or not all(isinstance(v,str) for v in reported):
         return "INCOMPLETE"
     return "PASS" if len(reported) == len(overdue) and set(reported) == overdue else "FAIL"
+
+
+def abandonment_quality(admissions, starts, abandoned, reported_served):
+    """Reconcile a closed queue cohort at service start using per-request event times."""
+    from benches.x03_quality import finite_measure
+    if not all(isinstance(events, dict) for events in (admissions, starts, abandoned)):
+        return "INCOMPLETE"
+    if not isinstance(reported_served, set):
+        return "INCOMPLETE"
+    for events in (admissions, starts, abandoned):
+        if not all(map(finite_measure, events.values())):
+            return "INCOMPLETE"
+    if starts.keys() & abandoned.keys():
+        return "FAIL"
+    terminal = {**starts, **abandoned}
+    if terminal.keys() - admissions.keys():
+        return "FAIL"
+    if admissions.keys() - terminal.keys():
+        return "INCOMPLETE"
+    if any(time < admissions[key] for key, time in terminal.items()):
+        return "FAIL"
+    return "PASS" if reported_served == starts.keys() else "FAIL"

@@ -605,3 +605,32 @@ def test_only_declared_wind_period_conversions(source,target,factor,expected):
     assert grade(20,source,target,rules,expected+1) == "FAIL"
     assert grade(20,3,600,{},15) == "FAIL"
     assert grade(20,None,target,rules,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("parts", [("rail", "adapter"), ("guard", "lid"), ("clamp", "spacer", "insert")])
+def test_procure_compatible_accessories(parts):
+    from itertools import combinations
+    from benches.x03_catalog_oracle import accessory_compatibility_quality
+    selected = set(parts)
+    compatibility = {frozenset(pair): True for pair in combinations(parts, 2)}
+    assembly = dict(revision="kit-v3", eligible=selected, compatible=compatibility)
+    def grade():
+        return accessory_compatibility_quality("kit-v3", assembly, selected)
+    assert grade() == "PASS"
+    pair = frozenset(parts[:2])
+    compatibility[pair] = False
+    assert grade() == "FAIL"
+    del compatibility[pair]
+    assert grade() == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("unit,value,impossible", [("C", -10, -274), ("F", 14, -460), ("K", 263.15, -1)])
+def test_cold_string_voltage_across_weather_units(unit, value, impossible):
+    from benches.x03_weather_oracle import temperature_unit_voltage_quality
+    sample = dict(site="roof", station="mast", timezone="UTC", timestamp=1, unit=unit, cell_temp=value)
+    def grade(record):
+        return temperature_unit_voltage_quality(record, reported=108.75, site="roof", station="mast",
+                                               as_of=1, max_age=0, voc_at_25=50, coefficient_per_c=-0.0025, modules=2)
+    assert grade(sample) == "PASS"
+    assert grade(dict(sample, cell_temp=impossible)) == "FAIL"
+    assert grade(dict(sample, unit=None)) == "INCOMPLETE"

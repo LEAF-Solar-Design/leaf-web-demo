@@ -808,3 +808,29 @@ def test_transformer_energization_trip_envelope(peak,width,running):
     assert grade([(0,width,peak,True),trace[1]],policy) == "FAIL"
     assert grade([(0,width+0.1,peak,False),(width+0.1,3,running,False)],policy) == "FAIL"
     assert grade(trace[1:],policy) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ask,spectrum,rating", [
+    ("Check the DC link on one switching frequency", {100: 2}, 2),
+    ("Check a rectifier with two recorded harmonics", {120: 3, 240: 4}, 5),
+    ("Size the filter for all three switching bands", {50: 1, 100: 2, 150: 2}, 3),
+])
+def test_recorded_capacitor_ripple(ask, spectrum, rating):
+    from benches.x03_quality import ripple_current_quality
+    bands = set(spectrum)
+    assert ripple_current_quality(bands, spectrum, rating) == "PASS"
+    assert ripple_current_quality(bands, spectrum, rating - 0.1) == "FAIL"
+    assert ripple_current_quality(bands, {}, rating) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("capacities,volts,wh", [
+    ([4, 10], 6, 24), ([8, 6, 9], 10, 60), ([12, 11, 7, 14], 20, 140),
+])
+def test_series_pack_requested_energy_at_first_cutoff(capacities, volts, wh):
+    from benches.x03_quality import series_energy_quality
+    cells = dict(enumerate(capacities))
+    def check(data, required):
+        return series_energy_quality(set(cells), data, "first-cell-cutoff", volts, required)
+    assert check(cells, wh) == "PASS"
+    assert check(cells, wh + 1) == "FAIL"
+    assert check(dict(list(cells.items())[1:]), wh) == "INCOMPLETE"

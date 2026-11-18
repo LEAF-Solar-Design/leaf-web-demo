@@ -1454,3 +1454,33 @@ def inrush_quality(trace, protection):
             return "FAIL"
         cursor = right
     return "PASS" if cursor == start else "INCOMPLETE"
+
+
+def ripple_current_quality(expected_hz, spectrum_rms_a, rating_a):
+    """Compare orthogonal AC components against a recorded broadband RMS rating."""
+    if not isinstance(expected_hz, (set, frozenset)) or not expected_hz:
+        return "INCOMPLETE"
+    if not isinstance(spectrum_rms_a, dict) or spectrum_rms_a.keys() != expected_hz:
+        return "INCOMPLETE"
+    if not all(finite_measure(hz) and hz > 0 for hz in expected_hz):
+        return "INCOMPLETE"
+    if not finite_measure(rating_a) or rating_a <= 0:
+        return "INCOMPLETE"
+    if not all(finite_measure(amps) and amps >= 0 for amps in spectrum_rms_a.values()):
+        return "INCOMPLETE"
+    heating = sum(Fraction(str(amps)) ** 2 for amps in spectrum_rms_a.values())
+    return "PASS" if heating <= Fraction(str(rating_a)) ** 2 else "FAIL"
+
+
+def series_energy_quality(cell_ids, capacities_ah, cutoff_rule, bank_volts, required_wh):
+    """Recorded constant bank voltage, series discharge until the first cell hits cutoff."""
+    if cutoff_rule != "first-cell-cutoff" or not isinstance(cell_ids, (set, frozenset)) or not cell_ids:
+        return "INCOMPLETE"
+    if not isinstance(capacities_ah, dict) or capacities_ah.keys() != cell_ids:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in capacities_ah.values()):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (bank_volts, required_wh))) or bank_volts <= 0 or required_wh < 0:
+        return "INCOMPLETE"
+    available = Fraction(str(min(capacities_ah.values()))) * Fraction(str(bank_volts))
+    return "PASS" if available >= Fraction(str(required_wh)) else "FAIL"

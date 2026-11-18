@@ -315,3 +315,14 @@ def test_miner_sum_over_all_stress_bins(low,high,expected):
     assert grade(bins,[20,40],curve,"lot-a","miner-linear") == expected
     assert grade({20:low},[20,40],curve,"lot-a","miner-linear") == "INCOMPLETE"
     assert grade(bins,[20,40],curve,"lot-b","miner-linear") == "FAIL"
+
+
+@pytest.mark.parametrize("zone,position,outside", [((5, 12), 5, 4), ((30, 50), 50, 51), ((70, 75), 72, 76)])
+def test_module_edge_clamp_placement(zone, position, outside):
+    from benches.x03_layout_oracle import clamp_zone_quality
+    rule = dict(revision="mount-v2", zones_mm={"near": zone, "far": (90, 100)})
+    def check(positions):
+        return clamp_zone_quality("mount-v2", rule, positions)
+    assert check({"near": position, "far": 100}) == "PASS"
+    assert check({"near": outside, "far": 100}) == "FAIL"
+    assert check({"near": position}) == "INCOMPLETE"

@@ -485,3 +485,20 @@ def galvanic_quality(first, second, exposure, isolation, catalog, revision):
     if len(matches) != 1 or not isinstance(matches[0],list):
         return "INCOMPLETE"
     return "PASS" if isolation in matches[0] else "FAIL"
+
+
+def accessory_compatibility_quality(revision, assembly, selected):
+    """Require an explicit compatibility decision for each pair in the selected assembly."""
+    from itertools import combinations
+    if not revision or not isinstance(assembly, dict) or assembly.get("revision") != revision:
+        return "INCOMPLETE"
+    eligible = assembly.get("eligible")
+    pairs = assembly.get("compatible")
+    if not isinstance(eligible, set) or not isinstance(selected, set) or not selected or not isinstance(pairs, dict):
+        return "INCOMPLETE"
+    if not selected <= eligible:
+        return "FAIL"
+    decisions = [pairs.get(frozenset(pair)) for pair in combinations(selected, 2)]
+    if any(value is False for value in decisions):
+        return "FAIL"
+    return "PASS" if all(value is True for value in decisions) else "INCOMPLETE"

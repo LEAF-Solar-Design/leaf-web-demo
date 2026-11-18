@@ -635,3 +635,27 @@ def fatigue_quality(cycles, required_bins, curve, revision, rule):
             return "INCOMPLETE"
         damage += count / Fraction(str(life))
     return "PASS" if damage < 1 else "FAIL"
+
+
+def clamp_zone_quality(revision, mounting_rule, positions_mm):
+    """Grade each required clamp's distance along the mounting edge from the pinned datum."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(mounting_rule, dict) or revision != mounting_rule.get("revision"):
+        return "INCOMPLETE"
+    zones = mounting_rule.get("zones_mm")
+    if not isinstance(zones, dict) or not zones or not isinstance(positions_mm, dict):
+        return "INCOMPLETE"
+    if zones.keys() - positions_mm.keys():
+        return "INCOMPLETE"
+    if positions_mm.keys() != zones.keys():
+        return "FAIL"
+    for clamp, bounds in zones.items():
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            return "INCOMPLETE"
+        low, high = bounds
+        position = positions_mm[clamp]
+        if not all(map(finite_measure, (low, high, position))) or low > high:
+            return "INCOMPLETE"
+        if not low <= position <= high:
+            return "FAIL"
+    return "PASS"

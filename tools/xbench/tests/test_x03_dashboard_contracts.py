@@ -367,3 +367,15 @@ def test_aging_of_eligible_work_amid_fast_dispatches(limit,dispatch,expected):
     assert grade(ready,events,6,policy,expected) == "PASS"
     assert grade(ready,events,6,policy,[] if expected else ["low"]) == "FAIL"
     assert grade(ready,events,6,None,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("served,left", [(["a"], ["b"]), ([], ["a", "b"]), (["a", "b"], ["c", "d"])])
+def test_queue_report_excludes_abandoned_requests(served, left):
+    from benches.x03_dashboard_oracle import abandonment_quality
+    arrivals = dict.fromkeys(served + left, 1)
+    starts = dict.fromkeys(served, 2)
+    exits = dict.fromkeys(left, 3)
+    assert abandonment_quality(arrivals, starts, exits, set(served)) == "PASS"
+    assert abandonment_quality(arrivals, starts, exits, set(arrivals)) == "FAIL"
+    del exits[left[0]]
+    assert abandonment_quality(arrivals, starts, exits, set(served)) == "INCOMPLETE"
