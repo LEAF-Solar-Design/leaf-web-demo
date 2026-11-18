@@ -505,3 +505,13 @@ def test_voltage_from_weighted_station_temperatures(weights, volts):
     assert grade(samples, dict(north=-0.1, south=1.1), **conditions) == "FAIL"
     assert grade(samples, dict(north=1, south=1), **conditions) == "FAIL"
     assert grade({"north":samples["north"]}, policy, **conditions) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("air,rh,surface,risk", [(20,50,9,True), (20,50,10,False), (12,100,12,True)])
+def test_condensation_at_recorded_surface(air,rh,surface,risk):
+    from benches.x03_weather_oracle import condensation_quality as grade
+    # At 20 C and 50% RH the declared rule gives a dew point of about 9.26 C.
+    rule = dict(method="magnus-water",a=17.62,b_c=243.12)
+    assert grade(air,rh,surface,rule,risk) == "PASS"
+    assert grade(air,rh,surface,rule,not risk) == "FAIL"
+    assert grade(air,None,surface,rule,risk) == "INCOMPLETE"

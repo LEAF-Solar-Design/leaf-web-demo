@@ -692,3 +692,30 @@ def test_cell_spread_with_constant_pack_voltage(cells, limit):
     assert grade(ids, readings, limit) == "FAIL"
     del readings[ids[0]]
     assert grade(ids, readings, limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("trip,reset,delay", [(10,8,2), (110,100,5), (3.5,3.1,0.5)])
+def test_sampled_relay_deadband_and_continuous_reset(trip,reset,delay):
+    from benches.x03_quality import relay_trace_quality as grade
+    middle = (trip+reset)/2
+    trace = [(0,trip,True),(1,middle,True),(2,reset,True),(2+delay/2,middle,True),
+             (3+delay,reset,True),(3+2*delay,reset,False)]
+    assert grade(trace,trip,reset,delay) == "PASS"
+    for index in (1,4):
+        early = list(trace)
+        early[index] = (*trace[index][:2],False)
+        assert grade(early,trip,reset,delay) == "FAIL"
+    assert grade(trace,trip,reset,None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("states,expected", [(["sun","shade"],47.5), (["shade","sun","shade"],45),
+                                            (["sun","partial"],65)])
+def test_substring_bypass_at_series_current(states,expected):
+    from benches.x03_quality import bypass_string_quality as grade
+    curves = dict(revision="r2", volts_by_current={"sun":[(0,15),(10,5)], "shade":[(0,2),(10,-8)],
+                                                   "partial":[(0,6),(10,0)]})
+    rows = {i:dict(shading=s,diode_drop=0.5) for i,s in enumerate(states)}
+    assert grade(rows,5,"r2",curves,expected) == "PASS"
+    assert grade(rows,5,"r2",curves,50*len(states)) == "FAIL"
+    del rows[0]["diode_drop"]
+    assert grade(rows,5,"r2",curves,expected) == "INCOMPLETE"

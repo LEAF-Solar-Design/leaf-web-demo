@@ -266,3 +266,13 @@ def test_hinged_door_obstacle_inside_sweep(tip, angle, blocked, clear):
     assert grade((0,0), tip, angle, [Point(clear).buffer(0.1)]) == "PASS"
     assert grade((0,0), tip, angle, [Point(blocked).buffer(0.1)]) == "FAIL"
     assert grade((0,0), None, angle, []) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("condition,k,below,above", [("pinned",1,986,987), ("cantilever",2,246,247),
+                                                       ("fixed",0.5,3947,3948)])
+def test_weak_axis_buckling(condition,k,below,above):
+    from benches.x03_layout_oracle import buckling_quality as grade
+    rail = dict(end_condition=condition,length_mm=100,modulus_mpa=100000,weak_inertia_mm4=10,compression_n=below)
+    assert grade([rail],{condition:k}) == "PASS"
+    assert grade([dict(rail,compression_n=above)],{condition:k}) == "FAIL"
+    assert grade([rail],{}) == "INCOMPLETE"

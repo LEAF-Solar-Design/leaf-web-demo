@@ -613,3 +613,27 @@ def mean_queue_quality(start, end, opening_count, events, reported):
     area += count * (Fraction(str(end)) - previous)
     mean = area / (Fraction(str(end)) - Fraction(str(start)))
     return "PASS" if finite_measure(reported) and isclose(reported, float(mean), rel_tol=1e-12, abs_tol=1e-12) else "FAIL"
+
+
+def scheduled_throughput_quality(completions, shifts, reported):
+    """Count completed work in the union of scheduled half-open intervals in seconds."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(completions, dict) or not isinstance(shifts, list) or not shifts or reported is None:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, completions.values())):
+        return "INCOMPLETE"
+    spans = []
+    for shift in shifts:
+        if not isinstance(shift, (list, tuple)) or len(shift) != 2 or not all(map(finite_measure, shift)) or shift[0] >= shift[1]:
+            return "INCOMPLETE"
+        spans.append(tuple(Fraction(str(v)) for v in shift))
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(end, merged[-1][1])
+        else:
+            merged.append([start, end])
+    count = sum(any(a <= Fraction(str(t)) < b for a,b in merged) for t in completions.values())
+    rate = 3600 * count / sum(b-a for a,b in merged)
+    return "PASS" if finite_measure(reported) and isclose(reported, float(rate), rel_tol=1e-12) else "FAIL"

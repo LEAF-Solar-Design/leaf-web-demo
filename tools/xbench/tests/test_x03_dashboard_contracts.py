@@ -311,3 +311,13 @@ def test_time_weighted_queue_length(opening,events,mean,wrong):
     assert grade(0,10,opening,events,wrong) == "FAIL"
     assert grade(None,10,opening,events,mean) == "INCOMPLETE"
     assert grade(0,10,None,events,mean) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("shifts,expected", [
+    ([(0,1800),(900,2700)],4), ([(0,900),(2700,3600)],4), ([(0,1200),(0,1200)],6)])
+def test_completions_per_scheduled_hour(shifts,expected):
+    from benches.x03_dashboard_oracle import scheduled_throughput_quality as grade
+    completions = dict(a=0,b=900,c=1800,d=3000)
+    assert grade(completions,shifts,expected) == "PASS"
+    assert grade(completions,shifts,4.8) == "FAIL"
+    assert grade(completions,None,expected) == "INCOMPLETE"

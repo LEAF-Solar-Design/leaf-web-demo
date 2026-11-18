@@ -27,7 +27,16 @@ def member_key(name):
     return key if key not in {"", "."} and ":" not in key else None
 
 
-def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_bytes=32*1024*1024, max_members=1024):
+def compression_ratio_quality(path, manifest, max_ratio=None):
+    """Apply the declared per-member expansion ceiling before reading any payload."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not finite_measure(max_ratio) or max_ratio <= 0:
+        return "INCOMPLETE"
+    return package_quality(path, manifest, _ratio_limit=Fraction(str(max_ratio)))
+
+
+def package_quality(path, manifest, *, _ratio_limit=None, max_member_bytes=8*1024*1024, max_total_bytes=32*1024*1024, max_members=1024):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("members"), list):
         return "INCOMPLETE"
     if type(max_members) is not int or max_members < 0 or len(manifest["members"]) > max_members:
@@ -44,6 +53,8 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
     try:
         with ZipFile(path) as archive:
             entries = archive.infolist()
+            if _ratio_limit is not None and any(e.file_size > _ratio_limit * e.compress_size for e in entries):
+                return "FAIL"
             if len(entries) > max_members:
                 return "FAIL"
             if sum(entry.file_size for entry in entries) > max_total_bytes:
