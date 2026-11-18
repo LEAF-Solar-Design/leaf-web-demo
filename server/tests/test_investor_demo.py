@@ -132,7 +132,7 @@ def test_link_format_and_mac(configured, monkeypatch):
         parts = fields.copy()
         parts[2] = start + parts[2][1:]
         bad.append(".".join(parts))
-    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    alphabet = "".join(map(chr, [*range(65, 91), *range(97, 123), *range(48, 58)])) + "-_"
     bad.append(token[:-1] + alphabet[alphabet.index(token[-1]) + 1])
     for value in bad:
         with pytest.raises(demo.InvalidLink) as failure:
