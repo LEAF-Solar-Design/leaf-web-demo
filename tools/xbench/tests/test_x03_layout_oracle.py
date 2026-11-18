@@ -372,3 +372,15 @@ def test_rail_section_stress_at_positive_and_negative_moments(moment,modulus,all
     assert grade(moments,sections,limits) == "PASS"
     assert grade(moments,sections,dict(limits,support=allowable-1)) == "FAIL"
     assert grade(moments,{"span":modulus},limits) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("plate,t,d,allowable,force", [
+    ("bracket",2,5,100,1000), ("rail",4,8,75,-2400), ("gusset",3,10,120,3600),
+])
+def test_local_hole_bearing_even_with_spare_peer_capacity(plate,t,d,allowable,force):
+    from benches.x03_layout_oracle import hole_bearing_quality as grade
+    section = dict(thickness_mm=t,diameter_mm=d,allowable_mpa=allowable)
+    holes = {plate:section,"spare":section}
+    assert grade({plate:force,"spare":0},holes) == "PASS"
+    assert grade({plate:abs(force)+1,"spare":0},holes) == "FAIL"
+    assert grade({plate:force},{plate:dict(section,diameter_mm=None)}) == "INCOMPLETE"

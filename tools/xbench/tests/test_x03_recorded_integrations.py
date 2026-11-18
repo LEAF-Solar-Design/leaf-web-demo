@@ -713,3 +713,26 @@ def test_adjust_wind_reading_for_terrain_and_height(sensor,target,speed,alpha,ex
     assert grade("terrain",model,sensor,target,speed,expected) == "PASS"
     assert grade("terrain",model,sensor,target,speed,speed) == "FAIL"
     assert grade("terrain",dict(model,exponent=None),sensor,target,speed,expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("mount,low,mid,high,limit", [("rail",10,20,30,2),("wall",15,25,45,3),("frame",2,10,18,1.5)])
+def test_vibration_across_operating_band(mount,low,mid,high,limit):
+    from benches.x03_catalog_oracle import vibration_qualification_quality as grade
+    sheet = dict(revision="test",complete_mount_list=True,mounts={mount:[(low,mid,limit+1),(mid,high,limit)]})
+    assert grade("test",sheet,mount,(low,high),limit) == "PASS"
+    assert grade("test",sheet,mount,(low,high),limit+0.1) == "FAIL"
+    assert grade("test",sheet,"other",(low,high),limit) == "FAIL"
+    assert grade("test",sheet,mount,(low,high+1),limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("rows,direction,arithmetic", [
+    ([(350,1),(10,1)],0,180), ([(359,2),(1,2),(0,1)],0,144), ([(270,1),(0,1)],315,135),
+])
+def test_weighted_wind_direction_crosses_north(rows,direction,arithmetic):
+    from benches.x03_weather_oracle import circular_wind_quality as grade
+    def check(samples, result):
+        return grade(samples,"weighted-vector-mean",result,0.0001)
+    assert check(rows,direction) == "PASS"
+    assert check(rows,arithmetic) == "FAIL"
+    assert check([(90,1),(270,1)],direction) == "INCOMPLETE"
+    assert check([(0,2),(90,1)],26.565051) == "PASS"

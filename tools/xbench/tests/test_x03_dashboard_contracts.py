@@ -419,3 +419,14 @@ def test_counter_throughput_across_resets_and_wraps(before, after, delta):
         assert grade(epochs,100,wrong) == "FAIL"
     epochs[1]["samples"] = [(after[0][0],0,None),after[1]]
     assert grade(epochs,100,delta) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("end,begin,limits", [(2,2,{0:1}), (4,2,{0:1,2:2}), (3,3,{0:2,3:1})])
+def test_admission_limit_at_release_or_limit_change(end,begin,limits):
+    from benches.x03_dashboard_oracle import admission_limit_quality as grade
+    ids = {"a","b"}
+    starts = {"a":0,"b":begin}
+    terminals = {"a":end,"b":6}
+    assert grade(ids,starts,terminals,limits) == "PASS"
+    assert grade(ids,{"a":0,"b":1},terminals,{0:1,2:3}) == "FAIL"
+    assert grade(ids,starts,{"a":end},limits) == "INCOMPLETE"
