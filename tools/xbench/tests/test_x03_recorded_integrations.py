@@ -585,3 +585,23 @@ def test_fence_after_worker_reassignment(old,new,worker):
     assert grade([original,granted,dict(stale,committed=True)]) == "FAIL"
     assert grade([original,dict(granted,epoch=old),current]) == "FAIL"
     assert grade([original,granted,dict(current,epoch=None)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("a,b,exposure,allowed", [("Al","Cu","wet","sleeve"),("Zn","Cu","marine","barrier"),
+                                                  ("steel","Al","rain","washer")])
+def test_exposed_material_pair_requires_pinned_isolation(a,b,exposure,allowed):
+    from benches.x03_catalog_oracle import galvanic_quality as grade
+    catalog = dict(revision="sheet-1",rules=[dict(materials=[b,a],exposure=exposure,allowed_isolation=[allowed])])
+    assert grade(a,b,exposure,allowed,catalog,"sheet-1") == "PASS"
+    assert grade(a,b,exposure,"bare",catalog,"sheet-1") == "FAIL"
+    assert grade(None,b,exposure,allowed,catalog,"sheet-1") == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("source,target,factor,expected", [(3,600,0.75,15),(600,3,1.4,28),(60,60,1,20)])
+def test_only_declared_wind_period_conversions(source,target,factor,expected):
+    from benches.x03_weather_oracle import wind_period_quality as grade
+    rules = {(source,target):factor}
+    assert grade(20,source,target,rules,expected) == "PASS"
+    assert grade(20,source,target,rules,expected+1) == "FAIL"
+    assert grade(20,3,600,{},15) == "FAIL"
+    assert grade(20,None,target,rules,expected) == "INCOMPLETE"

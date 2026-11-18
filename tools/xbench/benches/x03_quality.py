@@ -1410,3 +1410,47 @@ def surge_coordination_quality(residual_v, lead_rise_v, impulse_rating_v):
         return "FAIL"
     installed = Fraction(str(residual_v)) + Fraction(str(lead_rise_v))
     return "PASS" if installed <= Fraction(str(impulse_rating_v)) else "FAIL"
+
+
+def voltage_thd_quality(rms_volts, required_orders, limit_percent):
+    """Compare squared harmonic RMS with the squared fraction of the fundamental."""
+    if not isinstance(rms_volts, dict) or not isinstance(required_orders, (list, tuple)) or not required_orders:
+        return "INCOMPLETE"
+    if not all(type(k) is int and k >= 2 for k in required_orders) or not finite_measure(limit_percent):
+        return "INCOMPLETE"
+    if not all(type(k) is int and k >= 1 for k in rms_volts) or not {1, *required_orders} <= rms_volts.keys():
+        return "INCOMPLETE"
+    if not all(map(finite_measure, rms_volts.values())) or min(rms_volts.values()) < 0 or rms_volts[1] <= 0 or limit_percent < 0:
+        return "INCOMPLETE"
+    distortion = sum(Fraction(str(v))**2 for k,v in rms_volts.items() if k > 1)
+    allowed = Fraction(str(rms_volts[1])) * Fraction(str(limit_percent)) / 100
+    return "PASS" if distortion <= allowed**2 else "FAIL"
+
+
+def inrush_quality(trace, protection):
+    """Compare interval RMS currents with a recorded piecewise no-trip ceiling since energization."""
+    if not isinstance(protection, list) or not protection or not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    bands = []
+    start = 0
+    for band in protection:
+        if not isinstance(band, (list, tuple)) or len(band) != 2 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        end, ceiling = band
+        if end <= start or ceiling < 0:
+            return "INCOMPLETE"
+        bands.append((start, end, ceiling))
+        start = end
+    cursor = 0
+    for record in trace:
+        if not isinstance(record, (tuple, list)) or len(record) != 4:
+            return "INCOMPLETE"
+        left, right, amps, tripped = record
+        if not all(map(finite_measure, (left,right,amps))) or type(tripped) is not bool:
+            return "INCOMPLETE"
+        if left != cursor or not left < right <= start or amps < 0:
+            return "INCOMPLETE"
+        if tripped or any(amps > ceiling for a,b,ceiling in bands if a < right and left < b):
+            return "FAIL"
+        cursor = right
+    return "PASS" if cursor == start else "INCOMPLETE"
