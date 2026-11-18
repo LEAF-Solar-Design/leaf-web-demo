@@ -51,10 +51,27 @@ def selection_quality(saved, reverted, exports, added, removed, *, inventory=Non
     if requested_scope == "full-drawing":
         expected = [live, live]
     elif requested_scope == "visible-only":
-        visible = handle_set(inventory.get("visible_handles"))
-        if visible is None:
+        entities, layers = inventory.get("entities"), inventory.get("layers")
+        if not isinstance(entities, list) or not isinstance(layers, dict):
             return "INCOMPLETE"
-        if not visible.issubset(live):
+        visible, seen = set(), set()
+        for entity in entities:
+            if not isinstance(entity, dict) or type(entity.get("visible")) is not bool:
+                return "INCOMPLETE"
+            handles = handle_set([entity.get("handle")])
+            layer_name = entity.get("layer")
+            layer = layers.get(layer_name) if isinstance(layer_name, str) else None
+            if handles is None or not isinstance(layer, dict) or any(
+                    type(layer.get(k)) is not bool for k in ("on", "frozen")):
+                return "INCOMPLETE"
+            if seen & handles or not handles <= live:
+                return "FAIL"
+            seen.update(handles)
+            if entity["visible"] and layer["on"] and not layer["frozen"]:
+                visible.update(handles)
+        if seen != live:
+            return "INCOMPLETE"
+        if "visible_handles" in inventory and handle_set(inventory["visible_handles"]) != visible:
             return "FAIL"
         expected = [visible, visible]
     return "PASS" if (expected == sets[2:] and after-before == additions

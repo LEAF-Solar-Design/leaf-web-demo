@@ -18,3 +18,39 @@ def layout_quality(panels, usable_area, setback):
         if any(panel.relate_pattern(other, "T********") for other in panels[:i]):
             return "FAIL"
     return "PASS"
+
+
+def row_layout_quality(rows, usable_area, setback, *, orientation=None, row_axis=None, min_pitch=None):
+    """Angles are degrees from +X. Pitch is centerline distance normal to row_axis."""
+    from math import atan2, cos, degrees, hypot, isclose, radians, sin
+    if not rows or any(not row for row in rows) or None in (orientation, row_axis, min_pitch):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (orientation, row_axis, min_pitch))) or min_pitch <= 0:
+        return "FAIL"
+    panels = [panel for row in rows for panel in row]
+    quality = layout_quality(panels, usable_area, setback)
+    if quality != "PASS":
+        return quality
+    normal = (-sin(radians(row_axis)), cos(radians(row_axis)))
+    offsets = []
+    for row in rows:
+        positions = []
+        for panel in row:
+            rectangle = panel.minimum_rotated_rectangle
+            if not panel.equals(rectangle) and panel.symmetric_difference(rectangle).area > panel.area * 1e-9:
+                return "INCOMPLETE"
+            vertices = list(rectangle.exterior.coords)
+            edges = [(b[0]-a[0], b[1]-a[1]) for a, b in zip(vertices, vertices[1:])]
+            if isclose(hypot(*edges[0]), hypot(*edges[1])):
+                return "INCOMPLETE"
+            dx, dy = max(edges, key=lambda edge: hypot(*edge))
+            difference = (degrees(atan2(dy, dx)) - orientation + 90) % 180 - 90
+            if abs(difference) > 1e-7:
+                return "FAIL"
+            positions.append(panel.centroid.x * normal[0] + panel.centroid.y * normal[1])
+        if max(positions) - min(positions) > 1e-8:
+            return "FAIL"
+        offsets.append(positions[0])
+    offsets.sort()
+    return "PASS" if all(b-a >= min_pitch or isclose(b-a, min_pitch, rel_tol=1e-12)
+                         for a, b in zip(offsets, offsets[1:])) else "FAIL"

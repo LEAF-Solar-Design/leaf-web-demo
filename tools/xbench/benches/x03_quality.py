@@ -190,3 +190,86 @@ def string_partition_quality(strings, inventory, adjacency):
         if verdict != "PASS":
             return verdict
     return "PASS"
+
+
+def wiring_quality(strings, module_ratings, max_voltage, max_current):
+    """Grade parallel strings of identical series modules at the supplied rating point.
+
+    Each record names the module type and series count. Limits and ratings
+    are supplied for the same operating condition.
+    """
+    if not strings or not isinstance(module_ratings, dict) or None in (max_voltage, max_current):
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v > 0 for v in (max_voltage, max_current)):
+        return "FAIL"
+    parallel_current = Fraction(0)
+    for string in strings:
+        if not isinstance(string, dict) or not isinstance(string.get("module"), str):
+            return "INCOMPLETE"
+        rating = module_ratings.get(string["module"])
+        if not isinstance(rating, dict) or any(rating.get(k) is None for k in ("volts", "amps")):
+            return "INCOMPLETE"
+        count = string.get("series_count")
+        if count is None:
+            return "INCOMPLETE"
+        if type(count) is not int or count < 1 or not all(
+                finite_measure(rating[k]) and rating[k] > 0 for k in ("volts", "amps")):
+            return "FAIL"
+        if count * Fraction(str(rating["volts"])) > Fraction(str(max_voltage)):
+            return "FAIL"
+        parallel_current += Fraction(str(rating["amps"]))
+    return "PASS" if parallel_current <= Fraction(str(max_current)) else "FAIL"
+
+
+def mppt_quality(currents, trackers, assignments):
+    """Require exactly one tracker assignment per string and enforce each tracker limit."""
+    if not all(isinstance(x, dict) and x for x in (currents, trackers, assignments)):
+        return "INCOMPLETE"
+    if set(assignments) != set(currents):
+        return "FAIL"
+    loads = Counter()
+    amps = Counter()
+    for string, tracker in assignments.items():
+        if not isinstance(tracker, (str, int)) or tracker not in trackers:
+            return "FAIL"
+        current = currents[string]
+        if current is None:
+            return "INCOMPLETE"
+        if not finite_measure(current) or current <= 0:
+            return "FAIL"
+        loads[tracker] += 1
+        amps[tracker] += Fraction(str(current))
+    for tracker, limits in trackers.items():
+        if not isinstance(limits, dict) or any(limits.get(k) is None for k in ("inputs", "amps")):
+            return "INCOMPLETE"
+        count, current = limits["inputs"], limits["amps"]
+        if type(count) is not int or count < 0 or not finite_measure(current) or current < 0:
+            return "FAIL"
+        if loads[tracker] > count or amps[tracker] > Fraction(str(current)):
+            return "FAIL"
+    return "PASS"
+
+
+def terminal_route_quality(routes, terminals, destinations, assignments, trunk, tolerance):
+    """Check complete directed planar paths including their declared common trunk."""
+    from shapely.geometry import Point
+    if not all(isinstance(x, dict) and x for x in (routes, terminals, destinations, assignments)):
+        return "INCOMPLETE"
+    if trunk is None or tolerance is None:
+        return "INCOMPLETE"
+    if (trunk.geom_type != "LineString" or trunk.is_empty or not trunk.is_valid
+            or not finite_measure(tolerance) or tolerance < 0):
+        return "FAIL"
+    if set(routes) != set(terminals) or set(assignments) != set(terminals):
+        return "FAIL"
+    for terminal, route in routes.items():
+        start = terminals[terminal]
+        end = destinations.get(assignments[terminal])
+        if any(p is None or p.is_empty for p in (start, end, route)):
+            return "INCOMPLETE"
+        if (start.geom_type != "Point" or end.geom_type != "Point" or route.geom_type != "LineString"
+                or not route.is_valid or not route.covers(trunk)
+                or Point(route.coords[0]).distance(start) > tolerance
+                or Point(route.coords[-1]).distance(end) > tolerance):
+            return "FAIL"
+    return "PASS"

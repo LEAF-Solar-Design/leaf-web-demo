@@ -15,3 +15,17 @@ def test_panels_fit_usable_area(width, setback):
     assert layout_quality([hole], area, setback) == "FAIL"
     assert layout_quality([first], area, setback+0.01) == "FAIL"
     assert layout_quality([None], area, setback) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("angle,pitch", [(0, 2), (90, 3), (32, 4)])
+def test_rotated_rows_and_pitch(angle, pitch):
+    from shapely.affinity import rotate
+    from benches.x03_layout_oracle import row_layout_quality
+    rows = [[rotate(box(x, y, x+2, y+1), angle, origin=(0, 0)) for x in (0, 3)] for y in (0, pitch)]
+    def grade(orientation, minimum):
+        return row_layout_quality(rows, box(-20, -20, 20, 20), 0, orientation=orientation,
+                                  row_axis=angle, min_pitch=minimum)
+    assert grade(angle, pitch) == "PASS"
+    assert grade(angle+90, pitch) == "FAIL"
+    assert grade(angle, pitch+0.01) == "FAIL"
+    assert grade(None, pitch) == "INCOMPLETE"

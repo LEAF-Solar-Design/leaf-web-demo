@@ -175,3 +175,48 @@ def test_eligible_assignments_against_exhaustive_reference(caps, options):
         groups = [[s for s, slot in enumerate(assignment) if slot == i] for i in range(len(caps))]
         expected = "PASS" if candidates.get(assignment) == optimum else "FAIL"
         assert inverter_quality(strings, caps, groups, eligibility=eligibility) == expected
+
+
+@pytest.mark.parametrize("series,parallel,volts,amps,peak_v,total_a", [
+    (3, 2, 40, 9, 120, 18), (5, 1, 32, 8, 160, 8), (2, 4, 50, 2.5, 100, 10),
+])
+def test_series_parallel_limits(series, parallel, volts, amps, peak_v, total_a):
+    from benches.x03_quality import wiring_quality
+    strings = [dict(module="M", series_count=series) for _ in range(parallel)]
+    ratings = {"M": dict(volts=volts, amps=amps)}
+    assert wiring_quality(strings, ratings, peak_v, total_a) == "PASS"
+    assert wiring_quality(strings, ratings, peak_v-1, total_a) == "FAIL"
+    assert wiring_quality(strings, ratings, peak_v, total_a-1) == "FAIL"
+    assert wiring_quality(strings, {"M": {"volts": volts}}, peak_v, total_a) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("amps,slots,limits", [
+    ([4, 6, 2], [1, 2], [6, 8]), ([8, 2], [2, 2], [8, 6]), ([3, 3, 3], [2, 1], [7, 4]),
+])
+def test_tracker_limits_for_all_assignments(amps, slots, limits):
+    from itertools import product
+    from benches.x03_quality import mppt_quality
+    trackers = {i: dict(inputs=n, amps=limits[i]) for i, n in enumerate(slots)}
+    for choice in product(trackers, repeat=len(amps)):
+        ok = all(choice.count(i) <= slots[i] and sum(a for a, j in zip(amps, choice) if j == i) <= limits[i]
+                 for i in trackers)
+        assert mppt_quality(dict(enumerate(amps)), trackers, dict(enumerate(choice))) == ("PASS" if ok else "FAIL")
+
+
+@pytest.mark.parametrize("span,tolerance", [(2, 0), (4, 0.5), (8, 1)])
+def test_all_assigned_terminal_paths(span, tolerance):
+    from shapely.geometry import LineString, Point
+    from benches.x03_quality import terminal_route_quality
+    terminals = {"a": Point(-1-tolerance, 1), "b": Point(-1, -1)}
+    destinations = {"x": Point(span+1, 2), "y": Point(span+1, -2)}
+    assignments = {"a": "x", "b": "y"}
+    paths = {t: LineString([(-1, terminals[t].y), (0, 0), (span, 0), destinations[d].coords[0]])
+             for t, d in assignments.items()}
+    trunk = LineString([(0, 0), (span, 0)])
+    def grade(edges, mapping, shared):
+        return terminal_route_quality(edges, terminals, destinations, mapping, shared, tolerance)
+    assert grade(paths, assignments, trunk) == "PASS"
+    assert grade(paths, {"a": "y", "b": "x"}, trunk) == "FAIL"
+    assert grade(paths, assignments, LineString([(0, 4), (span, 4)])) == "FAIL"
+    assert grade(paths, assignments, None) == "INCOMPLETE"
+    assert grade({"a": paths["a"]}, assignments, trunk) == "FAIL"

@@ -51,6 +51,11 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
             keys = [member_key(entry.orig_filename) for entry in entries]
             if None in keys or len(set(keys)) != len(keys):
                 return "FAIL"
+            inventory = {key for entry, key in zip(entries, keys) if not entry.is_dir()}
+            if inventory != set(expected):
+                return "FAIL"
+            if not inventory:
+                return "INCOMPLETE"
             for entry, key in zip(entries, keys):
                 if entry.flag_bits & 1:
                     return "INCOMPLETE"
