@@ -5,6 +5,8 @@ from math import isfinite
 def catalog_quality(rows, part, version, unit, result):
     if not isinstance(rows, list) or not isinstance(result, dict):
         return "INCOMPLETE"
+    if not all(isinstance(value, str) and value.strip() for value in (part, version, unit)):
+        return "INCOMPLETE"
     matches = [r for r in rows if isinstance(r, dict) and
                (r.get("part"), r.get("version")) == (part, version)]
     if len(matches) != 1:

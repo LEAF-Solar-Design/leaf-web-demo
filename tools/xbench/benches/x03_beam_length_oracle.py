@@ -1,6 +1,6 @@
 """Grade a supplied set of beam entities. DXF LINEs and circular ARCs are supported."""
 from collections import defaultdict
-from math import dist, isclose, isfinite, radians
+from math import atan, dist, isclose, isfinite, radians
 
 METRES = {"m": 1, "mm": 0.001, "ft": 0.3048}
 
@@ -10,6 +10,22 @@ def beam_length_quality(entities, units, reported):
         return "INCOMPLETE"
     totals = defaultdict(float)
     for entity in entities:
+        if entity.dxftype() == "LWPOLYLINE":
+            vertices = list(entity.get_points("xyb"))
+            if len(vertices) < 2 or not all(all(map(isfinite, v)) for v in vertices):
+                return "INCOMPLETE"
+            ends = vertices[1:] + (vertices[:1] if entity.closed else [])
+            length = 0.0
+            for a, b in zip(vertices, ends):
+                chord = dist(a[:2], b[:2])
+                bulge = abs(a[2])
+                if bulge and not chord:
+                    return "INCOMPLETE"
+                # theta=4*atan(bulge), radius=chord*(1+b*b)/(4*b).
+                factor = (atan(bulge)/bulge + atan(bulge)*bulge) if bulge else 1
+                length += chord * factor
+            totals[entity.dxf.layer] += length * METRES[units]
+            continue
         if entity.dxftype() == "ARC":
             radius, start, end = (entity.dxf.get(k) for k in ("radius","start_angle","end_angle"))
             if not all(type(x) in (int,float) and isfinite(x) for x in (radius,start,end)) or radius <= 0:

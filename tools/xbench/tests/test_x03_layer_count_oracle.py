@@ -29,3 +29,21 @@ def test_ambiguous_count_in_either_order(change):
     entities = [entity(), entity(**change)]
     assert layer_count_quality(entities,"roof","panel",1) == "INCOMPLETE"
     assert layer_count_quality(reversed(entities),"roof","panel",1) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("query,count", [("roof",2),("east",1),("other",0)])
+def test_nested_panel_layer_inheritance(query,count):
+    doc = pytest.importorskip("ezdxf").new()
+    doc.blocks.new("panel")
+    inner = doc.blocks.new("inner")
+    inner.add_blockref("panel",(0,0)).grid((2,1),(1,1))
+    outer = doc.blocks.new("outer")
+    outer.add_blockref("inner",(0,0))
+    outer.add_blockref("panel",(0,0),dxfattribs={"layer":"east"})
+    space = doc.modelspace()
+    space.add_blockref("outer",(0,0),dxfattribs={"layer":"roof"})
+    assert layer_count_quality(space,query,"panel",count) == "PASS"
+    ref = inner.add_blockref("outer",(0,0))
+    assert layer_count_quality(space,query,"panel",count) == "INCOMPLETE"
+    ref.dxf.name = "missing"
+    assert layer_count_quality(space,query,"panel",count) == "INCOMPLETE"

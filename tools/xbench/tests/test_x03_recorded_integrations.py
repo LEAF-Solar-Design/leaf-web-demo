@@ -38,3 +38,18 @@ def test_voltage_reference(temp, modules, expected):
     assert check({},expected) == "INCOMPLETE"
     for changes in (dict(timestamp=89), dict(unit="F"), dict(cell_temp=float("nan"))):
         assert check(dict(weather,**changes),expected) == "FAIL"
+
+
+@pytest.mark.parametrize("field,bad", [("part",None), ("version"," "), ("unit",[])])
+def test_missing_requested_catalog_identity(field,bad):
+    row = dict(part="p",version="v",unit="W",rating=20)
+    row[field] = bad
+    assert catalog_quality([row],row["part"],row["version"],row["unit"],row) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("overrides", [{"modules":10**500}, {"voc_at_25":1e308,"modules":100},
+                                       {"coefficient_per_c":1}])
+def test_voltage_arithmetic_fails_closed(overrides):
+    args = dict(as_of=10,max_age=5,voc_at_25=50,modules=5,coefficient_per_c=-0.003,reported=250)
+    args.update(overrides)
+    assert weather_quality(dict(cell_temp=0,unit="C",timestamp=10),**args) == "FAIL"

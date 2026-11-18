@@ -9,7 +9,11 @@ def dashboard_quality(runs, failures, changes, before, after):
         return "INCOMPLETE"
     ids, failed, outputs = set(), Counter(), {}
     inputs = {}
+    if not isinstance(runs, list):
+        return "INCOMPLETE"
     for run in runs:
+        if not isinstance(run, dict) or run.get("status") not in ("complete", "failed", "cancelled"):
+            return "INCOMPLETE"
         keys = ("id", "drawing", "version", "tool", "revision", "status")
         if not all(isinstance(run.get(k), str) and run[k] for k in keys):
             return "INCOMPLETE"

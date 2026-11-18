@@ -14,13 +14,13 @@ def test_grouped_lengths_in_metres(units, factor):
     assert beam_length_quality(space, None, expected) == "INCOMPLETE"
 
 
-@pytest.mark.parametrize("kind", ["LWPOLYLINE", "missing endpoint"])
+@pytest.mark.parametrize("kind", ["SPLINE", "missing endpoint"])
 def test_incomplete_beam_coverage(kind):
     doc = pytest.importorskip("ezdxf").new()
     space = doc.modelspace()
     space.add_line((0,0),(2,0))
-    if kind == "LWPOLYLINE":
-        space.add_lwpolyline([(0,0),(1,2)])
+    if kind == "SPLINE":
+        space.add_spline([(0,0),(1,2),(2,3)])
     else:
         beam = space.add_line((0,0),(1,0))
         beam.dxf.discard("end")
@@ -37,3 +37,13 @@ def test_mixed_beam_lengths(unit,factor,start,end,arc_pi):
     space.add_arc((0,0),2,start,end, dxfattribs={"layer":"beams"})
     assert beam_length_quality(space,unit,{"beams":(5+arc_pi*pi)*factor}) == "PASS"
     assert beam_length_quality(space,unit,{"beams":5*factor}) == "FAIL"
+
+
+@pytest.mark.parametrize("closed,bulge,expected", [(False,0,5), (True,0,10), (False,-1,2.5*3.141592653589793)])
+def test_polyline_beams(closed, bulge, expected):
+    doc = pytest.importorskip("ezdxf").new()
+    space = doc.modelspace()
+    line = space.add_lwpolyline([(0,0,bulge),(3,4,0)],format="xyb",close=closed)
+    assert beam_length_quality(space,"m",{"0":expected}) == "PASS"
+    line.set_points([(0,0,float("nan")),(3,4,0)],format="xyb")
+    assert beam_length_quality(space,"m",{"0":expected}) == "INCOMPLETE"

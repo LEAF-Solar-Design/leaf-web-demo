@@ -66,3 +66,20 @@ def test_bounded_member_hash_and_crc(tmp_path, name):
     with ZipFile(package, "w") as archive:
         archive.writestr(name,data+b"changed")
     assert package_quality(package,manifest) == "FAIL"
+
+
+@pytest.mark.parametrize("method,flags", [(0,1), (93,0), (99,1)])
+def test_package_unreadable_encoding(tmp_path,method,flags):
+    import struct
+    from zipfile import ZipFile
+    from benches.x03_package_oracle import package_quality
+    path = tmp_path/"package.zip"
+    with ZipFile(path,"w") as z:
+        z.writestr("part",b"payload")
+    data = bytearray(path.read_bytes())
+    central = data.index(b"PK\x01\x02")
+    for offset in (6,central+8):
+        struct.pack_into("<HH",data,offset,flags,method)
+    path.write_bytes(data)
+    manifest = {"members":["part"],"sha256":{"part":hashlib.sha256(b"payload").hexdigest()}}
+    assert package_quality(path,manifest) in {"FAIL","INCOMPLETE"}

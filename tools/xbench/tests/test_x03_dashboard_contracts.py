@@ -41,3 +41,11 @@ def test_reconcile_external_dashboard_rows(tool):
     assert grade(receipts,[]) == "FAIL"
     for mismatch in ({"input_sha256":None}, {"input_sha256":"b"*64}, {"parameters":None}, {"parameters":{"scale":2}}):
         assert grade([first,dict(next_run,**mismatch),failed],delta) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("bad", [None, ["failed"], {"status":"failure_typo"}])
+def test_dashboard_rejects_unreadable_receipts(bad):
+    from benches.x03_dashboard_oracle import dashboard_quality
+    valid = dict(id="1",drawing="d",version="v",tool="t",revision="old",status="cancelled")
+    row = dict(valid, **bad) if isinstance(bad,dict) else bad
+    assert dashboard_quality([row],[],[],"old","new") == "INCOMPLETE"

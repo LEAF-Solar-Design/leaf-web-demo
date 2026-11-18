@@ -32,6 +32,8 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
     try:
         with ZipFile(path) as archive:
             for entry in archive.infolist():
+                if entry.flag_bits & 1:
+                    return "INCOMPLETE"
                 key = member_key(entry.filename)
                 if key is None or key in seen or stat.S_ISLNK(entry.external_attr >> 16):
                     return "FAIL"
@@ -54,6 +56,6 @@ def package_quality(path, manifest, *, max_member_bytes=8*1024*1024, max_total_b
                     files.add(key)
     except BadZipFile:
         return "FAIL"
-    except OSError:
+    except (OSError, NotImplementedError, RuntimeError):
         return "INCOMPLETE"
     return "PASS" if set(expected) == files else "FAIL"
