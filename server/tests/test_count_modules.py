@@ -569,3 +569,23 @@ def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
                                                         ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
     result, _ = module.run(drawing, route["params"])
     assert [row["layer"] for row in result["ranking"]] == expected
+
+
+@pytest.mark.parametrize("phrase,expected", [
+    ("What percentage of all panels is on each layer?", {"East", "West", "North"}),
+    ("Select only the west, north, and East panel sets. What percentage of that selection is on each layer?",
+     {"East", "West", "North"}),
+    ("Within the window (-1,-1) to (3,2), what percentage of the selected panels is on each layer?", {"West"}),
+])
+def test_share_request_selection_and_window(phrase, expected):
+    import deps
+    import nl_router
+    route = nl_router.classify(phrase, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    d = {"inserts": [dict(name="Panel", layer=layer, handle=h, x=x, y=0)
+                     for layer, h, x in [("West","A",0), ("East","B",10), ("North","C",20)]],
+         "blocks": {"Panel": {"complete": True, "base": [0,0,0],
+                              "children": [{"kind":"LINE","pts":[[0,0,0],[1,1,0]]}]}}}
+    result, _ = module.run(d, route["params"])
+    assert {q["layer"] for q in result["shares"]} == expected
+    assert all(q["numerator"] == 1 and q["denominator"] == len(expected) for q in result["shares"])

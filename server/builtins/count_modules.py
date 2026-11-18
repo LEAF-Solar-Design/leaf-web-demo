@@ -263,10 +263,23 @@ def run(intake, params):
             not all(isinstance(name, str) and name.strip() for name in names) or
             selected_ids or not shares or "panel_scope" not in params):
         raise InputValidationError("Choose named panel layers or explicit module sets.")
-    if shares and "panel_scope" in params and not selected_ids:
+    auto_shares = shares and "panel_scope" in params and not selected_ids
+    if auto_shares:
         listing, _ = run(intake, {})
         candidates = listing["sets"]
         if names is not None:
+            available = {group["layer"] for group in candidates}
+            resolved = set()
+            for name in names:
+                name = name.strip()
+                matches = {label for label in available if label.casefold() == name.casefold()}
+                if name in available:
+                    resolved.add(name)
+                elif len(matches) == 1:
+                    resolved.update(matches)
+                else:
+                    raise InputValidationError("A requested panel layer is absent or ambiguous. Check the layer names.")
+            names = resolved
             candidates = [group for group in candidates if group["layer"] in names]
             if {group["layer"] for group in candidates} != set(names):
                 raise InputValidationError("A requested panel layer is absent. Check the layer names.")
@@ -316,7 +329,7 @@ def run(intake, params):
     if not selected_ids and (params.get("group_by") == "layer" or top is not None) and "panel_scope" in params:
         selected_ids = _named_panel_sets(sets, params["panel_scope"])
     selected_sets = [s for s in sets if s["set_id"] in selected_ids]
-    if len(selected_sets) != len(selected_ids):
+    if len(selected_sets) != len(selected_ids) and not (auto_shares and window is not None):
         if window is not None:
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")

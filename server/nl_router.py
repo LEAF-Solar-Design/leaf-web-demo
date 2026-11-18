@@ -449,7 +449,7 @@ def _share_params(text):
         params["region"] = [float(value) for value in window.groups()]
         remaining = remaining[window.end():]
     elif selection:
-        params["layer_names"] = re.split(r",\s*|\s+and\s+", selection[1], flags=re.I)
+        params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection[1], flags=re.I)
         remaining = remaining[selection.end():]
     if not _SHARE_QUERY.fullmatch(remaining):
         return None
