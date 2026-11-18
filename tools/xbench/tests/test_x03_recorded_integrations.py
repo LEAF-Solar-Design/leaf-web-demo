@@ -229,3 +229,39 @@ def test_batch_item_delivery(scenario, expected):
 def test_voltage_series_cadence(samples, step, expected):
     from benches.x03_weather_oracle import weather_cadence_quality
     assert weather_cadence_quality(samples, 0, 30, step) == expected
+
+
+@pytest.mark.parametrize("time, version, overlap, expected", [
+    (10, "new", False, "PASS"), (10, "old", False, "FAIL"),
+    (9, "new", False, "FAIL"), (10, "new", True, "FAIL"),
+], ids=["use-replacement-on-effective-date", "reject-expired-part", "reject-future-part", "flag-overlapping-ratings"])
+def test_design_time_ratings(time, version, overlap, expected):
+    from benches.x03_catalog_oracle import effective_catalog_quality
+    part = dict(part="module", unit="W")
+    rows = [dict(part, version="old", rating=400, valid_from=0, valid_until=11 if overlap else 10),
+            dict(part, version="new", rating=420, valid_from=10, valid_until=20)]
+    result = dict(part, version=version, rating=420 if version == "new" else 400)
+    assert effective_catalog_quality(rows, time, "module", version, "W", result) == expected
+
+
+@pytest.mark.parametrize("links, final, expected", [
+    ([("alpha", "zeta"), ("zeta", None)], "alpha", "PASS"),
+    ([("red", None), ("blue", "red"), ("green", "red")], "blue", "FAIL"),
+    ([("final", "draft")], "final", "INCOMPLETE"),
+    ([("zeta", None), ("alpha", "zeta")], "zeta", "FAIL"),
+], ids=["follow-nonnumeric-labels", "reject-fork", "require-predecessor", "reject-stale-final"])
+def test_delivery_revision_chain(links, final, expected):
+    from benches.x03_issue_delivery_oracle import predecessor_quality
+    events = [dict(revision=child, predecessor=parent) for child, parent in links]
+    assert predecessor_quality(events, final) == expected
+
+
+@pytest.mark.parametrize("bounds, coefficient, limit, expected", [
+    ((5, 35), -0.005, 105, "FAIL"), ((15, 45), 0.005, 105, "FAIL"),
+    ((5, 35), -0.005, 110, "PASS"), (None, -0.005, 105, "INCOMPLETE"),
+], ids=["check-cold-endpoint-at-110V", "check-hot-endpoint-at-110V", "check-exact-110V-limit", "missing-interval"])
+def test_temperature_interval(bounds, coefficient, limit, expected):
+    from benches.x03_weather_oracle import uncertain_voltage_quality
+    weather = dict(unit="C", cell_temp=25, timestamp=10, site="roof", station="local", timezone="UTC")
+    assert uncertain_voltage_quality(weather, bounds, limit, site="roof", station="local", as_of=10,
+                                     max_age=0, voc_at_25=50, coefficient_per_c=coefficient, modules=2) == expected

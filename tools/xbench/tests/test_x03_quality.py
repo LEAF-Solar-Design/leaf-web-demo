@@ -403,3 +403,14 @@ def test_reverse_current(currents, rating, cap, expected):
     sources = dict(enumerate(currents))
     assert reverse_current_quality(sources, {0: rating, 1: 20, 2: 20},
                                    {0: cap, 1: "unprotected", 2: "unprotected"}) == expected
+
+
+@pytest.mark.parametrize("faults, ratings, verdict", [
+    ({"service": 22000}, {"service": 22000}, "PASS"),
+    ({"main": 12000, "branch": 10001}, {"main": 65000, "branch": 10000}, "FAIL"),
+    ({"east": 9380, "west": 14850}, {"east": 10000, "west": 18000}, "PASS"),
+    ({"service": None}, {"service": 22000}, "INCOMPLETE"),
+], ids=["check-exact-interrupting-limit", "locate-underrated-branch", "compare-independent-feeders", "missing-fault-study"])
+def test_device_interrupting_ratings(faults, ratings, verdict):
+    from benches.x03_quality import interrupting_rating_quality
+    assert interrupting_rating_quality(faults, ratings) == verdict

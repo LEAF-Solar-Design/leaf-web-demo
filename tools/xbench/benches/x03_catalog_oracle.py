@@ -151,3 +151,27 @@ def replacement_quality(parts, requested, selected, approvals, rating_bounds):
         if not all(map(finite_measure, (*bounds, ratings[field]))) or not bounds[0] <= ratings[field] <= bounds[1]:
             return "FAIL"
     return "PASS"
+
+
+def effective_catalog_quality(rows, design_time, part, version, unit, result):
+    """Design time and the half-open validity intervals use the same integer time scale."""
+    if not isinstance(rows, list) or type(design_time) is not int:
+        return "INCOMPLETE"
+    active = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("part") is None:
+            return "INCOMPLETE"
+        if row["part"] != part:
+            continue
+        start, end = row.get("valid_from"), row.get("valid_until")
+        if not all(type(v) is int for v in (start, end)) or not row.get("version"):
+            return "INCOMPLETE"
+        if start >= end:
+            return "FAIL"
+        if start <= design_time < end:
+            active.append(row)
+    if len(active) != 1 or active[0]["version"] != version:
+        return "FAIL"
+    if active[0].get("rating") is None:
+        return "INCOMPLETE"
+    return catalog_quality(active, part, version, unit, result)

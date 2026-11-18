@@ -190,3 +190,31 @@ def retry_dashboard_quality(attempts, reported):
     if expected.keys() - reported.keys():
         return "INCOMPLETE"
     return "PASS" if all(type(reported[k]) is int and reported[k] == v for k, v in expected.items()) else "FAIL"
+
+
+def paired_release_quality(cohort, before, after, reported):
+    """Compare successful runs on the same frozen drawing-version cohort for each release."""
+    if not isinstance(cohort, list) or not cohort or not isinstance(reported, dict):
+        return "INCOMPLETE"
+    if not all(isinstance(key, str) and key for key in cohort) or len(set(cohort)) != len(cohort):
+        return "FAIL"
+    successes = []
+    for rows in (before, after):
+        if not isinstance(rows, list):
+            return "INCOMPLETE"
+        outcomes = {}
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("drawing_version"), str) or row.get("outcome") is None:
+                return "INCOMPLETE"
+            key = row["drawing_version"]
+            if key in outcomes or row["outcome"] not in ("passed", "failed"):
+                return "FAIL"
+            outcomes[key] = row["outcome"]
+        if outcomes.keys() != set(cohort):
+            return "FAIL"
+        successes.append(sum(v == "passed" for v in outcomes.values()))
+    old, new = successes
+    expected = dict(pairs=len(cohort), before_passed=old, after_passed=new, improved=new > old)
+    if expected.keys() - reported.keys():
+        return "INCOMPLETE"
+    return "PASS" if all(type(reported[k]) is type(v) and reported[k] == v for k, v in expected.items()) else "FAIL"

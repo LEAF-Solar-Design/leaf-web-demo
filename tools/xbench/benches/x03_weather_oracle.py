@@ -79,3 +79,26 @@ def weather_cadence_quality(timestamps, start, end, step):
     if remainder or len(timestamps) != intervals + 1 or len(set(timestamps)) != len(timestamps):
         return "FAIL"
     return "PASS" if all(start <= t <= end and (t-start) % step == 0 for t in timestamps) else "FAIL"
+
+
+def uncertain_voltage_quality(weather, bounds_c, limit_volts, **conditions):
+    """Both endpoints of a recorded cell-temperature interval must satisfy the voltage limit."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(bounds_c, (tuple, list)) or len(bounds_c) != 2 or None in bounds_c or limit_volts is None:
+        return "INCOMPLETE"
+    nominal = _sample_voltage(weather, **conditions)
+    if isinstance(nominal, str):
+        return nominal
+    low, high = bounds_c
+    if not all(map(finite_measure, (low, high, limit_volts))) or not low <= weather["cell_temp"] <= high or limit_volts <= 0:
+        return "FAIL"
+    for temperature in (low, high):
+        volts = _sample_voltage(dict(weather, cell_temp=temperature), **conditions)
+        if isinstance(volts, str):
+            return volts
+        reference = Fraction(str(conditions["voc_at_25"])) * conditions["modules"]
+        factor = 1 + Fraction(str(conditions["coefficient_per_c"])) * (Fraction(str(temperature)) - 25)
+        if reference * factor > Fraction(str(limit_volts)):
+            return "FAIL"
+    return "PASS"
