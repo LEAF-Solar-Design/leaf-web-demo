@@ -994,3 +994,21 @@ def test_roof_continuity_does_not_change_ground_contract(case):
             "layer": None, "block_name": None, "source_command": None}}
     result = solve.accept_candidate(graph, candidate(case), expected_rev=0)
     assert [string["module_count"] for string in result["strings"]] == [12, 12]
+
+
+def test_plugin_parity_preserves_long_steps_without_enabling_public_bypass(case):
+    graph, _, response = roof_continuity_case(case, step=40.0)
+    proposal = candidate(case)
+    before = copy.deepcopy((graph, proposal))
+    replayed = commit.commit_solve(graph, {"expected_rev": 0}, candidate=proposal,
+                                  plugin_parity=True)
+    expected = [cell["Id"] for cell in sorted(
+        (cell for row in response["data"]["final_grid"]["Rows"] for cell in row["Panels"]),
+        key=lambda cell: cell["Seq"])]
+    assert [ref for string in replayed["strings"] for ref in string["ordered_panel_refs"]] == expected
+    assert [string["module_count"] for string in replayed["strings"]] == [12, 12]
+    with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+        commit.run(graph, {"expected_rev": 0}, candidate=proposal)
+    with pytest.raises(GraphValidationError, match="INVALID_COMMIT_REQUEST"):
+        commit.run(graph, {"expected_rev": 0, "plugin_parity": True}, candidate=proposal)
+    assert (graph, proposal) == before

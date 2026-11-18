@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-upload-extraction-concurrency",
     "server-x07-offline",
     "web-stage-source-contracts",
     "web-page-service-smoke",

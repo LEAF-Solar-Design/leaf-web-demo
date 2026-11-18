@@ -877,3 +877,15 @@ def test_roof_continuity_split_seam_and_partial_cut_reset(graph, monkeypatch, lo
         assert result["extra"]["solve_coverage"] == {
             "duplicate_panel_refs": [], "unassigned_panel_refs": []}
     assert (value, proposal) == before
+
+
+def test_plugin_parity_split_preserves_recorded_cut_across_long_seam(graph, monkeypatch):
+    value, proposal = roof_seam_candidate(graph, monkeypatch, long_step=True)
+    before = copy.deepcopy((value, proposal))
+    result = solve.accept_split_candidate(value, proposal, expected_rev=0, plugin_parity=True)
+    refs = value["frames"][0]["panel_refs"]
+    assert [string["ordered_panel_refs"] for string in result["strings"]] == [refs[:3], refs[3:]]
+    assert not any(solve.coverage(result).values())
+    with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+        solve.accept_split_candidate(value, proposal, expected_rev=0)
+    assert (value, proposal) == before
