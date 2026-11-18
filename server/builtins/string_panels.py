@@ -16,7 +16,8 @@ Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
      rotate into the bank frame, band centroids into rows by frame-y
      (tolerance = half the median rotated bbox height), and order panels
      serpentine (row 0 left->right, row 1 right->left, ...),
-  4. chunk each bank's walk into strings of at most
+  4. end a continuous run before a step longer than 1.5 median module long
+     edges, then chunk each run into strings of at most
      ``max_modules_per_string``, where that limit comes from the NEC 690.7
      cold-temperature Voc check:
 
@@ -55,6 +56,7 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 INCHES_PER_FOOT = 12.0
+MAX_STEP_MODULE_LENGTHS = 1.5
 METERS_PER_INCH = 0.0254
 MAX_METERS_PER_UNIT = 1000.0
 SCALE_INVALID = "meters_per_unit must be a finite number greater than 0 and at most 1000"
@@ -236,6 +238,19 @@ def _bank_serpentine(panels: List[Dict[str, Any]], idxs: List[int],
     return ordered
 
 
+def _continuous_chunks(ordered, cents, max_modules, max_step):
+    """Keep the bank walk, but never connect a string across an internal gap."""
+    chunk = []
+    for index in ordered:
+        if chunk and (len(chunk) == max_modules
+                      or math.dist(cents[chunk[-1]], cents[index]) > max_step):
+            yield chunk
+            chunk = []
+        chunk.append(index)
+    if chunk:
+        yield chunk
+
+
 def run(intake: Dict[str, Any], params: Dict[str, Any]):
     scale = _inches_per_unit(intake, params)
     p = dict(DEFAULTS)
@@ -262,15 +277,21 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
     lengths_ft: List[float] = []
     for idxs in banks:
         ordered = _bank_serpentine(panels, idxs, cents)
-        for si in range(0, len(ordered), max_modules):
-            chunk = [cents[i] for i in ordered[si:si + max_modules]]
+        module_length = statistics.median(
+            max(math.dist(a[:2], b[:2]) for a, b in zip(
+                panels[i]["pts"], panels[i]["pts"][1:] + panels[i]["pts"][:1]))
+            for i in idxs)
+        for indices in _continuous_chunks(
+                ordered, cents, max_modules, MAX_STEP_MODULE_LENGTHS * module_length):
+            chunk = [cents[i] for i in indices]
             pts = [[round(c[0], 3), round(c[1], 3)] for c in chunk]
             if scale != 1.0:
                 # Back to drawing units; never rounded again, so the inch grid is what is kept.
                 pts = [[x / scale, y / scale] for x, y in pts]
             length_units = sum(
                 math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(chunk, chunk[1:]))
-            length_ft = round(length_units / INCHES_PER_FOOT, 1)
+            # Unit conversion can perturb exact half-tenths by a few ulps.
+            length_ft = round(round(length_units / INCHES_PER_FOOT, 9), 1)
             if scale != 1.0 and not (math.isfinite(length_ft)
                                  and all(math.isfinite(c) for pt in pts for c in pt)):
                 raise ValueError(SCALE_OVERFLOW)

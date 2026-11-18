@@ -1,0 +1,37 @@
+# X07 offline resource budgets
+
+Studio X-bench X07 uses these limits in its injected profile workflow and synthetic evidence tools. Values below describe source enforcement. Smoke timings do not establish responsiveness at the default maxima.
+
+| Surface | Default or fixed limit | Enforcement point | Boundary evidence |
+| --- | --- | --- | --- |
+| Adapter intake | 100,000 inserts, 4,096 alias entries, 256 copies | `_budget` before snapshot copying in [x07_workflow_adapter.py](../../server/x07_workflow_adapter.py) | [test_x07_intake_budgets.py](../../server/tests/test_x07_intake_budgets.py) uses small injected exact and excessive limits |
+| Adapter structure | Depth 32, 1,000,000 nodes, combined UTF-8 string bytes 16 MiB | `_budget` in the same source | The intake budget check exercises lowered exact boundaries. Full default maxima are unmeasured here. Caller-supplied positive limits can raise or lower defaults. |
+| Application identity | 200 characters per explicit customer, project or drawing key | `_key` in [x07_customer_profile_store.py](../../server/x07_customer_profile_store.py) | [test_x07_scope_key_collisions.py](../../server/tests/test_x07_scope_key_collisions.py), [test_x07_embedded_nul_keys.py](../../server/tests/test_x07_embedded_nul_keys.py). A character is a Python string element, not a byte. |
+| Selection labels | 1,024 characters for confirmed block and layer | `select_modules` in [x07_role_selection.py](../../server/x07_role_selection.py) | [test_x07_selection_numeric_limits.py](../../server/tests/test_x07_selection_numeric_limits.py). Full label-length boundary is unmeasured by that numeric check. |
+| Profile role JSON | 131,072 encoded UTF-8 bytes | `save_version` and `_profile` in the profile store | [test_x07_role_json_size_boundaries.py](../../server/tests/test_x07_role_json_size_boundaries.py) checks exact encoded boundaries. JSON escaping affects measured size. |
+| Profile version | Positive integer through 9,007,199,254,740,991 | `MAX_PROFILE_VERSION` and version guards in the profile store | [x07_version_precision_dom.cjs](tests/x07_version_precision_dom.cjs) checks actual JSX precision and explicit refusal beyond the safe boundary. |
+| SQLite connection wait | 5 seconds | Connection factories in profile store and receipt journal | Lock recovery tests exercise shorter injected waits. This timeout covers SQLite lock waiting, not total operation latency. |
+| Bridge request | 1,048,576 UTF-8 bytes | Before outbound spawn and inbound JSON parsing in [x07_adapter_jsx_journey.cjs](tests/x07_adapter_jsx_journey.cjs) | [x07_bridge_request_byte_limits.cjs](tests/x07_bridge_request_byte_limits.cjs) checks exact inbound bytes and one extra byte, ASCII and multibyte payloads. |
+| Bridge response streams | 1,048,576 raw stdout bytes, 65,536 retained stderr bytes | Stream handlers in the bridge helper | [x07_bridge_resource_limits.cjs](tests/x07_bridge_resource_limits.cjs). Excessive stream chunks are observed then refused, so the threshold does not bound the size of one OS-delivered chunk. |
+| Bridge JSON and timer | Nesting 32 on request/reply, worker timer 15,000 ms | Python depth walk, `strictJSON`, request timer | [x07_bridge_duplicate_json_keys.cjs](tests/x07_bridge_duplicate_json_keys.cjs), [x07_bridge_protocol_failures.cjs](tests/x07_bridge_protocol_failures.cjs). Fixture timeout override exists. Cleanup adds elapsed time. No hard end-to-end wall-clock or bridge node-count limit is claimed. |
+| Cached receipt replay | 262,144 UTF-8 bytes of stored result JSON | `ConfirmationReceiptStore.run` before JSON decode | [test_x07_receipt_same_scope_tampering.py](../../server/tests/test_x07_receipt_same_scope_tampering.py). SQL has already materialized the string before this check. This is a replay cap, not a journal insertion cap. Default-size memory behavior is unmeasured. |
+| Report receipt reads | 262,144 raw bytes per journey or proof, read limit plus one | `read_receipt` in [x07_offline_acceptance_report.py](x07_offline_acceptance_report.py) | [test_x07_report_json_budgets.py](../../server/tests/test_x07_report_json_budgets.py), [test_x07_report_cli_integrity.py](../../server/tests/test_x07_report_cli_integrity.py) |
+| Report JSON structure | Depth 32 and 100,000 nodes by default, configurable through 128 and 1,000,000 | `check_json_budget` in the report | The JSON budget check exercises below, exact and excessive injected limits. Full maximum combinations are unmeasured. |
+| Report numbers | Integer lexemes through 4,096 decimal digits, finite floats | `receipt_integer` and `receipt_float` in the report | [test_x07_report_numeric_tokens.py](tests/test_x07_report_numeric_tokens.py). Semantic fields have narrower type/value checks. |
+| Report proofs | 1 through 16 proof receipts, plus one journey | `aggregate` before receipt opens | [test_x07_report_proof_budget.py](../../server/tests/test_x07_report_proof_budget.py) |
+| Report source reads | 8 MiB per file read and 64 MiB cumulative by default, chunks through 65,536 bytes | `SourceBudget.digest` in the report | [test_x07_offline_acceptance_report.py](../../server/tests/test_x07_offline_acceptance_report.py) uses lowered exact limits. Cumulative usage includes repeated references and final verification passes. Configurable nonnegative limits have no fixed upper cap. Full defaults are unmeasured here. |
+| Report file types | Regular files required before reads and after opening | `regular_stream` in the report | [test_x07_report_special_files.py](tests/test_x07_report_special_files.py) exercises real FIFO refusal on POSIX and injected descriptor types. |
+| History reducer | 256 commands, 262,144 bytes of serialized finite JSON, default 128 oracle calls and maximum 4,096 calls | `reduce_history` in [x07_history_reducer.py](x07_history_reducer.py) | [test_x07_history_reducer.py](tests/test_x07_history_reducer.py) checks deterministic reduction and exact call-budget termination. |
+
+MiB and KiB mean powers of 1,024. Byte caps do not establish total process memory caps. The reducer assumes a deterministic, terminating injected oracle. Its call budget cannot stop an oracle that blocks inside one call. `complete=false` preserves the last known failing history when the call budget runs out.
+
+Run these offline checks sequentially from the repository root. Python checks use the allocated offhost verification rail.
+
+```powershell
+python C:/Users/ehaug/.claude/scripts/offhost.py run --scope verify --worktree D:/agent-wt/xbench-x07-role-discovery --cwd server --no-local --timeout 240 -- python -P -m pytest tests/test_x07_intake_budgets.py tests/test_x07_role_json_size_boundaries.py tests/test_x07_report_json_budgets.py tests/test_x07_report_proof_budget.py ../tools/xbench/tests/test_x07_report_numeric_tokens.py ../tools/xbench/tests/test_x07_history_reducer.py -o pythonpath=server/tests -q -p no:cacheprovider
+node tools/xbench/tests/x07_bridge_request_byte_limits.cjs --deps C:/tmp/x07-web-check-20261115/node_modules
+node tools/xbench/tests/x07_bridge_resource_limits.cjs --deps C:/tmp/x07-web-check-20261115/node_modules
+python tools/xbench/x07_history_reducer.py --max-calls 3
+```
+
+The report output uses atomic replacement for `--out`. Its output byte size has no separate configurable cap. Real storage exhaustion, whole-process native memory and worst-case timing at every default limit remain unmeasured by these recipes.

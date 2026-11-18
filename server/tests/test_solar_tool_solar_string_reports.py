@@ -651,7 +651,12 @@ def synthetic_piece(piece, tenant, child_job, monkeypatch, *, partial):
     final = request.wire_payload()["grid"]
     path = []
     for row, cells in enumerate(final["Rows"]):
-        for col, cell in enumerate(cells["Panels"]):
+        # Keep the fake native traversal continuous across row boundaries.
+        columns = range(len(cells["Panels"]))
+        if row % 2:
+            columns = reversed(columns)
+        for col in columns:
+            cell = cells["Panels"][col]
             if cell["Code"] == 1:
                 path.append([row + 1, col + 1])
                 cell["Seq"] = len(path)

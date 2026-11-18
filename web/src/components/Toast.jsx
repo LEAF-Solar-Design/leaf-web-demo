@@ -6,12 +6,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import './toastParity.css'
+import { completionText } from '../solar/stringResultOverlay.js'
 
 // C3 A: design-parity-forks-20261101/receipts/operator-forks-all-a-20261101.json
 export const TOAST_MS = { info: 5000, action: 8000 }
 const EXIT_MS = 180   // M1 exit fade
 
-export default function Toast({ toast, onDone }) {
+export function toastHeadline(toast, result, tool) {
+  const outcome = completionText(result ?? toast?.result)
+  if (outcome) return outcome
+  const text = toast?.text ?? ''
+  const completed = /^([a-z0-9]+(?:-[a-z0-9]+)+) complete$/i.exec(text)
+  if (result || toast?.result || completed) {
+    const title = tool?.title ?? tool?.label ?? toast?.tool?.title ?? toast?.tool?.label
+    if (title) return title
+    const name = tool?.name ?? toast?.tool?.name ?? completed?.[1]
+    return name ? name.replace(/[-_]+/g, ' ').replace(/^./, c => c.toUpperCase()) : 'Tool complete'
+  }
+  return text
+}
+
+export default function Toast({ toast, onDone, result, tool }) {
   const [exiting, setExiting] = useState(false)
   const rootRef = useRef(null)
   const actionRef = useRef(null)
@@ -141,6 +156,7 @@ export default function Toast({ toast, onDone }) {
   }
 
   if (!toast) return null
+  const headline = toastHeadline(toast, result, tool)
   return (
     <div
       ref={rootRef}
@@ -149,7 +165,8 @@ export default function Toast({ toast, onDone }) {
       data-has-action={toast.action ? 'true' : undefined}
       role="status"
       tabIndex={-1}
-      style={{ touchAction: 'pan-y' }}
+      title={headline}
+      style={{ touchAction: 'pan-y', minWidth: 240 }}
       onMouseEnter={() => { hoveredRef.current = true; lifecycleRef.current?.syncPause() }}
       onMouseLeave={() => { hoveredRef.current = false; lifecycleRef.current?.syncPause() }}
       onFocusCapture={() => { focusedRef.current = true; lifecycleRef.current?.syncPause() }}
@@ -179,7 +196,7 @@ export default function Toast({ toast, onDone }) {
         suppressClickRef.current = false
       }}
     >
-      <span>{toast.text}</span>
+      <span title={headline} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{headline}</span>
       {toast.action && (
         <button
           ref={actionRef}

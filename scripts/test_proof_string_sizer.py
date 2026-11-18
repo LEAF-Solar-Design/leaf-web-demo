@@ -894,8 +894,8 @@ def test_g2a_33_ttl_fires_while_sigint_is_ignored(tmp_path):
 SP_PACKAGE = SCRIPTS / "fixtures/rooftop_solve_replay.json"
 SP_SIZING = REPO / "server/tests/fixtures/w1_rooftop_unsplit_sizing_response.json"
 SP_SIZING_SHA = "840bb09ca947f80c274ad4beda315b7ecd26aecd889c4467ae06f8acbd6efd41"
-SP_PACKAGE_SHA = "53ed4b7b1f8d5c22c9a5e991d0eafd100e6fb598fe702114b091d3f7d66c4618"
-SP_PINS = [[12,21300,"7be3421b5834ca07ad32ad340d403ad628649cd3d490d532946503d035a515bb",23162,"9e30176bcfb9d8cbf127ccbdbb3dff6ba5d737d3db394e5c6df517c5b24b0110",[[14,13],[7,1]],8],[13,20141,"495a015e052494930c929e69bf2dd04523a65ea74dd9cfc661b6c9b0a4f3ecab",21959,"673f016c46ead20fe15cdd4c04773e75d04d2dab52e0d668165f0a1035ee1cd0",[[14,13],[0,8]],8],[16,18152,"b7b3139ac495d8b50a986e196b54cda65c3856c6ae1080480b864e10c9af741d",19915,"09009716285ee7304e5dca54b68606c149eb508b86fabf7a6c41d7e51103e50f",[[13,12],[3,5]],8],[19,22296,"edcc9f287a3456f3585b8dddcf0e9bb14df9e20ca62c5b6aa6f39c3367b4c1fd",24408,"0501d452148aa892adad922ae576c02c8375f445932023e38766a41956594c2d",[[14,13],[7,3]],10],[20,30096,"5f43f72c977fbc48ad8db34b9b57b7f0c2c56962d6dc67eaae0adea3073f5c18",32228,"80f45979bd6da379adadbe72960f20470ecc744ae07b1400bf0ee852dbab865f",[[14,13],[4,6]],10],[21,35306,"27747c602e70236fae1d38f1a6fa4279d84ae810dffb95cfb123e59f76f48bdd",37384,"6d59868565dd397b3b455e555a15d3b38307d02a475b0a70a1d75ad647a78c7a",[[14,13],[6,3]],9],[22,28622,"bf739a8eb93c699d1ed3f04bb95283ae12de573a241bd0af1f19257af1293c27",31093,"2e21188a3a85864125516d54a576ea200d9fee5ac65f8aa958117778d022e0c4",[[14,13],[5,8]],13]]
+SP_PACKAGE_SHA = "e0601c0102f9f532d02161de7a8d5b8c051c01ed5fd1a367101d901ad8bbddbc"
+SP_PINS = [[12,21300,"4f4f7767d097c05620bc70563308437a5ddfdf8565fb9f1af52acb9e9edd1c9d",23162,"370d530103ca6e43868d83f49207c820244046f775025a1f1cbd21657a7d9fb4",[[14,13],[7,1]],8],[13,20141,"e95bb33e0466436121dfcc53af4b28f950d3e6ad62e905fc810ecb859f557db0",21959,"46c1fc4629b37764d7fb87d062c00df0bc0300bf87b8138101fea5bb1e2664ad",[[14,13],[0,8]],8],[16,18152,"b8f5020f0562286c62abee22c1004f192a7d4c253b5d528161e719d036e20355",19915,"fe631d2f4f50ac97d2a975f7c8c723fbb393700ec5ca53994549d980d37c3f98",[[13,12],[3,5]],8],[19,22296,"dda6c0d2c080fe284e58f36d347f3cae6030b34e2e597515ad735091c4b856da",24408,"22b525749d0cefb4e676e2faec1d8fad017a2863b158a192837cda881092e766",[[14,13],[7,3]],10],[20,30096,"25773870cfb48ba751bc6f080c9b7e714d54b58113943248191b9311e21bb420",32228,"6b9173dfb9ce1f9818c4aa33d3acf020cf8d4d69e7fc1f2fced42f42e0bc4447",[[14,13],[4,6]],10],[21,35306,"87b47b27519e1c7e022062b36ba48c36a7eac175bbba84f3df73bc2330e4168c",37384,"160f7d805da7659dab4dd083dd9c837f8204d5b1fd2d290637a9d9e665c159c0",[[14,13],[6,3]],9],[22,28622,"0bbf109389b7951c5dbf4e0d76861d203a54fc977669ae70ef6676ac727b6078",31093,"0bd5846fc0d5d9d470ad64b7c923f44f877e8b16db024579c7f70b495393542d",[[14,13],[5,8]],13]]
 SP_PIECES = [row[0] for row in SP_PINS]
 SP_ASSETS = [
     "scripts/proof_string_sizer.py", "scripts/test_proof_string_sizer.py",
@@ -927,9 +927,9 @@ def sp_reconstruct():
     assert digest(dxf) == "18cfed23a3fd45d0bc6382b6f274c85c22dd717f4cf63a1ac10c1f30f76d9bda"
     intake = parse_dxf_bytes(dxf, source_name="rooftop-unsplit.dxf")
     upload = json.dumps(intake).encode()
-    assert len(upload) == 177010
+    assert len(upload) == 177394
     source = digest(upload)
-    assert source == "9990fdd62a048fdd7f559d819a05ed2250bcca4f4e212a150d2c272597050a04"
+    assert source == "08cfe95649cad66c946c420a7b611819ed91908926422068eec7305eb8e55ca0"
     recorded = (REPO / "server/tests/fixtures/w1_rooftop_unsplit_solve.json").read_bytes()
     assert digest(recorded) == "4044d38eb28f442266e5b43372d5090f6f951c7d8e180fe60c0ef4114991fc87"
     pairs = []
@@ -1163,7 +1163,7 @@ def test_sp21a_06_changed_zip_sizing_refused(sp_listeners, wire):
 def test_sp21a_07_changed_drawing_label_solve_refused(sp_listeners):
     wire = replay.solve_module().canonical_bytes(sp_pair(12)["request"])
     changed = wire.replace(b"rooftop_demo.dwg", b"rooftop_dema.dwg")
-    assert digest(changed) == "7c4dc3dab2d9b76a181d84e66d5d74124f3d3f4567b0881b5342c459c08c258e"
+    assert digest(changed) == "4cd813ec5ed8ee7e83d8104db2581104ad76cce670a4bf4daf06d97f8a95fbed"
     assert sp_post(sp_listeners[1], changed)[0] == 409
 
 

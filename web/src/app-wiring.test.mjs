@@ -30,6 +30,7 @@ import { createWorkspaceController } from './controllers/workspace/createWorkspa
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
+import { requiresReconciliation } from './errorPresentation.js'
 
 it('every solar panel module is mounted from App or explicitly API-only or tutorial-only', () => {
   const exceptions = {
@@ -444,6 +445,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     projectClient: 'projectSolar.projectClient', projectCatalog: 'catalogState.projectCatalog', isCurrent: 'projectSolar.isCurrent',
     FlowRail: 'SolarFlowRail', StepEditor: 'SolarStepEditor', GraphForm: 'ProjectSolarGraphForm',
     newProjectIntentKey: 'mintCorrelationId', onProjectSubmit: 'projectSolarRuntime.onProjectSubmit',
+    onEstimatePublished: '(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,\n                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)',
     submissionSignal: 'projectSolarRuntime.submissionSignal', openTool: 'projectSolarRuntime.openTool',
     onOpenTool: 'onOpenProjectSolarTool', onClose: 'onCloseProjectSolarTool', busy: 'projectSolarRuntime.busy',
     projectRunMemory: 'projectSolarRuntime.projectRunMemory', projectPending: 'projectSolarRuntime.projectPending',
@@ -459,7 +461,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
     'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
     'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-    'solar-electrical-schedules', 'solar-cable-export',
+    'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff',
     'solar-solaredge-accept', 'solar-solaredge-tracking-read',
   ])
 })
@@ -629,6 +631,7 @@ function r13Fixture({ project = true, context = null, rows = null } = {}) {
   const envelope = { ok: true, result: { new_version: { drawing_id: 'drawing-1', version: 8 } } }
   const env = {
     projectModeRef: { current: project }, drawingErrorRef: { current: null }, projectSolarAppReason,
+    requiresReconciliation, runErr: null, result: null,
     SOLAR_SETTINGS_TOOL_NAME, catalogRunContextRef: { current: context },
     catalogRunContext: context ?? standalone, mock: false, session: { status: 'active' },
     running: false, previewing: false, writeLocked: false, canRunWrite: true, engineDirty: false,
@@ -2876,6 +2879,7 @@ function formBHarness(shell) {
   const tools = [formBTool, { ...formBTool, name: 'solar-combiners' }]
   const env = {
     tools, mock: false, session: { status: 'active' }, canOperate: true,
+    requiresReconciliation, runErr: null, result: null,
     running: false, previewing: false, busy: false, jobRunning: false,
     writeLocked: false, canRunWrite: true, engineDirty: false,
     catalogRunContext: formBContext, catalogRunContextRef: { current: formBContext },

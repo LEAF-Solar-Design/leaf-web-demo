@@ -19,4 +19,5 @@ SUPPORTED_TOOLS = frozenset((
     "solar-solve-proposal",
     "solar-commit-solve",
     "solar-solaredge-accept",
+    "solar-add-all-inverters",
 ))

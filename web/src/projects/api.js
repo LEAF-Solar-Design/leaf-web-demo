@@ -380,8 +380,24 @@ export async function resetProject(projectId) {
   return request(`/api/projects/${id}/reset`, mutation('POST'))
 }
 
-// DELETE /api/projects/{id} -> {..., receipt}. TERMINAL, same as reset.
-export async function deleteProject(projectId) {
+export async function archiveProject(projectId, key) {
   const id = requireUuid(projectId, 'project')
-  return request(`/api/projects/${id}`, mutation('DELETE'))
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/archive`, opts)
+}
+
+export async function restoreProject(projectId, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/restore`, opts)
+}
+
+// DELETE is permanent and only accepted for an archived project.
+export async function deleteProject(projectId, { confirmName }, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('DELETE', { confirm_name: confirmName })
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}`, opts)
 }

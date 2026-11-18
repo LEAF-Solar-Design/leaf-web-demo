@@ -188,3 +188,40 @@ def test_reconcile_after_parameter_revision_keeps_the_original_policy_run(export
     bundle = ledger.export_bundle(tenant, 'export-policy', 1, authorize=lambda graph, run: None)
     assert bundle['parts']['evaluations'][0]['complete_results']['synthetic-job'] == value
     assert bundle['parts']['graph'] == artifact['graph']
+
+
+@pytest.mark.parametrize('damage', [None, 'crc', 'truncated'])
+def test_source_read_retains_imported_concatenated_gzip_members(monkeypatch, damage):
+    import platform_link
+    import project_reference_materials as originals
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_reference_materials as metadata
+    tenant, project, actor = (str(uuid.uuid4()) for _ in range(3))
+    first = gzip.compress(b'{"synthetic":1}\n', mtime=0)
+    second = bytearray(gzip.compress(b'{"synthetic":2}\n', mtime=0))
+    if damage == 'crc':
+        second[-8] ^= 1
+    elif damage == 'truncated':
+        second = second[:-3]
+    raw_rows = first + bytes(second)
+    raw_suite = b'{"synthetic":"suite"}'
+    materials = {}
+    descriptors = {}
+    for key, media, raw in [('corpus', 'application/gzip', raw_rows), ('suite', 'application/json', raw_suite)]:
+        descriptor = {'material_id': str(uuid.uuid4()), 'sha256': hashlib.sha256(raw).hexdigest(), 'byte_size': len(raw)}
+        descriptors[key] = descriptor
+        materials[descriptor['material_id']] = dict(descriptor, org_id=tenant, project_id=project,
+            media_type=media, name='rows.jsonl.gz' if key == 'corpus' else 'suite.json')
+    context = {'schema': corpus.SCHEMA, 'tenant_id': tenant, 'org_id': tenant,
+        'project_id': project, 'actor_id': actor, 'capability_sha256': corpus.ARCHIVE_SHA256, **descriptors}
+    def get_material(org, selected_project, selected_actor, material_id):
+        assert (org, selected_project, selected_actor) == (tenant, project, actor)
+        return materials[material_id]
+    monkeypatch.setattr(metadata, 'get_material', get_material)
+    monkeypatch.setattr(originals, 'read_content', lambda org, selected_project, material:
+        raw_rows if material['media_type'] == 'application/gzip' else raw_suite)
+    if damage:
+        with pytest.raises(originals.InvalidReference):
+            corpus.read_sources(context)
+    else:
+        assert corpus.read_sources(context) == {'corpus': raw_rows, 'suite': raw_suite}

@@ -790,6 +790,9 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card {
     left: auto !important; right: 14px !important;
     top: auto !important; bottom: 70px !important; width: 260px; max-width: 260px; padding: 10px 12px;
+    /* The pinned seat wins over the centered fallback's translate(-50%, -50%), which
+       otherwise shifted a beat whose target is absent here (the author beat) off the seat. */
+    transform: none !important;
     border-radius: var(--leaf-radius-key); font-family: var(--ck-font);
     /* Chrome on the drawing is dark (two-material rule); the coach is no
        exception once it sits on the canvas. */
@@ -805,6 +808,11 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-actions { gap: 6px; margin-top: 6px; }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot { background: var(--ck-ink-off); }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot.on { background: var(--ck-cmd); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result { background: var(--ck-recess); border-color: var(--ck-edge); border-left-color: var(--ck-cmd); padding: 6px 8px; margin-top: 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-head { color: var(--leaf-ink-muted); font: 400 var(--leaf-size-caption)/14px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row { font: 400 var(--leaf-size-caption)/16px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row dt { color: var(--leaf-ink-muted); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row dd { color: var(--leaf-ink); font-weight: 600; }
 }
 
 @media (min-width: 1024px) and (max-width: 1439px) {

@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import './resultObjectLinks.css'
+import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
-import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
 import ResultJsonDownload from './ResultJsonDownload.jsx'
 import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
+import { stringResultSummary } from '../solar/stringResultOverlay.js'
 
 // Renders a Result envelope (CONTRACT §3): result data (counts table or
 // key/value), overlay summary, timing + cost receipt, and a normalized error
@@ -27,6 +29,7 @@ function errParts(e) {
 }
 
 function isRetryable(e) {
+  if (requiresReconciliation(e) || compactRefusal(e)) return false
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
@@ -67,25 +70,78 @@ function KeyValue({ data, density }) {
 
 // Generic table: result.table = { columns: string[], rows: any[][] }. Used by tools whose
 // output is a list of inspection rows, rendered before the scalar key/values.
-function GridTable({ table, density }) {
+const cellStyle = value => ({ minWidth: 64, whiteSpace: 'nowrap',
+  ...(isNumericCell(value) ? { textAlign: 'right', fontVariantNumeric: 'tabular-nums' } : {}) })
+const scalarCell = value => value == null || typeof value === 'object' ? ''
+  : typeof value === 'number' ? value.toLocaleString() : String(value)
+
+function GridTable({ table, density, navigation }) {
   const cols = Array.isArray(table.columns) ? table.columns : []
   const rows = Array.isArray(table.rows) ? table.rows : []
+  const visible = cols.map((c, i) => ({ c, i })).filter(({ c, i }) =>
+    typeof c === 'string' && !/^(pts|points|vertices|geometry|coordinates|route)$/i.test(c) &&
+    !rows.some(row => row?.[i] !== null && typeof row?.[i] === 'object'))
+  const idColumn = cols.findIndex(c => typeof c === 'string' && /^(id|handle|string)$/i.test(c))
+  const locate = idColumn >= 0 && typeof navigation?.jump === 'function'
   return (
     <table className="counts grid" data-density={density}>
-      <thead><tr>{cols.map((c, i) => <th key={i} scope="col">{String(c)}</th>)}</tr></thead>
+      <thead><tr>{visible.map(({ c, i }) => <th key={i} scope="col" style={cellStyle(c)}>{c}</th>)}{locate && <th scope="col">Locate</th>}</tr></thead>
       <tbody>
         {rows.map((r, i) => (
           <tr key={i}>
-            {(Array.isArray(r) ? r : [r]).map((v, j) => (
-              <td key={j} className={isNumericCell(v) ? 'num dp-number' : ''}>
-                {typeof v === 'number' ? v.toLocaleString() : String(v ?? '')}
+            {visible.map(({ i: j }) => (
+              <td key={j} style={cellStyle(r?.[j])} className={isNumericCell(r?.[j]) ? 'num dp-number' : ''}>
+                {scalarCell(r?.[j])}
               </td>
             ))}
+            {locate && <td><button type="button" title="View on canvas" aria-label={`View ${scalarCell(r?.[idColumn])} on canvas`}
+              style={{ width: 28, height: 28 }} onClick={() => navigation.jump(r?.[idColumn])}>⌖</button></td>}
           </tr>
         ))}
       </tbody>
     </table>
   )
+}
+
+function StringSummary({ data, stale }) {
+  const s = stringResultSummary(data)
+  const tiles = [
+    ['STRINGS', s.strings], ['MAX VOC', s.maxVoc, ' V', s.limit === undefined ? null : `LIMIT ${s.limit} V`],
+    ['MODULES', s.modules], ['PANELS', s.panels],
+  ].filter(([, value]) => value !== undefined).slice(0, 4)
+  return <div aria-label="String result summary" style={{ display: 'flex', gap: 20, flexWrap: 'wrap', margin: '16px 0' }}>
+    {tiles.map(([caption, value, unit, limit]) => <div key={caption}>
+      <div className="string-stat-value" style={{ fontSize: 28, fontWeight: 600, opacity: stale ? 0.5 : 1, fontVariantNumeric: 'tabular-nums' }}>{value.toLocaleString()}{unit}</div>
+      <div style={{ fontSize: 11, letterSpacing: '0.1em' }}>{caption}</div>
+      {limit && <small>{limit}</small>}
+    </div>)}
+    {s.pass !== undefined && <span className="string-check" style={{ alignSelf: 'center', borderRadius: 12, padding: '3px 8px',
+      color: s.pass ? 'var(--status-success)' : 'var(--status-danger)', border: '1px solid currentColor' }}>{s.pass ? 'Pass' : 'Fail'}</span>}
+  </div>
+}
+
+function StringTable({ data, density, navigation }) {
+  const rows = data.strings.filter(isRowObject)
+  const definitions = [
+    ['String', row => row.id ?? row.circuit_tag],
+    ['Modules', row => row.modules ?? row.module_count],
+    ['Voc at Tmin', row => row.voc_at_tmin ?? row.worst_string_voc],
+    ['Inverter', row => row.inverter ?? row.inverter_ref],
+  ]
+  const columns = definitions.filter(([, get]) => rows.some(row => get(row) != null && typeof get(row) !== 'object'))
+  const locate = typeof navigation?.jump === 'function'
+  const modules = rows.map(row => row.modules ?? row.module_count)
+  const total = stringResultSummary(data).modules ?? (modules.length && modules.every(Number.isFinite) ? modules.reduce((a, b) => a + b, 0) : undefined)
+  return <div className="table-scroll"><table className="counts grid" data-density={density}>
+    <thead><tr>{columns.map(([name]) => <th scope="col" key={name} style={cellStyle(name)}>{name}</th>)}{locate && <th scope="col">Locate</th>}</tr></thead>
+    <tbody>{rows.map((row, i) => <tr key={i}>
+      {columns.map(([name, get]) => <td key={name} style={cellStyle(get(row))}>{scalarCell(get(row))}</td>)}
+      {locate && <td><button type="button" title="View on canvas" aria-label={`View ${scalarCell(row.id ?? row.circuit_tag)} on canvas`}
+        style={{ width: 28, height: 28 }} onClick={() => navigation.jump(row.id)}>⌖</button></td>}
+    </tr>)}</tbody>
+    <tfoot style={{ fontWeight: 700 }}><tr>{columns.map(([name], i) => <td key={name} style={cellStyle(name === 'Modules' ? total : '')}>
+      {i === 0 ? 'Total' : name === 'Modules' ? scalarCell(total) : ''}</td>)}{locate && <td />}</tr></tfoot>
+  </table></div>
 }
 
 function isRowObject(value) {
@@ -279,7 +335,7 @@ function FileLinks({ files }) {
   )
 }
 
-function ResultBody({ result, density, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
+function ResultBody({ result, density, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save, navigation, stale }) {
   const data = result?.result
   if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
   if (isSolarProjectReadResult(data)) {
@@ -295,6 +351,11 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   }
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
+  if (Array.isArray(data.strings) || data.electrical) return <>
+    <StringSummary data={data} stale={stale} />
+    {Array.isArray(data.strings) && <StringTable data={data} density={density} navigation={navigation} />}
+    <FileLinks files={data.files} />
+  </>
   const rowArrays = findRowArrays(data)
   const rowTables = <>
     <RowArrayResults entries={rowArrays} density={density} />
@@ -304,7 +365,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
       <>
-        <div className="table-scroll"><GridTable table={data.table} density={density} /></div>
+        <div className="table-scroll"><GridTable table={data.table} density={density} navigation={navigation} /></div>
         {rowTables}
         {Array.isArray(data.warnings) && data.warnings.length > 0 && (
           <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>
@@ -345,6 +406,9 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
 // The calm quota/entitlement variants keep the broker's own sentence — a
 // budget/plan boundary is not a failure to re-phrase.
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
+  const refusal = compactRefusal(err)
+  if (refusal) return <div className="inline-error" role="alert" data-error-code={refusal.code}>{refusal.text}</div>
+  if (requiresReconciliation(err)) return <div className="inline-error" role="alert">{err}</div>
   const { message, code, nextAction, actor } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`} role="alert">
@@ -437,8 +501,8 @@ export function versionLabel(version) {
   return `drawing version${seq === null ? '' : ` ${seq}`}${id === null ? '' : ` (${id})`}`
 }
 
-export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density,
-  solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density, onSelectModuleSet,
+  solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save, stale = false }) {
   const [announcement, setAnnouncement] = useState('')
   const announcementFrame = useRef(null)
   const tableDensity = density ?? (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches
@@ -453,6 +517,11 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red 'Failed'. Only this error_code softens; all others stay red.
   const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
+  const placementReceipt = result?.result?.graph_commit
+  const deterministicPlacement = result?.ok === true && result.tool === 'solar-add-all-inverters' &&
+    placementReceipt?.tool === result.tool && placementReceipt.engine === 'deterministic_fallback' &&
+    placementReceipt.producing_attempt?.job_id === result.job_id
+
   // The coarse DAILY run-count limit (HTTP 429) rides in with the same quota
   // error_code but a distinct `quota_kind` — label it honestly ("Daily limit")
   // rather than "Spend cap". Still calm amber.
@@ -466,7 +535,8 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // is visible. Skipped while typing in a field and while a run is in flight;
   // the condition mirrors the `retry` props on the two ErrorLine sites below.
   const canRetryKey = !running && !!onRetry &&
-    (!!error || !!(result && result.error && !isEnt && isRetryable(result.error)))
+    !requiresReconciliation(error) && !requiresReconciliation(result?.error) &&
+    ((!!error && !compactRefusal(error)) || !!(result && result.error && !isEnt && isRetryable(result.error)))
   useEffect(() => {
     if (!canRetryKey) return undefined
     const onKey = (e) => {
@@ -503,17 +573,22 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
       {result && !running && (
         <div className="result-card">
           <div className="result-head">
+            {result.ok && <span className="dim" aria-label={stale ? 'Stale result' : 'Updated result'}>{stale ? '● Stale' : '✓ Updated'}</span>}
             <span className={`ok ${result.ok ? 'yes' : (calm ? 'quota' : 'no')}`}>
               {result.ok ? 'Passed' : (isDailyQuota ? 'Daily limit' : (isQuota ? 'Spend cap' : (isEnt ? 'Plan' : 'Failed')))}
             </span>
             <span className="result-tool">{result.tool} <span className="dim">{versionLabel(result.version)}</span></span>
+            {deterministicPlacement && <span className="degraded">Deterministic fallback</span>}
             {result.degraded_mode && (
               <span className="degraded">local fallback</span>
             )}
           </div>
 
+          {deterministicPlacement && <ResultJsonDownload result={result} />}
+          {result.ok && result.tool === 'count-modules' && <ModuleSetPicker key={result.job_id || JSON.stringify(result.result?.sets)}
+            data={result.result} drawingKey={result.origin?.drawingKey} running={running} onSelect={onSelectModuleSet} />}
           {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
-            projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} />}
+            projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} navigation={navigation} stale={stale} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
           {!result.overlay && <ResultObjectLinks result={result} navigation={navigation} announce={announce} />}

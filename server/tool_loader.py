@@ -48,6 +48,7 @@ PLATFORM_PACKAGE_REGISTRY = SERVER_DIR.parent / "engine" / "registry.json"
 # authored tools resolve by their own `entry` file and NEVER through this map,
 # so a newly authored tool needs no entry here (that is the whole point).
 BUILTIN_OPS: Dict[str, str] = {
+    "count_modules": "count_modules.py",
     "count_by_layer": "count_by_layer.py",
     "measure_area_by_layer": "measure_area_by_layer.py",
     "measure_panel_area": "measure_area_by_layer.py",

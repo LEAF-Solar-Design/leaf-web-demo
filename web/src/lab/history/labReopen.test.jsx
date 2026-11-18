@@ -1,4 +1,6 @@
 import { StrictMode } from 'react'
+import { canonicalJSON } from '../contract.js'
+import { sha256Hex } from '../runtime/sha256.js'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GraphView from '../canvas/GraphView.jsx'
@@ -230,5 +232,68 @@ describe('GraphView reopens saved work', () => {
     expect(take).not.toHaveBeenCalled()
     expect(client.state.restoredGraph).toBeNull()
     await waitFor(() => expect(screen.queryByTestId('host-source-1')).toBeNull())
+  })
+})
+
+
+describe('retained evaluation export response budget', () => {
+  function delayedClient(delay) {
+    const graph = emptyGraph()
+    const hash = value => sha256Hex(canonicalJSON(value))
+    const parts = {
+      identity: { doc_id: 'roof-plan_2', tenant_id: 'tenant', revision: 2, kind: 'graph', sha256: hash(graph) },
+      graph, layout: null,
+      policy_reference: { graph_sha256: hash(graph), blocks: [], compiled: [] },
+      evaluations: [],
+    }
+    const bundle = { schema: 'leaf.lab-bundle.v1', parts,
+      manifest: { algorithm: 'sha256', parts: Object.fromEntries(Object.entries(parts).map(([key, value]) => [key, hash(value)])) } }
+    const fetchImpl = vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(response(bundle)), delay)
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer)
+        reject(new DOMException('Aborted', 'AbortError'))
+      }, { once: true })
+    }))
+    return { client: createLabArtifactsClient({ storage: rememberedStorage(), fetchImpl }), fetchImpl, bundle }
+  }
+
+  it('downloads a verified response that takes as long as the observed retained export', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, fetchImpl, bundle } = delayedClient(17804)
+      const pending = client.exportBundle('roof-plan_2', 2)
+      await vi.advanceTimersByTimeAsync(17804)
+      expect(await pending).toEqual({ ok: true, bundle })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(paths(fetchImpl)).toEqual(['/api/lab/docs/roof-plan_2/revisions/2/export'])
+    } finally { vi.useRealTimers() }
+  })
+
+  it('bounds a stalled export without retrying or changing the selected document', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, fetchImpl } = delayedClient(120000)
+      const pending = client.exportBundle('roof-plan_2', 2)
+      await vi.advanceTimersByTimeAsync(59999)
+      expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(await pending).toMatchObject({ ok: false, status: 0 })
+      expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(client.currentDocId()).toBe('roof-plan_2')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('retains the short response budget for ordinary history reads', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, fetchImpl } = delayedClient(120000)
+      const pending = client.head('roof-plan_2')
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(await pending).toMatchObject({ ok: false, status: 0 })
+      expect(fetchImpl.mock.calls[0][1].signal.aborted).toBe(true)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    } finally { vi.useRealTimers() }
   })
 })
