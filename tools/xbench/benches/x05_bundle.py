@@ -415,6 +415,47 @@ def diff_inventories(before, after):
                    changed_member_total=len({row['name'] for row in differences}), differences=differences[:MAX_DIAGNOSTICS])
 
 
+def diff_stage_references(before, after):
+    """Compare claimed bindings. Checking a target against inventory is a separate operation."""
+    sides = []
+    errors = []
+    for side, rows in (("before", before), ("after", after)):
+        indexed = {}
+        sides.append(indexed)
+        if type(rows) is not list or len(rows) > MAX_MEMBERS:
+            _error(errors, "REFERENCES_UNREADABLE", side=side)
+            continue
+        for row in rows:
+            if (type(row) is not dict or set(row) != {"fixture", "stage", "name", "design_version"}
+                    or any(not _token(row[key]) for key in ("fixture", "stage", "design_version"))
+                    or _name(row["name"]) is None):
+                _error(errors, "REFERENCE_INVALID", side=side)
+                continue
+            key = row["fixture"], row["stage"]
+            if key in indexed:
+                _error(errors, "REFERENCE_STAGE_DUPLICATE", side=side)
+            indexed[key] = dict(name=_name(row["name"]), design_version=row["design_version"])
+    if errors:
+        return _result(errors, references_equal=None, difference_total=None,
+                       difference_counts=None, differences=[])
+
+    left, right = sides
+    counts = dict(added=0, removed=0, retargeted=0)
+    examples = []
+    for key in sorted(left.keys() | right.keys()):
+        old, new = left.get(key), right.get(key)
+        if old == new:
+            continue
+        kind = "added" if old is None else "removed" if new is None else "retargeted"
+        counts[kind] += 1
+        if len(examples) < MAX_DIAGNOSTICS:
+            examples.append(dict(fixture=key[0], stage=key[1], kind=kind, before=old, after=new))
+    total = sum(counts.values())
+    return _result([], references_equal=total == 0, difference_total=total,
+                   difference_counts=counts, differences=examples)
+
+
+
 def _diff_unknown(code):
     return _result([dict(code=code)], verdict='UNREADABLE', inventory_equal=None,
                    difference_total=None, difference_counts=None, changed_member_total=None, differences=[])

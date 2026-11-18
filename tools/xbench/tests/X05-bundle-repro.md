@@ -745,3 +745,15 @@ Endpoint equality establishes matching caller-supplied metadata. History and
 origin require independently trusted records. The intermediate B inventory
 records the repin and reassignment on each hop. Stop on any mismatch. Each
 child has a 15-second deadline and terminates before the summary.
+
+### Identical inventories with a redirected stage reference
+
+From the repository root, run this offline replay with pytest installed.
+
+    python -P -m pytest tools/xbench/tests/test_x05_bundle.py::test_identical_inventory_reference_retarget_replay -q -o pythonpath=tools/xbench
+
+Both synthetic fixtures start with readable evidence. The replay redirects
+alpha's stage reference to beta's existing member. All inventory pins and
+payload bytes stay fixed, so the inventory diff reports zero changes and the
+byte audit succeeds. The reference diff reports one retarget. Replay changes
+from PASS to UNREADABLE because the target belongs to another fixture.
