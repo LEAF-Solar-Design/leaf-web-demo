@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 import json
@@ -391,12 +392,17 @@ def validate_material_context(value):
 def project_discovery(value, limit, *, include_snapshot=False):
     """Project the Ops application-service discovery envelope, without receipts."""
     if (type(value) is not dict or not {"records", "nextCursor"} <= value.keys()
-            or value.keys() - {"records", "nextCursor", "snapshotId", "totalCount"}):
+            or value.keys() - {"records", "nextCursor", "snapshotId", "schemaRevision", "totalCount"}):
         raise ReadFailure("invalid_response")
     if "totalCount" in value and (type(value["totalCount"]) is not int or value["totalCount"] < 0):
         raise ReadFailure("invalid_response")
     if "snapshotId" in value and (type(value["snapshotId"]) is not str
                                   or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["snapshotId"])):
+        raise ReadFailure("invalid_response")
+    if "schemaRevision" in value and not (
+        (type(value["schemaRevision"]) is int and 0 <= value["schemaRevision"] <= 9007199254740991)
+        or (type(value["schemaRevision"]) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["schemaRevision"]))
+    ):
         raise ReadFailure("invalid_response")
     records, cursor = value["records"], value["nextCursor"]
     if type(records) is not list or len(records) > limit:
@@ -454,6 +460,8 @@ def project_discovery(value, limit, *, include_snapshot=False):
     result = {"datasets": datasets, "next_cursor": cursor}
     if include_snapshot and "snapshotId" in value:
         result["_snapshot"] = value["snapshotId"]
+    if include_snapshot and "schemaRevision" in value:
+        result["_schema_revision"] = value["schemaRevision"]
     if include_snapshot and "totalCount" in value:
         result["_total_count"] = value["totalCount"]
     if len(json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
@@ -550,9 +558,11 @@ class IntegrationToolService:
         return self.resolve(tenant, session, turn)
 
     def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
-                       require_snapshot=False, cancel_event=None, provider_statuses=None):
+                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False):
         visited = set()
         first_snapshot = None
+        first_schema_revision = None
+        schema_by_ref = {}
         rows_read = 0
         dataset_ids = set()
         declared_total = None
@@ -583,6 +593,20 @@ class IntegrationToolService:
                 rows_read += len(page["datasets"])
                 if rows_read > DATASET_ROW_BUDGET:
                     raise ReadFailure("response_too_large")
+                schema_revision = page.pop("_schema_revision", None)
+                if require_schema and schema_revision is None:
+                    raise IncompleteInventory(len(visited) + 1)
+                if not visited:
+                    first_schema_revision = schema_revision
+                elif first_schema_revision != schema_revision:
+                    raise IncompleteInventory(len(visited) + 1)
+                for dataset in page["datasets"]:
+                    ref = dataset["dataset_ref"]
+                    identity = (ref["id"], ref["version"], ref["digest"])
+                    fields = sorted(dataset["fields"], key=lambda field: field["id"])
+                    digest = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).digest()
+                    if schema_by_ref.setdefault(identity, digest) != digest:
+                        raise IncompleteInventory(len(visited) + 1)
                 dataset_ids.update(row["dataset_ref"]["id"] for row in page["datasets"])
                 page_total = page.pop("_total_count", None)
                 if page_total is not None:
@@ -669,7 +693,9 @@ class IntegrationToolService:
         size = 0
         pages = 0
         datasets_by_id = {}
-        from authored_dataset_discovery import TIMESTAMPS, provider_status_filter, report_columns, requires_snapshot
+        from authored_dataset_discovery import (
+            TIMESTAMPS, provider_status_filter, report_columns, requires_schema_revision, requires_snapshot,
+        )
         pinned = operation == "datasets" and requires_snapshot(description)
         provider_statuses = provider_status_filter(description) if operation == "datasets" else None
         columns = report_columns(description) if operation == "datasets" else None
@@ -677,7 +703,8 @@ class IntegrationToolService:
             raise ReadFailure("invalid_input")
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
                                         require_snapshot=pinned, cancel_event=cancel_event,
-                                        provider_statuses=provider_statuses):
+                                        provider_statuses=provider_statuses,
+                                        require_schema=operation == "datasets" and requires_schema_revision(description)):
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}
