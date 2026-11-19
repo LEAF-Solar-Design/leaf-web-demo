@@ -173,8 +173,10 @@ def test_v2_only_plan_bytes_are_frozen():
         + b"ADDCIRCLE|0|1,2,0|0.5\nADDLINE|0|0,0,0|3,4,0\n")
 
 
-def test_mock_insert_uses_intake_shape_and_dxf_maps_its_temporary_handle():
+@pytest.mark.parametrize("endpoint", [[1.0, 0.0, 0.0], [3.0, 4.0, 0.0], [-2.0, 1.0, 5.0]])
+def test_mock_insert_uses_intake_shape_and_dxf_maps_its_temporary_handle(endpoint):
     base = _base()
+    base["blocks"]["Fixture"]["children"][0]["pts"][1] = endpoint
     before = copy.deepcopy(base)
     result = write_loop.apply_mutations(base, {"added": [_add()]})
     assert result["inserts"] == [_insert("new-insert")]
@@ -183,10 +185,17 @@ def test_mock_insert_uses_intake_shape_and_dxf_maps_its_temporary_handle():
     # whose existing fresh-handle allocator maps it to the first free hex.
     parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))
     assert parsed["inserts"] == [_insert("100")]
-    assert parsed["blocks"] == base["blocks"]
+    # The authored measurement view adds a handle-bound path to the definition.
+    block = dict(parsed["blocks"]["Fixture"])
+    path, = block.pop("beam_paths")
+    assert path["pts"] == base["blocks"]["Fixture"]["children"][0]["pts"]
+    assert path["handle"] and path["layer"] == "0" and path["closed"] is False
+    assert {"Fixture": block} == base["blocks"]
     result["inserts"][0]["handle"] = "A1"
     # DXF reads the whole file, so member evidence coverage is unconditional.
-    assert _without_dependency_report(dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(result))) == {**result, "memberEvidenceCovered": True}
+    canonical = dxf_intake.parse_dxf_bytes(
+        intake_dxf.intake_to_dxf(result), include_measurement_evidence=False)
+    assert _without_dependency_report(canonical) == {**result, "memberEvidenceCovered": True}
 
 
 def test_verifier_binds_added_insert_to_actual_handle(monkeypatch):
