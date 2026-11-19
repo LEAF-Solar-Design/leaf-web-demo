@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { marqueeMode, worldRect, marqueeHandles } from './marqueeSelection.js'
+import { OrthographicCamera, Plane, Raycaster, Vector2, Vector3 } from 'three'
+import { marqueeMode, worldRect, marqueeHandles, marqueeMapping } from './marqueeSelection.js'
 
 const rect = worldRect({ x: 0, y: 0 }, { x: 10, y: 10 })
 const line = (handle, pts, closed = false) => ({ handle, pts, closed })
@@ -59,5 +60,68 @@ describe('SSD1-24C directional geometry', () => {
     const polys = [{ ...line('10', [[1, 1], [2, 1]]), layer: 'shown' },
       { ...line('10', [[9, 9], [12, 9]]), layer: 'hidden' }]
     expect(marqueeHandles(polys, rect, 'window', p => p.layer !== 'hidden')).toEqual(['10'])
+  })
+})
+
+describe('client-space marquee', () => {
+  const bounds = { left: 45, top: 32, width: 640, height: 320 }
+  const start = { x: 280, y: 130 }, end = { x: 390, y: 210 }
+  function cameraAt(x, y, z) {
+    const camera = new OrthographicCamera(-32, 32, 16, -16, -200, 200)
+    camera.position.set(x, y, z)
+    camera.lookAt(2, -3, 0)
+    camera.zoom = 1.4
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld()
+    return camera
+  }
+
+  it.each([[20, 12, 30], [-23, 18, 14], [6, -35, 9]])(
+    'selects the drawn box at camera (%s, %s, %s)', (x, y, z) => {
+      const camera = cameraAt(x, y, z)
+      // Specify the oracle directly in client pixels. Cast rays onto the
+      // drawing plane to construct world fixtures independently of the mapper.
+      const fixture = (handle, pixels, closed) => line(handle, pixels.map(([u, v]) => {
+        const ray = new Raycaster()
+        ray.setFromCamera(new Vector2(2 * (u - bounds.left) / bounds.width - 1,
+          1 - 2 * (v - bounds.top) / bounds.height), camera)
+        return ray.ray.intersectPlane(new Plane(new Vector3(0, 0, 1), 0), new Vector3()).toArray()
+      }), closed)
+      const polys = [
+        fixture('edge', [[280, 130], [280, 185], [340, 190]]),
+        fixture('bend outside', [[260, 180], [260, 100], [340, 100]]),
+        fixture('bend crosses', [[260, 180], [405, 180], [405, 220]]),
+        fixture('closing edge', [[260, 175], [260, 100], [405, 100]], true),
+        fixture('block', [[310, 155], [320, 170]]),
+        fixture('block', [[420, 180], [430, 190]]),
+        fixture('gap', [[250, 170], [260, 170]]),
+        fixture('gap', [[405, 170], [415, 170]]),
+        { ...fixture('edge', [[420, 180], [430, 190]]), layer: 'hidden' },
+        line('invalid', [...fixture('invalid', [[310, 155]]).pts, [2, 3, NaN]]),
+      ]
+      for (const [a, b, expected] of [
+        [start, end, ['edge']],
+        [end, start, ['edge', 'bend crosses', 'closing edge', 'block']],
+      ]) {
+        const { rect, project } = marqueeMapping(camera, bounds, a, b)
+        const visible = pl => pl.layer !== 'hidden'
+        expect(marqueeHandles(polys, rect, marqueeMode(a, b), visible, project)).toEqual(expected)
+      }
+    })
+
+  it('keeps the flat view in world coordinates and refuses unusable mappings', () => {
+    const camera = cameraAt(2, -3, 30)
+    const flat = marqueeMapping(camera, bounds, start, end)
+    expect(flat.project).toBeUndefined()
+    const polys = [line('inside', [[2, -3], [3, -3]]), line('through', [[-20, -3], [20, -3]])]
+    expect(marqueeHandles(polys, flat.rect, 'window')).toEqual(['inside'])
+    expect(marqueeHandles(polys, flat.rect, 'crossing')).toEqual(['inside', 'through'])
+    expect(marqueeMapping(camera, { ...bounds, width: 0 }, start, end)).toBeNull()
+    expect(marqueeMapping(camera, { ...bounds, height: NaN }, start, end)).toBeNull()
+    expect(marqueeMapping(cameraAt(30, -3, 0), bounds, start, end)).toBeNull()
+    expect(marqueeMapping(camera, bounds, start, { x: Infinity, y: 2 })).toBeNull()
+    camera.left = camera.right
+    camera.updateProjectionMatrix()
+    expect(marqueeMapping(camera, bounds, start, end)).toBeNull()
   })
 })
