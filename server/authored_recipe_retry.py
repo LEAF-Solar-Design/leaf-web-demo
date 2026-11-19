@@ -68,6 +68,7 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
     establishes the desired successor exists; it does not identify its writer.
     """
     from integration_tool_service import ReadFailure, failure, normalize
+    from platform_link import ProjectSessionForbidden
     import tool_loader
     import tools_fallback
 
@@ -97,6 +98,8 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
         except ReadFailure as exc:
             if str(exc) in {"denied", "unauthenticated"}:
                 return failure(str(exc))
+        except ProjectSessionForbidden:
+            return failure("denied")
         except Exception:
             # An unavailable read or malformed provider reply cannot settle a save.
             pass

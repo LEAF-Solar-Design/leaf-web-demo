@@ -187,7 +187,12 @@ def attach_clips(pairs, out):
             elif kind == "ENDSEC":
                 section = ""
             elif section == "OBJECTS" and kind in ("DICTIONARY", "SPATIAL_FILTER", "XRECORD"):
-                objects[dict(tags).get(5, "").upper()] = (kind, tags)
+                handle = dict(tags).get(5, "").upper()
+                if handle in objects:
+                    # An ambiguous handle must never select a filter by file order.
+                    objects[handle] = ("AMBIGUOUS", [])
+                else:
+                    objects[handle] = (kind, tags)
             elif section in ("ENTITIES", "BLOCKS") and kind == "INSERT":
                 handle = dict(tags).get(5, "").upper()
                 try:
