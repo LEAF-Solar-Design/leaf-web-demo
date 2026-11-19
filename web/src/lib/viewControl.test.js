@@ -37,10 +37,12 @@ describe('viewRequestFromEvent', () => {
     ]) expect(viewRequestFromEvent(invalid, now)).toBeNull()
   })
 
-  it('accepts events up to sixty seconds old and rejects missing, invalid or future timestamps', () => {
+  it('accepts events up to sixty seconds old and tolerates 5 s of clock skew and rejects missing, invalid or further-future timestamps', () => {
     expect(viewRequestFromEvent(event(), now + 60000)).toEqual({ op: 'fit' })
     expect(viewRequestFromEvent(event(), now + 60001)).toBeNull()
-    expect(viewRequestFromEvent(event(), now - 1)).toBeNull()
+    expect(viewRequestFromEvent(event(), now - 1)).toEqual({ op: 'fit' })
+    expect(viewRequestFromEvent(event(), now - 5000)).toEqual({ op: 'fit' })
+    expect(viewRequestFromEvent(event(), now - 5001)).toBeNull()
     for (const invalid of [undefined, null, 'bad']) {
       expect(viewRequestFromEvent({ ...event(), ts: invalid }, now)).toBeNull()
     }

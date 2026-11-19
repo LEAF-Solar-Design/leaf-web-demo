@@ -1,6 +1,8 @@
 export const VIEW_CONTROL_EVENT = 'cockpit:view'
 
 const operations = new Set(['fit', 'zoom_in', 'zoom_out', 'zoom_to_layer'])
+// The server stamps env.ts; a browser clock up to 5 s behind it still sees a fresh event.
+const MAX_CLOCK_SKEW_MS = 5000
 const announced = new Set()
 
 export function viewRequestFromEvent(env, nowMs) {
@@ -8,7 +10,7 @@ export function viewRequestFromEvent(env, nowMs) {
   const result = env.data.result
   if (result?.contract !== 'leaf.view-request.v1' || !operations.has(result.op)) return null
   const age = nowMs - Date.parse(typeof env.ts === 'string' ? env.ts : '')
-  if (!Number.isFinite(age) || age < 0 || age > 60000) return null
+  if (!Number.isFinite(age) || age < -MAX_CLOCK_SKEW_MS || age > 60000) return null
 
   const { op, layer } = result
   if (op !== 'zoom_to_layer') return 'layer' in result ? null : { op }
