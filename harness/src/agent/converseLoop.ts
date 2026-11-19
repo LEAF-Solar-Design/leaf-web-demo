@@ -1458,11 +1458,16 @@ export class ConverseLoop {
           const invocation = buildInstantInvocation(instant.value, params, target);
           try {
             const response = await instantExecutor.invoke(instant.value.assignment, invocation);
+            if (response.invocation_id !== invocation.invocation_id ||
+                response.tenant_id !== invocation.tenant_id || response.session_id !== invocation.session_id ||
+                response.code_digest !== invocation.code_digest) {
+              return err("instant execution rejected: response_identity_mismatch");
+            }
             if (response.status !== "succeeded") {
               return err(JSON.stringify({ route: "instant", status: response.status, error: response.error ?? {} }));
             }
             return ok(JSON.stringify({
-              route: "instant", invocation_id: invocation.invocation_id, result: response.result ?? {},
+              route: "instant", invocation_id: invocation.invocation_id, executed_code_digest: response.code_digest, result: response.result ?? {},
             }));
           } catch (error) {
             if (catalogEntry.batch_fallback !== true) {
