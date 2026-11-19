@@ -297,10 +297,19 @@ def get_version_plan(drawing_id: str, version: str,
         plan_text = data.decode("utf-8")
     except UnicodeError:
         return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    plan_lines = plan_text.splitlines()
+    if not plan_lines or plan_lines[0] not in {
+            "LEAF_MUTATION_PLAN|1", "LEAF_MUTATION_PLAN|2", "LEAF_MUTATION_PLAN|3"}:
+        return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    plan_grammar = int(plan_lines[0].rsplit("|", 1)[1])
+    plan_kind = ("checkpoint" if len(plan_lines) > 2
+                 and plan_lines[1].startswith("BASE_SHA256|")
+                 and plan_lines[2] == "CLEARMODEL" else "ops")
     return with_envelope_fields({
         "drawing_id": drawing_id, "version": v,
         "parent_version": entry["parent_version"],
         "plan_sha256": entry["plan_sha256"], "plan_text": plan_text,
+        "plan_grammar": plan_grammar, "plan_kind": plan_kind,
         "result_sha256": write_loop.version_content_sha256(
             backend, str(tenant_id), drawing_id, v),
     })

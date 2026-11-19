@@ -1504,7 +1504,9 @@
     color: transparent;
   }
 
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(.properties-dock) .bar-dock {
+  /* The second selector outranks studioShell.css's cockpit .bar-dock rule, which loads later. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(.properties-dock) .bar-dock,
+  .studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]):has(.properties-dock) .bar-dock {
     left: max(calc(50% - 360px), calc(var(--ck-pane) + 8px));
     width: min(720px, calc(100vw - var(--ck-pane) - 16px)); margin-left: 0;
   }
