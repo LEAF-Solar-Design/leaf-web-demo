@@ -3,6 +3,27 @@ from fractions import Fraction
 from math import isfinite
 
 
+def connector_latch_quality(revision, sheet, plug, receptacle, latched, pull_loads_n):
+    """Grade a mating pair against its pinned latched axial retention rating."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(value, str) and value.strip() for value in (plug, receptacle)):
+        return "INCOMPLETE"
+    ratings = sheet.get("latched_retention_n")
+    if not isinstance(ratings, dict) or not isinstance(ratings.get(plug), dict):
+        return "INCOMPLETE"
+    limit = ratings[plug].get(receptacle)
+    if not finite_measure(limit) or limit <= 0 or type(latched) is not bool:
+        return "INCOMPLETE"
+    if not isinstance(pull_loads_n, list) or not pull_loads_n:
+        return "INCOMPLETE"
+    if not all(finite_measure(load) and load >= 0 for load in pull_loads_n):
+        return "INCOMPLETE"
+    return "PASS" if latched and max(pull_loads_n) <= limit else "FAIL"
+
+
 def cable_handling_temperature_quality(revision, sheet, cable, handling, temperatures_c):
     """Compare every recorded handling temperature with the qualified cold-bend minimum."""
     from benches.x03_quality import finite_measure

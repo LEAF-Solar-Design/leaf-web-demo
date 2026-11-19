@@ -4,6 +4,23 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("span,position,force,rigidity,rigid_tip,actual_tip", [
+    pytest.param(3, 1, 10, 900, 0.10, 0.16, id="check-a-splice-near-the-support"),
+    pytest.param(2, 1, -15, 400, 0.10, 0.12, id="check-a-reversed-midspan-load"),
+    pytest.param(6, 3, 5, 1200, 0.30, 0.36, id="check-a-long-cantilever-extension"),
+])
+def test_rail_splice_rotation_increases_tip_deflection(span, position, force, rigidity, rigid_tip, actual_tip):
+    from benches.x03_layout_oracle import splice_deflection_quality as grade
+
+    rule = dict(revision="lab", model="cantilever-tip-load-symmetric-splice-v1",
+                moment_nm_rotation_rad=[(0, 0), (10, 0.01), (20, 0.03)])
+    beam = (span, position, force, rigidity)
+    assert grade("lab", rule, *beam, actual_tip) == "PASS"
+    assert grade("lab", rule, *beam, rigid_tip) == "FAIL"
+    assert grade("lab", dict(rule, moment_nm_rotation_rad=[]), *beam, actual_tip) == "INCOMPLETE"
+    assert grade("lab", rule, span, position, force * 2, rigidity, actual_tip) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("support,bearing,resistance", [
     pytest.param("end", 20, 1200, id="check-a-short-end-seat"),
     pytest.param("interior", 40, 4000, id="size-an-intermediate-bearing"),

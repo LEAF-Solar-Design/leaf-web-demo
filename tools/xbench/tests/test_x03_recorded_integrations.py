@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("plug,socket,retention,loads", [
+    pytest.param("sensor", "board", 12, [3, 12], id="check-a-pulled-sensor-lead"),
+    pytest.param("feeder", "cabinet", 90, [90, 45], id="qualify-a-cabinet-connector"),
+    pytest.param("jumper", "inline", 25, [10, 25, 5], id="check-an-inline-mated-pair"),
+])
+def test_mated_latch_retention(plug, socket, retention, loads):
+    from benches.x03_catalog_oracle import connector_latch_quality as grade
+
+    sheet = dict(revision="r1", rated_amps=20, latched_retention_n={plug: {socket: retention}})
+    assert 10 <= sheet["rated_amps"]
+    assert grade("r1", sheet, plug, socket, True, loads) == "PASS"
+    assert grade("r1", sheet, plug, socket, True, [*loads, retention + 1]) == "FAIL"
+    assert grade("r1", sheet, plug, socket, False, loads) == "FAIL"
+    assert grade("r1", sheet, plug, socket, None, loads) == "INCOMPLETE"
+    assert grade("r1", sheet, plug, "unqualified mate", True, loads) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("cable,operation,minimum,readings", [
     pytest.param("control", "reel pull", -10, [-5, -10, 2], id="qualify-a-winter-control-cable-pull"),
     pytest.param("feeder", "field bend", 0, [10, 0, 3], id="check-a-cold-feeder-bend"),
@@ -1196,3 +1213,18 @@ def test_undercatch_uses_phase_and_gauge_height_wind(measurements, expected):
     assert grade("wind-tunnel-4", calibration, intervals, sum(d for _, _, d in measurements)) == "FAIL"
     assert grade("wind-tunnel-4", calibration, [dict(intervals[0], gauge_height_wind_m_s=5)], expected) == "INCOMPLETE"
     assert grade("wind-tunnel-3", calibration, intervals, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("curve,angle,raw,corrected", [
+    pytest.param([(0, 1), (60, 0.8)], 60, 400, 500, id="correct-late-afternoon-underresponse"),
+    pytest.param([(0, 1), (40, 1.2)], 20, 550, 500, id="remove-interpolated-overresponse"),
+    pytest.param([(5, 1), (45, 0.9), (85, 0.6)], 65, 150, 200, id="reconcile-a-high-incidence-reading"),
+])
+def test_cosine_response_uses_calibrated_angle(curve, angle, raw, corrected):
+    from benches.x03_weather_oracle import cosine_response_quality as grade
+
+    calibration = dict(revision="lab-12", model="linear-measured-to-ideal-v1", angle_ratio=curve)
+    assert grade("lab-12", calibration, angle, raw, corrected) == "PASS"
+    assert grade("lab-12", calibration, angle, raw, raw) == "FAIL"
+    assert grade("lab-12", calibration, curve[-1][0] + 1, raw, corrected) == "INCOMPLETE"
+    assert grade("lab-13", calibration, angle, raw, corrected) == "INCOMPLETE"

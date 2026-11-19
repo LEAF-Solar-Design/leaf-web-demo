@@ -1364,3 +1364,51 @@ def token_bucket_quality(capacity, refill_per_second, initial, arrivals):
             available -= cost
         previous = timestamp
     return "PASS" if valid else "FAIL"
+
+
+def gang_start_quality(policy, cohorts, reservations, starts, *, complete):
+    """Check a complete launch ledger at integer scheduler ticks.
+
+    Each named cohort may remain pending, or start every member at one tick
+    on distinct workers with unique, cohort-bound reservations.
+    """
+    if policy != "all-members-one-tick-v1" or complete is not True:
+        return "INCOMPLETE"
+    if not isinstance(cohorts, dict) or not cohorts or not isinstance(reservations, dict) or not isinstance(starts, list):
+        return "INCOMPLETE"
+    for cohort, members in cohorts.items():
+        if not isinstance(cohort, str) or not cohort or not isinstance(members, list) or not members:
+            return "INCOMPLETE"
+        if not all(isinstance(m, str) and m for m in members) or len(set(members)) != len(members):
+            return "INCOMPLETE"
+    for ticket, reservation in reservations.items():
+        if not isinstance(ticket, str) or not ticket or not isinstance(reservation, (list, tuple)) or len(reservation) != 4:
+            return "INCOMPLETE"
+        cohort, worker, begin, end = reservation
+        if not isinstance(cohort, str) or cohort not in cohorts or not isinstance(worker, str) or not worker:
+            return "INCOMPLETE"
+        if type(begin) is not int or type(end) is not int or begin >= end:
+            return "INCOMPLETE"
+    batches = {}
+    consumed = set()
+    occupied_ticks = set()
+    for event in starts:
+        if not isinstance(event, (list, tuple)) or len(event) != 4:
+            return "INCOMPLETE"
+        cohort, member, ticket, tick = event
+        if not all(isinstance(x, str) and x for x in (cohort, member, ticket)) or type(tick) is not int:
+            return "INCOMPLETE"
+        if cohort not in cohorts:
+            return "INCOMPLETE"
+        if ticket not in reservations or ticket in consumed:
+            return "FAIL"
+        owner, worker, begin, end = reservations[ticket]
+        if owner != cohort or not begin <= tick < end or (worker, tick) in occupied_ticks:
+            return "FAIL"
+        batch_tick, launched = batches.setdefault(cohort, (tick, set()))
+        if batch_tick != tick or member not in cohorts[cohort] or member in launched:
+            return "FAIL"
+        launched.add(member)
+        consumed.add(ticket)
+        occupied_ticks.add((worker, tick))
+    return "PASS" if all(launched == set(cohorts[c]) for c, (_, launched) in batches.items()) else "FAIL"
