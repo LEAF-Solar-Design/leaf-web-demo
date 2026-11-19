@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from contextvars import ContextVar
 import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
@@ -44,6 +45,20 @@ REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
 DATASET_ROW_BUDGET = 1000
 CURSOR_BYTE_BUDGET = 1024
+_PRIVATE_CATALOG_HTTP = ContextVar("private_catalog_http", default=False)
+
+
+def _allow_wire_diagnostic(record):
+    # HTTPX logs full URLs and reason phrases, and httpcore traces headers
+    # and exception details. Only this request's transport diagnostics are private.
+    return not _PRIVATE_CATALOG_HTTP.get()
+
+
+for _wire_logger in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                     "httpcore.proxy", "httpcore.socks"):
+    logging.getLogger(_wire_logger).addFilter(_allow_wire_diagnostic)
+
+
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
@@ -481,8 +496,22 @@ class _DatasetResponseStream(httpx.AsyncByteStream):
         self.stream = stream
         self.owned = owned
 
-    def __aiter__(self):
-        return self.stream.__aiter__()
+    async def __aiter__(self):
+        received = False
+        try:
+            async for chunk in self.stream:
+                received = received or bool(chunk)
+                yield chunk
+        except asyncio.CancelledError:
+            # Propagate cancellation requested by our caller (including its
+            # timeout). A provider that cancels its own iterator lost the page.
+            if not received or asyncio.current_task().cancelling():
+                raise
+            raise PartialResponse("unavailable") from None
+        except Exception:
+            if received:
+                raise PartialResponse("unavailable") from None
+            raise
 
     async def aclose(self):
         if not self.owned:
@@ -868,9 +897,14 @@ class IntegrationToolService:
                         if saving:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport,
                                 save=True, expected_revision=args.get("expectedRevision")))
-                        elif operation == "datasets" and expected_authority is not None:
-                            value = asyncio.run(bounded_http(method, url, token, body, remaining,
-                                                             self.transport, dataset_report=True))
+                        elif operation == "datasets":
+                            private_http = _PRIVATE_CATALOG_HTTP.set(True)
+                            try:
+                                value = asyncio.run(bounded_http(
+                                    method, url, token, body, remaining, self.transport,
+                                    dataset_report=expected_authority is not None))
+                            finally:
+                                _PRIVATE_CATALOG_HTTP.reset(private_http)
                         else:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport))
                         check()
