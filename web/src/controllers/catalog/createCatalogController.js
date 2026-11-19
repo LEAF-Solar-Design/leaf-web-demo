@@ -624,10 +624,32 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       if (!requestIsCurrent()) return undefined
       const decision = solveRunDecision(routed)
       const unmatched = isUnmatchedDecision(decision)
-      if (decision.lane === 'run' && !unmatched && solarRefusal(decision.tool, decision.params)) {
-        return commitDecision(decision, { requestText: text })
-      }
       const confidence = Number(decision.confidence) || 0
+      const reason = decision.lane === 'run' && !unmatched && solarRefusal(decision.tool, decision.params)
+      if (reason) {
+        if (current.agentDisabled || projectScope() || typeof adapters.startAgentTurn !== 'function' ||
+            reason.split('; ').some((code) => code === 'entitlement_required' || code === 'entitlement_policy_unavailable')) {
+          return commitDecision(decision, { requestText: text })
+        }
+        publish({ agentBanner: null })
+        if (!requestIsCurrent()) return undefined
+        try {
+          await adapters.startAgentTurn(text, {
+            lane: decision.lane, tool: decision.tool || null, confidence,
+            rationale: `${decision.tool} is not ready here: ${reason}`,
+          }, { allowSecretOnce })
+        } catch (error) {
+          if (!requestIsCurrent()) return undefined
+          if (isSecretRefused(error)) throw error
+          const result = commitDecision(decision, { requestText: text })
+          if (!requestIsCurrent()) return undefined
+          publish({ agentBanner: adapters.agentBannerFor?.(error) || null })
+          return result
+        }
+        if (!requestIsCurrent()) return undefined
+        publish({ agentMode: 'primary', prompt: '' })
+        return decision
+      }
       // An unmatched photo-inspection request uses existing agent tools. A
       // build-lane classifier result must not turn it into new repository source.
       const photoInspection = !current.agentDisabled && isPhotoInspectionRequest(originalText)
