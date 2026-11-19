@@ -2219,6 +2219,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_drawing_dxf_route.py"), 10),
         Suite("server-drawing-plan-grammar", "server tests/test_drawing_plan_grammar.py", "pytest", SERVER,
               _py_pytest("tests/test_drawing_plan_grammar.py"), 12),
+        Suite("server-drawing-publish-provenance", "server tests/test_drawing_publish_provenance.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_publish_provenance.py"), 5),
         Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_edited_version.py"), 9),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):

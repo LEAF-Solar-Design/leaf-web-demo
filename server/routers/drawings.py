@@ -1604,6 +1604,7 @@ def save_edited_version(drawing_id: str,
                         file: UploadFile = File(...),
                         parent_version: int = Form(...),
                         source_digest: str = Form(...),
+                        origin: Optional[str] = Form(default=None),
                         tenant_id: str = Depends(deps.require_active_tenant),
                         x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
     """Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION
@@ -1627,6 +1628,10 @@ def save_edited_version(drawing_id: str,
       - the receipt names both digests and a truthful cost: the edit ran in
         the tenant's own browser, so engine cost is exactly 0.
     """
+    if origin is not None and origin != "autocad":
+        return error_response(ErrorCode.BAD_PARAMS,
+                              "origin must be autocad when present",
+                              retryable=False, status_code=400)
     blocked = _mutation_gate("drawings.save_edited_version")
     if blocked is not None:
         return blocked
@@ -1680,7 +1685,8 @@ def save_edited_version(drawing_id: str,
             new_v = write_loop._put_bytes_version(
                 backend, str(tenant_id), drawing_id, intake_payload,
                 parent_version=int(parent_version),
-                meta={"tool": "cad-edit-surface", "source": "cad_edit",
+                meta={"tool": "autocad-publish" if origin == "autocad" else "cad-edit-surface",
+                      "source": "autocad" if origin == "autocad" else "cad_edit",
                       "source_sha256": actual_digest,
                       "intake_sha256": intake_digest,
                       "note": "browser edit via the isolated engine worker"},
