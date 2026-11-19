@@ -670,10 +670,11 @@ class IntegrationToolService:
             args = {"limit": limit, "after": cursor}
 
     def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None,
-                            journal_sha256=None):
+                            journal_sha256=None, journal_max_age_seconds=None):
         from authored_recipe_retry import recover_recipe_save
         return recover_recipe_save(self, description, original_args, tenant, session, turn,
-                                   read_revision=read_revision, journal_sha256=journal_sha256)
+                                   read_revision=read_revision, journal_sha256=journal_sha256,
+                                   journal_max_age_seconds=journal_max_age_seconds)
 
     def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
         from authored_batch_recipe import edit_table_recipes
