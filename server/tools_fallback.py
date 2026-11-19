@@ -520,6 +520,8 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     the dynamic loader runs THAT FILE, not a hardcoded primitive. Families:
     list_layers | count | measure | highlight (all read-only, deterministic)."""
     description = (description or "").strip()
+    import authored_dataset_discovery
+    import authored_multibundle
     import authored_aisle_detour
     import authored_revision_panel_moves
     import authored_spatial_clearance
@@ -535,6 +537,14 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_revision_panel_moves.build_body(description)
         drawing_params = authored_revision_panel_moves.PARAMS
         summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_dataset_discovery.matches(description):
+        verb, engine_op = "list", "project_dataset_discovery"
+        drawing_body = authored_dataset_discovery.build_body(description)
+        summary = "reports project dataset freshness from a turn-authorized catalog"
+    elif authored_multibundle.matches(description):
+        verb, engine_op = "route", "multibundle"
+        drawing_body = authored_multibundle.build_body(description)
+        summary = "assigns cable bundles on Bundle load N layers to routes on Tray cap N layers within each tray's capacity"
     elif authored_aisle_detour.matches(description):
         verb, engine_op = "route", "aisle_detour"
         drawing_body = authored_aisle_detour.build_body(description)
@@ -545,11 +555,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         summary = "checks vertical separation above and below panel footprints in drawing units"
         drawing_params = {"type": "object", "properties": {"clearance": {
             "type": "number", "exclusiveMinimum": 0,
-            "description": "Required vertical separation in drawing units"}}, "required": ["clearance"]}
+            "description": "Required vertical separation in drawing units"}}, "required": [] if authored_spatial_clearance.measures_minimum(description) else ["clearance"]}
     elif authored_beam_openings.matches(description):
         verb, engine_op = "measure", "installed_steel_by_level"
         drawing_body = authored_beam_openings.build_body(description)
-        summary = "deducts opening stations from BEAM-<level> centerlines using Openings text marks: OPENING <beam handle> <start> <end>"
+        summary = "ranks floor deductions from model-space Openings marks: OPENING <instance path or unique beam handle> <start> <end>, in world drawing units"
     elif authored_beam_lengths.matches(description):
         verb, engine_op = "measure", "beam_lengths_by_layer"
         drawing_body = authored_beam_lengths.build_body(description)

@@ -516,12 +516,15 @@ class IntegrationToolService:
     def iter_dataset_pages(self, tenant, session, turn, *, limit=50):
         """Read each catalog page under the same turn authority, with bounded cursor history."""
         authority = self.resolve(tenant, session, turn).authority
+        yield from self._dataset_pages(tenant, session, turn, limit, authority)
+
+    def _dataset_pages(self, tenant, session, turn, limit, authority):
         visited = set()
         args = {"limit": limit}
         while True:
             if self.resolve(tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
-            reply = self.execute("datasets", args, tenant, session, turn)
+            reply = self._execute("datasets", args, tenant, session, turn, authority)
             if self.resolve(tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
@@ -539,7 +542,45 @@ class IntegrationToolService:
                 return
             args = {"limit": limit, "after": cursor}
 
+    def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50):
+        """Run an offline-authored report over a bounded, turn-scoped catalog snapshot."""
+        import tools_fallback
+        import tool_loader
+
+        if not isinstance(description, str) or not 1 <= len(description) <= 4000:
+            raise ReadFailure("invalid_input")
+        package, source, _ = tools_fallback.author_tool(description)
+        if package["engine_op"] != "project_dataset_discovery":
+            raise ReadFailure("invalid_input")
+        authority = self.resolve(tenant, session, turn).authority
+        rows = []
+        size = 0
+        pages = 0
+        for page in self._dataset_pages(tenant, session, turn, limit, authority):
+            pages += 1
+            for dataset in page["datasets"]:
+                row = {key: dataset[key] for key in ("dataset_ref", "title", "status")}
+                size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
+                if size > RESPONSE_CAP:
+                    raise ReadFailure("response_too_large")
+                rows.append(row)
+        if self.resolve(tenant, session, turn).authority != authority:
+            raise ReadFailure("denied")
+        intake = {"project_dataset_catalog": {"datasets": rows, "pages_read": pages}}
+        status, payload = tool_loader._run_source_in_sandbox(source, "dataset_report.py", intake, {})
+        if status != "ok":
+            raise ReadFailure("unavailable")
+        report, _ = payload
+        if len(json.dumps(report, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
+            raise ReadFailure("response_too_large")
+        if self.resolve(tenant, session, turn).authority != authority:
+            raise ReadFailure("denied")
+        return report
+
     def execute(self, operation, value, tenant, session, turn):
+        return self._execute(operation, value, tenant, session, turn, None)
+
+    def _execute(self, operation, value, tenant, session, turn, expected_authority):
         result = None
         code = "unavailable"
         try:
@@ -552,6 +593,8 @@ class IntegrationToolService:
                     return resolve_current(tenant, session, turn, write=True)
                 return self.resolve(tenant, session, turn)
             current = resolve()
+            if expected_authority is not None and current.authority != expected_authority:
+                raise ReadFailure("denied")
             custody = self.store.load_active(current.authority, self.clock())
             if custody is None:
                 raise ReadFailure("unavailable")

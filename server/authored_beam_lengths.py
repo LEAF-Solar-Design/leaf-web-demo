@@ -18,16 +18,20 @@ def matches(description):
     prompt = description.casefold()
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
-                and _GROUPED.search(prompt))
+                and (_GROUPED.search(prompt)
+                     or re.search(r"\bcurved\s+beams?\b", prompt)))
 
 
-def build_body(description):
+def build_body(description, *, entry_point="run"):
+    if entry_point not in ("run", "measure_gross_beams"):
+        raise ValueError("Unsupported beam measurement entry point.")
     for pattern, label, factor in _UNITS:
         if re.search(pattern, description, re.IGNORECASE):
             break
     else:
         label, factor = "drawing_units", 1.0
-    return (_BODY.replace("__OUTPUT_UNIT__", repr(label))
+    return (_BODY.replace("__ENTRY_POINT__", entry_point)
+            .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
             .replace("__LIST_MEMBERS__", repr(bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
 
@@ -38,7 +42,52 @@ import re
 """ + TRANSFORM_SOURCE + """
 
 
-def run(intake, params):
+LENGTH_RELATIVE_TOLERANCE = 1e-5
+
+
+def curved_length(frame, delta, bulge, normal):
+    # The unscaled chord and n x chord span the circle. Its tangent at
+    # mid-sweep points along the chord, including clockwise and major arcs.
+    nx, ny, nz = unit_vector(normal)
+    dx, dy, dz = delta
+    across = (ny*dz - nz*dy, nz*dx - nx*dz, nx*dy - ny*dx)
+    along = transform_vector(frame, delta)
+    across = transform_vector(frame, across)
+    size = abs(bulge)
+    half = 2 * math.atan(size)
+    # Factor out radius times sweep to avoid constructing a remote arc center.
+    arc_factor = (math.atan(size) / size) + size * math.atan(size)
+    if frame == identity_frame():
+        return math.hypot(*along) * arc_factor
+
+    def speed(angle):
+        c = math.cos(angle)
+        s = math.copysign(1.0, bulge) * math.sin(angle)
+        return math.hypot(*(c*x + s*y for x, y in zip(along, across)))
+
+    # For each subarc its chord bounds length below, and its two endpoint
+    # tangents up to their intersection bound length above. Both bounds
+    # survive any affine placement. Double the mesh and reuse endpoints.
+    count = 4
+    step = 2 * half / count
+    endpoints = (speed(-half) + speed(half)) / 2
+    endpoints += sum(speed(-half + i*step) for i in range(1, count))
+    while count <= 16384:
+        midpoints = sum(speed(-half + (i + .5)*step) for i in range(count))
+        h = step / 2
+        if h == 0:
+            return arc_factor * speed(0)
+        lower = (math.sin(h) / h) * (midpoints / count)
+        upper = (math.tan(h) / h) * (endpoints / count)
+        if upper - lower <= 2 * LENGTH_RELATIVE_TOLERANCE * lower:
+            return arc_factor * ((lower + upper) / 2)
+        endpoints += midpoints
+        count *= 2
+        step /= 2
+    raise ValueError("Curved beam length could not meet the reported tolerance.")
+
+
+def __ENTRY_POINT__(intake, params):
     metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
                        6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
     source_unit = intake.get("insunits")
@@ -63,25 +112,16 @@ def run(intake, params):
         bulges = path.get("bulges", [])
         if bulges and len(bulges) != len(points):
             raise ValueError("Beam curve lacks per-vertex bulges.")
-        if any(bulges) and frame != identity:
-            # A circular bulge stays circular under a similarity in its plane.
-            # An anisotropically stretched arc requires elliptical integration.
-            x, y, _ = extrusion_axes(path.get("nrm", (0, 0, 1)))
-            x, y = transform_vector(frame, x), transform_vector(frame, y)
-            nx, ny = math.hypot(*x), math.hypot(*y)
-            if (not math.isclose(nx, ny, rel_tol=1e-8)
-                    or abs(sum(a*b for a, b in zip(x, y))) > 1e-8*nx*ny):
-                raise ValueError("A nonuniformly scaled curved beam requires elliptical measurement.")
         length = 0.0
         for i in range(len(points) - 1):
             delta = [b-a for a, b in zip(points[i], points[i+1])]
             if len(delta) == 2:
                 delta.append(0)
-            chord = math.hypot(*transform_vector(frame, delta))
-            bulge = abs(bulges[i]) if bulges else 0.0
+            bulge = bulges[i] if bulges else 0.0
             if bulge:
-                chord *= (1 + bulge**2) * (math.atan(bulge) / bulge)
-            length += chord
+                length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
+            else:
+                length += math.hypot(*transform_vector(frame, delta))
         total = totals.get(layer, 0.0) + copies * length * factor
         if not math.isfinite(total):
             raise ValueError("Beam length exceeds the supported numeric range.")
@@ -157,7 +197,8 @@ def run(intake, params):
         raise ValueError("Unresolved block reference in beam measurement.")
     for insert in intake.get("inserts", []):
         visit(insert, identity, "0", (), (), 1)
-    result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__}
+    result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
+              "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
     if __LIST_MEMBERS__:
         result["lengths_by_handle"] = members
     return (result, None)
