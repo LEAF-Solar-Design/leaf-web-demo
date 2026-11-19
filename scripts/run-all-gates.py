@@ -2217,6 +2217,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"could not import 'ezdxf': .*",)),
         Suite("server-drawing-dxf-route", "server tests/test_drawing_dxf_route.py", "pytest", SERVER,
               _py_pytest("tests/test_drawing_dxf_route.py"), 10),
+        Suite("server-drawing-plan-grammar", "server tests/test_drawing_plan_grammar.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_plan_grammar.py"), 12),
         Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_edited_version.py"), 9),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):

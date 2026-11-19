@@ -56,6 +56,8 @@ def _assert_plan(client, backend, drawing, expected):
         "drawing_id": drawing, "version": 2, "parent_version": 1,
         "plan_text": expected.decode("utf-8"),
         "plan_sha256": hashlib.sha256(expected).hexdigest(),
+        "plan_grammar": int(expected.splitlines()[0].rsplit(b"|", 1)[1]),
+        "plan_kind": "ops",
         "result_sha256": (hashlib.sha256(saves.EDITED_DXF).hexdigest()
                           if backend.exists(write_loop.edited_source_key(
                               saves.TENANT, drawing, 2)) else None),
