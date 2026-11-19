@@ -192,6 +192,8 @@ export interface GrantSettlement {
   usage: Pick<ConverseTurnUsage, "cost_tokens">;
   stop_reason: ConverseStopReason;
   retry_after_s?: number;
+  /** The runner's terminal error code for the turn, when emitted (for example oauth_org_not_allowed). */
+  error_code?: string;
 }
 
 // --------------------------------------------------------------------------- //
@@ -260,6 +262,8 @@ export interface GrantAccountStatus {
   eligible?: boolean;
   usage_tokens?: number;
   cooldown_until?: string | null;
+  auth_refused_at?: string | null;
+  auth_refused_code?: string | null;
 }
 
 /** Token-free operational facts about one tenant grant record. */

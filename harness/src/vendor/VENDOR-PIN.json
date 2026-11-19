@@ -2,8 +2,8 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "agent/authorLoop.ts": {
-      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior.",
-      "sha256": "09e46316007b6c2425025468d3cebe4722b7edc9d7678853bbb9a0aeb86f34cd"
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
+      "sha256": "d3dfca96eeea3cebff109eb0a6cd3638e26d343e18c7fcc7d03aed0b7bb415ef"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
@@ -34,8 +34,8 @@
       "sha256": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4"
     },
     "ports/impl/oauthGrantProvider.ts": {
-      "reason": "P-182: EnvelopeTenantGrantStore seals tenant grants at rest for LEAF_GRANT_STORE=vault; retire when upstream includes equivalent behavior.",
-      "sha256": "f88db8916046d01ecfdf0ec52f29830dee11b7e9f898bd87b9660b998246f097"
+      "reason": "P-182: EnvelopeTenantGrantStore seals tenant grants at rest for LEAF_GRANT_STORE=vault; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
+      "sha256": "59006af6f4f89e73a73df1d85bddcd4c1a45cf69a6682eed63d83fee54e21605"
     },
     "ports/impl/pgSessionStore.ts": {
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
@@ -62,12 +62,12 @@
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594.",
-      "sha256": "0abd0de16cd26741efa99cdccbf250ca3dfe782438cd70e5a0ec1b0c2b609d92"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
+      "sha256": "484fd46fcf4902d9c48c994d555287d547f470c42c7e2daf2c256aa5dfcd5295"
     }
   },
   "files": {
-    "agent/authorLoop.ts": "09e46316007b6c2425025468d3cebe4722b7edc9d7678853bbb9a0aeb86f34cd",
+    "agent/authorLoop.ts": "d3dfca96eeea3cebff109eb0a6cd3638e26d343e18c7fcc7d03aed0b7bb415ef",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -107,7 +107,7 @@
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
     "ports/impl/mcpNetworkPolicy.ts": "298ac12f2c6a76acaf30aa18459d3aba1a8a3082eb0024f5c8deb48f6b4dc7a2",
     "ports/impl/mcpProxy.ts": "62f34ba8837d0b90ea066b944c2b88f69920e92a9bc2376f95cc3eb9bdb4df1b",
-    "ports/impl/oauthGrantProvider.ts": "f88db8916046d01ecfdf0ec52f29830dee11b7e9f898bd87b9660b998246f097",
+    "ports/impl/oauthGrantProvider.ts": "59006af6f4f89e73a73df1d85bddcd4c1a45cf69a6682eed63d83fee54e21605",
     "ports/impl/pgSessionStore.ts": "f5b97239f0e615109aa7a1efbfbef2bbe4a47a012f5167eaa887ce476efb6ee2",
     "ports/impl/repoEditRunner.ts": "d924a9f2cc131676a7b1aadd966c8176a6186b03d1c4b0caf05f9fbca10595bb",
     "ports/impl/requestJournal.ts": "f17dbd7e7a9ce79a864034ba4a04a3b0ae276235ec2ead4f1b147497e72af1e6",
@@ -123,7 +123,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantDocumentRepo.ts": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
-    "ports/index.ts": "0abd0de16cd26741efa99cdccbf250ca3dfe782438cd70e5a0ec1b0c2b609d92",
+    "ports/index.ts": "484fd46fcf4902d9c48c994d555287d547f470c42c7e2daf2c256aa5dfcd5295",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
     "ports/labDocumentPort.ts": "5af5dd550c66eceffa5321bf32b9525eac26ee9350642977010fafa4420b3578",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",

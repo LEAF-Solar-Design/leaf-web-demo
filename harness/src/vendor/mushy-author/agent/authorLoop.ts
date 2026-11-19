@@ -225,6 +225,10 @@ export function authorGrantSettlement(
   if (message === "Agent SDK auth failure: billing_error") {
     return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "llm_quota_exhausted" };
   }
+  const authFailure = /^Agent SDK auth failure: (oauth_org_not_allowed|authentication_failed)$/.exec(message);
+  if (authFailure) {
+    return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error", error_code: authFailure[1]! };
+  }
   return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error" };
 }
 
