@@ -2155,3 +2155,35 @@ def sheath_voltage_quality(model, sections, limit_v):
         voltage += length_m * coupling_v_per_m
         peak = max(peak, abs(voltage))
     return "PASS" if peak <= Fraction(str(limit_v)) else "FAIL"
+
+
+def motor_start_quality(source_v, effective_ohm, locked_a, seconds, normal_min_v, transient_min_v, max_dip_s):
+    """Per-phase constant locked-rotor current and effective in-phase source impedance."""
+    values = (source_v, effective_ohm, locked_a, seconds, normal_min_v, transient_min_v, max_dip_s)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    source, impedance, amps, duration, normal, floor, allowed = (Fraction(str(v)) for v in values)
+    if min(source, amps, duration, floor) <= 0 or min(impedance, allowed) < 0 or normal < floor:
+        return "INCOMPLETE"
+    starting = source - impedance * amps
+    acceptable = starting >= floor and (starting >= normal or duration <= allowed)
+    return "PASS" if acceptable else "FAIL"
+
+
+def harmonic_load_quality(revision, model, rms_by_order):
+    """Pinned winding loss model: sum I_h squared times (copper + eddy times h squared)."""
+    if not revision or not isinstance(model, dict) or model.get("revision") != revision:
+        return "INCOMPLETE"
+    highest = model.get("highest_order")
+    if type(highest) is not int or highest < 1 or not isinstance(rms_by_order, dict) or len(rms_by_order) != highest:
+        return "INCOMPLETE"
+    values = (model.get("copper_w_per_a2"), model.get("eddy_w_per_a2"), model.get("max_w"))
+    if not all(finite_measure(x) and x > 0 for x in values):
+        return "INCOMPLETE"
+    copper, eddy, maximum = (Fraction(str(v)) for v in values)
+    loss = Fraction(0)
+    for order, amps in rms_by_order.items():
+        if type(order) is not int or not 1 <= order <= highest or not finite_measure(amps) or amps < 0:
+            return "INCOMPLETE"
+        loss += Fraction(str(amps)) ** 2 * (copper + eddy * order ** 2)
+    return "PASS" if loss <= maximum else "FAIL"

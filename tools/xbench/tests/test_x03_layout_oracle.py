@@ -485,3 +485,15 @@ def test_anchor_row_overlap_and_edges(locations,y,capacity):
     assert grade("row1",rule,locations,y,(100,100),10,capacity) == "PASS"
     assert grade("row1",rule,locations,y,(100,100),10,capacity+1) == "FAIL"
     assert grade("row1",{},locations,y,(100,100),10,capacity) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("length,safe,unstable", [(2,3100,3200),(4,1500,1600),(8,780,790)])
+def test_beam_unbraced_length_can_govern(length,safe,unstable):
+    from benches.x03_layout_oracle import lateral_torsional_quality as grade
+    # EI = 4000 N m2, GJ = 1000 N m2. Section bending capacity alone is 4000 N m.
+    props = (length,200e9,2e-8,80e9,1.25e-8)
+    rule = "elastic-uniform-no-warping"
+    assert unstable < 4000
+    assert grade(rule,"fork-supported",*props,safe) == "PASS"
+    assert grade(rule,"fork-supported",*props,unstable) == "FAIL"
+    assert grade(rule,None,*props,safe) == "INCOMPLETE"

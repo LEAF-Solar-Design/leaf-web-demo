@@ -604,3 +604,29 @@ def pyranometer_horizontal_quality(model, tilt_deg, facing_deg, sun_elevation_de
         return "INCOMPLETE"
     expected = direct_poa * sin(elevation) / incidence
     return "PASS" if reported >= 0 and abs(reported-expected) <= tolerance else "FAIL"
+
+
+def daylight_energy_quality(daylight_s, intervals, reported_wh_m2):
+    """Integrate recorded interval means over one fully covered daylight window."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(daylight_s, (list, tuple)) or len(daylight_s) != 2 or not all(map(finite_measure, daylight_s)):
+        return "INCOMPLETE"
+    start, end = daylight_s
+    if start >= end or not isinstance(intervals, list) or not finite_measure(reported_wh_m2):
+        return "INCOMPLETE"
+    energy = Fraction(0)
+    for row in intervals:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            return "INCOMPLETE"
+        left, right, mean, unit = row
+        if not all(map(finite_measure, (left, right, mean))) or left != start or not left < right <= end or mean < 0:
+            return "INCOMPLETE"
+        if unit not in ("W/m2", "kW/m2"):
+            return "INCOMPLETE"
+        seconds = Fraction(str(right)) - Fraction(str(left))
+        energy += Fraction(str(mean)) * (1000 if unit == "kW/m2" else 1) * seconds / 3600
+        start = right
+    if start != end:
+        return "INCOMPLETE"
+    return "PASS" if energy == Fraction(str(reported_wh_m2)) else "FAIL"

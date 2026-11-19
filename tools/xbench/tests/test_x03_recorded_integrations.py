@@ -960,3 +960,27 @@ def test_direct_beam_horizontal_projection(tilt,facing,elev,sun,reading,expected
     assert grade(model,tilt,facing,elev,sun,reading,expected+10,0.001) == "FAIL"
     assert grade(model,tilt,None,elev,sun,reading,expected,0.001) == "INCOMPLETE"
     assert grade("global-unseparated",tilt,facing,elev,sun,reading,expected,0.001) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("material,history,dose", [
+    ("jacket",[(4,10),(1,5)],45),("seal",[(1.5,8),(2,2)],16),("cover",[(0.5,6),(1,0)],3),
+])
+def test_material_uv_dose(material,history,dose):
+    from benches.x03_catalog_oracle import uv_dose_quality as grade
+    sheet = dict(revision="q",ingress="IP67",qualified_wh_m2={material:dose})
+    assert grade("q",sheet,material,history,True) == "PASS"
+    assert grade("q",sheet,material,history+[(1,1)],True) == "FAIL"
+    assert grade("q",sheet,material,history,False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("rows,energy", [
+    ([(0,1800,800,"W/m2")],400),
+    ([(0,900,1,"kW/m2"),(900,2700,200,"W/m2")],350),
+    ([(0,7200,0.25,"kW/m2")],500),
+])
+def test_energy_requires_full_daylight_integration(rows,energy):
+    from benches.x03_weather_oracle import daylight_energy_quality as grade
+    window = (0,rows[-1][1])
+    assert grade(window,rows,energy) == "PASS"
+    assert grade(window,rows,rows[0][2]) == "FAIL"
+    assert grade((0,window[1]+1),rows,energy) == "INCOMPLETE"

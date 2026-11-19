@@ -853,3 +853,25 @@ def insulation_spacing_quality(revision, sheet, pollution, altitude_m, creepage_
     if selected is None:
         return "INCOMPLETE"
     return "PASS" if creepage_mm >= selected[0] and clearance_mm >= selected[1] else "FAIL"
+
+
+def uv_dose_quality(revision, sheet, grade, history, complete):
+    """Accumulate interval irradiance (W/m2) times hours against a grade's qualified Wh/m2."""
+    from benches.x03_quality import finite_measure
+    if complete is not True or not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    limits = sheet.get("qualified_wh_m2")
+    if not isinstance(grade, str) or not isinstance(limits, dict) or not isinstance(history, list):
+        return "INCOMPLETE"
+    limit = limits.get(grade)
+    if not finite_measure(limit) or limit <= 0:
+        return "INCOMPLETE"
+    dose = Fraction(0)
+    for interval in history:
+        if not isinstance(interval, (list,tuple)) or len(interval) != 2 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        hours, irradiance = (Fraction(str(x)) for x in interval)
+        if hours <= 0 or irradiance < 0:
+            return "INCOMPLETE"
+        dose += hours * irradiance
+    return "PASS" if dose <= Fraction(str(limit)) else "FAIL"
