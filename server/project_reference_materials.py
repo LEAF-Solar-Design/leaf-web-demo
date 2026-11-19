@@ -30,6 +30,13 @@ class ReferenceStoreUnavailable(RuntimeError):
     pass
 
 
+def unique_json_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
+    return result
+
+
 def upload_policy(name, content_type):
     name = unicodedata.normalize('NFC', name).strip()
     if not name or len(name) > 255 or any(unicodedata.category(c).startswith('C') or c in '/\\' for c in name):
@@ -242,14 +249,9 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
             if media_type == 'application/json':
                 def invalid_constant(value):
                     raise ValueError('non-finite JSON')
-                def unique_object(pairs):
-                    result = {}
-                    for key, value in pairs:
-                        if key in result:
-                            raise ValueError('duplicate JSON key')
-                        result[key] = value
-                    return result
-                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_object)
+                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+        except InvalidReference:
+            raise
         except (UnicodeError, ValueError, RecursionError):
             raise InvalidReference('Reference must contain valid UTF-8 text or strict JSON.') from None
     return {'name': name, 'media_type': media_type, 'byte_size': len(raw),
