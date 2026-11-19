@@ -187,7 +187,9 @@ def run(intake, params):
     selected = intake.get("checker_material_selection") or {}
     original = selected.get("record_values")
     operations = __OPERATIONS__
-    if not operations or params or type(original) is not list or selected.get("record_exact_numbers"):
+    if selected.get("record_exact_numbers"):
+        raise ValueError("The selected number exceeds the editable numeric range or precision.")
+    if not operations or params or type(original) is not list:
         raise ValueError("Select editable JSON records and specify ordered insert, remove or move operations.")
     rows = deepcopy(original)
     identities = record_ids(rows)
