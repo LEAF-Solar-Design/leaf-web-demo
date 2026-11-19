@@ -1019,3 +1019,33 @@ def test_bank_resonance_near_present_harmonic(hz,x,c,order):
     assert grade("sc",source,c,{1:10,order:2},2) == "FAIL"
     assert grade("sc",source,c,{1:10,order:0},2) == "PASS"
     assert grade("sc",source,c,None,2) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("trace,window,dc", [
+    ([(0,1,5),(1,2,-3)], (0,2), 1),
+    ([(0,2,-6),(2,3,6)], (0,3), 2),
+    ([(0,2,8),(2,5,-2)], (1,4), 4/3),
+])
+def test_grid_dc_offset_from_signed_interval_means(trace,window,dc):
+    from benches.x03_quality import dc_injection_quality as grade
+    # Every instantaneous magnitude is below the recorded 10 A RMS ceiling.
+    assert max(abs(row[2]) for row in trace) <= 10
+    assert grade(trace,[window],dc+0.000001) == "PASS"
+    assert grade(trace,[window],dc-0.01) == "FAIL"
+    assert grade(trace[:-1],[window],dc) == "INCOMPLETE"
+    assert grade([(0,1,5),(1,2,-5)],[(0,2),(0,1)],1) == "FAIL"
+
+
+@pytest.mark.parametrize("amps,polarity,final,shortcut", [
+    ((4,-2),"charging-positive",12.5,14),
+    ((2,6),"discharging-positive",3,4),
+    ((-2,6),"charging-positive",15,13),
+])
+def test_interval_charge_reconciliation(amps,polarity,final,shortcut):
+    from benches.x03_quality import coulomb_count_quality as grade
+    # Half an hour followed by one hour, except the first case starts at 12.5 Ah.
+    initial = 12.5 if amps == (4,-2) else 10
+    spans = [(0,1800,amps[0]),(1800,5400,amps[1])]
+    assert grade((0,5400),spans,initial,final,polarity) == "PASS"
+    assert grade((0,5400),spans,initial,shortcut,polarity) == "FAIL"
+    assert grade((0,5400),spans[1:],initial,final,polarity) == "INCOMPLETE"

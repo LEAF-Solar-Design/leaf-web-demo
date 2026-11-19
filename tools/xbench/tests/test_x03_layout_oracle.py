@@ -405,3 +405,13 @@ def test_joint_load_at_effective_throat_capacity(sizes,stress,capacity):
     assert grade(welds,capacity,stress) == "PASS"
     assert grade(welds,capacity+1,stress) == "FAIL"
     assert grade(welds+[{}],capacity,stress) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("length,pitch,diameter,width,stress,capacity", [
+    (6,1,5,0.5,100,4712.39), (4.8,1.5,8,0.75,80,4523.89), (9,2,10,1,50,6283.19),
+])
+def test_internal_thread_pullout_capacity(length,pitch,diameter,width,stress,capacity):
+    from benches.x03_layout_oracle import thread_engagement_quality as grade
+    assert grade(length,pitch,diameter,width,stress,capacity-0.1) == "PASS"
+    assert grade(length,pitch,diameter,width,stress,capacity+0.1) == "FAIL"
+    assert grade(length,pitch,None,width,stress,capacity) == "INCOMPLETE"

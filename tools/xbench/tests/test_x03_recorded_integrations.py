@@ -777,3 +777,28 @@ def test_component_operates_within_joint_pressure_temperature_limit(duty,maximum
     assert grade("pt",curve,[(0,10),(duty,maximum)]) == "PASS"
     assert grade("pt",curve,[(duty,maximum+0.5)]) == "FAIL"
     assert grade("pt",{},[(duty,maximum)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("package,shape,duration,peak", [
+    ("crate","half-sine",10,20), ("foam","sawtooth",5,30), ("pallet","trapezoid",15,12),
+])
+def test_shipping_shock_at_recorded_packaging_and_pulse(package,shape,duration,peak):
+    from benches.x03_catalog_oracle import transport_shock_quality as grade
+    sheet = dict(revision="q",exhaustive=True,ratings={(package,shape):[(duration-1,duration+1,peak)]})
+    assert grade("q",sheet,package,shape,duration,peak) == "PASS"
+    assert grade("q",sheet,package,shape,duration,peak+1) == "FAIL"
+    assert grade("q",sheet,package,shape,duration+2,peak) == "FAIL"
+    assert grade("q",sheet,"unpacked",shape,duration,peak) == "FAIL"
+    assert grade("q",dict(sheet,ratings={}),package,shape,None,peak) == "INCOMPLETE"
+    assert grade("q",dict(sheet,exhaustive=False,ratings={}),package,shape,duration,peak) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("dry,wet,pressure,rh", [(20,20,100,100),(20,15,100,58.8),(30,20,90,41.06)])
+def test_ventilated_wet_bulb_weather_report(dry,wet,pressure,rh):
+    from benches.x03_weather_oracle import psychrometric_quality as grade
+    model = dict(revision="station",kind="magnus-psychrometer",a=17.625,b_c=243.04,
+                 base_kpa=0.61094,coefficient_per_c=0.00066)
+    assert grade("station",model,dry,wet,pressure,rh,0.01) == "PASS"
+    assert grade("station",model,dry,wet,pressure,rh-2,0.01) == "FAIL"
+    assert grade("station",model,dry,dry+1,pressure,rh,0.01) == "FAIL"
+    assert grade("station",model,dry,wet,None,rh,0.01) == "INCOMPLETE"

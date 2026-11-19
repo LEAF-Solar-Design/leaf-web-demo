@@ -456,3 +456,16 @@ def test_queue_service_relative_to_declared_entitlements(weights,balanced,skewed
     assert grade(dict(enumerate(balanced)),entitlements,0) == "PASS"
     assert grade(dict(enumerate(skewed)),entitlements,0) == "FAIL"
     assert grade(dict(enumerate(balanced)),{},0) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("events,active", [
+    ([(0,"start"),(3,"suspend"),(8,"resume"),(10,"complete")],5),
+    ([(1,"start"),(2,"suspend"),(4,"resume"),(7,"suspend"),(9,"resume"),(12,"complete")],7),
+    ([(0.5,"start"),(1.5,"suspend"),(2.5,"resume"),(3,"complete")],1.5),
+])
+def test_preempted_jobs_exclude_suspended_time(events,active):
+    from benches.x03_dashboard_oracle import preemption_quality as grade
+    assert grade(events,active) == "PASS"
+    assert grade(events,events[-1][0]-events[0][0]) == "FAIL"
+    assert grade(events[:-1]+[events[-2],events[-1]],active) == "FAIL"
+    assert grade(events[:-1],active) == "INCOMPLETE"

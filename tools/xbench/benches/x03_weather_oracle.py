@@ -410,3 +410,30 @@ def plane_irradiance_quality(revision, model, dni, dhi, zenith_deg, sun_azimuth_
     ground = (dni*cos(z) + dhi) * albedo * (1 - sky_view)
     expected = dni * max(0, projection) + dhi * sky_view + ground
     return "PASS" if reported >= 0 and isclose(reported, expected, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"
+
+
+def psychrometric_quality(revision, model, dry_c, wet_c, pressure_kpa, reported_rh, tolerance_pct):
+    """Liquid-water Magnus saturation pressure with a pinned ventilated psychrometer coefficient."""
+    from math import exp
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(model, dict) or model.get("revision") != revision or model.get("kind") != "magnus-psychrometer":
+        return "INCOMPLETE"
+    a, b, base, coeff = (model.get(key) for key in ("a", "b_c", "base_kpa", "coefficient_per_c"))
+    if not all(map(finite_measure, (a,b,base,coeff,dry_c,wet_c,pressure_kpa,reported_rh,tolerance_pct))):
+        return "INCOMPLETE"
+    if min(a,b,base,coeff) <= 0 or not 0 <= tolerance_pct <= 100:
+        return "INCOMPLETE"
+    if pressure_kpa <= 0 or wet_c > dry_c or not 0 <= reported_rh <= 100:
+        return "FAIL"
+    if wet_c < 0:
+        return "INCOMPLETE"
+    try:
+        saturation = base * exp(a * dry_c / (b + dry_c))
+        vapor = base * exp(a * wet_c / (b + wet_c)) - coeff * pressure_kpa * (dry_c - wet_c)
+    except OverflowError:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (saturation, vapor))):
+        return "INCOMPLETE"
+    if not 0 <= vapor < pressure_kpa:
+        return "FAIL"
+    return "PASS" if abs(100*vapor/saturation - reported_rh) <= tolerance_pct else "FAIL"

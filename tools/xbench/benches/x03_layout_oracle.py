@@ -799,3 +799,14 @@ def weld_throat_quality(welds, resultant_n, allowable_mpa):
             return "INCOMPLETE"
         area += Fraction(str(length)) * Fraction(str(throat))
     return "PASS" if Fraction(str(resultant_n)) <= area * Fraction(str(allowable_mpa)) else "FAIL"
+
+
+def thread_engagement_quality(engaged_mm, pitch_mm, shear_diameter_mm, stripping_width_mm, allowable_mpa, pull_n):
+    """Recorded effective shear width per full thread, neglecting partial end threads."""
+    values = (engaged_mm, pitch_mm, shear_diameter_mm, stripping_width_mm, allowable_mpa, pull_n)
+    if not all(map(finite_measure, values)) or min(values[:5]) <= 0 or pull_n < 0 or stripping_width_mm > pitch_mm:
+        return "INCOMPLETE"
+    from math import pi
+    turns = Fraction(str(engaged_mm)) // Fraction(str(pitch_mm))
+    area = pi * shear_diameter_mm * stripping_width_mm * turns
+    return "PASS" if pull_n <= area * allowable_mpa else "FAIL"
