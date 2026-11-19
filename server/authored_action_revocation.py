@@ -9,6 +9,7 @@ import json
 import math
 import re
 from threading import RLock
+from urllib.parse import urljoin
 
 from integration_tool_service import ReadFailure, validate_action_catalog
 
@@ -109,6 +110,32 @@ def _check_local_schema_refs(schema, registry):
     active = set()
     dialect = Draft202012Validator.META_SCHEMA["$id"]
 
+    # Index lexical declarations before lookup: registry crawling can silently
+    # choose one of two declarations. Following references in this pass would
+    # count legitimate repeated uses of the same declaration as collisions.
+    resource_uris = set()
+    anchors = set()
+    declarations_left = remaining
+
+    def index(resource, base, depth):
+        nonlocal declarations_left
+        declarations_left -= 1
+        if declarations_left < 0 or depth >= 64:
+            raise ValueError("Action schema resolution budget exceeded")
+        identifier = resource.id()
+        if depth == 0 or identifier is not None:
+            base = urljoin(base, identifier or "")
+            if base in resource_uris:
+                raise ValueError("Ambiguous local schema resource ID")
+            resource_uris.add(base)
+        for anchor in resource.anchors():
+            key = (base, anchor.name)
+            if key in anchors:
+                raise ValueError("Ambiguous local schema anchor")
+            anchors.add(key)
+        for child in resource.subresources():
+            index(child, base, depth + 1)
+
     def visit(node, resolver):
         nonlocal remaining, has_patterns
         remaining -= 1
@@ -146,7 +173,9 @@ def _check_local_schema_refs(schema, registry):
             visit(child, resolver.in_subresource(DRAFT202012.create_resource(child)))
         active.remove(id(node))
 
-    visit(schema, registry.resolver_with_root(DRAFT202012.create_resource(schema)))
+    root = DRAFT202012.create_resource(schema)
+    index(root, "", 0)
+    visit(schema, registry.resolver_with_root(root))
     return has_patterns
 
 

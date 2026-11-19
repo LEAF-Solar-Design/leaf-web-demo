@@ -115,9 +115,15 @@ def bind_selection(intake, org_id, project_id, actor_id, material_id, context):
 
 
 def build_body(description):
+    from project_reference_materials import InvalidReference, check_json_unicode
+
     operations = _parse(description)
+    try:
+        check_json_unicode(operations)
+    except InvalidReference as exc:
+        operations = str(exc)
     if isinstance(operations, str):
-        # Do not emit a partially executable plan for an over-budget request.
+        # Refuse the entire plan before any edit runs.
         return "def run(intake, params):\n    raise ValueError(" + repr(operations) + ")\n"
     return _BODY.replace("__OPERATIONS__", repr(operations))
 
