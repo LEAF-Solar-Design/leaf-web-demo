@@ -4,6 +4,24 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_web_shear_quality(revision, rule, depth_mm, thickness_mm, shear_n):
+    """Grade a web using the pinned elastic shear coefficient and stress ceiling."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "elastic-web-shear-v1":
+        return "INCOMPLETE"
+    values = (depth_mm, thickness_mm, shear_n, rule.get("buckling_coefficient_mpa"),
+              rule.get("allowable_shear_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    depth, thickness, shear, coefficient, allowable = (Fraction(str(value)) for value in values)
+    if min(depth, thickness, coefficient, allowable) <= 0:
+        return "INCOMPLETE"
+    critical_stress = coefficient * (thickness / depth) ** 2
+    resistance_n = depth * thickness * min(critical_stress, allowable)
+    return "PASS" if abs(shear) <= resistance_n else "FAIL"
+
+
 def rail_interaction_quality(revision, rule, compression_n, moment_nm):
     """Check concurrent compression and uniaxial bending for one rail section."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

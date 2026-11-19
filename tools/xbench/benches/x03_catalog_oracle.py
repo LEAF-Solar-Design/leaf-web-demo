@@ -3,6 +3,27 @@ from fractions import Fraction
 from math import isfinite
 
 
+def hazardous_area_quality(revision, sheet, zone, gas_group, temperature_class, marking):
+    """Compare a complete field marking with the pinned approvals for one site class."""
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    required = (zone, gas_group, temperature_class)
+    if not all(isinstance(value, str) and value.strip() for value in required):
+        return "INCOMPLETE"
+    if not isinstance(marking, str) or not marking.strip():
+        return "INCOMPLETE"
+    rules = sheet.get("approved_markings")
+    if not isinstance(rules, dict):
+        return "INCOMPLETE"
+    for value in required:
+        if not isinstance(rules, dict) or value not in rules:
+            return "INCOMPLETE"
+        rules = rules[value]
+    if not isinstance(rules, list) or not all(isinstance(item, str) and item.strip() for item in rules):
+        return "INCOMPLETE"
+    return "PASS" if marking in rules else "FAIL"
+
+
 def terminal_contact_quality(revision, rule, current_a, joint_temp_c, drop_mv):
     """Use a four-wire DC voltage-drop magnitude at the specified test current."""
     from benches.x03_quality import finite_measure

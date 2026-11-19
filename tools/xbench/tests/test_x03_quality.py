@@ -1278,3 +1278,46 @@ def test_semiconductor_soa(pulse, curve, voltage, allowed):
     assert semiconductor_soa_quality("r3", envelope, voltage, allowed, pulse) == "INCOMPLETE"
     row["voltage_v_current_a"] = []
     assert grade(allowed) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("spectrum,bands,blind", [
+    pytest.param({"sine": [(60, 4)], "dc": [(0, 2)]},
+                 {"sine": (50, 60, 4), "dc": (0, 0, 2)}, "dc", id="check-inverter-dc-leakage"),
+    pytest.param({"pulsed": [(50, 3), (100, 2)]},
+                 {"pulsed": (50, 100, 5)}, "pulsed", id="check-rectifier-pulse-train"),
+    pytest.param({"switching": [(400, 1.5)], "sine": [(50, 1)]},
+                 {"switching": (200, 400, 1.5), "sine": (45, 65, 3)}, "switching",
+                 id="check-variable-speed-drive"),
+])
+def test_residual_waveform_class_coverage(spectrum, bands, blind):
+    from benches.x03_quality import residual_waveform_quality as grade
+
+    classes = {"revision": "fixture-r2", "simultaneous_ratings": {
+        "qualified": bands, "blind": {**bands, blind: False},
+        "undocumented": {key: value for key, value in bands.items() if key != blind},
+    }}
+    assert grade("fixture-r2", classes, "qualified", spectrum) == "PASS"
+    assert grade("fixture-r2", classes, "blind", spectrum) == "FAIL"
+    assert grade("fixture-r2", classes, "undocumented", spectrum) == "INCOMPLETE"
+    assert grade("fixture-r1", classes, "qualified", spectrum) == "INCOMPLETE"
+    overloaded = {**spectrum, blind: spectrum[blind] * 2}
+    assert grade("fixture-r2", classes, "qualified", overloaded) == "FAIL"
+    out_of_band = {**spectrum, blind: [(bands[blind][1] + 1, 1)]}
+    assert grade("fixture-r2", classes, "qualified", out_of_band) == "FAIL"
+
+
+@pytest.mark.parametrize("excess,currents,duties,hours", [
+    pytest.param({"A": 0.2}, {"A": 0.1}, {"A": 0.5}, 4, id="overnight-bleed"),
+    pytest.param({"top": 1, "mid": 0.25}, {"top": 0.5, "mid": 1},
+                 {"top": 1, "mid": 0.25}, 2, id="parallel-pack-channels"),
+    pytest.param({"first": 0, "last": 0.3}, {"first": 0, "last": 0.2},
+                 {"first": 0, "last": 0.25}, 6, id="idle-cell-and-duty-limited-cell"),
+])
+def test_independent_bleed_deadline(excess, currents, duties, hours):
+    from benches.x03_quality import cell_balance_deadline_quality as grade
+
+    policy = "independent-constant-bleed-v1"
+    assert grade(policy, excess, currents, duties, hours) == "PASS"
+    assert grade(policy, excess, currents, duties, hours - 0.01) == "FAIL"
+    assert grade(None, excess, currents, duties, hours) == "INCOMPLETE"
+    assert grade(policy, excess, currents, {}, hours) == "INCOMPLETE"
