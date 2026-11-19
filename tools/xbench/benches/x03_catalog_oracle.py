@@ -660,3 +660,37 @@ def duty_pressure_quality(revision, curve, duty):
         else:
             return "INCOMPLETE"
     return "PASS"
+
+
+def transport_shock_quality(revision, sheet, package, shape, duration_ms, peak_g):
+    """Use recorded qualified duration bands for the actual package and pulse shape."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(v, str) and v for v in (package, shape)):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (duration_ms, peak_g))) or duration_ms <= 0 or peak_g < 0:
+        return "INCOMPLETE"
+    ratings = sheet.get("ratings")
+    if not isinstance(ratings, dict):
+        return "INCOMPLETE"
+    key = (package, shape)
+    if key not in ratings:
+        return "FAIL" if sheet.get("exhaustive") is True else "INCOMPLETE"
+    bands = ratings[key]
+    if not isinstance(bands, list) or not bands:
+        return "INCOMPLETE"
+    applicable = set()
+    for band in bands:
+        if not isinstance(band, (list, tuple)) or len(band) != 3 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        low, high, maximum = band
+        if not 0 < low <= high or maximum < 0:
+            return "INCOMPLETE"
+        if low <= duration_ms <= high:
+            applicable.add(maximum)
+    if not applicable:
+        return "FAIL" if sheet.get("exhaustive") is True else "INCOMPLETE"
+    if len(applicable) != 1:
+        return "INCOMPLETE"
+    return "PASS" if peak_g <= applicable.pop() else "FAIL"

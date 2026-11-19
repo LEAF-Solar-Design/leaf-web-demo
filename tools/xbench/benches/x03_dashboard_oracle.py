@@ -926,3 +926,36 @@ def scheduler_fairness_quality(service, entitlements, allowed_share_error):
         if abs(amounts[queue]/total - weights[queue]/weight) > Fraction(str(allowed_share_error)):
             return "FAIL"
     return "PASS"
+
+
+def preemption_quality(events, reported_active):
+    """Sum active service from start through completion for one recorded job."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(events, list) or not events or not finite_measure(reported_active):
+        return "INCOMPLETE"
+    state = "initial"
+    previous = None
+    active = Fraction(0)
+    transitions = {("initial","start"):"running", ("running","suspend"):"paused",
+                   ("paused","resume"):"running", ("running","complete"):"done"}
+    for row in events:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            return "INCOMPLETE"
+        stamp, event = row
+        if not finite_measure(stamp) or not isinstance(event, str):
+            return "INCOMPLETE"
+        stamp = Fraction(str(stamp))
+        if previous is not None and stamp < previous:
+            return "FAIL"
+        if state == "initial" and event != "start":
+            return "INCOMPLETE"
+        if (state, event) not in transitions:
+            return "FAIL"
+        if state == "running":
+            active += stamp - previous
+        state = transitions[state, event]
+        previous = stamp
+    if state != "done":
+        return "INCOMPLETE"
+    return "PASS" if active == Fraction(str(reported_active)) else "FAIL"

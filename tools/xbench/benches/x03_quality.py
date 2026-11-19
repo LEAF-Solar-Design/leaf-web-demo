@@ -1804,3 +1804,54 @@ def bank_resonance_quality(revision, source, capacitance_f, spectrum, exclusion_
     resonant_hz = sqrt(hz / (2*pi*reactance*capacitance_f))
     return "FAIL" if any(amps > 0 and abs(order*hz - resonant_hz) <= exclusion_hz
                          for order, amps in spectrum.items()) else "PASS"
+
+
+def _current_integral(window, waveform):
+    """Ampere-seconds from interval-mean amperes, clipped to a fully covered time window."""
+    if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(map(finite_measure, window)):
+        return None
+    start, end = map(lambda v: Fraction(str(v)), window)
+    if start >= end or not isinstance(waveform, list):
+        return None
+    spans = []
+    for row in waveform:
+        if not isinstance(row, (tuple, list)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return None
+        left, right, amps = (Fraction(str(v)) for v in row)
+        if right <= left:
+            return None
+        if left < end and start < right:
+            spans.append((max(start, left), min(end, right), amps))
+    charge = Fraction(0)
+    cursor = start
+    for left, right, amps in sorted(spans):
+        if left != cursor:
+            return None
+        charge += (right - left) * amps
+        cursor = right
+    return charge if cursor == end else None
+
+
+def dc_injection_quality(waveform, windows, max_dc_a):
+    if not isinstance(windows, list) or not windows or not finite_measure(max_dc_a) or max_dc_a < 0:
+        return "INCOMPLETE"
+    exceeded = False
+    for window in windows:
+        charge = _current_integral(window, waveform)
+        if charge is None:
+            return "INCOMPLETE"
+        left, right = (Fraction(str(v)) for v in window)
+        exceeded |= abs(charge) > Fraction(str(max_dc_a)) * (right-left)
+    return "FAIL" if exceeded else "PASS"
+
+
+def coulomb_count_quality(window, intervals, initial_ah, reported_ah, polarity):
+    if polarity not in ("charging-positive", "discharging-positive") or not all(map(finite_measure, (initial_ah, reported_ah))):
+        return "INCOMPLETE"
+    charge = _current_integral(window, intervals)
+    if charge is None or initial_ah < 0:
+        return "INCOMPLETE"
+    if polarity == "discharging-positive":
+        charge = -charge
+    expected = Fraction(str(initial_ah)) + charge / 3600
+    return "PASS" if expected >= 0 and expected == Fraction(str(reported_ah)) else "FAIL"
