@@ -9,17 +9,25 @@ function ToolForm({ bridge, tool, busy, onBusy }) {
   const [model] = useState(() => buildFormModel(tool.params ?? tool.manifest?.params))
   const [values, setValues] = useState(() => Object.fromEntries(model.map((field) => [field.name, field.initial])))
   const [outcome, setOutcome] = useState(null)
+  const [fieldError, setFieldError] = useState(null)
   const inFlight = useRef(false)
   const active = useRef(true)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   async function run(event) {
     event.preventDefault()
     if (inFlight.current || busy) return
-    inFlight.current = true
-    onBusy(true)
+    setFieldError(null)
     setOutcome(null)
+    let args
+    try { args = formArgs(model, values) } catch (error) {
+      if (error.field) setFieldError(error)
+      else setOutcome({ reason: error.message })
+      return
+    }
+    const operation = {}
+    inFlight.current = operation
+    onBusy(operation)
     try {
-      const args = formArgs(model, values)
       const result = await bridge.runTool({ name: tool.name, version: tool.version, packageDigest: tool.packageDigest, args })
       if (active.current) setOutcome(result.decision === 'accept'
         ? { result: JSON.stringify(result.result, null, 2), truncated: result.resultTruncated }
@@ -28,7 +36,7 @@ function ToolForm({ bridge, tool, busy, onBusy }) {
       if (active.current) setOutcome({ reason: error.message })
     } finally {
       inFlight.current = false
-      if (active.current) onBusy(false)
+      onBusy((current) => current === operation ? false : current)
     }
   }
   function update(field, value) { setValues((previous) => ({ ...previous, [field.name]: value })) }
@@ -46,6 +54,7 @@ function ToolForm({ bridge, tool, busy, onBusy }) {
             : field.type === 'json' ? <textarea style={fieldStyle} value={values[field.name]} disabled={busy} required={field.required} onChange={(event) => update(field, event.target.value)} />
               : <input type={['integer', 'number'].includes(field.type) ? 'number' : 'text'} step={field.type === 'integer' ? '1' : 'any'}
                 style={fieldStyle} value={values[field.name]} required={field.required} disabled={busy} onChange={(event) => update(field, event.target.value)} />}
+        {fieldError?.field === field.name && <span role="alert">{fieldError.message}</span>}
       </label>)}
       <button type="submit" disabled={busy || !tool.runnable || tool.decision !== 'accept'}>Run {tool.name}</button>
     </form>
@@ -55,25 +64,39 @@ function ToolForm({ bridge, tool, busy, onBusy }) {
   </article>
 }
 
-export default function BranchToolsPanel({ bridge }) {
+export default function BranchToolsPanel({ bridge, working, setWorking }) {
   const [tools, setTools] = useState([])
   const [error, setError] = useState(null)
-  const [busy, setBusy] = useState(true)
+  const [localWorking, setLocalWorking] = useState(false)
+  const busy = working ?? localWorking
+  const setBusy = setWorking ?? setLocalWorking
+  const [loadRequested, setLoadRequested] = useState(true)
   const [attempt, setAttempt] = useState(0)
+  const active = useRef(false)
+  const listing = useRef(false)
   useEffect(() => {
-    let active = true
-    setBusy(true)
+    active.current = true
+    return () => { active.current = false }
+  }, [bridge])
+  useEffect(() => {
+    if (busy || !loadRequested || listing.current) return
+    const operation = {}
+    listing.current = operation
+    setLoadRequested(false)
+    setBusy(operation)
     setError(null)
     setTools([])
     Promise.resolve().then(() => bridge.listTools()).then((result) => {
-      if (active) setTools(result.tools)
-    }).catch((failure) => { if (active) setError(failure.message) })
-      .finally(() => { if (active) setBusy(false) })
-    return () => { active = false }
-  }, [bridge, attempt])
+      if (active.current) setTools(result.tools)
+    }).catch((failure) => { if (active.current) setError(failure.message) })
+      .finally(() => {
+        listing.current = false
+        setBusy((current) => current === operation ? false : current)
+      })
+  }, [bridge, busy, loadRequested, setBusy])
   return <section aria-label="Branch tools">
     <h2>Branch tools</h2>
-    <button type="button" disabled={busy} onClick={() => setAttempt((value) => value + 1)}>Refresh tools</button>
+    <button type="button" disabled={busy || loadRequested} onClick={() => { setAttempt((value) => value + 1); setLoadRequested(true) }}>Refresh tools</button>
     {error && <p role="status">{describeDecision(error)}</p>}
     {busy && <p role="status">Waiting for AutoCAD…</p>}
     {!busy && !error && tools.length === 0 && <p>No tools are installed.</p>}

@@ -82,15 +82,24 @@ export function buildFormModel(params) {
       ['type', 'enum', 'default', 'title', 'description', 'minimum', 'maximum', 'minLength', 'maxLength'].includes(key))
     const type = supported && Array.isArray(schema.enum) && schema.enum.length ? 'enum'
       : supported && ['string', 'integer', 'number', 'boolean'].includes(schema.type) ? schema.type : 'json'
-    const initial = schema?.default ?? (type === 'boolean' ? false : type === 'enum' ? schema.enum[0] : type === 'json' ? null : '')
+    const initial = type === 'enum'
+      ? (schema.enum.some((option) => Object.is(option, schema.default)) ? schema.default : schema.enum[0])
+      : schema?.default ?? (type === 'boolean' ? false : '')
     return { name, label: typeof schema?.title === 'string' ? schema.title : name, type,
       options: type === 'enum' ? schema.enum : null, required: params.required?.includes(name) === true,
-      initial: type === 'json' ? JSON.stringify(initial) : initial }
+      initial: type === 'json' ? (Object.hasOwn(schema ?? {}, 'default') ? JSON.stringify(schema.default) : '') : initial }
   })
 }
 export function formArgs(model, values) {
+  function parseJson(value, field) {
+    try { return JSON.parse(value) } catch {
+      const error = new Error(`Invalid JSON in ${field.label}`)
+      error.field = field.name
+      throw error
+    }
+  }
   if (model.length === 1 && model[0].wholeArgs === true) {
-    const args = JSON.parse(values.$args)
+    const args = parseJson(values.$args, model[0])
     serializeArgs(args)
     return args
   }
@@ -102,7 +111,7 @@ export function formArgs(model, values) {
       const number = Number(value)
       if ((typeof value === 'string' && value.trim() === '') || !Number.isFinite(number) || (field.type === 'integer' && !Number.isSafeInteger(number))) throw new Error('invalid_command')
       args[field.name] = number
-    } else args[field.name] = field.type === 'json' ? JSON.parse(value) : value
+    } else args[field.name] = field.type === 'json' ? parseJson(value, field) : value
   }
   serializeArgs(args)
   return args

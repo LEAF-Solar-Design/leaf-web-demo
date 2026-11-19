@@ -139,7 +139,7 @@ describe('drawing sync commands', () => {
     ]
     for (const [method, args, result] of results) {
       const { sent, outcome } = await send(method, args)
-      const response = callback(sent.payload.commandId)
+      const response = callback(sent.payload.commandId, method === 'runTool' ? 'rejected' : 'applied', method === 'runTool' ? reason : null)
       await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
       await expect(outcome).resolves.toEqual(result)
     }
@@ -173,9 +173,21 @@ describe('drawing sync commands', () => {
     expect(sent.payload.allowedMutation).toBe(verb === 'run_tool' ? 'leaf.tool_run.v1' : undefined)
     const { signature, ...unsigned } = sent
     expect(signature).toBe(sign(unsigned).signature)
-    const response = callback(sent.payload.commandId)
+    const response = callback(sent.payload.commandId, result.decision === 'refused' ? 'rejected' : 'applied', result.reason ?? null)
     await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
     await expect(outcome).resolves.toEqual(result)
+  })
+
+  it.each([
+    ['applied', { ...accepted, decision: 'refused', reason: 'confirmation_declined', result: null }],
+    ['rejected', accepted],
+    ['stale', accepted],
+  ])('rejects callback status %s inconsistent with the run decision', async (status, result) => {
+    const { sent, outcome } = await send('runTool', toolPayload)
+    const rejected = expect(outcome).rejects.toThrow('invalid_response')
+    const response = callback(sent.payload.commandId, status)
+    await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
+    await rejected
   })
 
   it.each([

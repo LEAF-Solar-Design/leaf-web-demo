@@ -19,6 +19,65 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 describe('Branch tools panel', () => {
+  it('defers the mount list while shared work is pending and disables actions during sync', async () => {
+    function SharedPanel({ syncing }) {
+      const [working, setWorking] = React.useState(false)
+      return <BranchToolsPanel bridge={bridge} working={syncing || working} setWorking={setWorking} />
+    }
+    const view = render(<SharedPanel syncing />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh tools' }).disabled).toBe(true))
+    expect(bridge.listTools).not.toHaveBeenCalled()
+    view.rerender(<SharedPanel syncing={false} />)
+    const run = await screen.findByRole('button', { name: 'Run panel-gap-check' })
+    await waitFor(() => expect(run.disabled).toBe(false))
+    view.rerender(<SharedPanel syncing />)
+    expect(run.disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Refresh tools' }).disabled).toBe(true)
+    fireEvent.click(run)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh tools' }))
+    expect(bridge.runTool).not.toHaveBeenCalled()
+    expect(bridge.listTools).toHaveBeenCalledTimes(1)
+  })
+
+  it('omits untouched optional JSON fields and sends edited JSON', async () => {
+    bridge.listTools.mockResolvedValue({ tools: [{ ...tool, params: { type: 'object', properties: {
+      handles: { type: 'array' }, settings: { type: 'object', default: { enabled: true } },
+    } } }] })
+    render(<BranchToolsPanel bridge={bridge} />)
+    const handles = await screen.findByLabelText('handles')
+    expect(handles.value).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Run panel-gap-check' }))
+    await screen.findByText(/"gaps": 2/)
+    expect(bridge.runTool.mock.calls[0][0].args).toEqual({ settings: { enabled: true } })
+    fireEvent.change(handles, { target: { value: '["A1"]' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Run panel-gap-check' }))
+    await waitFor(() => expect(bridge.runTool).toHaveBeenCalledTimes(2))
+    expect(bridge.runTool.mock.calls[1][0].args.handles).toEqual(['A1'])
+  })
+
+  it.each([true, false])('shows invalid JSON as a field message (whole args: %s)', async (wholeArgs) => {
+    bridge.listTools.mockResolvedValue({ tools: [{ ...tool, params: wholeArgs ? undefined
+      : { type: 'object', properties: { handles: { type: 'array' } } } }] })
+    render(<BranchToolsPanel bridge={bridge} />)
+    const label = wholeArgs ? 'Arguments JSON' : 'handles'
+    fireEvent.change(await screen.findByLabelText(label), { target: { value: '{broken' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Run panel-gap-check' }))
+    expect(screen.getByRole('alert').textContent).toBe(`Invalid JSON in ${label}`)
+    expect(screen.queryByText(/Tool refused:/)).toBeNull()
+    expect(bridge.runTool).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the first enum option for an invalid default', async () => {
+    bridge.listTools.mockResolvedValue({ tools: [{ ...tool, params: { type: 'object', properties: {
+      mode: { type: 'string', enum: ['first', 'second'], default: 'missing' },
+    } } }] })
+    render(<BranchToolsPanel bridge={bridge} />)
+    expect((await screen.findByLabelText('mode')).value).toBe('0')
+    fireEvent.click(screen.getByRole('button', { name: 'Run panel-gap-check' }))
+    await screen.findByText(/"gaps": 2/)
+    expect(bridge.runTool.mock.calls[0][0].args).toEqual({ mode: 'first' })
+  })
+
   it('lists the decision, edits manifest args and shows a run result', async () => {
     render(<BranchToolsPanel bridge={bridge} />)
     const input = await screen.findByLabelText('min_gap_in')
@@ -110,6 +169,12 @@ describe('Branch tools panel', () => {
 })
 
 describe('Branch tool argument helpers', () => {
+  it('keeps JSON fields required without inventing null defaults', () => {
+    const model = buildFormModel({ type: 'object', properties: { handles: { type: 'array' } }, required: ['handles'] })
+    expect(model[0]).toMatchObject({ required: true, initial: '' })
+    expect(() => formArgs(model, { handles: '' })).toThrow('Invalid JSON in handles')
+    expect(formArgs(model, { handles: '[]' })).toEqual({ handles: [] })
+  })
   it('counts encoded bytes at the exact limit', () => {
     expect(serializeArgs({ note: 'x'.repeat(65525) })).toHaveLength(65536)
     expect(() => serializeArgs({ note: 'x'.repeat(65526) })).toThrow('args_too_large')

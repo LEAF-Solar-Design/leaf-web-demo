@@ -457,7 +457,9 @@ export class LeafHostBridge {
           !IDENTITY_KEYS.every((key) => typeof callback[key] === 'string' &&
             callback[key].toLowerCase() === ready[key].toLowerCase())) return rejectEnvelope('shape')
       if (['list_tools', 'run_tool'].includes(this.pendingCommand.action)) {
-        if (!isToolResponse(this.pendingCommand.action, callback.result)) {
+        if (!isToolResponse(this.pendingCommand.action, callback.result) ||
+            (this.pendingCommand.action === 'run_tool' &&
+              (callback.status === 'applied') !== (callback.result.decision === 'accept'))) {
           this.finishCommand('rejected', 'invalid_response')
         } else this.finishCommand(callback.status, callback.reason, true, callback.result)
       } else this.finishCommand(callback.status, callback.reason, true, callback)
