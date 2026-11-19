@@ -3,6 +3,40 @@ from fractions import Fraction
 from math import isfinite
 
 
+def reflow_profile_quality(revision, rule, samples, duration_s):
+    """Grade a complete piecewise-linear trace. Dwell counts time strictly above liquidus."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    values = (duration_s, rule.get("max_sample_gap_s"), rule.get("liquidus_c"),
+              rule.get("max_peak_c"), rule.get("max_above_liquidus_s"))
+    if not all(map(finite_measure, values)) or not isinstance(samples, list) or len(samples) < 2:
+        return "INCOMPLETE"
+    end, gap, liquidus, peak_limit, dwell_limit = (Fraction(str(value)) for value in values)
+    if min(end, gap) <= 0 or peak_limit < liquidus or dwell_limit < 0:
+        return "INCOMPLETE"
+    trace = []
+    for row in samples:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        trace.append(tuple(Fraction(str(value)) for value in row))
+    if trace[0][0] != 0 or trace[-1][0] != end:
+        return "INCOMPLETE"
+    dwell = Fraction(0)
+    for (start, t0), (finish, t1) in zip(trace, trace[1:]):
+        interval = finish - start
+        if not 0 < interval <= gap:
+            return "INCOMPLETE"
+        low, high = sorted((t0, t1))
+        if low > liquidus:
+            dwell += interval
+        elif high > liquidus:
+            dwell += interval * (high - liquidus) / (high - low)
+    peak = max(temp for _, temp in trace)
+    return "PASS" if peak <= peak_limit and dwell <= dwell_limit else "FAIL"
+
+
 def torque_tool_quality(revision, calibration, tool_id, assembly_date, required_nm):
     """Qualify an identified tool on the assembly date, with inclusive range and dates."""
     from datetime import date

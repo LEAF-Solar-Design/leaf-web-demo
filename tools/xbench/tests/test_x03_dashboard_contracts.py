@@ -613,3 +613,25 @@ def test_head_of_line_bypass_reconciles_idle_workers(queue, needs, space, allowe
     assert grade("first-compatible-bypass-v1", *args, strict) == "FAIL"
     del eligible[queue[0]][workers[0]]
     assert grade("first-compatible-bypass-v1", *args, bypass) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("owners,waits,releasable", [
+    pytest.param({"tile": "draw", "cache": "save"}, {"draw": ["cache"], "save": ["tile"]},
+                 "tile", id="check-two-worker-lock-exchange"),
+    pytest.param({"a": "one", "b": "two", "c": "three", "d": "log"},
+                 {"one": ["b", "d"], "two": ["c"], "three": ["a"], "log": []},
+                 "b", id="find-a-three-stage-pipeline-cycle"),
+    pytest.param({"lease": "retry", "quota": "submit"}, {"retry": ["lease"], "submit": ["lease"]},
+                 "lease", id="detect-a-nonreentrant-self-wait"),
+])
+def test_deadlock_respects_release_dependencies(owners, waits, releasable):
+    from benches.x03_dashboard_oracle import resource_deadlock_quality as grade
+
+    policy = "exclusive-wait-all-v1"
+    release = dict.fromkeys(owners, "on-completion")
+    assert grade(policy, owners, waits, release) == "FAIL"
+    release[releasable] = "independent-timer"
+    assert grade(policy, owners, waits, release) == "PASS"
+    without_owner = {k: v for k, v in owners.items() if k != releasable}
+    without_rule = {k: v for k, v in release.items() if k != releasable}
+    assert grade(policy, without_owner, waits, without_rule) == "INCOMPLETE"

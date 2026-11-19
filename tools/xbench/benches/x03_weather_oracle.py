@@ -720,3 +720,32 @@ def wind_direction_frame_quality(frame, sensor_deg, reported_from_deg, tolerance
     expected = orientation + reading + (180 if convention == "to" else 0)
     distance = abs((reported - expected + 180) % 360 - 180)
     return "PASS" if distance <= tolerance else "FAIL"
+
+
+def sea_level_pressure_quality(model, station, report, tolerance_hpa):
+    """Reduce dry station pressure using a constant mean column temperature."""
+    from math import exp, isfinite
+    from benches.x03_quality import finite_measure
+
+    if model != "dry-isothermal-hypsometric-v1" or not all(isinstance(x, dict) for x in (station, report)):
+        return "INCOMPLETE"
+    pressure = station.get("pressure_hpa")
+    elevation = station.get("elevation_m_asl")
+    temperature = station.get("mean_column_k")
+    reported = report.get("pressure_hpa")
+    if not all(map(finite_measure, (pressure, elevation, temperature, reported, tolerance_hpa))):
+        return "INCOMPLETE"
+    if pressure <= 0 or temperature <= 0 or tolerance_hpa < 0:
+        return "INCOMPLETE"
+    if station.get("datum") not in ("station", "sea-level") or report.get("datum") not in ("station", "sea-level"):
+        return "INCOMPLETE"
+    if station["datum"] != "station" or report["datum"] != "sea-level":
+        return "FAIL"
+    # Version 1 pins gravity at 9.80665 m/s2 and dry-air R at 287.05 J/(kg K).
+    try:
+        reduced = pressure * exp(9.80665 * elevation / temperature / 287.05)
+    except OverflowError:
+        return "INCOMPLETE"
+    if not isfinite(reduced) or reduced <= 0:
+        return "INCOMPLETE"
+    return "PASS" if reported > 0 and abs(reported - reduced) <= tolerance_hpa else "FAIL"

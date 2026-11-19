@@ -1359,3 +1359,39 @@ def test_contactor_minimum_dwell(initial, since, off_s, on_s, events, early):
     assert grade(policy, initial, since, early, complete=True) == "FAIL"
     assert grade(policy, initial, None, events, complete=True) == "INCOMPLETE"
     assert grade(policy, initial, since, events, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("delays,events,early", [
+    pytest.param([2], [(1,"trip"), (3,"close")], 2.99, id="single-shot-feeder"),
+    pytest.param([1,5], [(0,"trip"), (1,"close"), (4,"trip"), (9,"close")], 8, id="two-stage-service"),
+    pytest.param([0.1,0.2,0.3], [(1,"trip"), (1.1,"close"), (2,"trip"), (2.2,"close"),
+               (3,"trip"), (3.3,"close")], 3.29, id="three-shot-branch"),
+])
+def test_breaker_reclosing_sequence(delays, events, early):
+    from benches.x03_quality import breaker_reclosing_quality as grade
+
+    rule = dict(model="single-sequence-v1", dead_times_s=delays)
+    locked = events + [(12, "trip")]
+    assert grade(rule, locked, complete=True) == "PASS"
+    assert grade(rule, events[:-1] + [(early, "close")], complete=True) == "FAIL"
+    assert grade(rule, locked + [(100, "close")], complete=True) == "FAIL"
+    assert grade(rule, events[1:], complete=True) == "INCOMPLETE"
+    assert grade(rule, events, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("amps,gap,span,force_n", [
+    pytest.param(10000, 0.1, 0.5, 100, id="feeder-support"),
+    pytest.param(20000, 0.2, 1, 400, id="switchboard-brace"),
+    pytest.param(5000, 0.05, 0.3, 30, id="compact-link"),
+])
+def test_peak_busbar_support_load(amps, gap, span, force_n):
+    from benches.x03_quality import busbar_force_quality as grade
+
+    rule = dict(model="parallel-pair-tributary-v1", force_coefficient_n_per_a2=2e-7)
+    # Independent line loads are 200, 400 and 100 N/m. A short pulse fits
+    # the synthetic thermal budget while exceeding a weaker support's rating.
+    assert amps ** 2 * 0.001 < 500000
+    assert grade(rule, amps, gap, span, force_n) == "PASS"
+    assert grade(rule, amps, gap, span, force_n - 1) == "FAIL"
+    assert grade(rule, None, gap, span, force_n) == "INCOMPLETE"
+    assert grade({}, amps, gap, span, force_n) == "INCOMPLETE"

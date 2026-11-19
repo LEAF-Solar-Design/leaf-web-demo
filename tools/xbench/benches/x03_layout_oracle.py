@@ -4,6 +4,34 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def baseplate_contact_quality(model, pad_xy_mm, reactions_n, axial_n, mx_nmm, my_nmm):
+    """Check recorded point contacts under a vertical load, without hold-down tension.
+
+    Moments are required reaction moments about the origin: Mx = sum(yR), My = -sum(xR).
+    """
+    if model != "vertical-point-contacts-v1" or not isinstance(pad_xy_mm, dict) or not pad_xy_mm:
+        return "INCOMPLETE"
+    if not isinstance(reactions_n, dict) or reactions_n.keys() != pad_xy_mm.keys():
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (axial_n, mx_nmm, my_nmm))) or axial_n < 0:
+        return "INCOMPLETE"
+    total = moment_x = moment_y = Fraction(0)
+    tension = False
+    for pad, location in pad_xy_mm.items():
+        if not isinstance(location, (tuple, list)) or len(location) != 2:
+            return "INCOMPLETE"
+        values = (*location, reactions_n[pad])
+        if not all(map(finite_measure, values)):
+            return "INCOMPLETE"
+        x, y, reaction = (Fraction(str(value)) for value in values)
+        total += reaction
+        moment_x += y * reaction
+        moment_y -= x * reaction
+        tension |= reaction < 0
+    target = tuple(Fraction(str(value)) for value in (axial_n, mx_nmm, my_nmm))
+    return "PASS" if not tension and (total, moment_x, moment_y) == target else "FAIL"
+
+
 def rectangular_block_shear_quality(revision, rule, rows_mm, columns_mm, hole_mm, thickness_mm, demand_n):
     """Grade a nominated rectangular bolt block. Rows are distances from its free edge."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

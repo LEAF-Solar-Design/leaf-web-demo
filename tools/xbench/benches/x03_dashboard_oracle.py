@@ -1239,3 +1239,49 @@ def head_of_line_quality(policy, queue, workers, demand, free, eligible, assignm
         if selected is not None:
             pending.remove(selected)
     return "PASS"
+
+
+def resource_deadlock_quality(policy, owners, waits, release):
+    """Check exclusive resources when each worker requires every listed resource.
+
+    A held resource is released on worker completion or by a guaranteed timer
+    independent of worker progress. None explicitly records an unowned resource.
+    """
+    from collections import deque
+
+    if policy != "exclusive-wait-all-v1" or not all(isinstance(x, dict) for x in (owners, waits, release)):
+        return "INCOMPLETE"
+    if owners.keys() != release.keys() or not all(isinstance(w, str) and w for w in waits):
+        return "INCOMPLETE"
+    for resource, owner in owners.items():
+        if not isinstance(resource, str) or not resource:
+            return "INCOMPLETE"
+        if owner is not None and (not isinstance(owner, str) or owner not in waits):
+            return "INCOMPLETE"
+        if release[resource] not in ("on-completion", "independent-timer"):
+            return "INCOMPLETE"
+    dependents = {w: [] for w in waits}
+    remaining = {}
+    for worker, requests in waits.items():
+        if not isinstance(requests, list):
+            return "INCOMPLETE"
+        dependencies = set()
+        for resource in requests:
+            if not isinstance(resource, str) or resource not in owners:
+                return "INCOMPLETE"
+            owner = owners[resource]
+            if owner is not None and release[resource] == "on-completion":
+                dependencies.add(owner)
+        remaining[worker] = len(dependencies)
+        for owner in dependencies:
+            dependents[owner].append(worker)
+    ready = deque(w for w in waits if remaining[w] == 0)
+    completed = 0
+    while ready:
+        owner = ready.popleft()
+        completed += 1
+        for worker in dependents[owner]:
+            remaining[worker] -= 1
+            if remaining[worker] == 0:
+                ready.append(worker)
+    return "PASS" if completed == len(waits) else "FAIL"

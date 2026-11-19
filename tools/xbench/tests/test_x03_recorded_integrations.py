@@ -5,6 +5,26 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("trace,peak,dwell", [
+    pytest.param([(0, 180), (10, 220), (20, 180)], 220, 10, id="qualify-a-controller-ramp"),
+    pytest.param([(0, 200), (4, 200), (8, 230), (14, 230), (18, 200)], 230, 14,
+                 id="check-a-module-plateau"),
+    pytest.param([(0, 190), (6, 210), (12, 190), (16, 210), (20, 190)], 210, 10,
+                 id="sum-two-connector-exposures"),
+])
+def test_pinned_reflow_peak_and_liquidus_dwell(trace, peak, dwell):
+    from benches.x03_catalog_oracle import reflow_profile_quality as grade
+
+    rule = dict(revision="board-r1", max_sample_gap_s=10, liquidus_c=200,
+                max_peak_c=peak, max_above_liquidus_s=dwell)
+    duration = trace[-1][0]
+    assert grade("board-r1", rule, trace, duration) == "PASS"
+    assert grade("board-r1", dict(rule, max_peak_c=peak - 1), trace, duration) == "FAIL"
+    assert grade("board-r1", dict(rule, max_above_liquidus_s=dwell - 1), trace, duration) == "FAIL"
+    assert grade("board-r1", rule, trace[:-1], duration) == "INCOMPLETE"
+    assert grade("board-r1", dict(rule, max_sample_gap_s=1), trace, duration) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("tool,low,high,target,outside", [
     pytest.param("driver", 1, 5, 1, 0.9, id="qualify-low-torque-terminal"),
     pytest.param("wrench", 10, 40, 40, 41, id="check-rail-clamp-wrench"),
@@ -1086,3 +1106,21 @@ def test_wind_direction_rotates_sensor_frame(zero, direction, reading, expected)
     assert grade(frame, reading, (expected + 180) % 360, 3) == "FAIL"
     for key in frame:
         assert grade({k: v for k, v in frame.items() if k != key}, reading, expected, 0) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("pressure,elevation,temperature,expected", [
+    pytest.param(900, 1000, 280, 1016.791621, id="normalize-mountain-station-pressure"),
+    pytest.param(1020, -200, 290, 996.248605, id="reduce-a-below-sea-level-observation"),
+    pytest.param(800, 1900, 275, 1012.979100, id="compare-high-plateau-pressure-to-sea-level"),
+])
+def test_sea_level_reduction_binds_datum(pressure, elevation, temperature, expected):
+    from benches.x03_weather_oracle import sea_level_pressure_quality as grade
+
+    station = dict(datum="station", pressure_hpa=pressure, elevation_m_asl=elevation, mean_column_k=temperature)
+    report = dict(datum="sea-level", pressure_hpa=expected)
+    model = "dry-isothermal-hypsometric-v1"
+    assert grade(model, station, report, 0.000001) == "PASS"
+    assert grade(model, station, dict(report, pressure_hpa=pressure), 0.000001) == "FAIL"
+    assert grade(model, station, dict(report, datum="station"), 0.000001) == "FAIL"
+    del station["elevation_m_asl"]
+    assert grade(model, station, report, 0.000001) == "INCOMPLETE"
