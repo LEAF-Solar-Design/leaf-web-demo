@@ -37,15 +37,12 @@ def _ascii(value):
             and all(32 <= ord(char) <= 126 for char in value))
 
 
-def _reserve(successors, column, row):
-    """Reserve the first free row >= row, compressing the occupied successor path."""
-    trail = []
-    while (column, row) in successors:
-        trail.append(row)
-        row = successors[column, row]
-    for occupied in trail:
-        successors[column, occupied] = row + 1
-    successors[column, row] = row + 1
+def _reserve(next_rows, columns, row):
+    """Place above prior labels in the footprint. Callers visit anchor rows bottom up."""
+    for column in columns:
+        row = max(row, next_rows.get(column, row))
+    for column in columns:
+        next_rows[column] = row + 1
     return row
 
 
@@ -117,13 +114,12 @@ def prepare_tags(graph, request):
         single = _single_add()
         panels = single.find_panels(before, wanted, single.slot_tables(before))
     margin = height * 0.25
-    cell_width = 1.2 * max(len(s["circuit_tag"]) for s in strings) * height + 2 * margin
+    cell_width = 1.2 * height + 2 * margin
     cell_height = height + 2 * margin
     if not _positive(cell_width) or cell_width > MAX_COORDINATE or cell_height > MAX_COORDINATE:
         raise GraphValidationError("STRING_TAG_SCALE_LIMIT")
-    successors = {}
-    tags = []
-    for string, (point, ref, path) in sorted(zip(strings, anchors), key=lambda pair: pair[0]["id"]):
+    placements = []
+    for string, (point, ref, path) in zip(strings, anchors):
         if point is None:
             point = panels.get(ref, {}).get("centre")
         if type(point) is not list or len(point) not in (2, 3):
@@ -134,15 +130,26 @@ def prepare_tags(graph, request):
             raise GraphValidationError("STRING_TAG_COORDINATE_LIMIT", path)
         # Floor snapping is defined for negative anchors too. Reservation only moves upward.
         column, row = (math.floor(ratio) for ratio in ratios)
-        row = _reserve(successors, column, row)
+        text = string["circuit_tag"]
+        width = 1.2 * len(text) * height
+        if width + 2 * margin > MAX_COORDINATE:
+            raise GraphValidationError("STRING_TAG_SCALE_LIMIT")
+        placements.append((row, string["id"], column, text, width, path))
+
+    next_rows = {}
+    tags = []
+    for row, string_id, column, text, width, path in sorted(placements):
+        # In tenths of text height the padded width is 12*n + 5 and the pitch is 17.
+        span = (12 * len(text) + 5 + 16) // 17
+        row = _reserve(next_rows, range(column, column + span), row)
         if abs(row) > MAX_CELL_INDEX:
             raise GraphValidationError("STRING_TAG_COORDINATE_LIMIT", path)
         x, y = column * cell_width + margin, row * cell_height + margin
-        width = 1.2 * len(string["circuit_tag"]) * height
         if any(not math.isfinite(v) or abs(v) > MAX_COORDINATE
                for v in (x, y, x + width, y + height)):
             raise GraphValidationError("STRING_TAG_COORDINATE_LIMIT", path)
-        tags.append({"string_ref": string["id"], "text": string["circuit_tag"],
+        tags.append({"string_ref": string_id, "text": text,
                      "position": [x, y, 0], "height": height, "rotation_degrees": 0})
+    tags.sort(key=lambda tag: tag["string_ref"])
     return {"schema": "leaf.solar-string-tags.v1", "tag_layer": layer,
             "paper_mm_per_drawing_unit": factor, "tags": tags}
