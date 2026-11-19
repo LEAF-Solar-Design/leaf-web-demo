@@ -23,8 +23,8 @@ def matches(description):
     if cutout_breakdown(description):
         return True
     return bool(re.search(r"\b(?:pv\s+)?(?:panels?|modules?)\b", description, re.I)
-                and re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
-                              description, re.I)
+                and (re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
+                               description, re.I) or re.search(r"\bvisible footprints?\b", description, re.I))
                 and re.search(r"\b(?:areas?|square|footprints?|states?|overrides?|dynamic|visibility)\b",
                               description, re.I))
 
@@ -101,7 +101,11 @@ def visible_area(rings, breakdown):
     # a midpoint slice integrates the slab exactly apart from floating point.
     xs = set()
     edges = []
+    x0, y0 = rings[0][0][0]
     for index, (points, inverted) in enumerate(rings):
+        # Intersections and mid-slab ordinates can fall between adjacent
+        # world-coordinate floats even when all source vertices are exact.
+        points = [(x-x0, y-y0) for x,y in points]
         xs.update(p[0] for p in points)
         for p, q in zip(points, points[1:]+points[:1]):
             if p[0] != q[0]:

@@ -28,7 +28,10 @@ def _parse(description):
             value, end = _DECODER.raw_decode(tail[verb.end():])
         except (ValueError, RecursionError, OverflowError):
             return None
-        if action in ("copy", "set", "test"):
+        # A positional row move uses "from index". Pointer moves use "to".
+        if action == "move" and re.match(r"\s+to\s+", tail[verb.end()+end:], re.I):
+            action = "move_field"
+        if action in ("copy", "set", "test", "move_field"):
             if type(value) is not str:
                 return None
             argument = tail[verb.end()+end:]
@@ -40,7 +43,7 @@ def _parse(description):
                 other, end = _DECODER.raw_decode(argument[label.end():])
             except (ValueError, RecursionError, OverflowError):
                 return None
-            if action == "copy" and type(other) is not str:
+            if action in ("copy", "move_field") and type(other) is not str:
                 return None
             ops.append((action, value, other))
             tail = argument[label.end()+end:]
@@ -49,7 +52,7 @@ def _parse(description):
                 return None
         elif type(value) not in (str, int):
             return None
-        if action not in ("copy", "set", "test"):
+        if action not in ("copy", "set", "test", "move_field"):
             tail = tail[verb.end()+end:]
             positions = []
             for relation in (("from", "to") if action == "move" else ("at",)):
@@ -171,11 +174,21 @@ def run(intake, params):
             if not json_equal(container[key], positions):
                 raise ValueError("Material test failed: value differs.")
             continue
-        if action in ("copy", "set"):
-            if action == "copy":
+        if action in ("copy", "move_field", "set"):
+            if action in ("copy", "move_field"):
+                if action == "move_field":
+                    if "" in (value, positions):
+                        if value == positions:
+                            continue
+                        raise ValueError("Cannot move or replace the material selection root.")
+                    if positions.startswith(value + "/"):
+                        raise ValueError("Cannot move a material field into its descendant.")
                 source, key = location(rows, value)
+                if action == "move_field" and value == positions:
+                    continue
+                # The destination index is evaluated after removing the source.
+                item = source.pop(key) if action == "move_field" else deepcopy(source[key])
                 parent, dest = location(rows, positions, add=True)
-                item = deepcopy(source[key])
                 if type(parent) is list:
                     parent.insert(dest, item)
                 else:

@@ -1,5 +1,6 @@
 """Submit a host-selected action only while its exact operation and grant are current."""
 from dataclasses import dataclass
+from fractions import Fraction
 from hashlib import sha256
 import json
 import math
@@ -35,6 +36,12 @@ def _pins(entry):
 
 def _identity(ref):
     return json.dumps(ref, sort_keys=True, separators=(",", ":"))
+
+
+def _exact_json_number(literal):
+    # JSON Schema applies integer and multipleOf to the exact numeric value.
+    value = Fraction(literal)
+    return value.numerator if value.denominator == 1 else value
 
 
 def form_digest(form):
@@ -156,7 +163,7 @@ class AuthorizedLocalActions:
             encoded = _identity(argument_schema)
             if sha256(encoded.encode("utf-8")).hexdigest() != reference["operation_ref"]["digest"]:
                 raise ValueError("Argument schema differs from the pinned operation digest")
-            schema = json.loads(encoded)
+            schema = json.loads(encoded, parse_float=_exact_json_number)
             if (not isinstance(schema, dict) or schema.get("type") != "object"
                     or schema.get("additionalProperties") is not False):
                 raise ValueError("Structured action arguments require a closed object schema")
@@ -192,7 +199,8 @@ class AuthorizedLocalActions:
             if binding.argument_validator is None:
                 _check_arguments(binding.fields, values)
             else:
-                if not binding.argument_validator.is_valid(values):
+                exact_values = json.loads(arguments, parse_float=_exact_json_number)
+                if not binding.argument_validator.is_valid(exact_values):
                     raise ReadFailure("invalid_input")
                 field_ids = {field["id"] for field in binding.fields}
                 _check_arguments(binding.fields, {k: v for k, v in values.items() if k in field_ids})
