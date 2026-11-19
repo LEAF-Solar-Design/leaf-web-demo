@@ -7,6 +7,19 @@ from test_x03_project_dataset_discovery import CASES, record
 import tools_fallback
 
 
+@pytest.mark.parametrize("ask,expected", [
+    ("Which datasets are not stale or unavailable?", ["ready", "empty"]),
+    ("List datasets: include ready, stale and empty, excluding empty ones.", ["ready", "stale"]),
+    ("Show connected data other than unavailable.", ["ready", "empty", "stale"]),
+])
+def test_authored_status_exclusions(rig, ask, expected):
+    statuses = ["ready", "empty", "stale", "unavailable"]
+    rig.response = {"records": [record(status, status) for status in statuses], "nextCursor": None}
+    report = rig.svc.run_authored_dataset_report(ask, rig.auth.tenant_id,
+                                                 rig.auth.session_id, rig.auth.turn_id)
+    assert [row["status"] for row in report["datasets"]] == expected
+
+
 @pytest.mark.parametrize("ask,names,statuses", CASES)
 def test_authored_dataset_report(rig, ask, names, statuses):
     # Author through the product dispatcher. Service authors the same source when run.
