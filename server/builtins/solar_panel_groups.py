@@ -8,6 +8,7 @@ geometry-only groups leave electrical sizing unknown on an unassigned graph.
 import copy
 import hashlib
 import math
+from statistics import median
 from uuid import UUID
 
 from mutation_plan import emit_plan, plan_sha256, validate_mutations
@@ -120,6 +121,18 @@ def create_groups(graph, params, *, drawing_intake, licensed_matrix=None):
             "plan_sha256": plan_sha256(plan), "cancelled": False}
 
 
+def _measurement_bands(panels, axis):
+    """Limit the full spread of a band to the kernel's outline precision."""
+    band = []
+    for panel in sorted(panels, key=lambda entry: entry[axis]):
+        if band and panel[axis] - band[0][axis] > kernel.INTAKE_LENGTH_TOL:
+            yield band
+            band = []
+        band.append(panel)
+    if band:
+        yield band
+
+
 def _discover_groups(graph, settings, source_intake):
     """Derive memberships from the pinned drawing, never from request handles."""
     keys = {"BranchMaxOffset", "AlignmentTolerance", "InstallationDesign"}
@@ -156,26 +169,30 @@ def _discover_groups(graph, settings, source_intake):
     available.sort(key=lambda panel: kernel.handle_sort_key(panel["handle"]))
     discovered = []
     # Defer matrix allocation to run(), where the cumulative graph budget applies.
-    for island in kernel.island_partition(available, settings["BranchMaxOffset"]):
-        angles = {}
-        for index in island:
-            panel = available[index]
-            angles.setdefault(kernel.angle_key(panel["angle"]), []).append(panel["handle"])
-        discovered.extend(angles.values())
+    for widths in _measurement_bands(available, "column_dim"):
+        for size in _measurement_bands(widths, "row_dim"):
+            # A panel of a different size cannot bridge two otherwise separate islands.
+            size.sort(key=lambda panel: kernel.handle_sort_key(panel["handle"]))
+            for island in kernel.island_partition(size, settings["BranchMaxOffset"]):
+                angles = {}
+                for index in island:
+                    panel = size[index]
+                    angles.setdefault(kernel.angle_key(panel["angle"]), []).append(panel["handle"])
+                discovered.extend(angles.values())
     discovered.sort(key=lambda members: kernel.handle_sort_key(members[0]))
     names = {frame["name"].casefold() for frame in graph["frames"]}
     groups = []
     for members in discovered:
-        first = source[members[0].upper()]
-        name = "Roof group " + first["handle"].upper()
+        measurements = [source[handle.upper()] for handle in members]
+        name = "Roof group " + members[0].upper()
         while name.casefold() in names:
             name += " new"
         names.add(name.casefold())
         groups.append({"name": name,
             "panel_refs": [by_handle[handle.upper()]["id"] for handle in members],
             "alignment_tolerance": settings["AlignmentTolerance"],
-            "module_width_along_row": first["column_dim"],
-            "module_height_across_row": first["row_dim"]})
+            "module_width_along_row": median(panel["column_dim"] for panel in measurements),
+            "module_height_across_row": median(panel["row_dim"] for panel in measurements)})
     return groups
 
 
