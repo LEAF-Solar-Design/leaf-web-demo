@@ -8,17 +8,20 @@ section 7) — it now returns 202 {job_id}; `?wait=1` keeps the old sync shape.
 from __future__ import annotations
 
 from typing import Any, Dict
+import os
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 import customization_service
+import customization_flags
 import deps
 import entitlements
 import investor_demo
 import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
+from branch_tools import dev_catalog
 
 router = APIRouter()
 
@@ -52,6 +55,38 @@ def published_revocations(tenant=Depends(deps.require_active_tenant)) -> Respons
     if raw is None:
         return JSONResponse({"detail": "no_revocation_list"}, status_code=404, headers=_PUBLISHED_CACHE)
     return Response(raw, media_type="application/json", headers=_PUBLISHED_CACHE)
+
+
+_DEV_CACHE = {"Cache-Control": "no-store"}
+
+
+def _dev_visible(tenant) -> bool:
+    return (os.environ.get("LEAF_BRANCH_DEV_TOOLS") == "1"
+            and str(tenant) in customization_flags.internal_tenants())
+
+
+def _dev_missing() -> Response:
+    return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_DEV_CACHE)
+
+
+@router.get("/api/tool-envelopes/dev")
+def dev_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _dev_visible(tenant):
+        return _dev_missing()
+    entries = dev_catalog.read_catalog()
+    if entries is None:
+        return _dev_missing()
+    return JSONResponse({"tools": [entry.metadata for entry in entries]}, headers=_DEV_CACHE)
+
+
+@router.get("/api/tool-envelopes/dev/{name}/{version}/package")
+def dev_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _dev_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _dev_missing()
+    for entry in dev_catalog.read_catalog() or []:
+        if entry.metadata["name"] == name and entry.metadata["version"] == version:
+            return FileResponse(entry.package, media_type="application/zip", headers=_DEV_CACHE)
+    return _dev_missing()
 
 
 @router.get("/api/tool-envelopes/{name:path}/{version}/envelope")
