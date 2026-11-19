@@ -1,6 +1,7 @@
 """Read back a lost recipe save at the original successor without replaying a write."""
 import hashlib
 import json
+import math
 import re
 
 from json_resource_limits import within_depth_budget
@@ -45,7 +46,16 @@ def request_retry_key(authority, request):
                     "subject": authority.subject, "request": request})
 
 
-def _journal_request(raw, digest, authority):
+def finite_seconds(value):
+    if type(value) not in (float, int):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _journal_request(raw, digest, authority, clock, max_age):
     """A host-provided checksum pins the bytes; the retry key pins their scoped operation."""
     from authored_recipe_edit import prepare_inspection_edit
     from integration_tool_service import REQUEST_CAP, ReadFailure, normalize, strict_json
@@ -68,6 +78,15 @@ def _journal_request(raw, digest, authority):
     version = intent.pop("format_version", 1)
     if type(version) is not int or version != JOURNAL_FORMAT_VERSION:
         raise ReadFailure("unsupported_journal_version")
+    if "recorded_at" in intent and not finite_seconds(intent["recorded_at"]):
+        return None
+    recorded_at = intent.pop("recorded_at", None)
+    if max_age is not None:
+        if recorded_at is None or not finite_seconds(max_age) or max_age < 0:
+            return None
+        now = clock()
+        if not finite_seconds(now) or not 0 <= now - recorded_at <= max_age:
+            return None
     if set(intent) != {"description", "snapshot", "retry_key"}:
         return None
     try:
@@ -79,12 +98,14 @@ def _journal_request(raw, digest, authority):
 
 
 def recover_recipe_save(service, description, original_args, tenant, session, turn, *, read_revision=None,
-                        expected_authority=None, journal_sha256=None):
+                        expected_authority=None, journal_sha256=None, journal_max_age_seconds=None):
     """Read-only reconciliation using the host's authorized, revision-specific reader.
 
     original_args are the original save request. The host reader enforces its own
     read authorization for the supplied authority, element ID and revision. A match
     establishes the desired successor exists; it does not identify its writer.
+    If the host supplies a maximum journal age, the pinned creation time must
+    fall within the inclusive retention window at the start of recovery.
     """
     from integration_tool_service import ReadFailure, failure, normalize
     from platform_link import ProjectSessionForbidden
@@ -97,8 +118,8 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
         authority = service._resolve_operation("elements", tenant, session, turn).authority
         if expected_authority is not None and authority != expected_authority:
             return failure("denied")
-        if isinstance(original_args, bytes) or journal_sha256 is not None:
-            args = _journal_request(original_args, journal_sha256, authority)
+        if isinstance(original_args, bytes) or journal_sha256 is not None or journal_max_age_seconds is not None:
+            args = _journal_request(original_args, journal_sha256, authority, service.clock, journal_max_age_seconds)
         else:
             args = normalize("elements", original_args)
     except ReadFailure as exc:

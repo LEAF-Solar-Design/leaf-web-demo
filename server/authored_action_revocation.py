@@ -176,6 +176,9 @@ def _check_local_schema_refs(schema, registry, format_policy):
             raise ValueError("Cyclic action schema reference")
         if node.get("$schema", dialect) != dialect:
             raise ValueError("Unsupported action schema dialect")
+        if any(required and uri not in Draft202012Validator.META_SCHEMA["$vocabulary"]
+               for uri, required in node.get("$vocabulary", {}).items()):
+            raise ValueError("Unsupported required action vocabulary")
         if node.get("x-leaf-format-policy", format_policy) != format_policy:
             raise ValueError("Conflicting action format policy")
         if format_policy == "assertion" and "format" in node and node["format"] not in _ASSERTED_FORMATS:
