@@ -793,6 +793,31 @@ def test_shipping_shock_at_recorded_packaging_and_pulse(package,shape,duration,p
     assert grade("q",dict(sheet,exhaustive=False,ratings={}),package,shape,duration,peak) == "INCOMPLETE"
 
 
+
+
+@pytest.mark.parametrize("powers,radius,expected", [
+    ([80],1,69.008),([80,80],1,72.018),([80,70],2,63.401),
+])
+def test_receiver_sound_budget(powers,radius,expected):
+    from benches.x03_catalog_oracle import acoustic_quality as grade
+    rows = [("r1",p,radius) for p in powers]
+    args = (rows,"r1","free-field-incoherent-v1")
+    assert grade(*args,expected,expected+1) == "PASS"
+    assert grade(*args,expected,expected-1) == "FAIL"
+    assert grade(*args,sum(powers),200) == "FAIL"
+    assert grade(rows,"r2",args[2],expected,200) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("initial,rain,warm,expected", [(0,6,1,4),(5,2,2,3),(1,1,3,0)])
+def test_retained_freezing_rain(initial,rain,warm,expected):
+    from benches.x03_weather_oracle import ice_history_quality as grade
+    rows = [(0,1,"freezing-rain",-2,rain),(1,3,"dry",warm,0)]
+    model = "freezing-rain-degree-hour-v1"
+    assert grade(0,3,initial,rows,1,expected,model) == "PASS"
+    assert grade(0,3,initial,rows,1,expected-1,model) == "FAIL"
+    assert grade(0,3,initial,rows[1:],1,expected,model) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("dry,wet,pressure,rh", [(20,20,100,100),(20,15,100,58.8),(30,20,90,41.06)])
 def test_ventilated_wet_bulb_weather_report(dry,wet,pressure,rh):
     from benches.x03_weather_oracle import psychrometric_quality as grade

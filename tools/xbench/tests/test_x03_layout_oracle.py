@@ -407,6 +407,19 @@ def test_joint_load_at_effective_throat_capacity(sizes,stress,capacity):
     assert grade(welds+[{}],capacity,stress) == "INCOMPLETE"
 
 
+
+
+@pytest.mark.parametrize("direct,arm,toe,share,amplified", [
+    (100,20,10,0.5,200),(240,10,20,1,360),(80,15,5,0.25,140),
+])
+def test_flange_toe_amplifies_bolt_load(direct,arm,toe,share,amplified):
+    from benches.x03_layout_oracle import bolt_prying_quality as grade
+    model = "lever-stiffness-fraction-v1"
+    assert grade(direct,arm,toe,share,amplified,model) == "PASS"
+    assert grade(direct,arm,toe,share,amplified-1,model) == "FAIL"
+    assert grade(direct,arm,None,share,amplified,model) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("length,pitch,diameter,width,stress,capacity", [
     (6,1,5,0.5,100,4712.39), (4.8,1.5,8,0.75,80,4523.89), (9,2,10,1,50,6283.19),
 ])

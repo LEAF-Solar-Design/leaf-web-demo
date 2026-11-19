@@ -1845,6 +1845,68 @@ def dc_injection_quality(waveform, windows, max_dc_a):
     return "FAIL" if exceeded else "PASS"
 
 
+
+
+def rocof_quality(samples, window_s, threshold_hz_s, delay_s, trip_s):
+    """Sampled trailing difference; consecutive pickup starts a definite-time timer.
+
+    Samples before pickup are pre-event history. A null trip records no trip
+    through the final sample. Grade one event with a latched first trip.
+    """
+    if not all(map(finite_measure, (window_s, threshold_hz_s, delay_s))):
+        return "INCOMPLETE"
+    if window_s <= 0 or threshold_hz_s <= 0 or delay_s < 0:
+        return "INCOMPLETE"
+    if not isinstance(samples, list) or len(samples) < 2 or (trip_s is not None and not finite_measure(trip_s)):
+        return "INCOMPLETE"
+    window, threshold, delay = (Fraction(str(x)) for x in (window_s, threshold_hz_s, delay_s))
+    history = {}
+    pickup = deadline = None
+    for row in samples:
+        if not isinstance(row, (list, tuple)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        t, hz = (Fraction(str(x)) for x in row)
+        if hz <= 0 or (history and t <= last):
+            return "INCOMPLETE"
+        if not history:
+            first = t
+        last = t
+        history[t] = hz
+        if t - first < window:
+            continue
+        if t - window not in history:
+            return "INCOMPLETE"
+        if pickup is not None and t >= pickup + delay:
+            deadline = pickup + delay if deadline is None else deadline
+        if abs(hz - history[t-window]) >= window * threshold:
+            if pickup is None:
+                pickup = t
+            if delay == 0 and deadline is None:
+                deadline = t
+        else:
+            pickup = None
+    if last - first < window:
+        return "INCOMPLETE"
+    if deadline is None and pickup is not None and trip_s is None:
+        return "INCOMPLETE"
+    observed = None if trip_s is None else Fraction(str(trip_s))
+    return "PASS" if observed == deadline else "FAIL"
+
+
+def droop_quality(hz, nominal_hz, deadband_hz, base_kw, gains, limits_kw, reported_kw):
+    """Two pinned linear slopes outside a symmetric deadband, clamped at output limits."""
+    if not all(isinstance(pair, (tuple, list)) and len(pair) == 2 for pair in (gains, limits_kw)):
+        return "INCOMPLETE"
+    values = (hz, nominal_hz, deadband_hz, base_kw, *gains, *limits_kw, reported_kw)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    hz, nominal, band, base, up, down, low, high, actual = map(lambda x: Fraction(str(x)), values)
+    if min(hz, nominal) <= 0 or min(band, up, down) < 0 or not low <= base <= high:
+        return "INCOMPLETE"
+    target = base + up * max(0, nominal-band-hz) - down * max(0, hz-nominal-band)
+    return "PASS" if actual == min(high, max(low, target)) else "FAIL"
+
+
 def coulomb_count_quality(window, intervals, initial_ah, reported_ah, polarity):
     if polarity not in ("charging-positive", "discharging-positive") or not all(map(finite_measure, (initial_ah, reported_ah))):
         return "INCOMPLETE"

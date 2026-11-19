@@ -458,6 +458,18 @@ def test_queue_service_relative_to_declared_entitlements(weights,balanced,skewed
     assert grade(dict(enumerate(balanced)),{},0) == "INCOMPLETE"
 
 
+
+
+@pytest.mark.parametrize("receive,send_cal,recv_cal,bounds", [
+    (15,(1,2),(3,4),(2,4)),(10,(-1,1),(-2,0),(0,3)),(8,(4,5),(0,1),(1,3)),
+])
+def test_latency_respects_both_host_clocks(receive,send_cal,recv_cal,bounds):
+    from benches.x03_dashboard_oracle import latency_bounds_quality as grade
+    assert grade(10,receive,send_cal,recv_cal,bounds) == "PASS"
+    assert grade(10,receive,send_cal,recv_cal,(bounds[1],bounds[1])) == "FAIL"
+    assert grade(10,receive,None,recv_cal,bounds) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("events,active", [
     ([(0,"start"),(3,"suspend"),(8,"resume"),(10,"complete")],5),
     ([(1,"start"),(2,"suspend"),(4,"resume"),(7,"suspend"),(9,"resume"),(12,"complete")],7),
