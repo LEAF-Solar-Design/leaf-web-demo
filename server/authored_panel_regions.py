@@ -13,7 +13,15 @@ def operation(description):
     return "state_clipped_panels"
 
 
+def cutout_breakdown(description):
+    return bool(re.search(r"\b(?:each|per|individual)\s+(?:overlapping\s+)?(?:cutouts?|exclusion loops?)\b",
+                          description, re.I)
+                and re.search(r"\bareas?\b", description, re.I))
+
+
 def matches(description):
+    if cutout_breakdown(description):
+        return True
     return bool(re.search(r"\b(?:pv\s+)?(?:panels?|modules?)\b", description, re.I)
                 and re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
                               description, re.I)
@@ -81,12 +89,13 @@ def build_body(description):
         r"\b(?:each|per|every|individual)\s+(?:(?:pv|solar|photovoltaic)\s+)?(?:panels?|modules?)\b",
         description, re.I))
     return CLIP_SOURCE + VISIBILITY_SOURCE + (_AREA_SOURCE if area else "") + _TRAVERSAL.replace(
-        "AREA_MODE", str(area)).replace("PER_PLACEMENT", str(per_placement)).replace("PANEL_PATTERN", repr(PANEL_NAME)).replace(
+        "AREA_MODE", str(area)).replace("CUTOUT_BREAKDOWN", str(cutout_breakdown(description))).replace(
+        "PER_PLACEMENT", str(per_placement)).replace("PANEL_PATTERN", repr(PANEL_NAME)).replace(
             "PLACEMENT_LIMIT", str(expansion_budget(description, 10000)))
 
 
 _AREA_SOURCE = """
-def visible_area(rings):
+def visible_area(rings, breakdown):
     # Each vertical slab has a fixed order of polygon edges between successive
     # vertex and intersection x coordinates. Its occupied height is linear, so
     # a midpoint slice integrates the slab exactly apart from floating point.
@@ -113,6 +122,7 @@ def visible_area(rings):
                     xs.add(low+(high-low)*(dy0/(dy0-dy1)))
     cuts = sorted(xs)
     areas = []
+    removed = {}
     for left, right in zip(cuts, cuts[1:]):
         # Adjacent floats have no representable interior x. Select edges by
         # the slab endpoints and integrate their linear height at both ends.
@@ -123,9 +133,15 @@ def visible_area(rings):
         for y, index in hits:
             if previous is not None and all(flags):
                 areas.append((y-previous)*(right-left))
+            elif breakdown and previous is not None and y > previous:
+                # Within the footprint and every retaining clip, the failed
+                # inverted rings identify exactly which cutouts own this strip.
+                if all(flags[i] or inverted for i, (_, inverted) in enumerate(rings)):
+                    owners = tuple(i for i, flag in enumerate(flags) if not flag)
+                    removed.setdefault(owners, []).append((y-previous)*(right-left))
             flags[index] = not flags[index]
             previous = y
-    return math.fsum(areas)
+    return math.fsum(areas), {owners: math.fsum(values) for owners,values in removed.items()}
 """
 
 
@@ -142,6 +158,7 @@ def run(intake, params):
     blocks = {n.casefold(): b for n,b in intake.get("blocks", {}).items()}
     paths, areas = set(), {}
     placement_areas = {}
+    removed_groups = {}
     def children_for(ref, name, block):
         if re.fullmatch(PANEL_PATTERN, " ".join(re.findall(r"[a-z0-9]+", name))):
             return ()
@@ -187,14 +204,21 @@ def run(intake, params):
                 chain = boundaries
                 if clip:
                     pts = [transform_point(frame, (*p,0))[:2] for p in clip["points"]]
-                    chain = (*chain, {"points":pts, "inverted":clip["inverted"]})
+                    chain = (*chain, {"points":pts, "inverted":clip["inverted"], "path":path})
                 if panel and AREA_MODE:
                     outline = intake.get("panel_footprints", {}).get(name, {})
                     if not outline.get("points") or not block.get("complete") or children:
                         raise ValueError(outline.get("error","Missing complete panel footprint."))
                     polygon = [transform_point(frame, (*p,0))[:2] for p in outline["points"]]
                     rings = [(polygon,False)] + [(c["points"],c["inverted"]) for c in chain]
-                    area = visible_area(rings) * scale
+                    area, removed = visible_area(rings, CUTOUT_BREAKDOWN)
+                    area *= scale
+                    for indices, value in removed.items():
+                        owners = tuple(sorted(chain[i-1]["path"] for i in indices))
+                        total = removed_groups.get(owners, 0) + value*scale
+                        if not math.isfinite(total):
+                            raise ValueError("Removed panel area exceeds numeric range.")
+                        removed_groups[owners] = total
                     if not math.isfinite(area):
                         raise ValueError("Panel footprint area exceeds numeric range.")
                     if PER_PLACEMENT:
@@ -220,6 +244,12 @@ def run(intake, params):
         visit(ref,"0","",(),identity_frame(),(),1)
     if AREA_MODE:
         details = {"area_by_placement": placement_areas} if PER_PLACEMENT else {}
+        if CUTOUT_BREAKDOWN:
+            if not intake.get("panel_footprints"):
+                raise ValueError("A cutout breakdown requires panel footprint evidence.")
+            details["removed_area_groups"] = [{"cutout_paths": list(owners), "area": value}
+                                              for owners,value in sorted(removed_groups.items())]
+            details["removed_area_basis"] = "panel footprints; shared area is reported once for the containing cutouts"
         return {**details, "area_by_layer":areas, "expanded_placements":expanded, "area_units":"square drawing units", "visible_panels":len(paths),
                 "boundary_policy":"edge or corner contact contributes zero footprint area"}, None
     return {"visible_paths":sorted(paths), "expanded_placements":expanded, "total":len(paths),

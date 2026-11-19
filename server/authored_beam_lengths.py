@@ -35,6 +35,9 @@ def build_body(description, *, entry_point="run"):
     else:
         label, factor = "drawing_units", 1.0
     collect_segments = entry_point == "collect_spline_segments"
+    requested_budget = re.search(r"\b(?:at most|budget of|limit of)\s+(\d+)\s+(?:spline )?evaluations?\b",
+                                 description, re.I)
+    evaluation_limit = min(int(requested_budget[1]), 1_000_000) if requested_budget else 1_000_000
     span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
     spline_request = span_detail or re.search(r"\b(?:splines?|nurbs)\b", description, re.I)
     mixed_scope = re.search(
@@ -54,6 +57,7 @@ def build_body(description, *, entry_point="run"):
             .replace("__OUTPUT_FACTOR__", repr(factor))
             .replace("__ONLY_SPLINES__", repr(only_splines))
             .replace("__COLLECT_SPLINES__", repr(collect_segments))
+            .replace("__EVALUATION_LIMIT__", str(evaluation_limit))
             .replace("__ENDPOINTS__", repr(endpoints))
             .replace("__SPAN_DETAIL__", repr(span_detail))
             .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or endpoints or bool(list_members))))
@@ -120,6 +124,7 @@ def __ENTRY_POINT__(intake, params):
             raise ValueError("Set a supported drawing insertion unit before measuring beam lengths.")
         factor = metres_per_unit[source_unit] / __OUTPUT_FACTOR__
     totals = {}
+    evaluation_budget = [__EVALUATION_LIMIT__]
     members = {}
     span_reports = {}
     identity = identity_frame()
@@ -160,7 +165,7 @@ def __ENTRY_POINT__(intake, params):
         if path.get("kind") == "SPLINE":
             if __SURVEY__:
                 raise ValueError("Survey precision bounds require straight beam coordinates.")
-            length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__)
+            length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__, evaluation_budget)
         else:
             if path.get("measurement_error"):
                 raise ValueError(path["measurement_error"])
@@ -199,7 +204,7 @@ def __ENTRY_POINT__(intake, params):
             if __SPAN_DETAIL__ and path.get("kind") == "SPLINE":
                 span_reports[key] = span_report
             if (__COLLECT_SPLINES__ or __ENDPOINTS__) and path.get("kind") == "SPLINE":
-                members[key]["ends"] = spline_endpoints(path, frame, require_continuity=__COLLECT_SPLINES__)
+                members[key]["ends"] = spline_endpoints(path, frame, evaluation_budget, require_continuity=__COLLECT_SPLINES__)
 
     for path in distinct_entities(intake.get("polylines", [])):
         measure(path, identity, "0", (), 1)
@@ -272,6 +277,9 @@ def __ENTRY_POINT__(intake, params):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if evaluation_budget[0] < __EVALUATION_LIMIT__:
+        result["spline_evaluations"] = __EVALUATION_LIMIT__ - evaluation_budget[0]
+        result["spline_evaluation_limit"] = __EVALUATION_LIMIT__
     if __SURVEY__:
         result["absolute_error_by_layer"] = {layer: value*LENGTH_RELATIVE_TOLERANCE for layer, value in totals.items()}
     if __ENDPOINTS__:

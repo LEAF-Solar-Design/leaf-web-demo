@@ -71,12 +71,15 @@ def _read_clip(owner, extension, objects):
 
     def entry(handle, parent, key):
         tags = obj(handle, "DICTIONARY", parent)
-        for i, tag in enumerate(tags):
-            if tag == (3, key):
-                if i+1 >= len(tags) or tags[i+1][0] not in (350, 360):
-                    raise ValueError("Invalid clip dictionary entry.")
-                return tags[i+1][1].upper()
-        return None
+        indices = [i for i, tag in enumerate(tags) if tag == (3, key)]
+        if not indices:
+            return None
+        if len(indices) != 1:
+            raise ValueError("Ambiguous clip dictionary entry.")
+        i = indices[0]
+        if i+1 >= len(tags) or tags[i+1][0] not in (350, 360):
+            raise ValueError("Invalid clip dictionary entry.")
+        return tags[i+1][1].upper()
 
     sub = entry(extension, owner, "ACAD_FILTER")
     if sub is None:

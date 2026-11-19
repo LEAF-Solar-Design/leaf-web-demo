@@ -50,6 +50,12 @@ class ReadFailure(Exception):
     """Only a fixed category may cross an internal boundary."""
 
 
+class IncompleteInventory(ReadFailure):
+    def __init__(self, pages_read):
+        super().__init__("incomplete_inventory")
+        self.pages_read = pages_read
+
+
 class DefiniteHTTPFailure(ReadFailure):
     """A save was explicitly rejected by the application service."""
 
@@ -545,7 +551,10 @@ class IntegrationToolService:
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
-                raise ReadFailure(reply.get("error", {}).get("code", "denied"))
+                code = reply.get("error", {}).get("code", "denied")
+                if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
+                    raise IncompleteInventory(len(visited))
+                raise ReadFailure(code)
             page = reply["result"]
             if operation == "datasets":
                 snapshot = page.pop("_snapshot", None)
@@ -581,11 +590,11 @@ class IntegrationToolService:
         return compare_role_actions(self, description, tenant, session, turn, policy=policy, limit=limit)
 
     def edit_inspection_recipe(self, description, snapshot, tenant, session, turn, *,
-                               issue_retry_key=False, retry_key=None, read_revision=None):
+                               issue_retry_key=False, retry_key=None, read_revision=None, record_attempt=None):
         from authored_recipe_edit import edit_inspection_recipe
         return edit_inspection_recipe(self, description, snapshot, tenant, session, turn,
                                       issue_retry_key=issue_retry_key, retry_key=retry_key,
-                                      read_revision=read_revision)
+                                      read_revision=read_revision, record_attempt=record_attempt)
 
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
                                     page_size=None, sort="catalog", cursor=None):
@@ -771,6 +780,10 @@ class IntegrationToolService:
                     return output
                 except DefiniteHTTPFailure as exc:
                     category = str(exc)
+                except httpx.ConnectError:
+                    category = "unavailable"
+                except httpx.ConnectTimeout:
+                    category = "timeout"
                 except ReadFailure as exc:
                     category = ("outcome_unknown" if saving and started else
                                 str(exc) if str(exc) in STATUS else "unavailable")

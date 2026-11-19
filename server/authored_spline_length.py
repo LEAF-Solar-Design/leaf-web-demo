@@ -1,14 +1,21 @@
 """Source embedded in the offline tool for measuring positive-weight B-splines."""
 
 SPLINE_LENGTH_SOURCE = """
+def charge_spline_work(budget, count):
+    # One evaluation blends two homogeneous control points or projects one pole.
+    if count > budget[0]:
+        raise ValueError("Spline length did not converge within the evaluation budget.")
+    budget[0] -= count
+
 def spline_blend(a, b, fraction):
     return tuple((1 - fraction)*x + fraction*y for x, y in zip(a, b))
 
 
-def bezier_span(control, knots, degree, span):
+def bezier_span(control, knots, degree, span, budget):
     # Polar form of de Boor evaluation. Choosing each span endpoint j times
     # gives the j-th homogeneous Bezier control of this knot interval.
     left, right = knots[span], knots[span + 1]
+    charge_spline_work(budget, degree * (degree + 1)**2 // 2)
     result = []
     for j in range(degree + 1):
         net = control[span-degree:span+1]
@@ -37,11 +44,12 @@ def split_bezier(net):
     return left, right[::-1]
 
 
-def bezier_length(net):
+def bezier_length(net, budget):
     # Positive rational Bezier curves are variation diminishing. Their
     # endpoint chord and projected control polygon enclose the arc length.
     pieces = [net]
     while len(pieces) <= 16384:
+        charge_spline_work(budget, len(pieces) * len(net))
         lower, upper = 0.0, 0.0
         for piece in pieces:
             points = [tuple(x / p[3] for x in p[:3]) for p in piece]
@@ -49,6 +57,9 @@ def bezier_length(net):
             upper += sum(math.dist(a, b) for a, b in zip(points, points[1:]))
         if upper - lower <= 2 * LENGTH_RELATIVE_TOLERANCE * lower:
             return (lower + upper) / 2
+        if len(pieces) == 16384:
+            break
+        charge_spline_work(budget, len(pieces) * len(net) * (len(net)-1) // 2)
         pieces = [half for piece in pieces for half in split_bezier(piece)]
     raise ValueError("Spline beam length did not converge to the reported tolerance.")
 
@@ -62,7 +73,7 @@ def spline_jump(points, knots, degree, k, frame):
     return math.hypot(*transform_vector(frame, tuple(b-a for a, b in zip(left, right))))
 
 
-def spline_endpoints(path, frame, require_continuity=False):
+def spline_endpoints(path, frame, budget, require_continuity=False):
     degree, points, knots = path["degree"], path["control_points"], path["knots"]
     weights = path["weights"]
     scale = max(weights)
@@ -74,7 +85,8 @@ def spline_endpoints(path, frame, require_continuity=False):
             raise ValueError("Discontinuous knot sequence within one spline segment.")
     ends = []
     for k, index in ((spans[0], 0), (spans[-1], -1)):
-        p = bezier_span(net, knots, degree, k)[index]
+        charge_spline_work(budget, 1)
+        p = bezier_span(net, knots, degree, k, budget)[index]
         end = transform_point(frame, tuple(x/p[3] for x in p[:3]))
         if not all(math.isfinite(x) for x in end):
             raise ValueError("Unresolved transformed spline endpoint.")
@@ -82,7 +94,7 @@ def spline_endpoints(path, frame, require_continuity=False):
     return ends
 
 
-def spline_length(path, frame, factor, detail):
+def spline_length(path, frame, factor, detail, budget):
     if path.get("spline_error"):
         raise ValueError(path["spline_error"])
     degree = path["degree"]
@@ -97,13 +109,15 @@ def spline_length(path, frame, factor, detail):
         local = tuple(x - base for x, base in zip(point, points[0]))
         vector = transform_vector(frame, local)
         w = weight / scale
+        if w < 2.2250738585072014e-308:
+            raise ValueError("Spline length did not converge: normalized weight below numeric precision.")
         control.append((*[x*w for x in vector], w))
     total = 0.0
     spans, jumps = [], []
     for k in range(degree, len(points)):
         if knots[k] == knots[k+1]:
             continue
-        length = bezier_length(bezier_span(control, knots, degree, k))
+        length = bezier_length(bezier_span(control, knots, degree, k, budget), budget)
         total += length
         if detail:
             if spans:

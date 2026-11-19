@@ -12,7 +12,7 @@ CASES = [
 ]
 
 
-def geometry(reverse=False, shift=0, crossed=False):
+def geometry(reverse=False, shift=0, crossed=False, holes=None):
     tags = []
 
     def record(kind, *fields):
@@ -53,6 +53,8 @@ def geometry(reverse=False, shift=0, crossed=False):
     outer = [(0, 0), (8, 0), (8, 4), (4, 4), (4, 8), (0, 8)]
     hole_a = [(1, 1), (3, 1), (3, 2), (2, 2), (2, 3), (1, 3)]
     hole_b = [(3, 2.5), (5, 2.5), (5, 3.5), (3, 3.5)]
+    if holes is not None:
+        hole_a, hole_b = holes
     if crossed:
         hole_b[1], hole_b[2] = hole_b[2], hole_b[1]
     matrix = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)

@@ -530,6 +530,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_action_revocation
     import authored_batch_recipe
     import authored_material_three_way
+    import authored_material_patch
     import authored_material_revision
     import authored_panel_regions
     import authored_role_action
@@ -567,6 +568,10 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "edit", "batch_recipe_edit"
         drawing_body = authored_batch_recipe.build_body(description)
         summary = "edits selected tables and reports each revision result"
+    elif authored_material_patch.matches(description):
+        verb, engine_op = "edit", "material_array_patch"
+        drawing_body = authored_material_patch.build_body(description)
+        summary = "applies ordered edits to a verified material selection"
     elif authored_material_three_way.matches(description):
         verb, engine_op = "merge", "material_three_way_merge"
         drawing_body = authored_material_three_way.build_body(description)
