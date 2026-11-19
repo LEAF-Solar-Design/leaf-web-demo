@@ -646,7 +646,7 @@ class IntegrationToolService:
                                         include_form_digest=include_form_digest)
 
     def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
-                            expected_authority=None, cancel_event=None):
+                            expected_authority=None, cancel_event=None, dataset_sort="catalog"):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -669,15 +669,24 @@ class IntegrationToolService:
         size = 0
         pages = 0
         datasets_by_id = {}
-        from authored_dataset_discovery import provider_status_filter, requires_snapshot
+        from authored_dataset_discovery import TIMESTAMPS, provider_status_filter, report_columns, requires_snapshot
         pinned = operation == "datasets" and requires_snapshot(description)
         provider_statuses = provider_status_filter(description) if operation == "datasets" else None
+        columns = report_columns(description) if operation == "datasets" else None
+        if columns == ():
+            raise ReadFailure("invalid_input")
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
                                         require_snapshot=pinned, cancel_event=cancel_event,
                                         provider_statuses=provider_statuses):
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}
+                if columns:
+                    for key in columns:
+                        if key in ("freshness", "fields"):
+                            row[key] = entry[key]
+                        elif key in TIMESTAMPS and entry["freshness"] is not None and key in entry["freshness"]:
+                            row[key] = entry["freshness"][key]
                 if operation == "action_catalog" and include_form_digest:
                     from authored_action_revocation import form_digest
                     row["form_digest"] = form_digest(entry["form"])
@@ -695,6 +704,8 @@ class IntegrationToolService:
                 rows.append(row)
         if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")
+        if dataset_sort != "catalog":
+            rows.sort(key=lambda row: (row["title"], row["dataset_ref"]["id"]), reverse=dataset_sort == "-title")
         catalog = {collection: rows, "pages_read": pages}
         if pinned:
             catalog["snapshot_verified"] = True
