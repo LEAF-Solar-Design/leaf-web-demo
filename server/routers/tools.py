@@ -43,7 +43,7 @@ def authored_view_source(name: str, project_id: str, session_id: str, catalog_co
 
 @router.get("/api/tool-envelopes")
 def published_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
-    return JSONResponse({"tools": tool_envelopes.published_catalog().list()}, headers=_PUBLISHED_CACHE)
+    return JSONResponse({"tools": tool_envelopes.published_catalog().list(str(tenant))}, headers=_PUBLISHED_CACHE)
 
 
 @router.get("/api/tool-envelopes/revocations")
@@ -58,7 +58,7 @@ def published_revocations(tenant=Depends(deps.require_active_tenant)) -> Respons
 def published_envelope(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
     if not tool_envelopes.valid_identity(name, version):
         return JSONResponse({"detail": "invalid_tool_identity"}, status_code=400, headers=_PUBLISHED_CACHE)
-    raw = tool_envelopes.published_catalog().envelope_bytes(name, version)
+    raw = tool_envelopes.published_catalog().envelope_bytes(name, version, str(tenant))
     if raw is None:
         return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_PUBLISHED_CACHE)
     return Response(raw, media_type="application/json", headers=_PUBLISHED_CACHE)
@@ -68,7 +68,7 @@ def published_envelope(name: str, version: str, tenant=Depends(deps.require_acti
 def published_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
     if not tool_envelopes.valid_identity(name, version):
         return JSONResponse({"detail": "invalid_tool_identity"}, status_code=400, headers=_PUBLISHED_CACHE)
-    path = tool_envelopes.published_catalog().package_path(name, version)
+    path = tool_envelopes.published_catalog().package_path(name, version, str(tenant))
     if path is None:
         return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_PUBLISHED_CACHE)
     return FileResponse(path, media_type="application/zip", headers=_PUBLISHED_CACHE)
