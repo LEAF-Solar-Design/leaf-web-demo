@@ -44,6 +44,8 @@ from leaf_platform.integration_turn_grant_store import (
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
 DATASET_ROW_BUDGET = 1000
+DATASET_ROW_BYTE_BUDGET = 64 * 1024
+DATASET_TOTAL_BYTE_BUDGET = RESPONSE_CAP
 CURSOR_BYTE_BUDGET = 1024
 _PRIVATE_CATALOG_HTTP = ContextVar("private_catalog_http", default=False)
 
@@ -433,10 +435,21 @@ def project_discovery(value, limit, *, include_snapshot=False):
                               or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None):
         raise ReadFailure("invalid_response")
     datasets = []
+    page_row_bytes = 0
     identities = set()
     for record in records:
         if type(record) is not dict:
             raise ReadFailure("invalid_response")
+        if include_snapshot:
+            # Charge complete source records, including duplicates and fields
+            # that the author does not project. Formatting whitespace is free.
+            try:
+                row_bytes = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            except UnicodeEncodeError:
+                raise ReadFailure("invalid_response") from None
+            if row_bytes > DATASET_ROW_BYTE_BUDGET:
+                raise ReadFailure("row_too_large")
+            page_row_bytes += row_bytes
         reference = record.get("reference")
         validate("IntegrationRefV1", reference)
         identity = (reference["id"], reference["version"], reference["digest"])
@@ -478,6 +491,8 @@ def project_discovery(value, limit, *, include_snapshot=False):
             dataset["material_context"] = context
         datasets.append(dataset)
     result = {"datasets": datasets, "next_cursor": cursor}
+    if include_snapshot:
+        result["_row_bytes"] = page_row_bytes
     if include_snapshot and "snapshotId" in value:
         result["_snapshot"] = value["snapshotId"]
     if include_snapshot and "schemaRevision" in value:
@@ -638,6 +653,7 @@ class IntegrationToolService:
         first_schema_revision = None
         schema_by_ref = {}
         rows_read = 0
+        bytes_read = 0
         dataset_ids = set()
         declared_total = None
         args = {"limit": limit}
@@ -656,7 +672,9 @@ class IntegrationToolService:
                 raise ReadFailure("denied")
             if "result" not in reply:
                 code = reply.get("error", {}).get("code", "denied")
-                if operation == "datasets" and code in {"cursor_too_large", "partial_page"}:
+                if operation == "datasets" and code in {
+                    "cursor_too_large", "partial_page", "row_too_large", "response_too_large"
+                }:
                     raise IncompleteInventory(len(visited))
                 if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
                     raise IncompleteInventory(len(visited))
@@ -665,6 +683,9 @@ class IntegrationToolService:
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited) + 1)
             if operation == "datasets":
+                bytes_read += page.pop("_row_bytes")
+                if bytes_read > DATASET_TOTAL_BYTE_BUDGET:
+                    raise IncompleteInventory(len(visited))
                 if provider_statuses is not None and any(row["status"] not in provider_statuses
                                                           for row in page["datasets"]):
                     raise ReadFailure("provider_filter_mismatch")
@@ -961,8 +982,8 @@ class IntegrationToolService:
                                 projected = (project_discovery(value, args["limit"], include_snapshot=expected_authority is not None) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
                         except ReadFailure as exc:
-                            if str(exc) == "cursor_too_large":
-                                return failure("cursor_too_large")
+                            if str(exc) in {"cursor_too_large", "row_too_large"}:
+                                return failure(str(exc))
                             if str(exc) == "response_too_large":
                                 raise
                             raise ReadFailure("invalid_response") from None
