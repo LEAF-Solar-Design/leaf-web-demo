@@ -459,6 +459,7 @@
     "server-microvm",
     "server-multi-claude-grants",
     "server-mutation-contract-v2",
+    "server-plan-conformance-corpus",
     "server-nl-router",
     "server-no-da-imports",
     "server-no-presigned-credentials-tracked",
