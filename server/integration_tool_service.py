@@ -41,6 +41,7 @@ from leaf_platform.integration_turn_grant_store import (
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
 DATASET_ROW_BUDGET = 1000
+CURSOR_BYTE_BUDGET = 1024
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
@@ -153,7 +154,7 @@ def normalize(operation, value):
         args = {"operation": operation, "limit": limit}
         if "after" in value:
             after = value["after"]
-            if (type(after) is not str or not 1 <= len(after) <= 1024
+            if (type(after) is not str or not 1 <= len(after) <= CURSOR_BYTE_BUDGET
                     or re.fullmatch(r"[A-Za-z0-9_-]+", after) is None):
                 raise ReadFailure("invalid_input")
             args["after"] = after
@@ -400,7 +401,9 @@ def project_discovery(value, limit, *, include_snapshot=False):
     records, cursor = value["records"], value["nextCursor"]
     if type(records) is not list or len(records) > limit:
         raise ReadFailure("invalid_response")
-    if cursor is not None and (type(cursor) is not str or not 1 <= len(cursor) <= 1024
+    if isinstance(cursor, str) and len(cursor.encode("utf-8", errors="surrogatepass")) > CURSOR_BYTE_BUDGET:
+        raise ReadFailure("cursor_too_large" if include_snapshot else "invalid_response")
+    if cursor is not None and (type(cursor) is not str or not cursor
                               or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None):
         raise ReadFailure("invalid_response")
     datasets = []
@@ -564,6 +567,8 @@ class IntegrationToolService:
                 raise ReadFailure("denied")
             if "result" not in reply:
                 code = reply.get("error", {}).get("code", "denied")
+                if operation == "datasets" and code == "cursor_too_large":
+                    raise IncompleteInventory(len(visited))
                 if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
                     raise IncompleteInventory(len(visited))
                 raise ReadFailure(code)
@@ -798,6 +803,8 @@ class IntegrationToolService:
                                 projected = (project_discovery(value, args["limit"], include_snapshot=expected_authority is not None) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
                         except ReadFailure as exc:
+                            if str(exc) == "cursor_too_large":
+                                return failure("cursor_too_large")
                             if str(exc) == "response_too_large":
                                 raise
                             raise ReadFailure("invalid_response") from None

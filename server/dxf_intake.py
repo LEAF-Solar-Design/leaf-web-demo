@@ -786,6 +786,9 @@ def _spline_measurement_path(record):
             normal = [float(groups.get(code, 0)) for code in (210, 220, 230)]
             if not all(map(math.isfinite, normal)) or not any(normal):
                 raise ValueError("Degenerate spline plane normal.")
+        for code, field in ((71, "degree"), (72, "knot count"), (73, "control point count")):
+            if len({int(v) for c,v in record if c == code}) > 1:
+                raise ValueError("Conflicting spline " + field + " declarations.")
         degree = int(groups.get(71, 0))
         knots = [float(v) for c, v in record if c == 40]
         weights = [float(v) for c, v in record if c == 41]
