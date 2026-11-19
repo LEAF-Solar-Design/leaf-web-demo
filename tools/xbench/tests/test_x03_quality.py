@@ -1434,3 +1434,50 @@ def test_capacitor_accumulated_life(bands, history, extra):
     assert grade("qualification-A", curve, uncovered, complete=True) == "INCOMPLETE"
     assert grade("qualification-B", curve, history, complete=True) == "INCOMPLETE"
     assert grade("qualification-A", curve, history, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("volts,power,cap,strong,weak", [
+    pytest.param(20, 200, 0.1, -0.75, -0.25, id="bench-supply-with-regulated-drive"),
+    pytest.param(100, 1000, 0.05, -0.2, -0.05, id="battery-bus-with-converter"),
+    pytest.param(50, 5000, 0.25, -3, -1, id="parallel-source-dc-link"),
+])
+def test_dc_bus_incremental_stability(volts, power, cap, strong, weak):
+    from benches.x03_quality import dc_bus_stability_quality as grade
+
+    model = "single-capacitor-current-balance-v1"
+    amps = power / volts
+    slope = -power / volts ** 2
+    # Independent check: at +1% voltage the exact constant-power load draws
+    # less current. A restoring net current must discharge the capacitor.
+    perturbation = 0.01 * volts
+    perturbed_load = power / (volts + perturbation)
+    assert amps + strong * perturbation < perturbed_load < amps + weak * perturbation
+    assert grade(model, cap, amps, amps, strong, slope) == "PASS"
+    assert grade(model, cap, amps, amps, weak, slope) == "FAIL"
+    assert grade(model, cap, amps, amps, slope, slope) == "FAIL"
+    assert grade(model, cap, amps + 1, amps, strong, slope) == "FAIL"
+    assert grade(model, cap, amps, amps, strong, None) == "INCOMPLETE"
+    assert grade(model, None, amps, amps, strong, slope) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("low,high,delay,hold,direction", [
+    pytest.param(110, 120, 2, 4, 1, id="raise-a-low-feeder"),
+    pytest.param(220, 240, 3, 5, -1, id="lower-a-high-service"),
+    pytest.param(45, 50, 1, 3, 1, id="stop-reversals-on-a-small-transformer"),
+])
+def test_tap_hunting_and_persistence(low, high, delay, hold, direction):
+    from benches.x03_quality import tap_sequence_quality as grade
+
+    policy = dict(model="sampled-tap-delay-v1", low_v=low, high_v=high,
+                  outside_ticks=delay, reversal_ticks=hold)
+    first, opposite = (low - 1, high + 1) if direction == 1 else (high + 1, low - 1)
+    initial = [(tick, first, direction if tick == delay-1 else 0) for tick in range(delay)]
+    reverse = [(tick, opposite, 0) for tick in range(delay, delay + hold - 1)]
+    reverse.append((delay + hold - 1, opposite, -direction))
+    assert grade(policy, initial + reverse, complete=True) == "PASS"
+    assert grade(policy, initial + reverse[:-2] + [(reverse[-2][0], opposite, -direction)], complete=True) == "FAIL"
+    assert grade(policy, [(0, low, direction)], complete=True) == "FAIL"
+    if delay > 1:
+        assert grade(policy, [(0, first, direction)], complete=True) == "FAIL"
+    assert grade({}, initial, complete=True) == "INCOMPLETE"
+    assert grade(policy, initial, complete=False) == "INCOMPLETE"

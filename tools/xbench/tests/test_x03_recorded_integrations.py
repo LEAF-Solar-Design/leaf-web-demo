@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("cable,operation,minimum,readings", [
+    pytest.param("control", "reel pull", -10, [-5, -10, 2], id="qualify-a-winter-control-cable-pull"),
+    pytest.param("feeder", "field bend", 0, [10, 0, 3], id="check-a-cold-feeder-bend"),
+    pytest.param("sensor", "hand dress", 5, [5, 8], id="dress-a-chilled-sensor-lead"),
+])
+def test_installation_temperature_uses_cold_bend_qualification(cable, operation, minimum, readings):
+    from benches.x03_catalog_oracle import cable_handling_temperature_quality as grade
+
+    sheet = dict(revision="test-catalog", service_c=(-40, 80), cold_bend_min_c={cable: {operation: minimum}})
+    freezing_event = [*readings, minimum - 1]
+    assert sheet["service_c"][0] <= min(freezing_event) <= max(freezing_event) <= sheet["service_c"][1]
+    assert grade("test-catalog", sheet, cable, operation, readings) == "PASS"
+    assert grade("test-catalog", sheet, cable, operation, freezing_event) == "FAIL"
+    assert grade("test-catalog", sheet, cable, "unqualified", readings) == "INCOMPLETE"
+    assert grade("test-catalog", sheet, cable, operation, []) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("low,high,qualified_cycles", [
     pytest.param(-35, 80, 100, id="check-the-outdoor-controller"),
     pytest.param(-5, 40, 5000, id="qualify-the-cabinet-display"),
@@ -1161,3 +1178,21 @@ def test_anemometer_mean_from_pinned_gust_response(winds, observed, step, rise, 
     assert grade(model, trace, biased) == "FAIL"
     assert grade(dict(model, max_speed=max(winds) - 1), trace, mean) == "INCOMPLETE"
     assert grade(model, [(0, 5), (step + 1, 6)], mean) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("measurements,expected", [
+    pytest.param([("rain", 2, 9)], 10, id="correct-a-liquid-gauge-reading"),
+    pytest.param([("snow", 4, 3), ("snow", 0, 2)], 8, id="reconcile-windy-and-calm-snow"),
+    pytest.param([("rain", 4, 4), ("snow", 2, 6)], 13, id="sum-a-rain-to-snow-transition"),
+])
+def test_undercatch_uses_phase_and_gauge_height_wind(measurements, expected):
+    from benches.x03_weather_oracle import wind_undercatch_quality as grade
+
+    calibration = dict(revision="wind-tunnel-4", phase_curves={
+        "rain": [(0, 1), (4, 0.8)], "snow": [(0, 1), (4, 0.5)],
+    })
+    intervals = [dict(phase=p, gauge_height_wind_m_s=w, caught_mm=d) for p, w, d in measurements]
+    assert grade("wind-tunnel-4", calibration, intervals, expected) == "PASS"
+    assert grade("wind-tunnel-4", calibration, intervals, sum(d for _, _, d in measurements)) == "FAIL"
+    assert grade("wind-tunnel-4", calibration, [dict(intervals[0], gauge_height_wind_m_s=5)], expected) == "INCOMPLETE"
+    assert grade("wind-tunnel-3", calibration, intervals, expected) == "INCOMPLETE"

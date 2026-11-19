@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("support,bearing,resistance", [
+    pytest.param("end", 20, 1200, id="check-a-short-end-seat"),
+    pytest.param("interior", 40, 4000, id="size-an-intermediate-bearing"),
+    pytest.param("end", 65, 3300, id="check-the-long-rail-shoe"),
+])
+def test_concentrated_reaction_web_crippling(support, bearing, resistance):
+    from benches.x03_layout_oracle import rail_bending_stress_quality, web_crippling_quality as grade
+
+    rule = dict(revision="rail-section-a", model="linear-bearing-length-v1",
+                resistance_by_support={"end": [(20, 1200), (50, 3000), (80, 3600)],
+                                       "interior": [(30, 3500), (50, 4500)]})
+    assert rail_bending_stress_quality({"r": 10}, {"r": 0.1}, {"r": 200}) == "PASS"
+    assert grade("rail-section-a", rule, support, bearing, resistance) == "PASS"
+    assert grade("rail-section-a", rule, support, bearing, resistance + 1) == "FAIL"
+    assert grade("rail-section-a", rule, support, None, resistance) == "INCOMPLETE"
+    assert grade("rail-section-a", rule, support, 81, resistance) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("history,duration,installed,remaining", [
     pytest.param([(0, 5, "normal")], 5, 200, 180, id="check-the-rail-clamp-after-service"),
     pytest.param([(0, 10, "hot")], 10, 400, 300, id="check-the-warm-inverter-bracket"),

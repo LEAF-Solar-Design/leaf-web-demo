@@ -654,3 +654,23 @@ def test_buffer_watermarks_require_matching_intake_events(low, high, occupancies
     assert check([rows[0], (1, 2, middle, "resume", 1), rows[2]]) == "FAIL"
     assert check([(0, 1, start, "pause", 1), *rows[1:]]) == "FAIL"
     assert check([rows[0], rows[2]]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("capacity,rate,opening,arrivals,rejected", [
+    pytest.param(4, 1, (0, 4), [(0, 3, True), (0, 2, False), (12, 4, True)], 1,
+                 id="audit-a-simultaneous-api-burst"),
+    pytest.param(3, 0.5, (0, 0), [(2, 2, False), (4, 2, True), (20, 3, True)], 0,
+                 id="audit-a-cold-start-with-fractional-refill"),
+    pytest.param(2, 2, (10, 1), [(20, 2, True), (20, 1, False), (21, 2, True)], 1,
+                 id="cap-idle-credit-before-a-weighted-burst"),
+])
+def test_token_bucket_accounts_for_bursts(capacity, rate, opening, arrivals, rejected):
+    from benches.x03_dashboard_oracle import token_bucket_quality as grade
+
+    assert grade(capacity, rate, opening, arrivals) == "PASS"
+    altered = list(arrivals)
+    time, cost, _ = altered[rejected]
+    altered[rejected] = time, cost, True
+    assert sum(c for _, c, _ in arrivals) <= rate * (arrivals[-1][0] - opening[0])
+    assert grade(capacity, rate, opening, altered) == "FAIL"
+    assert grade(capacity, rate, None, arrivals) == "INCOMPLETE"
