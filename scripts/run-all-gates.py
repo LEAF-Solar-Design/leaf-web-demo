@@ -2195,7 +2195,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
                   "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
-              ], 62),
+              ], 64),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
         # fail-closed legs, and the browser-edited version write-back (card

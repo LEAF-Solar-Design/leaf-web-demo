@@ -380,7 +380,9 @@ __LAYER_BINDING__
         visited += 1
         if visited > 100000:
             raise ValueError("Block traversal exceeds the supported instance-path limit.")
-        name = insert["name"].casefold()
+        name = insert.get("name", "").casefold()
+        if not name:
+            raise ValueError("Missing block name for panel count.")
         own_layer = insert.get("layer", "0")
         effective_layer = parent_layer if own_layer == "0" else own_layer
         rows, columns = insert.get("rows", 1), insert.get("columns", 1)
@@ -394,12 +396,16 @@ __LAYER_BINDING__
                 paths.append({"path": path, "multiplicity": copies})
             continue
         block = blocks.get(name)
-        if block is None or block.get("count", 0) > len(block.get("children", [])):
+        if block is None and not __REQUIRE_NESTED__:
+            continue  # Older flat intakes omit definitions for unrelated symbols.
+        if block is None or block.get("nested_inserts_incomplete"):
+            raise ValueError("Incomplete block catalogue for panel count.")
+        if "nested_inserts" not in block and block.get("count", 0) > len(block.get("children", [])) and __REQUIRE_NESTED__:
             raise ValueError("Incomplete block catalogue for panel count.")
         if name in ancestors:
             raise ValueError("Cyclic block reference in panel count.")
         children = block.get("nested_inserts", [])
-        if sum(child.get("type") == "INSERT" for child in block.get("children", [])) != len(children):
+        if any(child.get("type") == "INSERT" for child in block.get("children", [])) and not children and __REQUIRE_NESTED__:
             raise ValueError("Missing nested block reference evidence.")
         stack.extend((child, effective_layer, path, ancestors + (name,), copies)
                      for child in reversed(children))
@@ -552,7 +558,8 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             binding = f'    layer = params.get("layer", {layer!r})'
         body = _BODIES[engine_op]
         if engine_op == "count_by_layer" and _PANEL_COUNT_TARGET.search(description):
-            body = _BODY_COUNT_PANELS
+            requires_nested = bool(re.search(r"\b(?:nested|inside|repeated|references)\b", description, re.I))
+            body = _BODY_COUNT_PANELS.replace("__REQUIRE_NESTED__", str(requires_nested))
             if relative_layer:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)

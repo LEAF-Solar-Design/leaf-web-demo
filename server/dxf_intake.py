@@ -711,6 +711,8 @@ def _parse_block(pairs, i, parse_errors):
         code, kind = pairs[i]
         if code == 0 and kind == "ENDBLK":
             _, i = _entity_groups(pairs, i + 1)
+            if block["count"] > len(block["children"]):
+                block.setdefault("nested_inserts", [])
             return name, block, i
         if code == 0 and kind in ("ENDSEC", "BLOCK", "EOF"):
             break
@@ -722,12 +724,18 @@ def _parse_block(pairs, i, parse_errors):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
-            if kind == "INSERT" and block["count"] <= 60:
+            if kind == "INSERT":
                 insert, _ = _parse_insert(pairs, i + 1)
                 insert.pop("_properties", None)
-                block.setdefault("nested_inserts", []).append(insert)
+                refs = block.setdefault("nested_inserts", [])
+                if len(refs) < 10000:
+                    refs.append(insert)
+                else:
+                    block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
+            if kind == "INSERT":
+                block["nested_inserts_incomplete"] = True
             parse_errors.append(f"BKE {name} ({kind}): {exc}")
             _, i = _entity_groups(pairs, i + 1)
             continue
@@ -736,6 +744,7 @@ def _parse_block(pairs, i, parse_errors):
             block["complete"] = False
         if block["count"] <= 60:
             block["children"].append(child)
+    block["nested_inserts_incomplete"] = True
     block["complete"] = False  # unterminated definition
     return name, block, i
 

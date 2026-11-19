@@ -57,3 +57,21 @@ def test_nested_missing_current_layer():
     _, source, _ = author_tool(ASKS[0])
     status, payload = invoke(source, drawing(None))
     assert status == "tool_error" and "layer" in str(payload).lower()
+
+@pytest.mark.parametrize("pad_module,expected", [(False, 12), (True, 14)])
+def test_reference_index_independent_of_geometry_preview(pad_module, expected):
+    raw = drawing()
+    # The rack preview ends before its first nested reference. A large detail
+    # symbol also has a truncated preview, but contains no references at all.
+    points = b"0\nPOINT\n10\n1\n20\n1\n" * 64
+    raw = raw.replace(b"0\nINSERT\n5\nA2", points + b"0\nINSERT\n5\nA2")
+    detail = b"0\nBLOCK\n2\nDetail\n" + points
+    if pad_module:
+        detail += b"0\nINSERT\n5\nA8\n2\nPV Module\n8\n0\n70\n2\n"
+    raw = raw.replace(b"0\nENDSEC\n0\nSECTION\n2\nENTITIES",
+                      detail + b"0\nENDBLK\n0\nENDSEC\n0\nSECTION\n2\nENTITIES")
+    raw = raw.replace(b"0\nINSERT\n5\nB1", b"0\nINSERT\n5\nB8\n2\nDetail\n8\nRoof\n0\nINSERT\n5\nB1")
+    _, source, _ = author_tool(ASKS[0])
+    status, payload = invoke(source, raw)
+    assert status == "ok", payload
+    assert payload[0]["total"] == expected
