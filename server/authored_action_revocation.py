@@ -9,7 +9,7 @@ import json
 import math
 import re
 from threading import RLock
-from urllib.parse import urljoin
+from urllib.parse import quote, unquote, urljoin
 
 from integration_tool_service import ReadFailure, validate_action_catalog
 
@@ -96,9 +96,36 @@ def form_digest(form):
 
 
 _EMPTY_FORM = {"fields": [], "submit_label": "Submit"}
+_ASSERTED_FORMATS = ("date", "ipv4", "ipv6", "uuid")
 
 
-def _check_local_schema_refs(schema, registry):
+@dataclass(frozen=True)
+class _LocalFragmentResolver:
+    """Apply identical URI and pointer rules during preflight and validation."""
+
+    resolver: object
+
+    def in_subresource(self, resource):
+        return _LocalFragmentResolver(self.resolver.in_subresource(resource))
+
+    def lookup(self, reference):
+        from attrs import evolve
+
+        if not isinstance(reference, str) or not reference.startswith("#"):
+            raise ValueError("Action schema references must be local")
+        if re.search(r"%(?![0-9A-Fa-f]{2})", reference):
+            raise ValueError("Malformed action schema fragment escape")
+        fragment = unquote(reference[1:], errors="strict")
+        if fragment.startswith("/"):
+            if re.search(r"~(?![01])", fragment):
+                raise ValueError("Malformed action schema pointer escape")
+            # referencing decodes pointer bytes, but takes named anchors as-is.
+            fragment = quote(fragment, safe="/~")
+        result = self.resolver.lookup("#" + fragment)
+        return evolve(result, resolver=_LocalFragmentResolver(result.resolver))
+
+
+def _check_local_schema_refs(schema, registry, format_policy):
     """Preflight the pinned draft's schema graph without retrieving other resources."""
     from jsonschema import Draft202012Validator
     from jsonschema.exceptions import SchemaError
@@ -149,6 +176,10 @@ def _check_local_schema_refs(schema, registry):
             raise ValueError("Cyclic action schema reference")
         if node.get("$schema", dialect) != dialect:
             raise ValueError("Unsupported action schema dialect")
+        if node.get("x-leaf-format-policy", format_policy) != format_policy:
+            raise ValueError("Conflicting action format policy")
+        if format_policy == "assertion" and "format" in node and node["format"] not in _ASSERTED_FORMATS:
+            raise ValueError("Unsupported asserted action format")
         if "$dynamicRef" in node or "$recursiveRef" in node:
             raise ValueError("Action schemas require static draft 2020-12 references")
         patterns = list(node.get("patternProperties", {}))
@@ -162,8 +193,6 @@ def _check_local_schema_refs(schema, registry):
         active.add(id(node))
         if "$ref" in node:
             ref = node["$ref"]
-            if not isinstance(ref, str) or not ref.startswith("#"):
-                raise ValueError("Action schema references must be local")
             try:
                 target = resolver.lookup(ref)
             except Unresolvable as exc:
@@ -175,8 +204,9 @@ def _check_local_schema_refs(schema, registry):
 
     root = DRAFT202012.create_resource(schema)
     index(root, "", 0)
-    visit(schema, registry.resolver_with_root(root))
-    return has_patterns
+    resolver = _LocalFragmentResolver(registry.resolver_with_root(root))
+    visit(schema, resolver)
+    return has_patterns, resolver
 
 
 def _valid_value(field, value):
@@ -245,7 +275,7 @@ class AuthorizedLocalActions:
             # A structured local operation advertises the digest of its JSON
             # argument schema in its operation reference. The wire form holds
             # presentation hints for any scalar fields the host also displays.
-            from jsonschema import Draft202012Validator
+            from jsonschema import Draft202012Validator, FormatChecker
             from referencing import Registry
 
             encoded = _identity(argument_schema)
@@ -260,8 +290,12 @@ class AuthorizedLocalActions:
                 raise ValueError("Structured action arguments require a boolean or closed object schema")
             Draft202012Validator.check_schema(schema)
             registry = Registry()
-            has_patterns = _check_local_schema_refs(schema, registry)
-            validator = _pinned_validator_type()(schema, registry=registry)
+            policy = schema.get("x-leaf-format-policy", "annotation") if isinstance(schema, dict) else "annotation"
+            if policy not in ("annotation", "assertion"):
+                raise ValueError("Unsupported action format policy")
+            has_patterns, resolver = _check_local_schema_refs(schema, registry, policy)
+            checker = FormatChecker(formats=_ASSERTED_FORMATS) if policy == "assertion" else None
+            validator = _pinned_validator_type()(schema, registry=registry, _resolver=resolver, format_checker=checker)
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],
