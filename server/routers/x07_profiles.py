@@ -100,7 +100,9 @@ def _operate(tenant, project_id, drawing_id, input_version_id, org_header, proje
                 result = workflow.confirm(context.intake, customer_key=customer, project_key=project,
                                           drawing_key=drawing, roles=roles, window=payload.design_window,
                                           expected_version=payload.expected_version)
-            return {**result, **identity, 'ok': True}
+            # A replay can return an older project pin. Read the editable profile
+            # separately under the same customer lock as confirmation.
+            return {**result, **identity, 'ok': True, 'profile': store.latest(customer)}
     try:
         return JSONResponse(content=with_envelope_fields(operation()), headers={'Cache-Control': 'no-store'})
     except ValueError:

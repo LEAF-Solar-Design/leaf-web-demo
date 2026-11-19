@@ -44,8 +44,9 @@ function LeaveBoundary(props) {
   return <>{message && <p role="status">{message}</p>}<Editor key={held.key} {...active} onDirtyChange={value => { dirty.current = value }} /></>
 }
 
-function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinnedRoles, onDirtyChange }) {
-  const [profile, setProfile] = useState(null), [draft, setDraft] = useState(null)
+function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applicationRecord, pinnedRoles, onDirtyChange }) {
+  const [profile, setProfile] = useState(() => valid(initialProfile, customerKey) ? initialProfile : null)
+  const [draft, setDraft] = useState(() => profile ? clone(profile.roles) : null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
   const [reconcile, setReconcile] = useState(false)
@@ -97,7 +98,8 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
       .finally(() => { if (current(controller)) { pending.current = null; setBusy(false) } })
   }
   useEffect(() => {
-    alive.current = true; load(false)
+    alive.current = true
+    if (!profile) load(false)
     return () => { alive.current = false; pending.current?.abort(); pending.current = null }
   }, [])
   const save = event => {

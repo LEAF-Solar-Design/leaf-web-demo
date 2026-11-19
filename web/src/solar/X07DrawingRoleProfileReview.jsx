@@ -72,7 +72,14 @@ function ScopedProfileReview(props) {
         || !isSuccessfulRoleConfirmation(result)) return { ok: false }
     const pin = confirmedPin(result, owner)
     if (!pin) return { ok: false }
-    setApplied({ client: owner.projectClient, pin })
+    const latestProfile = result.profile
+    const initialProfile = latestProfile?.customer_key === pin.customer_key
+      && latestProfile.profile_id === pin.profile_id && Number.isSafeInteger(latestProfile.version)
+      && latestProfile.version >= pin.version && validRoles(latestProfile.roles)
+      ? { customer_key: pin.customer_key, profile_id: pin.profile_id,
+          version: latestProfile.version, roles: structuredClone(latestProfile.roles) }
+      : null
+    setApplied({ client: owner.projectClient, pin, initialProfile })
     return { ok: true }
   }
   if (applied?.client === props.projectClient) return <section ref={container} aria-label="Confirmed drawing profile" aria-describedby={statusId}>
@@ -84,7 +91,7 @@ function ScopedProfileReview(props) {
       </div>)}</dl>
     </section>
     <X07CustomerProfileEditor customerKey={props.customerKey} drawingKey={props.drawingKey}
-      loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} pinnedRoles={applied.pin.roles} />
+      initialProfile={applied.initialProfile} loadProfile={props.loadProfile} saveProfile={props.saveProfile} applicationRecord={applied.pin} pinnedRoles={applied.pin.roles} />
   </section>
   return <X07DrawingRoleReview {...props} onConfirm={typeof props.onConfirm === 'function' ? confirm : undefined} />
 }
