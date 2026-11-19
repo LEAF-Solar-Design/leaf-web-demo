@@ -53,3 +53,39 @@ def test_wide_domain_interior_knot_retains_blending_fraction():
         # |speed''| <= |acceleration|^2 / min(speed); min(speed)=4/sqrt(5).
         bound = 2*20*math.sqrt(5)/(4*24*n**2)
         assert abs(payload[0]["lengths_by_layer"]["Steel-Beams"] - length) <= 1e-5*length + bound
+
+
+@pytest.mark.parametrize("ask,straight_length", [
+    ("Total beam lengths by layer across LINE, POLYLINE and SPLINE entities.", 107),
+    ("List each beam length, including straight lines, polylines and NURBS.", 107),
+    ("Measure the combined length of spline, line and polyline beams per layer.", 107),
+    ("Measure only spline beam lengths per layer.", 0),
+])
+def test_mixed_beam_takeoff(ask, straight_length):
+    # placed_dxf also places a 100-unit line in this block.
+    curve = spline_record([(5, 0, 0), (5, 5, 0), (0, 5, 0)], [0]*3 + [1]*3,
+                          [1, math.sqrt(.5), 1], (0, 0, 1))
+    polyline = [(0, "LWPOLYLINE"), (5, "E3"), (8, "0"), (90, 3), (70, 0),
+                (10, 0), (20, 0), (10, 3), (20, 0), (10, 3), (20, 4)]
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, placed_dxf(curve + polyline, (1, 1, 1)))
+    assert status == "ok", payload
+    expected = straight_length + 5*math.pi/2
+    assert payload[0]["lengths_by_layer"] == pytest.approx({"Steel-Beams": expected}, rel=1e-5)
+
+
+@pytest.mark.parametrize("ask", [
+    "Measure all beams, including splines, and total their lengths by layer.",
+    "List all beam lengths by layer, counting bulged arcs and NURBS too.",
+])
+def test_inclusive_takeoff_measures_polyline_arcs(ask):
+    spline = spline_record([(0, 0, 0), (1, 0, 0), (2, 0, 0)], [0]*3 + [1]*3,
+                           [1]*3, (0, 0, 1))
+    arc = [(0, "LWPOLYLINE"), (5, "E4"), (8, "0"), (90, 2), (70, 0),
+           (10, 0), (20, 0), (42, 1), (10, 6), (20, 0)]
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, placed_dxf(spline + arc, (1, 1, 1)))
+    assert status == "ok", payload
+    # Two-unit spline, radius-three semicircle, and the fixture's 100-unit line.
+    expected = 102 + 3*math.pi
+    assert payload[0]["lengths_by_layer"] == pytest.approx({"Steel-Beams": expected}, rel=1e-5)

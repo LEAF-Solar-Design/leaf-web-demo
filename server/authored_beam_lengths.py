@@ -36,6 +36,13 @@ def build_body(description, *, entry_point="run"):
         label, factor = "drawing_units", 1.0
     collect_segments = entry_point == "collect_spline_segments"
     span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
+    spline_request = span_detail or re.search(r"\b(?:splines?|nurbs)\b", description, re.I)
+    mixed_scope = re.search(
+        r"\b(?:lines?|(?:lw)?polylines?|arcs?|bulges?|straight beams?|"
+        r"(?:all|every) beams?|including (?:rational )?(?:splines?|nurbs))\b", description, re.I)
+    explicit_spline_scope = re.search(
+        r"\b(?:only (?:the )?(?:splines?|nurbs)|(?:splines?|nurbs)(?: beams?)? only)\b", description, re.I)
+    only_splines = collect_segments or bool(spline_request and (explicit_spline_scope or not mixed_scope))
     periodic = bool(re.search(r"\bperiodic\b", description, re.I))
     survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
@@ -43,7 +50,7 @@ def build_body(description, *, entry_point="run"):
             .replace("__SURVEY__", repr(survey))
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
-            .replace("__ONLY_SPLINES__", repr(collect_segments or span_detail or bool(re.search(r"\b(?:splines?|nurbs)\b", description, re.I))))
+            .replace("__ONLY_SPLINES__", repr(only_splines))
             .replace("__COLLECT_SPLINES__", repr(collect_segments))
             .replace("__SPAN_DETAIL__", repr(span_detail))
             .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
