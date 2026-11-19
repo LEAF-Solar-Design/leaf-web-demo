@@ -34,6 +34,7 @@ const KNOWN_ACTIONS = new Set([
   "read_platform_state",
   "run_read_tool",
   "run_write_tool",
+  "run_drawing_edit_tool",
   "run_solve_tool",
   "submit_live_solve",
   "undo_drawing_version",
@@ -80,6 +81,7 @@ function hashArgs(args: Record<string, unknown>): string {
 
 export class FakeGateClient implements GateClient {
   readonly checks: RecordedGateCheck[] = [];
+  readonly approvalRequired = new Set<string>();
   /** action name or run-tool target -> deny reason. */
   private readonly denials = new Map<string, string>();
   /** confirmation_id -> the app-side pending record it was minted with. */
@@ -131,6 +133,7 @@ export class FakeGateClient implements GateClient {
     if (
       action === "run_read_tool" ||
       action === "run_write_tool" ||
+      action === "run_drawing_edit_tool" ||
       action === "run_solve_tool" ||
       action === "submit_live_solve" ||
       action === "author_tool" ||
@@ -140,6 +143,9 @@ export class FakeGateClient implements GateClient {
       const targetDenial = this.denials.get(target);
       if (targetDenial) {
         return { decision: "deny", reason: targetDenial, policy: "always_deny", rung: "R2" };
+      }
+      if (action === "run_drawing_edit_tool" && !this.approvalRequired.has(action)) {
+        return { decision: "allow", policy: "auto", rung: "R3" };
       }
       if (action !== "run_read_tool") {
         const rung =
