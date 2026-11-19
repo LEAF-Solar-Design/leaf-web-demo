@@ -2658,3 +2658,57 @@ def motor_thermal_memory_quality(rule, initial_heat, intervals):
         heat += (equilibrium - heat) * fraction
         exceeded |= heat > trip
     return "FAIL" if exceeded else "PASS"
+
+
+def _valid_polar_reading(reading):
+    return (isinstance(reading, (list, tuple)) and len(reading) == 2
+            and all(map(finite_measure, reading)) and reading[0] >= 0)
+
+
+def directional_overcurrent_quality(rule, voltage, current, tripped):
+    """Voltage-polarized relay. Polar RMS angles share a reference, in degrees."""
+    if not isinstance(rule, dict) or rule.get("model") != "current-minus-voltage-sector-v1":
+        return "INCOMPLETE"
+    if not all(map(_valid_polar_reading, (voltage, current))) or type(tripped) is not bool:
+        return "INCOMPLETE"
+    values = [rule.get(k) for k in ("min_polarizing_v", "pickup_a", "center_deg", "half_width_deg")]
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    minimum, pickup, center, width = values
+    if min(minimum, pickup) <= 0 or voltage[0] < minimum or not 0 < width < 180:
+        return "INCOMPLETE"
+    offset = Fraction(str(current[1])) - Fraction(str(voltage[1])) - Fraction(str(center))
+    distance = abs((offset + 180) % 360 - 180)
+    expected = current[0] >= pickup and distance <= Fraction(str(width))
+    return "PASS" if tripped == expected else "FAIL"
+
+
+def winding_differential_quality(rule, group, hv, lv, ct_ratios, tripped):
+    """Balanced positive-sequence phasors measured by CTs, referenced in through-current direction.
+
+    Recover primary amperes, refer LV to the HV base and rotate LV by the
+    selected vector group's recorded compensation angle. Apply fixed pickup.
+    """
+    from math import hypot, radians, sin, sqrt
+
+    if not isinstance(rule, dict) or rule.get("model") != "balanced-fixed-differential-v1":
+        return "INCOMPLETE"
+    groups = rule.get("lv_to_hv_degrees")
+    if not isinstance(groups, dict) or not isinstance(group, str) or not group.strip():
+        return "INCOMPLETE"
+    if not all(map(_valid_polar_reading, (hv, lv))) or type(tripped) is not bool:
+        return "INCOMPLETE"
+    if not isinstance(ct_ratios, (tuple, list)) or len(ct_ratios) != 2:
+        return "INCOMPLETE"
+    scale, pickup, shift = rule.get("lv_to_hv_current_scale"), rule.get("pickup_a"), groups.get(group)
+    if not all(map(finite_measure, (*ct_ratios, scale, pickup, shift))) or min(*ct_ratios, scale, pickup) <= 0:
+        return "INCOMPLETE"
+    high = hv[0] * ct_ratios[0]
+    low = lv[0] * ct_ratios[1] * scale
+    if not all(map(finite_measure, (high, low))):
+        return "INCOMPLETE"
+    delta = (Fraction(str(lv[1])) + Fraction(str(shift)) - Fraction(str(hv[1])) + 180) % 360 - 180
+    # Half-angle form preserves cancellation for nearly equal through currents.
+    quadrature = sqrt(high) * sqrt(low) * (2 * sin(radians(float(delta)) / 2))
+    differential = hypot(high - low, quadrature)
+    return "PASS" if tripped == (differential >= pickup) else "FAIL"

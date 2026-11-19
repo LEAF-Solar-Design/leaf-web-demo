@@ -872,3 +872,23 @@ def cosine_response_quality(revision, calibration, incidence_deg, measured_w_m2,
     if ratio is None:
         return "INCOMPLETE"
     return "PASS" if Fraction(str(corrected_w_m2)) * ratio == Fraction(str(measured_w_m2)) else "FAIL"
+
+
+def sonic_dry_bulb_quality(model, sonic_k, specific_humidity, reported_dry_k):
+    """Check the pinned acoustic approximation Ts = T * (1 + 0.51 q), in kelvin.
+
+    q is specific humidity in kg water per kg moist air. The calibration's
+    q interval limits where the approximation can be used.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(model, dict) or model.get("rule") != "sonic-specific-humidity-0.51-v1":
+        return "INCOMPLETE"
+    values = (model.get("min_q"), model.get("max_q"), sonic_k, specific_humidity, reported_dry_k)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    low, high, acoustic, humidity, reported = (Fraction(str(x)) for x in values)
+    if not 0 <= low <= humidity <= high < 1 or acoustic <= 0:
+        return "INCOMPLETE"
+    return "PASS" if acoustic == reported * (1 + Fraction(51, 100) * humidity) else "FAIL"
