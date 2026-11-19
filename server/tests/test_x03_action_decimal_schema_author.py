@@ -51,3 +51,12 @@ def test_pinned_decimal_submission(catalog, ask, operation, step, low, high, sam
             with pytest.raises(ReadFailure, match="invalid_input"):
                 run_selected_action(service, chosen, *scope, host=host)
         assert calls == expected
+
+
+def test_exact_number_limits():
+    from authored_action_revocation import _exact_json_number
+
+    for literal in ("NaN", "Infinity", "-Infinity", "1e-769", "1e309"):
+        with pytest.raises(ValueError):
+            _exact_json_number(literal)
+    assert _exact_json_number("1e-768").denominator == 10**768

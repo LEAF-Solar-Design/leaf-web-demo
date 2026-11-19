@@ -1,5 +1,6 @@
 """Submit a host-selected action only while its exact operation and grant are current."""
 from dataclasses import dataclass
+from decimal import Decimal
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -40,7 +41,12 @@ def _identity(ref):
 
 def _exact_json_number(literal):
     # JSON Schema applies integer and multipleOf to the exact numeric value.
-    value = Fraction(literal)
+    if len(literal) > 768 or not math.isfinite(float(literal)):
+        raise ValueError("Unsupported JSON number")
+    decimal = Decimal(literal)
+    if abs(decimal.as_tuple().exponent) > 768:
+        raise ValueError("Unsupported JSON decimal scale")
+    value = Fraction(decimal)
     return value.numerator if value.denominator == 1 else value
 
 
@@ -163,7 +169,7 @@ class AuthorizedLocalActions:
             encoded = _identity(argument_schema)
             if sha256(encoded.encode("utf-8")).hexdigest() != reference["operation_ref"]["digest"]:
                 raise ValueError("Argument schema differs from the pinned operation digest")
-            schema = json.loads(encoded, parse_float=_exact_json_number)
+            schema = json.loads(encoded, parse_float=_exact_json_number, parse_constant=_exact_json_number)
             if (not isinstance(schema, dict) or schema.get("type") != "object"
                     or schema.get("additionalProperties") is not False):
                 raise ValueError("Structured action arguments require a closed object schema")
@@ -199,7 +205,11 @@ class AuthorizedLocalActions:
             if binding.argument_validator is None:
                 _check_arguments(binding.fields, values)
             else:
-                exact_values = json.loads(arguments, parse_float=_exact_json_number)
+                try:
+                    exact_values = json.loads(arguments, parse_float=_exact_json_number,
+                                              parse_constant=_exact_json_number)
+                except (ValueError, ArithmeticError):
+                    raise ReadFailure("invalid_input") from None
                 if not binding.argument_validator.is_valid(exact_values):
                     raise ReadFailure("invalid_input")
                 field_ids = {field["id"] for field in binding.fields}
