@@ -35,6 +35,7 @@ beforeEach(() => {
     start: vi.fn(), stop: vi.fn(), bindDrawing: vi.fn().mockResolvedValue(undefined),
     bindDrawingWithGrant: vi.fn().mockResolvedValue(undefined),
     focusObject: vi.fn().mockResolvedValue(undefined),
+    listTools: vi.fn().mockResolvedValue({ tools: [] }),
     retryHello: vi.fn(() => { state = { ...state, helloSentAt: Date.now() }; listener(state) }),
   }
   getLeafHostBridge.mockReturnValue(bridge)
@@ -62,6 +63,18 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  it.each([undefined, false, true])('mounts Branch tools only with runTool true (%s)', async (runTool) => {
+    state = { status: 'connected', ready: { ...ready, ...(runTool === undefined ? {} : { capabilities: { planGrammarMax: 2, runTool, hostApi: 1 } }) } }
+    render(<LeafPlatformScene />)
+    if (runTool === true) {
+      expect(await screen.findByRole('region', { name: 'Branch tools' })).toBeTruthy()
+      await waitFor(() => expect(bridge.listTools).toHaveBeenCalledTimes(1))
+    } else {
+      expect(screen.queryByRole('region', { name: 'Branch tools' })).toBeNull()
+      expect(bridge.listTools).not.toHaveBeenCalled()
+    }
+  })
+
   it('shows the drawing sync row and publishes the first version', async () => {
     state = { status: 'connected', ready, selectedObjectId: null }
     openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })

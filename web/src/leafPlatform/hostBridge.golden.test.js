@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// Golden wire fixture from the AutoCAD plugin (Branch2025 Tests/Fixtures/web-bridge), vendored
-// byte-for-byte. Every case must be accepted exactly as the plugin posts it, and tampered copies
-// must be refused, so the page and the plugin cannot drift on canonicalization or session checks.
-import { webcrypto } from 'node:crypto'
+// Original AutoCAD plugin cases are vendored byte-for-byte; SBT-W1 cases append the frozen
+// tool contract using the fixture session key. Signed round trips and tampering checks pin
+// canonicalization and session checks independently of browser signing.
+import { createHmac, webcrypto } from 'node:crypto'
 import { TextEncoder } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import golden from './__fixtures__/leaf.web-bridge.v1.golden.json'
@@ -10,7 +10,8 @@ import { createLeafHostBridge, PROTOCOL_VERSION } from './hostBridge.js'
 
 const CASE_NAMES = ['ready', 'selection-handles', 'selection-empty', 'unbound', 'unbound-with-capability', 'bind-accepted', 'bind-rejected',
   'callback-applied', 'callback-stale', 'callback-rejected']
-const HANDSHAKE_NAMES = ['ready', 'unbound', 'unbound-with-capability']
+const TOOL_CASE_NAMES = ['list_tools.request', 'list_tools.response', 'run_tool.request', 'run_tool.response.accept', 'run_tool.response.refused', 'ready-with-capabilities']
+const HANDSHAKE_NAMES = ['ready', 'unbound', 'unbound-with-capability', 'ready-with-capabilities']
 const ENVELOPE_NAMES = CASE_NAMES.filter((name) => !HANDSHAKE_NAMES.includes(name))
 const UNBOUND_REVISION = '00000000-0000-0000-0000-000000000000'
 const location = { origin: golden.session.origin }
@@ -77,9 +78,9 @@ describe('Studio host bridge against the plugin golden wire fixture', () => {
     expect(golden.protocolVersion, 'fixture protocolVersion differs from the page PROTOCOL_VERSION').toBe(PROTOCOL_VERSION)
     expect(golden.testOnly).toBe(true)
     const names = golden.cases.map((entry) => entry.name)
-    const missing = CASE_NAMES.filter((name) => !names.includes(name))
+    const missing = [...CASE_NAMES, ...TOOL_CASE_NAMES].filter((name) => !names.includes(name))
     expect(missing, `golden fixture dropped cases: ${missing.join(', ')}`).toEqual([])
-    for (const name of CASE_NAMES) {
+    for (const name of [...CASE_NAMES, ...TOOL_CASE_NAMES]) {
       const entry = goldenCase(name)
       const parsed = wire(name)
       if (HANDSHAKE_NAMES.includes(name)) {
@@ -102,6 +103,58 @@ describe('Studio host bridge against the plugin golden wire fixture', () => {
     expect(state.ready.nonce).toBe(golden.session.nonce)
     expect(state.ready.origin).toBe(golden.session.origin)
     expect(Buffer.from(state.ready.sessionKey, 'base64').toString('hex')).toBe(golden.session.sessionKeyHex)
+  })
+
+  const digest = '079bc8c277c9cba64b38d881a58fdaede524d19636d7400887fc99273bcd1f72'
+  const tool = { name: 'panel-gap-check', version: '1.0.0', packageDigest: digest }
+  const frozen = {
+    'list_tools.request': { verb: 'list_tools', action: 'list_tools', payload: {} },
+    'list_tools.response': { tools: [{ ...tool, source: 'downloaded', decision: 'accept', runnable: true }] },
+    // Reference package tool.json uses integer min_gap_in, default 18, instead of illustrative min_gap.
+    'run_tool.request': { verb: 'run_tool', action: 'run_tool', mutation: 'leaf.tool_run.v1', payload: { ...tool, args: { min_gap_in: 18 } } },
+    'run_tool.response.accept': { decision: 'accept', reason: null, result: {}, resultTruncated: false, generation: 1, durationMs: 0 },
+    'run_tool.response.refused': { decision: 'refused', reason: 'version_not_current', result: null, resultTruncated: false, generation: 0, durationMs: 0 },
+  }
+  function canonical(value) {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+    if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`
+    return JSON.stringify(value)
+  }
+  it.each(Object.keys(frozen))('decodes %s to the frozen contract and pins its signature', (name) => {
+    const { signature, ...envelope } = wire(name)
+    expect(signature).toBe(createHmac('sha256', Buffer.from(golden.session.sessionKeyHex, 'hex')).update(canonical(envelope)).digest('hex'))
+    const command = envelope.payload
+    const decoded = name.endsWith('.request') ? { verb: envelope.verb, action: command.action,
+      ...(command.allowedMutation ? { mutation: command.allowedMutation } : {}), payload: command.payload } : command.result
+    expect(decoded).toEqual(frozen[name])
+  })
+
+  it('accepts the frozen capability handshake', async () => {
+    await bridge.receive(wire('ready-with-capabilities'))
+    expect(state.status).toBe('connected')
+    expect(state.ready.capabilities).toEqual({ planGrammarMax: 2, runTool: true, hostApi: 1 })
+  })
+
+  it.each(['list_tools.response', 'run_tool.response.accept', 'run_tool.response.refused'])('round trips %s over the signed bridge', async (name) => {
+    const response = wire(name)
+    vi.setSystemTime(midpoint(response))
+    await bridge.receive(wire('ready-with-capabilities'))
+    randomUUID.mockReturnValueOnce(response.payload.commandId)
+    let posted
+    const sent = new Promise((resolve) => { posted = resolve })
+    channel.postMessage.mockImplementationOnce(posted)
+    const action = name.startsWith('list_tools') ? 'list_tools' : 'run_tool'
+    const outcome = action === 'list_tools' ? bridge.listTools() : bridge.runTool(frozen['run_tool.request'].payload)
+    const command = await sent
+    expect({ verb: command.verb, action: command.payload.action,
+      ...(command.payload.allowedMutation ? { mutation: command.payload.allowedMutation } : {}), payload: command.payload.payload }).toEqual(frozen[`${action}.request`])
+    const { signature, ...body } = command
+    expect(signature).toBe(createHmac('sha256', Buffer.from(golden.session.sessionKeyHex, 'hex')).update(canonical(body)).digest('hex'))
+    const tampered = { ...response, signature: '0'.repeat(64) }
+    await bridge.receive(tampered)
+    expect(bridge.pendingCommand).not.toBeNull()
+    await bridge.receive(response)
+    await expect(outcome).resolves.toEqual(frozen[name])
   })
 
   it.each([

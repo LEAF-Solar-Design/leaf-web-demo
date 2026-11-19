@@ -1,5 +1,6 @@
 import { track } from '../telemetry.js'
 import { getDiagnostics, sanitizeDetail } from './diagnostics.js'
+import { isToolResponse, validateToolPayload } from './branchTools.js'
 
 export const LEAF_PLATFORM_CONTRACT_VERSION = 'leaf.platform.v1alpha1'
 export const PROTOCOL_VERSION = 'leaf.web-bridge.v1'
@@ -105,14 +106,23 @@ function isReady(value) {
   if (!isRecord(value)) return false
   const hasEndpoint = Object.hasOwn(value, 'bridgeEndpoint')
   const extras = [...IDENTITY_KEYS, ...(hasEndpoint ? ['bridgeEndpoint'] : []),
-    ...(Object.hasOwn(value, 'syncCursor') ? ['syncCursor'] : [])]
+    ...(Object.hasOwn(value, 'syncCursor') ? ['syncCursor'] : []),
+    ...(Object.hasOwn(value, 'capabilities') ? ['capabilities'] : [])]
   return isHandshake(value, 'host_bridge_ready', extras) &&
+    (!Object.hasOwn(value, 'capabilities') || isCapabilities(value.capabilities)) &&
     (!Object.hasOwn(value, 'syncCursor') || (isRecord(value.syncCursor) &&
       Object.keys(value.syncCursor).length === 2 &&
       typeof value.syncCursor.drawingStoreId === 'string' && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(value.syncCursor.drawingStoreId) &&
       Number.isSafeInteger(value.syncCursor.version) && value.syncCursor.version > 0)) &&
     (!hasEndpoint || isBridgeEndpoint(value.bridgeEndpoint)) &&
     IDENTITY_KEYS.every((key) => typeof value[key] === 'string' && UUID.test(value[key]))
+}
+
+function isCapabilities(value) {
+  return isRecord(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)) &&
+    Reflect.ownKeys(value).length === 3 && ['planGrammarMax', 'runTool', 'hostApi'].every((key) => Object.hasOwn(value, key)) &&
+    Number.isSafeInteger(value.planGrammarMax) && value.planGrammarMax >= 1 && value.planGrammarMax <= 3 &&
+    typeof value.runTool === 'boolean' && Number.isSafeInteger(value.hostApi) && value.hostApi >= 1
 }
 
 function isUnbound(value) {
@@ -245,6 +255,13 @@ export class LeafHostBridge {
   }
 
   exportDxf() { return this.sendCommand('drawing.export_dxf', 'export_dxf', {}) }
+
+  listTools() { return this.sendCommand('list_tools', 'list_tools', {}) }
+
+  async runTool(payload) {
+    validateToolPayload(payload)
+    return this.sendCommand('run_tool', 'run_tool', JSON.parse(JSON.stringify(payload)), 'leaf.tool_run.v1')
+  }
 
   syncCursor({ drawingStoreId, version, exportSha256 }) {
     return this.sendCommand('drawing.sync_cursor', 'sync_cursor', { drawingStoreId, version, exportSha256 }, 'leaf.sync_cursor.v1')
@@ -439,7 +456,11 @@ export class LeafHostBridge {
           !(callback.reason === null || typeof callback.reason === 'string') ||
           !IDENTITY_KEYS.every((key) => typeof callback[key] === 'string' &&
             callback[key].toLowerCase() === ready[key].toLowerCase())) return rejectEnvelope('shape')
-      this.finishCommand(callback.status, callback.reason, true, callback)
+      if (['list_tools', 'run_tool'].includes(this.pendingCommand.action)) {
+        if (!isToolResponse(this.pendingCommand.action, callback.result)) {
+          this.finishCommand('rejected', 'invalid_response')
+        } else this.finishCommand(callback.status, callback.reason, true, callback.result)
+      } else this.finishCommand(callback.status, callback.reason, true, callback)
     } else if (envelope.verb === 'drawing.dxf_export') {
       const data = envelope.payload
       const pending = this.pendingCommand

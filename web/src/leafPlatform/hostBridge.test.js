@@ -122,6 +122,102 @@ describe('drawing sync commands', () => {
     const outcome = bridge[method](args)
     return { sent: await sent, outcome }
   }
+  const toolPayload = { name: 'panel-gap-check', version: '1.0.0', packageDigest: '079bc8c277c9cba64b38d881a58fdaede524d19636d7400887fc99273bcd1f72', args: { min_gap_in: 18 } }
+  const accepted = { decision: 'accept', reason: null, result: {}, resultTruncated: false, generation: 1, durationMs: 0 }
+  // Closed set from ToolDecisions.Code plus the frozen bridge refusal reasons.
+  const refusalReasons = ['malformed', 'unknown_key', 'signature_invalid', 'digest_mismatch',
+    'identity_mismatch', 'revoked', 'stale_revocation_list', 'unreviewed', 'unentitled',
+    'host_api_too_low', 'capability_violation', 'timeout', 'compile_failed', 'script_error',
+    'revocation_invalid', 'invalid_command', 'tool_not_installed', 'version_not_current',
+    'confirmation_declined', 'run_tool_unavailable']
+
+  it.each(refusalReasons)('accepts the closed refusal code %s for runs and listed tools', async (reason) => {
+    const results = [
+      ['runTool', toolPayload, { ...accepted, decision: 'refused', reason, result: null, generation: 0 }],
+      ['listTools', undefined, { tools: [{ name: toolPayload.name, version: toolPayload.version,
+        packageDigest: toolPayload.packageDigest, source: 'downloaded', decision: reason, runnable: false }] }],
+    ]
+    for (const [method, args, result] of results) {
+      const { sent, outcome } = await send(method, args)
+      const response = callback(sent.payload.commandId)
+      await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
+      await expect(outcome).resolves.toEqual(result)
+    }
+  })
+
+  it.each([undefined, { planGrammarMax: 2, runTool: true, hostApi: 1 }])('accepts ready with optional capabilities %j', async (capabilities) => {
+    await bridge.receive({ ...ready(), ...(capabilities ? { capabilities } : {}) })
+    expect(bridge.state.status).toBe('connected')
+    expect(bridge.state.ready.capabilities).toEqual(capabilities)
+  })
+
+  it.each([
+    null, [], { planGrammarMax: 2, runTool: true, hostApi: 1, extra: true },
+    { planGrammarMax: 4, runTool: true, hostApi: 1 }, { planGrammarMax: 2, runTool: 'true', hostApi: 1 },
+    { planGrammarMax: 2, runTool: true, hostApi: 0 }, { planGrammarMax: 1.5, runTool: true, hostApi: 1 },
+  ])('rejects malformed capabilities %j', async (capabilities) => {
+    const previous = bridge.state
+    await bridge.receive({ ...ready(), capabilities })
+    expect(bridge.state).toBe(previous)
+  })
+
+  it.each([
+    ['listTools', undefined, 'list_tools', { tools: [{ name: toolPayload.name, version: toolPayload.version, packageDigest: toolPayload.packageDigest, source: 'downloaded', decision: 'accept', runnable: true }] }],
+    ['runTool', toolPayload, 'run_tool', accepted],
+    ['runTool', toolPayload, 'run_tool', { decision: 'refused', reason: 'version_not_current', result: null, resultTruncated: false, generation: 0, durationMs: 0 }],
+  ])('signs %s and validates its response', async (method, args, verb, result) => {
+    const { sent, outcome } = await send(method, args)
+    expect(sent.verb).toBe(verb)
+    expect(sent.payload.action).toBe(verb)
+    expect(sent.payload.payload).toEqual(args ?? {})
+    expect(sent.payload.allowedMutation).toBe(verb === 'run_tool' ? 'leaf.tool_run.v1' : undefined)
+    const { signature, ...unsigned } = sent
+    expect(signature).toBe(sign(unsigned).signature)
+    const response = callback(sent.payload.commandId)
+    await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
+    await expect(outcome).resolves.toEqual(result)
+  })
+
+  it.each([
+    [{ ...toolPayload, extra: true }, 'invalid_command'], [{ ...toolPayload, name: 'Bad name' }, 'invalid_command'],
+    [{ ...toolPayload, version: '01.0.0' }, 'invalid_command'], [{ ...toolPayload, packageDigest: 'A'.repeat(64) }, 'invalid_command'],
+    [{ ...toolPayload, name: 'panel-gap-check\n' }, 'invalid_command'], [{ ...toolPayload, version: '1.0.0\n' }, 'invalid_command'],
+    [{ ...toolPayload, args: { text: 'é'.repeat(32768) } }, 'args_too_large'],
+  ])('refuses invalid tool args without sending', async (payload, reason) => {
+    const count = channel.postMessage.mock.calls.length
+    await expect(bridge.runTool(payload)).rejects.toThrow(reason)
+    expect(channel.postMessage).toHaveBeenCalledTimes(count)
+  })
+
+  it.each([
+    ['missing fields', {}], ['wrong reason', { ...accepted, reason: 'unknown' }], ['extra fields', { ...accepted, extra: true }],
+    ['unknown refusal', { ...accepted, decision: 'refused', reason: 'unknown', result: null }],
+    ['accept is not a refusal', { ...accepted, decision: 'refused', reason: 'accept', result: null }],
+    ['client-only refusal', { ...accepted, decision: 'refused', reason: 'args_too_large', result: null }],
+    ['oversized result', { ...accepted, result: { text: 'x'.repeat(256 * 1024) } }],
+  ])('rejects invalid tool response: %s', async (_label, result) => {
+    const { sent, outcome } = await send('runTool', toolPayload)
+    const rejected = expect(outcome).rejects.toThrow('invalid_response')
+    const response = callback(sent.payload.commandId)
+    await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
+    await rejected
+  })
+
+  it.each([
+    { tools: 'invalid' }, { tools: [{ name: 'panel-gap-check' }] },
+    ...['unknown', 'args_too_large', 'invalid_response'].map((decision) => ({ tools: [{
+      name: toolPayload.name, version: toolPayload.version, packageDigest: toolPayload.packageDigest,
+      source: 'downloaded', decision, runnable: false,
+    }] })),
+    { tools: [{ name: toolPayload.name, version: toolPayload.version, packageDigest: toolPayload.packageDigest,
+      source: 'downloaded', decision: 'accept', runnable: true, packageBytes: 'never allowed' }] },
+  ])('rejects malformed tool lists', async (result) => {
+    const { sent, outcome } = await send('listTools')
+    const rejected = expect(outcome).rejects.toThrow('invalid_response')
+    const response = callback(sent.payload.commandId)
+    await bridge.receive(envelope(ready(), { verb: 'host.callback', payload: { ...response.payload, result } }))
+    await rejected
+  })
   const planArgs = { planText: '{"schema":"leaf.mutation_plan.v1"}', planSha256: 'a'.repeat(64),
     parentVersion: 1, resultVersion: 2, drawingStoreId: 'roof-1', resultContentSha256: 'c'.repeat(64) }
   const cursorArgs = { drawingStoreId: 'roof-1', version: 2, exportSha256: 'b'.repeat(64) }

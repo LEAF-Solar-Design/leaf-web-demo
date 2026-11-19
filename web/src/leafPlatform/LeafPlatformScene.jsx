@@ -5,6 +5,7 @@ import { resolveDrawingStore, pull, publish } from './drawingSync.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
+import BranchToolsPanel from './BranchToolsPanel.jsx'
 import { humanizeError } from '../errorHumanize.js'
 import './leafPlatform.css'
 
@@ -477,6 +478,8 @@ export default function LeafPlatformScene() {
           </div>
           {boundDetail?.identity === boundIdentity && boundDetail.project &&
             <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} />}
+          {state.ready?.capabilities?.runTool === true &&
+            <BranchToolsPanel key={boundIdentity + ':' + state.ready.sessionId} bridge={bridge} />}
         </>}
       </section>}
       <DiagnosticsDetails />
