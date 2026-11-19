@@ -25,6 +25,23 @@ export function estimateLineCents(line, rate) {
 
 const money = (cents) => `$${cents / 100n}.${String(cents % 100n).padStart(2, '0')}`
 
+const UNPRICED_LABELS = {
+  RATE_MISSING: 'Missing rates',
+  INVALID_RATE: 'Invalid rates',
+  QUANTITY_MISSING: 'Unavailable quantities',
+  NONCOMPUTED_LINE: 'Not computed',
+  NONPRICEABLE_LINE: 'Nonpriceable',
+  UNIT_MISMATCH: 'Rate unit mismatches',
+  OTHER: 'Unspecified reason',
+}
+
+function draftReason(line, rate) {
+  if (line.status !== 'computed') return 'NONCOMPUTED_LINE'
+  if (line.priceable !== true) return 'NONPRICEABLE_LINE'
+  if (!decimal(line.quantity)) return 'QUANTITY_MISSING'
+  return rate ? 'INVALID_RATE' : 'RATE_MISSING'
+}
+
 function describe(props) {
   const { tool, solarBinding, authorityKey, projectClient, projectCatalog, isCurrent } = props
   try {
@@ -247,12 +264,24 @@ export default function ProjectGroundEstimatePanel(props) {
       if (operation.current === active) operation.current = null
     }
   }
+  const reasonCounts = new Map()
   const amounts = visible.lines?.map((line) => {
+    const rate = rates[line.line_id] ?? ''
+    let cents, reason
     if (saved && !dirty && visible.savedDigest === saved.content_sha256) {
-      const amount = saved.estimate.lines.find((row) => row.line_id === line.line_id)?.amount
-      return typeof amount === 'string' && /^\d+\.\d{2}$/.test(amount) ? BigInt(amount.replace('.', '')) : null
+      const row = saved.estimate.lines.find((entry) => entry.line_id === line.line_id)
+      const amount = row?.amount
+      cents = typeof amount === 'string' && /^\d+\.\d{2}$/.test(amount) ? BigInt(amount.replace('.', '')) : null
+      reason = row?.pricing_reason === 'QUANTITY_INVALID' ? 'QUANTITY_MISSING' : row?.pricing_reason
+    } else {
+      cents = estimateLineCents(line, rate)
+      if (cents === null) reason = draftReason(line, rate)
     }
-    return estimateLineCents(line, rates[line.line_id] ?? '')
+    if (cents === null) {
+      const key = Object.hasOwn(UNPRICED_LABELS, reason) ? reason : 'OTHER'
+      reasonCounts.set(key, (reasonCounts.get(key) ?? 0) + 1)
+    }
+    return cents
   }) || []
   const subtotal = amounts.reduce((total, cents) => total + (cents ?? 0n), 0n)
   return <section aria-label="Ground estimate preview">
@@ -280,6 +309,11 @@ export default function ProjectGroundEstimatePanel(props) {
             }} /></td><td>{amounts[index] === null ? 'Unpriced' : money(amounts[index])}</td>
         </tr>)}</tbody></table>
       <p>Priced subtotal (preview): {money(subtotal)}</p>
+      {reasonCounts.size > 0 && <ul aria-label="Unpriced line breakdown">
+        {Object.entries(UNPRICED_LABELS).filter(([key]) =>
+          key === 'RATE_MISSING' || key === 'INVALID_RATE' || reasonCounts.has(key)
+        ).map(([key, label]) => <li key={key}>{label}: {reasonCounts.get(key) ?? 0}</li>)}
+      </ul>}
       <p>{amounts.filter((amount) => amount === null).length} unpriced lines. {saved && !dirty && visible.savedDigest === saved.content_sha256 ?
         'Saved checkpoint; TEST rates only.' : 'TEST rates only; preview is not saved.'}</p>
     </>}
