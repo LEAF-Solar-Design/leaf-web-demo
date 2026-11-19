@@ -99,6 +99,12 @@ def _in_inches(panel, k):
     return dict(panel, pts=pts)
 
 
+class InputValidationError(ValueError):
+    def __init__(self, message: str, next_action: str):
+        super().__init__(message)
+        self.next_action = next_action
+
+
 def nec_max_modules(voc: float, temp_coeff_pct_per_c: float,
                     design_min_temp_c: float, max_system_voltage: float
                     ) -> Tuple[int, float]:
@@ -111,14 +117,16 @@ def nec_max_modules(voc: float, temp_coeff_pct_per_c: float,
         1.0 + float(temp_coeff_pct_per_c) / 100.0 * (float(design_min_temp_c) - 25.0)
     )
     if worst_voc <= 0:
-        raise ValueError(
+        raise InputValidationError(
             f"NEC 690.7 check degenerate: worst-case Voc {worst_voc:.3f} V <= 0 "
-            "(check voc / temp_coeff_pct_per_c / design_min_temp_c)")
+            "(check voc / temp_coeff_pct_per_c / design_min_temp_c)",
+            "Correct the module voltage or temperature inputs using the module data sheet.")
     max_modules = int(math.floor(float(max_system_voltage) / worst_voc))
     if max_modules < 1:
-        raise ValueError(
+        raise InputValidationError(
             f"NEC 690.7 check yields 0 modules per string (worst-case Voc "
-            f"{worst_voc:.2f} V exceeds max system voltage {max_system_voltage} V)")
+            f"{worst_voc:.2f} V exceeds max system voltage {max_system_voltage} V)",
+            "Select a module whose cold open-circuit voltage fits the system limit.")
     return max_modules, worst_voc
 
 
@@ -272,13 +280,17 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
         if pl.get("layer") == layer and pl.get("closed") and pl.get("pts")
     ]
     if not panels:
-        raise ValueError(f"no closed polylines found on layer {layer!r}")
+        raise InputValidationError(f"no closed polylines found on layer {layer!r}",
+                                   "Set panel_layer to the layer containing closed panel outlines.")
     if scale != 1.0:
         panels = [_in_inches(pl, scale) for pl in panels]
 
-    max_modules, worst_voc_per_module = nec_max_modules(
-        p["voc"], p["temp_coeff_pct_per_c"], p["design_min_temp_c"],
-        p["max_system_voltage"])
+    try:
+        max_modules, worst_voc_per_module = nec_max_modules(
+            p["voc"], p["temp_coeff_pct_per_c"], p["design_min_temp_c"],
+            p["max_system_voltage"])
+    except InputValidationError as exc:
+        raise InputValidationError(f"Layer {layer!r}: {exc}", exc.next_action) from exc
 
     cents = [_centroid(pl) for pl in panels]
     banks = _cluster_banks(cents, float(p["cluster_radius_factor"]))
@@ -293,7 +305,9 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
         if (type(minimum) is not int or minimum < 1
                 or type(requested_maximum) is not int or requested_maximum < 1
                 or ("max_modules_per_string" in params and requested_maximum < minimum)):
-            raise ValueError("string module bounds must be positive integers with minimum <= maximum")
+            raise InputValidationError(
+                f"Layer {layer!r}: string module bounds must be positive integers with minimum <= maximum",
+                "Set min_modules_per_string and max_modules_per_string to an ordered positive range.")
         effective_maximum = min(max_modules, requested_maximum)
 
     plans = []
