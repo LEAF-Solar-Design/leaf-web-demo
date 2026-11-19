@@ -59,6 +59,10 @@ class IncompleteInventory(ReadFailure):
         self.pages_read = pages_read
 
 
+class PartialResponse(ReadFailure):
+    """The provider disconnected after yielding bytes from this response."""
+
+
 class DefiniteHTTPFailure(ReadFailure):
     """A save was explicitly rejected by the application service."""
 
@@ -512,6 +516,10 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                     if parsed is None:
                         raise ReadFailure("invalid_response")
                     return parsed
+                except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                    if raw:
+                        raise PartialResponse("unavailable") from exc
+                    raise
                 finally:
                     crypto._scrub(raw)
 
@@ -578,7 +586,7 @@ class IntegrationToolService:
                 raise ReadFailure("denied")
             if "result" not in reply:
                 code = reply.get("error", {}).get("code", "denied")
-                if operation == "datasets" and code == "cursor_too_large":
+                if operation == "datasets" and code in {"cursor_too_large", "partial_page"}:
                     raise IncompleteInventory(len(visited))
                 if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
                     raise IncompleteInventory(len(visited))
@@ -862,6 +870,10 @@ class IntegrationToolService:
                     if verdict["decision"] == "allow":
                         check()
                     return output
+                except PartialResponse:
+                    if operation == "datasets" and expected_authority is not None:
+                        return failure("partial_page")
+                    category = "outcome_unknown" if saving and started else "unavailable"
                 except DefiniteHTTPFailure as exc:
                     category = str(exc)
                 except httpx.ConnectError:

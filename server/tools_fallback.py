@@ -676,8 +676,10 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)
 
-    header = _HEADER_TEMPLATE.format(
-        name=name, description=(description.replace('"', "'") or "(none)"), engine_op=engine_op)
+    # The description is data inside the generated docstring. Preserve its
+    # backslashes so JSON escape sequences are never interpreted as Python.
+    description_literal = repr(description.replace('"', "'") or "(none)")[1:-1]
+    header = _HEADER_TEMPLATE.format(name=name, description=description_literal, engine_op=engine_op)
     code = header + body
 
     tool = {

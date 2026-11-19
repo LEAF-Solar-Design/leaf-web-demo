@@ -85,6 +85,8 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
     originals.check_json_depth(raw)
     document = json.loads(raw.decode("utf-8-sig"), parse_float=Decimal if exact_numbers else float,
                           object_pairs_hook=originals.unique_json_object)
+    if br'\u' in raw:
+        originals.check_json_unicode(document)
     pointer = context["selection"]["records_pointer"]
     rows = _selected_rows(document, pointer, context["row_count"])
     # JSON comparison preserves distinctions such as false versus 0.
