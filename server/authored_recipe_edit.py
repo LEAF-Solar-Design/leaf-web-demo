@@ -1,0 +1,118 @@
+"""Author one bounded edit to an inspection table and save it at its observed revision."""
+import re
+
+
+_NUMBERS = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+_CONFLICT_CLAUSE = re.compile(
+    r"(?:,?\s+(?:without overwriting another editor|and warn me if (?:the table|it) changed|"
+    r"unless another editor saved first))?[.!?]*$", re.I)
+
+
+def _edit(description):
+    if not isinstance(description, str) or not 0 < len(description) <= 1000:
+        return None
+    text = _CONFLICT_CLAUSE.sub("", description.strip(), count=1)
+    rename = re.fullmatch(
+        r'(?:rename|retitle) (?:my |the |this )?inspection (?:table|recipe) (?:to|as) (.+)', text, re.I)
+    if rename:
+        title = rename[1].strip()
+        if len(title) >= 2 and title[0] == title[-1] and title[0] in ("'", '"'):
+            title = title[1:-1]
+        if title and len(title) <= 120 and title.isprintable():
+            return "title", title
+    rows = re.fullmatch(
+        r"(?:show|display) (\d{1,4}|[a-z]+) inspection rows per page|"
+        r"set (?:my |the |this )?inspection (?:table|recipe) to (?:show |display )?"
+        r"(\d{1,4}|[a-z]+) rows per page", text, re.I)
+    if rows:
+        raw = (rows[1] or rows[2]).casefold()
+        if raw.isdecimal():
+            count = int(raw)
+        elif raw in _NUMBERS:
+            count = _NUMBERS.index(raw)
+        else:
+            return None
+        if 1 <= count <= 1000:
+            return "row_limit", count
+    order = re.fullmatch(
+        r"sort (?:the |my )?inspection (?:rows by )?([a-z_][a-z0-9_]*) "
+        r"(highest first|lowest first|ascending|descending)", text, re.I)
+    if order:
+        direction = "desc" if order[2].casefold() in ("highest first", "descending") else "asc"
+        return "sort", (order[1].casefold(), direction)
+    return None
+
+
+def matches(description):
+    return _edit(description) is not None
+
+
+def build_body(description):
+    edit = _edit(description)
+    if edit is None:
+        raise ValueError("Unsupported inspection table edit.")
+    # repr escapes the literal argument before embedding it in a standalone script.
+    return _BODY.replace("__EDIT__", repr(edit))
+
+
+_BODY = r"""
+import re
+
+
+def run(intake, params):
+    snapshot = intake.get("inspection_recipe") or {}
+    element = snapshot.get("element") or {}
+    revision = snapshot.get("revision")
+    if type(revision) is not int or revision < 1:
+        raise ValueError("Select a saved recipe revision before editing.")
+    label = element.get("id", "") + " " + element.get("title", "")
+    if element.get("kind") != "dataset.table" or "inspection" not in re.findall(r"[a-z0-9]+", label.lower()):
+        raise ValueError("Select the inspection table to edit.")
+    field, value = __EDIT__
+    edited = dict(element)
+    if field == "title":
+        edited["title"] = value
+    elif field == "row_limit":
+        edited["props"] = {**element["props"], "row_limit": value}
+    else:
+        requested, direction = value
+        query = element["query"]
+        available = list(dict.fromkeys(query["fields"] + element["props"]["columns"]))
+        # An exact field ID wins. A plural in the request may name a singular column.
+        matches = [f for f in available if f.casefold() == requested]
+        if not matches and requested.endswith("s"):
+            matches = [f for f in available if f.casefold() == requested[:-1]]
+        if len(matches) != 1:
+            raise ValueError("Choose an existing unambiguous inspection field to sort.")
+        column = matches[0]
+        order = [{"field": column, "direction": direction}]
+        order.extend(row for row in query.get("sort", []) if row["field"] != column)
+        edited["query"] = {**query, "sort": order}
+    return {"recipe": edited, "expectedRevision": revision}, None
+"""
+
+
+def edit_inspection_recipe(service, description, snapshot, tenant, session, turn):
+    """Prepare an edit offline; the existing guarded CAS service owns the write."""
+    from integration_tool_service import ReadFailure, failure, normalize
+    import tool_loader
+    import tools_fallback
+
+    if not matches(description) or type(snapshot) is not dict or set(snapshot) != {"element", "revision"}:
+        return failure("invalid_input")
+    try:
+        selected = normalize("elements", {"recipe": snapshot["element"], "expectedRevision": snapshot["revision"]})
+    except ReadFailure:
+        return failure("invalid_input")
+    package, source, _ = tools_fallback.author_tool(description)
+    if package["engine_op"] != "inspection_recipe_edit":
+        return failure("invalid_input")
+    intake = {"inspection_recipe": {"element": selected["recipe"], "revision": selected["expectedRevision"]}}
+    status, payload = tool_loader._run_source_in_sandbox(source, "inspection_recipe.py", intake, {})
+    if status != "ok":
+        return failure("invalid_input" if status == "tool_error" else "unavailable")
+    args, _ = payload
+    if (args.get("expectedRevision") != selected["expectedRevision"]
+            or args.get("recipe", {}).get("id") != selected["recipe"]["id"]):
+        return failure("invalid_input")
+    return service.execute("elements", args, tenant, session, turn)

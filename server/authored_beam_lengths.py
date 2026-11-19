@@ -2,6 +2,7 @@
 import re
 
 from authored_block_transform import TRANSFORM_SOURCE
+from authored_spline_length import SPLINE_LENGTH_SOURCE
 
 
 _GROUPED = re.compile(r"\b(?:by|per|each|every)\s+(?:drawing\s+)?layer\b|\blayer[- ]by[- ]layer\b")
@@ -23,23 +24,25 @@ def matches(description):
 
 
 def build_body(description, *, entry_point="run"):
-    if entry_point not in ("run", "measure_gross_beams"):
+    if entry_point not in ("run", "measure_gross_beams", "collect_spline_segments"):
         raise ValueError("Unsupported beam measurement entry point.")
     for pattern, label, factor in _UNITS:
         if re.search(pattern, description, re.IGNORECASE):
             break
     else:
         label, factor = "drawing_units", 1.0
+    collect_segments = entry_point == "collect_spline_segments"
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
-            .replace("__LIST_MEMBERS__", repr(bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__COLLECT_SPLINES__", repr(collect_segments))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
 
 
 _BODY = """
 import math
 import re
-""" + TRANSFORM_SOURCE + """
+""" + TRANSFORM_SOURCE + SPLINE_LENGTH_SOURCE + """
 
 
 LENGTH_RELATIVE_TOLERANCE = 1e-5
@@ -104,24 +107,33 @@ def __ENTRY_POINT__(intake, params):
         layer = path.get("layer", "0")
         if layer == "0":
             layer = inherited
-        if path.get("space") == "paper" or path.get("closed"):
+        if __COLLECT_SPLINES__ and path.get("kind") != "SPLINE":
+            return
+        if path.get("space") == "paper":
             return
         if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
             return
-        points = path["pts"]
-        bulges = path.get("bulges", [])
-        if bulges and len(bulges) != len(points):
-            raise ValueError("Beam curve lacks per-vertex bulges.")
-        length = 0.0
-        for i in range(len(points) - 1):
-            delta = [b-a for a, b in zip(points[i], points[i+1])]
-            if len(delta) == 2:
-                delta.append(0)
-            bulge = bulges[i] if bulges else 0.0
-            if bulge:
-                length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
-            else:
-                length += math.hypot(*transform_vector(frame, delta))
+        if path.get("closed"):
+            if __COLLECT_SPLINES__:
+                raise ValueError("A closed spline has no free ends for a joined beam report.")
+            return
+        if path.get("kind") == "SPLINE":
+            length = spline_length(path, frame)
+        else:
+            points = path["pts"]
+            bulges = path.get("bulges", [])
+            if bulges and len(bulges) != len(points):
+                raise ValueError("Beam curve lacks per-vertex bulges.")
+            length = 0.0
+            for i in range(len(points) - 1):
+                delta = [b-a for a, b in zip(points[i], points[i+1])]
+                if len(delta) == 2:
+                    delta.append(0)
+                bulge = bulges[i] if bulges else 0.0
+                if bulge:
+                    length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
+                else:
+                    length += math.hypot(*transform_vector(frame, delta))
         total = totals.get(layer, 0.0) + copies * length * factor
         if not math.isfinite(total):
             raise ValueError("Beam length exceeds the supported numeric range.")
@@ -132,8 +144,13 @@ def __ENTRY_POINT__(intake, params):
             if not key or key in members:
                 raise ValueError("Individual beam lengths require unique entity handles.")
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
+            if __COLLECT_SPLINES__:
+                members[key]["ends"] = spline_endpoints(path, frame)
 
     for path in intake.get("polylines", []):
+        measure(path, identity, "0", (), 1)
+
+    for path in intake.get("splines", []):
         measure(path, identity, "0", (), 1)
 
     blocks = {name.casefold(): block for name, block in intake.get("blocks", {}).items()}
@@ -156,7 +173,7 @@ def __ENTRY_POINT__(intake, params):
                 raise ValueError("Beam paths require complete block geometry: " + name)
             paths = []
             for child in children:
-                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                     raise ValueError("Missing beam geometry in block: " + name)
                 if child.get("type") == "INSERT" and "nested_inserts" not in block:
                     raise ValueError("Missing nested reference in block: " + name)
@@ -179,9 +196,9 @@ def __ENTRY_POINT__(intake, params):
             raise ValueError("Beam block traversal exceeds 10000 placements.")
         if not __LIST_MEMBERS__:
             copies *= rows * cols
-        # Array offsets and translations cannot affect a centerline length.
-        frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)))
         for index in range(placements):
+            row, column = divmod(index, cols)
+            frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)), row, column)
             branch = prefix
             if __LIST_MEMBERS__:
                 tag = insert.get("handle")
@@ -199,6 +216,8 @@ def __ENTRY_POINT__(intake, params):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if __COLLECT_SPLINES__:
+        result["output_per_drawing_unit"] = factor
     if __LIST_MEMBERS__:
         result["lengths_by_handle"] = members
     return (result, None)

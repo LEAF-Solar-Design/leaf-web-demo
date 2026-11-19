@@ -88,6 +88,7 @@ def parse_dxf_bytes(
     seen_layers: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
+    splines: List[Dict[str, Any]] = []
     circles: List[Dict[str, Any]] = []
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
@@ -228,6 +229,15 @@ def parse_dxf_bytes(
             if props is not None and entity.get("handle"):
                 insert_properties[entity["handle"]] = props
             continue
+        if include_measurement_evidence and section == "ENTITIES" and (code, value) == (0, "SPLINE"):
+            entity = _spline_measurement_path(record)
+            entity.update(space_info)
+            splines.append(entity)
+            if entity["layer"] not in seen_layers:
+                seen_layers.add(entity["layer"])
+                layers.append(entity["layer"])
+            i = j
+            continue
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
             if entity is not None:
@@ -315,6 +325,8 @@ def parse_dxf_bytes(
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if splines:
+        out["splines"] = splines
     if elevation_evidence:
         out["elevation_evidence"] = elevation_evidence
     if insunits is not None:
@@ -490,6 +502,13 @@ def parse_dxf_bytes(
         out["parseErrors"] = parse_errors
     from drawing_dependency_report import from_pairs
     out["dependency_report"] = from_pairs(pairs, literal_text=literal_text)
+    if include_measurement_evidence:
+        from dxf_spatial_clips import attach_clips
+        from authored_dynamic_visibility import attach_visibility
+        from authored_panel_regions import attach_footprints
+        attach_clips(pairs, out)
+        attach_footprints(pairs, out)
+        attach_visibility(pairs, out)
     return out
 
 
@@ -738,7 +757,45 @@ def _explicit_elevation(pairs, end, kind, groups):
     return count >= 2
 
 
+def _spline_measurement_path(record):
+    groups = dict(record)
+    path = {"kind": "SPLINE", "layer": groups.get(8) or "0", "handle": groups.get(5)}
+    # Preserve bad evidence on its own path so unrelated layers and unused
+    # block definitions do not prevent a valid beam takeoff.
+    try:
+        path["closed"] = bool(int(groups.get(70, 0)) & 3)
+        degree = int(groups.get(71, 0))
+        knots = [float(v) for c, v in record if c == 40]
+        weights = [float(v) for c, v in record if c == 41]
+        points = []
+        for code, value in record:
+            if code == 10:
+                points.append([float(value)])
+            elif code in (20, 30):
+                if not points or len(points[-1]) != code // 10 - 1:
+                    raise ValueError("Invalid spline control point coordinates.")
+                points[-1].append(float(value))
+        if (len(points) <= degree or degree < 1 or int(groups.get(73, -1)) != len(points)
+                or any(len(p) < 2 or not all(math.isfinite(x) for x in p) for p in points)):
+            raise ValueError("Invalid spline degree or control points.")
+        if (len(knots) != len(points) + degree + 1 or int(groups.get(72, -1)) != len(knots)
+                or not all(math.isfinite(x) for x in knots)
+                or any(b < a for a, b in zip(knots, knots[1:]))
+                or knots[degree] >= knots[len(points)]
+                or any(a == b for a, b in zip(knots, knots[degree+1:]))):
+            raise ValueError("Invalid spline knot vector.")
+        if weights and (len(weights) != len(points) or any(w <= 0 or not math.isfinite(w) for w in weights)):
+            raise ValueError("Spline weights must be finite, positive and match the control count.")
+        path.update(degree=degree, control_points=[p if len(p) == 3 else [*p, 0.] for p in points],
+                    knots=knots, weights=weights or [1.] * len(points))
+    except (ValueError, OverflowError) as exc:
+        path["spline_error"] = "Invalid SPLINE: " + str(exc)
+    return path
+
+
 def _block_measurement_path(pairs, start, end, kind):
+    if kind == "SPLINE":
+        return _spline_measurement_path(pairs[start:end])
     parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
     path, _ = parse(pairs, start)
     path.pop("_properties", None)
@@ -782,7 +839,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                 paths = block.setdefault("beam_paths", [])
                 if len(paths) < 10000:
                     path = _block_measurement_path(pairs, i + 1, end, kind)
@@ -800,7 +857,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 block["nested_inserts_incomplete"] = True
