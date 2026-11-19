@@ -8,7 +8,7 @@ export * from "../vendor/mushy-author/ports/index.js";
 export const SPINE_TOOL_NAMES = [
   "catalog_search", "drawing_state", "ask_user", "run_capability", "job_status",
   "author_tool", "author_stage_status", "request_publication", "request_confirmation", "propose_overlay",
-  "customize_platform", "finish_project", "project_completion_status",
+  "customize_platform", "finish_project", "project_completion_status", "view_control",
   "integration_datasets", "integration_action_catalog", "integration_query",
   "integration_save_element", "propose_project_page", "inspect_project_photo", "propose_project_photo_assignments",
   "device_list", "device_install_package", "device_ha_step", "device_light",
@@ -21,6 +21,13 @@ import { z } from "zod";
 export const CanonicalChangeSetId = z.string().length(36)
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 export const AuthorStageStatusInput = z.strictObject({ change_set_id: CanonicalChangeSetId });
+
+export const ViewControlInput = z.strictObject({
+  op: z.enum(["fit", "zoom_in", "zoom_out", "zoom_to_layer"]),
+  layer: z.string().min(1).max(255).optional(),
+}).refine(v => (v.op === "zoom_to_layer") === (typeof v.layer === "string") &&
+  (v.layer === undefined || !/[\u0000-\u001f\u007f]/.test(v.layer)));
+export type ViewControlInput = z.infer<typeof ViewControlInput>;
 
 const photoAssignmentText = (low: number, high: number) => z.string().refine(value =>
   Array.from(value).length >= low && Array.from(value).length <= high &&

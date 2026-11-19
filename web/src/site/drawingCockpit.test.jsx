@@ -10,6 +10,7 @@ import { useCallback, useRef, useState } from 'react'
 
 import { BACK_UNAVAILABLE, CockpitStatus, FootRegion, StatusToggles, ViewCluster, ViewerGrid, formatCoordinate, formatScale, gridLayout, gridStep, paintGrid, useViewNavigation, zoomViewer } from './DrawingCockpit.jsx'
 import { createViewHistory } from '../lib/viewHistory.js'
+import { VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 
 afterEach(cleanup)
@@ -575,6 +576,45 @@ const flushFrame = () => act(async () => { await nextFrame() })
 const backButton = () => screen.getByRole('button', { name: 'Back to the previous view' })
 const upButton = () => screen.getByRole('button', { name: 'Up one level' })
 const liveText = () => screen.getByTestId('cockpit-view-live').textContent
+
+describe('assistant view requests', () => {
+  const move = detail => act(() => { window.dispatchEvent(new CustomEvent(VIEW_CONTROL_EVENT, { detail })) })
+
+  it('zooms around the current pose, frames the requested layer, and fits the drawing', async () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    const { unmount } = render(<NavHarness viewer={viewer} probe={probe} />)
+    move({ op: 'zoom_in' })
+    expect(viewer.setView).toHaveBeenLastCalledWith({ zoom: POSE_A.zoom * 1.25 })
+    move({ op: 'zoom_out' })
+    expect(viewer.setView).toHaveBeenLastCalledWith({ zoom: POSE_A.zoom * 0.8 })
+    move({ op: 'zoom_to_layer', layer: 'roo' })
+    expect(probe.current.size).toBe(1)
+    expect(viewer.frame).toHaveBeenCalledWith({ minX: 20, minY: 20, maxX: 30, maxY: 25 }, 0.8)
+    await flushFrame()
+    expect(liveText()).toBe('Showing layer Roof')
+    move({ op: 'fit' })
+    expect(viewer.setView).toHaveBeenLastCalledWith('home')
+    await flushFrame()
+    expect(liveText()).toBe('Showing the whole drawing')
+    unmount()
+    viewer.setView.mockClear()
+    move({ op: 'fit' })
+    expect(viewer.setView).not.toHaveBeenCalled()
+  })
+
+  it('announces a missing layer or a layer the viewer cannot frame', async () => {
+    const viewer = fakeViewer({ frameResult: false })
+    render(<NavHarness viewer={viewer} probe={{ current: null }} />)
+    move({ op: 'zoom_to_layer', layer: 'Missing' })
+    expect(viewer.frame).not.toHaveBeenCalled()
+    await flushFrame()
+    expect(liveText()).toBe('No layer named Missing in this drawing')
+    move({ op: 'zoom_to_layer', layer: 'Roof' })
+    await flushFrame()
+    expect(liveText()).toBe('That layer has nothing to show')
+  })
+})
 
 describe('ViewCluster Back and Up (S3)', () => {
   it('shows visible Back and Up labels, and an empty Back is aria-disabled but focusable', () => {
