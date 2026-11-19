@@ -23,7 +23,7 @@ def matches(description):
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
                 and (_GROUPED.search(prompt)
-                     or re.search(r"\bcurved\s+beams?\b", prompt)))
+                     or re.search(r"\b(?:curved|spatial)\s+beams?\b|\b(?:3d|polylines?|vertices)\b|\bellip(?:ses?|tical)\b", prompt)))
 
 
 def build_body(description, *, entry_point="run"):
@@ -41,14 +41,15 @@ def build_body(description, *, entry_point="run"):
     span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
     spline_request = span_detail or re.search(r"\b(?:splines?|nurbs)\b", description, re.I)
     mixed_scope = re.search(
-        r"\b(?:lines?|(?:lw)?polylines?|arcs?|bulges?|straight beams?|"
+        r"\b(?:lines?|(?:lw)?polylines?|arcs?|ellip(?:ses?|tical)|bulges?|straight beams?|"
         r"(?:all|every) beams?|including (?:rational )?(?:splines?|nurbs))\b", description, re.I)
     explicit_spline_scope = re.search(
         r"\b(?:only (?:the )?(?:splines?|nurbs)|(?:splines?|nurbs)(?: beams?)? only)\b", description, re.I)
     only_splines = collect_segments or bool(spline_request and (explicit_spline_scope or not mixed_scope))
     periodic = bool(re.search(r"\bperiodic\b", description, re.I))
     survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
-    endpoints = bool(spline_request and re.search(r"\b(?:endpoints?|orientation|direction)\b", description, re.I))
+    endpoints = bool(re.search(r"\b(?:endpoints?|start and end (?:coordinates|points))\b", description, re.I)
+                     or spline_request and re.search(r"\b(?:orientation|direction)\b", description, re.I))
     list_members = re.search(r"\blist(?:s|ing)?\b|\beach\s+(?:(?:spline|nurbs)\s+)?beam\b", description, re.I)
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__PERIODIC__", repr(periodic))
@@ -92,6 +93,10 @@ def curved_length(frame, delta, bulge, normal):
         s = math.copysign(1.0, bulge) * math.sin(angle)
         return math.hypot(*(c*x + s*y for x, y in zip(along, across)))
 
+    return bounded_conic_length(speed, half, arc_factor)
+
+
+def bounded_conic_length(speed, half, arc_factor):
     # For each subarc its chord bounds length below, and its two endpoint
     # tangents up to their intersection bound length above. Both bounds
     # survive any affine placement. Double the mesh and reuse endpoints.
@@ -112,6 +117,36 @@ def curved_length(frame, delta, bulge, normal):
         count *= 2
         step /= 2
     raise ValueError("Curved beam length could not meet the reported tolerance.")
+
+
+def ellipse_axes(path):
+    major = path["major"]
+    axis = unit_vector(major)
+    nx, ny, nz = normal = unit_vector(path["nrm"])
+    ratio = path["ratio"]
+    if not 0 < ratio <= 1 or abs(sum(a*n for a, n in zip(axis, normal))) > 1e-8:
+        raise ValueError("Invalid ELLIPSE axes.")
+    x, y, z = major
+    minor = tuple(ratio*v for v in (ny*z - nz*y, nz*x - nx*z, nx*y - ny*x))
+    return major, minor
+
+
+def native_ellipse_length(path, frame):
+    major, minor = ellipse_axes(path)
+    u, v = transform_vector(frame, major), transform_vector(frame, minor)
+    start, end = path["start_param"], path["end_param"]
+    if end == start or abs(end-start) > math.tau + 1e-12:
+        raise ValueError("Ambiguous or invalid ELLIPSE sweep.")
+    # A rounded positive full turn can exceed tau by a few ulps. Modulo
+    # would turn it into a near-zero arc. Preserve genuinely small sweeps.
+    sweep = math.tau if end-start >= math.tau else ((end-start) % math.tau or math.tau)
+    mid = start + sweep / 2
+
+    def speed(offset):
+        angle = mid + offset
+        return math.hypot(*(b*math.cos(angle) - a*math.sin(angle) for a, b in zip(u, v)))
+
+    return bounded_conic_length(speed, sweep/2, sweep)
 
 
 def native_arc_length(path, frame):
@@ -184,13 +219,18 @@ def __ENTRY_POINT__(intake, params):
             return
         if __PERIODIC__ and not path.get("periodic"):
             return
-        if path.get("closed") and not path.get("bulges") and not (__PERIODIC__ and path.get("periodic")):
+        if path.get("measurement_error"):
+            raise ValueError(path["measurement_error"])
+        if (path.get("closed") and not path.get("polyline3d") and not path.get("bulges")
+                and not (__PERIODIC__ and path.get("periodic"))):
             if __COLLECT_SPLINES__:
                 raise ValueError("A closed spline has no free ends for a joined beam report.")
             return
-        if path.get("measurement_error"):
-            raise ValueError(path["measurement_error"])
-        if path.get("kind") == "ARC":
+        if path.get("kind") == "ELLIPSE":
+            if __SURVEY__:
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
+            length = native_ellipse_length(path, frame)
+        elif path.get("kind") == "ARC":
             if __SURVEY__:
                 raise ValueError("Survey precision bounds require straight beam coordinates.")
             length = native_arc_length(path, frame)
@@ -237,8 +277,30 @@ def __ENTRY_POINT__(intake, params):
                 span_reports[key] = span_report
             if (__COLLECT_SPLINES__ or __ENDPOINTS__) and path.get("kind") == "SPLINE":
                 members[key]["ends"] = spline_endpoints(path, frame, evaluation_budget, require_continuity=__COLLECT_SPLINES__)
+            elif __ENDPOINTS__:
+                if path.get("kind") in ("ARC", "ELLIPSE"):
+                    if "c" not in path:
+                        raise ValueError("Missing conic center for endpoint coordinates.")
+                    if path["kind"] == "ARC":
+                        u, v, _ = extrusion_axes(path.get("nrm", (0, 0, 1)))
+                        u, v = tuple(path["r"]*x for x in u), tuple(path["r"]*y for y in v)
+                        start, end = math.radians(path["start_deg"]), math.radians(path["end_deg"])
+                    else:
+                        u, v = ellipse_axes(path)
+                        start, end = path["start_param"], path["end_param"]
+                    points = [tuple(c + a*math.cos(t) + b*math.sin(t) for c, a, b in zip(path["c"], u, v))
+                              for t in (start, end)]
+                else:
+                    points = (path["pts"][0], path["pts"][0 if path.get("closed") else -1])
+                ends = [transform_point(frame, tuple(point) if len(point) == 3 else (*point, 0)) for point in points]
+                if not all(math.isfinite(value) for end in ends for value in end):
+                    raise ValueError("Unresolved transformed beam endpoint.")
+                members[key]["ends"] = ends
 
     for path in distinct_entities(intake.get("polylines", [])):
+        measure(path, identity, "0", (), 1)
+
+    for path in distinct_entities(intake.get("beam_ellipses", [])):
         measure(path, identity, "0", (), 1)
 
     for arc in distinct_entities(intake.get("arcs", [])):
@@ -267,7 +329,7 @@ def __ENTRY_POINT__(intake, params):
                 raise ValueError("Beam paths require complete block geometry: " + name)
             paths = []
             for child in children:
-                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ELLIPSE"):
                     raise ValueError("Missing beam geometry in block: " + name)
                 if child.get("type") == "INSERT" and "nested_inserts" not in block:
                     raise ValueError("Missing nested reference in block: " + name)
@@ -297,7 +359,7 @@ def __ENTRY_POINT__(intake, params):
         nested = distinct_entities(block.get("nested_inserts", []))
         for index in range(placements):
             row, column = divmod(index, cols)
-            frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)), row, column)
+            frame = insert_frame(parent, insert, block.get("measurement_base", block.get("base", (0, 0, 0))), row, column, source_precision=True)
             branch = prefix
             if __LIST_MEMBERS__:
                 tag = insert.get("handle")
