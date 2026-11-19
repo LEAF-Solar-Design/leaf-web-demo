@@ -4,6 +4,23 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def timber_end_notch_quality(revision, rule, width_mm, depth_mm, notch_mm, reaction_n):
+    """Reduce rectangular section shear resistance by the pinned remaining-depth factor."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "rectangular-end-notch-depth-ratio-v1":
+        return "INCOMPLETE"
+    values = (width_mm, depth_mm, notch_mm, reaction_n, rule.get("allowable_shear_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    width, depth, notch, reaction, strength = (Fraction(str(v)) for v in values)
+    if min(width, strength) <= 0 or not 0 <= notch < depth:
+        return "INCOMPLETE"
+    remaining = depth - notch
+    capacity = Fraction(2, 3) * strength * width * remaining * (remaining / depth)
+    return "PASS" if abs(reaction) <= capacity else "FAIL"
+
+
 def shear_lag_quality(revision, rule, net_area_mm2, centroid_offset_mm, connection_mm, tension_n):
     """Use the pinned effective area An(1 - x/L) for a partially connected member."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

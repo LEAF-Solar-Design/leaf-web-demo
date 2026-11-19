@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("width,depth,notch,strength,capacity,gross", [
+    pytest.param(60, 200, 50, 2, 9000, 16000, id="check-the-notched-roof-joist"),
+    pytest.param(100, 120, 30, 1.5, 6750, 12000, id="check-a-wide-end-seat"),
+    pytest.param(45, 150, 50, 2.5, 5000, 11250, id="qualify-the-deep-rafter-notch"),
+])
+def test_timber_end_notch_shear(width, depth, notch, strength, capacity, gross):
+    from benches.x03_layout_oracle import timber_end_notch_quality as grade
+
+    rule = dict(revision="timber", model="rectangular-end-notch-depth-ratio-v1", allowable_shear_mpa=strength)
+    assert grade("timber", rule, width, depth, 0, gross) == "PASS"
+    assert grade("timber", rule, width, depth, notch, capacity) == "PASS"
+    assert capacity + 1 < gross
+    assert grade("timber", rule, width, depth, notch, capacity + 1) == "FAIL"
+    assert grade("timber", rule, width, depth, None, capacity) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("area,offset,length,stress,capacity", [
     pytest.param(100, 10, 50, 120, 9600, id="check-a-single-leg-angle"),
     pytest.param(240, 25, 100, 100, 18000, id="check-a-bolted-channel"),

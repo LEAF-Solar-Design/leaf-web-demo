@@ -2509,6 +2509,15 @@ def capacitor_life_quality(revision, curve, history, *, complete):
     Each band ends at an inclusive upper temperature. Reaching one full unit
     of damage exhausts the capacitor's qualified life.
     """
+    return _temperature_life_quality(revision, curve, history, complete)
+
+
+def transformer_insulation_life_quality(revision, curve, hot_spot_history, *, complete):
+    """Grade full-lifetime winding hot-spot intervals under the pinned temperature/life table."""
+    return _temperature_life_quality(revision, curve, hot_spot_history, complete)
+
+
+def _temperature_life_quality(revision, curve, history, complete):
     if complete is not True or not isinstance(revision, str) or not revision.strip():
         return "INCOMPLETE"
     if not isinstance(curve, dict) or curve.get("revision") != revision:
@@ -3144,3 +3153,24 @@ def ct_supervision_quality(zone_inputs, states, differential_pickups, alarms, tr
     expected_trips = {zone: differential_pickups[zone] and not any(expected_alarms[ct] for ct in inputs)
                       for zone, inputs in zone_inputs.items()}
     return "PASS" if alarms == expected_alarms and trips == expected_trips else "FAIL"
+
+
+def negative_sequence_duty_quality(rule, initial_duty, intervals, *, complete):
+    """Accumulate (negative-sequence RMS amps / rated amps)^2 * seconds without cooling."""
+    if complete is not True or not isinstance(rule, dict) or rule.get("model") != "adiabatic-i2-pu-v1":
+        return "INCOMPLETE"
+    rated, limit = rule.get("rated_a"), rule.get("limit_pu2_s")
+    if not all(map(finite_measure, (rated, limit, initial_duty))) or min(rated, limit) <= 0 or initial_duty < 0:
+        return "INCOMPLETE"
+    if not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    duty = Fraction(str(initial_duty))
+    rated = Fraction(str(rated))
+    for interval in intervals:
+        if not isinstance(interval, (tuple, list)) or len(interval) != 2 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        seconds, i2_amps = interval
+        if seconds <= 0 or i2_amps < 0:
+            return "INCOMPLETE"
+        duty += Fraction(str(seconds)) * (Fraction(str(i2_amps)) / rated) ** 2
+    return "PASS" if duty <= Fraction(str(limit)) else "FAIL"

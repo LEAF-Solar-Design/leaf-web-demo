@@ -1756,3 +1756,48 @@ def semaphore_permit_quality(policy, capacity, opening, events, reported_free, *
                 return "FAIL"
             used -= held.pop(grant)[1]
     return "PASS" if reported_free == capacity - used else "FAIL"
+
+
+def condition_wait_quality(rule, events, *, initial_predicate, expected_count):
+    """Audit a broadcast condition variable with initially free mutex and no waiters.
+
+    wait-until checks the shared predicate and atomically releases the mutex
+    when it parks. Broadcast under the mutex makes every parked waiter runnable.
+    """
+    if rule != "locked-predicate-broadcast-v1" or type(initial_predicate) is not bool:
+        return "INCOMPLETE"
+    if not isinstance(events, list) or type(expected_count) is not int or expected_count != len(events):
+        return "INCOMPLETE"
+    for index, row in enumerate(events):
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        order, actor, op = row
+        if type(order) is not int or order != index or not isinstance(actor, str) or not actor:
+            return "INCOMPLETE"
+        if op not in ("lock", "unlock", "set-true", "set-false", "wait-until", "broadcast"):
+            return "INCOMPLETE"
+
+    parked = set()
+    owner = None
+    predicate = initial_predicate
+    for _, actor, op in events:
+        if op == "lock":
+            if owner is not None or actor in parked:
+                return "FAIL"
+            owner = actor
+        elif owner != actor:
+            return "FAIL"
+        elif op == "unlock":
+            owner = None
+        elif op == "broadcast":
+            parked.clear()
+        elif op == "wait-until":
+            if not predicate:
+                parked.add(actor)
+                owner = None
+        else:
+            predicate = op == "set-true"
+    # A producer still holding the mutex can issue the notification before unlock.
+    if predicate and parked:
+        return "FAIL" if owner is None else "INCOMPLETE"
+    return "PASS"

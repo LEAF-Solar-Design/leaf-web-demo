@@ -870,3 +870,27 @@ def test_semaphore_conserves_owned_permits(capacity, opening_grant, acquired, re
     assert check([dict(release, owner="b")], free) == "FAIL"
     assert check([dict(release, owner=None)], free) == "INCOMPLETE"
     assert check([], free, snapshot=None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("workers,early_signal", [
+    pytest.param(["draw"], False, id="wake-a-render-worker-after-input-arrives"),
+    pytest.param(["merge", "save"], False, id="broadcast-readiness-to-two-waiters"),
+    pytest.param(["fit", "plot", "export"], True, id="discard-a-broadcast-before-workers-park"),
+])
+def test_condition_predicate_does_not_strand_waiters(workers, early_signal):
+    from benches.x03_dashboard_oracle import condition_wait_quality as grade
+
+    prefix = [("source", "lock"), ("source", "broadcast"), ("source", "unlock")] if early_signal else []
+    for worker in workers:
+        prefix.extend([(worker, "lock"), (worker, "wait-until")])
+    prefix.extend([("source", "lock"), ("source", "set-true")])
+    def encode(steps):
+        return [(i, actor, op) for i, (actor, op) in enumerate(steps)]
+    def check(rows):
+        return grade("locked-predicate-broadcast-v1", rows, initial_predicate=False, expected_count=len(rows))
+
+    valid = encode(prefix + [("source", "broadcast"), ("source", "unlock")])
+    assert check(valid) == "PASS"
+    assert check(encode(prefix + [("source", "unlock")])) == "FAIL"
+    assert check(encode(prefix + [("source", "unlock"), ("source", "broadcast")])) == "FAIL"
+    assert check(valid[1:]) == "INCOMPLETE"
