@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("history,duration,installed,remaining", [
+    pytest.param([(0, 5, "normal")], 5, 200, 180, id="check-the-rail-clamp-after-service"),
+    pytest.param([(0, 10, "hot")], 10, 400, 300, id="check-the-warm-inverter-bracket"),
+    pytest.param([(0, 10, "normal"), (10, 20, "hot")], 20, 300, 210, id="verify-the-mixed-service-joint"),
+])
+def test_bolt_retention_over_service_history(history, duration, installed, remaining):
+    from benches.x03_layout_oracle import preload_retention_quality as grade
+
+    rule = dict(revision="lab-curve", hour_factors={"normal": 1, "hot": 2},
+                retention_curve=[(0, 1), (10, 0.8), (30, 0.7)])
+    # At 5, 20 and 30 equivalent hours the sheet retains 90%, 75% and 70%.
+    assert grade("lab-curve", rule, history, duration, installed, remaining) == "PASS"
+    assert installed > remaining + 1
+    assert grade("lab-curve", rule, history, duration, installed, remaining + 1) == "FAIL"
+    assert grade("lab-curve", rule, history, duration + 1, installed, remaining) == "INCOMPLETE"
+    assert grade("lab-curve", rule, [(0, 31, "normal")], 31, installed, remaining) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("forces,axial,mx,my", [
     pytest.param([0, 2, 3, 5], 10, 24, -14, id="check-the-unloaded-west-corner"),
     pytest.param([4, 0, 2, 2], 8, 12, -4, id="verify-the-eccentric-cabinet-load"),

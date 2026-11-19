@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("low,high,qualified_cycles", [
+    pytest.param(-35, 80, 100, id="check-the-outdoor-controller"),
+    pytest.param(-5, 40, 5000, id="qualify-the-cabinet-display"),
+    pytest.param(10, 65, 800, id="check-the-power-module"),
+])
+def test_thermal_cycles_within_operating_range(low, high, qualified_cycles):
+    from benches.x03_catalog_oracle import thermal_cycle_quality as grade
+
+    sheet = dict(revision="tc2", operating_c=(-45, 95), thermal_cycle_envelopes=[
+        (low, high, qualified_cycles), (low + 1, high, qualified_cycles * 2),
+    ])
+    assert sheet["operating_c"][0] <= low < high <= sheet["operating_c"][1]
+    assert grade("tc2", sheet, low, high, qualified_cycles) == "PASS"
+    assert grade("tc2", sheet, low, high, qualified_cycles + 1) == "FAIL"
+    assert grade("tc2", sheet, low, high + 1, qualified_cycles) == "FAIL"
+    assert grade("tc2", dict(sheet, thermal_cycle_envelopes=[]), low, high, qualified_cycles) == "INCOMPLETE"
+    assert grade("unknown", sheet, low, high, qualified_cycles) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("trace,peak,dwell", [
     pytest.param([(0, 180), (10, 220), (20, 180)], 220, 10, id="qualify-a-controller-ramp"),
     pytest.param([(0, 200), (4, 200), (8, 230), (14, 230), (18, 200)], 230, 14,
@@ -1124,3 +1143,21 @@ def test_sea_level_reduction_binds_datum(pressure, elevation, temperature, expec
     assert grade(model, station, dict(report, datum="station"), 0.000001) == "FAIL"
     del station["elevation_m_asl"]
     assert grade(model, station, report, 0.000001) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("winds,observed,step,rise,fall,mean,biased", [
+    pytest.param([9, 5], [5, 9, 7], 1, 1, 0.5, 7, 8, id="remove-decay-bias-after-a-single-gust"),
+    pytest.param([10, 6, 5], [8, 10, 9, 8], 2, 1, 0.25, 7, 9, id="reconstruct-a-two-step-lull"),
+    pytest.param([6, 9, 0], [2, 5, 8, 6], 5, 0.75, 0.25, 5, 6.333333, id="recover-a-gust-followed-by-calm"),
+])
+def test_anemometer_mean_from_pinned_gust_response(winds, observed, step, rise, fall, mean, biased):
+    from benches.x03_weather_oracle import anemometer_overspeed_quality as grade
+
+    model = dict(rule="asymmetric-discrete-response-v1", step_s=step, rise_gain=rise,
+                 fall_gain=fall, min_speed=0, max_speed=12)
+    trace = [(i * step, speed) for i, speed in enumerate(observed)]
+    assert sum(winds) == mean * len(winds)
+    assert grade(model, trace, mean) == "PASS"
+    assert grade(model, trace, biased) == "FAIL"
+    assert grade(dict(model, max_speed=max(winds) - 1), trace, mean) == "INCOMPLETE"
+    assert grade(model, [(0, 5), (step + 1, 6)], mean) == "INCOMPLETE"

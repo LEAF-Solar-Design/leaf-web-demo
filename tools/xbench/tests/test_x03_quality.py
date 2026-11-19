@@ -1395,3 +1395,42 @@ def test_peak_busbar_support_load(amps, gap, span, force_n):
     assert grade(rule, amps, gap, span, force_n - 1) == "FAIL"
     assert grade(rule, None, gap, span, force_n) == "INCOMPLETE"
     assert grade({}, amps, gap, span, force_n) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("limit,demand,target,deadline", [
+    pytest.param(10, 15, 6, 2, id="recover-a-pump-speed-loop"),
+    pytest.param(-10, -12, -4, 1, id="release-a-negative-torque-limit"),
+    pytest.param(10, 20, 0, 0, id="center-a-position-servo"),
+])
+def test_anti_windup_release(limit, demand, target, deadline):
+    from benches.x03_quality import anti_windup_quality as grade
+
+    rule = dict(model="saturated-step-recovery-v1", output_min=-10, output_max=10,
+                integral_min=-3, integral_max=3, tolerance=0.25, recovery_ticks=deadline)
+    hold = [(0, demand, limit, 3), (1, demand, limit, 3)]
+    lag = [(2 + tick, target, limit, 2) for tick in range(deadline)]
+    exact = (2 + deadline, target, target + 0.25, 1)
+    assert grade(rule, hold + lag + [exact]) == "PASS"
+    assert grade(rule, hold + lag + [(exact[0], target, limit, 1), (exact[0]+1, target, target, 1)]) == "FAIL"
+    assert grade(rule, [(0, demand, limit, 4)] + hold[1:] + lag + [exact]) == "FAIL"
+    assert grade(rule, hold + lag) == "INCOMPLETE"
+    assert grade({}, hold + lag + [exact]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("bands,history,extra", [
+    pytest.param([(50, 1000), (80, 400)], [(50, 500), (80, 196)], (80, 4), id="dc-link-hot-hours"),
+    pytest.param([(45, 2400), (65, 600)], [(30, 1200), (60, 240)], (65, 60), id="filter-bank-service"),
+    pytest.param([(40, 800), (70, 400), (90, 100)], [(40, 200), (70, 100), (90, 45)],
+                 (90, 5), id="controller-temperature-history"),
+])
+def test_capacitor_accumulated_life(bands, history, extra):
+    from benches.x03_quality import capacitor_life_quality as grade
+
+    curve = dict(revision="qualification-A", min_c=0, upper_c_life_h=bands)
+    # The recorded duties consume 99%, 90% and 95% before the final interval.
+    assert grade("qualification-A", curve, history, complete=True) == "PASS"
+    assert grade("qualification-A", curve, history + [extra], complete=True) == "FAIL"
+    uncovered = history + [(bands[-1][0] + 1, 1)]
+    assert grade("qualification-A", curve, uncovered, complete=True) == "INCOMPLETE"
+    assert grade("qualification-B", curve, history, complete=True) == "INCOMPLETE"
+    assert grade("qualification-A", curve, history, complete=False) == "INCOMPLETE"

@@ -2451,3 +2451,88 @@ def busbar_force_quality(rule, peak_a, spacing_m, tributary_span_m, support_limi
         return "INCOMPLETE"
     force = coefficient * peak ** 2 * span / spacing
     return "PASS" if force <= limit else "FAIL"
+
+
+def anti_windup_quality(policy, trace):
+    """Grade one saturated hold followed by a constant attainable command.
+
+    Each consecutive control tick records demand, measured actuator output and
+    integrator state. Recovery starts at the first attainable demand.
+    """
+    if not isinstance(policy, dict) or policy.get("model") != "saturated-step-recovery-v1":
+        return "INCOMPLETE"
+    values = [policy.get(k) for k in ("output_min", "output_max", "integral_min", "integral_max", "tolerance")]
+    deadline = policy.get("recovery_ticks")
+    if not all(map(finite_measure, values)) or type(deadline) is not int or deadline < 0:
+        return "INCOMPLETE"
+    low, high, i_min, i_max, tolerance = (Fraction(str(v)) for v in values)
+    if low >= high or i_min >= i_max or tolerance < 0 or not isinstance(trace, list):
+        return "INCOMPLETE"
+    rail = target = released = previous = None
+    failed = False
+    for row in trace:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            return "INCOMPLETE"
+        tick, *readings = row
+        if type(tick) is not int or not all(map(finite_measure, readings)):
+            return "INCOMPLETE"
+        if previous is not None and tick != previous + 1:
+            return "INCOMPLETE"
+        previous = tick
+        demand, output, integral = (Fraction(str(v)) for v in readings)
+        if not low <= output <= high or not i_min <= integral <= i_max:
+            failed = True
+        if demand > high or demand < low:
+            limit = high if demand > high else low
+            if released is not None or (rail is not None and rail != limit):
+                return "INCOMPLETE"
+            rail = limit
+            if output != limit:
+                return "INCOMPLETE"
+        else:
+            if rail is None or demand in (low, high):
+                return "INCOMPLETE"
+            if released is None:
+                released, target = tick, demand
+            if demand != target:
+                return "INCOMPLETE"
+            if tick - released >= deadline and abs(output - target) > tolerance:
+                failed = True
+    if released is None or previous - released < deadline:
+        return "INCOMPLETE"
+    return "FAIL" if failed else "PASS"
+
+
+def capacitor_life_quality(revision, curve, history, *, complete):
+    """Sum fractions of service life used under a pinned stepwise temperature curve.
+
+    Each band ends at an inclusive upper temperature. Reaching one full unit
+    of damage exhausts the capacitor's qualified life.
+    """
+    if complete is not True or not isinstance(revision, str) or not revision.strip():
+        return "INCOMPLETE"
+    if not isinstance(curve, dict) or curve.get("revision") != revision:
+        return "INCOMPLETE"
+    lower, bands = curve.get("min_c"), curve.get("upper_c_life_h")
+    if not finite_measure(lower) or not isinstance(bands, list) or not bands:
+        return "INCOMPLETE"
+    previous = lower
+    for band in bands:
+        if not isinstance(band, (list, tuple)) or len(band) != 2 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        upper, life = band
+        if upper <= previous or life <= 0:
+            return "INCOMPLETE"
+        previous = upper
+    if not isinstance(history, list) or not history:
+        return "INCOMPLETE"
+    damage = Fraction(0)
+    for interval in history:
+        if not isinstance(interval, (list, tuple)) or len(interval) != 2 or not all(map(finite_measure, interval)):
+            return "INCOMPLETE"
+        temperature, hours = interval
+        if hours <= 0 or not lower <= temperature <= previous:
+            return "INCOMPLETE"
+        rated_h = next(life for upper, life in bands if temperature <= upper)
+        damage += Fraction(str(hours)) / Fraction(str(rated_h))
+    return "PASS" if damage < 1 else "FAIL"

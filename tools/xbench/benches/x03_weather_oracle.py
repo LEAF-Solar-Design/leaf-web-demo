@@ -749,3 +749,42 @@ def sea_level_pressure_quality(model, station, report, tolerance_hpa):
     if not isfinite(reduced) or reduced <= 0:
         return "INCOMPLETE"
     return "PASS" if reported > 0 and abs(reported - reduced) <= tolerance_hpa else "FAIL"
+
+
+def anemometer_overspeed_quality(model, trace, reported_mean):
+    """Invert a calibrated asymmetric first-order response at fixed sample intervals.
+
+    The first reading initializes the sensor. Each later reading follows one
+    interval of constant wind, with a separate gain for acceleration and decay.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(model, dict) or model.get("rule") != "asymmetric-discrete-response-v1":
+        return "INCOMPLETE"
+    values = [model.get(key) for key in ("step_s", "rise_gain", "fall_gain", "min_speed", "max_speed")]
+    if not all(map(finite_measure, values)) or not finite_measure(reported_mean):
+        return "INCOMPLETE"
+    step, rise, fall, low, high = (Fraction(str(x)) for x in values)
+    if step <= 0 or not 0 < fall <= rise <= 1 or not 0 <= low < high:
+        return "INCOMPLETE"
+    if not isinstance(trace, list) or len(trace) < 2:
+        return "INCOMPLETE"
+    readings = []
+    for row in trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        time, speed = (Fraction(str(x)) for x in row)
+        if not low <= speed <= high:
+            return "INCOMPLETE"
+        readings.append((time, speed))
+    total = Fraction(0)
+    for (start, prior), (end, observed) in zip(readings, readings[1:]):
+        if end - start != step:
+            return "INCOMPLETE"
+        gain = rise if observed >= prior else fall
+        wind = prior + (observed - prior) / gain
+        if not low <= wind <= high:
+            return "INCOMPLETE"
+        total += wind
+    return "PASS" if total == Fraction(str(reported_mean)) * (len(readings) - 1) else "FAIL"

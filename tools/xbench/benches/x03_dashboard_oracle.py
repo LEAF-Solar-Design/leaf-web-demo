@@ -1285,3 +1285,45 @@ def resource_deadlock_quality(policy, owners, waits, release):
             if remaining[worker] == 0:
                 ready.append(worker)
     return "PASS" if completed == len(waits) else "FAIL"
+
+
+def backpressure_hysteresis_quality(low, high, window, segments, *, initially_paused):
+    """Check each recorded intake decision after sampling buffer occupancy.
+
+    The trace covers every decision in a contiguous interval. Occupancy at
+    each segment start controls intake for that segment.
+    """
+    if type(low) is not int or type(high) is not int or not 0 <= low < high:
+        return "INCOMPLETE"
+    if type(initially_paused) is not bool or not isinstance(segments, list):
+        return "INCOMPLETE"
+    if not isinstance(window, (list, tuple)) or len(window) != 2 or not all(type(x) is int for x in window):
+        return "INCOMPLETE"
+    cursor, end = window
+    if end <= cursor:
+        return "INCOMPLETE"
+    paused = initially_paused
+    valid = True
+    for segment in segments:
+        if not isinstance(segment, (list, tuple)) or len(segment) != 5:
+            return "INCOMPLETE"
+        start, stop, occupancy, event, accepted = segment
+        if not all(type(x) is int for x in (start, stop, occupancy, accepted)):
+            return "INCOMPLETE"
+        if start != cursor or stop <= start or min(occupancy, accepted) < 0:
+            return "INCOMPLETE"
+        if event not in ("pause", "resume", "none"):
+            return "INCOMPLETE"
+        expected = "none"
+        if not paused and occupancy >= high:
+            paused = True
+            expected = "pause"
+        elif paused and occupancy <= low:
+            paused = False
+            expected = "resume"
+        if event != expected or (paused and accepted > 0):
+            valid = False
+        cursor = stop
+    if cursor != end:
+        return "INCOMPLETE"
+    return "PASS" if valid else "FAIL"

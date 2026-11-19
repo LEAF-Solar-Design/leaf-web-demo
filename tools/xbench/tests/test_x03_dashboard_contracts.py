@@ -635,3 +635,22 @@ def test_deadlock_respects_release_dependencies(owners, waits, releasable):
     without_owner = {k: v for k, v in owners.items() if k != releasable}
     without_rule = {k: v for k, v in release.items() if k != releasable}
     assert grade(policy, without_owner, waits, without_rule) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("low,high,occupancies", [
+    pytest.param(2, 8, [8, 4, 2], id="check-a-queue-draining-to-its-resume-watermark"),
+    pytest.param(5, 12, [16, 11, 4], id="audit-an-ingest-burst-above-the-stop-limit"),
+    pytest.param(0, 3, [3, 1, 0], id="verify-intake-waits-for-an-empty-buffer"),
+])
+def test_buffer_watermarks_require_matching_intake_events(low, high, occupancies):
+    from benches.x03_dashboard_oracle import backpressure_hysteresis_quality as grade
+
+    start, middle, last = occupancies
+    rows = [(0, 1, start, "pause", 0), (1, 2, middle, "none", 0), (2, 3, last, "resume", 1)]
+    def check(trace):
+        return grade(low, high, (0, 3), trace, initially_paused=False)
+
+    assert check(rows) == "PASS"
+    assert check([rows[0], (1, 2, middle, "resume", 1), rows[2]]) == "FAIL"
+    assert check([(0, 1, start, "pause", 1), *rows[1:]]) == "FAIL"
+    assert check([rows[0], rows[2]]) == "INCOMPLETE"

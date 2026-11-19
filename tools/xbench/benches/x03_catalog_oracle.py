@@ -3,6 +3,29 @@ from fractions import Fraction
 from math import isfinite
 
 
+def thermal_cycle_quality(revision, sheet, low_c, high_c, cycles):
+    """Require one complete test envelope that covers both extrema and the cycle count."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (low_c, high_c))) or low_c >= high_c or type(cycles) is not int or cycles <= 0:
+        return "INCOMPLETE"
+    envelopes = sheet.get("thermal_cycle_envelopes")
+    if not isinstance(envelopes, list) or not envelopes:
+        return "INCOMPLETE"
+    qualified = False
+    for row in envelopes:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            return "INCOMPLETE"
+        cold, hot, count = row
+        if not all(map(finite_measure, (cold, hot))) or cold >= hot or type(count) is not int or count <= 0:
+            return "INCOMPLETE"
+        if cold <= low_c and high_c <= hot and cycles <= count:
+            qualified = True
+    return "PASS" if qualified else "FAIL"
+
+
 def reflow_profile_quality(revision, rule, samples, duration_s):
     """Grade a complete piecewise-linear trace. Dwell counts time strictly above liquidus."""
     from benches.x03_quality import finite_measure
