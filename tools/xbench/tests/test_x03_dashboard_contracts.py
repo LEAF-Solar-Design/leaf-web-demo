@@ -527,3 +527,23 @@ def test_retry_discards_non_durable_tail(first_end,saved,final_end):
     assert grade([first,retry],final_end,complete=True) == "PASS"
     assert grade([first,retry],final_end+first_end-saved,complete=True) == "FAIL"
     assert grade([first,dict(retry,parent=None)],final_end,complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("workers,tasks,allowed", [
+    ({"a":(4,1),"b":(1,4)},{"t":(2,2)},{"t":["a","b"]}),
+    ({"a":(2,2),"b":(2,2)},{"x":(2,1),"y":(1,2)},{"x":["a"],"y":["a"]}),
+    ({"a":(3,3),"b":(2,2)},{"x":(2,2),"y":(3,3)},{"x":["a","b"],"y":["a","b"]}),
+])
+def test_worker_fit_matches_cartesian_enumeration(workers,tasks,allowed):
+    from itertools import product
+    from benches.x03_dashboard_oracle import placement_feasibility_quality as grade
+    def feasible(choices):
+        for w, capacity in workers.items():
+            assigned = [tasks[t] for t,target in zip(tasks,choices) if target == w]
+            if any(sum(d[i] for d in assigned) > capacity[i] for i in (0,1)):
+                return False
+        return True
+    expected = any(feasible(p) for p in product(*(allowed[t] for t in tasks)))
+    assert grade(workers,tasks,allowed,expected) == "PASS"
+    assert grade(workers,tasks,allowed,not expected) == "FAIL"
+    assert grade(workers,tasks,{},expected) == "INCOMPLETE"

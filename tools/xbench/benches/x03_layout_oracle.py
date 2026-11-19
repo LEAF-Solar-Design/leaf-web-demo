@@ -917,3 +917,15 @@ def anchor_row_breakout_quality(revision, substrate, anchor_x_mm, row_y_mm, slab
         right = end
     band = min(height,y+radius)-max(0,y-radius)
     return "PASS" if load <= stress*covered*band else "FAIL"
+
+
+def lateral_torsional_quality(rule, restraint, length_m, e_pa, minor_i_m4, g_pa, torsion_j_m4, moment_nm):
+    """Uniform moment, fork supports, load at shear centre; omit warping stiffness per pinned model."""
+    from math import pi, sqrt
+    if rule != "elastic-uniform-no-warping" or restraint != "fork-supported":
+        return "INCOMPLETE"
+    values = (length_m, e_pa, minor_i_m4, g_pa, torsion_j_m4, moment_nm)
+    if not all(map(finite_measure, values)) or min(values[:-1]) <= 0:
+        return "INCOMPLETE"
+    critical = pi / length_m * sqrt(e_pa * minor_i_m4 * g_pa * torsion_j_m4)
+    return "PASS" if abs(moment_nm) <= critical else "FAIL"

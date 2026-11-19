@@ -1207,3 +1207,26 @@ def test_grounded_end_sheath_voltage_profile(sections,peak):
     assert grade(None,sections,peak) == "INCOMPLETE"
     assert grade("independently-bonded-spans-v1",[(10,1),(10,1)],10) == "PASS"
     assert grade(rule,[(10,1),(10,1)],10) == "FAIL"
+
+
+@pytest.mark.parametrize("source,ohms,locked,delay,normal,floor", [
+    pytest.param(240,0.2,150,2,220,210,id="pump"),
+    pytest.param(120,0.25,80,1,110,100,id="fan"),
+    pytest.param(480,0.4,200,3,450,400,id="compressor"),
+])
+def test_motor_sag_duration_and_depth(source,ohms,locked,delay,normal,floor):
+    from benches.x03_quality import motor_start_quality as grade
+    assert source-ohms*(locked/10) >= normal
+    assert grade(source,ohms,locked,delay,normal,floor,delay) == "PASS"
+    assert grade(source,ohms,locked,delay+0.1,normal,floor,delay) == "FAIL"
+    assert grade(source,ohms,locked+1,delay,normal,floor,delay) == "FAIL"
+    assert grade(source,None,locked,delay,normal,floor,delay) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("spectrum,watts", [({1:4,2:2},52),({1:3,2:0,3:2},58),({1:5,2:1,3:0,4:1},72)])
+def test_transformer_harmonic_loss(spectrum,watts):
+    from benches.x03_quality import harmonic_load_quality as grade
+    model = dict(revision="lab",highest_order=len(spectrum),copper_w_per_a2=1,eddy_w_per_a2=1,max_w=watts)
+    assert grade("lab",model,spectrum) == "PASS"
+    assert grade("lab",dict(model,max_w=watts-1),spectrum) == "FAIL"
+    assert grade("lab",model,{1:spectrum[1]}) == "INCOMPLETE"

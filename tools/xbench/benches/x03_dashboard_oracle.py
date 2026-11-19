@@ -1089,3 +1089,33 @@ def checkpoint_work_quality(attempts, reported_units, *, complete):
         if attempt["finished"] != (index == len(attempts)-1):
             return "INCOMPLETE"
     return "PASS" if reported_units == end else "FAIL"
+
+
+def placement_feasibility_quality(workers, demands, allowed, reported_feasible):
+    """Exact placement for small recorded snapshots, with indivisible tasks and worker affinity."""
+    def resource_pair(pair):
+        return isinstance(pair, (list,tuple)) and len(pair) == 2 and all(type(n) is int and n >= 0 for n in pair)
+    if type(reported_feasible) is not bool or not all(isinstance(x,dict) for x in (workers,demands,allowed)):
+        return "INCOMPLETE"
+    if allowed.keys() != demands.keys() or not all(map(resource_pair, workers.values())) or not all(map(resource_pair, demands.values())):
+        return "INCOMPLETE"
+    for candidates in allowed.values():
+        if not isinstance(candidates, list) or not all(isinstance(w,str) and w in workers for w in candidates):
+            return "INCOMPLETE"
+    tasks = sorted(demands, key=lambda t: len(allowed[t]))
+    free = dict(workers)
+    def fits(index):
+        if index == len(tasks):
+            return True
+        task = tasks[index]
+        cpu, memory = demands[task]
+        for worker in allowed[task]:
+            cores, ram = free[worker]
+            if cpu <= cores and memory <= ram:
+                free[worker] = (cores-cpu, ram-memory)
+                placed = fits(index+1)
+                free[worker] = (cores,ram)
+                if placed:
+                    return True
+        return False
+    return "PASS" if fits(0) == reported_feasible else "FAIL"
