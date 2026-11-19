@@ -170,9 +170,11 @@ class AuthorizedLocalActions:
             if sha256(encoded.encode("utf-8")).hexdigest() != reference["operation_ref"]["digest"]:
                 raise ValueError("Argument schema differs from the pinned operation digest")
             schema = json.loads(encoded, parse_float=_exact_json_number, parse_constant=_exact_json_number)
-            if (not isinstance(schema, dict) or schema.get("type") != "object"
-                    or schema.get("additionalProperties") is not False):
-                raise ValueError("Structured action arguments require a closed object schema")
+            if not isinstance(schema, bool) and (
+                not isinstance(schema, dict) or schema.get("type") != "object"
+                or schema.get("additionalProperties") is not False
+            ):
+                raise ValueError("Structured action arguments require a boolean or closed object schema")
             Draft202012Validator.check_schema(schema)
             registry = Registry()
             _check_local_schema_refs(schema, registry)

@@ -550,7 +550,7 @@ class IntegrationToolService:
         return self.resolve(tenant, session, turn)
 
     def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
-                       require_snapshot=False, cancel_event=None):
+                       require_snapshot=False, cancel_event=None, provider_statuses=None):
         visited = set()
         first_snapshot = None
         rows_read = 0
@@ -562,7 +562,8 @@ class IntegrationToolService:
                 raise IncompleteInventory(len(visited))
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
-            reply = self._execute(operation, args, tenant, session, turn, authority)
+            reply = self._execute(operation, args, tenant, session, turn, authority,
+                                  provider_statuses=provider_statuses)
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
@@ -576,6 +577,9 @@ class IntegrationToolService:
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited) + 1)
             if operation == "datasets":
+                if provider_statuses is not None and any(row["status"] not in provider_statuses
+                                                          for row in page["datasets"]):
+                    raise ReadFailure("provider_filter_mismatch")
                 rows_read += len(page["datasets"])
                 if rows_read > DATASET_ROW_BUDGET:
                     raise ReadFailure("response_too_large")
@@ -665,10 +669,12 @@ class IntegrationToolService:
         size = 0
         pages = 0
         datasets_by_id = {}
-        from authored_dataset_discovery import requires_snapshot
+        from authored_dataset_discovery import provider_status_filter, requires_snapshot
         pinned = operation == "datasets" and requires_snapshot(description)
+        provider_statuses = provider_status_filter(description) if operation == "datasets" else None
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
-                                        require_snapshot=pinned, cancel_event=cancel_event):
+                                        require_snapshot=pinned, cancel_event=cancel_event,
+                                        provider_statuses=provider_statuses):
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}
@@ -706,11 +712,13 @@ class IntegrationToolService:
     def execute(self, operation, value, tenant, session, turn):
         return self._execute(operation, value, tenant, session, turn, None)
 
-    def _execute(self, operation, value, tenant, session, turn, expected_authority):
+    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None):
         result = None
         code = "unavailable"
         try:
             args = normalize(operation, value)
+            if provider_statuses is not None:
+                args["statuses"] = list(provider_statuses)
             saving = operation == "elements"
             def resolve():
                 return self._resolve_operation(operation, tenant, session, turn)
@@ -765,6 +773,8 @@ class IntegrationToolService:
                             url = base + "?limit=" + str(args["limit"])
                             if "after" in args:
                                 url += "&after=" + quote(args["after"], safe="")
+                            if provider_statuses is not None:
+                                url += "&statuses=" + quote(",".join(provider_statuses), safe="")
                         else:
                             ref = args["dataset_ref"]
                             method = "POST"
