@@ -516,16 +516,23 @@ class IntegrationToolService:
     def iter_dataset_pages(self, tenant, session, turn, *, limit=50):
         """Read each catalog page under the same turn authority, with bounded cursor history."""
         authority = self.resolve(tenant, session, turn).authority
-        yield from self._dataset_pages(tenant, session, turn, limit, authority)
+        yield from self._catalog_pages("datasets", tenant, session, turn, limit, authority)
 
-    def _dataset_pages(self, tenant, session, turn, limit, authority):
+    def _resolve_operation(self, operation, tenant, session, turn):
+        if operation in {"elements", "action_catalog"}:
+            if self.resolve_write is not None:
+                return self.resolve_write(tenant, session, turn)
+            return resolve_current(tenant, session, turn, write=True)
+        return self.resolve(tenant, session, turn)
+
+    def _catalog_pages(self, operation, tenant, session, turn, limit, authority):
         visited = set()
         args = {"limit": limit}
         while True:
-            if self.resolve(tenant, session, turn).authority != authority:
+            if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
-            reply = self._execute("datasets", args, tenant, session, turn, authority)
-            if self.resolve(tenant, session, turn).authority != authority:
+            reply = self._execute(operation, args, tenant, session, turn, authority)
+            if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
                 raise ReadFailure(reply.get("error", {}).get("code", "denied"))
@@ -542,38 +549,54 @@ class IntegrationToolService:
                 return
             args = {"limit": limit, "after": cursor}
 
+    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn):
+        from authored_recipe_edit import edit_inspection_recipe
+        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn)
+
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50):
-        """Run an offline-authored report over a bounded, turn-scoped catalog snapshot."""
+        return self._run_catalog_report("datasets", description, tenant, session, turn, limit)
+
+    def run_authored_action_report(self, description, tenant, session, turn, *, limit=50):
+        return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit)
+
+    def _run_catalog_report(self, operation, description, tenant, session, turn, limit):
+        """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
 
         if not isinstance(description, str) or not 1 <= len(description) <= 4000:
             raise ReadFailure("invalid_input")
         package, source, _ = tools_fallback.author_tool(description)
-        if package["engine_op"] != "project_dataset_discovery":
+        if operation == "action_catalog":
+            kind, collection = "action", "actions"
+            keys = ("connection_id", "connection_title", "title", "connector_ref", "operation_ref")
+        else:
+            kind, collection = "dataset", "datasets"
+            keys = ("dataset_ref", "title", "status")
+        if package["engine_op"] != f"project_{kind}_discovery":
             raise ReadFailure("invalid_input")
-        authority = self.resolve(tenant, session, turn).authority
+        authority = self._resolve_operation(operation, tenant, session, turn).authority
         rows = []
         size = 0
         pages = 0
-        for page in self._dataset_pages(tenant, session, turn, limit, authority):
+        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority):
             pages += 1
-            for dataset in page["datasets"]:
-                row = {key: dataset[key] for key in ("dataset_ref", "title", "status")}
+            for entry in page[collection]:
+                row = {key: entry[key] for key in keys}
                 size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
                 if size > RESPONSE_CAP:
                     raise ReadFailure("response_too_large")
                 rows.append(row)
-        if self.resolve(tenant, session, turn).authority != authority:
+        if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")
-        intake = {"project_dataset_catalog": {"datasets": rows, "pages_read": pages}}
-        status, payload = tool_loader._run_source_in_sandbox(source, "dataset_report.py", intake, {})
+        intake = {f"project_{kind}_catalog": {collection: rows, "pages_read": pages}}
+        status, payload = tool_loader._run_source_in_sandbox(source, f"{kind}_report.py", intake, {})
         if status != "ok":
             raise ReadFailure("unavailable")
         report, _ = payload
         if len(json.dumps(report, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
             raise ReadFailure("response_too_large")
-        if self.resolve(tenant, session, turn).authority != authority:
+        if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")
         return report
 
@@ -587,11 +610,7 @@ class IntegrationToolService:
             args = normalize(operation, value)
             saving = operation == "elements"
             def resolve():
-                if saving or operation == "action_catalog":
-                    if self.resolve_write is not None:
-                        return self.resolve_write(tenant, session, turn)
-                    return resolve_current(tenant, session, turn, write=True)
-                return self.resolve(tenant, session, turn)
+                return self._resolve_operation(operation, tenant, session, turn)
             current = resolve()
             if expected_authority is not None and current.authority != expected_authority:
                 raise ReadFailure("denied")

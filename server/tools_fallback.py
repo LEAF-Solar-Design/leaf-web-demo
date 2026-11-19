@@ -520,6 +520,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     the dynamic loader runs THAT FILE, not a hardcoded primitive. Families:
     list_layers | count | measure | highlight (all read-only, deterministic)."""
     description = (description or "").strip()
+    import authored_material_selection
+    import authored_action_discovery
+    import authored_dynamic_visibility
+    import authored_clipped_panels
+    import authored_recipe_edit
     import authored_dataset_discovery
     import authored_multibundle
     import authored_aisle_detour
@@ -537,6 +542,26 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_revision_panel_moves.build_body(description)
         drawing_params = authored_revision_panel_moves.PARAMS
         summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_dynamic_visibility.matches(description):
+        verb, engine_op = "count", "count_visible_state_panels"
+        drawing_body = authored_dynamic_visibility.build_body(description)
+        summary = "counts panel instances in resolved block visibility states"
+    elif authored_clipped_panels.matches(description):
+        verb, engine_op = "count", "count_clipped_panels"
+        drawing_body = authored_clipped_panels.build_body(description)
+        summary = "counts panel insertion points inside the effective clipping region"
+    elif authored_material_selection.matches(description):
+        verb, engine_op = "report", "material_selection_provenance"
+        drawing_body = authored_material_selection.build_body(description)
+        summary = "reports verified JSON pointers and digests for the checker selection"
+    elif authored_action_discovery.matches(description):
+        verb, engine_op = "list", "project_action_discovery"
+        drawing_body = authored_action_discovery.build_body(description)
+        summary = "lists authorized version-pinned actions for this project"
+    elif authored_recipe_edit.matches(description):
+        verb, engine_op = "edit", "inspection_recipe_edit"
+        drawing_body = authored_recipe_edit.build_body(description)
+        summary = "prepares the requested edit against the inspected recipe revision"
     elif authored_dataset_discovery.matches(description):
         verb, engine_op = "list", "project_dataset_discovery"
         drawing_body = authored_dataset_discovery.build_body(description)

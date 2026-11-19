@@ -2,6 +2,7 @@
 import re
 
 from authored_block_transform import TRANSFORM_SOURCE
+from authored_spline_length import SPLINE_LENGTH_SOURCE
 
 
 _GROUPED = re.compile(r"\b(?:by|per|each|every)\s+(?:drawing\s+)?layer\b|\blayer[- ]by[- ]layer\b")
@@ -39,7 +40,7 @@ def build_body(description, *, entry_point="run"):
 _BODY = """
 import math
 import re
-""" + TRANSFORM_SOURCE + """
+""" + TRANSFORM_SOURCE + SPLINE_LENGTH_SOURCE + """
 
 
 LENGTH_RELATIVE_TOLERANCE = 1e-5
@@ -108,20 +109,23 @@ def __ENTRY_POINT__(intake, params):
             return
         if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
             return
-        points = path["pts"]
-        bulges = path.get("bulges", [])
-        if bulges and len(bulges) != len(points):
-            raise ValueError("Beam curve lacks per-vertex bulges.")
-        length = 0.0
-        for i in range(len(points) - 1):
-            delta = [b-a for a, b in zip(points[i], points[i+1])]
-            if len(delta) == 2:
-                delta.append(0)
-            bulge = bulges[i] if bulges else 0.0
-            if bulge:
-                length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
-            else:
-                length += math.hypot(*transform_vector(frame, delta))
+        if path.get("kind") == "SPLINE":
+            length = spline_length(path, frame)
+        else:
+            points = path["pts"]
+            bulges = path.get("bulges", [])
+            if bulges and len(bulges) != len(points):
+                raise ValueError("Beam curve lacks per-vertex bulges.")
+            length = 0.0
+            for i in range(len(points) - 1):
+                delta = [b-a for a, b in zip(points[i], points[i+1])]
+                if len(delta) == 2:
+                    delta.append(0)
+                bulge = bulges[i] if bulges else 0.0
+                if bulge:
+                    length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
+                else:
+                    length += math.hypot(*transform_vector(frame, delta))
         total = totals.get(layer, 0.0) + copies * length * factor
         if not math.isfinite(total):
             raise ValueError("Beam length exceeds the supported numeric range.")
@@ -134,6 +138,9 @@ def __ENTRY_POINT__(intake, params):
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
 
     for path in intake.get("polylines", []):
+        measure(path, identity, "0", (), 1)
+
+    for path in intake.get("splines", []):
         measure(path, identity, "0", (), 1)
 
     blocks = {name.casefold(): block for name, block in intake.get("blocks", {}).items()}
@@ -156,7 +163,7 @@ def __ENTRY_POINT__(intake, params):
                 raise ValueError("Beam paths require complete block geometry: " + name)
             paths = []
             for child in children:
-                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                     raise ValueError("Missing beam geometry in block: " + name)
                 if child.get("type") == "INSERT" and "nested_inserts" not in block:
                     raise ValueError("Missing nested reference in block: " + name)
