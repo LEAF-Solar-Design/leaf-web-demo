@@ -10,7 +10,7 @@ import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
-import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
 import * as THREE from 'three'
@@ -996,13 +996,13 @@ const Viewer = forwardRef(function Viewer(
       }
       const mode = marqueeMode(start, end)
       const bounds = dom.getBoundingClientRect()
-      const rect = worldRect(unprojectClientToPlane(camera, bounds, start.x, start.y),
-        unprojectClientToPlane(camera, bounds, end.x, end.y))
+      const mapping = marqueeMapping(camera, bounds, start, end,
+        pl => bridge ? null : displayZ(pl) + 0.05)
       clearMarquee()
       const callbacks = marqueeRef.current
-      if (!rect || !callbacks.gate?.()) return
-      const handles = marqueeHandles(polylines, rect, mode,
-        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false)
+      if (!mapping || !callbacks.gate?.()) return
+      const handles = marqueeHandles(polylines, mapping.rect, mode,
+        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false, mapping.project)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
       const pending = armObservation(handles, 'marquee', additive, e)
       callbacks.select?.(handles, { additive, mode })
