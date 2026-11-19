@@ -27,7 +27,7 @@ def requires_snapshot(description):
                           r"(?:view|version|revision|inventory|catalog)\b", description, re.I))
 
 
-def build_body(description):
+def selected_statuses(description):
     prompt = description.casefold()
     selected, excluded, additional = set(), set(), set()
     for group in _STATUS_GROUP.finditer(prompt):
@@ -43,8 +43,22 @@ def build_body(description):
         selected = set(_STATUS_NAMES.values())
         if re.search(r"\bcan read\b|\breadable\b", prompt):
             selected.discard("unavailable")
-    statuses = sorted((selected | additional) - excluded)
-    return _BODY.replace("__STATUSES__", repr(tuple(statuses))).replace(
+    return tuple(sorted((selected | additional) - excluded))
+
+
+def provider_status_filter(description):
+    # Reports normally filter the complete inventory locally. Only explicit
+    # source-side filtering changes the contract for each returned page.
+    location = r"(?:provider|source|server)"
+    modifier = r"\b" + location + r"[- ]side\s+filter(?:s|ing)?\b"
+    directive = r"\bfilter(?:ed|ing)?\s+(?:at|by|on)\s+(?:the\s+)?" + location + r"\b"
+    if re.search(modifier + "|" + directive, description, re.I):
+        return selected_statuses(description)
+    return None
+
+
+def build_body(description):
+    return _BODY.replace("__STATUSES__", repr(selected_statuses(description))).replace(
         "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description)))
 
 

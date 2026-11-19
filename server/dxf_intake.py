@@ -800,6 +800,10 @@ def _spline_measurement_path(record):
                 if not points or len(points[-1]) != code // 10 - 1:
                     raise ValueError("Invalid spline control point coordinates.")
                 points[-1].append(float(value))
+        if (not points and not knots and not weights and 11 in groups
+                and int(groups.get(73, 0)) == 0 and int(groups.get(72, 0)) == 0):
+            path["spline_error"] = "Fit-point-only SPLINE length is unsupported without a control net."
+            return path
         if (len(points) <= degree or degree < 1 or int(groups.get(73, -1)) != len(points)
                 or any(len(p) < 2 or not all(math.isfinite(x) for x in p) for p in points)):
             raise ValueError("Invalid spline degree or control points.")
