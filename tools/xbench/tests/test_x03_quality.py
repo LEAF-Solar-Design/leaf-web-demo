@@ -1180,3 +1180,30 @@ def test_ct_excitation_error_budget(fault,ratio,burden,max_fraction):
     assert grade("lab",curve,fault,ratio,burden,max_fraction) == "PASS"
     assert grade("lab",curve,fault,ratio,burden,max_fraction/2) == "FAIL"
     assert grade("lab",{},fault,ratio,burden,max_fraction) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("group,other,ratio,z", [("Dyn11","Dyn1",10,5),("Yy0","Yy6",20,4),("Dd6","Dd0",50,8)])
+def test_parallel_bank_requires_matching_phase_and_spreads(group,other,ratio,z):
+    from benches.x03_quality import transformer_parallel_quality as grade
+    first = dict(revision="study",vector_group=group,tap_ratio=ratio,z_common_base=z)
+    def check(**changes):
+        return grade("study",[first,dict(first,**changes)],0.02,0.1)
+    assert check() == "PASS"
+    assert check(vector_group=other) == "FAIL"
+    assert check(tap_ratio=ratio*1.03) == "FAIL"
+    assert check(z_common_base=z*1.2) == "FAIL"
+    assert check(vector_group=None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sections,peak", [
+    ([(100,0.1)],10), ([(100,-0.2),(50,0.4)],20), ([(20,0.5),(40,0.25)],20),
+])
+def test_grounded_end_sheath_voltage_profile(sections,peak):
+    from benches.x03_quality import sheath_voltage_quality as grade
+    rule = "single-point-bonded-linear-v1"
+    assert grade(rule,sections,peak) == "PASS"
+    assert grade(rule,sections,peak-1) == "FAIL"
+    assert grade(rule,[(100,None)],peak) == "INCOMPLETE"
+    assert grade(None,sections,peak) == "INCOMPLETE"
+    assert grade("independently-bonded-spans-v1",[(10,1),(10,1)],10) == "PASS"
+    assert grade(rule,[(10,1),(10,1)],10) == "FAIL"

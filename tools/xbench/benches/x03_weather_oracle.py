@@ -586,3 +586,21 @@ def rolling_rain_quality(window_min, max_sample_min, max_mm_h, trace, rule):
     starts = {x for b in bounds for x in (b,b-width) if times[0] <= x <= last_end-width}
     peak = max(accumulated(x+width)-accumulated(x) for x in starts)
     return "PASS" if peak * 60 <= limit * width else "FAIL"
+
+
+def pyranometer_horizontal_quality(model, tilt_deg, facing_deg, sun_elevation_deg, sun_azimuth_deg, direct_poa, reported, tolerance):
+    """Project a beam-only plane reading to horizontal using the supplied sensor normal."""
+    from math import sin, cos, radians
+    from benches.x03_quality import finite_measure
+    values = (tilt_deg, facing_deg, sun_elevation_deg, sun_azimuth_deg, direct_poa, reported, tolerance)
+    if model != "direct-only-cosine-v1" or not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    if not 0 <= tilt_deg <= 90 or not 0 < sun_elevation_deg <= 90 or min(direct_poa,tolerance) < 0:
+        return "INCOMPLETE"
+    elevation, tilt = radians(sun_elevation_deg), radians(tilt_deg)
+    delta = radians((sun_azimuth_deg % 360) - (facing_deg % 360))
+    incidence = sin(elevation)*cos(tilt) + cos(elevation)*sin(tilt)*cos(delta)
+    if incidence <= 1e-12:
+        return "INCOMPLETE"
+    expected = direct_poa * sin(elevation) / incidence
+    return "PASS" if reported >= 0 and abs(reported-expected) <= tolerance else "FAIL"

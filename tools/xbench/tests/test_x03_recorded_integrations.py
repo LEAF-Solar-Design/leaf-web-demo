@@ -938,3 +938,25 @@ def test_peak_rain_intensity_between_gauge_readings(width,intervals,resolution,p
     assert grade(width,resolution,peak,intervals,rule) == "PASS"
     assert grade(width,resolution,peak-1,intervals,rule) == "FAIL"
     assert grade(width,resolution-1,peak,intervals,rule) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("pollution,alt,creep,clear", [(2,2000,4,3),(2,3000,4,5),(3,2000,7,4)])
+def test_spacing_depends_on_environment(pollution,alt,creep,clear):
+    from benches.x03_catalog_oracle import insulation_spacing_quality as grade
+    sheet = dict(revision="q",spacing_by_pollution={2:[(2000,4,3),(4000,4,5)],3:[(2000,7,4)]})
+    assert grade("q",sheet,pollution,alt,creep,clear) == "PASS"
+    assert grade("q",sheet,pollution,alt,creep-0.1,clear) == "FAIL"
+    assert grade("q",sheet,pollution,alt,creep,clear-0.1) == "FAIL"
+    assert grade("q",sheet,pollution,None,creep,clear) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("tilt,facing,elev,sun,reading,expected", [
+    (0,180,30,180,400,400),(60,90,30,90,800,400),(60,0,30,90,200,400),
+])
+def test_direct_beam_horizontal_projection(tilt,facing,elev,sun,reading,expected):
+    from benches.x03_weather_oracle import pyranometer_horizontal_quality as grade
+    model = "direct-only-cosine-v1"
+    assert grade(model,tilt,facing,elev,sun,reading,expected,0.001) == "PASS"
+    assert grade(model,tilt,facing,elev,sun,reading,expected+10,0.001) == "FAIL"
+    assert grade(model,tilt,None,elev,sun,reading,expected,0.001) == "INCOMPLETE"
+    assert grade("global-unseparated",tilt,facing,elev,sun,reading,expected,0.001) == "INCOMPLETE"

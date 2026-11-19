@@ -517,3 +517,13 @@ def test_work_steal_conserves_owner_until_ack(chain,ack_last,expected):
     assert grade(initial,events,[],complete=True) == "FAIL"
     assert grade(initial,events,final+initial,complete=True) == "FAIL"
     assert grade(initial,events,final,complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("first_end,saved,final_end", [(80,50,100),(20,0,40),(200,190,220)])
+def test_retry_discards_non_durable_tail(first_end,saved,final_end):
+    from benches.x03_dashboard_oracle import checkpoint_work_quality as grade
+    first = dict(parent=None,range=(0,first_end),checkpoint=("c1",saved),finished=False)
+    retry = dict(parent="c1",range=(saved,final_end),checkpoint=None,finished=True)
+    assert grade([first,retry],final_end,complete=True) == "PASS"
+    assert grade([first,retry],final_end+first_end-saved,complete=True) == "FAIL"
+    assert grade([first,dict(retry,parent=None)],final_end,complete=True) == "INCOMPLETE"
