@@ -20,6 +20,7 @@ import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
+import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
@@ -41,7 +42,7 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import useEscapeOwner from './lib/useEscapeOwner.js'
 import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'
 import useDockRise from './lib/useDockRise.js'
-import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
+import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, routeErrorText, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import { pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
@@ -890,6 +891,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  useEstimatorSurfaceStatus(mock)
   const { path: surfacePath } = useRoute()
   useEffect(() => {
     const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
@@ -6842,7 +6844,7 @@ export default function App() {
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
-                  ? `Couldn’t route the prompt: ${routeErr}`
+                  ? routeErrorText(routeErr)
                   : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>

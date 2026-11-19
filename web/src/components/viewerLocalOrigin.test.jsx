@@ -489,7 +489,9 @@ describe('Viewer local XY origin', () => {
     const insert = objects(object => object.userData.handle === 'INS2')[0]
     sameXY(insert.getWorldPosition(new THREE.Vector3()), intake.inserts[1].pt)
     expect(insert.rotation.z).toBeCloseTo(Math.PI / 6)
-    expect(insert.scale.toArray()).toEqual([1.7, 1.7, 1])
+    // The placeholder glyph is sized by the view (2% of the drawing span), so only the mirror
+    // sign of the insert's drawing scale applies to it (roof-site.dwg: scale 180 blanked the canvas).
+    expect(insert.scale.toArray()).toEqual([1, 1, 1])
     view.update({ visibleLayers: { Panels: false, Blocks: false, Surfaces: false } })
     expect(polyLines().parent.visible).toBe(false)
     expect(insert.parent.visible).toBe(false)

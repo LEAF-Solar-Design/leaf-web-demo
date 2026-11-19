@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
 import * as drawingApi from '../api.js'
 import { resolveDrawingStore, pull, publish } from './drawingSync.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
+import BranchToolsPanel from './BranchToolsPanel.jsx'
 import { humanizeError } from '../errorHumanize.js'
 import './leafPlatform.css'
 
@@ -42,7 +43,7 @@ function commandMessage(outcome) {
   return null
 }
 
-function DrawingSyncRow({ project, ready, bridge, working }) {
+function DrawingSyncRow({ project, ready, bridge, working, setWorking }) {
   const [sync, setSync] = useState(null)
   const operation = useRef(null)
   useEffect(() => {
@@ -51,7 +52,7 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     try {
       const { drawingStoreId } = resolveDrawingStore(project, ready)
       const cursor = ready.syncCursor?.drawingStoreId === drawingStoreId ? ready.syncCursor.version : null
-      setSync({ drawingStoreId, cursor, head: null, busy: false, message: '' })
+      setSync({ drawingStoreId, cursor, head: null, message: '' })
       Promise.resolve().then(() => drawingApi.getDrawingVersions(false, drawingStoreId)).then(({ head }) => {
         if (live) setSync((value) => ({ ...value, head }))
       }).catch(() => { if (live) setSync((value) => ({ ...value, message: 'Head version could not be loaded.' })) })
@@ -65,7 +66,8 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     if (operation.current || !sync?.drawingStoreId || working) return
     const token = {}
     operation.current = token
-    setSync((value) => ({ ...value, busy: true, message: 'Syncing drawing.' }))
+    setWorking(token)
+    setSync((value) => ({ ...value, message: 'Syncing drawing.' }))
     // A session change invalidates subsequent host commands, including a late export/save result.
     const boundBridge = Object.fromEntries(['applyPlan', 'exportDxf', 'syncCursor'].map((name) => [name, (...args) => {
       if (operation.current !== token) throw new Error('connection_changed')
@@ -84,8 +86,8 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     } finally {
       if (operation.current === token) {
         operation.current = null
-        setSync((value) => ({ ...value, busy: false }))
       }
+      setWorking((current) => current === token ? false : current)
     }
   }
 
@@ -94,8 +96,8 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     {sync?.drawingStoreId && <>
       <p>Drawing store: {sync.drawingStoreId}. Synced version: {sync.cursor ?? 'not synced'}. Head version: {sync.head ?? 'loading'}.</p>
       <div className="leaf-platform-actions">
-        <button type="button" disabled={sync.cursor == null || sync.busy || !!working} onClick={() => run('pull')}>Pull</button>
-        <button type="button" disabled={sync.busy || !!working} onClick={() => run('publish')}>{sync.cursor == null ? 'Publish drawing' : 'Publish'}</button>
+        <button type="button" disabled={sync.cursor == null || !!working} onClick={() => run('pull')}>Pull</button>
+        <button type="button" disabled={!!working} onClick={() => run('publish')}>{sync.cursor == null ? 'Publish drawing' : 'Publish'}</button>
       </div>
     </>}
     <p aria-live="polite">{sync?.message}</p>
@@ -246,7 +248,8 @@ export default function LeafPlatformScene() {
     return () => { live = false }
   }, [boundIdentity])
 
-  useEffect(() => {
+  // Reset the old connection before child effects can acquire the shared command slot.
+  useLayoutEffect(() => {
     if (state.ready) { setAwaitingReady(false); setReadyTimedOut(false) }
     setGrantFailed(false)
     if (bindingPending.current && state.status === 'connected') headingRef.current?.focus()
@@ -376,7 +379,7 @@ export default function LeafPlatformScene() {
   }
 
   async function runAction(action, name = true) {
-    if (actionInFlight.current) return
+    if (actionInFlight.current || working) return
     const operation = {}
     actionInFlight.current = operation
     setWorking(name)
@@ -476,7 +479,9 @@ export default function LeafPlatformScene() {
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'focus'), 'focus')}>{working === 'focus' ? 'Zooming...' : 'Zoom to'}</button>
           </div>
           {boundDetail?.identity === boundIdentity && boundDetail.project &&
-            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} />}
+            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} setWorking={setWorking} />}
+          {state.ready?.capabilities?.runTool === true &&
+            <BranchToolsPanel key={boundIdentity + ':' + state.ready.sessionId} bridge={bridge} working={working} setWorking={setWorking} />}
         </>}
       </section>}
       <DiagnosticsDetails />

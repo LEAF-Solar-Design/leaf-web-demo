@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, productSurfaceStates, surfaceContract, surfaceRailState } from '../site/productSurfaces.js'
 import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
+import { useEstimatorSurfaceStatus } from '../estimator/useEstimatorSurfaceStatus.js'
 import { isLabEmbedded, parseLabRoute } from '../lab/labRoute.js'
 import { EMPTY_WORKSPACE_PROJECT, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { useContinuityHost } from '../site/continuityStore.js'
@@ -97,8 +98,10 @@ export default function ProductSurfaceTabs({ activeSurface, states, onSelect, mo
   // appear here with no deploy. `mock` defaults to `true` (no network call)
   // so a bare render (a unit test that mounts this component directly)
   // renders the SAME tabs an empty overlay would produce.
-  const overlay = useSurfaceConfigOverlay(mock)
+  // S1-A11: Estimator is not in the pinned tenant overlay vocabulary yet.
+  const overlay = { ...useSurfaceConfigOverlay(mock), estimator: undefined }
   const labStatus = useLabSurfaceStatus(mock)
+  useEstimatorSurfaceStatus(mock)
   // Layout effect: the host is in place before paint, in the same commit the
   // frame publishes (also a layout effect, and an ancestor's, so it runs
   // after this one). On unmount the host is detached with its children

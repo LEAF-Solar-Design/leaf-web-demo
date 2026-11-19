@@ -289,8 +289,21 @@ export async function logout(hint) {
   }
   const jointHeaders = service.mode ? serviceHeaders(API_BASE) : null
   const serviceStorage = service.mode ? authorityStorage() : null
+  const pendingLogout = []
   for (const listener of beforeLogoutListeners) {
-    try { listener() } catch { /* an observer cannot prevent sign-out */ }
+    try {
+      const result = listener()
+      if (result && typeof result.then === 'function') pendingLogout.push(result)
+    } catch { /* an observer cannot prevent sign-out */ }
+  }
+  if (pendingLogout.length) {
+    let timer
+    try {
+      await Promise.race([
+        Promise.allSettled(pendingLogout),
+        new Promise(resolve => { timer = setTimeout(resolve, 1500) }),
+      ])
+    } finally { clearTimeout(timer) }
   }
   if (service.mode) {
     serviceSession().logout()

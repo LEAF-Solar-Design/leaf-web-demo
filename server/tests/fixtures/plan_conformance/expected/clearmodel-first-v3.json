@@ -1,0 +1,57 @@
+{
+  "blocks": [
+    {
+      "base": [
+        0,
+        0,
+        0
+      ],
+      "entities": [],
+      "name": "SYMBOL"
+    }
+  ],
+  "entities": [
+    {
+      "id": "H:E",
+      "kind": "LINE",
+      "layer": "0",
+      "points": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "space": "Paper"
+    },
+    {
+      "id": "A:0",
+      "kind": "LINE",
+      "layer": "0",
+      "points": [
+        [
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "space": "Model"
+    }
+  ],
+  "groups": [
+    {
+      "members": [],
+      "name": "G0"
+    }
+  ]
+}
