@@ -5,6 +5,22 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("zone,group,temp_class,accepted,rejected", [
+    pytest.param("Z1", "IIC", "T4", "db IIC T4", "ec IIC T4", id="choose-a-zone-one-enclosure"),
+    pytest.param("Z2", "IIB", "T5", "ec IIB T5", "ec IIA T5", id="qualify-a-gas-monitor"),
+    pytest.param("Z1", "IIA", "T6", "ia IIA T6", "ia IIA T3", id="check-a-cool-surface-probe"),
+])
+def test_hazardous_area_approved_markings(zone, group, temp_class, accepted, rejected):
+    from benches.x03_catalog_oracle import hazardous_area_quality as grade
+
+    sheet = dict(revision="lab-only", approved_markings={zone: {group: {temp_class: [accepted]}}})
+    assert grade("lab-only", sheet, zone, group, temp_class, accepted) == "PASS"
+    assert grade("lab-only", sheet, zone, group, temp_class, rejected) == "FAIL"
+    assert grade("other", sheet, zone, group, temp_class, accepted) == "INCOMPLETE"
+    assert grade("lab-only", sheet, zone, group, None, accepted) == "INCOMPLETE"
+    assert grade("lab-only", sheet, zone, group, temp_class, None) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("site,dust,water", [("dust chamber",6,4),("water jet",5,6),("immersion",6,8)])
 def test_installation_requires_both_qualified_ingress_codes(site,dust,water):
     from benches.x03_catalog_oracle import ingress_quality as grade
@@ -1021,3 +1037,19 @@ def test_rear_reflected_component_counts_each_patch_once(ground, view, expected)
     partial.pop(next(iter(partial)))
     assert grade(model, ground, partial, expected) == "INCOMPLETE"
     assert grade(None, ground, view, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("tips,bucket,dead,coverage,expected,uncorrected", [
+    pytest.param([1, 3, 5], 0.2, 1, (2, 6), 0.8, 0.4, id="correct-a-cloudburst"),
+    pytest.param([10, 13, 18], 0.24, 1, (3, 5), 0.66, 0.48, id="sum-variable-rain-intervals"),
+    pytest.param([100, 106, 116], 0.4, 2, (6, 10), 1.1, 0.8, id="compare-two-gauge-periods"),
+])
+def test_tipping_bucket_dead_time_uses_each_calibrated_gap(tips, bucket, dead, coverage, expected, uncorrected):
+    from benches.x03_weather_oracle import tipping_bucket_depth_quality as grade
+
+    model = dict(rule="nonparalyzable-intertip-v1", bucket_mm=bucket, dead_s=dead,
+                 min_gap_s=coverage[0], max_gap_s=coverage[1])
+    assert grade(model, tips, expected) == "PASS"
+    assert grade(model, tips, uncorrected) == "FAIL"
+    assert grade(model, [0, coverage[1] + 1], expected) == "INCOMPLETE"
+    assert grade(model, [0, dead], expected) == "INCOMPLETE"

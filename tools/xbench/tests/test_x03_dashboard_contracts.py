@@ -564,3 +564,26 @@ def test_cross_worker_offsets_bound_reports(start, end, offsets, bounds):
     assert grade(*events, {"a": offsets["a"]}, bounds) == "INCOMPLETE"
     # Shift the end clock back until the supported delay straddles zero.
     assert grade(events[0], ("b", end - midpoint), offsets, bounds) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("waiter,owner,priority,base,window,bound", [
+    pytest.param("render", "sync", 7, 2, (11, 15), 4, id="check-render-lock-wait"),
+    pytest.param("alarm", "trace", 9, 1, (31, 40), 12, id="audit-urgent-alarm-delay"),
+    pytest.param("commit", "upload", 5, 4, (100, 106), 6, id="verify-commit-blocking-budget"),
+])
+def test_priority_inversion_wait_requires_coverage_and_boost(waiter, owner, priority, base, window, bound):
+    from benches.x03_dashboard_oracle import priority_inversion_quality as grade
+
+    start, end = window
+    priorities = {waiter: priority, owner: base}
+    rule = {"policy": "single-lock-immediate-inheritance-v1", "max_wait_ticks": bound}
+    def report(rows, *, acquired=True, stop=end):
+        return grade(rule, waiter, priorities, (start, stop), rows, acquired=acquired)
+
+    boosted = [(start, end, owner, priority)]
+    assert report(boosted) == "PASS"
+    assert report(boosted, acquired=False) == "INCOMPLETE"
+    assert report([(start, end, owner, base)]) == "FAIL"
+    assert report([(start + 1, end, owner, priority)]) == "INCOMPLETE"
+    late = start + bound + 1
+    assert report([(start, late, owner, priority)], acquired=False, stop=late) == "FAIL"

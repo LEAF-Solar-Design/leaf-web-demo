@@ -1155,3 +1155,49 @@ def cross_worker_latency_quality(start, finish, offsets, reported_bounds):
     if not all(type(x) is int for x in reported_bounds):
         return "INCOMPLETE"
     return "PASS" if tuple(reported_bounds) == (earliest, latest) else "FAIL"
+
+
+def priority_inversion_quality(rule, waiter, priorities, wait, segments, *, acquired):
+    """Grade one high-priority wait for a single occupied lock.
+
+    Higher integer priorities run first. The trace covers the full wait with
+    contiguous half-open intervals of owner ID and effective owner priority.
+    The lock is handed to the waiter at acquisition. An open wait supplies a
+    lower bound on blocking time only.
+    """
+    if not isinstance(rule, dict) or rule.get("policy") != "single-lock-immediate-inheritance-v1":
+        return "INCOMPLETE"
+    limit = rule.get("max_wait_ticks")
+    if type(limit) is not int or limit < 0 or type(acquired) is not bool:
+        return "INCOMPLETE"
+    if not isinstance(priorities, dict) or not isinstance(waiter, str) or not waiter:
+        return "INCOMPLETE"
+    waiter_priority = priorities.get(waiter)
+    if type(waiter_priority) is not int:
+        return "INCOMPLETE"
+    if not isinstance(wait, (tuple, list)) or len(wait) != 2 or not all(type(t) is int for t in wait):
+        return "INCOMPLETE"
+    start, end = wait
+    if end <= start or not isinstance(segments, list):
+        return "INCOMPLETE"
+    cursor = start
+    inherited = True
+    for row in segments:
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            return "INCOMPLETE"
+        left, right, owner, effective = row
+        if type(left) is not int or type(right) is not int or left != cursor or right <= left:
+            return "INCOMPLETE"
+        if not isinstance(owner, str) or not owner or owner == waiter or type(effective) is not int:
+            return "INCOMPLETE"
+        base = priorities.get(owner)
+        if type(base) is not int:
+            return "INCOMPLETE"
+        if effective < max(base, waiter_priority):
+            inherited = False
+        cursor = right
+    if cursor != end:
+        return "INCOMPLETE"
+    if not inherited or end - start > limit:
+        return "FAIL"
+    return "PASS" if acquired else "INCOMPLETE"

@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("depth,thickness,coefficient,stress_ceiling,resistance", [
+    pytest.param(100, 2, 50000, 60, 4000, id="check-a-slender-edge-rail"),
+    pytest.param(200, 5, 32000, 40, 20000, id="check-a-deep-support-web"),
+    pytest.param(40, 4, 10000, 30, 4800, id="check-a-stocky-equipment-rail"),
+])
+def test_pinned_rail_web_shear(depth, thickness, coefficient, stress_ceiling, resistance):
+    from benches.x03_layout_oracle import rail_bending_stress_quality, rail_web_shear_quality as grade
+
+    rule = dict(revision="web-a", model="elastic-web-shear-v1",
+                buckling_coefficient_mpa=coefficient, allowable_shear_mpa=stress_ceiling)
+    assert rail_bending_stress_quality({"web": 1}, {"web": 0.001}, {"web": 2000}) == "PASS"
+    assert grade("web-a", rule, depth, thickness, resistance) == "PASS"
+    assert grade("web-a", rule, depth, thickness, -(resistance + 1)) == "FAIL"
+    assert grade("web-a", rule, depth, None, resistance) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("force_rating,moment_rating,force,moment", [
     pytest.param(1000, 80, 250, 60, id="check-quarter-loaded-roof-rail"),
     pytest.param(600, 120, 300, -60, id="check-reverse-bending-at-ridge"),

@@ -664,3 +664,32 @@ def rear_reflected_irradiance_quality(model, ground, rear_view, reported_w_m2):
     if total_view > 1:
         return "INCOMPLETE"
     return "PASS" if expected == Fraction(str(reported_w_m2)) else "FAIL"
+
+
+def tipping_bucket_depth_quality(model, tips_s, reported_mm):
+    """Correct only complete inter-tip intervals, assuming steady rain in each.
+
+    Each tip blinds the gauge for dead_s, then the next bucket fills. Observed
+    interval depth is bucket depth times elapsed time divided by active time.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(model, dict) or model.get("rule") != "nonparalyzable-intertip-v1":
+        return "INCOMPLETE"
+    values = [model.get(k) for k in ("bucket_mm", "dead_s", "min_gap_s", "max_gap_s")]
+    if not all(map(finite_measure, values)) or not finite_measure(reported_mm):
+        return "INCOMPLETE"
+    bucket, dead, shortest, longest = (Fraction(str(x)) for x in values)
+    if bucket <= 0 or not 0 <= dead < shortest <= longest:
+        return "INCOMPLETE"
+    if not isinstance(tips_s, (tuple, list)) or len(tips_s) < 2 or not all(map(finite_measure, tips_s)):
+        return "INCOMPLETE"
+    times = [Fraction(str(t)) for t in tips_s]
+    depth = Fraction(0)
+    for start, end in zip(times, times[1:]):
+        gap = end - start
+        if not shortest <= gap <= longest:
+            return "INCOMPLETE"
+        depth += bucket * gap / (gap - dead)
+    return "PASS" if Fraction(str(reported_mm)) == depth else "FAIL"

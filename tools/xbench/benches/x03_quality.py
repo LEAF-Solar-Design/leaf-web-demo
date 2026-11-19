@@ -2263,3 +2263,69 @@ def semiconductor_soa_quality(revision, envelope, voltage_v, current_a, pulse_s)
         return "INCOMPLETE"
     from math import isclose
     return "PASS" if current_a <= limit or isclose(current_a, limit, rel_tol=1e-14) else "FAIL"
+
+
+def residual_waveform_quality(revision, classes, trip_class, spectrum):
+    """Grade components against a recorded simultaneous-exposure qualification.
+
+    Spectrum maps waveform families to (frequency Hz, RMS mA) components.
+    A class explicitly lists each family's qualified frequency interval and
+    cumulative RMS ceiling, or False for a known blind family. The model
+    conservatively sums component magnitudes within each family.
+    """
+    if not isinstance(revision, str) or not revision.strip() or not isinstance(classes, dict):
+        return "INCOMPLETE"
+    if classes.get("revision") != revision or not isinstance(trip_class, str):
+        return "INCOMPLETE"
+    ratings = classes.get("simultaneous_ratings")
+    if not isinstance(ratings, dict) or not isinstance(ratings.get(trip_class), dict):
+        return "INCOMPLETE"
+    if not isinstance(spectrum, dict) or not spectrum:
+        return "INCOMPLETE"
+    failed = False
+    for family, components in spectrum.items():
+        if not isinstance(family, str) or not isinstance(components, list) or not components:
+            return "INCOMPLETE"
+        band = ratings[trip_class].get(family)
+        if band is not False:
+            if not isinstance(band, (tuple, list)) or len(band) != 3:
+                return "INCOMPLETE"
+            if not all(finite_measure(x) for x in band):
+                return "INCOMPLETE"
+            low, high, maximum = band
+            if not 0 <= low <= high or maximum <= 0:
+                return "INCOMPLETE"
+        magnitude = Fraction(0)
+        for component in components:
+            if not isinstance(component, (tuple, list)) or len(component) != 2:
+                return "INCOMPLETE"
+            hz, rms = component
+            if not all(map(finite_measure, component)) or hz < 0 or rms <= 0:
+                return "INCOMPLETE"
+            if band is False or not low <= hz <= high:
+                failed = True
+            magnitude += Fraction(str(rms))
+        if band is not False and magnitude > Fraction(str(maximum)):
+            failed = True
+    return "FAIL" if failed else "PASS"
+
+
+def cell_balance_deadline_quality(policy, excess_ah, currents_a, duty_limits, deadline_h):
+    """Independent bleed channels may each run at their recorded duty limit."""
+    if policy != "independent-constant-bleed-v1" or not finite_measure(deadline_h) or deadline_h < 0:
+        return "INCOMPLETE"
+    if not all(isinstance(table, dict) and table for table in (excess_ah, currents_a, duty_limits)):
+        return "INCOMPLETE"
+    if excess_ah.keys() != currents_a.keys() or excess_ah.keys() != duty_limits.keys():
+        return "INCOMPLETE"
+    feasible = True
+    for cell, excess in excess_ah.items():
+        current, duty = currents_a[cell], duty_limits[cell]
+        if not all(map(finite_measure, (excess, current, duty))):
+            return "INCOMPLETE"
+        if excess < 0 or current < 0 or not 0 <= duty <= 1:
+            return "INCOMPLETE"
+        removable = Fraction(str(current)) * Fraction(str(duty)) * Fraction(str(deadline_h))
+        if Fraction(str(excess)) > removable:
+            feasible = False
+    return "PASS" if feasible else "FAIL"
