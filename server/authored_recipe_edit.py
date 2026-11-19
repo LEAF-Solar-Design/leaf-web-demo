@@ -93,7 +93,7 @@ def run(intake, params):
 
 
 def edit_inspection_recipe(service, description, snapshot, tenant, session, turn, *,
-                           issue_retry_key=False, retry_key=None, read_revision=None):
+                           issue_retry_key=False, retry_key=None, read_revision=None, record_attempt=None):
     """Prepare an edit offline; the existing guarded CAS service owns the write."""
     from integration_tool_service import ReadFailure, failure, normalize
     import tool_loader
@@ -116,7 +116,7 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
     if (args.get("expectedRevision") != selected["expectedRevision"]
             or args.get("recipe", {}).get("id") != selected["recipe"]["id"]):
         return failure("invalid_input")
-    if not issue_retry_key and retry_key is None:
+    if not issue_retry_key and retry_key is None and record_attempt is None:
         return service.execute("elements", args, tenant, session, turn)
 
     from authored_recipe_retry import _digest, recover_recipe_save
@@ -137,6 +137,14 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
         return recover_recipe_save(service, "Recover my recipe save receipt.", request,
                                    tenant, session, turn, read_revision=read_revision,
                                    expected_authority=authority)
+    if record_attempt is not None:
+        # The host commits this intent before dispatch. A crash can then lose
+        # the entire reply without losing the identity needed for readback.
+        try:
+            record_attempt(authority, {"description": description, "snapshot": intake["inspection_recipe"],
+                                       "retry_key": key})
+        except Exception:
+            return failure("unavailable")
     outcome = service._execute("elements", request, tenant, session, turn, authority)
     if "result" in outcome or outcome.get("error", {}).get("code") == "outcome_unknown":
         return {**outcome, "retry_key": key}

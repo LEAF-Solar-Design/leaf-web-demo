@@ -20,7 +20,7 @@ def _parse(description):
     tail = description[prefix.end():].strip().removesuffix(".")
     ops = []
     while tail and len(ops) < 100:
-        verb = re.match(r"(insert|remove|move)\s+", tail, re.I)
+        verb = re.match(r"(insert|remove|move|copy|set)\s+", tail, re.I)
         if not verb:
             return None
         action = verb[1].lower()
@@ -28,21 +28,37 @@ def _parse(description):
             value, end = _DECODER.raw_decode(tail[verb.end():])
         except (ValueError, RecursionError, OverflowError):
             return None
-        if action == "insert":
+        if action in ("copy", "set"):
+            if type(value) is not str:
+                return None
+            argument = tail[verb.end()+end:]
+            label = re.match(r"\s+to\s+", argument, re.I)
+            if not label:
+                return None
+            try:
+                other, end = _DECODER.raw_decode(argument[label.end():])
+            except (ValueError, RecursionError, OverflowError):
+                return None
+            if action == "copy" and type(other) is not str:
+                return None
+            ops.append((action, value, other))
+            tail = argument[label.end()+end:]
+        elif action == "insert":
             if type(value) is not dict or type(value.get("id")) not in (str, int):
                 return None
         elif type(value) not in (str, int):
             return None
-        tail = tail[verb.end()+end:]
-        positions = []
-        for relation in (("from", "to") if action == "move" else ("at",)):
-            label = re.match(r"\s+" + relation + r"\s+index\s+", tail, re.I)
-            index = _INDEX.match(tail, label.end()) if label else None
-            if not index:
-                return None
-            positions.append(int(index[0]))
-            tail = tail[index.end():]
-        ops.append((action, value, positions))
+        if action not in ("copy", "set"):
+            tail = tail[verb.end()+end:]
+            positions = []
+            for relation in (("from", "to") if action == "move" else ("at",)):
+                label = re.match(r"\s+" + relation + r"\s+index\s+", tail, re.I)
+                index = _INDEX.match(tail, label.end()) if label else None
+                if not index:
+                    return None
+                positions.append(int(index[0]))
+                tail = tail[index.end():]
+            ops.append((action, value, positions))
         if not tail:
             return ops
         separator = _SEPARATOR.match(tail)
@@ -88,19 +104,65 @@ def build_body(description):
 
 
 _BODY = """
+from copy import deepcopy
+import json
+import re
+
+
+def location(rows, pointer, *, add=False):
+    if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
+        raise ValueError("Invalid material JSON pointer.")
+    parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
+    if len(parts) < 2 or parts[1] == "id":
+        raise ValueError("Select a field inside a record; its ID is immutable.")
+    parent = rows
+    for index, key in enumerate(parts):
+        final = index == len(parts)-1
+        if type(parent) is list:
+            if key == "-" and final and add:
+                key = len(parent)
+            elif re.fullmatch(r"0|[1-9][0-9]{0,8}", key):
+                key = int(key)
+            else:
+                raise ValueError("Invalid material array index.")
+            if key > len(parent) or (key == len(parent) and not (add and final)):
+                raise ValueError("Material array index is absent.")
+        elif type(parent) is not dict or (key not in parent and not (add and final)):
+            raise ValueError("Material field is absent.")
+        if final:
+            return parent, key
+        parent = parent[key]
+
+
 def run(intake, params):
     selected = intake.get("checker_material_selection") or {}
     original = selected.get("record_values")
     operations = __OPERATIONS__
     if not operations or params or type(original) is not list or selected.get("record_exact_numbers"):
         raise ValueError("Select editable JSON records and specify ordered insert, remove or move operations.")
-    rows = list(original)
+    rows = deepcopy(original)
     if any(type(row) is not dict or type(row.get("id")) not in (int, str) for row in rows):
         raise ValueError("Record IDs are required.")
     identities = {row["id"] for row in rows}
     if len(identities) != len(rows):
         raise ValueError("Record IDs must be unique.")
     for action, value, positions in operations:
+        if action in ("copy", "set"):
+            if action == "copy":
+                source, key = location(rows, value)
+                parent, dest = location(rows, positions, add=True)
+                item = deepcopy(source[key])
+                if type(parent) is list:
+                    parent.insert(dest, item)
+                else:
+                    parent[dest] = item
+            else:
+                target, key = location(rows, value)
+                target[key] = positions
+            # Repeated nested copies may grow exponentially even with a short edit list.
+            if len(json.dumps(rows, separators=(",", ":")).encode()) > 1048576:
+                raise ValueError("Edited material exceeds the sandbox result limit.")
+            continue
         index = positions[0]
         if action == "insert":
             if index > len(rows) or value["id"] in identities:
