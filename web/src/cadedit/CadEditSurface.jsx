@@ -131,7 +131,7 @@ export default function CadEditSurface({
       </div>}
     </details>
     <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} data-testid="drawing-navigation-live">{announcement}</LiveRegion>
-    {incompleteView && <p data-testid="drawing-incomplete-view">{incompleteView}</p>}
+    {incompleteView && <p className="drawing-incomplete-view" data-testid="drawing-incomplete-view">{incompleteView}</p>}
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">

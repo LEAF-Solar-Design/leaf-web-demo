@@ -29,6 +29,7 @@ it('keeps an incomplete-view warning visible outside the Objects disclosure for 
   const view = render(<CadEditSurface enabled />)
   const warning = screen.getByTestId('drawing-incomplete-view')
   expect(warning).toBeVisible()
+  expect(warning).toHaveClass('drawing-incomplete-view')
   expect(warning).not.toHaveAttribute('role')
   expect(screen.getAllByRole('status')).toHaveLength(1)
   expect(warning).toHaveTextContent('1 radius dimension omitted; 1 diameter dimension omitted; 1 angular dimension omitted')
