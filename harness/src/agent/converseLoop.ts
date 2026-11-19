@@ -787,17 +787,19 @@ export class ConverseLoop {
           // prevents preview approval from becoming a confirm-once grant for
           // the later real write. Live APS stays on its cost-bearing rung.
           // Unknown tools still fail toward the WRITE rung.
-          const action =
-            entry?.aps_live === true
-              ? "submit_live_solve"
-              : target === "solar-solve-proposal" && hasServerCapability(entry, "solve")
-                ? "run_solve_tool"
-              : entry && params.dry_run === true
-                ? "run_read_tool"
-                : !entry || entry.capabilities.includes("drawing.write")
-                ? "run_write_tool"
-                : "run_read_tool";
           const projectState = await appRun.getProjectDrawingState?.();
+          let action: string;
+          if (entry?.aps_live === true) {
+            action = "submit_live_solve";
+          } else if (target === "solar-solve-proposal" && hasServerCapability(entry, "solve")) {
+            action = "run_solve_tool";
+          } else if (!entry) {
+            action = "run_write_tool";
+          } else if (params.dry_run === true || !entry.capabilities.includes("drawing.write")) {
+            action = "run_read_tool";
+          } else {
+            action = projectState ? "run_write_tool" : "run_drawing_edit_tool";
+          }
           const solveContext = action === "run_solve_tool"
             ? canonicalSolveContext(args.solve_context, projectState?.graph_revision) : undefined;
           if (projectState && ((args.dwg != null && args.dwg !== projectState.binding.drawing_id) ||

@@ -807,6 +807,15 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "medium", "timeout_s": 120,
             "audit_extra": ["tool", "dwg"], "cost_class": "write",
         },
+        "run_drawing_edit_tool": {
+            "description": "Dispatch a registered drawing.write tool on the user's own standalone drawing via POST /api/run (R3; creates vN+1, undoable from version history). Runs without an approval card; project drawings, solves, live APS runs, authoring, publishing and platform edits keep their own approval actions.",
+            "rung": 3, "required_capability": "run_write", "policy": "auto",
+            "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+            "args_schema": _RUN_TOOL_SCHEMA,
+            "rate_limit_category": "medium", "timeout_s": 120,
+            "audit_extra": ["tool", "dwg"], "cost_class": "write",
+        },
         "run_solve_tool": {
             "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
             "rung": 4, "required_capability": "solve", "policy": "always-confirm",

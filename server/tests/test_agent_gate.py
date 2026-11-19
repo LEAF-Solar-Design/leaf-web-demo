@@ -165,6 +165,33 @@ def test_entitlement_denies_without_capability():
     assert res["reason"] == "entitlement_required: tier lacks 'run_read'"
 
 
+def test_standalone_drawing_edit_requires_write_entitlement():
+    args = {"tool": "add-panel"}
+    assert _gate("run_drawing_edit_tool", args)["decision"] == "allow"
+    denied = _gate("run_drawing_edit_tool", args, caps=dict(FULL_CAPS, run_write=False))
+    assert denied["decision"] == "deny"
+    assert denied["reason"] == "entitlement_required: tier lacks 'run_write'"
+    assert _gate("run_write_tool", args)["decision"] == "awaiting_approval"
+
+
+def test_plan_first_requires_approval_for_standalone_drawing_edit(monkeypatch):
+    import session_policy
+
+    monkeypatch.setattr(session_policy, "get_policy", lambda session, tenant: "plan_first")
+    result = _gate("run_drawing_edit_tool", {"tool": "add-panel"})
+    assert result["decision"] == "awaiting_approval"
+    assert result["confirmation_id"]
+
+
+def test_tenant_can_require_approval_for_standalone_drawing_edit():
+    agent_policy.tenants_file().write_text(json.dumps({
+        "t-tight": {"overlay": {"run_drawing_edit_tool": {"policy": "always-confirm"}}}
+    }), encoding="utf-8")
+    result = _gate("run_drawing_edit_tool", {"tool": "add-panel"}, tenant="t-tight")
+    assert result["decision"] == "awaiting_approval"
+    assert result["confirmation_id"]
+
+
 def test_entitlement_before_rate_limit_denied_calls_never_burn_budget(tmp_path, monkeypatch):
     _custom_policy(tmp_path, monkeypatch,
                    lambda raw: raw["rate_limits"].update({"medium_per_hour": 3}))
