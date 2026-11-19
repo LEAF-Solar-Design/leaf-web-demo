@@ -1,6 +1,6 @@
 import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
 import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { vertexZ, vertexSegments } from './viewerVertexZ.js'
@@ -587,9 +587,8 @@ const Viewer = forwardRef(function Viewer(
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(ins.pt[0] - origin.x, ins.pt[1] - origin.y, 2)
       mesh.rotation.z = THREE.MathUtils.degToRad(ins.rot || 0)
-      const sx = ins.scale?.[0] ?? 1
-      const sy = ins.scale?.[1] ?? 1
-      mesh.scale.set(sx || 1, sy || 1, 1)
+      const [sx, sy] = insertGlyphScale(ins.scale)
+      mesh.scale.set(sx, sy, 1)
       mesh.userData = { kind: 'insert', handle: ins.handle }
       // outline square + a tick toward local +X so rotation reads visually
       const o = hs
@@ -605,7 +604,7 @@ const Viewer = forwardRef(function Viewer(
       entityLayerGroup(insertLayerGroups, ins.layer).add(mesh)
       pickables.push(mesh)
       nInserts++
-      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
+      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx, sy], hs })
     }
 
     // --- 3DFACEs: filled triangle-pair surfaces -----------------------------
