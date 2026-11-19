@@ -853,3 +853,40 @@ def test_precipitation_complete_interval_sum(unit,depth,expected):
     assert check(rows+[rows[0]],expected+1) == "FAIL"
     assert check(rows[:1],expected) == "INCOMPLETE"
     assert check([rows[0],(1,3,1,"mm","unknown-reset")],expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("qualified,outside", [
+    ((600,10000,5),(601,10000,5)),
+    ((400,20000,8),(400,20001,8)),
+    ((500,9000,4),(500,9000,6)),
+])
+def test_fuse_requires_one_joint_dc_envelope(qualified,outside):
+    from benches.x03_catalog_oracle import dc_fuse_quality as grade
+    sheet = dict(revision="dc2",exhaustive=True,dc_envelopes_v_a_ms=[(600,10000,5),(400,20000,8)])
+    assert grade("dc2",sheet,qualified) == "PASS"
+    assert grade("dc2",sheet,outside) == "FAIL"
+    assert grade("dc2",dict(sheet,exhaustive=False),outside) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("terminal,wire,tool,minimum", [
+    ("lug","16 mm2","hex",400),("pin","1 mm2","indent",75),("splice","4 mm2","oval",150),
+])
+def test_crimp_requires_qualified_tool_and_each_pull(terminal,wire,tool,minimum):
+    from benches.x03_catalog_oracle import crimp_pull_quality as grade
+    sheet = dict(revision="p1",exhaustive=True,minimum_pull_n={(terminal,wire,tool):minimum})
+    args = ("p1",sheet,terminal,wire)
+    assert grade(*args,tool,[minimum,minimum+20]) == "PASS"
+    assert grade(*args,tool,[minimum-1,minimum+20]) == "FAIL"
+    assert grade(*args,"unlisted",[minimum+20]) == "FAIL"
+    assert grade(*args,tool,[]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("azimuth,height,beam", [(360,15,850),(90,25,700),(-90,5,500)])
+def test_horizon_masks_obstructed_direct_beam(azimuth,height,beam):
+    from benches.x03_weather_oracle import horizon_beam_quality as grade
+    profile = dict(revision="survey",sectors_deg=[(0,90,15),(90,180,25),(270,360,5)])
+    args = ("survey",profile,azimuth)
+    assert grade(*args,height,beam,0) == "PASS"
+    assert grade(*args,height-1,beam,beam) == "FAIL"
+    assert grade(*args,height+1,beam,beam) == "PASS"
+    assert grade("survey",profile,200,height,beam,0) == "INCOMPLETE"

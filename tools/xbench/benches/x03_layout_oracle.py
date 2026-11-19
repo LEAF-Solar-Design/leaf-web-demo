@@ -838,3 +838,14 @@ def joint_slip_quality(bolt_preloads_n, slip_factor, interfaces, shear_n):
     clamp = sum(Fraction(str(v)) for v in bolt_preloads_n)
     resistance = interfaces * Fraction(str(slip_factor)) * clamp
     return "PASS" if abs(Fraction(str(shear_n))) <= resistance else "FAIL"
+
+
+def punching_shear_quality(reaction_n, depth_mm, perimeter_mm, resistance_mpa, rule):
+    """Uniform punching stress on the recorded critical section, with design resistance supplied."""
+    values = (reaction_n, depth_mm, perimeter_mm, resistance_mpa)
+    if rule != "uniform-critical-section-v1" or not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    load, depth, perimeter, resistance = (Fraction(str(x)) for x in values)
+    if load < 0 or min(depth, perimeter, resistance) <= 0:
+        return "INCOMPLETE"
+    return "PASS" if load <= depth * perimeter * resistance else "FAIL"

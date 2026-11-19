@@ -1967,3 +1967,32 @@ def contactor_open_quality(command_s, settle_s, observation_end_s, safe_v, feedb
     if cursor != observation_end_s:
         return "INCOMPLETE"
     return "PASS" if isolated else "FAIL"
+
+
+def junction_temperature_quality(ambient_c, losses_w, path, max_junction_c):
+    """Steady-state series path carrying the same device losses from junction to ambient."""
+    if not all(map(finite_measure, (ambient_c, max_junction_c))):
+        return "INCOMPLETE"
+    if not isinstance(losses_w, list) or not losses_w or not all(finite_measure(w) and w >= 0 for w in losses_w):
+        return "INCOMPLETE"
+    if not isinstance(path, list) or not path:
+        return "INCOMPLETE"
+    node = "junction"
+    visited = {node}
+    resistance = Fraction(0)
+    for segment in path:
+        if not isinstance(segment, (tuple, list)) or len(segment) != 3:
+            return "INCOMPLETE"
+        start, end, kelvin_per_watt = segment
+        if start != node or not isinstance(end, str) or not end or end in visited:
+            return "INCOMPLETE"
+        if not finite_measure(kelvin_per_watt) or kelvin_per_watt < 0:
+            return "INCOMPLETE"
+        resistance += Fraction(str(kelvin_per_watt))
+        visited.add(end)
+        node = end
+    if node != "ambient":
+        return "INCOMPLETE"
+    power = sum(Fraction(str(w)) for w in losses_w)
+    temperature = Fraction(str(ambient_c)) + power * resistance
+    return "PASS" if temperature <= Fraction(str(max_junction_c)) else "FAIL"
