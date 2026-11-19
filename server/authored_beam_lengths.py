@@ -18,7 +18,7 @@ _UNITS = (
 def matches(description):
     prompt = description.casefold()
     spline = re.search(r"\b(?:splines?|nurbs|knots?)\b", prompt)
-    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure)\b", prompt):
+    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure|how long)\b", prompt):
         return True
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
@@ -45,6 +45,7 @@ def build_body(description, *, entry_point="run"):
     only_splines = collect_segments or bool(spline_request and (explicit_spline_scope or not mixed_scope))
     periodic = bool(re.search(r"\bperiodic\b", description, re.I))
     survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
+    list_members = re.search(r"\blist(?:s|ing)?\b|\beach\s+(?:(?:spline|nurbs)\s+)?beam\b", description, re.I)
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__PERIODIC__", repr(periodic))
             .replace("__SURVEY__", repr(survey))
@@ -53,7 +54,7 @@ def build_body(description, *, entry_point="run"):
             .replace("__ONLY_SPLINES__", repr(only_splines))
             .replace("__COLLECT_SPLINES__", repr(collect_segments))
             .replace("__SPAN_DETAIL__", repr(span_detail))
-            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or bool(list_members))))
 
 
 _BODY = """

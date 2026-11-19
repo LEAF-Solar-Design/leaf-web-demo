@@ -88,6 +88,7 @@ class _Registration:
     fields: list
     handler: object
     expects_arguments: bool
+    argument_validator: object
 
 
 class AuthorizedLocalActions:
@@ -98,15 +99,32 @@ class AuthorizedLocalActions:
         self._role_grants = {}
         self._memberships = {}
 
-    def register(self, tenant, project, reference, handler, *, form=None):
+    def register(self, tenant, project, reference, handler, *, form=None, argument_schema=None):
         slot = (tenant, project, reference["connection_id"], reference["operation_ref"]["id"])
         registered_form = json.loads(_identity(_EMPTY_FORM if form is None else form))
         validate_action_catalog({"actions": [{**reference, "connection_title": "Local",
                                  "title": "Local", "form": registered_form}], "next_cursor": None}, 1)
+        validator = None
+        if argument_schema is not None:
+            # A structured local operation advertises the digest of its JSON
+            # argument schema in its operation reference. The wire form holds
+            # presentation hints for any scalar fields the host also displays.
+            from jsonschema import Draft202012Validator
+            from referencing import Registry
+
+            encoded = _identity(argument_schema)
+            if sha256(encoded.encode("utf-8")).hexdigest() != reference["operation_ref"]["digest"]:
+                raise ValueError("Argument schema differs from the pinned operation digest")
+            schema = json.loads(encoded)
+            if (not isinstance(schema, dict) or schema.get("type") != "object"
+                    or schema.get("additionalProperties") is not False):
+                raise ValueError("Structured action arguments require a closed object schema")
+            Draft202012Validator.check_schema(schema)
+            validator = Draft202012Validator(schema, registry=Registry())
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],
-                handler, form is not None)
+                handler, form is not None or validator is not None, validator)
 
     def set_role_grants(self, tenant, project, role, references):
         with self._lock:
@@ -128,7 +146,13 @@ class AuthorizedLocalActions:
                     or binding.form_digest != digest or not allowed):
                 raise ReadFailure("denied")
             values = json.loads(arguments)
-            _check_arguments(binding.fields, values)
+            if binding.argument_validator is None:
+                _check_arguments(binding.fields, values)
+            else:
+                if not binding.argument_validator.is_valid(values):
+                    raise ReadFailure("invalid_input")
+                field_ids = {field["id"] for field in binding.fields}
+                _check_arguments(binding.fields, {k: v for k, v in values.items() if k in field_ids})
             return binding.handler(values) if binding.expects_arguments else binding.handler()
 
 

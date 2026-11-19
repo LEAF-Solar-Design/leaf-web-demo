@@ -576,9 +576,12 @@ class IntegrationToolService:
         from authored_role_action import compare_role_actions
         return compare_role_actions(self, description, tenant, session, turn, policy=policy, limit=limit)
 
-    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn):
+    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn, *,
+                               issue_retry_key=False, retry_key=None, read_revision=None):
         from authored_recipe_edit import edit_inspection_recipe
-        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn)
+        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn,
+                                      issue_retry_key=issue_retry_key, retry_key=retry_key,
+                                      read_revision=read_revision)
 
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50):
         return self._run_catalog_report("datasets", description, tenant, session, turn, limit)
@@ -607,6 +610,7 @@ class IntegrationToolService:
         rows = []
         size = 0
         pages = 0
+        datasets_by_id = {}
         from authored_dataset_discovery import requires_snapshot
         pinned = operation == "datasets" and requires_snapshot(description)
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority, require_snapshot=pinned):
@@ -619,6 +623,14 @@ class IntegrationToolService:
                 size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
                 if size > RESPONSE_CAP:
                     raise ReadFailure("response_too_large")
+                if operation == "datasets":
+                    dataset_id = row["dataset_ref"]["id"]
+                    previous = datasets_by_id.get(dataset_id)
+                    if previous is not None:
+                        if previous != row:
+                            raise ReadFailure("identity_conflict")
+                        continue
+                    datasets_by_id[dataset_id] = row
                 rows.append(row)
         if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")

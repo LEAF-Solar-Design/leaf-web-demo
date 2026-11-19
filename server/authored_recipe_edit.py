@@ -92,7 +92,8 @@ def run(intake, params):
 """
 
 
-def edit_inspection_recipe(service, description, snapshot, tenant, session, turn):
+def edit_inspection_recipe(service, description, snapshot, tenant, session, turn, *,
+                           issue_retry_key=False, retry_key=None, read_revision=None):
     """Prepare an edit offline; the existing guarded CAS service owns the write."""
     from integration_tool_service import ReadFailure, failure, normalize
     import tool_loader
@@ -115,4 +116,28 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
     if (args.get("expectedRevision") != selected["expectedRevision"]
             or args.get("recipe", {}).get("id") != selected["recipe"]["id"]):
         return failure("invalid_input")
-    return service.execute("elements", args, tenant, session, turn)
+    if not issue_retry_key and retry_key is None:
+        return service.execute("elements", args, tenant, session, turn)
+
+    from authored_recipe_retry import _digest, recover_recipe_save
+
+    try:
+        authority = service._resolve_operation("elements", tenant, session, turn).authority
+        request = normalize("elements", args)
+    except ReadFailure as exc:
+        return failure(str(exc))
+    # This is a request identity. Authority still comes from the active grant.
+    key = _digest({"operation": "inspection-recipe-save-v1", "origin": authority.origin,
+                   "tenant": authority.tenant_id, "project": authority.project_id,
+                   "subject": authority.subject, "request": request})
+    if retry_key is not None:
+        if retry_key != key:
+            return failure("conflict")
+        # A retry only reads the immutable successor, even after the head advances.
+        return recover_recipe_save(service, "Recover my recipe save receipt.", request,
+                                   tenant, session, turn, read_revision=read_revision,
+                                   expected_authority=authority)
+    outcome = service._execute("elements", request, tenant, session, turn, authority)
+    if "result" in outcome or outcome.get("error", {}).get("code") == "outcome_unknown":
+        return {**outcome, "retry_key": key}
+    return outcome
