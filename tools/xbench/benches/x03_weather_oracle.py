@@ -550,3 +550,39 @@ def snow_water_quality(depth, depth_unit, layers, density_unit, reported_mm):
     if cursor != Fraction(str(depth)):
         return "INCOMPLETE"
     return "PASS" if total == Fraction(str(reported_mm)) else "FAIL"
+
+
+def rolling_rain_quality(window_min, max_sample_min, max_mm_h, trace, rule):
+    """Maximum whole-window mean under a uniform rate in each recorded gauge interval."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    values = (window_min, max_sample_min, max_mm_h)
+    if rule != "continuous-uniform-interval-v1" or not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    width, resolution, limit = (Fraction(str(x)) for x in values)
+    if min(width, resolution) <= 0 or limit < 0 or not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    times, depths, rates = [], [], []
+    depth = Fraction(0)
+    for row in trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        start, end, mm = (Fraction(str(x)) for x in row)
+        if (times and start != last_end) or not 0 < end-start <= resolution or mm < 0:
+            return "INCOMPLETE"
+        times.append(start)
+        depths.append(depth)
+        rates.append(mm/(end-start))
+        depth += mm
+        last_end = end
+    if last_end-times[0] < width:
+        return "INCOMPLETE"
+    from bisect import bisect_right
+    def accumulated(t):
+        i = bisect_right(times, t)-1
+        return depths[i] + rates[i]*(t-times[i])
+    # The rolling integral changes slope only when either edge passes a gauge boundary.
+    bounds = times + [last_end]
+    starts = {x for b in bounds for x in (b,b-width) if times[0] <= x <= last_end-width}
+    peak = max(accumulated(x+width)-accumulated(x) for x in starts)
+    return "PASS" if peak * 60 <= limit * width else "FAIL"

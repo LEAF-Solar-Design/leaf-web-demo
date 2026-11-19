@@ -912,3 +912,29 @@ def test_snowpack_layer_mass_as_water_depth(depth,unit,rows,density,water):
     assert grade(depth,unit,rows,density,water) == "PASS"
     assert grade(depth,unit,rows,density,depth) == "FAIL"
     assert grade(depth,unit,rows[:-1],density,water) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("seal,groove,allowed", [
+    ((4,5),(3,3.6),(0.1,0.4)),((10,10),(7,8),(0.2,0.3)),((2,2.5),(1.5,1.8),(0.1,0.4)),
+])
+def test_gasket_squeeze_at_both_tolerance_extremes(seal,groove,allowed):
+    from benches.x03_catalog_oracle import gasket_squeeze_quality as grade
+    sheet = dict(revision="drawing",seal_height_mm=seal,squeeze_fraction=allowed)
+    shallow,deep = groove
+    assert grade("drawing",sheet,groove) == "PASS"
+    assert grade("drawing",sheet,(shallow,deep+0.01)) == "FAIL"
+    assert grade("drawing",sheet,(shallow-0.01,deep)) == "FAIL"
+    assert grade("drawing",sheet,(shallow,None)) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("width,intervals,resolution,peak", [
+    (5,[(0,5,0),(5,10,5),(10,15,0)],5,60),
+    (6,[(0,4,0),(4,8,8),(8,12,4),(12,16,0)],4,100),
+    (5,[(0,4,4),(4,6,4),(6,9,9),(9,12,0)],4,156),
+])
+def test_peak_rain_intensity_between_gauge_readings(width,intervals,resolution,peak):
+    from benches.x03_weather_oracle import rolling_rain_quality as grade
+    rule = "continuous-uniform-interval-v1"
+    assert grade(width,resolution,peak,intervals,rule) == "PASS"
+    assert grade(width,resolution,peak-1,intervals,rule) == "FAIL"
+    assert grade(width,resolution-1,peak,intervals,rule) == "INCOMPLETE"
