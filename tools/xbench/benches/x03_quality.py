@@ -2788,3 +2788,85 @@ def intertrip_quality(policy, last_heartbeat, trace, *, complete):
     if deadline is not None and previous < deadline:
         return "INCOMPLETE"
     return "FAIL" if failed else "PASS"
+
+
+def field_loss_quality(settings, trajectory, *, complete):
+    """Zero-order-held R/X intervals in relay ohms, starting untripped.
+
+    Each circular zone includes its boundary, times continuous residence
+    independently and resets on exit. A matured zone latches the trip.
+    """
+    if complete is not True or not isinstance(settings, dict) or settings.get("model") != "circular-latched-v1":
+        return "INCOMPLETE"
+    zones = settings.get("zones")
+    if not isinstance(zones, list) or not zones or not isinstance(trajectory, list) or not trajectory:
+        return "INCOMPLETE"
+    circles = []
+    for zone in zones:
+        if not isinstance(zone, (tuple, list)) or len(zone) != 4 or not all(map(finite_measure, zone)):
+            return "INCOMPLETE"
+        r0, x0, radius, delay = (Fraction(str(v)) for v in zone)
+        if radius <= 0 or delay < 0:
+            return "INCOMPLETE"
+        circles.append((r0, x0, radius ** 2, delay))
+    timers = [Fraction(0)] * len(circles)
+    expected = failed = False
+    for sample in trajectory:
+        if not isinstance(sample, (tuple, list)) or len(sample) != 4:
+            return "INCOMPLETE"
+        duration, r, x, tripped = sample
+        if type(tripped) is not bool or not all(map(finite_measure, sample[:3])) or duration <= 0:
+            return "INCOMPLETE"
+        duration, r, x = (Fraction(str(v)) for v in sample[:3])
+        for i, (r0, x0, radius_squared, delay) in enumerate(circles):
+            if (r - r0) ** 2 + (x - x0) ** 2 <= radius_squared:
+                timers[i] += duration
+                expected |= timers[i] >= delay
+            else:
+                timers[i] = 0
+        failed |= tripped != expected
+    return "FAIL" if failed else "PASS"
+
+
+def breaker_failure_quality(settings, trace, *, complete):
+    """Single primary trip sequence. Current samples precede each tick's backup event.
+
+    A command arms the failure timer while current exceeds dropout. At expiry
+    backup must operate once. Post-operation current must clear by the pinned
+    deadline, at least one sample after the event.
+    """
+    if complete is not True or not isinstance(settings, dict) or settings.get("model") != "single-breaker-backup-v1":
+        return "INCOMPLETE"
+    wait, clear, dropout = (settings.get(k) for k in ("failure_ticks", "clear_ticks", "dropout_a"))
+    if type(wait) is not int or wait < 0 or type(clear) is not int or clear < 1:
+        return "INCOMPLETE"
+    if not finite_measure(dropout) or dropout < 0 or not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    command_tick = backup_tick = previous = None
+    primary_cleared = failed = False
+    for sample in trace:
+        if not isinstance(sample, (tuple, list)) or len(sample) != 4:
+            return "INCOMPLETE"
+        tick, command, amps, operated = sample
+        if type(tick) is not int or not finite_measure(amps) or amps < 0:
+            return "INCOMPLETE"
+        if type(command) is not bool or type(operated) is not bool or (previous is not None and tick != previous + 1):
+            return "INCOMPLETE"
+        previous = tick
+        if command:
+            if command_tick is not None:
+                return "INCOMPLETE"
+            command_tick = tick
+        if command_tick is not None and backup_tick is None and amps <= dropout:
+            primary_cleared = True
+        due = command_tick is not None and not primary_cleared and tick == command_tick + wait
+        failed |= operated != due
+        if due:
+            backup_tick = tick
+        if backup_tick is not None and tick >= backup_tick + clear and amps > dropout:
+            failed = True
+    if command_tick is None:
+        return "INCOMPLETE"
+    if not failed and not primary_cleared and (backup_tick is None or previous < backup_tick + clear):
+        return "INCOMPLETE"
+    return "FAIL" if failed else "PASS"

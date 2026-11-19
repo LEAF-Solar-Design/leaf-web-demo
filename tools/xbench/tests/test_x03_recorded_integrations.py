@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("exposure,coating,hours,criterion,protocol", [
+    pytest.param("sheltered", "zinc", 48, "no binding", "neutral", id="qualify-a-coated-latch"),
+    pytest.param("coastal", "epoxy", 240, "no blistering", "cyclic", id="check-a-coastal-enclosure"),
+    pytest.param("spray", "duplex", 480, "no red rust", "neutral", id="select-a-bracket-finish"),
+])
+def test_salt_fog_qualification_requires_one_matching_record(exposure, coating, hours, criterion, protocol):
+    from benches.x03_catalog_oracle import salt_fog_quality as grade
+
+    rule = dict(hours=hours, criterion=criterion, protocol=protocol)
+    result = dict(rule, coating=coating, passed=True)
+    sheet = dict(revision="lab", exposure_classes={exposure: rule}, tests=[result])
+    assert grade("lab", sheet, exposure, coating) == "PASS"
+    mismatched = [dict(result, hours=hours - 1), dict(result, coating="other"),
+                  dict(result, criterion="visual only"), dict(result, passed=False)]
+    assert grade("lab", dict(sheet, tests=mismatched), exposure, coating) == "FAIL"
+    assert grade("lab", dict(sheet, tests=[]), exposure, coating) == "INCOMPLETE"
+    assert grade("lab", sheet, "unknown", coating) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("orders,events", [
     pytest.param([["A", "B"], ["B", "A"]], [(1, "A"), (1, "B"), (2, "B"), (2, "A")],
                  id="verify-a-two-bolt-clamp"),
@@ -1298,3 +1317,19 @@ def test_irradiance_bound_uses_solar_geometry(elevation, distance, multiplier, b
     assert grade(model, elevation, distance, bound + 1) == "FAIL"
     assert grade(model, -10, distance, 1) == "FAIL"
     assert grade(model, None, distance, bound) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("zenith,dni,dhi,expected,tol", [
+    pytest.param(0, 600, 80, 680, 2, id="close-a-midday-horizontal-observation"),
+    pytest.param(60, 400, 100, 300, 3, id="reconcile-a-slant-beam-and-diffuse-sky"),
+    pytest.param(90, 75, 25, 25, 0, id="check-the-horizon-projection"),
+])
+def test_irradiance_closure_requires_simultaneous_channels(zenith, dni, dhi, expected, tol):
+    from benches.x03_weather_oracle import irradiance_closure_quality as grade
+
+    readings = {"ghi": (5, expected + tol), "dni": (5, dni), "dhi": (5, dhi), "zenith_deg": (5, zenith)}
+    assert grade(readings, tol) == "PASS"
+    assert grade(dict(readings, ghi=(5, expected - tol)), tol) == "PASS"
+    assert grade(dict(readings, ghi=(5, expected + tol + 1)), tol) == "FAIL"
+    assert grade(dict(readings, dni=(4, dni)), tol) == "INCOMPLETE"
+    assert grade({k: v for k, v in readings.items() if k != "dhi"}, tol) == "INCOMPLETE"

@@ -753,3 +753,27 @@ def test_quorum_transition_certificates_intersect(old, new, old_votes, joint_vot
     assert check(epochs, [before, after]) == "FAIL"
     assert check(epochs, [cert("joint", old_votes)]) == "FAIL"
     assert check({"old": [old]}, [before, handoff]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("widths,layer_totals", [
+    pytest.param([2, 2], [2, 4], id="account-for-gateway-and-service-retries"),
+    pytest.param([3, 2], [3, 6], id="bound-database-attempts-across-three-workers"),
+    pytest.param([2, 2, 2], [2, 4, 8], id="measure-a-three-tier-retry-cascade"),
+])
+def test_retry_amplification_counts_all_parent_branches(widths, layer_totals):
+    from benches.x03_dashboard_oracle import retry_amplification_quality as grade
+
+    events = [("request", None, 0)]
+    parents = ["request"]
+    for level, width in enumerate(widths, 1):
+        batch = [(f"{p}-{i}", p, level) for p in parents for i in range(width)]
+        events.extend(batch)
+        parents = [identity for identity, _, _ in batch]
+    limits = [dict(per_parent=w, per_original=n) for w, n in zip(widths, layer_totals)]
+    def check(caps, rows):
+        return grade("layer-attempt-caps-v1", caps, rows, complete=True)
+
+    assert check(limits, list(reversed(events))) == "PASS"
+    assert check([*limits[:-1], dict(limits[-1], per_original=layer_totals[-1] - 1)], events) == "FAIL"
+    assert check([dict(limits[0], per_parent=widths[0] - 1), *limits[1:]], events) == "FAIL"
+    assert check(limits, [events[0], *events[2:]]) == "INCOMPLETE"

@@ -3,6 +3,39 @@ from fractions import Fraction
 from math import isfinite
 
 
+def salt_fog_quality(revision, sheet, exposure, coating):
+    """Require one recorded coating test that meets the pinned exposure-class procedure."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(value, str) and value.strip() for value in (exposure, coating)):
+        return "INCOMPLETE"
+    classes = sheet.get("exposure_classes")
+    if not isinstance(classes, dict) or not isinstance(classes.get(exposure), dict):
+        return "INCOMPLETE"
+    rule = classes[exposure]
+    hours, criterion, protocol = rule.get("hours"), rule.get("criterion"), rule.get("protocol")
+    if not finite_measure(hours) or hours <= 0 or not all(isinstance(s, str) and s.strip() for s in (criterion, protocol)):
+        return "INCOMPLETE"
+    records = sheet.get("tests")
+    if not isinstance(records, list) or not records:
+        return "INCOMPLETE"
+    qualified = False
+    for row in records:
+        if not isinstance(row, dict):
+            return "INCOMPLETE"
+        identity = (row.get("coating"), row.get("criterion"), row.get("protocol"))
+        duration, passed = row.get("hours"), row.get("passed")
+        if not all(isinstance(s, str) and s.strip() for s in identity):
+            return "INCOMPLETE"
+        if not finite_measure(duration) or duration <= 0 or type(passed) is not bool:
+            return "INCOMPLETE"
+        if identity == (coating, criterion, protocol) and duration >= hours and passed:
+            qualified = True
+    return "PASS" if qualified else "FAIL"
+
+
 def tightening_sequence_quality(revision, procedure, events, complete):
     """Compare a complete chronological event record with the pinned order of each pass."""
     if not revision or not isinstance(procedure, dict) or procedure.get("revision") != revision:

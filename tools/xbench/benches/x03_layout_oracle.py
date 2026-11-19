@@ -4,6 +4,25 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def timber_withdrawal_quality(revision, rule, substrate, grain, moisture, threaded_mm, uplift_n):
+    """Compare axial uplift with resistance per effective threaded millimetre in the recorded timber."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(key, str) and key.strip() for key in (substrate, grain, moisture)):
+        return "INCOMPLETE"
+    entry = rule.get("withdrawal_n_per_mm")
+    for key in (substrate, grain, moisture):
+        if not isinstance(entry, dict) or key not in entry:
+            return "INCOMPLETE"
+        entry = entry[key]
+    if not all(map(finite_measure, (entry, threaded_mm, uplift_n))):
+        return "INCOMPLETE"
+    rate, length, uplift = (Fraction(str(value)) for value in (entry, threaded_mm, uplift_n))
+    if rate < 0 or length <= 0 or uplift < 0:
+        return "INCOMPLETE"
+    return "PASS" if uplift <= rate * length else "FAIL"
+
+
 def alternate_load_path_quality(model, loads_n, connectivity, capacities_n, removed):
     """Share each load equally among its recorded surviving support connections."""
     if model != "equal-connected-supports-v1" or not isinstance(loads_n, dict) or not loads_n:
