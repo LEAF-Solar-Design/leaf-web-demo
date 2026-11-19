@@ -6,10 +6,11 @@ from authored_material_selection import bind_material_selection
 
 
 def matches(description):
-    return all(re.search(pattern, description, re.I) for pattern in (
-        r"\b(?:revision|version)s?\b", r"\b(?:json|import(?:ed)?|project material)\b",
-        r"\b(?:compare|comparisons?|diff|differences?|change[ds]?)\b",
-    ))
+    source = re.search(r"\b(?:json|imports?|imported|materials?)\b", description, re.I)
+    revisions = re.search(r"\b(?:revisions?|versions?|reordered|before and after)\b", description, re.I)
+    comparison = re.search(r"\b(?:compare|comparisons?|diff|differences?|change[ds]?|moved|edited)\b",
+                           description, re.I)
+    return bool(source and revisions and comparison)
 
 
 def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, prior, current):
@@ -64,7 +65,10 @@ def run(intake, params):
             kind = "modified"
         else:
             kind = "moved"
-        changes.append({"id": identity, "kind": kind, "before": left, "after": right})
+        present_in_both = left is not None and right is not None
+        changes.append({"id": identity, "kind": kind, "before": left, "after": right,
+                        "moved": present_in_both and left["pointer"] != right["pointer"],
+                        "edited": present_in_both and left["sha256"] != right["sha256"]})
     report["changes"] = changes
     return report, None
 """

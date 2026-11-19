@@ -549,6 +549,11 @@ class IntegrationToolService:
                 return
             args = {"limit": limit, "after": cursor}
 
+    def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None):
+        from authored_recipe_retry import recover_recipe_save
+        return recover_recipe_save(self, description, original_args, tenant, session, turn,
+                                   read_revision=read_revision)
+
     def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
         from authored_batch_recipe import edit_table_recipes
         return edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn)

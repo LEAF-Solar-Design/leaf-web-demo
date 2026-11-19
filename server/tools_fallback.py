@@ -525,6 +525,8 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_dynamic_visibility
     import authored_clipped_panels
     import authored_joined_spline
+    import authored_recipe_retry
+    import authored_action_revocation
     import authored_batch_recipe
     import authored_material_revision
     import authored_panel_regions
@@ -547,6 +549,14 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_revision_panel_moves.build_body(description)
         drawing_params = authored_revision_panel_moves.PARAMS
         summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_recipe_retry.matches(description):
+        verb, engine_op = "report", "recipe_save_recovery"
+        drawing_body = authored_recipe_retry.build_body(description)
+        summary = "checks the pinned successor after an unconfirmed recipe save"
+    elif authored_action_revocation.matches(description):
+        verb, engine_op = "select", "guarded_action_selection"
+        drawing_body = authored_action_revocation.build_body(description)
+        summary = "selects a pinned local action subject to its current grant"
     elif authored_joined_spline.matches(description):
         verb, engine_op = "measure", "joined_spline_beams"
         drawing_body = authored_joined_spline.build_body(description)

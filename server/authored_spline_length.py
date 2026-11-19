@@ -47,7 +47,16 @@ def bezier_length(net):
     raise ValueError("Spline beam length did not converge to the reported tolerance.")
 
 
-def spline_length(path, frame):
+def spline_jump(points, knots, degree, k, frame):
+    # At a degree+1 interior knot the two one-sided limits coincide with
+    # adjacent controls. Lower multiplicities guarantee positional continuity.
+    if knots[k-degree] != knots[k]:
+        return 0.0
+    left, right = points[k-degree-1], points[k-degree]
+    return math.hypot(*transform_vector(frame, tuple(b-a for a, b in zip(left, right))))
+
+
+def spline_length(path, frame, factor, detail):
     if path.get("spline_error"):
         raise ValueError(path["spline_error"])
     degree = path["degree"]
@@ -63,6 +72,18 @@ def spline_length(path, frame):
         vector = transform_vector(frame, local)
         w = weight / scale
         control.append((*[x*w for x in vector], w))
-    return sum(bezier_length(bezier_span(control, knots, degree, k))
-               for k in range(degree, len(points)) if knots[k] < knots[k+1])
+    total = 0.0
+    spans, jumps = [], []
+    for k in range(degree, len(points)):
+        if knots[k] == knots[k+1]:
+            continue
+        length = bezier_length(bezier_span(control, knots, degree, k))
+        total += length
+        if detail:
+            if spans:
+                distance = spline_jump(points, knots, degree, k, frame)
+                if distance:
+                    jumps.append({"knot": knots[k], "distance": distance*factor})
+            spans.append({"interval": [knots[k], knots[k+1]], "length": length*factor})
+    return total, {"spans": spans, "jumps": jumps}
 """

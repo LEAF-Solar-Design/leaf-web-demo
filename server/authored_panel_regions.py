@@ -2,7 +2,7 @@
 import math
 import re
 
-from authored_clipped_panels import CLIP_SOURCE
+from authored_clipped_panels import CLIP_SOURCE, expansion_budget
 from authored_dynamic_visibility import VISIBILITY_SOURCE
 from dxf_spatial_clips import _polygon
 
@@ -77,7 +77,8 @@ def attach_footprints(pairs, out):
 def build_body(description):
     area = operation(description) == "clipped_panel_area"
     return CLIP_SOURCE + VISIBILITY_SOURCE + (_AREA_SOURCE if area else "") + _TRAVERSAL.replace(
-        "AREA_MODE", str(area)).replace("PANEL_PATTERN", repr(PANEL_NAME))
+        "AREA_MODE", str(area)).replace("PANEL_PATTERN", repr(PANEL_NAME)).replace(
+            "PLACEMENT_LIMIT", str(expansion_budget(description, 10000)))
 
 
 _AREA_SOURCE = """
@@ -134,9 +135,15 @@ def run(intake, params):
         raise ValueError("Unresolved block reference.")
     blocks = {n.casefold(): b for n,b in intake.get("blocks", {}).items()}
     paths, areas = set(), {}
-    visited = 0
+    def children_for(ref, name, block):
+        if re.fullmatch(PANEL_PATTERN, " ".join(re.findall(r"[a-z0-9]+", name))):
+            return ()
+        _, children = active_children(visibility or {"definitions": {}}, name,
+                                      ref.get("handle", "").upper(), block.get("nested_inserts", []))
+        return children
+
+    expanded = preflight_expansion(intake.get("inserts", ()), blocks, PLACEMENT_LIMIT, children_for)
     def visit(ref, inherited, prefix, ancestors, parent, boundaries):
-        nonlocal visited
         if ref.get("space") == "paper":
             return
         handle = ref.get("handle", "").upper()
@@ -153,17 +160,12 @@ def run(intake, params):
         if definition and panel:
             raise ValueError("Active geometry inside a panel definition is unresolved.")
         rows, cols = ref.get("rows",1),ref.get("columns",1)
-        if min(rows,cols)<1 or visited + rows*cols > 10000:
-            raise ValueError("Panel array exceeds traversal limit.")
         clip = clips.get(handle)
         if clip and "error" in clip:
             raise ValueError(clip["error"])
         base = block.get("base", (0,0,0))
         for row in range(rows):
             for col in range(cols):
-                visited += 1
-                if visited > 10000:
-                    raise ValueError("Panel traversal exceeds its limit.")
                 path = prefix + f"{handle}[{row},{col}]"
                 frame = insert_frame(parent, ref, base, row, col)
                 if (frame[1][2] or frame[2][2] or
@@ -201,8 +203,8 @@ def run(intake, params):
     for ref in intake.get("inserts", []):
         visit(ref,"0","",(),identity_frame(),())
     if AREA_MODE:
-        return {"area_by_layer":areas, "area_units":"square drawing units", "visible_panels":len(paths),
+        return {"area_by_layer":areas, "expanded_placements":expanded, "area_units":"square drawing units", "visible_panels":len(paths),
                 "boundary_policy":"edge contact contributes zero footprint area"}, None
-    return {"visible_paths":sorted(paths), "total":len(paths),
+    return {"visible_paths":sorted(paths), "expanded_placements":expanded, "total":len(paths),
             "boundary_policy":"include panel insertion points on clip edges"}, None
 """

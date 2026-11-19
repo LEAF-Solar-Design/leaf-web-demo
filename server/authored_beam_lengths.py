@@ -17,6 +17,9 @@ _UNITS = (
 
 def matches(description):
     prompt = description.casefold()
+    spline = re.search(r"\b(?:splines?|nurbs|knots?)\b", prompt)
+    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure)\b", prompt):
+        return True
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
                 and (_GROUPED.search(prompt)
@@ -32,11 +35,14 @@ def build_body(description, *, entry_point="run"):
     else:
         label, factor = "drawing_units", 1.0
     collect_segments = entry_point == "collect_spline_segments"
+    span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
+            .replace("__ONLY_SPLINES__", repr(collect_segments or span_detail or bool(re.search(r"\b(?:splines?|nurbs)\b", description, re.I))))
             .replace("__COLLECT_SPLINES__", repr(collect_segments))
-            .replace("__LIST_MEMBERS__", repr(collect_segments or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__SPAN_DETAIL__", repr(span_detail))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
 
 
 _BODY = """
@@ -101,13 +107,14 @@ def __ENTRY_POINT__(intake, params):
         factor = metres_per_unit[source_unit] / __OUTPUT_FACTOR__
     totals = {}
     members = {}
+    span_reports = {}
     identity = identity_frame()
 
     def measure(path, frame, inherited, prefix, copies):
         layer = path.get("layer", "0")
         if layer == "0":
             layer = inherited
-        if __COLLECT_SPLINES__ and path.get("kind") != "SPLINE":
+        if __ONLY_SPLINES__ and path.get("kind") != "SPLINE":
             return
         if path.get("space") == "paper":
             return
@@ -118,7 +125,7 @@ def __ENTRY_POINT__(intake, params):
                 raise ValueError("A closed spline has no free ends for a joined beam report.")
             return
         if path.get("kind") == "SPLINE":
-            length = spline_length(path, frame)
+            length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__)
         else:
             points = path["pts"]
             bulges = path.get("bulges", [])
@@ -144,6 +151,8 @@ def __ENTRY_POINT__(intake, params):
             if not key or key in members:
                 raise ValueError("Individual beam lengths require unique entity handles.")
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
+            if __SPAN_DETAIL__ and path.get("kind") == "SPLINE":
+                span_reports[key] = span_report
             if __COLLECT_SPLINES__:
                 members[key]["ends"] = spline_endpoints(path, frame)
 
@@ -216,6 +225,8 @@ def __ENTRY_POINT__(intake, params):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if __SPAN_DETAIL__:
+        result["spline_spans_by_handle"] = span_reports
     if __COLLECT_SPLINES__:
         result["output_per_drawing_unit"] = factor
     if __LIST_MEMBERS__:

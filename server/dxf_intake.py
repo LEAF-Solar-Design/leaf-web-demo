@@ -764,6 +764,12 @@ def _spline_measurement_path(record):
     # block definitions do not prevent a valid beam takeoff.
     try:
         path["closed"] = bool(int(groups.get(70, 0)) & 3)
+        # SPLINE control points are Cartesian. The optional planar normal is
+        # metadata, unlike an INSERT extrusion that changes the placement basis.
+        if any(code in groups for code in (210, 220, 230)):
+            normal = [float(groups.get(code, 0)) for code in (210, 220, 230)]
+            if not all(map(math.isfinite, normal)) or not any(normal):
+                raise ValueError("Degenerate spline plane normal.")
         degree = int(groups.get(71, 0))
         knots = [float(v) for c, v in record if c == 40]
         weights = [float(v) for c, v in record if c == 41]
