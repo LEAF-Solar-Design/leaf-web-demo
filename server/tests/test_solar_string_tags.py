@@ -76,7 +76,7 @@ def test_ordered_midpoint_and_equivalent_physical_scales(graph, route, unit, mpu
     factor = 10 * mpu
     height = Fraction(2) / factor
     margin = height / 4
-    cw, ch = Fraction(29, 10) * height, Fraction(3, 2) * height
+    cw, ch = Fraction(17, 10) * height, Fraction(3, 2) * height
     centres = {p["id"]: p["centre"] for p in graph["panels"]}
     if route:
         for s in graph["strings"]:
@@ -132,28 +132,53 @@ def test_collocated_routes_get_separate_cells(graph):
     assert_disjoint(rows)
 
 
+@pytest.mark.parametrize("old,new", [("A" * 24, "B" * 24), ("A", "B" * 24), ("A" * 24, "B")])
+@pytest.mark.parametrize("gap", [8, 800])
+def test_rename_keeps_separate_route_label_near_its_anchor(graph, old, new, gap):
+    renamed, neighbor = sorted(graph["strings"], key=lambda s: s["id"])
+    mpu = graph["project"]["units"]["meters_per_unit"]
+    neighbor.update(circuit_tag="S2", route=[[20 * mpu, 0]])
+    renamed["route"] = [[(20 + gap) * mpu, 0]]
+    positions = []
+    for label in (old, new):
+        renamed["circuit_tag"] = label
+        rows = tags.prepare_tags(graph, request(graph))["tags"]
+        assert_disjoint(rows)
+        x, y, _ = rows[1]["position"]
+        assert abs(x - 20) <= 2 * rows[1]["height"]
+        assert abs(y) <= rows[1]["height"]
+        positions.append(rows[1]["position"])
+    assert positions[0] == positions[1]
+
+
+def test_long_label_spans_neighboring_route_anchor(graph):
+    left, right = sorted(graph["strings"], key=lambda s: s["id"])
+    mpu = graph["project"]["units"]["meters_per_unit"]
+    left.update(circuit_tag="A" * 32, route=[[0, 0]])
+    right.update(circuit_tag="B", route=[[20 * mpu, 0]])
+    rows = tags.prepare_tags(graph, request(graph))["tags"]
+    assert abs(rows[1]["position"][0] - 20) <= 2 * rows[1]["height"]
+    assert_disjoint(rows)
+
+
 def test_large_collocated_plan_and_reservation_work_is_bounded(graph, monkeypatch):
     class Counted(dict):
         operations = 0
 
-        def __contains__(self, key):
+        def get(self, key, default):
             self.operations += 1
-            return super().__contains__(key)
-
-        def __getitem__(self, key):
-            self.operations += 1
-            return super().__getitem__(key)
+            return super().get(key, default)
 
         def __setitem__(self, key, value):
             self.operations += 1
             return super().__setitem__(key, value)
 
     # Exercise the actual reservation path with an independent operation counter.
-    successors = Counted()
+    next_rows = Counted()
     reserve = tags._reserve
 
-    def counted(_successors, column, row):
-        return reserve(successors, column, row)
+    def counted(_next_rows, columns, row):
+        return reserve(next_rows, columns, row)
 
     monkeypatch.setattr(tags, "_reserve", counted)
     prototype = deepcopy(graph["strings"][0])
@@ -171,7 +196,7 @@ def test_large_collocated_plan_and_reservation_work_is_bounded(graph, monkeypatc
     assert [r["string_ref"] for r in rows] == [s["id"] for s in graph["strings"]]
     rects = boxes(rows)
     assert all(a[3] < b[1] for a, b in zip(rects, rects[1:]))
-    assert successors.operations < 12 * len(rows)
+    assert 0 < next_rows.operations < 12 * len(rows)
     extra = deepcopy(prototype)
     extra["id"] = "leaf:string:00000000-0000-4000-8000-000000010000"
     graph["strings"].append(extra)
