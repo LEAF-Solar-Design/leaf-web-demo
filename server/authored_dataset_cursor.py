@@ -13,7 +13,8 @@ def fingerprint(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def paged_report(service, description, tenant, session, turn, *, limit, page_size, sort, cursor):
+def paged_report(service, description, tenant, session, turn, *, limit, page_size, sort, cursor,
+                 cancel_event=None):
     if (type(page_size) is not int or not 1 <= page_size <= 100
             or sort not in ("catalog", "title", "-title") or type(description) is not str):
         raise ReadFailure("invalid_input")
@@ -36,7 +37,7 @@ def paged_report(service, description, tenant, session, turn, *, limit, page_siz
         offset = int(position)
 
     result = service._run_catalog_report("datasets", description, tenant, session, turn, limit,
-                                         expected_authority=authority)
+                                         expected_authority=authority, cancel_event=cancel_event)
     rows = result["datasets"]
     if sort != "catalog":
         rows.sort(key=lambda row: (row["title"], row["dataset_ref"]["id"]), reverse=sort == "-title")

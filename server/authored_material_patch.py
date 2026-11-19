@@ -20,7 +20,7 @@ def _parse(description):
     tail = description[prefix.end():].strip().removesuffix(".")
     ops = []
     while tail and len(ops) < 100:
-        verb = re.match(r"(insert|remove|move|copy|set)\s+", tail, re.I)
+        verb = re.match(r"(insert|remove|move|copy|set|test)\s+", tail, re.I)
         if not verb:
             return None
         action = verb[1].lower()
@@ -28,11 +28,12 @@ def _parse(description):
             value, end = _DECODER.raw_decode(tail[verb.end():])
         except (ValueError, RecursionError, OverflowError):
             return None
-        if action in ("copy", "set"):
+        if action in ("copy", "set", "test"):
             if type(value) is not str:
                 return None
             argument = tail[verb.end()+end:]
-            label = re.match(r"\s+to\s+", argument, re.I)
+            relation = "equals" if action == "test" else "to"
+            label = re.match(r"\s+" + relation + r"\s+", argument, re.I)
             if not label:
                 return None
             try:
@@ -48,7 +49,7 @@ def _parse(description):
                 return None
         elif type(value) not in (str, int):
             return None
-        if action not in ("copy", "set"):
+        if action not in ("copy", "set", "test"):
             tail = tail[verb.end()+end:]
             positions = []
             for relation in (("from", "to") if action == "move" else ("at",)):
@@ -105,15 +106,18 @@ def build_body(description):
 
 _BODY = """
 from copy import deepcopy
+from decimal import Decimal
 import json
 import re
 
 
-def location(rows, pointer, *, add=False):
+def location(rows, pointer, *, add=False, read_only=False):
+    if read_only and pointer == "":
+        return [rows], 0
     if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
         raise ValueError("Invalid material JSON pointer.")
     parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
-    if len(parts) < 2 or parts[1] == "id":
+    if not read_only and (len(parts) < 2 or parts[1] == "id"):
         raise ValueError("Select a field inside a record; its ID is immutable.")
     parent = rows
     for index, key in enumerate(parts):
@@ -134,6 +138,18 @@ def location(rows, pointer, *, add=False):
         parent = parent[key]
 
 
+def json_equal(actual, wanted):
+    if type(actual) in (int, float) and type(wanted) in (int, float):
+        return Decimal(str(actual)) == Decimal(str(wanted))
+    if type(actual) is not type(wanted):
+        return False
+    if type(actual) is dict:
+        return actual.keys() == wanted.keys() and all(json_equal(actual[k], wanted[k]) for k in actual)
+    if type(actual) is list:
+        return len(actual) == len(wanted) and all(json_equal(a, b) for a, b in zip(actual, wanted))
+    return actual == wanted
+
+
 def run(intake, params):
     selected = intake.get("checker_material_selection") or {}
     original = selected.get("record_values")
@@ -147,6 +163,14 @@ def run(intake, params):
     if len(identities) != len(rows):
         raise ValueError("Record IDs must be unique.")
     for action, value, positions in operations:
+        if action == "test":
+            try:
+                container, key = location(rows, value, read_only=True)
+            except ValueError:
+                raise ValueError("Material test failed: missing or invalid pointer.") from None
+            if not json_equal(container[key], positions):
+                raise ValueError("Material test failed: value differs.")
+            continue
         if action in ("copy", "set"):
             if action == "copy":
                 source, key = location(rows, value)

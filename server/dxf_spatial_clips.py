@@ -60,6 +60,35 @@ def _polygon(points, matrix):
     return result
 
 
+def _boundary_to_block(matrices, fields):
+    # The first matrix maps original world coordinates into the block. The
+    # second maps world coordinates into the coordinate system of the boundary.
+    block = [matrices[i:i+4] for i in (0,4,8)]
+    clip = [matrices[i:i+4] for i in (12,16,20)]
+    def dot(a, b):
+        return math.fsum(x*y for x,y in zip(a,b))
+    axes = [row[:3] for row in clip]
+    for i,a in enumerate(axes):
+        for j,b in enumerate(axes):
+            if not math.isclose(dot(a,b), float(i == j), abs_tol=1e-12):
+                raise ValueError("Unresolved clip coordinate frame.")
+    normal = [float(fields.get(k,v)) for k,v in ((210,0),(220,0),(230,1))]
+    size = math.hypot(*normal)
+    if not size or not math.isfinite(size) or math.dist([v/size for v in normal], axes[2]) > 1e-9:
+        raise ValueError("Clip normal conflicts with its coordinate frame.")
+    origin = [float(fields.get(k,0)) for k in (11,21,31)]
+    if any(not math.isclose(dot(row,origin) + row[3], 0., abs_tol=1e-9)
+           for row in clip):
+        raise ValueError("Clip origin conflicts with its coordinate frame.")
+    # Invert the orthonormal boundary axes, then apply the historical INSERT inverse.
+    rows = [[dot(row, axis) for axis in axes[:2]] + [0, dot(row,origin) + row[3]] for row in block]
+    for vector,offset in ((axes[0],0), (axes[1],0), (origin,block[2][3])):
+        terms = [a*b for a,b in zip(block[2],vector)] + [offset]
+        if abs(math.fsum(terms)) > 16*math.ulp(1.)*math.fsum(abs(term) for term in terms):
+            raise ValueError("Clip and block footprint planes are not coplanar.")
+    return rows[0] + rows[1]
+
+
 def _read_clip(owner, extension, objects):
     def obj(handle, kind, parent):
         found, tags = objects.get(handle, (None, []))
@@ -92,14 +121,12 @@ def _read_clip(owner, extension, objects):
     enabled = int(fields.get(71, 1))
     if enabled == 0:
         return None
-    if (enabled != 1 or int(fields.get(72, 0)) or int(fields.get(73, 0))
-            or tuple(float(fields.get(k, v)) for k, v in ((210,0),(220,0),(230,1))) != (0,0,1)
-            or any(float(fields.get(k, 0)) for k in (11,21,31))):
+    if enabled != 1 or int(fields.get(72, 0)) or int(fields.get(73, 0)):
         raise ValueError("Unsupported nonplanar clip filter.")
     points = _points(tags)
     matrices = [float(v) for c, v in tags if c == 40]
     if (len(points) != int(fields.get(70, -1)) or len(matrices) != 24
-            or not all(map(math.isfinite, matrices)) or any(matrices[i] for i in (8,9))):
+            or not all(map(math.isfinite, matrices))):
         raise ValueError("Invalid clip vertex count or transformation.")
     inverted = False
     ext = _extension(tags)
@@ -121,7 +148,7 @@ def _read_clip(owner, extension, objects):
                 inverted = True
     if int(fields.get(290, int(inverted))) != int(inverted):
         raise ValueError("Unresolved clip inversion flag.")
-    return {"points": _polygon(points, matrices), "inverted": inverted}
+    return {"points": _polygon(points, _boundary_to_block(matrices, fields)), "inverted": inverted}
 
 
 def attach_clips(pairs, out):
