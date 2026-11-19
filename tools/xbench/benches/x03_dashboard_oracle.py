@@ -905,3 +905,24 @@ def cancellation_latency_quality(requests, acknowledgements, stops, reported_lat
         if reported != latency or latency > Fraction(str(max_seconds)):
             return "FAIL"
     return "PASS"
+
+
+def scheduler_fairness_quality(service, entitlements, allowed_share_error):
+    """Continuously backlogged queues. Compare service fractions to normalized entitlement fractions."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not isinstance(service, dict) or not service or not isinstance(entitlements, dict) or service.keys() != entitlements.keys():
+        return "INCOMPLETE"
+    if not finite_measure(allowed_share_error) or not 0 <= allowed_share_error <= 1:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in service.values()) or not all(finite_measure(v) and v > 0 for v in entitlements.values()):
+        return "INCOMPLETE"
+    amounts = {k: Fraction(str(v)) for k,v in service.items()}
+    weights = {k: Fraction(str(v)) for k,v in entitlements.items()}
+    total, weight = sum(amounts.values()), sum(weights.values())
+    if not total:
+        return "INCOMPLETE"
+    for queue in service:
+        if abs(amounts[queue]/total - weights[queue]/weight) > Fraction(str(allowed_share_error)):
+            return "FAIL"
+    return "PASS"

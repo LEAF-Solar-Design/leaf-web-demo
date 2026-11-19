@@ -782,3 +782,20 @@ def net_section_quality(width_mm, thickness_mm, holes, tension_n, allowable_mpa)
         largest = max(largest, loss)
     capacity = (width-largest) * Fraction(str(thickness_mm)) * Fraction(str(allowable_mpa))
     return "PASS" if capacity > 0 and Fraction(str(tension_n)) <= capacity else "FAIL"
+
+
+def weld_throat_quality(welds, resultant_n, allowable_mpa):
+    """Uniform direct load across the effective throat area of the recorded joint."""
+    if not isinstance(welds, list) or not welds or not all(map(finite_measure, (resultant_n, allowable_mpa))):
+        return "INCOMPLETE"
+    if resultant_n < 0 or allowable_mpa <= 0:
+        return "INCOMPLETE"
+    area = Fraction(0)
+    for weld in welds:
+        if not isinstance(weld, dict):
+            return "INCOMPLETE"
+        length, throat = weld.get("effective_length_mm"), weld.get("throat_mm")
+        if not all(map(finite_measure, (length, throat))) or min(length, throat) <= 0:
+            return "INCOMPLETE"
+        area += Fraction(str(length)) * Fraction(str(throat))
+    return "PASS" if Fraction(str(resultant_n)) <= area * Fraction(str(allowable_mpa)) else "FAIL"

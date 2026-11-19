@@ -1775,3 +1775,32 @@ def touch_voltage_quality(fault_a, bonding_ohm, duration_s, duration_limits):
         return "INCOMPLETE"
     potential = Fraction(str(fault_a)) * Fraction(str(bonding_ohm))
     return "PASS" if potential <= Fraction(str(applicable)) else "FAIL"
+
+
+def capacitor_hold_up_quality(capacitance_f, initial_v, cutoff_v, load_w, required_s):
+    """Ideal capacitor supplying a constant-power load down to the stated cutoff."""
+    values = (capacitance_f, initial_v, cutoff_v, load_w, required_s)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    capacitance, initial, cutoff, load, duration = (Fraction(str(v)) for v in values)
+    if capacitance <= 0 or load <= 0 or min(initial, cutoff, duration) < 0:
+        return "INCOMPLETE"
+    usable_joules = capacitance * max(0, initial**2 - cutoff**2) / 2
+    return "PASS" if usable_joules >= load * duration else "FAIL"
+
+
+def bank_resonance_quality(revision, source, capacitance_f, spectrum, exclusion_hz):
+    """Parallel LC model with inductive source reactance measured at the reference frequency."""
+    from math import pi, sqrt
+    if not revision or not isinstance(source, dict) or revision != source.get("revision"):
+        return "INCOMPLETE"
+    hz, reactance = source.get("reference_hz"), source.get("inductive_reactance_ohm")
+    if not all(map(finite_measure, (hz, reactance, capacitance_f, exclusion_hz))):
+        return "INCOMPLETE"
+    if min(hz, reactance, capacitance_f) <= 0 or exclusion_hz < 0 or not isinstance(spectrum, dict) or not spectrum:
+        return "INCOMPLETE"
+    if any(type(order) is not int or order < 1 or not finite_measure(amps) or amps < 0 for order, amps in spectrum.items()):
+        return "INCOMPLETE"
+    resonant_hz = sqrt(hz / (2*pi*reactance*capacitance_f))
+    return "FAIL" if any(amps > 0 and abs(order*hz - resonant_hz) <= exclusion_hz
+                         for order, amps in spectrum.items()) else "PASS"

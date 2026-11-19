@@ -444,3 +444,15 @@ def test_cancellation_ends_at_worker_stop(worker,start,ack,stop,elapsed):
     assert check(terminal,ack-start,elapsed) == "FAIL"
     assert check(terminal,elapsed,elapsed/2) == "FAIL"
     assert check({},elapsed,elapsed) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("weights,balanced,skewed", [
+    ([1,1],[50,50],[60,40]), ([1,3],[25,75],[50,50]), ([2,3,5],[20,30,50],[20,40,40]),
+])
+def test_queue_service_relative_to_declared_entitlements(weights,balanced,skewed):
+    from benches.x03_dashboard_oracle import scheduler_fairness_quality as grade
+    entitlements = dict(enumerate(weights))
+    assert sum(balanced) == sum(skewed)
+    assert grade(dict(enumerate(balanced)),entitlements,0) == "PASS"
+    assert grade(dict(enumerate(skewed)),entitlements,0) == "FAIL"
+    assert grade(dict(enumerate(balanced)),{},0) == "INCOMPLETE"

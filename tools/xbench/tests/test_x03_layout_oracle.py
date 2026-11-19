@@ -396,3 +396,12 @@ def test_plate_capacity_uses_minimum_net_path(holes,net_width):
     assert grade(40,2,holes,capacity,100) == "PASS"
     assert grade(40,2,holes,capacity+1,100) == "FAIL"
     assert grade(40,2,None,capacity,100) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sizes,stress,capacity", [([(20,3)],100,6000), ([(10,2),(15,4)],50,4000), ([(8,2.5),(8,2.5)],80,3200)])
+def test_joint_load_at_effective_throat_capacity(sizes,stress,capacity):
+    from benches.x03_layout_oracle import weld_throat_quality as grade
+    welds = [dict(effective_length_mm=length,throat_mm=throat) for length,throat in sizes]
+    assert grade(welds,capacity,stress) == "PASS"
+    assert grade(welds,capacity+1,stress) == "FAIL"
+    assert grade(welds+[{}],capacity,stress) == "INCOMPLETE"
