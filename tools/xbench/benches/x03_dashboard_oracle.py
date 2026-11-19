@@ -1515,3 +1515,55 @@ def quorum_transition_quality(rule, epochs, commits, *, complete):
             return "FAIL"
         accepted.append((support, value))
     return "PASS"
+
+
+def retry_amplification_quality(policy, layers, attempts, *, complete):
+    """Check one original request with both per-parent and per-request layer caps.
+
+    Every attempt names an ID, its parent ID (None only for the original),
+    and its zero-based layer. Layer caps count all attempts including first tries.
+    """
+    from collections import Counter
+
+    if policy != "layer-attempt-caps-v1" or complete is not True:
+        return "INCOMPLETE"
+    if not isinstance(layers, list) or not layers or not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    caps = []
+    for layer in layers:
+        if not isinstance(layer, dict):
+            return "INCOMPLETE"
+        local, total = layer.get("per_parent"), layer.get("per_original")
+        if type(local) is not int or type(total) is not int or min(local, total) < 0:
+            return "INCOMPLETE"
+        caps.append((local, total))
+    lineage = {}
+    for attempt in attempts:
+        if not isinstance(attempt, (list, tuple)) or len(attempt) != 3:
+            return "INCOMPLETE"
+        identity, parent, level = attempt
+        if not isinstance(identity, str) or not identity or identity in lineage:
+            return "INCOMPLETE"
+        if type(level) is not int or not 0 <= level <= len(caps):
+            return "INCOMPLETE"
+        if parent is not None and (not isinstance(parent, str) or not parent):
+            return "INCOMPLETE"
+        lineage[identity] = (parent, level)
+    if sum(level == 0 for _, level in lineage.values()) != 1:
+        return "INCOMPLETE"
+    children = Counter()
+    at_layer = Counter()
+    for parent, level in lineage.values():
+        if level == 0:
+            if parent is not None:
+                return "INCOMPLETE"
+            continue
+        if parent not in lineage or lineage[parent][1] != level - 1:
+            return "INCOMPLETE"
+        children[parent] += 1
+        at_layer[level] += 1
+    for parent, count in children.items():
+        parent_level = lineage[parent][1]
+        if count > caps[parent_level][0]:
+            return "FAIL"
+    return "PASS" if all(count <= caps[level - 1][1] for level, count in at_layer.items()) else "FAIL"

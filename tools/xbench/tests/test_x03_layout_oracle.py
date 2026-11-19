@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("timber,grain,moisture,embedment,capacity", [
+    pytest.param("fir", "side", "dry", 40, 1200, id="check-a-dry-rafter-fastener"),
+    pytest.param("fir", "side", "wet", 55, 990, id="verify-a-wet-edge-attachment"),
+    pytest.param("pine", "end", "dry", 25, 312.5, id="check-a-fastener-in-end-grain"),
+])
+def test_withdrawal_depends_on_substrate_grain_and_moisture(timber, grain, moisture, embedment, capacity):
+    from benches.x03_layout_oracle import timber_withdrawal_quality as grade
+
+    rule = dict(revision="fixture", withdrawal_n_per_mm={
+        "fir": {"side": {"dry": 30, "wet": 18}}, "pine": {"end": {"dry": 12.5}},
+    })
+    args = ("fixture", rule, timber, grain, moisture, embedment)
+    assert grade(*args, capacity) == "PASS"
+    assert grade(*args, capacity + 1) == "FAIL"
+    assert grade("fixture", rule, None, grain, moisture, embedment, capacity) == "INCOMPLETE"
+    assert grade("fixture", rule, timber, grain, "unknown", embedment, capacity) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("loads,links,removed,target,intact,redistributed", [
     pytest.param({"rail": 90}, {"rail": ["A", "B"]}, "A", "B", 45, 90,
                  id="remove-one-of-two-end-seats"),

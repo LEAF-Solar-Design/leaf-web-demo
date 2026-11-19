@@ -1606,3 +1606,43 @@ def test_intertrip_loss_and_fault(timeout, clearing, fault_tick, open_tick):
     assert grade(policy, 0, events[1:], complete=True) == "INCOMPLETE"
     assert grade(policy, None, events, complete=True) == "INCOMPLETE"
     assert grade(policy, 0, events, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("zone,edge,delay", [
+    pytest.param((0,-4,5), (3,0), 2, id="generator-offset-field-zone"),
+    pytest.param((2,-5,2), (2,-7), 0.5, id="exciter-fast-inner-zone"),
+    pytest.param((-1,-7,5), (-5,-4), 3, id="standby-machine-slow-zone"),
+])
+def test_field_loss_requires_sustained_entry(zone, edge, delay):
+    from benches.x03_quality import field_loss_quality as grade
+
+    # Boundary offsets are (3,4), (0,-2) and (-4,3). The separate zone at
+    # (20,20) must neither inherit nor erase the first zone's dwell time.
+    settings = dict(model="circular-latched-v1", zones=[(*zone, delay), (20,20,1,10)])
+    near = (delay/2, *edge, False)
+    away = (1, 20, 20, False)
+    matured = (delay/2, *edge, True)
+    assert grade(settings, [near, away, near, matured, (1,40,40,True)], complete=True) == "PASS"
+    assert grade(settings, [near, near], complete=True) == "FAIL"
+    assert grade(settings, [near, away, matured], complete=True) == "FAIL"
+    assert grade({"model": "circular-latched-v1"}, [near], complete=True) == "INCOMPLETE"
+    assert grade(settings, [near], complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("wait,clear,dropout", [
+    pytest.param(2, 1, 5, id="feeder-breaker-fails-to-open"),
+    pytest.param(4, 2, 20, id="transformer-backup-clearing"),
+    pytest.param(0, 1, 1, id="instant-bus-backup"),
+])
+def test_breaker_failure_backup_clears(wait, clear, dropout):
+    from benches.x03_quality import breaker_failure_quality as grade
+
+    rule = dict(model="single-breaker-backup-v1", failure_ticks=wait, clear_ticks=clear, dropout_a=dropout)
+    stop = wait + clear
+    events = [(t, t == 0, dropout if t == stop else dropout+10, t == wait) for t in range(stop+1)]
+    assert grade(rule, events, complete=True) == "PASS"
+    assert grade(rule, [(*row[:3], False) for row in events], complete=True) == "FAIL"
+    assert grade(rule, events[:-1] + [(stop, False, dropout+1, False)], complete=True) == "FAIL"
+    assert grade(rule, events[:-1], complete=True) == "INCOMPLETE"
+    assert grade(rule, [(0, True, dropout, False)], complete=True) == "PASS"
+    assert grade(rule, events, complete=False) == "INCOMPLETE"

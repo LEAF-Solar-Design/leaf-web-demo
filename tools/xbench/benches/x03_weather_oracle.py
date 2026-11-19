@@ -916,3 +916,36 @@ def irradiance_plausibility_quality(model, elevation_deg, distance_au, ghi_w_m2)
     if not isfinite(bound) or bound <= 0:
         return "INCOMPLETE"
     return "PASS" if 0 <= ghi_w_m2 and (ghi_w_m2 <= bound or isclose(ghi_w_m2, bound, rel_tol=1e-14)) else "FAIL"
+
+
+def irradiance_closure_quality(readings, tolerance_w_m2):
+    """Check a simultaneous daylight observation with absolute GHI residual in W/m2."""
+    from math import cos, radians, isfinite, ulp
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(readings, dict) or not finite_measure(tolerance_w_m2) or tolerance_w_m2 < 0:
+        return "INCOMPLETE"
+    ticks = set()
+    values = []
+    for channel in ("ghi", "dni", "dhi", "zenith_deg"):
+        row = readings.get(channel)
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            return "INCOMPLETE"
+        tick, value = row
+        if type(tick) is not int or not finite_measure(value):
+            return "INCOMPLETE"
+        ticks.add(tick)
+        values.append(value)
+    ghi, dni, dhi, zenith = values
+    if len(ticks) != 1 or not 0 <= zenith <= 90:
+        return "INCOMPLETE"
+    if min(ghi, dni, dhi) < 0:
+        return "FAIL"
+    projected = 0.0 if zenith == 90 else dni * cos(radians(zenith))
+    expected = dhi + projected
+    if not isfinite(expected):
+        return "INCOMPLETE"
+    residual = abs(ghi - expected)
+    # Allow only floating roundoff in the cosine projection at the boundary.
+    bound = tolerance_w_m2 + 2 * ulp(expected)
+    return "PASS" if residual <= bound else "FAIL"
