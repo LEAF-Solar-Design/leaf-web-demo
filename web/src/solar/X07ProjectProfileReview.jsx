@@ -1,3 +1,4 @@
+import { validTrackers } from './x07TrackerRoles.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import X07DrawingRoleProfileReview from './X07DrawingRoleProfileReview.jsx'
 import X07CustomerProfileEditor from './X07CustomerProfileEditor.jsx'
@@ -8,7 +9,7 @@ const current = predicate => {
 const label = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 512
 const validRoles = roles => roles && typeof roles === 'object' && !Array.isArray(roles)
   && label(roles.module?.block) && label(roles.module?.layer)
-  && Object.entries(roles).every(([name, role]) => ['module', 'roof', 'obstruction'].includes(name)
+  && Object.entries(roles).every(([name, role]) => name === 'trackers' ? validTrackers(role) : ['module', 'roof', 'obstruction'].includes(name)
     && label(role?.layer) && (role.block === undefined || label(role.block)))
 const profile = (value, customer) => value?.customer_key === customer && label(value.profile_id)
   && Number.isSafeInteger(value.version) && value.version > 0 && validRoles(value.roles)

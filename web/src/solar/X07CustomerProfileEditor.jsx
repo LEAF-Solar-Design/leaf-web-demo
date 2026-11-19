@@ -1,3 +1,4 @@
+import { validTrackers, trackerValues } from './x07TrackerRoles.js'
 import { useEffect, useId, useRef, useState } from 'react'
 import X07ProfileRoleDiff from './X07ProfileRoleDiff.jsx'
 
@@ -5,11 +6,13 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const valid = (record, customer) => record?.customer_key === customer && typeof record.profile_id === 'string'
   && record.profile_id && Number.isSafeInteger(record.version) && record.version > 0 && object(record.roles)
   && object(record.roles.module) && typeof record.roles.module.block === 'string' && typeof record.roles.module.layer === 'string'
-  && Object.entries(record.roles).every(([role, value]) => !['module', 'roof', 'obstruction'].includes(role)
+  && Object.entries(record.roles).every(([role, value]) => role === 'trackers' ? validTrackers(value) : !['module', 'roof', 'obstruction'].includes(role)
     || (object(value) && typeof value.layer === 'string' && (value.block === undefined || typeof value.block === 'string')))
 const clone = value => JSON.parse(JSON.stringify(value))
-const roleNames = ['module', 'roof', 'obstruction']
-const roleDiffers = (before, after, role) => Boolean(before[role]) !== Boolean(after[role])
+const roleNames = ['module', 'roof', 'obstruction', 'trackers']
+const roleDiffers = (before, after, role) => role === 'trackers'
+  ? JSON.stringify(trackerValues(before.trackers)) !== JSON.stringify(trackerValues(after.trackers))
+  : Boolean(before[role]) !== Boolean(after[role])
   || ['block', 'layer'].some(field => Object.hasOwn(before[role] || {}, field) !== Object.hasOwn(after[role] || {}, field)
     || before[role]?.[field] !== after[role]?.[field])
 
@@ -106,6 +109,10 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
     if (composing.current || event.nativeEvent?.isComposing) return
     if (!profile || !draft || pending.current || stale) return
     if (!draft.module?.block?.trim() || !draft.module?.layer?.trim()) { setError('Module block and layer are required.'); return }
+    if (draft.trackers !== undefined && !validTrackers(draft.trackers)) {
+      setError('Each tracker needs a unique block and layer, a valid type, and one consistent positive module count per type.')
+      return
+    }
     if (['roof', 'obstruction'].some(role => draft[role] && !draft[role].layer?.trim())) {
       setError('Each added role needs a layer.'); return
     }
@@ -149,6 +156,19 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
     setMessage('Save cancelled. Stored changes may have completed. Reload the profile to reconcile.')
   }
   const edit = (role, field, value) => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);setDraft(previous => ({ ...previous, [role]: { ...previous[role], [field]: value } })); setMessage(null) }
+  const changeTrackers = rows => {
+    setUndo(null)
+    draftRevision.current++
+    onDirtyChange?.(true)
+    setMessage(null)
+    setError(null)
+    setDraft(previous => {
+      const next = { ...previous }
+      if (rows.length) next.trackers = rows
+      else delete next.trackers
+      return next
+    })
+  }
   const addRole = role => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);focusRole.current = role; setDraft(previous => ({ ...previous, [role]: { layer: '' } })); setMessage(null); setError(null) }
   const removeRole = role => { setUndo(null); draftRevision.current++; onDirtyChange?.(true);focusRole.current = 'module'; setDraft(previous => { const next = { ...previous }; delete next[role]; return next }); setMessage(null); setError(null) }
   const restoreRole = role => {
@@ -202,6 +222,20 @@ function Editor({ customerKey, loadProfile, saveProfile, applicationRecord, pinn
         })}
         {['roof', 'obstruction'].filter(role => !draft[role]).map(role =>
           <button key={role} type="button" onClick={() => addRole(role)}>Add {role} role</button>)}
+      </fieldset>
+      <fieldset><legend>Tracker roles</legend>
+        {(draft.trackers || []).map((row, index) => <fieldset key={index}>
+          <legend>Tracker {index + 1}</legend>
+          {Object.entries({ block: 'Tracker block', layer: 'Tracker layer', tracker_type: 'Tracker type', modules_per_instance: 'Modules per instance' }).map(([field, label]) =>
+            <label key={field}>{label}<input value={row[field]} type={field === 'modules_per_instance' ? 'number' : 'text'}
+              onChange={event => {
+                const raw = event.target.value
+                const value = field === 'modules_per_instance' && raw !== '' ? Number(raw) : raw
+                changeTrackers(draft.trackers.map((entry, i) => i === index ? { ...entry, [field]: value } : entry))
+              }} /></label>)}
+          <button type="button" onClick={() => changeTrackers(draft.trackers.filter((_, i) => i !== index))}>Remove tracker {index + 1}</button>
+        </fieldset>)}
+        <button type="button" onClick={() => changeTrackers([...(draft.trackers || []), { block: '', layer: '', tracker_type: '', modules_per_instance: '' }])}>Add tracker role</button>
       </fieldset>
       <button ref={saveButton} aria-describedby={error ? errorId : undefined} type="submit" disabled={busy || stale || typeof saveProfile !== 'function'}>Save profile</button>
       <button type="reset">Reset draft</button>

@@ -14,6 +14,7 @@ from envelopes import with_envelope_fields
 from x07_postgres_profile_store import PostgresProfileStore
 from x07_profile_compatibility import check_compatibility
 from x07_profile_workflow import ProfileWorkflow
+from x07_tracker_roles import TrackerRole, validate_trackers
 from x07_role_selection import select_modules
 
 router = APIRouter()
@@ -50,7 +51,19 @@ class Confirmation(BaseModel):
 
 class Edit(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    roles: dict[StrictStr, Role] = Field(min_length=1, max_length=3)
+    roles: dict[StrictStr, Role | list[TrackerRole]] = Field(min_length=1, max_length=4)
+
+    @field_validator('roles', mode='before')
+    @classmethod
+    def role_shape(cls, roles):
+        if not isinstance(roles, dict) or 'module' not in roles or set(roles) - {'module','roof','obstruction','trackers'}:
+            raise ValueError('invalid role map')
+        if any(not isinstance(value, dict) for key, value in roles.items() if key != 'trackers'):
+            raise ValueError('invalid drawing role')
+        if 'trackers' in roles:
+            validate_trackers(roles['trackers'])
+        return roles
+
     expected_version: StrictInt = Field(ge=1, le=2**53 - 2)
 
 
@@ -77,7 +90,7 @@ def _operate(tenant, project_id, drawing_id, input_version_id, org_header, proje
                 roles = payload.model_dump(exclude_none=True)['roles']
                 candidate = {'customer_key': customer, 'profile_id': 'explicit-edit',
                              'version': 1, 'roles': roles}
-                aliases = {role['block']: role['block'] for role in roles.values() if role.get('block', '').startswith('*')}
+                aliases = {role['block']: role['block'] for role in roles.values() if isinstance(role, dict) and role.get('block', '').startswith('*')}
                 compatible = check_compatibility(context.intake, candidate, customer_key=customer, block_aliases=aliases)
                 if compatible['decision'] != 'apply':
                     raise ValueError('incompatible roles')
