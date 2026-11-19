@@ -1558,15 +1558,20 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   return body
 }
 
+export function safeEditedFileName(value) {
+  return typeof value === 'string' && value.length <= 124 && /\.dxf$/i.test(value)
+    && !/[\\/"'\p{Cc}]/u.test(value) ? value : 'edited.dxf'
+}
+
 // Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION of
 // the drawing. `digest` is the sha256 the CLIENT computed over the exact
 // bytes it edited — the server recomputes and refuses a mismatch, so a
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, fileName = 'edited.dxf') {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safeEditedFileName(fileName))
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
@@ -1645,7 +1650,7 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     }
   }
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safeEditedFileName(opts.fileName))
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   form.append('plan', JSON.stringify({ mutations: mutations || {} }))

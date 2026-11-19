@@ -35,7 +35,7 @@ import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
 import DraftingRibbon from './site/DraftingRibbon.jsx'
 import PropertiesDock, { drawingExtents, drawingPropertyName } from './site/PropertiesDock.jsx'
-import { drawingHeaderName } from './site/drawingHeaderName.js'
+import { drawingHeaderName, drawingHeaderSource, editedDrawingFileName } from './site/drawingHeaderName.js'
 import { familiesForSurface, familyMonogram } from './lib/surfaceRails.js'
 import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry.js'
 import useEscapeOwner from './lib/useEscapeOwner.js'
@@ -5189,7 +5189,7 @@ export default function App() {
   // name makes the build transform rename one of them and the App wiring
   // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
   // A hand import's id is its filename; a head copy's id is internal. The mounted drawing names only this drawing's head.
-  const mountedDrawingFile = drawingName && (/\.dxf$/i.test(drawingName) ? drawingName : `${drawingName}.dwg`)
+  const mountedDrawingFile = drawingName && (/\.dxf$/i.test(drawingHeaderSource(shown, activeIntake, engineDocument) || '') ? `${drawingName}.dxf` : `${drawingName}.dwg`)
   const activeDocumentIsHead = !!activeIntake && engineDocument?.documentId === activeIntake.documentId
     && holdsHeadDocument(engineDocument, REQUESTED_DRAWING_ID)
   const activeDrawingName = projectMode ? projectDrawingName
@@ -5248,6 +5248,7 @@ export default function App() {
     save: async (bytes, parent, digest, plan = null, onStatus = null) => {
       // Retained save callbacks may resume after Connect seats a drawing.
       if (localCadSnapshotRef.current) throw new Error(LOCAL_CAD_EDIT_REASON)
+      const fileName = editedDrawingFileName(mountedDrawingRef.current?.name)
       // A hand import has no committed head, so fetch the chain head at save
       // time; a head document always carries its committed version.
       if (parent == null) parent = (await getDrawingVersions(false, REQUESTED_DRAWING_ID)).head
@@ -5283,10 +5284,10 @@ export default function App() {
         if (localCadSnapshotRef.current) throw new Error(LOCAL_CAD_EDIT_REASON)
         if (plan && plan.mutations) {
           return await saveDrawingVersionPlan(
-            REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus })
+            REQUESTED_DRAWING_ID, bytes, parent, digest, plan.mutations, cap, { onStatus, fileName })
         }
         return await saveEditedDrawingVersion(
-          REQUESTED_DRAWING_ID, bytes, parent, digest, cap)
+          REQUESTED_DRAWING_ID, bytes, parent, digest, cap, fileName)
       } catch (error) {
         keepLock = error?.outcomeUnknown === true
         if (acquired && keepLock) {
