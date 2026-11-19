@@ -1104,3 +1104,18 @@ def test_open_command_requires_two_isolation_observations(cmd,delay,safe,closed,
     assert check((due,due+1,True,safe)) == "PASS"
     assert check((due,due+1,not closed,voltage)) == "FAIL"
     assert check((due,due+1,None,0)) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("losses,ambient,r_case,r_air,peak,current,rated", [
+    pytest.param([10,5],40,1,3,100,20,30,id="inverter-switch-at-full-load"),
+    pytest.param([4,2],55,2,3,85,6,10,id="rectifier-in-hot-cabinet"),
+    pytest.param([16,4],25,0.25,1,50,15,25,id="converter-with-heatsink"),
+])
+def test_junction_temperature(losses,ambient,r_case,r_air,peak,current,rated):
+    from benches.x03_quality import junction_temperature_quality as grade
+    assert current <= rated
+    path = [("junction","case",r_case),("case","ambient",r_air)]
+    assert grade(ambient,losses,path,peak) == "PASS"
+    assert grade(ambient,losses,path,peak-1) == "FAIL"
+    assert grade(ambient,losses,path[1:],peak) == "INCOMPLETE"
+    assert grade(ambient,losses,path[:1],peak) == "INCOMPLETE"

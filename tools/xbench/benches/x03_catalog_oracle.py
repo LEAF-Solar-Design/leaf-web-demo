@@ -758,3 +758,40 @@ def floor_life_quality(revision, sheet, window_h, opening_h, history):
     if cursor != stop:
         return "INCOMPLETE"
     return "PASS" if exposure <= Fraction(str(limit)) else "FAIL"
+
+
+def dc_fuse_quality(revision, sheet, duty):
+    """Each listed envelope qualifies one joint voltage, current and time-constant duty."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    rows = sheet.get("dc_envelopes_v_a_ms")
+    if not isinstance(rows, list) or not rows or not isinstance(duty, (list, tuple)) or len(duty) != 3:
+        return "INCOMPLETE"
+    if not all(finite_measure(x) and x > 0 for x in duty):
+        return "INCOMPLETE"
+    for row in rows:
+        if not isinstance(row, (tuple, list)) or len(row) != 3 or not all(finite_measure(x) and x > 0 for x in row):
+            return "INCOMPLETE"
+    if any(all(value <= cap for value, cap in zip(duty, row)) for row in rows):
+        return "PASS"
+    return "FAIL" if sheet.get("exhaustive") is True else "INCOMPLETE"
+
+
+def crimp_pull_quality(revision, sheet, terminal, conductor, tooling, forces_n):
+    """Every recorded pull specimen must meet its qualified combination's minimum force."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    combinations = sheet.get("minimum_pull_n")
+    key = (terminal, conductor, tooling)
+    if not isinstance(combinations, dict) or not all(isinstance(x, str) and x for x in key):
+        return "INCOMPLETE"
+    if key not in combinations:
+        return "FAIL" if sheet.get("exhaustive") is True else "INCOMPLETE"
+    minimum = combinations[key]
+    if not finite_measure(minimum) or minimum <= 0 or not isinstance(forces_n, list) or not forces_n:
+        return "INCOMPLETE"
+    if not all(finite_measure(x) and x >= 0 for x in forces_n):
+        return "INCOMPLETE"
+    return "PASS" if min(forces_n) >= minimum else "FAIL"

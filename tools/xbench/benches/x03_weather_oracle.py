@@ -500,3 +500,29 @@ def precipitation_quality(window, intervals, policy, reported_mm):
     if cursor != window[1]:
         return "INCOMPLETE"
     return "PASS" if total == Fraction(str(reported_mm)) else "FAIL"
+
+
+def horizon_beam_quality(revision, profile, azimuth_deg, elevation_deg, clear_beam, reported_beam):
+    """Constant horizon per half-open azimuth sector; a ray grazing the horizon is masked."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(profile, dict) or profile.get("revision") != revision:
+        return "INCOMPLETE"
+    values = (azimuth_deg, elevation_deg, clear_beam, reported_beam)
+    if not all(map(finite_measure, values)) or not -90 <= elevation_deg <= 90 or clear_beam < 0:
+        return "INCOMPLETE"
+    sectors = profile.get("sectors_deg")
+    if not isinstance(sectors, list):
+        return "INCOMPLETE"
+    matches = []
+    for sector in sectors:
+        if not isinstance(sector, (list, tuple)) or len(sector) != 3 or not all(map(finite_measure, sector)):
+            return "INCOMPLETE"
+        start, end, height = sector
+        if not 0 <= start < end <= 360 or not -90 <= height <= 90:
+            return "INCOMPLETE"
+        if start <= azimuth_deg % 360 < end:
+            matches.append(height)
+    if len(matches) != 1:
+        return "INCOMPLETE"
+    expected = clear_beam if elevation_deg > max(0, matches[0]) else 0
+    return "PASS" if reported_beam == expected else "FAIL"

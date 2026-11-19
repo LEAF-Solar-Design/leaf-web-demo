@@ -438,3 +438,16 @@ def test_joint_slip_from_installed_preloads(preload,mu,planes,resistance):
     assert grade(preload,mu,planes,-resistance) == "PASS"
     assert grade(preload,mu,planes,resistance+1) == "FAIL"
     assert grade(preload,mu,None,resistance) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("depth,perimeter,resistance,capacity", [
+    pytest.param(100,800,0.5,40000,id="interior-support"),
+    pytest.param(150,600,0.4,36000,id="edge-support"),
+    pytest.param(200,350,0.8,56000,id="corner-support"),
+])
+def test_slab_punching_shear(depth,perimeter,resistance,capacity):
+    from benches.x03_layout_oracle import punching_shear_quality as grade
+    rule = "uniform-critical-section-v1"
+    assert grade(capacity,depth,perimeter,resistance,rule) == "PASS"
+    assert grade(capacity+1,depth,perimeter,resistance,rule) == "FAIL"
+    assert grade(capacity,depth,None,resistance,rule) == "INCOMPLETE"
