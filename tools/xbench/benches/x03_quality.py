@@ -2536,3 +2536,59 @@ def capacitor_life_quality(revision, curve, history, *, complete):
         rated_h = next(life for upper, life in bands if temperature <= upper)
         damage += Fraction(str(hours)) / Fraction(str(rated_h))
     return "PASS" if damage < 1 else "FAIL"
+
+
+def dc_bus_stability_quality(model, capacitance_f, source_a, load_a, source_slope, load_slope):
+    """Single capacitor at a fixed operating voltage. Slopes are dI/dV in A/V.
+
+    Source current enters the bus and load current leaves it. The perturbation
+    decays only when (source_slope - load_slope) / capacitance is negative.
+    """
+    if model != "single-capacitor-current-balance-v1":
+        return "INCOMPLETE"
+    values = (capacitance_f, source_a, load_a, source_slope, load_slope)
+    if not all(map(finite_measure, values)) or capacitance_f <= 0:
+        return "INCOMPLETE"
+    if source_a != load_a:
+        return "FAIL"
+    return "PASS" if source_slope < load_slope else "FAIL"
+
+
+def tap_sequence_quality(policy, trace, *, complete):
+    """Grade observed tap operations on contiguous ticks, starting with the timer cleared.
+
+    A positive step raises voltage. Each operation restarts the persistence
+    timer. A direction reversal must also satisfy the reversal delay.
+    """
+    if complete is not True or not isinstance(policy, dict) or policy.get("model") != "sampled-tap-delay-v1":
+        return "INCOMPLETE"
+    low, high = policy.get("low_v"), policy.get("high_v")
+    delay, reversal = policy.get("outside_ticks"), policy.get("reversal_ticks")
+    if not all(map(finite_measure, (low, high))) or low >= high:
+        return "INCOMPLETE"
+    if type(delay) is not int or delay < 1 or type(reversal) is not int or reversal < 0:
+        return "INCOMPLETE"
+    if not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    previous_tick = last_step_tick = None
+    direction = count = last_step = 0
+    failed = False
+    for row in trace:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            return "INCOMPLETE"
+        tick, volts, step = row
+        if type(tick) is not int or not finite_measure(volts) or type(step) is not int or step not in (-1, 0, 1):
+            return "INCOMPLETE"
+        if previous_tick is not None and tick != previous_tick + 1:
+            return "INCOMPLETE"
+        previous_tick = tick
+        requested = 1 if volts < low else -1 if volts > high else 0
+        count = count + 1 if requested == direction else 1
+        direction = requested
+        if step:
+            if step != requested or count < delay:
+                failed = True
+            if last_step == -step and tick - last_step_tick < reversal:
+                failed = True
+            last_step, last_step_tick, count = step, tick, 0
+    return "FAIL" if failed else "PASS"

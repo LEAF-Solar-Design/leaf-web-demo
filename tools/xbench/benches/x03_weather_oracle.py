@@ -788,3 +788,52 @@ def anemometer_overspeed_quality(model, trace, reported_mean):
             return "INCOMPLETE"
         total += wind
     return "PASS" if total == Fraction(str(reported_mean)) * (len(readings) - 1) else "FAIL"
+
+
+def wind_undercatch_quality(revision, calibration, intervals, reported_mm):
+    """Correct each gauge depth with its phase-specific efficiency at gauge height.
+
+    The calibration interpolates linearly between wind/efficiency knots. It
+    supports only the wind range measured for that phase.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(calibration, dict):
+        return "INCOMPLETE"
+    curves = calibration.get("phase_curves")
+    if calibration.get("revision") != revision or not isinstance(curves, dict):
+        return "INCOMPLETE"
+    if not isinstance(intervals, list) or not intervals or not finite_measure(reported_mm):
+        return "INCOMPLETE"
+    corrected = Fraction(0)
+    for interval in intervals:
+        if not isinstance(interval, dict):
+            return "INCOMPLETE"
+        phase = interval.get("phase")
+        wind, depth = interval.get("gauge_height_wind_m_s"), interval.get("caught_mm")
+        if not isinstance(phase, str) or not phase or not all(map(finite_measure, (wind, depth))):
+            return "INCOMPLETE"
+        curve = curves.get(phase)
+        if not isinstance(curve, list) or len(curve) < 2 or min(wind, depth) < 0:
+            return "INCOMPLETE"
+        wind = Fraction(str(wind))
+        previous = None
+        efficiency = None
+        for knot in curve:
+            if not isinstance(knot, (tuple, list)) or len(knot) != 2 or not all(map(finite_measure, knot)):
+                return "INCOMPLETE"
+            speed, ratio = (Fraction(str(v)) for v in knot)
+            if speed < 0 or not 0 < ratio <= 1:
+                return "INCOMPLETE"
+            if previous is not None:
+                left, left_ratio = previous
+                if speed <= left:
+                    return "INCOMPLETE"
+                if left <= wind <= speed:
+                    efficiency = left_ratio + (ratio - left_ratio) * (wind - left) / (speed - left)
+            previous = speed, ratio
+        if efficiency is None:
+            return "INCOMPLETE"
+        corrected += Fraction(str(depth)) / efficiency
+    return "PASS" if corrected == Fraction(str(reported_mm)) else "FAIL"

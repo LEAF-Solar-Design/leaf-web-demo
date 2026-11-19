@@ -4,6 +4,37 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def web_crippling_quality(revision, rule, support, bearing_mm, reaction_n):
+    """Interpolate the recorded reaction resistance for this support and rail section."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "linear-bearing-length-v1" or not isinstance(support, str):
+        return "INCOMPLETE"
+    tables = rule.get("resistance_by_support")
+    if not isinstance(tables, dict) or not isinstance(tables.get(support), list):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (bearing_mm, reaction_n))) or bearing_mm <= 0 or reaction_n < 0:
+        return "INCOMPLETE"
+    points = []
+    for point in tables[support]:
+        if not isinstance(point, (list, tuple)) or len(point) != 2 or not all(map(finite_measure, point)):
+            return "INCOMPLETE"
+        length, capacity = (Fraction(str(value)) for value in point)
+        if min(length, capacity) <= 0 or (points and length <= points[-1][0]):
+            return "INCOMPLETE"
+        points.append((length, capacity))
+    length = Fraction(str(bearing_mm))
+    demand = Fraction(str(reaction_n))
+    for x, capacity in points:
+        if length == x:
+            return "PASS" if demand <= capacity else "FAIL"
+    for (x0, c0), (x1, c1) in zip(points, points[1:]):
+        if x0 < length < x1:
+            capacity = c0 + (length - x0) * (c1 - c0) / (x1 - x0)
+            return "PASS" if demand <= capacity else "FAIL"
+    return "INCOMPLETE"
+
+
 def preload_retention_quality(revision, rule, history, service_h, installed_n, required_n):
     """Apply a pinned, piecewise-linear retention curve to equivalent service hours."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

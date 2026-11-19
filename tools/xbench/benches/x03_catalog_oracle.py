@@ -3,6 +3,25 @@ from fractions import Fraction
 from math import isfinite
 
 
+def cable_handling_temperature_quality(revision, sheet, cable, handling, temperatures_c):
+    """Compare every recorded handling temperature with the qualified cold-bend minimum."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(value, str) and value.strip() for value in (cable, handling)):
+        return "INCOMPLETE"
+    qualified = sheet.get("cold_bend_min_c")
+    if not isinstance(qualified, dict) or not isinstance(qualified.get(cable), dict):
+        return "INCOMPLETE"
+    minimum = qualified[cable].get(handling)
+    if not finite_measure(minimum) or not isinstance(temperatures_c, list) or not temperatures_c:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, temperatures_c)):
+        return "INCOMPLETE"
+    return "PASS" if min(temperatures_c) >= minimum else "FAIL"
+
+
 def thermal_cycle_quality(revision, sheet, low_c, high_c, cycles):
     """Require one complete test envelope that covers both extrema and the cycle count."""
     from benches.x03_quality import finite_measure

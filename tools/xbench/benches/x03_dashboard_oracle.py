@@ -1327,3 +1327,40 @@ def backpressure_hysteresis_quality(low, high, window, segments, *, initially_pa
     if cursor != end:
         return "INCOMPLETE"
     return "PASS" if valid else "FAIL"
+
+
+def token_bucket_quality(capacity, refill_per_second, initial, arrivals):
+    """Replay greedy whole-request admissions in arrival order, with a capped balance.
+
+    Initial state is (reference time, available tokens). Each arrival records
+    its time, token cost, and whether it was admitted. Rejected requests cost zero.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(initial, (tuple, list)) or len(initial) != 2:
+        return "INCOMPLETE"
+    values = (capacity, refill_per_second, *initial)
+    if not all(map(finite_measure, values)) or not isinstance(arrivals, list):
+        return "INCOMPLETE"
+    cap, rate, previous, available = (Fraction(str(x)) for x in values)
+    if cap <= 0 or rate < 0 or not 0 <= available <= cap:
+        return "INCOMPLETE"
+    valid = True
+    for event in arrivals:
+        if not isinstance(event, (tuple, list)) or len(event) != 3:
+            return "INCOMPLETE"
+        timestamp, cost, admitted = event
+        if type(admitted) is not bool or not all(map(finite_measure, (timestamp, cost))):
+            return "INCOMPLETE"
+        timestamp, cost = Fraction(str(timestamp)), Fraction(str(cost))
+        if timestamp < previous or cost <= 0:
+            return "INCOMPLETE"
+        available = min(cap, available + (timestamp - previous) * rate)
+        affordable = available >= cost
+        if admitted != affordable:
+            valid = False
+        if affordable:
+            available -= cost
+        previous = timestamp
+    return "PASS" if valid else "FAIL"
