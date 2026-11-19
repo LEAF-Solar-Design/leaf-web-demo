@@ -3,6 +3,28 @@ from fractions import Fraction
 from math import isfinite
 
 
+def torque_tool_quality(revision, calibration, tool_id, assembly_date, required_nm):
+    """Qualify an identified tool on the assembly date, with inclusive range and dates."""
+    from datetime import date
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(calibration, dict) or calibration.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(tool_id, str) or not tool_id.strip() or calibration.get("tool_id") != tool_id:
+        return "INCOMPLETE"
+    lower, upper = calibration.get("min_nm"), calibration.get("max_nm")
+    if not all(map(finite_measure, (lower, upper, required_nm))) or not (0 <= lower <= upper and required_nm > 0):
+        return "INCOMPLETE"
+    try:
+        start, end, assembled = (date.fromisoformat(value) for value in
+                                 (calibration.get("valid_from"), calibration.get("valid_through"), assembly_date))
+    except (TypeError, ValueError):
+        return "INCOMPLETE"
+    if start > end:
+        return "INCOMPLETE"
+    return "PASS" if start <= assembled <= end and lower <= required_nm <= upper else "FAIL"
+
+
 def hazardous_area_quality(revision, sheet, zone, gas_group, temperature_class, marking):
     """Compare a complete field marking with the pinned approvals for one site class."""
     if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:

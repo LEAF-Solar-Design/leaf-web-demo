@@ -2329,3 +2329,70 @@ def cell_balance_deadline_quality(policy, excess_ah, currents_a, duty_limits, de
         if Fraction(str(excess)) > removable:
             feasible = False
     return "PASS" if feasible else "FAIL"
+
+
+def stuck_sensor_quality(policy, primary_id, reference_id, trace):
+    """Check decisions at each tick using a fixed window and an independent channel.
+
+    Each row contains the tick, primary reading, reference reading and whether
+    control relied on the primary. Contiguous ticks are one sampling interval apart.
+    """
+    if not isinstance(policy, dict) or policy.get("model") != "redundant-window-span-v1":
+        return "INCOMPLETE"
+    if not all(isinstance(key, str) and key.strip() for key in (primary_id, reference_id)):
+        return "INCOMPLETE"
+    if primary_id == reference_id:
+        return "INCOMPLETE"
+    count = policy.get("consecutive_samples")
+    tolerances = policy.get("max_primary_span"), policy.get("min_reference_span")
+    if type(count) is not int or count < 2 or not all(map(finite_measure, tolerances)):
+        return "INCOMPLETE"
+    quiet, moving = (Fraction(str(value)) for value in tolerances)
+    if not 0 <= quiet < moving or not isinstance(trace, list) or len(trace) < count:
+        return "INCOMPLETE"
+    from collections import deque
+    primary, reference = deque(maxlen=count), deque(maxlen=count)
+    previous = None
+    failed = False
+    for row in trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            return "INCOMPLETE"
+        tick, value, independent, used = row
+        if type(tick) is not int or type(used) is not bool or not all(map(finite_measure, (value, independent))):
+            return "INCOMPLETE"
+        if previous is not None and tick != previous + 1:
+            return "INCOMPLETE"
+        previous = tick
+        primary.append(Fraction(str(value)))
+        reference.append(Fraction(str(independent)))
+        if used and len(primary) == count:
+            if max(primary) - min(primary) <= quiet and max(reference) - min(reference) >= moving:
+                failed = True
+    return "FAIL" if failed else "PASS"
+
+
+def contactor_dwell_quality(policy, initial_on, state_since, transitions, *, complete):
+    """Check each observed transition against the minimum time in its prior state."""
+    if complete is not True or not isinstance(policy, dict) or policy.get("model") != "minimum-dwell-v1":
+        return "INCOMPLETE"
+    limits = policy.get("min_off_s"), policy.get("min_on_s")
+    if not all(finite_measure(value) and value >= 0 for value in limits):
+        return "INCOMPLETE"
+    if type(initial_on) is not bool or not finite_measure(state_since) or not isinstance(transitions, list):
+        return "INCOMPLETE"
+    state = initial_on
+    since = Fraction(str(state_since))
+    failed = False
+    for event in transitions:
+        if not isinstance(event, (tuple, list)) or len(event) != 2:
+            return "INCOMPLETE"
+        when, next_state = event
+        if type(next_state) is not bool or next_state == state or not finite_measure(when):
+            return "INCOMPLETE"
+        instant = Fraction(str(when))
+        if instant < since:
+            return "INCOMPLETE"
+        if instant - since < Fraction(str(limits[state])):
+            failed = True
+        state, since = next_state, instant
+    return "FAIL" if failed else "PASS"

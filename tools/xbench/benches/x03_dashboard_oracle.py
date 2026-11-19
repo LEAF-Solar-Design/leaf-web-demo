@@ -1201,3 +1201,41 @@ def priority_inversion_quality(rule, waiter, priorities, wait, segments, *, acqu
     if not inherited or end - start > limit:
         return "FAIL"
     return "PASS" if acquired else "INCOMPLETE"
+
+
+def head_of_line_quality(policy, queue, workers, demand, free, eligible, assignments):
+    """Replay one dispatch per idle worker in recorded order.
+
+    Demands and free capacities use one common resource unit. Eligibility gives
+    separate placement constraints for every queued task and worker pair.
+    """
+    if policy not in ("strict-fifo-v1", "first-compatible-bypass-v1"):
+        return "INCOMPLETE"
+    if not all(isinstance(ids, list) for ids in (queue, workers)):
+        return "INCOMPLETE"
+    for ids in (queue, workers):
+        if not all(isinstance(x, str) and x for x in ids) or len(ids) != len(set(ids)):
+            return "INCOMPLETE"
+    if not all(isinstance(mapping, dict) for mapping in (demand, free, eligible, assignments)):
+        return "INCOMPLETE"
+    if set(assignments) != set(workers):
+        return "INCOMPLETE"
+    for worker in workers:
+        if type(free.get(worker)) is not int or free[worker] < 0:
+            return "INCOMPLETE"
+    for task in queue:
+        if type(demand.get(task)) is not int or demand[task] < 0:
+            return "INCOMPLETE"
+        choices = eligible.get(task)
+        if not isinstance(choices, dict) or any(type(choices.get(w)) is not bool for w in workers):
+            return "INCOMPLETE"
+    pending = list(queue)
+    for worker in workers:
+        candidates = pending[:1] if policy == "strict-fifo-v1" else pending
+        selected = next((task for task in candidates
+                         if eligible[task][worker] and demand[task] <= free[worker]), None)
+        if assignments[worker] != selected:
+            return "FAIL"
+        if selected is not None:
+            pending.remove(selected)
+    return "PASS"

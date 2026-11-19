@@ -4,6 +4,33 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rectangular_block_shear_quality(revision, rule, rows_mm, columns_mm, hole_mm, thickness_mm, demand_n):
+    """Grade a nominated rectangular bolt block. Rows are distances from its free edge."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "two-net-sides-net-end-v1":
+        return "INCOMPLETE"
+    values = (hole_mm, thickness_mm, demand_n, rule.get("shear_mpa"), rule.get("tension_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    hole, thickness, demand, shear, tension = (Fraction(str(value)) for value in values)
+    if min(hole, thickness, shear, tension) <= 0 or demand < 0:
+        return "INCOMPLETE"
+    if not isinstance(rows_mm, list) or not rows_mm or not isinstance(columns_mm, list) or len(columns_mm) < 2:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, rows_mm + columns_mm)):
+        return "INCOMPLETE"
+    rows = sorted(Fraction(str(value)) for value in rows_mm)
+    cols = sorted(Fraction(str(value)) for value in columns_mm)
+    if rows[0] <= hole / 2 or any(b - a <= hole for axis in (rows, cols) for a, b in zip(axis, axis[1:])):
+        return "INCOMPLETE"
+    # Each longitudinal side ends on a half hole. The transverse end has two half holes.
+    side_net = rows[-1] - (len(rows) * hole - hole / 2)
+    end_net = cols[-1] - cols[0] - (len(cols) - 1) * hole
+    resistance = thickness * (2 * side_net * shear + end_net * tension)
+    return "PASS" if demand <= resistance else "FAIL"
+
+
 def rail_web_shear_quality(revision, rule, depth_mm, thickness_mm, shear_n):
     """Grade a web using the pinned elastic shear coefficient and stress ceiling."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

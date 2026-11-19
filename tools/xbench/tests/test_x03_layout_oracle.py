@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("rows,cols,hole,thickness,shear,tension,capacity", [
+    pytest.param([10, 30], [0, 20], 4, 2, 10, 20, 1600, id="check-two-row-rail-splice"),
+    pytest.param([20], [0, 30, 60], 6, 3, 5, 10, 1950, id="check-wide-end-bracket"),
+    pytest.param([40, 10, 25], [-10, 10], 2, 4, 3, 7, 1344, id="check-three-row-clip"),
+])
+def test_rectangular_block_tearout(rows, cols, hole, thickness, shear, tension, capacity):
+    from benches.x03_layout_oracle import rectangular_block_shear_quality as grade
+
+    # Independent net side/end lengths in mm are (24,16), (17,48) and (35,18).
+    rule = dict(revision="lab", model="two-net-sides-net-end-v1", shear_mpa=shear, tension_mpa=tension)
+    args = ("lab", rule, rows, cols, hole, thickness)
+    assert grade(*args, capacity) == "PASS"
+    # Each specimen has an independent connection rating of 1000 N per bolt under equal sharing.
+    assert capacity + 1 < 1000 * len(rows) * len(cols)
+    assert grade(*args, capacity + 1) == "FAIL"
+    assert grade("lab", rule, rows, [], hole, thickness, capacity) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("depth,thickness,coefficient,stress_ceiling,resistance", [
     pytest.param(100, 2, 50000, 60, 4000, id="check-a-slender-edge-rail"),
     pytest.param(200, 5, 32000, 40, 20000, id="check-a-deep-support-web"),

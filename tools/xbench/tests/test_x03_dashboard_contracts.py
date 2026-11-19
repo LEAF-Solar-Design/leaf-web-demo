@@ -587,3 +587,29 @@ def test_priority_inversion_wait_requires_coverage_and_boost(waiter, owner, prio
     assert report([(start + 1, end, owner, priority)]) == "INCOMPLETE"
     late = start + bound + 1
     assert report([(start, late, owner, priority)], acquired=False, stop=late) == "FAIL"
+
+
+@pytest.mark.parametrize("queue,needs,space,allowed,expected,fifo", [
+    pytest.param(["large", "small"], [9, 3], [4], [[True], [True]], ["small"], [None],
+                 id="serve-a-small-job-behind-an-oversize-task"),
+    pytest.param(["gpu", "cpu"], [2, 2], [3, 4], [[False, True], [True, True]],
+                 ["cpu", "gpu"], [None, "gpu"], id="drain-the-cpu-queue-during-a-gpu-wait"),
+    pytest.param(["bulk", "urgent", "light"], [8, 3, 1], [2, 4],
+                 [[True, True], [True, True], [True, True]], ["light", "urgent"], [None, None],
+                 id="assign-two-workers-around-a-blocked-head"),
+])
+def test_head_of_line_bypass_reconciles_idle_workers(queue, needs, space, allowed, expected, fifo):
+    from benches.x03_dashboard_oracle import head_of_line_quality as grade
+
+    workers = [f"w{i}" for i in range(len(space))]
+    demand = dict(zip(queue, needs))
+    free = dict(zip(workers, space))
+    eligible = {task: dict(zip(workers, row)) for task, row in zip(queue, allowed)}
+    args = (queue, workers, demand, free, eligible)
+    bypass = dict(zip(workers, expected))
+    strict = dict(zip(workers, fifo))
+    assert grade("strict-fifo-v1", *args, strict) == "PASS"
+    assert grade("first-compatible-bypass-v1", *args, bypass) == "PASS"
+    assert grade("first-compatible-bypass-v1", *args, strict) == "FAIL"
+    del eligible[queue[0]][workers[0]]
+    assert grade("first-compatible-bypass-v1", *args, bypass) == "INCOMPLETE"

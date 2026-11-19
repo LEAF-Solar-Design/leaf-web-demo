@@ -1321,3 +1321,41 @@ def test_independent_bleed_deadline(excess, currents, duties, hours):
     assert grade(policy, excess, currents, duties, hours - 0.01) == "FAIL"
     assert grade(None, excess, currents, duties, hours) == "INCOMPLETE"
     assert grade(policy, excess, currents, {}, hours) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("primary,reference,quiet,moving", [
+    pytest.param([20, 20, 20], [20, 21, 22], 0, 2, id="coolant-temperature-control"),
+    pytest.param([4, 4.01, 4.02, 4], [4, 4.3, 4.2, 4.1], 0.02, 0.3, id="pump-pressure-fallback"),
+    pytest.param([900, 900], [960, 900], 1, 60, id="fan-speed-feedback"),
+])
+def test_stuck_sensor_control(primary, reference, quiet, moving):
+    from benches.x03_quality import stuck_sensor_quality as grade
+
+    policy = dict(model="redundant-window-span-v1", consecutive_samples=len(primary),
+                  max_primary_span=quiet, min_reference_span=moving)
+    unsafe = [(i, p, r, True) for i, (p, r) in enumerate(zip(primary, reference))]
+    safe = unsafe[:-1] + [(*unsafe[-1][:3], False)]
+    assert grade(policy, "main", "backup", safe) == "PASS"
+    assert grade(policy, "main", "backup", unsafe) == "FAIL"
+    # A later moving sample cannot erase an earlier unsafe decision.
+    assert grade(policy, "main", "backup", unsafe + [(len(unsafe), 12, 12, True)]) == "FAIL"
+    assert grade(policy, "main", "backup", [(i, p, p, True) for i, p, _, _ in unsafe]) == "PASS"
+    assert grade(policy, "main", "main", unsafe) == "INCOMPLETE"
+    assert grade(policy, "main", "backup", unsafe[:-1]) == "INCOMPLETE"
+    assert grade(policy, "main", "backup", unsafe[:-1] + [(len(unsafe), 1, None, True)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("initial,since,off_s,on_s,events,early", [
+    pytest.param(False, 0, 3, 5, [(3, True), (8, False)], [(2, True), (8, False)], id="pump-restart"),
+    pytest.param(True, 10, 7, 2, [(12, False), (19, True)], [(12, False), (18, True)], id="compressor-lockout"),
+    pytest.param(False, 1.1, 0.2, 0.3, [(1.3, True), (1.6, False)],
+                 [(1.3, True), (1.59, False)], id="transfer-contactor"),
+])
+def test_contactor_minimum_dwell(initial, since, off_s, on_s, events, early):
+    from benches.x03_quality import contactor_dwell_quality as grade
+
+    policy = dict(model="minimum-dwell-v1", min_off_s=off_s, min_on_s=on_s)
+    assert grade(policy, initial, since, events, complete=True) == "PASS"
+    assert grade(policy, initial, since, early, complete=True) == "FAIL"
+    assert grade(policy, initial, None, events, complete=True) == "INCOMPLETE"
+    assert grade(policy, initial, since, events, complete=False) == "INCOMPLETE"
