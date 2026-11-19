@@ -27,7 +27,7 @@ def spline_endpoints(path, frame):
     spans = [k for k in range(degree, len(points)) if knots[k] < knots[k+1]]
     # A fully multiple interior knot can break a single entity into disjoint spans.
     for k in spans[1:]:
-        if knots[k-degree] == knots[k]:
+        if spline_jump(points, knots, degree, k, frame):
             raise ValueError("Discontinuous knot sequence within one spline segment.")
     ends = []
     for k, index in ((spans[0], 0), (spans[-1], -1)):

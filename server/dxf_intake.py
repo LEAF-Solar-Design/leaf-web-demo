@@ -24,6 +24,7 @@ extracts through APS.
 """
 from __future__ import annotations
 
+from decimal import Decimal, DecimalException
 import math
 import re
 from pathlib import Path
@@ -241,6 +242,8 @@ def parse_dxf_bytes(
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
             if entity is not None:
+                if include_measurement_evidence:
+                    _retain_short_segment_vectors(entity, record, "LWPOLYLINE")
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
@@ -257,6 +260,8 @@ def parse_dxf_bytes(
             # intake field, the frozen §1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1, dropped_count)
             if entity is not None:
+                if include_measurement_evidence:
+                    _retain_short_segment_vectors(entity, record, "LINE")
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
@@ -763,7 +768,16 @@ def _spline_measurement_path(record):
     # Preserve bad evidence on its own path so unrelated layers and unused
     # block definitions do not prevent a valid beam takeoff.
     try:
-        path["closed"] = bool(int(groups.get(70, 0)) & 3)
+        flags = int(groups.get(70, 0))
+        path["closed"] = bool(flags & 3)
+        if flags & 2:
+            path["periodic"] = True
+        # SPLINE control points are Cartesian. The optional planar normal is
+        # metadata, unlike an INSERT extrusion that changes the placement basis.
+        if any(code in groups for code in (210, 220, 230)):
+            normal = [float(groups.get(code, 0)) for code in (210, 220, 230)]
+            if not all(map(math.isfinite, normal)) or not any(normal):
+                raise ValueError("Degenerate spline plane normal.")
         degree = int(groups.get(71, 0))
         knots = [float(v) for c, v in record if c == 40]
         weights = [float(v) for c, v in record if c == 41]
@@ -786,6 +800,18 @@ def _spline_measurement_path(record):
             raise ValueError("Invalid spline knot vector.")
         if weights and (len(weights) != len(points) or any(w <= 0 or not math.isfinite(w) for w in weights)):
             raise ValueError("Spline weights must be finite, positive and match the control count.")
+        if path.get("periodic"):
+            # A periodic control net repeats its first degree poles and weights.
+            # Its knot sequence must repeat after one active parameter period.
+            unique = len(points) - degree
+            period = knots[len(points)] - knots[degree]
+            if (unique < degree + 1 or points[-degree:] != points[:degree]
+                    or (weights and weights[-degree:] != weights[:degree])
+                    or any(knots[k-degree] == knots[k] < knots[k+1] and points[k-degree-1] != points[k-degree]
+                           for k in range(degree+1, len(points)))
+                    or not all(math.isclose(b - a, period, rel_tol=1e-12)
+                               for a, b in zip(knots, knots[unique:]))):
+                raise ValueError("Inconsistent periodic spline control points, weights or knots.")
         path.update(degree=degree, control_points=[p if len(p) == 3 else [*p, 0.] for p in points],
                     knots=knots, weights=weights or [1.] * len(points))
     except (ValueError, OverflowError) as exc:
@@ -793,11 +819,46 @@ def _spline_measurement_path(record):
     return path
 
 
+def _retain_short_segment_vectors(path, record, kind):
+    """Preserve decimal DXF differences when absolute binary coordinates lose resolution."""
+    points = path["pts"]
+    if not any(max(map(abs, (*a, *b))) > 1e7 * math.dist(a, b)
+               for a, b in zip(points, points[1:])):
+        return
+    groups = dict(record)
+    if kind == "LINE":
+        vertices = [tuple(groups.get(code + offset, "0") for code in (10, 20, 30))
+                    for offset in (0, 1)]
+    else:
+        xs = [v for c, v in record if c == 10]
+        ys = [v for c, v in record if c == 20]
+        if len(xs) != len(ys):
+            path["measurement_error"] = "Incomplete survey coordinates."
+            return
+        vertices = [(x, y, "0") for x, y in zip(xs, ys)]
+    normal = _group_point(groups, 210, (0, 0, 1))
+    deltas = []
+    try:
+        for a, b in zip(vertices, vertices[1:]):
+            vector = [float(Decimal(y) - Decimal(x)) for x, y in zip(a, b)]
+            if kind == "LWPOLYLINE" and any(abs(x-y) > 1e-6 for x,y in zip(normal, (0,0,1))):
+                vector = _ocs_to_wcs(vector, normal)
+            if not all(map(math.isfinite, vector)):
+                raise ValueError("Non-finite survey vector.")
+            deltas.append(vector)
+    except (DecimalException, ValueError, OverflowError):
+        path["measurement_error"] = "Invalid survey coordinates."
+        return
+    path["measurement_vectors"] = deltas
+
+
 def _block_measurement_path(pairs, start, end, kind):
     if kind == "SPLINE":
         return _spline_measurement_path(pairs[start:end])
     parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
     path, _ = parse(pairs, start)
+    if path and kind in ("LINE", "LWPOLYLINE"):
+        _retain_short_segment_vectors(path, pairs[start:end], kind)
     path.pop("_properties", None)
     path.pop("xdata", None)
     groups, _ = _entity_groups(pairs, start)
@@ -843,7 +904,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                 paths = block.setdefault("beam_paths", [])
                 if len(paths) < 10000:
                     path = _block_measurement_path(pairs, i + 1, end, kind)
-                    if path is not None and not path.get("closed"):
+                    if path is not None and (not path.get("closed") or path.get("periodic")):
                         paths.append(path)
                 else:
                     block["beam_paths_incomplete"] = True

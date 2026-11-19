@@ -22,6 +22,11 @@ _STATUS_GROUP = re.compile(
     + _ITEM + r")*)")
 
 
+def requires_snapshot(description):
+    return bool(re.search(r"\bsnapshot\b|\b(?:consistent|same|single) (?:catalog |inventory )?"
+                          r"(?:view|version|revision|inventory|catalog)\b", description, re.I))
+
+
 def build_body(description):
     prompt = description.casefold()
     selected, excluded, additional = set(), set(), set()
@@ -39,7 +44,8 @@ def build_body(description):
         if re.search(r"\bcan read\b|\breadable\b", prompt):
             selected.discard("unavailable")
     statuses = sorted((selected | additional) - excluded)
-    return _BODY.replace("__STATUSES__", repr(tuple(statuses)))
+    return _BODY.replace("__STATUSES__", repr(tuple(statuses))).replace(
+        "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description)))
 
 
 _BODY = """
@@ -47,6 +53,8 @@ def run(intake, params):
     catalog = intake.get("project_dataset_catalog")
     if catalog is None:
         raise ValueError("This report needs the current project's turn-bound integration catalog.")
+    if __REQUIRE_SNAPSHOT__ and catalog.get("snapshot_verified") is not True:
+        raise ValueError("This report needs a verified catalog snapshot.")
     statuses = __STATUSES__
     rows = []
     for dataset in catalog["datasets"]:
