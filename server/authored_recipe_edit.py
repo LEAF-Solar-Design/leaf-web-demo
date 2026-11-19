@@ -92,34 +92,42 @@ def run(intake, params):
 """
 
 
-def edit_inspection_recipe(service, description, snapshot, tenant, session, turn, *,
-                           issue_retry_key=False, retry_key=None, read_revision=None, record_attempt=None):
-    """Prepare an edit offline; the existing guarded CAS service owns the write."""
-    from integration_tool_service import ReadFailure, failure, normalize
+def prepare_inspection_edit(description, snapshot):
+    """Author and execute a plan from a normalized parent without writing."""
+    from integration_tool_service import ReadFailure, normalize
     import tool_loader
     import tools_fallback
 
     if not matches(description) or type(snapshot) is not dict or set(snapshot) != {"element", "revision"}:
-        return failure("invalid_input")
-    try:
-        selected = normalize("elements", {"recipe": snapshot["element"], "expectedRevision": snapshot["revision"]})
-    except ReadFailure:
-        return failure("invalid_input")
+        raise ReadFailure("invalid_input")
+    selected = normalize("elements", {"recipe": snapshot["element"], "expectedRevision": snapshot["revision"]})
     package, source, _ = tools_fallback.author_tool(description)
     if package["engine_op"] != "inspection_recipe_edit":
-        return failure("invalid_input")
+        raise ReadFailure("invalid_input")
     intake = {"inspection_recipe": {"element": selected["recipe"], "revision": selected["expectedRevision"]}}
     status, payload = tool_loader._run_source_in_sandbox(source, "inspection_recipe.py", intake, {})
     if status != "ok":
-        return failure("invalid_input" if status == "tool_error" else "unavailable")
+        raise ReadFailure("invalid_input" if status == "tool_error" else "unavailable")
     args, _ = payload
     if (args.get("expectedRevision") != selected["expectedRevision"]
             or args.get("recipe", {}).get("id") != selected["recipe"]["id"]):
-        return failure("invalid_input")
+        raise ReadFailure("invalid_input")
+    return args, intake["inspection_recipe"]
+
+
+def edit_inspection_recipe(service, description, snapshot, tenant, session, turn, *,
+                           issue_retry_key=False, retry_key=None, read_revision=None, record_attempt=None):
+    """Prepare an edit offline; the existing guarded CAS service owns the write."""
+    from integration_tool_service import ReadFailure, failure, normalize
+
+    try:
+        args, selected_snapshot = prepare_inspection_edit(description, snapshot)
+    except ReadFailure as exc:
+        return failure(str(exc))
     if not issue_retry_key and retry_key is None and record_attempt is None:
         return service.execute("elements", args, tenant, session, turn)
 
-    from authored_recipe_retry import _digest, recover_recipe_save
+    from authored_recipe_retry import recover_recipe_save, request_retry_key
 
     try:
         authority = service._resolve_operation("elements", tenant, session, turn).authority
@@ -127,9 +135,7 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
     except ReadFailure as exc:
         return failure(str(exc))
     # This is a request identity. Authority still comes from the active grant.
-    key = _digest({"operation": "inspection-recipe-save-v1", "origin": authority.origin,
-                   "tenant": authority.tenant_id, "project": authority.project_id,
-                   "subject": authority.subject, "request": request})
+    key = request_retry_key(authority, request)
     if retry_key is not None:
         if retry_key != key:
             return failure("conflict")
@@ -141,7 +147,7 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
         # The host commits this intent before dispatch. A crash can then lose
         # the entire reply without losing the identity needed for readback.
         try:
-            record_attempt(authority, {"description": description, "snapshot": intake["inspection_recipe"],
+            record_attempt(authority, {"description": description, "snapshot": selected_snapshot,
                                        "retry_key": key})
         except Exception:
             return failure("unavailable")

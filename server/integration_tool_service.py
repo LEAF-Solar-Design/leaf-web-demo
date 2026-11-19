@@ -540,11 +540,14 @@ class IntegrationToolService:
             return resolve_current(tenant, session, turn, write=True)
         return self.resolve(tenant, session, turn)
 
-    def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *, require_snapshot=False):
+    def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
+                       require_snapshot=False, cancel_event=None):
         visited = set()
         first_snapshot = None
         args = {"limit": limit}
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise IncompleteInventory(len(visited))
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             reply = self._execute(operation, args, tenant, session, turn, authority)
@@ -556,6 +559,8 @@ class IntegrationToolService:
                     raise IncompleteInventory(len(visited))
                 raise ReadFailure(code)
             page = reply["result"]
+            if cancel_event is not None and cancel_event.is_set():
+                raise IncompleteInventory(len(visited) + 1)
             if operation == "datasets":
                 snapshot = page.pop("_snapshot", None)
                 if require_snapshot and snapshot is None:
@@ -576,10 +581,11 @@ class IntegrationToolService:
                 return
             args = {"limit": limit, "after": cursor}
 
-    def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None):
+    def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None,
+                            journal_sha256=None):
         from authored_recipe_retry import recover_recipe_save
         return recover_recipe_save(self, description, original_args, tenant, session, turn,
-                                   read_revision=read_revision)
+                                   read_revision=read_revision, journal_sha256=journal_sha256)
 
     def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
         from authored_batch_recipe import edit_table_recipes
@@ -597,19 +603,20 @@ class IntegrationToolService:
                                       read_revision=read_revision, record_attempt=record_attempt)
 
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
-                                    page_size=None, sort="catalog", cursor=None):
+                                    page_size=None, sort="catalog", cursor=None, cancel_event=None):
         if page_size is not None or sort != "catalog" or cursor is not None:
             from authored_dataset_cursor import paged_report
             return paged_report(self, description, tenant, session, turn, limit=limit,
-                                page_size=page_size, sort=sort, cursor=cursor)
-        return self._run_catalog_report("datasets", description, tenant, session, turn, limit)
+                                page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event)
+        return self._run_catalog_report("datasets", description, tenant, session, turn, limit,
+                                        cancel_event=cancel_event)
 
     def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
         return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
                                         include_form_digest=include_form_digest)
 
     def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
-                            expected_authority=None):
+                            expected_authority=None, cancel_event=None):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -634,7 +641,8 @@ class IntegrationToolService:
         datasets_by_id = {}
         from authored_dataset_discovery import requires_snapshot
         pinned = operation == "datasets" and requires_snapshot(description)
-        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority, require_snapshot=pinned):
+        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
+                                        require_snapshot=pinned, cancel_event=cancel_event):
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}

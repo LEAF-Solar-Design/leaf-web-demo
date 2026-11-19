@@ -34,8 +34,33 @@ def _digest(element):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def request_retry_key(authority, request):
+    return _digest({"operation": "inspection-recipe-save-v1", "origin": authority.origin,
+                    "tenant": authority.tenant_id, "project": authority.project_id,
+                    "subject": authority.subject, "request": request})
+
+
+def _journal_request(raw, digest, authority):
+    """A host-provided checksum pins the bytes; the retry key pins their scoped operation."""
+    from authored_recipe_edit import prepare_inspection_edit
+    from integration_tool_service import REQUEST_CAP, ReadFailure, normalize, strict_json
+
+    if (type(raw) is not bytes or len(raw) > 2 * REQUEST_CAP + 8192
+            or hashlib.sha256(raw).hexdigest() != digest):
+        return None
+    try:
+        intent = strict_json(raw)
+        if type(intent) is not dict or set(intent) != {"description", "snapshot", "retry_key"}:
+            return None
+        args, _ = prepare_inspection_edit(intent["description"], intent["snapshot"])
+        request = normalize("elements", args)
+        return request if request_retry_key(authority, request) == intent["retry_key"] else None
+    except (ValueError, RecursionError, ReadFailure):
+        return None
+
+
 def recover_recipe_save(service, description, original_args, tenant, session, turn, *, read_revision=None,
-                        expected_authority=None):
+                        expected_authority=None, journal_sha256=None):
     """Read-only reconciliation using the host's authorized, revision-specific reader.
 
     original_args are the original save request. The host reader enforces its own
@@ -49,17 +74,21 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
     if not matches(description):
         return failure("invalid_input")
     try:
-        args = normalize("elements", original_args)
         authority = service._resolve_operation("elements", tenant, session, turn).authority
         if expected_authority is not None and authority != expected_authority:
             return failure("denied")
+        if isinstance(original_args, bytes) or journal_sha256 is not None:
+            args = _journal_request(original_args, journal_sha256, authority)
+        else:
+            args = normalize("elements", original_args)
     except ReadFailure as exc:
         return failure(str(exc))
-    successor = args.get("expectedRevision", 0) + 1
-    element = args["recipe"]
-    wanted = _digest(element)
-    request = {"successor": successor, "requested_digest": wanted, "observed": None}
-    if read_revision is not None:
+    request = {"observed": None}
+    if args is not None:
+        successor = args.get("expectedRevision", 0) + 1
+        element = args["recipe"]
+        request.update(successor=successor, requested_digest=_digest(element))
+    if args is not None and read_revision is not None:
         try:
             saved = read_revision(authority, element["id"], successor)
             if (type(saved) is dict and type(saved.get("revision")) is int
@@ -82,6 +111,6 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
             return failure("denied")
     except ReadFailure as exc:
         return failure(str(exc))
-    if status != "ok" or not payload[0]["successor_observed"]:
+    if args is None or status != "ok" or not payload[0]["successor_observed"]:
         return failure("outcome_unknown")
     return {"result": {"element": element, "revision": successor}}

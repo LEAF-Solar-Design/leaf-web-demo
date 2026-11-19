@@ -125,5 +125,7 @@ def spline_length(path, frame, factor, detail, budget):
                 if distance:
                     jumps.append({"knot": knots[k], "distance": distance*factor})
             spans.append({"interval": [knots[k], knots[k+1]], "length": length*factor})
+    if total == 0 and any(point != points[0] for point in points):
+        raise ValueError("Collapsed spline placement has no measurable beam length.")
     return total, {"spans": spans, "jumps": jumps}
 """

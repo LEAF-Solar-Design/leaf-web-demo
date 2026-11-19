@@ -118,6 +118,8 @@ def __ENTRY_POINT__(intake, params):
     metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
                        6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
     source_unit = intake.get("insunits")
+    if intake.get("insunits_error"):
+        raise ValueError(intake["insunits_error"])
     factor = 1.0
     if __OUTPUT_UNIT__ != "drawing_units":
         if source_unit not in metres_per_unit:

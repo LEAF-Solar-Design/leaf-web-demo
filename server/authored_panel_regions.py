@@ -23,8 +23,8 @@ def matches(description):
     if cutout_breakdown(description):
         return True
     return bool(re.search(r"\b(?:pv\s+)?(?:panels?|modules?)\b", description, re.I)
-                and re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
-                              description, re.I)
+                and (re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
+                               description, re.I) or re.search(r"\bvisible footprints?\b", description, re.I))
                 and re.search(r"\b(?:areas?|square|footprints?|states?|overrides?|dynamic|visibility)\b",
                               description, re.I))
 
@@ -101,7 +101,11 @@ def visible_area(rings, breakdown):
     # a midpoint slice integrates the slab exactly apart from floating point.
     xs = set()
     edges = []
+    x0, y0 = rings[0][0][0]
     for index, (points, inverted) in enumerate(rings):
+        # Intersections and mid-slab ordinates can fall between adjacent
+        # world-coordinate floats even when all source vertices are exact.
+        points = [(x-x0, y-y0) for x,y in points]
         xs.update(p[0] for p in points)
         for p, q in zip(points, points[1:]+points[:1]):
             if p[0] != q[0]:
@@ -192,14 +196,19 @@ def run(intake, params):
             for col in range(cols):
                 path = prefix + f"{handle}[{row},{col}]"
                 frame = insert_frame(parent, ref, base, row, col)
-                if (frame[1][2] or frame[2][2] or
-                        frame[1][0]*frame[2][1] == frame[2][0]*frame[1][1]):
-                    raise ValueError("Panel placement requires a nondegenerate XY transform.")
+                ax,ay,az = frame[1]
+                bx,by,bz = frame[2]
+                jacobian = math.hypot(ay*bz-az*by, az*bx-ax*bz, ax*by-ay*bx)
+                if not jacobian or not math.isfinite(jacobian):
+                    raise ValueError("Panel placement requires a nondegenerate surface transform.")
+                if (not AREA_MODE and (az or bz)) or (
+                        AREA_MODE and boundaries and (clip or panel) and (az or bz or frame[0][2])):
+                    raise ValueError("Panel and clip planes are not coplanar.")
                 scale = area_scale
                 if AREA_MODE and not boundaries and (clip or panel):
                     # Measure in the first shared clip frame to retain local
                     # detail even when the site has large world coordinates.
-                    scale = abs(frame[1][0]*frame[2][1] - frame[2][0]*frame[1][1])
+                    scale = jacobian
                     frame = identity_frame()
                 chain = boundaries
                 if clip:

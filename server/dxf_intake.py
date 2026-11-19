@@ -123,6 +123,7 @@ def parse_dxf_bytes(
     n = len(pairs)
     active_layer = None
     insunits = None
+    declared_units = set()
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -145,6 +146,9 @@ def parse_dxf_bytes(
                     insunits = int(pairs[i + 1][1])
                 except ValueError:
                     insunits = None
+                declared_units.add(insunits)
+            else:
+                declared_units.add(None)
         if section == "OBJECTS" and code == 0:
             j = i + 1
             while j < n and pairs[j][0] != 0:
@@ -334,7 +338,9 @@ def parse_dxf_bytes(
         out["splines"] = splines
     if elevation_evidence:
         out["elevation_evidence"] = elevation_evidence
-    if insunits is not None:
+    if len(declared_units) > 1:
+        out["insunits_error"] = "Conflicting drawing insertion units."
+    elif insunits is not None:
         out["insunits"] = insunits
     if active_layer is not None:
         out["active_layer"] = active_layer
