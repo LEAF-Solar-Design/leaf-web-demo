@@ -323,6 +323,7 @@
     "server-drawing-authority-cutover-marker",
     "server-drawing-authority-postgres",
     "server-drawing-dxf-route",
+    "server-drawing-plan-grammar",
     "server-drawing-identity",
     "server-drawings-bootstrap",
     "server-drawings-bootstrap-scope-callers",
