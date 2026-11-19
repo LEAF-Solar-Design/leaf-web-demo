@@ -477,13 +477,16 @@ def project_discovery(value, limit, *, include_snapshot=False):
 class _DatasetResponseStream(httpx.AsyncByteStream):
     """Keep response cleanup independent of the outcome of reading a catalog page."""
 
-    def __init__(self, stream):
+    def __init__(self, stream, *, owned):
         self.stream = stream
+        self.owned = owned
 
     def __aiter__(self):
         return self.stream.__aiter__()
 
     async def aclose(self):
+        if not self.owned:
+            return
         try:
             await self.stream.aclose()
         except Exception:
@@ -511,7 +514,10 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
             async with client.stream(method, url, headers=headers,
                                      content=body) as response:
                 if dataset_report:
-                    response.stream = _DatasetResponseStream(response.stream)
+                    # A local transport may lend a page stream. Network
+                    # response headers cannot set HTTPX transport extensions.
+                    ownership = response.extensions.get("leaf.catalog_stream_ownership", "owned")
+                    response.stream = _DatasetResponseStream(response.stream, owned=ownership != "borrowed")
                 if 300 <= response.status_code < 400:
                     raise ReadFailure("invalid_response")
                 if response.status_code != 200:
@@ -900,6 +906,11 @@ class IntegrationToolService:
                     if verdict["decision"] == "allow":
                         check()
                     return output
+                except asyncio.CancelledError:
+                    if not (saving and started):
+                        raise
+                    # Cancellation of the transport cannot recall a dispatched write.
+                    category = "outcome_unknown"
                 except PartialResponse:
                     if operation == "datasets" and expected_authority is not None:
                         return failure("partial_page")

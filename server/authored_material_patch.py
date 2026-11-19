@@ -204,15 +204,14 @@ def run(intake, params):
         if action in ("copy", "move_field", "set"):
             if action in ("copy", "move_field"):
                 if action == "move_field":
+                    if value == positions:
+                        location(rows, value, read_only=True)
+                        continue
                     if "" in (value, positions):
-                        if value == positions:
-                            continue
                         raise ValueError("Cannot move or replace the material selection root.")
                     if positions.startswith(value + "/"):
                         raise ValueError("Cannot move a material field into its descendant.")
                 source, key = location(rows, value, protect_records=not replaced_root)
-                if action == "move_field" and value == positions:
-                    continue
                 # The destination index is evaluated after removing the source.
                 item = source.pop(key) if action == "move_field" else deepcopy(source[key])
                 parent, dest = location(rows, positions, add=True, protect_records=not replaced_root)
