@@ -36,7 +36,8 @@ def _selected_rows(document, pointer, count):
         parent = value
 
 
-def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context, *, include_row_digests=False):
+def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context, *,
+                            include_row_digests=False, include_row_values=False):
     """Bind a host-provided selection against a separately authorized material ID."""
     from integration_tool_service import validate_material_context
     import platform_link
@@ -71,6 +72,8 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
                                       allow_nan=False).encode("utf-8")).hexdigest()
             for row in rows
         ]
+    if include_row_values:
+        selection["record_values"] = rows
     return {**intake, "checker_material_selection": selection}
 
 

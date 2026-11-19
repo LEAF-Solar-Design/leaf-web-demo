@@ -36,7 +36,11 @@ def build_body(description, *, entry_point="run"):
         label, factor = "drawing_units", 1.0
     collect_segments = entry_point == "collect_spline_segments"
     span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
+    periodic = bool(re.search(r"\bperiodic\b", description, re.I))
+    survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
+            .replace("__PERIODIC__", repr(periodic))
+            .replace("__SURVEY__", repr(survey))
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
             .replace("__ONLY_SPLINES__", repr(collect_segments or span_detail or bool(re.search(r"\b(?:splines?|nurbs)\b", description, re.I))))
@@ -120,20 +124,34 @@ def __ENTRY_POINT__(intake, params):
             return
         if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
             return
-        if path.get("closed"):
+        if __PERIODIC__ and not path.get("periodic"):
+            return
+        if path.get("closed") and not (__PERIODIC__ and path.get("periodic")):
             if __COLLECT_SPLINES__:
                 raise ValueError("A closed spline has no free ends for a joined beam report.")
             return
         if path.get("kind") == "SPLINE":
+            if __SURVEY__:
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
             length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__)
         else:
+            if path.get("measurement_error"):
+                raise ValueError(path["measurement_error"])
             points = path["pts"]
+            vectors = path.get("measurement_vectors")
             bulges = path.get("bulges", [])
+            if __SURVEY__ and any(bulges):
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
             if bulges and len(bulges) != len(points):
                 raise ValueError("Beam curve lacks per-vertex bulges.")
             length = 0.0
             for i in range(len(points) - 1):
-                delta = [b-a for a, b in zip(points[i], points[i+1])]
+                delta = vectors[i] if vectors is not None else [b-a for a,b in zip(points[i], points[i+1])]
+                if __SURVEY__:
+                    if not any(delta):
+                        raise ValueError("Collapsed beam segment has no measurable length.")
+                    if vectors is None and max(map(abs, (*points[i], *points[i+1]))) > 1e7 * math.hypot(*delta):
+                        raise ValueError("Insufficient source precision for short beam segment.")
                 if len(delta) == 2:
                     delta.append(0)
                 bulge = bulges[i] if bulges else 0.0
@@ -225,6 +243,8 @@ def __ENTRY_POINT__(intake, params):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if __SURVEY__:
+        result["absolute_error_by_layer"] = {layer: value*LENGTH_RELATIVE_TOLERANCE for layer, value in totals.items()}
     if __SPAN_DETAIL__:
         result["spline_spans_by_handle"] = span_reports
     if __COLLECT_SPLINES__:

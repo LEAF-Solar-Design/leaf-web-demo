@@ -15,7 +15,8 @@ def operation(description):
 
 def matches(description):
     return bool(re.search(r"\b(?:pv\s+)?(?:panels?|modules?)\b", description, re.I)
-                and re.search(r"\b(?:xclip|clip(?:ped|ping)?s?)\b", description, re.I)
+                and re.search(r"\b(?:xclip|clip(?:ped|ping)?s?|cutouts?|exclusion (?:loops?|boundaries))\b",
+                              description, re.I)
                 and re.search(r"\b(?:areas?|square|footprints?|states?|overrides?|dynamic|visibility)\b",
                               description, re.I))
 
@@ -76,8 +77,11 @@ def attach_footprints(pairs, out):
 
 def build_body(description):
     area = operation(description) == "clipped_panel_area"
+    per_placement = bool(re.search(
+        r"\b(?:each|per|every|individual)\s+(?:(?:pv|solar|photovoltaic)\s+)?(?:panels?|modules?)\b",
+        description, re.I))
     return CLIP_SOURCE + VISIBILITY_SOURCE + (_AREA_SOURCE if area else "") + _TRAVERSAL.replace(
-        "AREA_MODE", str(area)).replace("PANEL_PATTERN", repr(PANEL_NAME)).replace(
+        "AREA_MODE", str(area)).replace("PER_PLACEMENT", str(per_placement)).replace("PANEL_PATTERN", repr(PANEL_NAME)).replace(
             "PLACEMENT_LIMIT", str(expansion_budget(description, 10000)))
 
 
@@ -135,6 +139,7 @@ def run(intake, params):
         raise ValueError("Unresolved block reference.")
     blocks = {n.casefold(): b for n,b in intake.get("blocks", {}).items()}
     paths, areas = set(), {}
+    placement_areas = {}
     def children_for(ref, name, block):
         if re.fullmatch(PANEL_PATTERN, " ".join(re.findall(r"[a-z0-9]+", name))):
             return ()
@@ -185,6 +190,10 @@ def run(intake, params):
                     width = max(p[0] for p in polygon)-min(p[0] for p in polygon)
                     height = max(p[1] for p in polygon)-min(p[1] for p in polygon)
                     roundoff = 16 * max(math.ulp(v) for p in polygon for v in p) * (width+height)
+                    if PER_PLACEMENT:
+                        if path in placement_areas:
+                            raise ValueError("Duplicate panel placement path.")
+                        placement_areas[path] = area if area > roundoff else 0.0
                     if area > roundoff:
                         areas[layer] = areas.get(layer,0) + area
                     else:
@@ -203,7 +212,8 @@ def run(intake, params):
     for ref in intake.get("inserts", []):
         visit(ref,"0","",(),identity_frame(),())
     if AREA_MODE:
-        return {"area_by_layer":areas, "expanded_placements":expanded, "area_units":"square drawing units", "visible_panels":len(paths),
+        details = {"area_by_placement": placement_areas} if PER_PLACEMENT else {}
+        return {**details, "area_by_layer":areas, "expanded_placements":expanded, "area_units":"square drawing units", "visible_panels":len(paths),
                 "boundary_policy":"edge contact contributes zero footprint area"}, None
     return {"visible_paths":sorted(paths), "expanded_placements":expanded, "total":len(paths),
             "boundary_policy":"include panel insertion points on clip edges"}, None

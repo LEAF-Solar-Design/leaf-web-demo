@@ -379,9 +379,12 @@ def validate_material_context(value):
     return value
 
 
-def project_discovery(value, limit):
+def project_discovery(value, limit, *, include_snapshot=False):
     """Project the Ops application-service discovery envelope, without receipts."""
-    if type(value) is not dict or set(value) != {"records", "nextCursor"}:
+    if type(value) is not dict or set(value) not in ({"records", "nextCursor"}, {"records", "nextCursor", "snapshotId"}):
+        raise ReadFailure("invalid_response")
+    if "snapshotId" in value and (type(value["snapshotId"]) is not str
+                                  or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["snapshotId"])):
         raise ReadFailure("invalid_response")
     records, cursor = value["records"], value["nextCursor"]
     if type(records) is not list or len(records) > limit:
@@ -435,6 +438,8 @@ def project_discovery(value, limit):
             dataset["material_context"] = context
         datasets.append(dataset)
     result = {"datasets": datasets, "next_cursor": cursor}
+    if include_snapshot and "snapshotId" in value:
+        result["_snapshot"] = value["snapshotId"]
     if len(json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
         raise ReadFailure("response_too_large")
     return result
@@ -525,8 +530,9 @@ class IntegrationToolService:
             return resolve_current(tenant, session, turn, write=True)
         return self.resolve(tenant, session, turn)
 
-    def _catalog_pages(self, operation, tenant, session, turn, limit, authority):
+    def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *, require_snapshot=False):
         visited = set()
+        first_snapshot = None
         args = {"limit": limit}
         while True:
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
@@ -537,6 +543,14 @@ class IntegrationToolService:
             if "result" not in reply:
                 raise ReadFailure(reply.get("error", {}).get("code", "denied"))
             page = reply["result"]
+            if operation == "datasets":
+                snapshot = page.pop("_snapshot", None)
+                if require_snapshot and snapshot is None:
+                    raise ReadFailure("snapshot_unavailable")
+                if not visited:
+                    first_snapshot = snapshot
+                elif first_snapshot != snapshot:
+                    raise ReadFailure("snapshot_changed")
             cursor = page["next_cursor"]
             if cursor is not None:
                 if cursor in visited:
@@ -592,7 +606,9 @@ class IntegrationToolService:
         rows = []
         size = 0
         pages = 0
-        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority):
+        from authored_dataset_discovery import requires_snapshot
+        pinned = operation == "datasets" and requires_snapshot(description)
+        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority, require_snapshot=pinned):
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}
@@ -602,7 +618,10 @@ class IntegrationToolService:
                 rows.append(row)
         if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")
-        intake = {f"project_{kind}_catalog": {collection: rows, "pages_read": pages}}
+        catalog = {collection: rows, "pages_read": pages}
+        if pinned:
+            catalog["snapshot_verified"] = True
+        intake = {f"project_{kind}_catalog": catalog}
         status, payload = tool_loader._run_source_in_sandbox(source, f"{kind}_report.py", intake, {})
         if status != "ok":
             raise ReadFailure("unavailable")
@@ -710,7 +729,7 @@ class IntegrationToolService:
                             elif operation == "action_catalog":
                                 projected = validate_action_catalog(value, args["limit"])
                             else:
-                                projected = (project_discovery(value, args["limit"]) if operation == "datasets"
+                                projected = (project_discovery(value, args["limit"], include_snapshot=expected_authority is not None) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
                         except ReadFailure as exc:
                             if str(exc) == "response_too_large":

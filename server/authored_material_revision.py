@@ -13,14 +13,16 @@ def matches(description):
     return bool(source and revisions and comparison)
 
 
-def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, prior, current):
+def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, prior, current, *,
+                            include_row_values=False):
     """The host supplies a selected ledger and separately authorized material IDs."""
     snapshots = []
     for version, mid, selection in (prior, current):
         if type(version) is not int or version < 1:
             raise ValueError("Invalid material revision.")
-        verified = bind_material_selection({}, org, project, actor, mid, selection,
-                                           include_row_digests=True)["checker_material_selection"]
+        bound = bind_material_selection({}, org, project, actor, mid, selection,
+                                        include_row_digests=True, include_row_values=include_row_values)
+        verified = bound["checker_material_selection"]
         # A digest alone cannot distinguish two materials containing identical bytes.
         revision_ref = {"material_id": str(mid), "sha256": verified["sha256"]}
         manifest = json.dumps(revision_ref, separators=(",", ":"), sort_keys=True).encode()
@@ -32,6 +34,8 @@ def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, pr
             raise ValueError("Selected records need unique IDs in each revision.")
         snapshots.append({"version": version, **revision_ref, "records_pointer": verified["records_pointer"],
                           "record_ids": ids, "record_sha256": verified["record_sha256"]})
+        if include_row_values:
+            snapshots[-1]["record_values"] = verified["record_values"]
     return {**intake, "linked_material_selections": snapshots}
 
 
