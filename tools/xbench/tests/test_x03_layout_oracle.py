@@ -451,3 +451,14 @@ def test_slab_punching_shear(depth,perimeter,resistance,capacity):
     assert grade(capacity,depth,perimeter,resistance,rule) == "PASS"
     assert grade(capacity+1,depth,perimeter,resistance,rule) == "FAIL"
     assert grade(capacity,depth,None,resistance,rule) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("stress,temp,years,elastic,final", [(2,25,5,4,6),(3,40,10,3,6),(5,60,2,5,6)])
+def test_service_clearance_after_creep(stress,temp,years,elastic,final):
+    from benches.x03_layout_oracle import creep_deflection_quality as grade
+    sheet = {"revision":"r1","additional_creep_factors":{(stress,temp):[(0,0),(87600,1)]}}
+    args = ("r1",sheet,stress,temp,years*8760,elastic)
+    assert grade(*args,final) == "PASS"
+    assert elastic <= final-0.5
+    assert grade(*args,final-0.5) == "FAIL"
+    assert grade("r1",sheet,stress,temp+1,years*8760,elastic,final) == "INCOMPLETE"

@@ -526,3 +526,27 @@ def horizon_beam_quality(revision, profile, azimuth_deg, elevation_deg, clear_be
         return "INCOMPLETE"
     expected = clear_beam if elevation_deg > max(0, matches[0]) else 0
     return "PASS" if reported_beam == expected else "FAIL"
+
+
+def snow_water_quality(depth, depth_unit, layers, density_unit, reported_mm):
+    """Layer boundaries use the declared depth unit, from surface to full recorded depth."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    metres = {"m":1, "cm":Fraction(1,100), "mm":Fraction(1,1000)}
+    densities = {"kg/m3":1, "g/cm3":1000}
+    if not isinstance(depth_unit, str) or not isinstance(density_unit, str) or depth_unit not in metres or density_unit not in densities:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (depth, reported_mm))) or depth < 0 or not isinstance(layers, list):
+        return "INCOMPLETE"
+    cursor = total = Fraction(0)
+    for layer in layers:
+        if not isinstance(layer, (tuple, list)) or len(layer) != 3 or not all(map(finite_measure, layer)):
+            return "INCOMPLETE"
+        top, bottom, density = (Fraction(str(x)) for x in layer)
+        if top != cursor or bottom <= top or density <= 0:
+            return "INCOMPLETE"
+        total += (bottom-top) * metres[depth_unit] * density * densities[density_unit]
+        cursor = bottom
+    if cursor != Fraction(str(depth)):
+        return "INCOMPLETE"
+    return "PASS" if total == Fraction(str(reported_mm)) else "FAIL"

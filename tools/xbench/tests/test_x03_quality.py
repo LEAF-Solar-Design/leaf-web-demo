@@ -1119,3 +1119,28 @@ def test_junction_temperature(losses,ambient,r_case,r_air,peak,current,rated):
     assert grade(ambient,losses,path,peak-1) == "FAIL"
     assert grade(ambient,losses,path[1:],peak) == "INCOMPLETE"
     assert grade(ambient,losses,path[:1],peak) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cap,initial,safe,ohms,deadline,energy", [
+    pytest.param(0.01,100,10,100,2.31,50,id="dc-link-to-ten-volts"),
+    pytest.param(0.002,200,100,500,0.70,40,id="converter-half-voltage"),
+    pytest.param(0.1,20,5,10,1.39,20,id="storage-bleeder-to-quarter-voltage"),
+])
+def test_discharge_time_and_full_pulse_energy(cap,initial,safe,ohms,deadline,energy):
+    from benches.x03_quality import discharge_resistor_quality as grade
+    assert grade(cap,initial,safe,deadline,ohms,energy) == "PASS"
+    assert grade(cap,initial,safe,deadline-0.01,ohms,energy) == "FAIL"
+    assert grade(cap,initial,safe,deadline,ohms,energy-1) == "FAIL"
+    assert grade(cap,initial,safe,deadline,ohms,None) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cells,strings,common,duty", [
+    ({"A":(3,0.02),"B":(3,0.02)},[(["A","B"],0.01)],0.01,100),
+    ({"A":(4,0.03),"B":(4,0.03)},[(["A"],0.01),(["B"],0.01)],0.02,100),
+    ({"A":(3,0.02),"B":(3,0.04)},[(["A"],0.01),(["B"],0.02)],0,150),
+])
+def test_fault_duty_for_series_parallel_and_unequal_strings(cells,strings,common,duty):
+    from benches.x03_quality import battery_fault_quality as grade
+    assert grade(cells,strings,common,duty) == "PASS"
+    assert grade(cells,strings,common,duty-1) == "FAIL"
+    assert grade(cells,[(strings[0][0],None),*strings[1:]],common,duty) == "INCOMPLETE"
