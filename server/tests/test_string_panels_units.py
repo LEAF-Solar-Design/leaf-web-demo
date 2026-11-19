@@ -661,3 +661,26 @@ def test_anchor_reachability_preserves_unused_alternative_and_zero_hop_anchor():
     assert _anchor_reachable({2, 3}, 0, 2, 2, neighbors)
     assert not _anchor_reachable({2, 3}, 0, 2, 1, neighbors)
     assert _anchor_reachable({1, 2, 3}, 0, 0, 0, neighbors)
+
+@pytest.mark.parametrize("params,cause,action", [
+    ({"panel_layer": "Roof-West"}, "no closed polylines", "panel_layer"),
+    ({"max_system_voltage": 30}, "0 modules per string", "module"),
+    ({"min_modules_per_string": 12, "max_modules_per_string": 8}, "bounds", "min_modules_per_string"),
+])
+def test_string_refusal_recovery_survives_job_wait(params, cause, action):
+    import jobs
+    import tool_loader
+
+    tools = json.loads((REPO_DIR / "engine/registry.json").read_text(encoding="utf-8"))["tools"]
+    record = next(tool for tool in tools if tool["name"] == "string-panels")
+    drawing = {"polylines": [rect(0, 40, 80)]}
+    original = copy.deepcopy(drawing)
+    result = tool_loader.run_tool_dynamic(record, drawing, params, aps_live=False)
+    for envelope in (result, jobs.failed_envelope_from(result)):
+        error = envelope["error"]
+        assert error["error_code"] == "BAD_PARAMS"
+        assert cause in error["message"]
+        assert params.get("panel_layer", "Panels") in error["message"]
+        assert action in error["next_action"]
+        assert envelope["result"] is None
+    assert drawing == original
