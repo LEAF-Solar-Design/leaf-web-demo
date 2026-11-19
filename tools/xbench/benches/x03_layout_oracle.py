@@ -4,6 +4,27 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def composite_connector_quality(revision, rule, stations):
+    """Check each station's shear flow times tributary pitch against its connector group."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "equal-share-tributary-pitch-v1":
+        return "INCOMPLETE"
+    resistance = rule.get("connector_resistance_n")
+    if not finite_measure(resistance) or resistance <= 0 or not isinstance(stations, list) or not stations:
+        return "INCOMPLETE"
+    overload = False
+    for station in stations:
+        if not isinstance(station, (tuple, list)) or len(station) != 3:
+            return "INCOMPLETE"
+        flow, pitch, count = station
+        if not all(map(finite_measure, (flow, pitch))) or pitch <= 0 or type(count) is not int or count < 0:
+            return "INCOMPLETE"
+        demand = abs(Fraction(str(flow))) * Fraction(str(pitch))
+        overload |= demand > count * Fraction(str(resistance))
+    return "FAIL" if overload else "PASS"
+
+
 def anchor_pullout_quality(revision, rule, head_bearing_mm2, concrete_mpa, uplift_n):
     """Use the net head bearing area and the pinned coefficient for this anchor and concrete."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

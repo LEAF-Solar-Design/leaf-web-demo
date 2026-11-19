@@ -1680,3 +1680,44 @@ def test_distance_reach_respects_load_restraint(reach, block, load, fault):
     assert grade(settings, [(*load, True)]) == "FAIL"
     assert grade(settings, [(*fault, False)]) == "FAIL"
     assert grade(dict(trip=[reach]), [(*load, False)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("offset,pickup,delay", [
+    pytest.param((3, 4), 5, 2, id="feeder-vector-displacement"),
+    pytest.param((-6, 0), 6, 0.4, id="negative-real-bus-shift"),
+    pytest.param((0, -9), 9, 3, id="quadrature-generator-neutral"),
+])
+def test_displacement_requires_ground_reference_and_continuous_pickup(offset, pickup, delay):
+    from benches.x03_quality import neutral_displacement_quality as grade
+
+    settings = dict(reference="phase-to-ground", pickup_v0_volts=pickup, delay_s=delay)
+    # The three unshifted vectors sum to zero. Their shifted mean equals offset.
+    base = {"A": (100, 0), "B": (-50, 87), "C": (-50, -87)}
+    shifted = {k: (r + offset[0], x + offset[1]) for k, (r, x) in base.items()}
+    half = (delay / 2, shifted, False)
+    good = [half, (1, base, False), half, (delay / 2, shifted, True), (1, base, True)]
+    assert grade(settings, good) == "PASS"
+    assert grade(settings, [half, half]) == "FAIL"
+    assert grade(settings, [half, (1, base, False), (delay / 2, shifted, True)]) == "FAIL"
+    assert grade(dict(settings, reference=None), good) == "INCOMPLETE"
+    assert grade(settings, [(delay, {"A": (1, 0)}, False)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("projection,limits,outer,inner,opposite,required", [
+    pytest.param((1, 0), (-4, 4), (-5, 2), (1, 2), (4, 2), 1, id="single-generator-swing"),
+    pytest.param((0, 1), (1, 7), (3, 8), (3, 4), (3, 1), 2, id="two-crossing-intertie"),
+    pytest.param((1, -1), (0, 5), (1, 2), (4, 2), (7, 1), 3, id="oblique-three-swing-setting"),
+])
+def test_pole_slip_counts_full_crossings(projection, limits, outer, inner, opposite, required):
+    from benches.x03_quality import pole_slip_quality as grade
+
+    rule = dict(rule="full-traversals", a=projection[0], b=projection[1],
+                low=limits[0], high=limits[1], trip_count=required)
+    stable = [(*outer, False), (*inner, False), (*outer, False)]
+    assert grade(rule, stable) == "PASS"
+    assert grade(rule, [*stable[:-1], (*outer, True)]) == "FAIL"
+    ends = [opposite, outer, opposite][:required]
+    prefix = stable + [(*p, False) for p in ends[:-1]]
+    assert grade(rule, prefix + [(*ends[-1], True), (*inner, True)]) == "PASS"
+    assert grade(rule, prefix + [(*ends[-1], False)]) == "FAIL"
+    assert grade(dict(rule, trip_count=None), stable) == "INCOMPLETE"

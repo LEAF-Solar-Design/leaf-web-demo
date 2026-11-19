@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("voltage,tolerance,limit,charges", [
+    pytest.param(1000, 0, 10, [2, 10], id="qualify-a-molded-bushing"),
+    pytest.param(2500, 25, 5, [5, 2, 1], id="check-a-transformer-terminal"),
+    pytest.param(750, 5, 2.5, [0, 1, 2.5], id="review-a-sensor-feedthrough"),
+])
+def test_partial_discharge_at_required_voltage(voltage, tolerance, limit, charges):
+    from benches.x03_catalog_oracle import partial_discharge_quality as grade
+
+    rule = dict(revision="pd-lab", test_v=voltage, tolerance_v=tolerance, max_pc=limit)
+    test = dict(voltage_v=voltage + tolerance, apparent_charge_pc=charges, dielectric_pass=True)
+    assert grade("pd-lab", rule, test) == "PASS"
+    assert grade("pd-lab", rule, dict(test, apparent_charge_pc=[*charges, limit + 0.1])) == "FAIL"
+    assert grade("pd-lab", rule, dict(test, voltage_v=voltage - tolerance - 1)) == "FAIL"
+    assert grade("pd-lab", rule, dict(test, voltage_v=None)) == "INCOMPLETE"
+    assert grade("pd-lab", rule, dict(test, apparent_charge_pc=[])) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("material,plated,start,end", [
     pytest.param("fixture-A", 10, 40, 160, id="qualify-a-plated-fastener-lot"),
     pytest.param("fixture-B", 58, 70, 115, id="check-a-spring-clip-treatment"),
@@ -1371,3 +1388,19 @@ def test_pyranometer_offset_uses_pinned_thermal_calibration(dome, body, offset, 
     assert grade("lab-8", cal, dome, body, raw, expected) == "INCOMPLETE"
     assert grade("lab-7", cal, dome, 7, raw, expected) == "INCOMPLETE"
     assert grade("lab-7", dict(cal, slope_w_m2_per_k=None), dome, body, raw, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("irradiance,wind,raw,dry", [
+    pytest.param(500, 0, 25, 20, id="remove-still-air-shield-heating"),
+    pytest.param(200, 2, 12, 10.8, id="correct-a-ventilated-morning-observation"),
+    pytest.param(800, 4, -1, -2.6, id="recover-subzero-air-temperature-in-bright-sun"),
+])
+def test_shield_radiation_bias_depends_on_ventilation(irradiance, wind, raw, dry):
+    from benches.x03_weather_oracle import shield_radiation_bias_quality as grade
+
+    shield = dict(revision="aspiration-4", rule="linear-heating-by-ventilation-v1",
+                  wind_gain=[(0, 0.01), (4, 0.002)], irradiance_range=(0, 900))
+    assert grade("aspiration-4", shield, irradiance, wind, raw, dry) == "PASS"
+    assert grade("aspiration-4", shield, irradiance, wind, raw, raw) == "FAIL"
+    assert grade("aspiration-4", shield, irradiance, 5, raw, dry) == "INCOMPLETE"
+    assert grade("aspiration-4", shield, 1000, wind, raw, dry) == "INCOMPLETE"

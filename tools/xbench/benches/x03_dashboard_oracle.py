@@ -1599,3 +1599,60 @@ def speculative_winner_quality(attempts, committed, reported, *, complete):
     receipts = {tuple(row) for row in committed}
     credits = [tuple(row) for row in reported]
     return "PASS" if len(credits) == len(receipts) and set(credits) == receipts else "FAIL"
+
+
+def cache_invalidation_quality(manifest, initial_digests, events, *, complete):
+    """Reconcile cache builds and hits against the full source-dependency manifest.
+
+    A build receipt pins an output and its input digest map. An explicit eviction
+    discards that build even if the current inputs still match.
+    """
+    if complete is not True or not isinstance(manifest, dict) or not isinstance(initial_digests, dict):
+        return "INCOMPLETE"
+    if not isinstance(events, list):
+        return "INCOMPLETE"
+    def named(value):
+        return isinstance(value, str) and bool(value)
+
+    if not all(named(k) and named(v) for k, v in initial_digests.items()):
+        return "INCOMPLETE"
+    for key, dependencies in manifest.items():
+        if not named(key) or not isinstance(dependencies, list) or not dependencies:
+            return "INCOMPLETE"
+        if not all(named(dep) and dep in initial_digests for dep in dependencies):
+            return "INCOMPLETE"
+        if len(set(dependencies)) != len(dependencies):
+            return "INCOMPLETE"
+    current = dict(initial_digests)
+    builds = {}
+    for event in events:
+        if not isinstance(event, dict):
+            return "INCOMPLETE"
+        op, key = event.get("op"), event.get("key")
+        if not named(key):
+            return "INCOMPLETE"
+        if op == "change":
+            digest = event.get("digest")
+            if key not in current or not named(digest):
+                return "INCOMPLETE"
+            current[key] = digest
+            continue
+        if key not in manifest:
+            return "INCOMPLETE"
+        if op == "invalidate":
+            builds.pop(key, None)
+            continue
+        if op not in ("build", "reuse"):
+            return "INCOMPLETE"
+        receipt, output = event.get("dependencies"), event.get("output")
+        if not isinstance(receipt, dict) or not named(output) or set(receipt) != set(manifest[key]):
+            return "INCOMPLETE"
+        if not all(named(digest) for digest in receipt.values()):
+            return "INCOMPLETE"
+        if any(current[dep] != value for dep, value in receipt.items()):
+            return "FAIL"
+        if op == "reuse" and builds.get(key) != (output, receipt):
+            return "FAIL"
+        if op == "build":
+            builds[key] = (output, dict(receipt))
+    return "PASS"

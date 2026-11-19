@@ -973,3 +973,40 @@ def pyranometer_thermal_offset_quality(revision, calibration, dome_c, body_c, ra
     dome, body, raw, reported, intercept, slope = (Fraction(str(v)) for v in values)
     corrected = raw - intercept - slope * (dome - body)
     return "PASS" if corrected == reported else "FAIL"
+
+
+def shield_radiation_bias_quality(revision, shield, irradiance, ventilation, measured_c, reported_c):
+    """Interpolate shield heating per W/m2 at the recorded ventilation speed."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(shield, dict):
+        return "INCOMPLETE"
+    if shield.get("revision") != revision or shield.get("rule") != "linear-heating-by-ventilation-v1":
+        return "INCOMPLETE"
+    knots, bounds = shield.get("wind_gain"), shield.get("irradiance_range")
+    if not isinstance(knots, list) or len(knots) < 2 or not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (irradiance, ventilation, measured_c, reported_c, *bounds))):
+        return "INCOMPLETE"
+    if not 0 <= bounds[0] <= irradiance <= bounds[1] or ventilation < 0:
+        return "INCOMPLETE"
+    wind = Fraction(str(ventilation))
+    prior = gain = None
+    for knot in knots:
+        if not isinstance(knot, (tuple, list)) or len(knot) != 2 or not all(map(finite_measure, knot)):
+            return "INCOMPLETE"
+        speed, factor = (Fraction(str(x)) for x in knot)
+        if min(speed, factor) < 0:
+            return "INCOMPLETE"
+        if prior is not None:
+            left, left_gain = prior
+            if speed <= left:
+                return "INCOMPLETE"
+            if left <= wind <= speed:
+                gain = left_gain + (wind - left) * (factor - left_gain) / (speed - left)
+        prior = speed, factor
+    if gain is None:
+        return "INCOMPLETE"
+    expected = Fraction(str(measured_c)) - Fraction(str(irradiance)) * gain
+    return "PASS" if expected == Fraction(str(reported_c)) else "FAIL"
