@@ -2191,8 +2191,8 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_operand_binding_substitution.py",
                   "tests/test_x04_operand_binding_precedence.py",
               ], 1934),
-        Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
-              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
+        Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
+              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + ["tests/test_x03_offline_drawing_author.py"], 13),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
         # fail-closed legs, and the browser-edited version write-back (card
