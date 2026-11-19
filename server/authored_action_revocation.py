@@ -1,7 +1,9 @@
 """Submit a host-selected action only while its exact operation and grant are current."""
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
+from functools import cache
 from hashlib import sha256
 import json
 import math
@@ -9,6 +11,36 @@ import re
 from threading import RLock
 
 from integration_tool_service import ReadFailure, validate_action_catalog
+
+
+SCHEMA_EVALUATION_LIMIT = 16384
+_remaining_evaluations = ContextVar("action_schema_work")
+
+
+@cache
+def _pinned_validator_type():
+    from attrs import evolve
+    from jsonschema import Draft202012Validator, validators
+
+    validator_type = validators.extend(Draft202012Validator)
+    # Local graph admission already verifies the dialect at every resource.
+    # Retain this validator and its resolver when entering an explicit $schema.
+    validator_type.evolve = evolve
+
+    def counted(method):
+        def visit(self, *args, **kwargs):
+            remaining = _remaining_evaluations.get()
+            if remaining == 0:
+                raise ReadFailure("schema_work_limit")
+            _remaining_evaluations.set(remaining - 1)
+            return method(self, *args, **kwargs)
+        return visit
+
+    # jsonschema uses descend for subschemas and is_valid for independent
+    # checks (including the remaining branches after the first oneOf match).
+    validator_type.descend = counted(validator_type.descend)
+    validator_type.is_valid = counted(validator_type.is_valid)
+    return validator_type
 
 
 def matches(description):
@@ -79,8 +111,9 @@ def _check_local_schema_refs(schema, registry):
             raise ValueError("Action schema reference must target a schema")
         if id(node) in active:
             raise ValueError("Cyclic action schema reference")
-        if ("$dynamicRef" in node or "$recursiveRef" in node or
-                node.get("$schema", dialect) != dialect):
+        if node.get("$schema", dialect) != dialect:
+            raise ValueError("Unsupported action schema dialect")
+        if "$dynamicRef" in node or "$recursiveRef" in node:
             raise ValueError("Action schemas require static draft 2020-12 references")
         active.add(id(node))
         if "$ref" in node:
@@ -179,7 +212,7 @@ class AuthorizedLocalActions:
             Draft202012Validator.check_schema(schema)
             registry = Registry()
             _check_local_schema_refs(schema, registry)
-            validator = Draft202012Validator(schema, registry=registry)
+            validator = _pinned_validator_type()(schema, registry=registry)
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],
@@ -213,8 +246,12 @@ class AuthorizedLocalActions:
                                               parse_constant=_exact_json_number)
                 except (ValueError, ArithmeticError):
                     raise ReadFailure("invalid_input") from None
-                if not binding.argument_validator.is_valid(exact_values):
-                    raise ReadFailure("invalid_input")
+                token = _remaining_evaluations.set(SCHEMA_EVALUATION_LIMIT)
+                try:
+                    if not binding.argument_validator.is_valid(exact_values):
+                        raise ReadFailure("invalid_input")
+                finally:
+                    _remaining_evaluations.reset(token)
                 field_ids = {field["id"] for field in binding.fields}
                 _check_arguments(binding.fields, {k: v for k, v in values.items() if k in field_ids})
             return binding.handler(values) if binding.expects_arguments else binding.handler()

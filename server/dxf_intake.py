@@ -813,8 +813,11 @@ def _spline_measurement_path(record):
                 or knots[degree] >= knots[len(points)]
                 or any(a == b for a, b in zip(knots, knots[degree+1:]))):
             raise ValueError("Invalid spline knot vector.")
-        if weights and (len(weights) != len(points) or any(w <= 0 or not math.isfinite(w) for w in weights)):
-            raise ValueError("Spline weights must be finite, positive and match the control count.")
+        if weights and (len(weights) != len(points) or not all(map(math.isfinite, weights))):
+            raise ValueError("Spline weights must be finite and match the control count.")
+        if any(w <= 0 for w in weights):
+            path["spline_error"] = "Spline length with nonpositive rational weights is unsupported."
+            return path
         if path.get("periodic"):
             # A periodic control net repeats its first degree poles and weights.
             # Its knot sequence must repeat after one active parameter period.

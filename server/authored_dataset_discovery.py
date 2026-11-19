@@ -27,6 +27,10 @@ def requires_snapshot(description):
                           r"(?:view|version|revision|inventory|catalog)\b", description, re.I))
 
 
+def requires_schema_revision(description):
+    return bool(re.search(r"\bschema (?:revision|version)\b", description, re.I))
+
+
 def selected_statuses(description):
     prompt = description.casefold()
     selected, excluded, additional = set(), set(), set()
