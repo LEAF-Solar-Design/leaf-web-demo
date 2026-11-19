@@ -1572,6 +1572,10 @@ const Viewer = forwardRef(function Viewer(
     const s = stateRef.current
     if (!s) return
     const g = s.selectionGroup
+    for (const child of g.children) {
+      child.geometry.dispose()
+      child.material.dispose()
+    }
     g.clear()
     const committed = { version: s.observation.committed.version + 1,
       handles: [...new Set([selectedHandle, ...groupHighlight].filter(Boolean))], entries: [], ms: performance.now() }
@@ -1583,6 +1587,7 @@ const Viewer = forwardRef(function Viewer(
     for (const handle of new Set([selectedHandle, ...groupHighlight].filter(Boolean))) {
     const firstChild = g.children.length
     for (const d of s.pickIndex.get(handle) || []) {
+    if (visibleLayers?.[d.layer] === false) continue
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
@@ -1628,7 +1633,7 @@ const Viewer = forwardRef(function Viewer(
       if (count) committed.entries.push({ object, handle, count })
     }
     }
-  }, [selectedHandle, groupHighlight, buildTick])
+  }, [selectedHandle, groupHighlight, visibleLayers, buildTick])
 
   // --- markers (result-driven) ---------------------------------------------
   useEffect(() => {
