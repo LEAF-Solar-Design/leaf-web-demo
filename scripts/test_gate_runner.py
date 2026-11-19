@@ -5871,27 +5871,29 @@ def test_reused_from_problem_never_raises(reused_from):
     assert isinstance(problem, str) and problem
 
 
-def _device_verdict_gate_proof():
+def _device_verdict_gate_proof(coverage="selected"):
+    shard_total = 3 if coverage == "selected" else 6
     return {
         "schema": 2, "kind": "leaf-gate-proof", "tree": "b" * 40,
-        "mode": "device-verdict", "coverage": "selected",
+        "mode": "device-verdict", "coverage": coverage,
         "device_verdict": {
             "bucket": "device-verdicts", "version_id": "version-1", "sha256": "c" * 64,
             "key": "forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/"
                    + "a" * 40 + "/dv-0123456789abcdef.json",
             "repository": "LEAF-Solar-Design/leaf-web-demo", "head_sha": "a" * 40,
             "run_id": "dv-0123456789abcdef", "verdict_schema": "leaf.forge-ci.device-verdict.v1",
-            "mode": "selected", "state": "success", "shard_total": 2,
+            "mode": coverage, "state": "success", "shard_total": shard_total,
             "shards": [{"shard": i, "run_id": f"dv-{i:016x}", "state": "success"}
-                       for i in range(2)],
+                       for i in range(shard_total)],
         },
     }
 
 
 @pytest.mark.parametrize("allowed", [False, True])
-def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypatch, capsys, allowed):
+@pytest.mark.parametrize("coverage", ["selected", "full"])
+def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypatch, capsys, allowed, coverage):
     g = _load_runner()
-    data = _device_verdict_gate_proof()
+    data = _device_verdict_gate_proof(coverage)
     proof = tmp_path / "gate-proof.json"
     proof.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--verify-gate-proof", str(proof),
@@ -5902,7 +5904,7 @@ def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypat
     assert g.main() == (0 if allowed else 1)
     output = capsys.readouterr().out
     if allowed:
-        assert output == "VERIFIED mode: device-verdict coverage=selected\n"
+        assert output == f"VERIFIED mode: device-verdict coverage={coverage}\n"
     else:
         assert output == "NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted\n"
 
@@ -5912,7 +5914,7 @@ def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypat
     (("kind",), "other", "schema-2"),
     (("tree",), "c" * 40, "bound to tree"),
     (("tree",), 42, "40-hex tree"),
-    (("coverage",), "full", "coverage"),
+    (("coverage",), "unknown", "coverage"),
     (("device_verdict",), [], "object"),
     (("device_verdict", "extra"), "unknown", "extra"),
     (("extra",), "unknown", "extra"),
@@ -5931,7 +5933,7 @@ def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypat
     (("device_verdict", "verdict_schema"), "other", "verdict_schema"),
     (("device_verdict", "mode"), "full", "mode"),
     (("device_verdict", "state"), "failure", "state"),
-    (("device_verdict", "shard_total"), 3, "shard_total"),
+    (("device_verdict", "shard_total"), 2, "shard_total"),
     (("device_verdict", "shard_total"), 0, "shard_total"),
     (("device_verdict", "shard_total"), True, "shard_total"),
     (("device_verdict", "shard_total"), 2.0, "shard_total"),
@@ -5939,7 +5941,7 @@ def test_device_verdict_gate_proof_cli_requires_allow_device(tmp_path, monkeypat
     (("device_verdict", "shards"), {}, "shards"),
     (("device_verdict", "shards", 1), None, "entry"),
     (("device_verdict", "shards", 1, "shard"), 0, "indices"),
-    (("device_verdict", "shards", 1, "shard"), 2, "indices"),
+    (("device_verdict", "shards", 1, "shard"), 3, "indices"),
     (("device_verdict", "shards", 1, "shard"), True, "indices"),
     (("device_verdict", "shards", 1, "state"), "failure", "success"),
     (("device_verdict", "shards", 1, "run_id"), "bad", "run_id"),
@@ -5977,9 +5979,32 @@ def test_device_verdict_gate_proof_refuses_missing_fields(tmp_path, capsys, sect
     assert capsys.readouterr().out.startswith("NOT VERIFIED: ")
 
 
-def test_device_verdict_gate_proof_refuses_missing_shard(tmp_path, capsys):
+@pytest.mark.parametrize("coverage,mode", [("full", "selected"), ("selected", "full")])
+def test_device_verdict_gate_proof_refuses_coverage_mode_mismatch(tmp_path, capsys, coverage, mode):
     g = _load_runner()
-    data = _device_verdict_gate_proof()
+    data = _device_verdict_gate_proof(coverage)
+    data["device_verdict"]["mode"] = mode
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, data["tree"], allow_device_verdict=True) == 1
+    assert f"device_verdict.mode must be {coverage}" in capsys.readouterr().out
+
+
+def test_device_verdict_gate_proof_refuses_full_with_three_shards(tmp_path, capsys):
+    g = _load_runner()
+    data = _device_verdict_gate_proof("full")
+    data["device_verdict"]["shard_total"] = 3
+    data["device_verdict"]["shards"] = data["device_verdict"]["shards"][:3]
+    proof = tmp_path / "gate-proof.json"
+    proof.write_text(json.dumps(data), encoding="utf-8")
+    assert g.verify_gate_proof(proof, data["tree"], allow_device_verdict=True) == 1
+    assert "shard_total must be integer 6 for coverage full" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("coverage", ["selected", "full"])
+def test_device_verdict_gate_proof_refuses_missing_shard(tmp_path, capsys, coverage):
+    g = _load_runner()
+    data = _device_verdict_gate_proof(coverage)
     data["device_verdict"]["shards"].pop()
     proof = tmp_path / "gate-proof.json"
     proof.write_text(json.dumps(data), encoding="utf-8")
