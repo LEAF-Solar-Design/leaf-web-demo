@@ -35,6 +35,7 @@ beforeEach(() => {
     start: vi.fn(), stop: vi.fn(), bindDrawing: vi.fn().mockResolvedValue(undefined),
     bindDrawingWithGrant: vi.fn().mockResolvedValue(undefined),
     focusObject: vi.fn().mockResolvedValue(undefined),
+    listTools: vi.fn().mockResolvedValue({ tools: [] }),
     retryHello: vi.fn(() => { state = { ...state, helloSentAt: Date.now() }; listener(state) }),
   }
   getLeafHostBridge.mockReturnValue(bridge)
@@ -62,6 +63,18 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  it.each([undefined, false, true])('mounts Branch tools only with runTool true (%s)', async (runTool) => {
+    state = { status: 'connected', ready: { ...ready, ...(runTool === undefined ? {} : { capabilities: { planGrammarMax: 2, runTool, hostApi: 1 } }) } }
+    render(<LeafPlatformScene />)
+    if (runTool === true) {
+      expect(await screen.findByRole('region', { name: 'Branch tools' })).toBeTruthy()
+      await waitFor(() => expect(bridge.listTools).toHaveBeenCalledTimes(1))
+    } else {
+      expect(screen.queryByRole('region', { name: 'Branch tools' })).toBeNull()
+      expect(bridge.listTools).not.toHaveBeenCalled()
+    }
+  })
+
   it('shows the drawing sync row and publishes the first version', async () => {
     state = { status: 'connected', ready, selectedObjectId: null }
     openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
@@ -81,6 +94,60 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
     expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(false)
     expect(screen.getByText('Drawing published.')).toBeTruthy()
+  })
+
+  it('keeps drawing sync disabled until the mount tool list finishes', async () => {
+    state = { status: 'connected', ready: { ...ready, capabilities: { planGrammarMax: 2, runTool: true, hostApi: 1 },
+      syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    let finishList
+    bridge.listTools.mockImplementation(() => new Promise((resolve) => { finishList = resolve }))
+    render(<LeafPlatformScene />)
+    const publishButton = await screen.findByRole('button', { name: 'Publish' })
+    expect(publishButton.disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    await act(async () => { finishList({ tools: [] }) })
+    expect(publishButton.disabled).toBe(false)
+  })
+
+  it.each(['pull', 'publish'])('excludes tool runs and refresh from drawing %s in both directions', async (kind) => {
+    state = { status: 'connected', ready: { ...ready, capabilities: { planGrammarMax: 2, runTool: true, hostApi: 1 },
+      syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    bridge.listTools.mockResolvedValue({ tools: [{ name: 'panel-gap-check', version: '1.0.0', packageDigest: 'a'.repeat(64),
+      source: 'downloaded', decision: 'accept', runnable: true, params: { type: 'object', properties: {} } }] })
+    let finishRun, finishSync, finishList
+    bridge.runTool = vi.fn(() => new Promise((resolve) => { finishRun = resolve }))
+    const syncCommand = kind === 'pull' ? pull : publish
+    syncCommand.mockImplementation(() => new Promise((resolve) => { finishSync = resolve }))
+    render(<LeafPlatformScene />)
+    const run = await screen.findByRole('button', { name: 'Run panel-gap-check' })
+    const syncButton = await screen.findByRole('button', { name: kind === 'pull' ? 'Pull' : 'Publish' })
+    const refresh = screen.getByRole('button', { name: 'Refresh tools' })
+    await waitFor(() => expect(run.disabled || syncButton.disabled).toBe(false))
+    fireEvent.click(syncButton)
+    expect(run.disabled).toBe(true)
+    expect(refresh.disabled).toBe(true)
+    fireEvent.click(run)
+    fireEvent.click(refresh)
+    expect(bridge.runTool).not.toHaveBeenCalled()
+    expect(bridge.listTools).toHaveBeenCalledTimes(1)
+    await act(async () => { finishSync({ cursor: 3, applied: [3] }) })
+    fireEvent.click(run)
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(true)
+    fireEvent.click(syncButton)
+    expect(syncCommand).toHaveBeenCalledTimes(1)
+    await act(async () => { finishRun({ decision: 'accept', result: {}, resultTruncated: false }) })
+    bridge.listTools.mockImplementationOnce(() => new Promise((resolve) => { finishList = resolve }))
+    fireEvent.click(refresh)
+    await waitFor(() => expect(bridge.listTools).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(true)
+    await act(async () => { finishList({ tools: [] }) })
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
   })
 
   it('starts from the matching native cursor and pulls', async () => {
