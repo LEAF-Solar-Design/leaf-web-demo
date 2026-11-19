@@ -1,0 +1,58 @@
+"""Author a read-only report over catalog metadata bound by the integration host."""
+import re
+
+
+def matches(description):
+    prompt = description.casefold()
+    catalog = re.search(r"\b(?:datasets?|connected data)\b", prompt)
+    discovery = re.search(r"\b(?:show|list|which|discover|enumerate|report|identify)\b", prompt)
+    return bool(catalog and discovery)
+
+
+_STATUS_NAMES = {"ready": "ready", "empty": "empty", "stale": "stale", "outdated": "stale",
+                 "unavailable": "unavailable", "offline": "unavailable"}
+_WORD = r"\b(?:" + "|".join(_STATUS_NAMES) + r")\b"
+_NEGATIVE = r"not|excluding|exclude|except(?: for)?|without|other than|neither"
+_FLAG = r"flag|mark|label"
+_ITEM = _WORD + r"(?:\s+(?:ones|datasets|results))?"
+_STATUS_GROUP = re.compile(
+    r"(?:\b(?P<mode>" + _NEGATIVE + "|" + _FLAG + r"|including only|include only|including|include)\s+"
+    r"(?:(?:the|those|ones|datasets|that|which|are|is|only)\s+)*)?"
+    r"(?P<items>" + _ITEM + r"(?:\s*(?:,\s*(?:(?:and|or)\s+)?|\b(?:and|or|nor)\s+)"
+    + _ITEM + r")*)")
+
+
+def build_body(description):
+    prompt = description.casefold()
+    selected, excluded, additional = set(), set(), set()
+    for group in _STATUS_GROUP.finditer(prompt):
+        mode = group["mode"] or ""
+        statuses = {_STATUS_NAMES[word] for word in re.findall(_WORD, group["items"])}
+        if re.fullmatch(_NEGATIVE, mode):
+            excluded.update(statuses)
+        elif mode == "including" or (mode == "include" and re.search(r"\ball\s+(?:connected\s+)?datasets\b", prompt)):
+            additional.update(statuses)
+        elif not re.fullmatch(_FLAG, mode):
+            selected.update(statuses)
+    if not selected:
+        selected = set(_STATUS_NAMES.values())
+        if re.search(r"\bcan read\b|\breadable\b", prompt):
+            selected.discard("unavailable")
+    statuses = sorted((selected | additional) - excluded)
+    return _BODY.replace("__STATUSES__", repr(tuple(statuses)))
+
+
+_BODY = """
+def run(intake, params):
+    catalog = intake.get("project_dataset_catalog")
+    if catalog is None:
+        raise ValueError("This report needs the current project's turn-bound integration catalog.")
+    statuses = __STATUSES__
+    rows = []
+    for dataset in catalog["datasets"]:
+        status = dataset["status"]
+        if status in statuses:
+            rows.append({**dataset, "needs_attention": status in ("stale", "unavailable")})
+    return ({"datasets": rows, "datasets_scanned": len(catalog["datasets"]),
+             "pages_read": catalog["pages_read"]}, None)
+"""

@@ -4,21 +4,28 @@ import re
 from authored_route_crossings import PLANAR_GEOMETRY_BODY
 
 
+def measures_minimum(description):
+    words = description.casefold()
+    return bool(re.search(r"\b(?:minimum|smallest|closest|least)\b", words)
+                and re.search(r"\b(?:along|station|chainage|where)\b", words))
+
+
 def matches(description):
     words = description.casefold()
     return all(re.search(pattern, words) for pattern in (
         r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b",
         r"\b(?:arrays?|panels?|modules?)\b",
-        r"\bclearances?\b",
-        r"\b(?:above|below|vertical|overhead|underneath|elevations?|3d|envelope)\b",
+        r"\b(?:clearances?|separation|gap|closest approach)\b",
+        r"\b(?:above|below|vertical|overhead|underneath|elevations?|3d|envelope|stepped)\b",
     ))
 
 
 def build_body(description):
-    return PLANAR_GEOMETRY_BODY + _BODY
+    return PLANAR_GEOMETRY_BODY + _BODY.replace("__MEASURE_MINIMUM__", str(measures_minimum(description)))
 
 
 _BODY = r"""
+import math
 
 def role_of(label):
     words = set(re.findall(r"[a-z0-9]+", label.casefold()))
@@ -64,10 +71,10 @@ def panel_surface(points, handle):
     return bounds(xy), edges, origin, sx, sy
 
 
-def violates(a, b, panel, clearance):
+def segment_minimum(a, b, panel):
     box, edges, origin, sx, sy = panel
     if not overlaps(bounds((a[:2], b[:2])), box):
-        return False
+        return None
     direction = difference(b, a)
     gap = a[2] - origin[2] - sx*(a[0]-origin[0]) - sy*(a[1]-origin[1])
     change = b[2] - a[2] - sx*direction[0] - sy*direction[1]
@@ -75,24 +82,44 @@ def violates(a, b, panel, clearance):
     if any(direction):
         split_at_edges(a[:2], direction, edges, cuts)
     if change:
-        for boundary in (-clearance, clearance):
-            t = (boundary-gap)/change
-            if 0 < t < 1:
-                cuts.add(t)
-    # XY inclusion and the vertical clearance comparison are constant on each
-    # open interval. Test cuts separately for a single point of contact.
-    ordered = sorted(cuts)
-    samples = ordered + [(start+end)/2 for start, end in zip(ordered, ordered[1:])]
-    return any(abs(gap + t*change) < clearance and
-               location((a[0] + t*direction[0], a[1] + t*direction[1]), edges) >= 0
-               for t in samples)
+        contact = -gap/change
+        if 0 < contact < 1:
+            cuts.add(contact)
+    # On each closed interval inside the footprint the gap is affine: its
+    # absolute minimum occurs at an end or at an interior zero.
+    candidates = ((abs(gap + t*change), t) for t in cuts
+                  if location((a[0] + t*direction[0], a[1] + t*direction[1]), edges) >= 0)
+    return min(candidates, default=None)
+
+
+def route_minimum(points, panels):
+    best = None
+    station = 0.0
+    best_station = None
+    for i, (a, b) in enumerate(zip(points, points[1:])):
+        length = math.dist(a, b)
+        for handle, panel in panels:
+            match = segment_minimum(a, b, panel)
+            if match is None:
+                continue
+            separation, t = match
+            candidate = (separation, i, t, handle)
+            if best is None or candidate < best:
+                best = candidate
+                best_station = station + float(t)*length
+        station += length
+    if best is None:
+        return None
+    return best[0], {"separation": float(best[0]), "station": best_station, "panel_handle": best[3]}
 
 
 def run(intake, params):
     limit = params.get("clearance")
-    if type(limit) not in (int, float) or not 0 < limit < float("inf"):
+    measure = __MEASURE_MINIMUM__
+    if not (measure and "clearance" not in params) and (
+            type(limit) not in (int, float) or not 0 < limit < float("inf")):
         raise ValueError("Set a positive minimum vertical clearance in drawing units.")
-    clearance = Fraction(str(limit))
+    clearance = Fraction(str(limit)) if limit is not None else None
     evidence = set(intake.get("elevation_evidence", ()))
     panels = []
     routes = []
@@ -119,7 +146,7 @@ def run(intake, params):
                 points.pop()
             if not entity.get("closed") or len(points) < 3:
                 raise ValueError(f"Panel {handle} needs a closed footprint.")
-            panels.append(panel_surface(points, handle))
+            panels.append((handle, panel_surface(points, handle)))
         else:
             if len(points) < 2:
                 raise ValueError(f"Route {handle} requires at least two vertices.")
@@ -128,12 +155,21 @@ def run(intake, params):
             routes.append((handle, points))
     if not panels or not routes:
         raise ValueError("Clearance requires model-space cable routes and closed panel footprints.")
+    minimum_by_route = {}
     violating, clear = [], []
     for handle, points in routes:
-        hit = any(violates(a, b, panel, clearance) for a, b in zip(points, points[1:]) for panel in panels)
-        (violating if hit else clear).append(handle)
-    return {"violating_routes": violating, "clear_routes": clear,
-            "minimum_vertical_clearance": limit, "units": "drawing_units",
-            "scope": "Vertical centerline separation from top-level planar panel footprints on named model-space layers."}, {
-                "highlight_handles": violating, "markers": []}
+        minimum = route_minimum(points, panels)
+        if measure:
+            minimum_by_route[handle] = None if minimum is None else minimum[1]
+        if clearance is not None:
+            hit = minimum is not None and minimum[0] < clearance
+            (violating if hit else clear).append(handle)
+    result = {"units": "drawing_units",
+              "scope": "Vertical centerline separation from top-level planar panel footprints on named model-space layers."}
+    if measure:
+        result.update(minimum_by_route=minimum_by_route,
+                      station_basis="3D distance along the cable from its first vertex; earliest minimum")
+    if clearance is not None:
+        result.update(violating_routes=violating, clear_routes=clear, minimum_vertical_clearance=limit)
+    return result, {"highlight_handles": violating, "markers": []}
 """

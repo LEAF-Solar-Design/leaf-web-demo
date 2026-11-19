@@ -25,7 +25,7 @@ PARAMS = {
 def matches(description):
     prompt = description.casefold()
     return all(re.search(pattern, prompt) for pattern in (
-        r"\b(?:panels?|modules?)\b", r"\b(?:revisions?|versions?)\b",
+        r"\b(?:panels?|modules?)\b", r"\b(?:revisions?|versions?|parent drawing)\b",
         r"\b(?:floors?|levels?|storeys?|story|stories)\b", r"\b(?:mov\w*|chang\w*|relocat\w*)\b",
     ))
 
@@ -37,8 +37,6 @@ def bind_linked_dxfs(store, tenant_id, project_id, artifact_id, prior_version,
     This adapter performs no storage discovery. Callers supply the two files and
     their scope. The generated tool only compares snapshots available to it.
     """
-    from dxf_intake import parse_dxf_bytes
-
     if any(type(v) is not int or v < 1 for v in (prior_version, current_version)):
         raise ValueError("Expected positive integer drawing versions.")
     scope = (tenant_id, project_id, artifact_id)
@@ -46,13 +44,45 @@ def bind_linked_dxfs(store, tenant_id, project_id, artifact_id, prior_version,
     current = store.verify_read(*scope, current_version, current_bytes)
     if current.parent_version != prior_version:
         raise ValueError("Selected revisions must share a direct parent link.")
+    return _bind_snapshots(artifact_id, prior_version, current_version, prior_bytes, current_bytes)
+
+
+def bind_project_parent(tenant, context):
+    """Resolve the selected publication's recorded parent inside its exact drawing."""
+    from uuid import UUID
+
+    import project_drawing_editor as editor
+    import solar_project_context as project
+
+    binding = context.binding
+    proof = binding.version.provenance or {}
+    if proof.get("schema") != "leaf.project-drawing-publication.v1":
+        raise ValueError("The selected drawing version has no recorded parent publication.")
+    try:
+        parent_id = UUID(proof["parent_version_id"])
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise ValueError("The selected drawing version has no valid parent reference.") from None
+    parent = project.graph_store().resolve_version_binding(
+        binding.organization_id, binding.project_id, parent_id, drawing_id=binding.drawing_id)
+    if not 0 < parent.version.seq < binding.version.seq:
+        raise ValueError("The recorded parent must precede the selected drawing version.")
+    scope = tenant, binding.project_id, binding.drawing_id
+    prior_bytes, _ = editor.read_dxf(*scope, parent_id)
+    current_bytes, _ = editor.read_dxf(*scope, binding.input_version_id)
+    return _bind_snapshots(str(binding.drawing_id), parent.version.seq, binding.version.seq,
+                           prior_bytes, current_bytes)
+
+
+def _bind_snapshots(artifact_id, prior_version, current_version, prior_bytes, current_bytes):
+    from dxf_intake import parse_dxf_bytes
+
     intake = parse_dxf_bytes(current_bytes)
     previous = parse_dxf_bytes(prior_bytes)
     if previous.get("insunits") != intake.get("insunits"):
         raise ValueError("Linked drawing versions must share insertion units for the floor schedule.")
     intake["linked_panel_revision"] = {
         "drawing_id": artifact_id, "prior_version": prior_version, "current_version": current_version,
-        "parent_version": current.parent_version, "prior_intake": previous,
+        "parent_version": prior_version, "prior_intake": previous,
     }
     return intake
 

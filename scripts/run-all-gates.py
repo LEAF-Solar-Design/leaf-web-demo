@@ -2197,7 +2197,9 @@ def build_suites() -> List[Suite]:
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
                   "tests/test_x03_nested_beam_author.py", "tests/test_x03_aisle_detour_author.py",
                   "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
-                  "tests/test_x03_spatial_route_clearance.py",
+                  "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py",
+                  "tests/test_x03_multibundle_author.py", "tests/test_x03_instance_openings_author.py",
+                  "tests/test_x03_stepped_clearance_author.py",
               ], 91),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
@@ -4264,7 +4266,8 @@ def build_suites() -> List[Suite]:
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
               + ["tests/test_integration_tool_routes.py", "tests/test_x03_material_provenance.py",
-                 "tests/test_x03_action_discovery.py", "tests/test_x03_project_dataset_discovery.py"], 41),
+                 "tests/test_x03_action_discovery.py", "tests/test_x03_project_dataset_discovery.py",
+                 "tests/test_x03_dataset_discovery_author.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,

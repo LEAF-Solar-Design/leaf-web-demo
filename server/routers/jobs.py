@@ -655,34 +655,43 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    import project_drawing_editor
+
     def execute_read():
+        intake = context.intake
+        if tool.get("engine_op") == "revision_panel_moves":
+            from authored_revision_panel_moves import bind_project_parent
+            intake = bind_project_parent(tenant, context)
         return tool_loader.run_tool_dynamic(
-            tool, context.intake, params, aps_live=False, da=None,
+            tool, intake, params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
-    if persist:
-        try:
+    try:
+        if persist:
             record = jobs.platform_link.run_project_read_job(
                 tenant, context, {**tool, "catalog_digest": req.catalog_digest},
                 params, idempotency_key, execute_read)
-        except jobs.platform_link.CanonicalEntitlementDenied as exc:
-            return exc.response
-        except jobs.platform_link.ProjectSessionForbidden:
-            return error_response(ErrorCode.FORBIDDEN, "project access denied",
-                                  retryable=False, status_code=403)
-        except solar_project_context.ProjectContextError as exc:
-            def refusal():
-                raise exc
-            return project_drawings._dispatch(refusal)
-        except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                  status_code=400 if "required" in str(exc) else 409)
-        except Exception:
-            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-        return JSONResponse(status_code=202, content=record,
-                            headers={"Cache-Control": "no-store"})
-
-    env = execute_read()
+            return JSONResponse(status_code=202, content=record, headers={"Cache-Control": "no-store"})
+        env = execute_read()
+    except jobs.platform_link.CanonicalEntitlementDenied as exc:
+        return exc.response
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except solar_project_context.ProjectContextError as exc:
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400 if "required" in str(exc) else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     body = {
         key: env[key]
         for key in (
