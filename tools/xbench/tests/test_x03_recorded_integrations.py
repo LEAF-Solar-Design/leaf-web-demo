@@ -890,3 +890,25 @@ def test_horizon_masks_obstructed_direct_beam(azimuth,height,beam):
     assert grade(*args,height-1,beam,beam) == "FAIL"
     assert grade(*args,height+1,beam,beam) == "PASS"
     assert grade("survey",profile,200,height,beam,0) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("material,thickness,required", [("PC",2,"V-0"),("ABS",3,"V-1"),("PA",1.5,"HB")])
+def test_fire_rating_is_bound_to_grade_and_thickness(material,thickness,required):
+    from benches.x03_catalog_oracle import flammability_quality as grade
+    sheet = {"revision":"v3","exhaustive":True,"qualified_classes":{(material,thickness):[required]}}
+    assert grade("v3",sheet,material,thickness,required) == "PASS"
+    assert grade("v3",sheet,material,thickness/2,required) == "FAIL"
+    assert grade("v3",sheet,"other",thickness,required) == "FAIL"
+    assert grade("v3",dict(sheet,exhaustive=False),material,thickness/2,required) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("depth,unit,rows,density,water", [
+    (20,"cm",[(0,10,100),(10,20,300)],"kg/m3",40),
+    (0.5,"m",[(0,0.5,0.2)],"g/cm3",100),
+    (300,"mm",[(0,200,150),(200,300,400)],"kg/m3",70),
+])
+def test_snowpack_layer_mass_as_water_depth(depth,unit,rows,density,water):
+    from benches.x03_weather_oracle import snow_water_quality as grade
+    assert grade(depth,unit,rows,density,water) == "PASS"
+    assert grade(depth,unit,rows,density,depth) == "FAIL"
+    assert grade(depth,unit,rows[:-1],density,water) == "INCOMPLETE"

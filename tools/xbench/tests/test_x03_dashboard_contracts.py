@@ -496,3 +496,24 @@ def test_autoscaler_uses_every_decision_tick(window,cooldown,rows,wrong):
     assert check(rows) == "PASS"
     assert check(wrong) == "FAIL"
     assert check(rows[:1]+rows[2:]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("chain,ack_last,expected", [
+    (["beta"],True,("beta",5)),(["beta","gamma"],True,("gamma",6)),(["beta","gamma"],False,("beta",5)),
+])
+def test_work_steal_conserves_owner_until_ack(chain,ack_last,expected):
+    from benches.x03_dashboard_oracle import work_steal_quality as grade
+    initial = [("task","alpha",4)]
+    donor = "alpha"
+    events = []
+    for epoch, recipient in enumerate(chain,4):
+        transfer = ("task",donor,recipient,epoch)
+        events.append(("offer",*transfer))
+        if ack_last or recipient != chain[-1]:
+            events.append(("ack",*transfer))
+        donor = recipient
+    final = [("task",*expected)]
+    assert grade(initial,events,final,complete=True) == "PASS"
+    assert grade(initial,events,[],complete=True) == "FAIL"
+    assert grade(initial,events,final+initial,complete=True) == "FAIL"
+    assert grade(initial,events,final,complete=False) == "INCOMPLETE"

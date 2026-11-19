@@ -795,3 +795,22 @@ def crimp_pull_quality(revision, sheet, terminal, conductor, tooling, forces_n):
     if not all(finite_measure(x) and x >= 0 for x in forces_n):
         return "INCOMPLETE"
     return "PASS" if min(forces_n) >= minimum else "FAIL"
+
+
+def flammability_quality(revision, sheet, grade, thickness_mm, required_class):
+    """Qualification lists acceptable classes explicitly for each grade and tested thickness."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(x, str) and x for x in (grade, required_class)) or not finite_measure(thickness_mm) or thickness_mm <= 0:
+        return "INCOMPLETE"
+    rows = sheet.get("qualified_classes")
+    if not isinstance(rows, dict):
+        return "INCOMPLETE"
+    key = (grade, thickness_mm)
+    if key not in rows:
+        return "FAIL" if sheet.get("exhaustive") is True else "INCOMPLETE"
+    classes = rows[key]
+    if not isinstance(classes, list) or not all(isinstance(c, str) and c for c in classes):
+        return "INCOMPLETE"
+    return "PASS" if required_class in classes else "FAIL"

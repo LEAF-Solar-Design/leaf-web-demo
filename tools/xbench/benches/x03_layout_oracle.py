@@ -849,3 +849,33 @@ def punching_shear_quality(reaction_n, depth_mm, perimeter_mm, resistance_mpa, r
     if load < 0 or min(depth, perimeter, resistance) <= 0:
         return "INCOMPLETE"
     return "PASS" if load <= depth * perimeter * resistance else "FAIL"
+
+
+def creep_deflection_quality(revision, sheet, stress_mpa, temp_c, duration_h, elastic_mm, clearance_mm):
+    """Linearly interpolate additional creep factors at the recorded stress and temperature."""
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    values = (stress_mpa, temp_c, duration_h, elastic_mm, clearance_mm)
+    if not all(map(finite_measure, values)) or min(stress_mpa, duration_h, elastic_mm, clearance_mm) < 0:
+        return "INCOMPLETE"
+    curves = sheet.get("additional_creep_factors")
+    points = curves.get((stress_mpa, temp_c)) if isinstance(curves, dict) else None
+    if not isinstance(points, list) or len(points) < 2:
+        return "INCOMPLETE"
+    previous = factor = None
+    t = Fraction(str(duration_h))
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2 or not all(finite_measure(x) and x >= 0 for x in point):
+            return "INCOMPLETE"
+        hour, value = (Fraction(str(x)) for x in point)
+        if previous is not None:
+            start, low = previous
+            if hour <= start or value < low:
+                return "INCOMPLETE"
+            if start <= t <= hour:
+                factor = low + (value-low) * (t-start) / (hour-start)
+        previous = hour, value
+    if factor is None:
+        return "INCOMPLETE"
+    total = Fraction(str(elastic_mm)) * (1 + factor)
+    return "PASS" if total <= Fraction(str(clearance_mm)) else "FAIL"

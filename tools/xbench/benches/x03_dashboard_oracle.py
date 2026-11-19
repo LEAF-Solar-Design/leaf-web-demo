@@ -1016,3 +1016,40 @@ def autoscaler_quality(revision, policy, ticks, opening, prior_change_tick):
             prior_change_tick = stamp
         replicas, previous = observed, stamp
     return "PASS"
+
+
+def work_steal_quality(opening, events, closing, *, complete):
+    """Ownership advances one epoch at ack. An unacknowledged offer leaves the donor in charge."""
+    if complete is not True or not all(isinstance(x, list) for x in (opening, events, closing)):
+        return "INCOMPLETE"
+    for snapshot in (opening, closing):
+        for row in snapshot:
+            if not isinstance(row, (list, tuple)) or len(row) != 3:
+                return "INCOMPLETE"
+            task, owner, epoch = row
+            if not all(isinstance(x, str) and x for x in (task, owner)) or type(epoch) is not int or epoch < 0:
+                return "INCOMPLETE"
+    owners = {task:(owner, epoch) for task, owner, epoch in opening}
+    if len(owners) != len(opening):
+        return "FAIL"
+    pending = {}
+    for event in events:
+        if not isinstance(event, (list, tuple)) or len(event) != 5:
+            return "INCOMPLETE"
+        kind, task, donor, recipient, epoch = event
+        if not all(isinstance(x, str) and x for x in (task, donor, recipient)) or type(epoch) is not int:
+            return "INCOMPLETE"
+        if kind not in ("offer", "ack"):
+            return "INCOMPLETE"
+        if owners.get(task) != (donor, epoch) or donor == recipient:
+            return "FAIL"
+        if kind == "offer":
+            if task in pending:
+                return "FAIL"
+            pending[task] = recipient
+        else:
+            if pending.pop(task, None) != recipient:
+                return "FAIL"
+            owners[task] = recipient, epoch + 1
+    actual = {task:(owner, epoch) for task, owner, epoch in closing}
+    return "PASS" if len(actual) == len(closing) and actual == owners else "FAIL"

@@ -1996,3 +1996,47 @@ def junction_temperature_quality(ambient_c, losses_w, path, max_junction_c):
     power = sum(Fraction(str(w)) for w in losses_w)
     temperature = Fraction(str(ambient_c)) + power * resistance
     return "PASS" if temperature <= Fraction(str(max_junction_c)) else "FAIL"
+
+
+def discharge_resistor_quality(capacitance_f, initial_v, safe_v, deadline_s, resistance_ohm, pulse_j):
+    """A permanently connected ideal bleeder dissipates the full initial stored energy."""
+    from math import log
+    values = (capacitance_f, initial_v, safe_v, deadline_s, resistance_ohm, pulse_j)
+    if not all(finite_measure(v) and v > 0 for v in values) or safe_v >= initial_v:
+        return "INCOMPLETE"
+    time_s = resistance_ohm * capacitance_f * (log(initial_v) - log(safe_v))
+    energy_j = Fraction(str(capacitance_f)) * Fraction(str(initial_v)) ** 2 / 2
+    return "PASS" if time_s <= deadline_s and energy_j <= Fraction(str(pulse_j)) else "FAIL"
+
+
+def battery_fault_quality(cells, strings, common_ohm, rated_fault_a):
+    """Series cells and links in parallel strings feeding one common bolted fault."""
+    if not isinstance(cells, dict) or not cells or not isinstance(strings, list) or not strings:
+        return "INCOMPLETE"
+    if not all(finite_measure(x) and x >= 0 for x in (common_ohm, rated_fault_a)):
+        return "INCOMPLETE"
+    used = set()
+    conductance = norton_a = Fraction(0)
+    for row in strings:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            return "INCOMPLETE"
+        members, links_ohm = row
+        if not isinstance(members, list) or not members or not finite_measure(links_ohm) or links_ohm < 0:
+            return "INCOMPLETE"
+        resistance = Fraction(str(links_ohm))
+        voltage = Fraction(0)
+        for member in members:
+            if not isinstance(member, str) or member in used:
+                return "INCOMPLETE"
+            cell = cells.get(member)
+            if not isinstance(cell, (list, tuple)) or len(cell) != 2 or not all(finite_measure(x) and x > 0 for x in cell):
+                return "INCOMPLETE"
+            voltage += Fraction(str(cell[0]))
+            resistance += Fraction(str(cell[1]))
+            used.add(member)
+        norton_a += voltage / resistance
+        conductance += 1 / resistance
+    if used != cells.keys():
+        return "INCOMPLETE"
+    fault_a = norton_a / (1 + Fraction(str(common_ohm)) * conductance)
+    return "PASS" if Fraction(str(rated_fault_a)) >= fault_a else "FAIL"
