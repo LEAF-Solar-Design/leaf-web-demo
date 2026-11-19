@@ -9,17 +9,23 @@ from authored_material_selection import bind_material_selection
 _PREFIX = re.compile(r"(?:edit|patch|update) (?:the |my )?(?:selected |imported )?(?:json material|material records|json records):\s*", re.I)
 _INDEX = re.compile(r"(?:0|[1-9][0-9]{0,8})\b")
 _SEPARATOR = re.compile(r",\s*(?:then\s+)?|\s+then\s+", re.I)
+MAX_OPERATIONS = 100
+MAX_POINTER_SEGMENTS = 16
 
 
 def _parse(description):
-    if not isinstance(description, str) or len(description) > 4000:
+    if not isinstance(description, str):
         return None
+    if len(description) > 4000:
+        return "Material patch description budget exceeded."
     prefix = _PREFIX.match(description)
     if not prefix:
         return None
     tail = description[prefix.end():].strip().removesuffix(".")
     ops = []
-    while tail and len(ops) < 100:
+    while tail:
+        if len(ops) == MAX_OPERATIONS:
+            return "Material patch operation budget exceeded."
         verb = re.match(r"(insert|remove|move|copy|set|test)\s+", tail, re.I)
         if not verb:
             return None
@@ -45,6 +51,10 @@ def _parse(description):
                 return None
             if action in ("copy", "move_field") and type(other) is not str:
                 return None
+            # A slash inside an escaped property (~1) is data, not another segment.
+            pointers = (value, other) if action in ("copy", "move_field") else (value,)
+            if any(pointer.count("/") > MAX_POINTER_SEGMENTS for pointer in pointers):
+                return "Material patch pointer depth budget exceeded."
             ops.append((action, value, other))
             tail = argument[label.end()+end:]
         elif action == "insert":
@@ -104,7 +114,11 @@ def bind_selection(intake, org_id, project_id, actor_id, material_id, context):
 
 
 def build_body(description):
-    return _BODY.replace("__OPERATIONS__", repr(_parse(description)))
+    operations = _parse(description)
+    if isinstance(operations, str):
+        # Do not emit a partially executable plan for an over-budget request.
+        return "def run(intake, params):\n    raise ValueError(" + repr(operations) + ")\n"
+    return _BODY.replace("__OPERATIONS__", repr(operations))
 
 
 _BODY = """

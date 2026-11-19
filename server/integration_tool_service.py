@@ -40,6 +40,7 @@ from leaf_platform.integration_turn_grant_store import (
 
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
+DATASET_ROW_BUDGET = 1000
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
@@ -388,7 +389,10 @@ def validate_material_context(value):
 
 def project_discovery(value, limit, *, include_snapshot=False):
     """Project the Ops application-service discovery envelope, without receipts."""
-    if type(value) is not dict or set(value) not in ({"records", "nextCursor"}, {"records", "nextCursor", "snapshotId"}):
+    if (type(value) is not dict or not {"records", "nextCursor"} <= value.keys()
+            or value.keys() - {"records", "nextCursor", "snapshotId", "totalCount"}):
+        raise ReadFailure("invalid_response")
+    if "totalCount" in value and (type(value["totalCount"]) is not int or value["totalCount"] < 0):
         raise ReadFailure("invalid_response")
     if "snapshotId" in value and (type(value["snapshotId"]) is not str
                                   or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["snapshotId"])):
@@ -447,6 +451,8 @@ def project_discovery(value, limit, *, include_snapshot=False):
     result = {"datasets": datasets, "next_cursor": cursor}
     if include_snapshot and "snapshotId" in value:
         result["_snapshot"] = value["snapshotId"]
+    if include_snapshot and "totalCount" in value:
+        result["_total_count"] = value["totalCount"]
     if len(json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
         raise ReadFailure("response_too_large")
     return result
@@ -544,6 +550,9 @@ class IntegrationToolService:
                        require_snapshot=False, cancel_event=None):
         visited = set()
         first_snapshot = None
+        rows_read = 0
+        dataset_ids = set()
+        declared_total = None
         args = {"limit": limit}
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -562,6 +571,18 @@ class IntegrationToolService:
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited) + 1)
             if operation == "datasets":
+                rows_read += len(page["datasets"])
+                if rows_read > DATASET_ROW_BUDGET:
+                    raise ReadFailure("response_too_large")
+                dataset_ids.update(row["dataset_ref"]["id"] for row in page["datasets"])
+                page_total = page.pop("_total_count", None)
+                if page_total is not None:
+                    if declared_total is not None and declared_total != page_total:
+                        raise IncompleteInventory(len(visited) + 1)
+                    declared_total = page_total
+                if declared_total is not None and (len(dataset_ids) > declared_total or
+                        (page["next_cursor"] is None and len(dataset_ids) != declared_total)):
+                    raise IncompleteInventory(len(visited) + 1)
                 snapshot = page.pop("_snapshot", None)
                 if require_snapshot and snapshot is None:
                     raise ReadFailure("snapshot_unavailable")
