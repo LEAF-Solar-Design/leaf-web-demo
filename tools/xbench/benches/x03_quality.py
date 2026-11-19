@@ -2396,3 +2396,58 @@ def contactor_dwell_quality(policy, initial_on, state_since, transitions, *, com
             failed = True
         state, since = next_state, instant
     return "FAIL" if failed else "PASS"
+
+
+def breaker_reclosing_quality(policy, events, *, complete):
+    """Grade one fault sequence starting closed with all shots available.
+
+    A trip opens the breaker. Each successive close consumes one scheduled
+    shot. Once exhausted, the breaker must stay open after its next trip.
+    The trace ends before manual reset or successful sequence rearming.
+    """
+    if complete is not True or not isinstance(policy, dict) or policy.get("model") != "single-sequence-v1":
+        return "INCOMPLETE"
+    delays = policy.get("dead_times_s")
+    if not isinstance(delays, list) or not all(finite_measure(d) and d >= 0 for d in delays):
+        return "INCOMPLETE"
+    if not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    previous_time = trip_time = None
+    closes = 0
+    failed = False
+    for event in events:
+        if not isinstance(event, (list, tuple)) or len(event) != 2:
+            return "INCOMPLETE"
+        timestamp, action = event
+        if not finite_measure(timestamp) or action not in ("trip", "close"):
+            return "INCOMPLETE"
+        time = Fraction(str(timestamp))
+        if previous_time is not None and time < previous_time:
+            return "INCOMPLETE"
+        previous_time = time
+        if action == "trip":
+            if trip_time is not None:
+                return "INCOMPLETE"
+            trip_time = time
+        else:
+            if trip_time is None:
+                return "INCOMPLETE"
+            if closes >= len(delays) or time - trip_time < Fraction(str(delays[closes])):
+                failed = True
+            closes += 1
+            trip_time = None
+    return "FAIL" if failed else "PASS"
+
+
+def busbar_force_quality(rule, peak_a, spacing_m, tributary_span_m, support_limit_n):
+    """Two long parallel bars with equal peak current and a recorded force coefficient."""
+    if not isinstance(rule, dict) or rule.get("model") != "parallel-pair-tributary-v1":
+        return "INCOMPLETE"
+    values = (rule.get("force_coefficient_n_per_a2"), peak_a, spacing_m, tributary_span_m, support_limit_n)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    coefficient, peak, spacing, span, limit = (Fraction(str(v)) for v in values)
+    if min(coefficient, spacing, span, limit) <= 0 or peak < 0:
+        return "INCOMPLETE"
+    force = coefficient * peak ** 2 * span / spacing
+    return "PASS" if force <= limit else "FAIL"

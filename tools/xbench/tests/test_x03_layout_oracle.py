@@ -4,6 +4,26 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("forces,axial,mx,my", [
+    pytest.param([0, 2, 3, 5], 10, 24, -14, id="check-the-unloaded-west-corner"),
+    pytest.param([4, 0, 2, 2], 8, 12, -4, id="verify-the-eccentric-cabinet-load"),
+    pytest.param([5, 1, 0, 4], 10, 12, -10, id="trace-the-diagonal-rail-reactions"),
+])
+def test_compression_only_baseplate_equilibrium(forces, axial, mx, my):
+    from benches.x03_layout_oracle import baseplate_contact_quality as grade
+
+    pads = {"a": (0, 0), "b": (2, 0), "c": (0, 3), "d": (2, 3)}
+    load = (axial, mx, my)
+    reactions = dict(zip(pads, forces))
+    model = "vertical-point-contacts-v1"
+    assert grade(model, pads, reactions, *load) == "PASS"
+    # Shift reactions along the two diagonals. Both moments and the force sum stay equal.
+    fictitious = {pad: force + shift for (pad, force), shift in zip(reactions.items(), [-6, 6, 6, -6])}
+    assert grade(model, pads, fictitious, *load) == "FAIL"
+    assert grade(model, pads, reactions, axial, mx + 1, my) == "FAIL"
+    assert grade(model, dict(pads, a=None), reactions, *load) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("rows,cols,hole,thickness,shear,tension,capacity", [
     pytest.param([10, 30], [0, 20], 4, 2, 10, 20, 1600, id="check-two-row-rail-splice"),
     pytest.param([20], [0, 30, 60], 6, 3, 5, 10, 1950, id="check-wide-end-bracket"),
