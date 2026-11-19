@@ -547,3 +547,20 @@ def test_worker_fit_matches_cartesian_enumeration(workers,tasks,allowed):
     assert grade(workers,tasks,allowed,expected) == "PASS"
     assert grade(workers,tasks,allowed,not expected) == "FAIL"
     assert grade(workers,tasks,{},expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("start,end,offsets,bounds", [
+    pytest.param(100, 130, {"a": (0, 2), "b": (4, 6)}, (24, 28), id="bound-handoff-delay"),
+    pytest.param(50, 47, {"a": (5, 7), "b": (-3, -1)}, (3, 7), id="time-an-acknowledgement"),
+    pytest.param(0, 4, {"a": (-10, -8), "b": (-12, -10)}, (4, 8), id="reconcile-retry-latency"),
+])
+def test_cross_worker_offsets_bound_reports(start, end, offsets, bounds):
+    from benches.x03_dashboard_oracle import cross_worker_latency_quality as grade
+
+    events = (("a", start), ("b", end))
+    assert grade(*events, offsets, bounds) == "PASS"
+    midpoint = sum(bounds) // 2
+    assert grade(*events, offsets, (midpoint, midpoint)) == "FAIL"
+    assert grade(*events, {"a": offsets["a"]}, bounds) == "INCOMPLETE"
+    # Shift the end clock back until the supported delay straddles zero.
+    assert grade(events[0], ("b", end - midpoint), offsets, bounds) == "INCOMPLETE"

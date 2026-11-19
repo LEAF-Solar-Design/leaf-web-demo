@@ -2187,3 +2187,79 @@ def harmonic_load_quality(revision, model, rms_by_order):
             return "INCOMPLETE"
         loss += Fraction(str(amps)) ** 2 * (copper + eddy * order ** 2)
     return "PASS" if loss <= maximum else "FAIL"
+
+
+def _log_curve(points, at):
+    """Interpolate positive, nonincreasing ordinates on a strictly increasing axis."""
+    from math import exp, log
+
+    if not isinstance(points, (list, tuple)) or len(points) < 2:
+        return None
+    previous = None
+    result = None
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            return None
+        if not all(finite_measure(value) and value > 0 for value in point):
+            return None
+        x, y = point
+        if previous is not None:
+            x0, y0 = previous
+            if x <= x0 or y > y0:
+                return None
+            if x0 < at < x:
+                from math import log1p
+                def distance(value):
+                    if value / x0 < 2:
+                        return log1p((value - x0) / x0)
+                    return log(value) - log(x0)
+
+                weight = distance(at) / distance(x)
+                result = exp((1 - weight) * log(y0) + weight * log(y))
+        if at == x:
+            result = y
+        previous = point
+    return result
+
+
+def peukert_runtime_quality(revision, curve, cutoff_policy, load_a, reported_h, tolerance_h):
+    """Between recorded cutoff-matched points, fit the local Peukert power law."""
+    if not isinstance(revision, str) or not revision.strip() or not isinstance(curve, dict):
+        return "INCOMPLETE"
+    if curve.get("revision") != revision or not isinstance(cutoff_policy, str) or not cutoff_policy.strip():
+        return "INCOMPLETE"
+    if curve.get("cutoff_policy") != cutoff_policy:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (load_a, reported_h, tolerance_h))):
+        return "INCOMPLETE"
+    if load_a <= 0 or reported_h < 0 or tolerance_h < 0:
+        return "INCOMPLETE"
+    expected = _log_curve(curve.get("current_a_runtime_h"), load_a)
+    if expected is None:
+        return "INCOMPLETE"
+    from math import isclose
+    return "PASS" if isclose(expected, reported_h, rel_tol=1e-14, abs_tol=tolerance_h) else "FAIL"
+
+
+def semiconductor_soa_quality(revision, envelope, voltage_v, current_a, pulse_s):
+    """Grade a single pulse against its exact duration's pinned log-log SOA curve."""
+    if not isinstance(revision, str) or not revision.strip() or not isinstance(envelope, dict):
+        return "INCOMPLETE"
+    if envelope.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(finite_measure(value) and value > 0 for value in (voltage_v, pulse_s)):
+        return "INCOMPLETE"
+    if not finite_measure(current_a) or current_a < 0:
+        return "INCOMPLETE"
+    curves = envelope.get("curves")
+    if not isinstance(curves, list):
+        return "INCOMPLETE"
+    matches = [row for row in curves if isinstance(row, dict)
+               and finite_measure(row.get("pulse_s")) and row["pulse_s"] == pulse_s]
+    if len(matches) != 1:
+        return "INCOMPLETE"
+    limit = _log_curve(matches[0].get("voltage_v_current_a"), voltage_v)
+    if limit is None:
+        return "INCOMPLETE"
+    from math import isclose
+    return "PASS" if current_a <= limit or isclose(current_a, limit, rel_tol=1e-14) else "FAIL"

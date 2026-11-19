@@ -630,3 +630,37 @@ def daylight_energy_quality(daylight_s, intervals, reported_wh_m2):
     if start != end:
         return "INCOMPLETE"
     return "PASS" if energy == Fraction(str(reported_wh_m2)) else "FAIL"
+
+
+def rear_reflected_irradiance_quality(model, ground, rear_view, reported_w_m2):
+    """Lambertian ground patches, with rear-facing view factors and incident W/m2.
+
+    Each ground patch contributes once. Any remaining view is nonreflecting.
+    The report covers the ground-reflected component on the rear surface.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if model != "lambertian-ground-patches-v1" or not finite_measure(reported_w_m2):
+        return "INCOMPLETE"
+    if not isinstance(ground, dict) or not ground or not isinstance(rear_view, dict):
+        return "INCOMPLETE"
+    if ground.keys() != rear_view.keys():
+        return "INCOMPLETE"
+    expected = Fraction(0)
+    total_view = Fraction(0)
+    for patch, reading in ground.items():
+        if not isinstance(reading, (list, tuple)) or len(reading) != 2:
+            return "INCOMPLETE"
+        irradiance, albedo = reading
+        view = rear_view[patch]
+        if not all(map(finite_measure, (irradiance, albedo, view))):
+            return "INCOMPLETE"
+        if irradiance < 0 or not 0 <= albedo <= 1 or not 0 <= view <= 1:
+            return "INCOMPLETE"
+        factor = Fraction(str(view))
+        total_view += factor
+        expected += Fraction(str(irradiance)) * Fraction(str(albedo)) * factor
+    if total_view > 1:
+        return "INCOMPLETE"
+    return "PASS" if expected == Fraction(str(reported_w_m2)) else "FAIL"

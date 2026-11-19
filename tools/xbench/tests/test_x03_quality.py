@@ -1230,3 +1230,51 @@ def test_transformer_harmonic_loss(spectrum,watts):
     assert grade("lab",model,spectrum) == "PASS"
     assert grade("lab",dict(model,max_w=watts-1),spectrum) == "FAIL"
     assert grade("lab",model,{1:spectrum[1]}) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("points,load,expected,constant_ah", [
+    pytest.param([(5, 32), (20, 2)], 10, 8, 16, id="remote-pump-backup"),
+    pytest.param([(2, 72), (8, 9)], 4, 18 * 2 ** 0.5, 36, id="control-room-ups"),
+    pytest.param([(3, 20), (6, 8), (24, 2)], 6, 8, 10, id="radio-bank-at-cutoff"),
+])
+def test_peukert_runtime(points, load, expected, constant_ah):
+    from benches.x03_quality import peukert_runtime_quality
+
+    # At geometric-midpoint currents the measured durations have a geometric mean.
+    # The radio-bank value is a direct measurement at the cutoff.
+    curve = dict(revision="r1", cutoff_policy="end-voltage-A", current_a_runtime_h=points)
+
+    def grade(current, runtime, cutoff="end-voltage-A"):
+        return peukert_runtime_quality("r1", curve, cutoff, current, runtime, 1e-9)
+
+    assert grade(load, expected) == "PASS"
+    assert grade(load, constant_ah) == "FAIL"
+    assert grade(points[0][0] / 2, expected) == "INCOMPLETE"
+    assert grade(points[-1][0] * 2, expected) == "INCOMPLETE"
+    assert grade(load, expected, "other-cutoff") == "INCOMPLETE"
+    assert peukert_runtime_quality("r2", curve, "end-voltage-A", load, expected, 0) == "INCOMPLETE"
+    curve["current_a_runtime_h"] = points + [(points[-1][0], None)]
+    assert grade(load, expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("pulse,curve,voltage,allowed", [
+    pytest.param(0.001, [(10, 16), (40, 4)], 20, 8, id="converter-switch-pulse"),
+    pytest.param(0.02, [(20, 12), (80, 3)], 40, 6, id="precharge-transistor"),
+    pytest.param(0.1, [(12, 10), (24, 6), (48, 3)], 24, 6, id="linear-regulator-startup"),
+])
+def test_semiconductor_soa(pulse, curve, voltage, allowed):
+    from benches.x03_quality import semiconductor_soa_quality
+
+    row = dict(pulse_s=pulse, voltage_v_current_a=curve)
+    envelope = dict(revision="r4", curves=[row])
+
+    def grade(current, duration=pulse):
+        return semiconductor_soa_quality("r4", envelope, voltage, current, duration)
+
+    assert grade(allowed) == "PASS"
+    assert allowed + 1 < curve[0][1]  # Separate current and voltage checks would pass.
+    assert grade(allowed + 1) == "FAIL"
+    assert grade(allowed, pulse * 1.5) == "INCOMPLETE"
+    assert semiconductor_soa_quality("r3", envelope, voltage, allowed, pulse) == "INCOMPLETE"
+    row["voltage_v_current_a"] = []
+    assert grade(allowed) == "INCOMPLETE"

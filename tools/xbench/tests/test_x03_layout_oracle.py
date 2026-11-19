@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("force_rating,moment_rating,force,moment", [
+    pytest.param(1000, 80, 250, 60, id="check-quarter-loaded-roof-rail"),
+    pytest.param(600, 120, 300, -60, id="check-reverse-bending-at-ridge"),
+    pytest.param(200, 40, 150, 10, id="check-compression-heavy-end-span"),
+])
+def test_concurrent_rail_utilization(force_rating, moment_rating, force, moment):
+    from benches.x03_layout_oracle import rail_interaction_quality as grade
+
+    rule = dict(revision="r1", interaction="linear-uniaxial-v1",
+                compression_rating_n=force_rating, moment_rating_nm=moment_rating)
+    # The independent limit pairs consume 1/4 + 3/4, 1/2 + 1/2 and 3/4 + 1/4.
+    assert grade("r1", rule, force, moment) == "PASS"
+    assert force + 1 < force_rating and abs(moment) < moment_rating
+    assert grade("r1", rule, force + 1, moment) == "FAIL"
+    assert grade("r1", {k: v for k, v in rule.items() if k != "interaction"}, force, moment) == "INCOMPLETE"
+    assert grade("r2", rule, force, moment) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("force,arm,stiffness,limit", [(100,0.1,500,0.02),(40,-0.2,400,0.02),(150,0.02,100,0.03)])
 def test_rail_twist_at_permitted_bending_load(force,arm,stiffness,limit):
     from benches.x03_layout_oracle import rail_twist_quality as grade
