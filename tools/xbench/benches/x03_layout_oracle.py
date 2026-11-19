@@ -4,6 +4,33 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def anchor_pryout_quality(revision, rule, embedment_mm, shear_n):
+    """Interpolate the pinned concrete pryout resistance between qualified embedments."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "linear-pryout-table-v1":
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (embedment_mm, shear_n))) or embedment_mm <= 0:
+        return "INCOMPLETE"
+    table = rule.get("depth_mm_capacity_n")
+    if not isinstance(table, list) or len(table) < 2:
+        return "INCOMPLETE"
+    points = []
+    for row in table:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        depth, rating = (Fraction(str(v)) for v in row)
+        if min(depth, rating) <= 0 or (points and depth <= points[-1][0]):
+            return "INCOMPLETE"
+        points.append((depth, rating))
+    embedment = Fraction(str(embedment_mm))
+    for (a, low), (b, high) in zip(points, points[1:]):
+        if a <= embedment <= b:
+            resistance = low + (embedment - a) * (high - low) / (b - a)
+            return "PASS" if abs(Fraction(str(shear_n))) <= resistance else "FAIL"
+    return "INCOMPLETE"
+
+
 def composite_connector_quality(revision, rule, stations):
     """Check each station's shear flow times tributary pitch against its connector group."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

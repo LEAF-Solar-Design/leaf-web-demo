@@ -1010,3 +1010,41 @@ def shield_radiation_bias_quality(revision, shield, irradiance, ventilation, mea
         return "INCOMPLETE"
     expected = Fraction(str(measured_c)) - Fraction(str(irradiance)) * gain
     return "PASS" if expected == Fraction(str(reported_c)) else "FAIL"
+
+
+def precipitation_phase_quality(thresholds, trace, reported):
+    """Classify each wet-bulb sample. Snow and rain include their outer boundaries."""
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(thresholds, dict) or thresholds.get("boundary_rule") != "snow-le-rain-ge-v1":
+        return "INCOMPLETE"
+    snow = thresholds.get("snow_max_wet_bulb_c")
+    rain = thresholds.get("rain_min_wet_bulb_c")
+    if not all(map(finite_measure, (snow, rain))) or snow >= rain:
+        return "INCOMPLETE"
+    if not isinstance(trace, list) or not trace or not isinstance(reported, list):
+        return "INCOMPLETE"
+    expected = []
+    prior = None
+    for sample in trace:
+        if not isinstance(sample, (tuple, list)) or len(sample) != 2:
+            return "INCOMPLETE"
+        tick, temperature = sample
+        if type(tick) is not int or (prior is not None and tick <= prior) or not finite_measure(temperature):
+            return "INCOMPLETE"
+        if temperature <= snow:
+            phase = "snow"
+        elif temperature >= rain:
+            phase = "rain"
+        else:
+            phase = "mixed"
+        expected.append((tick, phase))
+        prior = tick
+    observed = []
+    for row in reported:
+        if not isinstance(row, (tuple, list)) or len(row) != 2:
+            return "INCOMPLETE"
+        if type(row[0]) is not int or not isinstance(row[1], str):
+            return "INCOMPLETE"
+        observed.append(tuple(row))
+    return "PASS" if observed == expected else "FAIL"

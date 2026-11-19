@@ -3005,3 +3005,86 @@ def pole_slip_quality(settings, trajectory):
             previous_side = side
         failed |= tripped != (crossings >= count)
     return "FAIL" if failed else "PASS"
+
+
+def load_shedding_quality(priority, stages, intervals):
+    """Each matured stage latches a cumulative number of lowest-priority loads.
+
+    Stage tuples are (pickup Hz, continuous delay seconds, cumulative load count).
+    Intervals record held frequency and the complete shed set at the interval end.
+    """
+    if not isinstance(priority, list) or not priority or not all(isinstance(s, str) and s.strip() for s in priority):
+        return "INCOMPLETE"
+    if len(set(priority)) != len(priority) or not isinstance(stages, list) or not stages:
+        return "INCOMPLETE"
+    timers = []
+    last_pickup, last_count = None, 0
+    for stage in stages:
+        if not isinstance(stage, (list, tuple)) or len(stage) != 3:
+            return "INCOMPLETE"
+        hz, delay, count = stage
+        if not all(map(finite_measure, (hz, delay))) or hz <= 0 or delay < 0:
+            return "INCOMPLETE"
+        if type(count) is not int or not last_count < count <= len(priority):
+            return "INCOMPLETE"
+        if last_pickup is not None and hz >= last_pickup:
+            return "INCOMPLETE"
+        timers.append(Fraction(0))
+        last_pickup, last_count = hz, count
+    if not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    shed_count = 0
+    failed = False
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        seconds, frequency, shed = row
+        if not all(map(finite_measure, (seconds, frequency))) or seconds <= 0 or frequency < 0:
+            return "INCOMPLETE"
+        if not isinstance(shed, list) or not all(isinstance(s, str) and s.strip() for s in shed):
+            return "INCOMPLETE"
+        duration = Fraction(str(seconds))
+        for i, (pickup, delay, count) in enumerate(stages):
+            if frequency <= pickup:
+                timers[i] += duration
+                if timers[i] >= Fraction(str(delay)):
+                    shed_count = max(shed_count, count)
+            else:
+                timers[i] = Fraction(0)
+        failed |= len(shed) != shed_count or set(shed) != set(priority[:shed_count])
+    return "FAIL" if failed else "PASS"
+
+
+def acceleration_duty_quality(envelopes, initial_state, intervals, final_speed_rpm):
+    """Sum start duty fractions against a recorded speed-banded I-squared-t envelope.
+
+    Samples hold speed and RMS current for their full duration before reaching
+    the final speed. The last band's upper edge is the required running speed.
+    """
+    if initial_state not in ("hot", "cold") or not isinstance(envelopes, dict):
+        return "INCOMPLETE"
+    bands = envelopes.get(initial_state)
+    if not isinstance(bands, list) or not bands or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    previous_limit = 0
+    for band in bands:
+        if not isinstance(band, (list, tuple)) or len(band) != 2 or not all(map(finite_measure, band)):
+            return "INCOMPLETE"
+        upper_rpm, amp2_seconds = band
+        if upper_rpm <= previous_limit or amp2_seconds <= 0:
+            return "INCOMPLETE"
+        previous_limit = upper_rpm
+    if not finite_measure(final_speed_rpm) or final_speed_rpm < 0:
+        return "INCOMPLETE"
+    used = Fraction(0)
+    for row in intervals:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        seconds, rpm, amps = row
+        if seconds <= 0 or rpm < 0 or amps < 0:
+            return "INCOMPLETE"
+        budget = next((limit for upper, limit in bands if rpm < upper), None)
+        if budget is None:
+            return "INCOMPLETE"
+        used += Fraction(str(seconds)) * Fraction(str(amps)) ** 2 / Fraction(str(budget))
+    return "PASS" if used <= 1 and final_speed_rpm >= previous_limit else "FAIL"
