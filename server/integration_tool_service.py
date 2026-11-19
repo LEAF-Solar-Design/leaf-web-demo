@@ -11,6 +11,7 @@ import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -473,8 +474,31 @@ def project_discovery(value, limit, *, include_snapshot=False):
     return result
 
 
+class _DatasetResponseStream(httpx.AsyncByteStream):
+    """Keep response cleanup independent of the outcome of reading a catalog page."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def __aiter__(self):
+        return self.stream.__aiter__()
+
+    async def aclose(self):
+        try:
+            await self.stream.aclose()
+        except Exception:
+            # HTTPX marks the response closed before calling its stream. Retry
+            # the owned stream directly while the outer client still owns the pool.
+            logger = logging.getLogger(__name__)
+            logger.warning("Retrying dataset response stream close")
+            try:
+                await self.stream.aclose()
+            except Exception:
+                logger.error("Dataset stream close unconfirmed after retry")
+
+
 async def bounded_http(method, url, token, body, deadline, transport=None, *, save=False,
-                       expected_revision=None):
+                       expected_revision=None, dataset_report=False):
     import httpx
     headers = {"Authorization": "Bearer " + token.decode("utf-8"),
                "Accept": "application/json", "Accept-Encoding": "identity",
@@ -486,6 +510,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                                     timeout=deadline, transport=transport) as client:
             async with client.stream(method, url, headers=headers,
                                      content=body) as response:
+                if dataset_report:
+                    response.stream = _DatasetResponseStream(response.stream)
                 if 300 <= response.status_code < 400:
                     raise ReadFailure("invalid_response")
                 if response.status_code != 200:
@@ -835,6 +861,9 @@ class IntegrationToolService:
                         if saving:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport,
                                 save=True, expected_revision=args.get("expectedRevision")))
+                        elif operation == "datasets" and expected_authority is not None:
+                            value = asyncio.run(bounded_http(method, url, token, body, remaining,
+                                                             self.transport, dataset_report=True))
                         else:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport))
                         check()
