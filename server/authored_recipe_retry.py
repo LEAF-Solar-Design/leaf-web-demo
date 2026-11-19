@@ -98,7 +98,8 @@ def _journal_request(raw, digest, authority, clock, max_age):
 
 
 def recover_recipe_save(service, description, original_args, tenant, session, turn, *, read_revision=None,
-                        expected_authority=None, journal_sha256=None, journal_max_age_seconds=None):
+                        expected_authority=None, journal_sha256=None, journal_max_age_seconds=None,
+                        journal_adapter=None):
     """Read-only reconciliation using the host's authorized, revision-specific reader.
 
     original_args are the original save request. The host reader enforces its own
@@ -106,6 +107,8 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
     establishes the desired successor exists; it does not identify its writer.
     If the host supplies a maximum journal age, the pinned creation time must
     fall within the inclusive retention window at the start of recovery.
+    A trusted adapter may supply bytes by (authority, digest) and discard that
+    exact record after confirmation. Cleanup does not determine the save outcome.
     """
     from integration_tool_service import ReadFailure, failure, normalize
     from platform_link import ProjectSessionForbidden
@@ -118,7 +121,16 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
         authority = service._resolve_operation("elements", tenant, session, turn).authority
         if expected_authority is not None and authority != expected_authority:
             return failure("denied")
-        if isinstance(original_args, bytes) or journal_sha256 is not None or journal_max_age_seconds is not None:
+        if journal_adapter is not None:
+            if original_args is not None:
+                return failure("invalid_input")
+            if type(journal_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", journal_sha256):
+                try:
+                    original_args = journal_adapter.read(authority, journal_sha256)
+                except (OSError, KeyError):
+                    pass
+        if (journal_adapter is not None or isinstance(original_args, bytes)
+                or journal_sha256 is not None or journal_max_age_seconds is not None):
             args = _journal_request(original_args, journal_sha256, authority, service.clock, journal_max_age_seconds)
         else:
             args = normalize("elements", original_args)
@@ -156,4 +168,9 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
         return failure(str(exc))
     if args is None or status != "ok" or not payload[0]["successor_observed"]:
         return failure("outcome_unknown")
+    if journal_adapter is not None:
+        try:
+            journal_adapter.discard(authority, journal_sha256)
+        except (OSError, KeyError):
+            pass
     return {"result": {"element": element, "revision": successor}}
