@@ -4,6 +4,29 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("loads,links,removed,target,intact,redistributed", [
+    pytest.param({"rail": 90}, {"rail": ["A", "B"]}, "A", "B", 45, 90,
+                 id="remove-one-of-two-end-seats"),
+    pytest.param({"rail": 60, "pad": 20}, {"rail": ["A", "B", "C"], "pad": ["B"]}, "A", "B", 40, 50,
+                 id="redistribute-load-onto-an-occupied-seat"),
+    pytest.param({"east": 40, "west": 30}, {"east": ["A", "C"], "west": ["B", "C"]}, "C", "A", 20, 40,
+                 id="lose-the-common-support"),
+])
+def test_support_removal_redistributes_connected_loads(loads, links, removed, target, intact, redistributed):
+    from benches.x03_layout_oracle import alternate_load_path_quality as grade
+
+    capacities = {"A": 100, "B": 100, "C": 100, target: redistributed}
+    model = "equal-connected-supports-v1"
+    assert grade(model, loads, links, capacities, removed) == "PASS"
+    capacities[target] -= 1
+    assert intact <= capacities[target]
+    assert grade(model, loads, links, capacities, removed) == "FAIL"
+    assert grade(model, loads, {}, capacities, removed) == "INCOMPLETE"
+    orphan = dict(links)
+    orphan[next(iter(loads))] = [removed]
+    assert grade(model, loads, orphan, capacities, removed) == "FAIL"
+
+
 @pytest.mark.parametrize("length,width,force,offset,peak", [
     pytest.param(20, 10, 100, 2, 0.3, id="check-the-bonded-rail-tab"),
     pytest.param(40, 5, 200, -4, 0.6, id="check-a-reverse-offset-bracket"),

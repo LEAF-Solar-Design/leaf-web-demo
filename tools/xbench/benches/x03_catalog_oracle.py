@@ -3,6 +3,31 @@ from fractions import Fraction
 from math import isfinite
 
 
+def tightening_sequence_quality(revision, procedure, events, complete):
+    """Compare a complete chronological event record with the pinned order of each pass."""
+    if not revision or not isinstance(procedure, dict) or procedure.get("revision") != revision:
+        return "INCOMPLETE"
+    orders = procedure.get("pass_orders")
+    if not isinstance(orders, list) or len(orders) < 2 or complete is not True or not isinstance(events, list):
+        return "INCOMPLETE"
+    expected = []
+    for number, order in enumerate(orders, 1):
+        if not isinstance(order, list) or not order or not all(isinstance(b, str) and b.strip() for b in order):
+            return "INCOMPLETE"
+        if len(set(order)) != len(order):
+            return "INCOMPLETE"
+        expected.extend((number, bolt) for bolt in order)
+    observed = []
+    for event in events:
+        if not isinstance(event, (list, tuple)) or len(event) != 2:
+            return "INCOMPLETE"
+        number, bolt = event
+        if type(number) is not int or number < 1 or not isinstance(bolt, str) or not bolt.strip():
+            return "INCOMPLETE"
+        observed.append((number, bolt))
+    return "PASS" if observed == expected else "FAIL"
+
+
 def immunity_band_quality(revision, sheet, band_mhz, exposure_vm, accepted_criteria):
     """Require qualifying field strength and performance throughout the requested band."""
     from benches.x03_quality import finite_measure

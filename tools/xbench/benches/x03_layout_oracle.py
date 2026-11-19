@@ -4,6 +4,35 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def alternate_load_path_quality(model, loads_n, connectivity, capacities_n, removed):
+    """Share each load equally among its recorded surviving support connections."""
+    if model != "equal-connected-supports-v1" or not isinstance(loads_n, dict) or not loads_n:
+        return "INCOMPLETE"
+    if not isinstance(connectivity, dict) or connectivity.keys() != loads_n.keys():
+        return "INCOMPLETE"
+    if not isinstance(capacities_n, dict) or not isinstance(removed, str) or removed not in capacities_n:
+        return "INCOMPLETE"
+    if not all(finite_measure(value) and value > 0 for value in capacities_n.values()):
+        return "INCOMPLETE"
+    reactions = dict.fromkeys(capacities_n, Fraction(0))
+    unsupported = False
+    for member, load in loads_n.items():
+        supports = connectivity[member]
+        if not finite_measure(load) or load < 0 or not isinstance(supports, list):
+            return "INCOMPLETE"
+        if not all(isinstance(s, str) and s in capacities_n for s in supports) or len(set(supports)) != len(supports):
+            return "INCOMPLETE"
+        surviving = [s for s in supports if s != removed]
+        if not surviving:
+            unsupported |= load > 0
+            continue
+        share = Fraction(str(load)) / len(surviving)
+        for support in surviving:
+            reactions[support] += share
+    overload = any(reaction > Fraction(str(capacities_n[support])) for support, reaction in reactions.items())
+    return "FAIL" if unsupported or overload else "PASS"
+
+
 def adhesive_peel_quality(revision, rule, length_mm, width_mm, shear_n, offset_mm):
     """Pinned rectangular bond with uniform shear and a linear peel stress distribution."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

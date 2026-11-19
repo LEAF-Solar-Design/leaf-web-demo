@@ -892,3 +892,27 @@ def sonic_dry_bulb_quality(model, sonic_k, specific_humidity, reported_dry_k):
     if not 0 <= low <= humidity <= high < 1 or acoustic <= 0:
         return "INCOMPLETE"
     return "PASS" if acoustic == reported * (1 + Fraction(51, 100) * humidity) else "FAIL"
+
+
+def irradiance_plausibility_quality(model, elevation_deg, distance_au, ghi_w_m2):
+    """Check horizontal irradiance against a pinned direct extraterrestrial envelope.
+
+    The declared multiplier scales the daylit bound. Night has zero solar flux.
+    """
+    from math import sin, radians, isfinite, isclose
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(model, dict) or model.get("rule") != "inverse-square-horizontal-v1":
+        return "INCOMPLETE"
+    constant = model.get("solar_constant_w_m2")
+    multiplier = model.get("daylight_multiplier")
+    if not all(map(finite_measure, (constant, multiplier, elevation_deg, distance_au, ghi_w_m2))):
+        return "INCOMPLETE"
+    if min(constant, multiplier, distance_au) <= 0 or not -90 <= elevation_deg <= 90:
+        return "INCOMPLETE"
+    if elevation_deg <= 0:
+        return "PASS" if ghi_w_m2 == 0 else "FAIL"
+    bound = constant / distance_au / distance_au * sin(radians(elevation_deg)) * multiplier
+    if not isfinite(bound) or bound <= 0:
+        return "INCOMPLETE"
+    return "PASS" if 0 <= ghi_w_m2 and (ghi_w_m2 <= bound or isclose(ghi_w_m2, bound, rel_tol=1e-14)) else "FAIL"
