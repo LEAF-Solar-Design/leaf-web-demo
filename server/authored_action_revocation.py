@@ -45,6 +45,47 @@ def form_digest(form):
 _EMPTY_FORM = {"fields": [], "submit_label": "Submit"}
 
 
+def _check_local_schema_refs(schema, registry):
+    """Preflight the pinned draft's schema graph without retrieving other resources."""
+    from jsonschema import Draft202012Validator
+    from referencing.exceptions import Unresolvable
+    from referencing.jsonschema import DRAFT202012
+
+    remaining = 4096
+    active = set()
+    dialect = Draft202012Validator.META_SCHEMA["$id"]
+
+    def visit(node, resolver):
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0 or len(active) >= 64:
+            raise ValueError("Action schema resolution budget exceeded")
+        if isinstance(node, bool):
+            return
+        if not isinstance(node, dict):
+            raise ValueError("Action schema reference must target a schema")
+        if id(node) in active:
+            raise ValueError("Cyclic action schema reference")
+        if ("$dynamicRef" in node or "$recursiveRef" in node or
+                node.get("$schema", dialect) != dialect):
+            raise ValueError("Action schemas require static draft 2020-12 references")
+        active.add(id(node))
+        if "$ref" in node:
+            ref = node["$ref"]
+            if not isinstance(ref, str) or not ref.startswith("#"):
+                raise ValueError("Action schema references must be local")
+            try:
+                target = resolver.lookup(ref)
+            except Unresolvable as exc:
+                raise ValueError("Unresolved action schema reference") from exc
+            visit(target.contents, target.resolver)
+        for child in DRAFT202012.subresources_of(node):
+            visit(child, resolver.in_subresource(DRAFT202012.create_resource(child)))
+        active.remove(id(node))
+
+    visit(schema, registry.resolver_with_root(DRAFT202012.create_resource(schema)))
+
+
 def _valid_value(field, value):
     if value is None:
         return field["nullable"]
@@ -120,7 +161,9 @@ class AuthorizedLocalActions:
                     or schema.get("additionalProperties") is not False):
                 raise ValueError("Structured action arguments require a closed object schema")
             Draft202012Validator.check_schema(schema)
-            validator = Draft202012Validator(schema, registry=Registry())
+            registry = Registry()
+            _check_local_schema_refs(schema, registry)
+            validator = Draft202012Validator(schema, registry=registry)
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],

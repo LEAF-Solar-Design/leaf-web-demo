@@ -771,6 +771,10 @@ class IntegrationToolService:
                     return output
                 except DefiniteHTTPFailure as exc:
                     category = str(exc)
+                except httpx.ConnectError:
+                    category = "unavailable"
+                except httpx.ConnectTimeout:
+                    category = "timeout"
                 except ReadFailure as exc:
                     category = ("outcome_unknown" if saving and started else
                                 str(exc) if str(exc) in STATUS else "unavailable")
