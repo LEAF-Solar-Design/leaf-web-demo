@@ -4,6 +4,49 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def preload_retention_quality(revision, rule, history, service_h, installed_n, required_n):
+    """Apply a pinned, piecewise-linear retention curve to equivalent service hours."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (service_h, installed_n, required_n))) or min(service_h, installed_n, required_n) <= 0:
+        return "INCOMPLETE"
+    factors = rule.get("hour_factors")
+    curve = rule.get("retention_curve")
+    if not isinstance(factors, dict) or not isinstance(history, list) or not history:
+        return "INCOMPLETE"
+    elapsed = exposure = Fraction(0)
+    for interval in history:
+        if not isinstance(interval, (tuple, list)) or len(interval) != 3:
+            return "INCOMPLETE"
+        start, end, condition = interval
+        if not isinstance(condition, str) or not finite_measure(factors.get(condition)):
+            return "INCOMPLETE"
+        if not all(map(finite_measure, (start, end))) or factors[condition] <= 0:
+            return "INCOMPLETE"
+        start, end, factor = (Fraction(str(value)) for value in (start, end, factors[condition]))
+        if start != elapsed or end <= start:
+            return "INCOMPLETE"
+        exposure += (end - start) * factor
+        elapsed = end
+    if elapsed != Fraction(str(service_h)) or not isinstance(curve, list) or len(curve) < 2:
+        return "INCOMPLETE"
+    points = []
+    for point in curve:
+        if not isinstance(point, (tuple, list)) or len(point) != 2 or not all(map(finite_measure, point)):
+            return "INCOMPLETE"
+        hours, retained = (Fraction(str(value)) for value in point)
+        if not 0 <= retained <= 1 or (points and (hours <= points[-1][0] or retained > points[-1][1])):
+            return "INCOMPLETE"
+        points.append((hours, retained))
+    if points[0] != (0, 1):
+        return "INCOMPLETE"
+    for (h0, r0), (h1, r1) in zip(points, points[1:]):
+        if exposure <= h1:
+            retained = r0 + (r1 - r0) * (exposure - h0) / (h1 - h0)
+            return "PASS" if Fraction(str(installed_n)) * retained >= Fraction(str(required_n)) else "FAIL"
+    return "INCOMPLETE"
+
+
 def baseplate_contact_quality(model, pad_xy_mm, reactions_n, axial_n, mx_nmm, my_nmm):
     """Check recorded point contacts under a vertical load, without hold-down tension.
 
