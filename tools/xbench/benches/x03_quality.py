@@ -4,6 +4,85 @@ from fractions import Fraction
 from math import ceil
 
 
+def power_swing_quality(rule, trace):
+    """Time inward crossings of two impedance-magnitude circles on linear segments.
+
+    A slow transit blocks distance trips until impedance leaves the outer circle.
+    Each row records time, magnitude and a distance trip at that timestamp.
+    """
+    if not isinstance(rule, dict) or rule.get("model") != "linear-magnitude-transit-v1":
+        return "INCOMPLETE"
+    values = [rule.get(key) for key in ("inner_ohm", "outer_ohm", "min_transit_s")]
+    if not all(map(finite_measure, values)) or not isinstance(trace, list) or len(trace) < 2:
+        return "INCOMPLETE"
+    inner, outer, delay = (Fraction(str(v)) for v in values)
+    if not 0 < inner < outer or delay <= 0:
+        return "INCOMPLETE"
+    entered = previous = None
+    blocked = completed = violation = False
+    for row in trace:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or type(row[2]) is not bool:
+            return "INCOMPLETE"
+        if not all(map(finite_measure, row[:2])) or row[1] < 0:
+            return "INCOMPLETE"
+        time, z = (Fraction(str(v)) for v in row[:2])
+        if previous is None:
+            if z <= outer:
+                return "INCOMPLETE"
+        else:
+            last, prior_z = previous
+            if time <= last:
+                return "INCOMPLETE"
+            if z > outer:
+                entered = None
+                blocked = False
+            if prior_z > outer >= z:
+                entered = last + (time - last) * (prior_z - outer) / (prior_z - z)
+            if entered is not None and prior_z > inner >= z:
+                reached = last + (time - last) * (prior_z - inner) / (prior_z - z)
+                blocked = reached - entered >= delay
+                completed = True
+                entered = None
+            violation |= blocked and row[2]
+        previous = time, z
+    if not completed:
+        return "INCOMPLETE"
+    return "FAIL" if violation else "PASS"
+
+
+def trip_continuity_quality(rule, intervals):
+    """Alarm on continuous loss of any series path element beyond the pinned delay.
+
+    Each row describes a constant-state interval: duration, coil continuity,
+    available supply, contact continuity and supervision alarm.
+    """
+    if not isinstance(rule, dict) or rule.get("model") != "series-path-delay-v1":
+        return "INCOMPLETE"
+    delay = rule.get("alarm_delay_s")
+    if not finite_measure(delay) or delay < 0 or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    delay = Fraction(str(delay))
+    open_time = Fraction(0)
+    missed = exercised = False
+    for row in intervals:
+        if not isinstance(row, (list, tuple)) or len(row) != 5:
+            return "INCOMPLETE"
+        seconds, coil, supply, contact, alarm = row
+        if not finite_measure(seconds) or seconds <= 0 or not all(type(v) is bool for v in row[1:]):
+            return "INCOMPLETE"
+        if coil and supply and contact:
+            open_time = Fraction(0)
+            missed |= alarm
+        else:
+            open_time += Fraction(str(seconds))
+            if open_time > delay:
+                exercised = True
+                missed |= not alarm
+    if not exercised:
+        return "INCOMPLETE"
+    return "FAIL" if missed else "PASS"
+
+
 def battery_thermal_quality(initial_c, ambient_c, heat_capacity_j_per_k, maximum_c, intervals):
     """Lumped thermal store with constant loads per interval and cooling limited at ambient."""
     inputs = (initial_c, ambient_c, heat_capacity_j_per_k, maximum_c)

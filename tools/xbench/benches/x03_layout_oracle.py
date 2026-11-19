@@ -4,6 +4,22 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def timber_splitting_quality(revision, rule, grain, edge_mm, thickness_mm, cross_grain_n):
+    """Apply a pinned timber edge-ligament resistance for a fastener loaded across grain."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "cross-grain-clear-ligament-v1" or grain != "perpendicular":
+        return "INCOMPLETE"
+    values = (edge_mm, thickness_mm, cross_grain_n, rule.get("hole_mm"), rule.get("ligament_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    edge, thickness, force, hole, stress = (Fraction(str(v)) for v in values)
+    if min(thickness, hole, stress) <= 0 or edge < hole / 2 or force < 0:
+        return "INCOMPLETE"
+    capacity = (edge - hole / 2) * thickness * stress
+    return "PASS" if force <= capacity else "FAIL"
+
+
 def timber_bearing_quality(revision, rule, timber, grain_direction, contact_mm2, reaction_n):
     """Grade local compression on the actual support footprint for recorded timber and grain."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

@@ -1147,3 +1147,26 @@ def reference_et_quality(model, day, reported_mm, tolerance_mm):
     aerodynamic = gamma * 900 * wind * (saturation - actual) / (temp + 273)
     denominator = slope + gamma * (1 + Fraction("0.34") * wind)
     return "PASS" if abs(reported - (energy + aerodynamic) / denominator) <= tolerance else "FAIL"
+
+
+def ultrasonic_snow_depth_quality(revision, calibration, height_m, air_c, echo_s, reported_depth_m):
+    """Grade a vertical round-trip echo above a flat reference surface."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(calibration, dict):
+        return "INCOMPLETE"
+    if calibration.get("revision") != revision or calibration.get("model") != "linear-sound-speed-v1":
+        return "INCOMPLETE"
+    keys = ("speed_at_zero_m_s", "slope_m_s_per_c", "min_c", "max_c")
+    values = [calibration.get(k) for k in keys] + [height_m, air_c, echo_s, reported_depth_m]
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    base, slope, low, high, height, air, echo, reported = (Fraction(str(x)) for x in values)
+    speed = base + slope * air
+    if height <= 0 or base <= 0 or speed <= 0 or not low <= air <= high:
+        return "INCOMPLETE"
+    if echo <= 0:
+        return "FAIL"
+    expected = height - speed * echo / 2
+    return "PASS" if expected >= 0 and expected == reported else "FAIL"

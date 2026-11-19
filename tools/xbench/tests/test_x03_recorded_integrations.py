@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("assembly,angle,limit", [
+    pytest.param("panel", 0, 12, id="qualify-a-normal-panel-strike"),
+    pytest.param("skylight", 30, 8, id="check-an-oblique-skylight-impact"),
+    pytest.param("cabinet", 50, 5, id="check-a-grazing-cabinet-impact"),
+])
+def test_hail_impact_requires_angle_energy_coverage(assembly, angle, limit):
+    from benches.x03_catalog_oracle import hail_impact_quality as grade
+
+    sheet = dict(revision="lab", static_load_pass=True, qualified_angle_energy={
+        "panel": [(0, 15, 12)], "skylight": [(0, 20, 16), (20, 35, 8)], "cabinet": [(40, 50, 5)],
+    })
+    assert grade("lab", sheet, assembly, angle, limit) == "PASS"
+    assert grade("lab", sheet, assembly, angle, limit + 1) == "FAIL"
+    assert grade("lab", sheet, assembly, 70, limit) == "INCOMPLETE"
+    assert grade("lab", sheet, "untested", angle, limit) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("seal,high,low,seconds,cycles", [
     pytest.param("valve", 100, 20, 10, 200, id="check-a-valve-blowdown"),
     pytest.param("fitting", 60, 0, 30, 1000, id="qualify-a-vented-fitting"),
@@ -1552,3 +1569,20 @@ def test_reference_et_reconciles_daily_depth(values, expected_mm):
     assert grade(model, day, 1000 * expected_mm, 0.000001) == "FAIL"
     assert grade(model, dict(day, actual_kpa=None), expected_mm, 0.000001) == "INCOMPLETE"
     assert grade(model, dict(day, hours=1), expected_mm, 0.000001) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("height,air,echo,expected,uncorrected", [
+    pytest.param(3, -10, 0.01, 1.375, 1.345, id="correct-an-overnight-cold-return"),
+    pytest.param(5, 5, 0.02, 1.66, 1.69, id="measure-snow-during-a-thaw"),
+    pytest.param(2, -20, 0.008, 0.724, 0.676, id="measure-a-shallow-cold-site"),
+])
+def test_snow_depth_corrects_echo_for_air_temperature(height, air, echo, expected, uncorrected):
+    from benches.x03_weather_oracle import ultrasonic_snow_depth_quality as grade
+
+    model = dict(revision="echo-3", model="linear-sound-speed-v1", speed_at_zero_m_s=331,
+                 slope_m_s_per_c=0.6, min_c=-30, max_c=20)
+    assert grade("echo-3", model, height, air, echo, expected) == "PASS"
+    assert grade("echo-3", model, height, air, echo, uncorrected) == "FAIL"
+    assert grade("echo-3", model, height, air, -echo, expected) == "FAIL"
+    assert grade("echo-3", model, height, air, 1, expected) == "FAIL"
+    assert grade("echo-4", model, height, air, echo, expected) == "INCOMPLETE"

@@ -4,6 +4,21 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("edge,hole,width,stress,capacity,bolt", [
+    pytest.param(30, 10, 40, 2, 2000, 4000, id="check-a-rafter-hanger-edge"),
+    pytest.param(22, 8, 50, 1.5, 1350, 3000, id="check-a-joist-side-fastener"),
+    pytest.param(35, 14, 80, 2.5, 5600, 9000, id="check-a-girder-bracket-bolt"),
+])
+def test_cross_grain_connection_splits_before_fastener_shear(edge, hole, width, stress, capacity, bolt):
+    from benches.x03_layout_oracle import timber_splitting_quality as grade
+
+    rule = dict(revision="lab", model="cross-grain-clear-ligament-v1", hole_mm=hole, ligament_mpa=stress)
+    assert capacity + 1 < bolt
+    assert grade("lab", rule, "perpendicular", edge, width, capacity) == "PASS"
+    assert grade("lab", rule, "perpendicular", edge, width, capacity + 1) == "FAIL"
+    assert grade("lab", rule, None, edge, width, capacity) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("timber,area,bearing,shear_limit", [
     pytest.param("A", 1200, 3600, 8000, id="check-the-rafter-seat"),
     pytest.param("B", 750, 1875, 5000, id="verify-the-narrow-joist-hanger"),

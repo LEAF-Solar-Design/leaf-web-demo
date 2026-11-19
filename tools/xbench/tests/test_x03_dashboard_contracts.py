@@ -913,3 +913,24 @@ def test_deficit_round_robin_reconciles_dispatch_and_idle_reset(quantum, cost, s
     assert grade(model, order, quanta, [dict(first, dispatch=["large", "quick"]), second]) == "FAIL"
     assert grade(model, order, quanta, [dict(first, closing={"batch": quantum, "short": 1})]) == "FAIL"
     assert grade(None, order, quanta, [first, second]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("readers,writer", [
+    pytest.param(["preview"], "publish", id="serialize-a-preview-and-a-publish"),
+    pytest.param(["left", "right"], "rebuild", id="wait-for-both-concurrent-viewport-reads"),
+    pytest.param(["audit", "export", "compare"], "replace", id="hand-off-after-three-auditors"),
+])
+def test_reader_writer_lock_excludes_conflicting_owners(readers, writer):
+    from benches.x03_dashboard_oracle import reader_writer_lock_quality as grade
+
+    rule = "shared-read-exclusive-write-v1"
+    opened = {readers[0]: "read"}
+    extend = [("acquire", r, "read") for r in readers[1:]]
+    release = [("release", r, "read") for r in readers]
+    write = ("acquire", writer, "write")
+    valid = extend + release + [write]
+    assert grade(rule, opened, valid, complete=True) == "PASS"
+    assert grade(rule, opened, extend + release[:-1] + [write], complete=True) == "FAIL"
+    assert grade(rule, opened, valid + [("acquire", "other", "write")], complete=True) == "FAIL"
+    assert grade(rule, opened, valid + [("acquire", "other", "read")], complete=True) == "FAIL"
+    assert grade(rule, None, valid, complete=True) == "INCOMPLETE"

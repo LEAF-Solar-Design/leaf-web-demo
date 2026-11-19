@@ -1853,3 +1853,34 @@ def deficit_round_robin_quality(policy, order, quanta, rounds):
         if expected != dispatch or closing != credit:
             return "FAIL"
     return "PASS"
+
+
+def reader_writer_lock_quality(policy, opening, events, *, complete):
+    """Audit a nonreentrant lock using explicit shared/exclusive ownership records."""
+    if policy != "shared-read-exclusive-write-v1" or complete is not True:
+        return "INCOMPLETE"
+    if not isinstance(opening, dict) or not isinstance(events, list):
+        return "INCOMPLETE"
+    owners = dict(opening)
+    for actor, mode in owners.items():
+        if not isinstance(actor, str) or not actor or mode not in ("read", "write"):
+            return "INCOMPLETE"
+    if "write" in owners.values() and len(owners) != 1:
+        return "FAIL"
+    for event in events:
+        if not isinstance(event, (tuple, list)) or len(event) != 3:
+            return "INCOMPLETE"
+        action, actor, mode = event
+        if not isinstance(actor, str) or not actor or mode not in ("read", "write"):
+            return "INCOMPLETE"
+        if action == "acquire":
+            if actor in owners or (mode == "write" and owners) or "write" in owners.values():
+                return "FAIL"
+            owners[actor] = mode
+        elif action == "release":
+            if owners.get(actor) != mode:
+                return "FAIL"
+            del owners[actor]
+        else:
+            return "INCOMPLETE"
+    return "PASS"
