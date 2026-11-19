@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 import json
+from x07_tracker_roles import encode_roles, read_roles
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
@@ -151,11 +152,12 @@ class CustomerProfileStore:
         encoded = result.pop('roles_json')
         try:
             roles = json.loads(encoded, parse_constant=lambda value: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
+            roles = read_roles(roles)
             if (not isinstance(encoded, str) or len(encoded.encode('utf-8')) > 131072
                     or not isinstance(roles, dict) or 'module' not in roles
-                    or set(roles)-{'module','roof','obstruction'}
+                    or set(roles)-{'module','roof','obstruction','trackers'}
                     or any(not isinstance(role, dict) or not isinstance(role.get('layer'),str) or not role['layer']
-                           or ('block' in role and (not isinstance(role['block'],str) or not role['block'])) for role in roles.values())):
+                           or ('block' in role and (not isinstance(role['block'],str) or not role['block'])) for key, role in roles.items() if key != 'trackers')):
                 raise ValueError('invalid role shape')
         except (TypeError, ValueError, RecursionError) as error:
             raise ValueError('stored profile roles are invalid') from error
@@ -168,7 +170,7 @@ class CustomerProfileStore:
         if not isinstance(roles, dict):
             raise ValueError('roles must be a JSON object')
         try:
-            encoded = json.dumps(roles, sort_keys=True, separators=(',', ':'), allow_nan=False)
+            encoded = encode_roles(roles)
         except (TypeError, ValueError, RecursionError) as exc:
             raise ValueError('roles must be finite JSON') from exc
         if len(encoded.encode('utf-8')) > 131072:

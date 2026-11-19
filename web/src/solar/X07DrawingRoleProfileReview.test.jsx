@@ -108,3 +108,13 @@ it('snapshots pinned roles instead of following mutable callbacks or later profi
   expect(screen.getByRole('region', { name: 'Pinned drawing roles' })).not.toHaveTextContent('UPDATED')
   expect(screen.getByRole('region', { name: 'Pinned drawing roles' })).not.toHaveTextContent('MUTATED_RECEIPT')
 })
+
+it('keeps typed tracker rows on the confirmed project pin', async () => {
+  const props = defaults()
+  const tracker = { block: 'Rack', layer: 'Ground', tracker_type: 'long', modules_per_instance: 42 }
+  const applied = { ...pin, roles: { ...roles, trackers: [tracker] } }
+  props.onConfirm.mockResolvedValue({ ok: true, drawing_key: 'drawing-a', applied_profile: applied })
+  render(<Review {...props} />)
+  await submit()
+  expect(await screen.findByText('Rack on Ground, long, 42 modules per instance')).toBeTruthy()
+})

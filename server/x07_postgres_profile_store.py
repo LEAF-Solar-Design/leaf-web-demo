@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 from uuid import UUID, uuid4
 
+from x07_tracker_roles import encode_roles
 from x07_customer_profile_store import CustomerProfileStore, MAX_PROFILE_VERSION, ProfileScopeError
 
 
@@ -44,7 +45,7 @@ class PostgresProfileStore:
         self._scope(customer_key)
         if type(expected_version) is not int or not 0 <= expected_version < MAX_PROFILE_VERSION:
             raise ValueError('explicit expected version is required')
-        encoded = json.dumps(roles, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        encoded = encode_roles(roles)
         # Reuse the existing persisted role shape and byte-budget checks.
         candidate = CustomerProfileStore._profile({'version': expected_version + 1, 'roles_json': encoded})
         if not candidate['roles']['module'].get('block'):
