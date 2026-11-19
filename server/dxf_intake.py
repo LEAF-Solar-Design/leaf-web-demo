@@ -897,6 +897,12 @@ def _retain_short_segment_vectors(path, record, kind):
 def _block_measurement_path(pairs, start, end, kind):
     if kind == "SPLINE":
         return _spline_measurement_path(pairs[start:end])
+    if kind == "ARC":
+        arc, _ = _parse_circle_or_arc(pairs, start, kind)
+        if arc is None:
+            raise ValueError("Invalid beam arc radius.")
+        arc.pop("_properties", None)
+        return {"kind": "ARC", **arc}
     parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
     path, _ = parse(pairs, start)
     if path and kind in ("LINE", "LWPOLYLINE"):
@@ -942,11 +948,11 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC"):
                 paths = block.setdefault("beam_paths", [])
                 if len(paths) < 10000:
                     path = _block_measurement_path(pairs, i + 1, end, kind)
-                    if path is not None and (not path.get("closed") or path.get("periodic")):
+                    if path is not None and (not path.get("closed") or path.get("periodic") or path.get("bulges")):
                         paths.append(path)
                 else:
                     block["beam_paths_incomplete"] = True
@@ -960,7 +966,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 block["nested_inserts_incomplete"] = True

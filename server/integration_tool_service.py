@@ -530,7 +530,7 @@ class _DatasetResponseStream(httpx.AsyncByteStream):
 
 
 async def bounded_http(method, url, token, body, deadline, transport=None, *, save=False,
-                       expected_revision=None, dataset_report=False):
+                       expected_revision=None, dataset_report=False, time_left=None):
     import httpx
     headers = {"Authorization": "Bearer " + token.decode("utf-8"),
                "Accept": "application/json", "Accept-Encoding": "identity",
@@ -540,6 +540,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
     async with asyncio.timeout(deadline):
         async with httpx.AsyncClient(verify=True, follow_redirects=False, trust_env=False,
                                     timeout=deadline, transport=transport) as client:
+            if time_left is not None:
+                time_left()
             async with client.stream(method, url, headers=headers,
                                      content=body) as response:
                 if dataset_report:
@@ -566,6 +568,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                 raw = bytearray()
                 try:
                     async for chunk in response.aiter_bytes():
+                        if time_left is not None:
+                            time_left()
                         if len(raw) + len(chunk) > RESPONSE_CAP:
                             raise ReadFailure("response_too_large")
                         raw.extend(chunk)
@@ -627,7 +631,8 @@ class IntegrationToolService:
         return self.resolve(tenant, session, turn)
 
     def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
-                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False):
+                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False,
+                       time_left=None):
         visited = set()
         first_snapshot = None
         first_schema_revision = None
@@ -637,12 +642,16 @@ class IntegrationToolService:
         declared_total = None
         args = {"limit": limit}
         while True:
+            if time_left is not None:
+                time_left()
             if cancel_event is not None and cancel_event.is_set():
                 raise IncompleteInventory(len(visited))
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             reply = self._execute(operation, args, tenant, session, turn, authority,
-                                  provider_statuses=provider_statuses)
+                                  provider_statuses=provider_statuses, time_left=time_left)
+            if time_left is not None:
+                time_left()
             if self._resolve_operation(operation, tenant, session, turn).authority != authority:
                 raise ReadFailure("denied")
             if "result" not in reply:
@@ -727,20 +736,38 @@ class IntegrationToolService:
                                       read_revision=read_revision, record_attempt=record_attempt)
 
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
-                                    page_size=None, sort="catalog", cursor=None, cancel_event=None):
+                                    page_size=None, sort="catalog", cursor=None, cancel_event=None, deadline=None):
+        """An optional absolute deadline uses the service clock's seconds."""
+        if deadline is not None and (type(deadline) not in (int, float) or not -math.inf < deadline < math.inf):
+            raise ReadFailure("invalid_input")
+
+        def remaining():
+            seconds = deadline - self.clock()
+            if seconds <= 0:
+                raise ReadFailure("timeout")
+            return seconds
+
+        time_left = remaining if deadline is not None else None
+        if time_left is not None:
+            time_left()
         if page_size is not None or sort != "catalog" or cursor is not None:
             from authored_dataset_cursor import paged_report
-            return paged_report(self, description, tenant, session, turn, limit=limit,
-                                page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event)
-        return self._run_catalog_report("datasets", description, tenant, session, turn, limit,
-                                        cancel_event=cancel_event)
+            report = paged_report(self, description, tenant, session, turn, limit=limit,
+                                  page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event,
+                                  time_left=time_left)
+        else:
+            report = self._run_catalog_report("datasets", description, tenant, session, turn, limit,
+                                              cancel_event=cancel_event, time_left=time_left)
+        if time_left is not None:
+            time_left()
+        return report
 
     def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
         return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
                                         include_form_digest=include_form_digest)
 
     def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
-                            expected_authority=None, cancel_event=None, dataset_sort="catalog"):
+                            expected_authority=None, cancel_event=None, dataset_sort="catalog", time_left=None):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -773,7 +800,7 @@ class IntegrationToolService:
             raise ReadFailure("invalid_input")
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
                                         require_snapshot=pinned, cancel_event=cancel_event,
-                                        provider_statuses=provider_statuses,
+                                        provider_statuses=provider_statuses, time_left=time_left,
                                         require_schema=operation == "datasets" and requires_schema_revision(description)):
             pages += 1
             for entry in page[collection]:
@@ -807,6 +834,8 @@ class IntegrationToolService:
         if pinned:
             catalog["snapshot_verified"] = True
         intake = {f"project_{kind}_catalog": catalog}
+        if time_left is not None:
+            time_left()
         status, payload = tool_loader._run_source_in_sandbox(source, f"{kind}_report.py", intake, {})
         if status != "ok":
             raise ReadFailure("unavailable")
@@ -820,7 +849,8 @@ class IntegrationToolService:
     def execute(self, operation, value, tenant, session, turn):
         return self._execute(operation, value, tenant, session, turn, None)
 
-    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None):
+    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None,
+                 time_left=None):
         result = None
         code = "unavailable"
         try:
@@ -893,6 +923,8 @@ class IntegrationToolService:
                         remaining = min(10.0, binding.expires_at - self.clock())
                         if remaining <= 0:
                             raise ReadFailure("denied")
+                        if time_left is not None:
+                            remaining = min(remaining, time_left())
                         started = True
                         if saving:
                             value = asyncio.run(bounded_http(method, url, token, body, remaining, self.transport,
@@ -902,7 +934,7 @@ class IntegrationToolService:
                             try:
                                 value = asyncio.run(bounded_http(
                                     method, url, token, body, remaining, self.transport,
-                                    dataset_report=expected_authority is not None))
+                                    dataset_report=expected_authority is not None, time_left=time_left))
                             finally:
                                 _PRIVATE_CATALOG_HTTP.reset(private_http)
                         else:

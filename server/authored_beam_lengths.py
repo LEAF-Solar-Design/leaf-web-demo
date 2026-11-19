@@ -114,6 +114,30 @@ def curved_length(frame, delta, bulge, normal):
     raise ValueError("Curved beam length could not meet the reported tolerance.")
 
 
+def native_arc_length(path, frame):
+    radius = path["r"]
+    start = math.radians(path["start_deg"])
+    degrees = path["end_deg"] - path["start_deg"]
+    if not all(math.isfinite(v) for v in (radius, start, degrees)) or radius <= 0:
+        raise ValueError("Invalid ARC measurement.")
+    if degrees == 0 or abs(degrees) > 360:
+        raise ValueError("Ambiguous or invalid ARC sweep.")
+    sweep = math.radians(degrees % 360 or 360)
+    x_axis, y_axis, normal = extrusion_axes(path.get("nrm", (0, 0, 1)))
+    # Construct each subarc's chord from its midpoint tangent. No distant
+    # center subtraction, and a full turn never degenerates to a zero chord.
+    count = math.ceil(sweep / (math.pi / 2))
+    angle = sweep / count
+    chord = 2*radius*math.sin(angle/2)
+    bulge = math.tan(angle/4)
+    length = 0.0
+    for index in range(count):
+        mid = start + (index + .5)*angle
+        delta = tuple(chord*(v*math.cos(mid) - u*math.sin(mid)) for u, v in zip(x_axis, y_axis))
+        length += curved_length(frame, delta, bulge, normal)
+    return length
+
+
 def __ENTRY_POINT__(intake, params):
     metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
                        6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
@@ -160,17 +184,21 @@ def __ENTRY_POINT__(intake, params):
             return
         if __PERIODIC__ and not path.get("periodic"):
             return
-        if path.get("closed") and not (__PERIODIC__ and path.get("periodic")):
+        if path.get("closed") and not path.get("bulges") and not (__PERIODIC__ and path.get("periodic")):
             if __COLLECT_SPLINES__:
                 raise ValueError("A closed spline has no free ends for a joined beam report.")
             return
-        if path.get("kind") == "SPLINE":
+        if path.get("measurement_error"):
+            raise ValueError(path["measurement_error"])
+        if path.get("kind") == "ARC":
+            if __SURVEY__:
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
+            length = native_arc_length(path, frame)
+        elif path.get("kind") == "SPLINE":
             if __SURVEY__:
                 raise ValueError("Survey precision bounds require straight beam coordinates.")
             length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__, evaluation_budget)
         else:
-            if path.get("measurement_error"):
-                raise ValueError(path["measurement_error"])
             points = path["pts"]
             vectors = path.get("measurement_vectors")
             bulges = path.get("bulges", [])
@@ -179,12 +207,14 @@ def __ENTRY_POINT__(intake, params):
             if bulges and len(bulges) != len(points):
                 raise ValueError("Beam curve lacks per-vertex bulges.")
             length = 0.0
-            for i in range(len(points) - 1):
-                delta = vectors[i] if vectors is not None else [b-a for a,b in zip(points[i], points[i+1])]
+            for i in range(len(points) if path.get("closed") else len(points) - 1):
+                nxt = (i + 1) % len(points)
+                delta = (vectors[i] if vectors is not None and i < len(vectors)
+                         else [b-a for a,b in zip(points[i], points[nxt])])
                 if __SURVEY__:
                     if not any(delta):
                         raise ValueError("Collapsed beam segment has no measurable length.")
-                    if vectors is None and max(map(abs, (*points[i], *points[i+1]))) > 1e7 * math.hypot(*delta):
+                    if vectors is None and max(map(abs, (*points[i], *points[nxt]))) > 1e7 * math.hypot(*delta):
                         raise ValueError("Insufficient source precision for short beam segment.")
                 if len(delta) == 2:
                     delta.append(0)
@@ -210,6 +240,9 @@ def __ENTRY_POINT__(intake, params):
 
     for path in distinct_entities(intake.get("polylines", [])):
         measure(path, identity, "0", (), 1)
+
+    for arc in distinct_entities(intake.get("arcs", [])):
+        measure(dict(arc, kind="ARC"), identity, "0", (), 1)
 
     for path in distinct_entities(intake.get("splines", [])):
         measure(path, identity, "0", (), 1)
@@ -238,13 +271,16 @@ def __ENTRY_POINT__(intake, params):
                     raise ValueError("Missing beam geometry in block: " + name)
                 if child.get("type") == "INSERT" and "nested_inserts" not in block:
                     raise ValueError("Missing nested reference in block: " + name)
-                if child.get("kind") == "LINE":
+                if child.get("kind") in ("LINE", "ARC"):
                     paths.append(child)
                 elif child.get("kind") == "LWPOLYLINE":
                     axes = ((0, 0, 0), *extrusion_axes(child.get("nrm", (0, 0, 1))))
                     points = [transform_point(axes, (p[0], p[1], child.get("elev", 0)))
                               for p in child["pts"]]
                     paths.append(dict(child, pts=points))
+        elif not any(path.get("kind") == "ARC" for path in paths):
+            paths = paths + [dict(child, measurement_error="Reimport this drawing to measure native block arcs at source precision.")
+                             for child in block.get("children", []) if child.get("kind") == "ARC"]
         layer = insert.get("layer", "0")
         if layer == "0":
             layer = inherited
