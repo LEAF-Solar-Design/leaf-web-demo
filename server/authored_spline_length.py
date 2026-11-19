@@ -62,6 +62,26 @@ def spline_jump(points, knots, degree, k, frame):
     return math.hypot(*transform_vector(frame, tuple(b-a for a, b in zip(left, right))))
 
 
+def spline_endpoints(path, frame, require_continuity=False):
+    degree, points, knots = path["degree"], path["control_points"], path["knots"]
+    weights = path["weights"]
+    scale = max(weights)
+    net = [(*[v*(w/scale) for v in p], w/scale) for p, w in zip(points, weights)]
+    spans = [k for k in range(degree, len(points)) if knots[k] < knots[k+1]]
+    # A fully multiple interior knot can break a single entity into disjoint spans.
+    for k in spans[1:]:
+        if require_continuity and spline_jump(points, knots, degree, k, frame):
+            raise ValueError("Discontinuous knot sequence within one spline segment.")
+    ends = []
+    for k, index in ((spans[0], 0), (spans[-1], -1)):
+        p = bezier_span(net, knots, degree, k)[index]
+        end = transform_point(frame, tuple(x/p[3] for x in p[:3]))
+        if not all(math.isfinite(x) for x in end):
+            raise ValueError("Unresolved transformed spline endpoint.")
+        ends.append(end)
+    return ends
+
+
 def spline_length(path, frame, factor, detail):
     if path.get("spline_error"):
         raise ValueError(path["spline_error"])

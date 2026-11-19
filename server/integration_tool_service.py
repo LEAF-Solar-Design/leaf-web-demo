@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 import re
+import secrets
 import time
 import httpx
 from urllib.parse import quote, quote_plus, unquote, unquote_plus
@@ -42,7 +43,7 @@ RESPONSE_CAP = 256 * 1024
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
-          "outcome_unknown": 502}
+          "outcome_unknown": 502, "deleted_conflict": 409}
 
 
 class ReadFailure(Exception):
@@ -461,6 +462,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                 if 300 <= response.status_code < 400:
                     raise ReadFailure("invalid_response")
                 if response.status_code != 200:
+                    if save and expected_revision is not None and response.status_code == 410:
+                        raise DefiniteHTTPFailure("deleted_conflict")
                     if save and response.status_code in {400, 401, 403, 404, 409}:
                         raise DefiniteHTTPFailure({400: "invalid_input", 401: "unauthenticated",
                                                    403: "denied", 404: "not_found",
@@ -517,6 +520,7 @@ class IntegrationToolService:
         self.store = store if store is not None else IntegrationTurnGrantStore()
         self.decrypt, self.gate, self.clock = decrypt, gate, clock
         self.transport, self.keys = transport, keys
+        self._dataset_cursor_key = secrets.token_bytes(32)
 
     def iter_dataset_pages(self, tenant, session, turn, *, limit=50):
         """Read each catalog page under the same turn authority, with bounded cursor history."""
@@ -576,18 +580,27 @@ class IntegrationToolService:
         from authored_role_action import compare_role_actions
         return compare_role_actions(self, description, tenant, session, turn, policy=policy, limit=limit)
 
-    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn):
+    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn, *,
+                               issue_retry_key=False, retry_key=None, read_revision=None):
         from authored_recipe_edit import edit_inspection_recipe
-        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn)
+        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn,
+                                      issue_retry_key=issue_retry_key, retry_key=retry_key,
+                                      read_revision=read_revision)
 
-    def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50):
+    def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
+                                    page_size=None, sort="catalog", cursor=None):
+        if page_size is not None or sort != "catalog" or cursor is not None:
+            from authored_dataset_cursor import paged_report
+            return paged_report(self, description, tenant, session, turn, limit=limit,
+                                page_size=page_size, sort=sort, cursor=cursor)
         return self._run_catalog_report("datasets", description, tenant, session, turn, limit)
 
     def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
         return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
                                         include_form_digest=include_form_digest)
 
-    def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False):
+    def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
+                            expected_authority=None):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -604,9 +617,12 @@ class IntegrationToolService:
         if package["engine_op"] != f"project_{kind}_discovery":
             raise ReadFailure("invalid_input")
         authority = self._resolve_operation(operation, tenant, session, turn).authority
+        if expected_authority is not None and authority != expected_authority:
+            raise ReadFailure("denied")
         rows = []
         size = 0
         pages = 0
+        datasets_by_id = {}
         from authored_dataset_discovery import requires_snapshot
         pinned = operation == "datasets" and requires_snapshot(description)
         for page in self._catalog_pages(operation, tenant, session, turn, limit, authority, require_snapshot=pinned):
@@ -619,6 +635,14 @@ class IntegrationToolService:
                 size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
                 if size > RESPONSE_CAP:
                     raise ReadFailure("response_too_large")
+                if operation == "datasets":
+                    dataset_id = row["dataset_ref"]["id"]
+                    previous = datasets_by_id.get(dataset_id)
+                    if previous is not None:
+                        if previous != row:
+                            raise ReadFailure("identity_conflict")
+                        continue
+                    datasets_by_id[dataset_id] = row
                 rows.append(row)
         if self._resolve_operation(operation, tenant, session, turn).authority != authority:
             raise ReadFailure("denied")

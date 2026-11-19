@@ -34,7 +34,8 @@ def _digest(element):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def recover_recipe_save(service, description, original_args, tenant, session, turn, *, read_revision=None):
+def recover_recipe_save(service, description, original_args, tenant, session, turn, *, read_revision=None,
+                        expected_authority=None):
     """Read-only reconciliation using the host's authorized, revision-specific reader.
 
     original_args are the original save request. The host reader enforces its own
@@ -50,6 +51,8 @@ def recover_recipe_save(service, description, original_args, tenant, session, tu
     try:
         args = normalize("elements", original_args)
         authority = service._resolve_operation("elements", tenant, session, turn).authority
+        if expected_authority is not None and authority != expected_authority:
+            return failure("denied")
     except ReadFailure as exc:
         return failure(str(exc))
     successor = args.get("expectedRevision", 0) + 1

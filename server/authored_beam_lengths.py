@@ -18,7 +18,7 @@ _UNITS = (
 def matches(description):
     prompt = description.casefold()
     spline = re.search(r"\b(?:splines?|nurbs|knots?)\b", prompt)
-    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure)\b", prompt):
+    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure|how long)\b", prompt):
         return True
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
@@ -45,6 +45,8 @@ def build_body(description, *, entry_point="run"):
     only_splines = collect_segments or bool(spline_request and (explicit_spline_scope or not mixed_scope))
     periodic = bool(re.search(r"\bperiodic\b", description, re.I))
     survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
+    endpoints = bool(spline_request and re.search(r"\b(?:endpoints?|orientation|direction)\b", description, re.I))
+    list_members = re.search(r"\blist(?:s|ing)?\b|\beach\s+(?:(?:spline|nurbs)\s+)?beam\b", description, re.I)
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__PERIODIC__", repr(periodic))
             .replace("__SURVEY__", repr(survey))
@@ -52,8 +54,9 @@ def build_body(description, *, entry_point="run"):
             .replace("__OUTPUT_FACTOR__", repr(factor))
             .replace("__ONLY_SPLINES__", repr(only_splines))
             .replace("__COLLECT_SPLINES__", repr(collect_segments))
+            .replace("__ENDPOINTS__", repr(endpoints))
             .replace("__SPAN_DETAIL__", repr(span_detail))
-            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or endpoints or bool(list_members))))
 
 
 _BODY = """
@@ -195,8 +198,8 @@ def __ENTRY_POINT__(intake, params):
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
             if __SPAN_DETAIL__ and path.get("kind") == "SPLINE":
                 span_reports[key] = span_report
-            if __COLLECT_SPLINES__:
-                members[key]["ends"] = spline_endpoints(path, frame)
+            if (__COLLECT_SPLINES__ or __ENDPOINTS__) and path.get("kind") == "SPLINE":
+                members[key]["ends"] = spline_endpoints(path, frame, require_continuity=__COLLECT_SPLINES__)
 
     for path in distinct_entities(intake.get("polylines", [])):
         measure(path, identity, "0", (), 1)
@@ -271,6 +274,8 @@ def __ENTRY_POINT__(intake, params):
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
     if __SURVEY__:
         result["absolute_error_by_layer"] = {layer: value*LENGTH_RELATIVE_TOLERANCE for layer, value in totals.items()}
+    if __ENDPOINTS__:
+        result["endpoint_units"] = "drawing_units"
     if __SPAN_DETAIL__:
         result["spline_spans_by_handle"] = span_reports
     if __COLLECT_SPLINES__:

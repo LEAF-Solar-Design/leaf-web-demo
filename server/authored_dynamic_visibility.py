@@ -140,21 +140,23 @@ def active_children(evidence, name, handle, children):
 """
 
 
-_BODY = VISIBILITY_SOURCE + r"""
+INSTANCE_SOURCE = VISIBILITY_SOURCE + r"""
 
 
-def run(intake, params):
-    evidence = intake.get("block_visibility", {})
-    definitions = evidence.get("definitions")
-    if not definitions:
-        raise ValueError(evidence.get("error", "Missing block visibility evidence."))
+def visible_instances(intake, evidence, hidden_layers=None, known_layers=None):
     if any("unresolved block reference" in msg for msg in intake.get("parseErrors", [])):
         raise ValueError("Unresolved INSERT in visibility traversal.")
     blocks = {name.casefold(): definition for name, definition in intake.get("blocks", {}).items()}
     visible_paths = []
     visited = 0
 
-    def visit(ref, prefix, ancestors):
+    def visit(ref, prefix, ancestors, parent_layer):
+        layer = ref.get("layer", "0").casefold()
+        layer = parent_layer if layer == "0" else layer
+        if known_layers is not None and layer not in known_layers:
+            raise ValueError("Unresolved placement layer in viewport.")
+        if hidden_layers is not None and layer in hidden_layers:
+            return
         nonlocal visited
         name = ref.get("name", "").casefold()
         block = blocks.get(name)
@@ -186,12 +188,21 @@ def run(intake, params):
                     visible_paths.append(path)
                 else:
                     for child in children:
-                        visit(child, path + "/", ancestors + (name,))
+                        visit(child, path + "/", ancestors + (name,), layer)
 
     for ref in intake.get("inserts", []):
         if ref.get("space") != "paper":
-            visit(ref, "", ())
+            visit(ref, "", (), "0")
     if len(set(visible_paths)) != len(visible_paths):
         raise ValueError("Duplicate visibility placement paths.")
-    return {"total": len(visible_paths), "visible_paths": sorted(visible_paths)}, None
+    return {"total": len(visible_paths), "visible_paths": sorted(visible_paths)}
+"""
+
+
+_BODY = INSTANCE_SOURCE + """
+def run(intake, params):
+    evidence = intake.get("block_visibility", {})
+    if not evidence.get("definitions"):
+        raise ValueError(evidence.get("error", "Missing block visibility evidence."))
+    return visible_instances(intake, evidence), None
 """

@@ -522,6 +522,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     description = (description or "").strip()
     import authored_material_selection
     import authored_action_discovery
+    import authored_viewport_panels
     import authored_dynamic_visibility
     import authored_clipped_panels
     import authored_joined_spline
@@ -574,6 +575,12 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "compare", "material_revision_diff"
         drawing_body = authored_material_revision.build_body(description)
         summary = "compares verified records across pinned import revisions"
+    elif authored_viewport_panels.matches(description):
+        verb, engine_op = "count", "viewport_layer_panels"
+        drawing_body = authored_viewport_panels.build_body(description)
+        drawing_params = {"type": "object", "properties": {"viewport_handle": {"type": "string"}},
+                          "required": [] if authored_viewport_panels.viewport_handle(description) else ["viewport_handle"]}
+        summary = "counts model-space panel placements by viewport layer visibility"
     elif authored_panel_regions.matches(description):
         verb, engine_op = "measure", authored_panel_regions.operation(description)
         drawing_body = authored_panel_regions.build_body(description)
