@@ -693,3 +693,30 @@ def tipping_bucket_depth_quality(model, tips_s, reported_mm):
             return "INCOMPLETE"
         depth += bucket * gap / (gap - dead)
     return "PASS" if Fraction(str(reported_mm)) == depth else "FAIL"
+
+
+def wind_direction_frame_quality(frame, sensor_deg, reported_from_deg, tolerance_deg):
+    """Grade a horizontal meteorological bearing clockwise from true north.
+
+    The sensor bearing advances clockwise from its recorded zero orientation.
+    The output is the direction wind comes from.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(frame, dict) or frame.get("model") != "clockwise-true-north-v1":
+        return "INCOMPLETE"
+    convention = frame.get("sensor_direction")
+    orientation = frame.get("zero_true_deg")
+    if convention not in ("from", "to"):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (orientation, sensor_deg, reported_from_deg, tolerance_deg))):
+        return "INCOMPLETE"
+    if not 0 <= tolerance_deg < 180:
+        return "INCOMPLETE"
+    orientation, reading, reported, tolerance = (
+        Fraction(str(value)) for value in (orientation, sensor_deg, reported_from_deg, tolerance_deg)
+    )
+    expected = orientation + reading + (180 if convention == "to" else 0)
+    distance = abs((reported - expected + 180) % 360 - 180)
+    return "PASS" if distance <= tolerance else "FAIL"

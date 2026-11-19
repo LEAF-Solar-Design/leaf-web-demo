@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("tool,low,high,target,outside", [
+    pytest.param("driver", 1, 5, 1, 0.9, id="qualify-low-torque-terminal"),
+    pytest.param("wrench", 10, 40, 40, 41, id="check-rail-clamp-wrench"),
+    pytest.param("multiplier", 40, 160, 100, 39, id="qualify-flange-assembly-tool"),
+])
+def test_torque_tool_calibration(tool, low, high, target, outside):
+    from benches.x03_catalog_oracle import torque_tool_quality as grade
+
+    certificate = dict(revision="r1", tool_id=tool, min_nm=low, max_nm=high,
+                       valid_from="2026-01-01", valid_through="2026-06-30")
+    assert grade("r1", certificate, tool, "2026-06-30", target) == "PASS"
+    assert grade("r1", certificate, tool, "2026-07-01", target) == "FAIL"
+    assert grade("r1", certificate, tool, "2026-06-30", outside) == "FAIL"
+    assert grade("r1", dict(certificate, valid_through=None), tool, "2026-06-30", target) == "INCOMPLETE"
+    assert grade("r1", certificate, "another tool", "2026-06-30", target) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("zone,group,temp_class,accepted,rejected", [
     pytest.param("Z1", "IIC", "T4", "db IIC T4", "ec IIC T4", id="choose-a-zone-one-enclosure"),
     pytest.param("Z2", "IIB", "T5", "ec IIB T5", "ec IIA T5", id="qualify-a-gas-monitor"),
@@ -1053,3 +1070,19 @@ def test_tipping_bucket_dead_time_uses_each_calibrated_gap(tips, bucket, dead, c
     assert grade(model, tips, uncorrected) == "FAIL"
     assert grade(model, [0, coverage[1] + 1], expected) == "INCOMPLETE"
     assert grade(model, [0, dead], expected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("zero,direction,reading,expected", [
+    pytest.param(90, "from", 45, 135, id="rotate-a-rooftop-vane-to-true-north"),
+    pytest.param(270, "to", 90, 180, id="convert-an-outgoing-vector-to-wind-origin"),
+    pytest.param(355, "from", 7, 2, id="audit-a-bearing-across-north"),
+])
+def test_wind_direction_rotates_sensor_frame(zero, direction, reading, expected):
+    from benches.x03_weather_oracle import wind_direction_frame_quality as grade
+
+    frame = {"model": "clockwise-true-north-v1", "zero_true_deg": zero, "sensor_direction": direction}
+    assert grade(frame, reading, expected, 0) == "PASS"
+    assert grade(frame, reading, (expected - 3) % 360, 3) == "PASS"
+    assert grade(frame, reading, (expected + 180) % 360, 3) == "FAIL"
+    for key in frame:
+        assert grade({k: v for k, v in frame.items() if k != key}, reading, expected, 0) == "INCOMPLETE"
