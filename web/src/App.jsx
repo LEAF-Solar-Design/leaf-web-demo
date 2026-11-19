@@ -6550,6 +6550,12 @@ export default function App() {
                   onMarqueeSelect={(handles, gesture) => {
                     if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     if (projectMode) {
+                      if (gesture?.subtract) {
+                        if (!handles.length) return
+                        setSelectedHandle(current => handles.includes(current) ? null : current)
+                        viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, subtract: true })
+                        return
+                      }
                       if (!gesture?.additive) setSelectedHandle(null)
                       viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, additive: !!gesture?.additive })
                       return
