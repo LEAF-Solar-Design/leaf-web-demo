@@ -810,3 +810,16 @@ def thread_engagement_quality(engaged_mm, pitch_mm, shear_diameter_mm, stripping
     turns = Fraction(str(engaged_mm)) // Fraction(str(pitch_mm))
     area = pi * shear_diameter_mm * stripping_width_mm * turns
     return "PASS" if pull_n <= area * allowable_mpa else "FAIL"
+
+
+def joint_slip_quality(bolt_preloads_n, slip_factor, interfaces, shear_n):
+    """Uniform friction coefficient and common slip planes across the preloaded bolt group."""
+    if not isinstance(bolt_preloads_n, list) or not bolt_preloads_n or type(interfaces) is not int or interfaces <= 0:
+        return "INCOMPLETE"
+    if not all(finite_measure(v) and v >= 0 for v in bolt_preloads_n):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (slip_factor, shear_n))) or slip_factor <= 0:
+        return "INCOMPLETE"
+    clamp = sum(Fraction(str(v)) for v in bolt_preloads_n)
+    resistance = interfaces * Fraction(str(slip_factor)) * clamp
+    return "PASS" if abs(Fraction(str(shear_n))) <= resistance else "FAIL"

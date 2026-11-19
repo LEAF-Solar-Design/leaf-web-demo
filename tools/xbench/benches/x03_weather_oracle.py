@@ -437,3 +437,36 @@ def psychrometric_quality(revision, model, dry_c, wet_c, pressure_kpa, reported_
     if not 0 <= vapor < pressure_kpa:
         return "FAIL"
     return "PASS" if abs(100*vapor/saturation - reported_rh) <= tolerance_pct else "FAIL"
+
+
+def precipitation_quality(window, intervals, policy, reported_mm):
+    """Sum interval increments over an exactly tiled window. Resets require resolved increments."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if policy != "complete-interval-increments" or not isinstance(intervals, list) or not finite_measure(reported_mm):
+        return "INCOMPLETE"
+    if not isinstance(window, (list, tuple)) or len(window) != 2 or not all(map(finite_measure, window)) or window[0] >= window[1]:
+        return "INCOMPLETE"
+    factors = {"mm":1, "cm":10, "in":Fraction("25.4")}
+    rows = []
+    for row in intervals:
+        if not isinstance(row, (list, tuple)) or len(row) != 5:
+            return "INCOMPLETE"
+        left, right, amount, unit, provenance = row
+        if not isinstance(unit, str) or unit not in factors or provenance not in ("increment", "resolved-reset"):
+            return "INCOMPLETE"
+        if not all(map(finite_measure, (left,right,amount))) or amount < 0 or not window[0] <= left < right <= window[1]:
+            return "INCOMPLETE"
+        rows.append((left,right,Fraction(str(amount))*factors[unit]))
+    cursor = window[0]
+    total = Fraction(0)
+    for left,right,increment in sorted(rows):
+        if left < cursor:
+            return "FAIL"
+        if left > cursor:
+            return "INCOMPLETE"
+        total += increment
+        cursor = right
+    if cursor != window[1]:
+        return "INCOMPLETE"
+    return "PASS" if total == Fraction(str(reported_mm)) else "FAIL"

@@ -1049,3 +1049,33 @@ def test_interval_charge_reconciliation(amps,polarity,final,shortcut):
     assert grade((0,5400),spans,initial,final,polarity) == "PASS"
     assert grade((0,5400),spans,initial,shortcut,polarity) == "FAIL"
     assert grade((0,5400),spans[1:],initial,final,polarity) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("equipment,turns,volts,dt,initial,peak", [
+    ("control transformer",100,10,0.1,0,0.01),
+    ("isolation transformer",200,-20,0.2,-0.01,0.03),
+    ("converter winding",50,5,0.2,0.02,0.04),
+])
+def test_peak_flux_before_volt_seconds_cancel(equipment,turns,volts,dt,initial,peak):
+    from benches.x03_quality import transformer_flux_quality as grade
+    trace = [(0,dt,volts),(dt,2*dt,-volts)]
+    # Both polarities have the same RMS, below the independent 24 V ceiling.
+    assert abs(volts) <= 24
+    assert grade((0,2*dt),trace,turns,initial,peak) == "PASS"
+    assert grade((0,2*dt),trace,turns,initial,peak-0.001) == "FAIL"
+    assert grade((0,2*dt),trace,turns,initial,None) == "INCOMPLETE"
+    assert grade((0,2*dt),trace[:1],turns,initial,peak) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cmd,delay,safe,closed,voltage", [
+    (0,1,5,True,0), (10,2,10,False,48), (20,3,12,True,120),
+])
+def test_open_command_requires_two_isolation_observations(cmd,delay,safe,closed,voltage):
+    from benches.x03_quality import contactor_open_quality as grade
+    due = cmd+delay
+    start = (cmd,due,False,120)
+    def check(tail):
+        return grade(cmd,delay,due+1,safe,[start,tail])
+    assert check((due,due+1,True,safe)) == "PASS"
+    assert check((due,due+1,not closed,voltage)) == "FAIL"
+    assert check((due,due+1,None,0)) == "INCOMPLETE"
