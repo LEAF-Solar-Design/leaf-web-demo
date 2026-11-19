@@ -37,10 +37,8 @@ def paged_report(service, description, tenant, session, turn, *, limit, page_siz
         offset = int(position)
 
     result = service._run_catalog_report("datasets", description, tenant, session, turn, limit,
-                                         expected_authority=authority, cancel_event=cancel_event)
+                                         expected_authority=authority, cancel_event=cancel_event, dataset_sort=sort)
     rows = result["datasets"]
-    if sort != "catalog":
-        rows.sort(key=lambda row: (row["title"], row["dataset_ref"]["id"]), reverse=sort == "-title")
     digest = fingerprint(rows)
     if previous is not None and digest != previous:
         raise ReadFailure("snapshot_changed")

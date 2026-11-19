@@ -26,10 +26,11 @@ def _parse(description):
     while tail:
         if len(ops) == MAX_OPERATIONS:
             return "Material patch operation budget exceeded."
-        verb = re.match(r"(insert|remove|move|copy|set|test)\s+", tail, re.I)
+        verb = re.match(r"(insert|remove|move|copy|set|replace|test)\s+", tail, re.I)
         if not verb:
             return None
-        action = verb[1].lower()
+        requested = verb[1].lower()
+        action = "set" if requested == "replace" else requested
         try:
             value, end = _DECODER.raw_decode(tail[verb.end():])
         except (ValueError, RecursionError, OverflowError):
@@ -41,7 +42,7 @@ def _parse(description):
             if type(value) is not str:
                 return None
             argument = tail[verb.end()+end:]
-            relation = "equals" if action == "test" else "to"
+            relation = "equals" if action == "test" else "with" if requested == "replace" else "to"
             label = re.match(r"\s+" + relation + r"\s+", argument, re.I)
             if not label:
                 return None
@@ -128,13 +129,13 @@ import json
 import re
 
 
-def location(rows, pointer, *, add=False, read_only=False):
+def location(rows, pointer, *, add=False, read_only=False, protect_records=True):
     if read_only and pointer == "":
         return [rows], 0
     if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
         raise ValueError("Invalid material JSON pointer.")
     parts = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
-    if not read_only and (len(parts) < 2 or parts[1] == "id"):
+    if protect_records and not read_only and (len(parts) < 2 or parts[1] == "id"):
         raise ValueError("Select a field inside a record; its ID is immutable.")
     parent = rows
     for index, key in enumerate(parts):
@@ -167,6 +168,15 @@ def json_equal(actual, wanted):
     return actual == wanted
 
 
+def record_ids(rows):
+    if type(rows) is not list or any(type(row) is not dict or type(row.get("id")) not in (int, str) for row in rows):
+        raise ValueError("Record IDs are required.")
+    identities = {row["id"] for row in rows}
+    if len(identities) != len(rows):
+        raise ValueError("Record IDs must be unique.")
+    return identities
+
+
 def run(intake, params):
     selected = intake.get("checker_material_selection") or {}
     original = selected.get("record_values")
@@ -174,11 +184,8 @@ def run(intake, params):
     if not operations or params or type(original) is not list or selected.get("record_exact_numbers"):
         raise ValueError("Select editable JSON records and specify ordered insert, remove or move operations.")
     rows = deepcopy(original)
-    if any(type(row) is not dict or type(row.get("id")) not in (int, str) for row in rows):
-        raise ValueError("Record IDs are required.")
-    identities = {row["id"] for row in rows}
-    if len(identities) != len(rows):
-        raise ValueError("Record IDs must be unique.")
+    identities = record_ids(rows)
+    replaced_root = False
     for action, value, positions in operations:
         if action == "test":
             try:
@@ -197,24 +204,29 @@ def run(intake, params):
                         raise ValueError("Cannot move or replace the material selection root.")
                     if positions.startswith(value + "/"):
                         raise ValueError("Cannot move a material field into its descendant.")
-                source, key = location(rows, value)
+                source, key = location(rows, value, protect_records=not replaced_root)
                 if action == "move_field" and value == positions:
                     continue
                 # The destination index is evaluated after removing the source.
                 item = source.pop(key) if action == "move_field" else deepcopy(source[key])
-                parent, dest = location(rows, positions, add=True)
+                parent, dest = location(rows, positions, add=True, protect_records=not replaced_root)
                 if type(parent) is list:
                     parent.insert(dest, item)
                 else:
                     parent[dest] = item
+            elif value == "":
+                rows = deepcopy(positions)
+                replaced_root = True
             else:
-                target, key = location(rows, value)
+                target, key = location(rows, value, protect_records=not replaced_root)
                 target[key] = positions
             # Repeated nested copies may grow exponentially even with a short edit list.
             if len(json.dumps(rows, separators=(",", ":")).encode()) > 1048576:
                 raise ValueError("Edited material exceeds the sandbox result limit.")
             continue
         index = positions[0]
+        if replaced_root:
+            identities = record_ids(rows)
         if action == "insert":
             if index > len(rows) or value["id"] in identities:
                 raise ValueError("Stale insertion index or duplicate record ID.")

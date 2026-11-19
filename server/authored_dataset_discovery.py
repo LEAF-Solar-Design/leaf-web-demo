@@ -57,9 +57,26 @@ def provider_status_filter(description):
     return None
 
 
+TIMESTAMPS = ("fetched_at", "source_updated_at", "synced_at")
+REPORT_COLUMNS = {"dataset_ref", "title", "status", "fields", "freshness", "needs_attention", *TIMESTAMPS}
+
+
+def report_columns(description):
+    clause = re.search(r"\b(?:with|return|show|include)\s+(?:the\s+)?(?:columns|fields)\s*:?\s+([^.!?]+)",
+                       description, re.I)
+    if not clause:
+        return None
+    names = re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", clause[1].strip().casefold())
+    names = [name.strip().replace(" ", "_") for name in names]
+    if any(name not in REPORT_COLUMNS for name in names):
+        return ()
+    return tuple(dict.fromkeys(["dataset_ref", *names]))
+
+
 def build_body(description):
     return _BODY.replace("__STATUSES__", repr(selected_statuses(description))).replace(
-        "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description)))
+        "__REQUIRE_SNAPSHOT__", repr(requires_snapshot(description))).replace(
+        "__COLUMNS__", repr(report_columns(description)))
 
 
 _BODY = """
@@ -70,11 +87,15 @@ def run(intake, params):
     if __REQUIRE_SNAPSHOT__ and catalog.get("snapshot_verified") is not True:
         raise ValueError("This report needs a verified catalog snapshot.")
     statuses = __STATUSES__
+    columns = __COLUMNS__
+    if columns == ():
+        raise ValueError("Unknown dataset report column.")
     rows = []
     for dataset in catalog["datasets"]:
         status = dataset["status"]
         if status in statuses:
-            rows.append({**dataset, "needs_attention": status in ("stale", "unavailable")})
+            row = {**dataset, "needs_attention": status in ("stale", "unavailable")}
+            rows.append(row if columns is None else {key: row[key] for key in columns if key in row})
     return ({"datasets": rows, "datasets_scanned": len(catalog["datasets"]),
              "pages_read": catalog["pages_read"]}, None)
 """
