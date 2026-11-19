@@ -828,3 +828,28 @@ def gasket_squeeze_quality(revision, sheet, groove_mm):
     if not (0 < short <= tall and 0 < shallow <= deep and 0 <= low <= high <= 1):
         return "INCOMPLETE"
     return "PASS" if low <= 1-deep/short and 1-shallow/tall <= high else "FAIL"
+
+
+def insulation_spacing_quality(revision, sheet, pollution, altitude_m, creepage_mm, clearance_mm):
+    """Use the pinned pollution class and first inclusive rated altitude ceiling."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (altitude_m, creepage_mm, clearance_mm))) or min(creepage_mm, clearance_mm) < 0:
+        return "INCOMPLETE"
+    rules = sheet.get("spacing_by_pollution")
+    if type(pollution) is not int or not isinstance(rules, dict) or not isinstance(rules.get(pollution), list):
+        return "INCOMPLETE"
+    selected = previous = None
+    for row in rules[pollution]:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        ceiling, creep, clear = row
+        if min(creep,clear) <= 0 or (previous is not None and ceiling <= previous):
+            return "INCOMPLETE"
+        if selected is None and altitude_m <= ceiling:
+            selected = creep, clear
+        previous = ceiling
+    if selected is None:
+        return "INCOMPLETE"
+    return "PASS" if creepage_mm >= selected[0] and clearance_mm >= selected[1] else "FAIL"

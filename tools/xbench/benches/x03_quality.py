@@ -2102,3 +2102,56 @@ def ct_excitation_quality(revision, sheet, primary_fault_a, ratio, secondary_ohm
     if excitation is None:
         return "INCOMPLETE"
     return "PASS" if excitation <= limit * secondary else "FAIL"
+
+
+def transformer_parallel_quality(revision, plates, ratio_tol, impedance_tol):
+    """Compare common-base nameplates under an identical vector-group requirement.
+
+    Pairwise relative spreads use the lower value as the reference.
+    """
+    import re
+    if not revision or not isinstance(plates, list) or len(plates) < 2:
+        return "INCOMPLETE"
+    if not all(finite_measure(x) and x >= 0 for x in (ratio_tol, impedance_tol)):
+        return "INCOMPLETE"
+    groups, ratios, impedances = set(), [], []
+    for plate in plates:
+        if not isinstance(plate, dict) or plate.get("revision") != revision:
+            return "INCOMPLETE"
+        group = plate.get("vector_group")
+        if not isinstance(group, str) or not re.fullmatch(r"(?:YN?|D|ZN?)(?:yn?|d|zn?)(?:[0-9]|1[01])", group):
+            return "INCOMPLETE"
+        values = (plate.get("tap_ratio"), plate.get("z_common_base"))
+        if not all(finite_measure(x) and x > 0 for x in values):
+            return "INCOMPLETE"
+        ratio, impedance = (Fraction(str(x)) for x in values)
+        groups.add(group)
+        ratios.append(ratio)
+        impedances.append(impedance)
+    for values, tolerance in ((ratios, ratio_tol), (impedances, impedance_tol)):
+        if max(values)-min(values) > Fraction(str(tolerance))*min(values):
+            return "FAIL"
+    return "PASS" if len(groups) == 1 else "FAIL"
+
+
+def sheath_voltage_quality(model, sections, limit_v):
+    """Signed longitudinal coupling per metre in radial single-point-bonded sections.
+
+    Traverse away from the grounded end; check every segment endpoint including interior peaks.
+    """
+    if model not in ("single-point-bonded-linear-v1", "independently-bonded-spans-v1") or not isinstance(sections, list) or not sections:
+        return "INCOMPLETE"
+    if not finite_measure(limit_v) or limit_v < 0:
+        return "INCOMPLETE"
+    peak = voltage = Fraction(0)
+    for row in sections:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        length_m, coupling_v_per_m = (Fraction(str(x)) for x in row)
+        if length_m <= 0:
+            return "INCOMPLETE"
+        if model == "independently-bonded-spans-v1":
+            voltage = Fraction(0)
+        voltage += length_m * coupling_v_per_m
+        peak = max(peak, abs(voltage))
+    return "PASS" if peak <= Fraction(str(limit_v)) else "FAIL"

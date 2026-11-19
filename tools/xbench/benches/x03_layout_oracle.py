@@ -891,3 +891,29 @@ def deck_pad_bending_quality(span_mm, pad_length_mm, pad_width_mm, load_n, momen
         return "INCOMPLETE"
     moment_per_width = load * (2 * span - length) / (8 * width)
     return "PASS" if moment_per_width <= limit else "FAIL"
+
+
+def anchor_row_breakout_quality(revision, substrate, anchor_x_mm, row_y_mm, slab_mm, embedment_mm, demand_n):
+    """Union of square projected breakout footprints clipped to a rectangular slab, one anchor row."""
+    if not revision or not isinstance(substrate, dict) or substrate.get("revision") != revision:
+        return "INCOMPLETE"
+    if substrate.get("model") != "row-square-projection-v1" or not isinstance(slab_mm, (tuple, list)) or len(slab_mm) != 2:
+        return "INCOMPLETE"
+    if not isinstance(anchor_x_mm, list) or not anchor_x_mm:
+        return "INCOMPLETE"
+    values = (*slab_mm, row_y_mm, embedment_mm, demand_n, substrate.get("projection_factor"), substrate.get("resistance_n_per_mm2"))
+    if not all(map(finite_measure, (*values, *anchor_x_mm))):
+        return "INCOMPLETE"
+    width, height, y, depth, load, factor, stress = (Fraction(str(x)) for x in values)
+    if min(width,height,depth,factor,stress) <= 0 or not 0 <= y <= height or load < 0:
+        return "INCOMPLETE"
+    radius = factor * depth
+    covered = right = Fraction(0)
+    for x in sorted(Fraction(str(n)) for n in anchor_x_mm):
+        if not 0 <= x <= width:
+            return "INCOMPLETE"
+        end = min(width, x+radius)
+        covered += max(0, end-max(right,x-radius,0))
+        right = end
+    band = min(height,y+radius)-max(0,y-radius)
+    return "PASS" if load <= stress*covered*band else "FAIL"

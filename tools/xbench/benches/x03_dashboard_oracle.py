@@ -1053,3 +1053,39 @@ def work_steal_quality(opening, events, closing, *, complete):
             owners[task] = recipient, epoch + 1
     actual = {task:(owner, epoch) for task, owner, epoch in closing}
     return "PASS" if len(actual) == len(closing) and actual == owners else "FAIL"
+
+
+def checkpoint_work_quality(attempts, reported_units, *, complete):
+    """Count the durable prefix plus final completion for a sequential range task.
+
+    Each attempt records its parent checkpoint, executed half-open range, and an
+    optional new durable checkpoint (identity and exclusive offset). A retry
+    starts at the most recent durable offset, so replay adds no units.
+    """
+    if complete is not True or not isinstance(attempts, list) or not attempts or type(reported_units) is not int:
+        return "INCOMPLETE"
+    parent, offset = None, 0
+    seen = set()
+    for index, attempt in enumerate(attempts):
+        if not isinstance(attempt, dict) or not {"parent", "range", "checkpoint", "finished"} <= attempt.keys():
+            return "INCOMPLETE"
+        bounds = attempt["range"]
+        if not isinstance(bounds, (tuple,list)) or len(bounds) != 2 or not all(type(x) is int for x in bounds):
+            return "INCOMPLETE"
+        start, end = bounds
+        if attempt["parent"] != parent:
+            return "INCOMPLETE"
+        if start != offset or end < start or type(attempt["finished"]) is not bool:
+            return "INCOMPLETE"
+        checkpoint = attempt["checkpoint"]
+        if checkpoint is not None:
+            if not isinstance(checkpoint, (tuple,list)) or len(checkpoint) != 2:
+                return "INCOMPLETE"
+            name, saved = checkpoint
+            if not isinstance(name,str) or not name or name in seen or type(saved) is not int or not start <= saved <= end:
+                return "INCOMPLETE"
+            seen.add(name)
+            parent, offset = name, saved
+        if attempt["finished"] != (index == len(attempts)-1):
+            return "INCOMPLETE"
+    return "PASS" if reported_units == end else "FAIL"

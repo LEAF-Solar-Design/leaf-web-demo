@@ -474,3 +474,14 @@ def test_local_deck_moment_with_acceptable_bearing(span,length,width,load,moment
     assert grade(span,length,width,load,moment,rule) == "PASS"
     assert grade(span,length,width,load,moment-1,rule) == "FAIL"
     assert grade(span,length,None,load,moment,rule) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("locations,y,capacity", [
+    ([40,50],50,600), ([0,10],0,200), ([20,40,70],50,1200),
+])
+def test_anchor_row_overlap_and_edges(locations,y,capacity):
+    from benches.x03_layout_oracle import anchor_row_breakout_quality as grade
+    rule = dict(revision="row1",model="row-square-projection-v1",projection_factor=1,resistance_n_per_mm2=1)
+    assert grade("row1",rule,locations,y,(100,100),10,capacity) == "PASS"
+    assert grade("row1",rule,locations,y,(100,100),10,capacity+1) == "FAIL"
+    assert grade("row1",{},locations,y,(100,100),10,capacity) == "INCOMPLETE"
