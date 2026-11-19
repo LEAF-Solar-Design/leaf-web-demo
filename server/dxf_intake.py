@@ -62,7 +62,9 @@ def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
     return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
 
 
-def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str, Any]:
+def parse_dxf_bytes(
+    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True
+) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
             "binary DXF is not supported; re-save this drawing as ASCII DXF "
@@ -177,7 +179,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
-            name, block, i = _parse_block(pairs, i + 1, parse_errors)
+            name, block, i = _parse_block(pairs, i + 1, parse_errors, include_measurement_evidence)
             if name and not _layout_block_name(name):
                 block_count += 1
                 if block_count <= 200:
@@ -194,7 +196,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 j += 1
             record = pairs[i + 1:j]
             handle = next((v for c, v in record if c == 5), None)
-            if handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
                 if _explicit_elevation(pairs, j, value, dict(record)):
                     elevation_evidence.append(handle)
             if handle:
@@ -756,7 +758,7 @@ def _block_measurement_path(pairs, start, end, kind):
     return path
 
 
-def _parse_block(pairs, i, parse_errors):
+def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
     block = {"base": [round(v, 3) for v in _group_point(groups)],
@@ -767,7 +769,8 @@ def _parse_block(pairs, i, parse_errors):
             _, i = _entity_groups(pairs, i + 1)
             if block["count"] > len(block["children"]):
                 block.setdefault("nested_inserts", [])
-                block.setdefault("beam_paths", [])
+                if include_measurement_evidence:
+                    block.setdefault("beam_paths", [])
             return name, block, i
         if code == 0 and kind in ("ENDSEC", "BLOCK", "EOF"):
             break
@@ -779,7 +782,7 @@ def _parse_block(pairs, i, parse_errors):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
-            if kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
                 paths = block.setdefault("beam_paths", [])
                 if len(paths) < 10000:
                     path = _block_measurement_path(pairs, i + 1, end, kind)
@@ -797,7 +800,7 @@ def _parse_block(pairs, i, parse_errors):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
-            if kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 block["nested_inserts_incomplete"] = True
@@ -809,7 +812,8 @@ def _parse_block(pairs, i, parse_errors):
             block["complete"] = False
         if block["count"] <= 60:
             block["children"].append(child)
-    block["beam_paths_incomplete"] = True
+    if include_measurement_evidence:
+        block["beam_paths_incomplete"] = True
     block["nested_inserts_incomplete"] = True
     block["complete"] = False  # unterminated definition
     return name, block, i

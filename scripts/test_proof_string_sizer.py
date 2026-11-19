@@ -925,7 +925,8 @@ def sp_reconstruct():
     dxf = intake_to_dxf(json.loads(raw))
     assert len(dxf) == 170266
     assert digest(dxf) == "18cfed23a3fd45d0bc6382b6f274c85c22dd717f4cf63a1ac10c1f30f76d9bda"
-    intake = parse_dxf_bytes(dxf, source_name="rooftop-unsplit.dxf")
+    # The recorded upload predates the optional spatial measurement indexes.
+    intake = parse_dxf_bytes(dxf, source_name="rooftop-unsplit.dxf", include_measurement_evidence=False)
     upload = json.dumps(intake).encode()
     assert len(upload) == 177394
     source = digest(upload)
