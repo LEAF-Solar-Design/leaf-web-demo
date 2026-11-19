@@ -3088,3 +3088,59 @@ def acceleration_duty_quality(envelopes, initial_state, intervals, final_speed_r
             return "INCOMPLETE"
         used += Fraction(str(seconds)) * Fraction(str(amps)) ** 2 / Fraction(str(budget))
     return "PASS" if used <= 1 and final_speed_rpm >= previous_limit else "FAIL"
+
+
+def cooling_stage_quality(modes, available, load_kva):
+    """Maximum continuous kVA across modes supported by available fans and pumps.
+
+    Each pinned row gives minimum running fan count, pump count and continuous kVA.
+    A mode with neither auxiliary required represents natural cooling.
+    """
+    if not isinstance(modes, list) or not modes or not isinstance(available, dict):
+        return "INCOMPLETE"
+    counts = [available.get(k) for k in ("fans", "pumps")]
+    if any(type(n) is not int or n < 0 for n in counts) or not finite_measure(load_kva) or load_kva < 0:
+        return "INCOMPLETE"
+    fans, pumps = counts
+    capacity = 0
+    seen = set()
+    for row in modes:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        required_fans, required_pumps, rating = row
+        if any(type(n) is not int or n < 0 for n in row[:2]) or not finite_measure(rating) or rating <= 0:
+            return "INCOMPLETE"
+        demand = (required_fans, required_pumps)
+        if demand in seen:
+            return "INCOMPLETE"
+        seen.add(demand)
+        if fans >= required_fans and pumps >= required_pumps:
+            capacity = max(capacity, rating)
+    return "PASS" if load_kva <= capacity else "FAIL"
+
+
+def ct_supervision_quality(zone_inputs, states, differential_pickups, alarms, trips):
+    """Instantaneous supervision snapshots. Alarm each open CT and block its mapped zones."""
+    if not isinstance(zone_inputs, dict) or not zone_inputs or not isinstance(states, dict):
+        return "INCOMPLETE"
+    required = set()
+    for zone, inputs in zone_inputs.items():
+        if not isinstance(zone, str) or not zone.strip() or not isinstance(inputs, list) or not inputs:
+            return "INCOMPLETE"
+        if not all(isinstance(ct, str) and ct.strip() for ct in inputs) or len(set(inputs)) != len(inputs):
+            return "INCOMPLETE"
+        required.update(inputs)
+    if set(states) != required or any(state not in ("open", "closed") for state in states.values()):
+        return "INCOMPLETE"
+    if not isinstance(differential_pickups, dict) or set(differential_pickups) != set(zone_inputs):
+        return "INCOMPLETE"
+    if not all(type(flag) is bool for flag in differential_pickups.values()):
+        return "INCOMPLETE"
+    # Complete per-channel readbacks distinguish an absent alarm from missing evidence.
+    for recorded, inventory in ((alarms, required), (trips, set(zone_inputs))):
+        if not isinstance(recorded, dict) or set(recorded) != inventory or not all(type(v) is bool for v in recorded.values()):
+            return "INCOMPLETE"
+    expected_alarms = {ct: states[ct] == "open" for ct in required}
+    expected_trips = {zone: differential_pickups[zone] and not any(expected_alarms[ct] for ct in inputs)
+                      for zone, inputs in zone_inputs.items()}
+    return "PASS" if alarms == expected_alarms and trips == expected_trips else "FAIL"

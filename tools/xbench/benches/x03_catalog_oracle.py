@@ -3,6 +3,28 @@ from fractions import Fraction
 from math import isfinite
 
 
+def tracking_index_quality(revision, sheet, material, required_group):
+    """Check a group's minimum CTI against the same material and test procedure."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(s, str) and s.strip() for s in (material, required_group, sheet.get("protocol"))):
+        return "INCOMPLETE"
+    thresholds, records = sheet.get("group_min_cti_v"), sheet.get("material_tests")
+    if not isinstance(thresholds, dict) or not isinstance(records, dict):
+        return "INCOMPLETE"
+    minimum, record = thresholds.get(required_group), records.get(material)
+    if not finite_measure(minimum) or minimum <= 0 or not isinstance(record, dict):
+        return "INCOMPLETE"
+    if record.get("protocol") != sheet["protocol"]:
+        return "INCOMPLETE"
+    measured = record.get("cti_v")
+    if not finite_measure(measured) or measured < 0:
+        return "INCOMPLETE"
+    return "PASS" if measured >= minimum else "FAIL"
+
+
 def elastomer_set_quality(revision, rule, test):
     """Compare permanent set with the limit for the specified aging and recovery conditions."""
     from benches.x03_quality import finite_measure

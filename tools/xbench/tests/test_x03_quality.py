@@ -1762,3 +1762,44 @@ def test_acceleration_consumes_speed_banded_thermal_duty(state, amps, low_budget
     assert grade(curves, state, trace + [(0.01, 600, amps)], 1200) == "FAIL"
     assert grade(curves, state, [(first + second, 0, amps)], 0) == "FAIL"
     assert grade(curves, None, trace, 1200) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("modes,fans,pumps,limit", [
+    pytest.param([(0, 0, 500), (2, 0, 750)], 1, 0, 500, id="derate-after-a-fan-bank-outage"),
+    pytest.param([(2, 1, 1600), (2, 0, 1200), (0, 0, 900)], 2, 0, 1200,
+                 id="keep-fan-cooling-after-a-pump-trip"),
+    pytest.param([(0, 0, 400), (1, 1, 650), (2, 1, 900)], 3, 2, 900,
+                 id="check-redundant-coolers-at-full-load"),
+])
+def test_available_transformer_cooling_limits(modes, fans, pumps, limit):
+    from benches.x03_quality import cooling_stage_quality as grade
+
+    available = dict(fans=fans, pumps=pumps)
+    assert grade(modes, available, limit) == "PASS"
+    assert grade(modes, available, limit + 1) == "FAIL"
+    assert grade(None, available, limit) == "INCOMPLETE"
+    assert grade(modes, {"fans": fans}, limit) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("zones,opened,blocked", [
+    pytest.param({"winding": ["high", "low"]}, "low", ["winding"], id="open-low-side-ct"),
+    pytest.param({"east": ["bus", "east-ct"], "west": ["bus", "west-ct"]}, "bus",
+                 ["east", "west"], id="open-shared-bus-ct"),
+    pytest.param({"line": ["line-ct"], "tie": ["tie-ct"]}, "line-ct", ["line"],
+                 id="keep-independent-tie-protection"),
+])
+def test_open_ct_supervision_blocks_only_affected_zones(zones, opened, blocked):
+    from benches.x03_quality import ct_supervision_quality as grade
+
+    states = {ct: "closed" for inputs in zones.values() for ct in inputs}
+    pickups = dict.fromkeys(zones, True)
+    alarms = dict.fromkeys(states, False)
+    assert grade(zones, states, pickups, alarms, pickups) == "PASS"
+    states[opened] = "open"
+    expected_alarms = {**alarms, opened: True}
+    expected_trips = {zone: zone not in blocked for zone in zones}
+    assert grade(zones, states, pickups, expected_alarms, expected_trips) == "PASS"
+    assert grade(zones, states, pickups, alarms, expected_trips) == "FAIL"
+    assert grade(zones, states, pickups, expected_alarms, pickups) == "FAIL"
+    del states[opened]
+    assert grade(zones, states, pickups, expected_alarms, expected_trips) == "INCOMPLETE"
