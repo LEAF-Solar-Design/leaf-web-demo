@@ -3,6 +3,34 @@ from fractions import Fraction
 from math import isfinite
 
 
+def seal_decompression_quality(revision, sheet, seal, high_bar, low_bar, release_s, cycles):
+    """Match repeated linear pressure releases to one pinned seal-test envelope."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(seal, str) or not seal.strip() or not all(map(finite_measure, (high_bar, low_bar, release_s))):
+        return "INCOMPLETE"
+    if not 0 <= low_bar < high_bar or release_s <= 0 or type(cycles) is not int or cycles <= 0:
+        return "INCOMPLETE"
+    tests = sheet.get("linear_release_envelopes")
+    if not isinstance(tests, dict) or not isinstance(tests.get(seal), list) or not tests[seal]:
+        return "INCOMPLETE"
+    high, low, duration = (Fraction(str(v)) for v in (high_bar, low_bar, release_s))
+    drop = high - low
+    qualified = False
+    for row in tests[seal]:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            return "INCOMPLETE"
+        peak, swing, rate, count = row
+        if not all(finite_measure(v) and v > 0 for v in (peak, swing, rate)) or type(count) is not int or count <= 0:
+            return "INCOMPLETE"
+        peak, swing, rate = (Fraction(str(v)) for v in (peak, swing, rate))
+        if high <= peak and drop <= swing and drop <= duration * rate and cycles <= count:
+            qualified = True
+    return "PASS" if qualified else "FAIL"
+
+
 def connector_fretting_quality(revision, sheet, contact, amplitude_um, cycles):
     """Use a tested amplitude band and its cycle endurance for the specified contact."""
     from benches.x03_quality import finite_measure

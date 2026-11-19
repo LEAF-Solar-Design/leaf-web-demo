@@ -1836,3 +1836,37 @@ def test_generator_sequence_duty_includes_initial_heat(rated, opening, trace, li
     assert grade(rule, opening, trace + [(1, 1)], complete=True) == "FAIL"
     assert grade(rule, None, trace, complete=True) == "INCOMPLETE"
     assert grade(rule, opening, trace, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("neutral,terminal,pickup,delay,kw", [
+    pytest.param(1, 9, 0.1, 2, 50, id="check-a-generator-at-minimum-load"),
+    pytest.param(3, 9, 0.25, 0.4, 175, id="check-a-fast-neutral-protection-stage"),
+    pytest.param(2, 18, 0.12, 3, 300, id="review-a-sustained-full-load-fault"),
+])
+def test_stator_earth_fault_uses_calibrated_ratio(neutral, terminal, pickup, delay, kw):
+    from benches.x03_quality import stator_earth_fault_quality as grade
+
+    rule = dict(min_kw=50, max_kw=300, pickup_fraction=pickup, delay_s=delay)
+    half = (delay / 2, kw, neutral, terminal, False)
+    clear = (1, kw, 10, 10, False)
+    assert grade(rule, [half, clear, half, (*half[:4], True)], complete=True) == "PASS"
+    assert grade(rule, [half, half], complete=True) == "FAIL"
+    assert grade(rule, [half, clear, (*half[:4], True)], complete=True) == "FAIL"
+    assert grade(rule, [(delay, 301, neutral, terminal, False)], complete=True) == "INCOMPLETE"
+    assert grade(dict(rule, min_kw=None), [half], complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("limit,prior,requests", [
+    pytest.param(2, [10, 20], [(30, False), (3610, True)], id="release-a-pump-at-the-hour-boundary"),
+    pytest.param(1, [], [(0, True), (0, False), (3600, True)], id="lock-out-a-second-simultaneous-fan-start"),
+    pytest.param(3, [-5, -4], [(0, True), (3594, False), (3595, True)], id="carry-conveyor-starts-into-the-shift"),
+])
+def test_motor_lockout_counts_actual_rolling_starts(limit, prior, requests):
+    from benches.x03_quality import motor_start_lockout_quality as grade
+
+    begin = requests[0][0] - 3600
+    assert grade(3600, limit, begin, prior, requests, complete=True) == "PASS"
+    bypassed = [(t, True) for t, _ in requests]
+    assert grade(3600, limit, begin, prior, bypassed, complete=True) == "FAIL"
+    assert grade(3600, limit, begin + 1, prior, requests, complete=True) == "INCOMPLETE"
+    assert grade(3600, limit, begin, None, requests, complete=True) == "INCOMPLETE"

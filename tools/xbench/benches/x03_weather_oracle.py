@@ -1121,3 +1121,29 @@ def leaf_wetness_duration_quality(rule, window, intervals, reported_ticks):
         if wet:
             duration += right - left
     return "PASS" if duration == reported_ticks else "FAIL"
+
+
+def reference_et_quality(model, day, reported_mm, tolerance_mm):
+    """Check daily FAO-56 short-grass ET0 using recorded vapor pressures and G=0.
+
+    See FAO Irrigation and Drainage Paper 56, chapter 4, equation 6.
+    """
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if model != "fao56-daily-grass-g0-v1" or not isinstance(day, dict) or day.get("hours") != 24:
+        return "INCOMPLETE"
+    keys = ("mean_c", "net_radiation_mj_m2_day", "wind_2m_m_s", "saturation_kpa", "actual_kpa",
+            "slope_kpa_per_c", "psychrometric_kpa_per_c")
+    values = [day.get(key) for key in keys] + [reported_mm, tolerance_mm]
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    temp, radiation, wind, saturation, actual, slope, gamma, reported, tolerance = (
+        Fraction(str(x)) for x in values
+    )
+    if temp <= -273 or wind < 0 or not 0 <= actual <= saturation or min(slope, gamma) <= 0 or tolerance < 0:
+        return "INCOMPLETE"
+    energy = Fraction("0.408") * slope * radiation
+    aerodynamic = gamma * 900 * wind * (saturation - actual) / (temp + 273)
+    denominator = slope + gamma * (1 + Fraction("0.34") * wind)
+    return "PASS" if abs(reported - (energy + aerodynamic) / denominator) <= tolerance else "FAIL"

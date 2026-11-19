@@ -1801,3 +1801,55 @@ def condition_wait_quality(rule, events, *, initial_predicate, expected_count):
     if predicate and parked:
         return "FAIL" if owner is None else "INCOMPLETE"
     return "PASS"
+
+
+def deficit_round_robin_quality(policy, order, quanta, rounds):
+    """Replay full rounds in fixed order from empty queues and zero deficits.
+
+    Each visit adds one quantum to a nonempty queue, dispatches affordable FIFO
+    heads and resets unused credits when the queue empties.
+    """
+    from collections import deque
+
+    if policy != "fifo-deficit-reset-empty-v1" or not isinstance(order, list) or not order:
+        return "INCOMPLETE"
+    if not all(isinstance(q, str) and q for q in order) or len(order) != len(set(order)):
+        return "INCOMPLETE"
+    if not isinstance(quanta, dict) or set(quanta) != set(order):
+        return "INCOMPLETE"
+    if any(type(x) is not int or x <= 0 for x in quanta.values()) or not isinstance(rounds, list) or not rounds:
+        return "INCOMPLETE"
+    pending = {q: deque() for q in order}
+    credit = dict.fromkeys(order, 0)
+    seen = set()
+    for row in rounds:
+        if not isinstance(row, dict):
+            return "INCOMPLETE"
+        arrivals, dispatch, closing = row.get("arrivals"), row.get("dispatch"), row.get("closing")
+        if not isinstance(arrivals, list) or not isinstance(dispatch, list) or not isinstance(closing, dict):
+            return "INCOMPLETE"
+        if set(closing) != set(order) or any(type(x) is not int for x in closing.values()):
+            return "INCOMPLETE"
+        for task in arrivals:
+            if not isinstance(task, (tuple, list)) or len(task) != 3:
+                return "INCOMPLETE"
+            q, identity, cost = task
+            if not isinstance(q, str) or q not in pending or not isinstance(identity, str) or not identity:
+                return "INCOMPLETE"
+            if identity in seen or type(cost) is not int or cost <= 0:
+                return "INCOMPLETE"
+            seen.add(identity)
+            pending[q].append((identity, cost))
+        expected = []
+        for q in order:
+            if pending[q]:
+                credit[q] += quanta[q]
+            while pending[q] and pending[q][0][1] <= credit[q]:
+                identity, cost = pending[q].popleft()
+                credit[q] -= cost
+                expected.append(identity)
+            if not pending[q]:
+                credit[q] = 0
+        if expected != dispatch or closing != credit:
+            return "FAIL"
+    return "PASS"
