@@ -2870,3 +2870,68 @@ def breaker_failure_quality(settings, trace, *, complete):
     if not failed and not primary_cleared and (backup_tick is None or previous < backup_tick + clear):
         return "INCOMPLETE"
     return "FAIL" if failed else "PASS"
+
+
+def reverse_power_quality(settings, intervals, *, complete):
+    """Latch at the end of the first interval with sufficient continuous reverse kW."""
+    if complete is not True or not isinstance(settings, dict):
+        return "INCOMPLETE"
+    sign = settings.get("positive_kw")
+    pickup, delay = settings.get("pickup_kw"), settings.get("delay_s")
+    if sign not in ("export", "import") or not all(map(finite_measure, (pickup, delay))):
+        return "INCOMPLETE"
+    if pickup <= 0 or delay < 0 or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    dwell = Fraction(0)
+    delay = Fraction(str(delay))
+    latched = failed = False
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        seconds, kw, observed_trip = row
+        if type(observed_trip) is not bool or not all(map(finite_measure, (seconds, kw))) or seconds <= 0:
+            return "INCOMPLETE"
+        motoring_kw = kw if sign == "import" else -kw
+        if motoring_kw >= pickup:
+            dwell += Fraction(str(seconds))
+            latched |= dwell >= delay
+        else:
+            dwell = Fraction(0)
+        failed |= latched != observed_trip
+    return "FAIL" if failed else "PASS"
+
+
+def distance_restraint_quality(settings, observations):
+    """Independent R/X test shots in relay ohms. Inclusive restraint overrides inclusive trip."""
+    from shapely.geometry import Point, Polygon
+
+    if not isinstance(settings, dict) or not isinstance(observations, list) or not observations:
+        return "INCOMPLETE"
+    zones = {}
+    for kind in ("trip", "restraint"):
+        outlines = settings.get(kind)
+        if not isinstance(outlines, list) or not outlines:
+            return "INCOMPLETE"
+        zones[kind] = []
+        for outline in outlines:
+            if not isinstance(outline, list) or len(outline) < 3:
+                return "INCOMPLETE"
+            for vertex in outline:
+                if not isinstance(vertex, (tuple, list)) or len(vertex) != 2 or not all(map(finite_measure, vertex)):
+                    return "INCOMPLETE"
+            polygon = Polygon(outline)
+            if not polygon.is_valid or polygon.area <= 0:
+                return "INCOMPLETE"
+            zones[kind].append(polygon)
+    failed = False
+    for shot in observations:
+        if not isinstance(shot, (tuple, list)) or len(shot) != 3:
+            return "INCOMPLETE"
+        r, x, tripped = shot
+        if type(tripped) is not bool or not all(map(finite_measure, (r, x))):
+            return "INCOMPLETE"
+        point = Point(r, x)
+        in_reach = any(zone.covers(point) for zone in zones["trip"])
+        restrained = any(zone.covers(point) for zone in zones["restraint"])
+        failed |= tripped != (in_reach and not restrained)
+    return "FAIL" if failed else "PASS"

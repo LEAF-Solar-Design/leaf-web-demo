@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("area,strength,coefficient,pullout,steel", [
+    pytest.param(50, 20, 2, 2000, 5000, id="check-a-small-headed-rail-anchor"),
+    pytest.param(120, 25, 1.5, 4500, 8000, id="check-a-baseplate-anchor"),
+    pytest.param(75, 32, 1.25, 3000, 6000, id="qualify-a-bracket-anchor"),
+])
+def test_headed_concrete_anchor_pullout(area, strength, coefficient, pullout, steel):
+    from benches.x03_layout_oracle import anchor_pullout_quality as grade
+
+    rule = dict(revision="fixture", model="net-head-bearing-v1", resistance_factor=coefficient)
+    assert grade("fixture", rule, area, strength, pullout) == "PASS"
+    assert pullout + 1 < steel
+    assert grade("fixture", rule, area, strength, pullout + 1) == "FAIL"
+    assert grade("fixture", rule, None, strength, pullout) == "INCOMPLETE"
+    assert grade("fixture", dict(rule, model=None), area, strength, pullout) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("timber,grain,moisture,embedment,capacity", [
     pytest.param("fir", "side", "dry", 40, 1200, id="check-a-dry-rafter-fastener"),
     pytest.param("fir", "side", "wet", 55, 990, id="verify-a-wet-edge-attachment"),
