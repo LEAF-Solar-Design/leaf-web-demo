@@ -601,6 +601,7 @@ class IntegrationToolService:
                                 validate("IntegrationElementV1", value.get("element"))
                                 revision = value.get("revision")
                                 if (type(revision) is not int or not 1 <= revision <= 9007199254740991
+                                        or revision != args.get("expectedRevision", 0) + 1
                                         or json.dumps(value["element"], sort_keys=True, allow_nan=False)
                                         != json.dumps(args["recipe"], sort_keys=True, allow_nan=False)):
                                     raise ReadFailure("invalid_response")

@@ -117,6 +117,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     i = 0
     n = len(pairs)
     active_layer = None
+    insunits = None
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -133,6 +134,12 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if section == "HEADER" and code == 9 and value == "$CLAYER":
             if i + 1 < n and pairs[i + 1][0] == 8 and pairs[i + 1][1]:
                 active_layer = pairs[i + 1][1]
+        if section == "HEADER" and (code, value) == (9, "$INSUNITS"):
+            if i + 1 < n and pairs[i + 1][0] == 70:
+                try:
+                    insunits = int(pairs[i + 1][1])
+                except ValueError:
+                    insunits = None
         if section == "OBJECTS" and code == 0:
             j = i + 1
             while j < n and pairs[j][0] != 0:
@@ -299,6 +306,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if insunits is not None:
+        out["insunits"] = insunits
     if active_layer is not None:
         out["active_layer"] = active_layer
     mlstyles = {}
@@ -711,6 +720,12 @@ def _parse_block(pairs, i, parse_errors):
         block["count"] += 1
         try:
             child, end = _parse_block_child(pairs, i + 1, kind)
+            # The inverse writer still treats nested INSERTs as unsupported.
+            # Preserve their identities separately for read-only instance traversal.
+            if kind == "INSERT" and block["count"] <= 60:
+                insert, _ = _parse_insert(pairs, i + 1)
+                insert.pop("_properties", None)
+                block.setdefault("nested_inserts", []).append(insert)
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
             parse_errors.append(f"BKE {name} ({kind}): {exc}")

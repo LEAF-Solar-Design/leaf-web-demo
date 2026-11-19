@@ -270,7 +270,7 @@ _QUOTED_LAYER = re.compile(
 _RELATIVE_LAYER = re.compile(r"\b(?:active|current)\s+layer\b", re.IGNORECASE)
 
 _PANEL_COUNT_TARGET = re.compile(
-    r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
+    r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:nested\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
     re.IGNORECASE,
 )
 
@@ -371,13 +371,39 @@ __LAYER_BINDING__
     if is_module_name(layer):
         total += sum(1 for poly in intake.get("polylines", [])
                      if poly.get("layer", "0") == layer and poly.get("closed") and poly.get("pts"))
-    for insert in intake.get("inserts", []):
-        if insert.get("layer", "0") == layer and is_module_name(insert.get("name", "")):
-            rows, columns = insert.get("rows", 1), insert.get("columns", 1)
-            if type(rows) is not int or type(columns) is not int or min(rows, columns) < 1:
-                raise ValueError("Invalid module array size.")
-            total += rows * columns
-    return ({"layer": layer, "counts": {layer: total}, "total": total}, None)
+    blocks = {name.casefold(): block for name, block in (intake.get("blocks") or {}).items()}
+    paths = []
+    stack = [(insert, "0", [], (), 1) for insert in reversed(intake.get("inserts", []))]
+    visited = 0
+    while stack:
+        insert, parent_layer, parent_path, ancestors, copies = stack.pop()
+        visited += 1
+        if visited > 100000:
+            raise ValueError("Block traversal exceeds the supported instance-path limit.")
+        name = insert["name"].casefold()
+        own_layer = insert.get("layer", "0")
+        effective_layer = parent_layer if own_layer == "0" else own_layer
+        rows, columns = insert.get("rows", 1), insert.get("columns", 1)
+        if type(rows) is not int or type(columns) is not int or min(rows, columns) < 1:
+            raise ValueError("Invalid module array size.")
+        copies *= rows * columns
+        path = parent_path + [insert.get("handle", "")]
+        if is_module_name(name):
+            if effective_layer.casefold() == layer.casefold():
+                total += copies
+                paths.append({"path": path, "multiplicity": copies})
+            continue
+        block = blocks.get(name)
+        if block is None or block.get("count", 0) > len(block.get("children", [])):
+            raise ValueError("Incomplete block catalogue for panel count.")
+        if name in ancestors:
+            raise ValueError("Cyclic block reference in panel count.")
+        children = block.get("nested_inserts", [])
+        if sum(child.get("type") == "INSERT" for child in block.get("children", [])) != len(children):
+            raise ValueError("Missing nested block reference evidence.")
+        stack.extend((child, effective_layer, path, ancestors + (name,), copies)
+                     for child in reversed(children))
+    return ({"layer": layer, "counts": {layer: total}, "total": total, "instance_paths": paths}, None)
 """
 
 _BODY_MEASURE = """
@@ -488,10 +514,27 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     the dynamic loader runs THAT FILE, not a hardcoded primitive. Families:
     list_layers | count | measure | highlight (all read-only, deterministic)."""
     description = (description or "").strip()
-    verb, engine_op = _detect_op(description)
+    import authored_beam_lengths
+    import authored_route_crossings
 
-    relative_layer = engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
-    if engine_op == "list_layers":
+    verb, engine_op = _detect_op(description)
+    drawing_body = None
+    if authored_beam_lengths.matches(description):
+        verb, engine_op = "measure", "beam_lengths_by_layer"
+        drawing_body = authored_beam_lengths.build_body(description)
+        summary = "measures model-space beam centerlines by layer"
+    elif authored_route_crossings.is_route_crossing_request(description):
+        verb, engine_op = "check", "check_route_crossings"
+        drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
+        summary = "checks cable routes against array and aisle boundaries"
+
+    relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
+    if drawing_body is not None:
+        layer = ""
+        name = engine_op.replace("_", "-")
+        default_params = {}
+        body = drawing_body
+    elif engine_op == "list_layers":
         layer = ""
         name = _slugify(description) or "list-layers"
         default_params: Dict[str, Any] = {}
@@ -524,7 +567,8 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "description": (description or f"{verb} on layer {layer}")[:200],
         "kind": "script",
         "engine_op": engine_op,
-        "params": _params_schema(engine_op, layer),
+        "params": ({"type": "object", "properties": {}, "required": []}
+                   if drawing_body is not None else _params_schema(engine_op, layer)),
         "returns": {"type": "object"},
         "capabilities": ["drawing.read"],
         "provenance": {"author": "agent", "created": _iso_now()},
@@ -532,7 +576,9 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "default_params": default_params,
     }
 
-    if relative_layer:
+    if drawing_body is not None:
+        preview = f"Tool '{name}' {summary}."
+    elif relative_layer:
         preview = f"Tool '{name}': runs '{verb}' on the drawing's current layer at execution time."
     elif engine_op == "list_layers":
         preview = (f"Tool '{name}': lists the distinct layer names in the drawing "
