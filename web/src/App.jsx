@@ -20,6 +20,7 @@ import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
+import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
@@ -890,6 +891,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  useEstimatorSurfaceStatus(mock)
   const { path: surfacePath } = useRoute()
   useEffect(() => {
     const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)

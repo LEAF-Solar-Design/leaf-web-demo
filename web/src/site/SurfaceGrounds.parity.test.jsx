@@ -7,6 +7,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 let SurfaceGrounds
 let labLoad
 let opsLoad
+let estimatorLoad
 let browserProps
 let reload
 
@@ -37,8 +38,10 @@ beforeEach(async () => {
   vi.doMock('../ios/DeviceGround.jsx', () => ({ DeviceGround: () => null }))
   labLoad = vi.fn()
   opsLoad = vi.fn()
+  estimatorLoad = vi.fn()
   vi.doMock('../lab/LabGround.jsx', () => labLoad())
   vi.doMock('../integrations/OpsWorkspaceGround.jsx', () => opsLoad())
+  vi.doMock('../estimator/EstimatorGround.jsx', () => estimatorLoad())
   SurfaceGrounds = (await import('./SurfaceGrounds.jsx')).default
 })
 
@@ -49,6 +52,7 @@ afterEach(() => {
   for (const path of [
     'react', './BrowserAssetGround.jsx', './ProjectBoardGround.jsx',
     '../ios/DeviceGround.jsx', '../lab/LabGround.jsx', '../integrations/OpsWorkspaceGround.jsx',
+    '../estimator/EstimatorGround.jsx',
     'next/dynamic',
   ]) vi.doUnmock(path)
 })
@@ -63,14 +67,15 @@ function resetImportMock(surface) {
   // Re-register to evict Vitest's mocked module result. The mounted ground
   // retains its rejected lazy type until the real Retry handler replaces it.
   if (surface === 'lab') vi.doMock('../lab/LabGround.jsx', () => labLoad())
+  else if (surface === 'estimator') vi.doMock('../estimator/EstimatorGround.jsx', () => estimatorLoad())
   else vi.doMock('../integrations/OpsWorkspaceGround.jsx', () => opsLoad())
 }
 
 it.each([
-  ['lab', 'lab', 'Lab'], ['ops', 'ops', 'Ops'],
+  ['lab', 'lab', 'Lab'], ['ops', 'ops', 'Ops'], ['estimator', 'estimator', 'Estimator'],
 ])('retries a rejected %s import inline and mounts the workspace', async (surface, ground, label) => {
-  const load = surface === 'lab' ? labLoad : opsLoad
-  const module = surface === 'lab'
+  const load = surface === 'lab' ? labLoad : surface === 'estimator' ? estimatorLoad : opsLoad
+  const module = surface !== 'ops'
     ? { default: loadedGround(ground) }
     : { OpsWorkspaceGround: loadedGround(ground) }
   load.mockRejectedValueOnce(new Error('Chunk unavailable')).mockResolvedValueOnce(module)
@@ -88,9 +93,9 @@ it.each([
 })
 
 it.each([
-  ['lab', 'lab'], ['ops', 'ops'],
+  ['lab', 'lab'], ['ops', 'ops'], ['estimator', 'estimator'],
 ])('keeps a second %s failure actionable and preserves visibility', async (surface, ground) => {
-  const load = surface === 'lab' ? labLoad : opsLoad
+  const load = surface === 'lab' ? labLoad : surface === 'estimator' ? estimatorLoad : opsLoad
   load.mockRejectedValue(new Error('Still unavailable'))
   const { rerender } = render(<SurfaceGrounds surface={surface} studioShell />)
   await screen.findByRole('alert')
