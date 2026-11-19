@@ -1144,3 +1144,39 @@ def test_fault_duty_for_series_parallel_and_unequal_strings(cells,strings,common
     assert grade(cells,strings,common,duty) == "PASS"
     assert grade(cells,strings,common,duty-1) == "FAIL"
     assert grade(cells,[(strings[0][0],None),*strings[1:]],common,duty) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("nominal,phase,delay,offset", [
+    pytest.param(230,0,2,0,id="pump-loses-phase-A"),
+    pytest.param(120,1,1,4,id="fan-loses-phase-B-after-recovery"),
+    pytest.param(277,2,0,8,id="compressor-immediate-phase-C-trip"),
+])
+def test_phase_loss_deadline(nominal,phase,delay,offset):
+    from benches.x03_quality import phase_loss_quality as grade
+    good = [nominal]*3
+    lost = good.copy()
+    lost[phase] = 0
+    start = offset+2
+    due = start+delay
+    prefix = [(offset,offset+1,lost,False),(offset+1,start,good,True)]
+    if delay:
+        prefix.append((start,due,lost,True))
+    args = ((offset,due+1),nominal*0.8,delay)
+    def check(rows):
+        return grade(args[0],rows,args[1],args[2])
+    assert check(prefix+[(due,due+1,lost,False)]) == "PASS"
+    assert check(prefix+[(due,due+1,lost,True)]) == "FAIL"
+    assert check(prefix) == "INCOMPLETE"
+    assert check(prefix+[(due,due+1,lost[:2],False)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("fault,ratio,burden,max_fraction", [
+    (1000,100,1,0.01),(2000,100,1,0.05),(1500,100,1,0.037),
+])
+def test_ct_excitation_error_budget(fault,ratio,burden,max_fraction):
+    from benches.x03_quality import ct_excitation_quality as grade
+    curve = {"revision":"lab","rms_v_excitation_a":[(0,0),(10,0.1),(20,1)]}
+    # Excitation at 10, 20 and 15 V is 0.1, 1 and 0.55 A respectively.
+    assert grade("lab",curve,fault,ratio,burden,max_fraction) == "PASS"
+    assert grade("lab",curve,fault,ratio,burden,max_fraction/2) == "FAIL"
+    assert grade("lab",{},fault,ratio,burden,max_fraction) == "INCOMPLETE"

@@ -462,3 +462,15 @@ def test_service_clearance_after_creep(stress,temp,years,elastic,final):
     assert elastic <= final-0.5
     assert grade(*args,final-0.5) == "FAIL"
     assert grade("r1",sheet,stress,temp+1,years*8760,elastic,final) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("span,length,width,load,moment", [
+    (800,200,100,800,1400),(600,600,200,2400,900),(1000,400,400,4000,2000),
+])
+def test_local_deck_moment_with_acceptable_bearing(span,length,width,load,moment):
+    from benches.x03_layout_oracle import deck_pad_bending_quality as grade
+    rule = "centered-one-way-strip-v1"
+    assert load/(length*width) < 0.1
+    assert grade(span,length,width,load,moment,rule) == "PASS"
+    assert grade(span,length,width,load,moment-1,rule) == "FAIL"
+    assert grade(span,length,None,load,moment,rule) == "INCOMPLETE"

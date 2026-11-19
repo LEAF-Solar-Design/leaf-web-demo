@@ -814,3 +814,17 @@ def flammability_quality(revision, sheet, grade, thickness_mm, required_class):
     if not isinstance(classes, list) or not all(isinstance(c, str) and c for c in classes):
         return "INCOMPLETE"
     return "PASS" if required_class in classes else "FAIL"
+
+
+def gasket_squeeze_quality(revision, sheet, groove_mm):
+    """Check both worst-case axial squeeze fractions of a compressed face seal."""
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    ranges = (sheet.get("seal_height_mm"), groove_mm, sheet.get("squeeze_fraction"))
+    if not all(isinstance(r, (list, tuple)) and len(r) == 2 and all(map(finite_measure, r)) for r in ranges):
+        return "INCOMPLETE"
+    (short, tall), (shallow, deep), (low, high) = [tuple(Fraction(str(v)) for v in r) for r in ranges]
+    if not (0 < short <= tall and 0 < shallow <= deep and 0 <= low <= high <= 1):
+        return "INCOMPLETE"
+    return "PASS" if low <= 1-deep/short and 1-shallow/tall <= high else "FAIL"

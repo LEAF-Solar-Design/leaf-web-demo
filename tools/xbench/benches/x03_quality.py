@@ -2040,3 +2040,65 @@ def battery_fault_quality(cells, strings, common_ohm, rated_fault_a):
         return "INCOMPLETE"
     fault_a = norton_a / (1 + Fraction(str(common_ohm)) * conductance)
     return "PASS" if Fraction(str(rated_fault_a)) >= fault_a else "FAIL"
+
+
+def phase_loss_quality(window, trace, minimum_v, delay_s):
+    """Grade a continuous three-phase undervoltage interval and the observed load state."""
+    if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(map(finite_measure, window)):
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (minimum_v, delay_s))) or minimum_v <= 0 or delay_s < 0:
+        return "INCOMPLETE"
+    if window[0] >= window[1] or not isinstance(trace, list):
+        return "INCOMPLETE"
+    cursor, end = window
+    lost_since = None
+    violation = False
+    for row in trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            return "INCOMPLETE"
+        start, stop, phases, running = row
+        if type(running) is not bool or not all(map(finite_measure, (start, stop))) or start != cursor or not start < stop <= end:
+            return "INCOMPLETE"
+        if not isinstance(phases, (list, tuple)) or len(phases) != 3 or not all(finite_measure(v) and v >= 0 for v in phases):
+            return "INCOMPLETE"
+        if min(phases) < minimum_v:
+            if lost_since is None:
+                lost_since = Fraction(str(start))
+            elapsed = Fraction(str(stop)) - lost_since
+            violation |= running and elapsed > Fraction(str(delay_s))
+        else:
+            lost_since = None
+        cursor = stop
+    if cursor != end:
+        return "INCOMPLETE"
+    return "FAIL" if violation else "PASS"
+
+
+def ct_excitation_quality(revision, sheet, primary_fault_a, ratio, secondary_ohm, max_error_fraction):
+    """Use the pinned linear excitation curve at the ideal secondary burden voltage."""
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    values = (primary_fault_a, ratio, secondary_ohm, max_error_fraction)
+    if not all(map(finite_measure, values)) or min(primary_fault_a, ratio) <= 0 or secondary_ohm < 0 or not 0 <= max_error_fraction <= 1:
+        return "INCOMPLETE"
+    points = sheet.get("rms_v_excitation_a")
+    if not isinstance(points, list) or len(points) < 2:
+        return "INCOMPLETE"
+    fault, ratio, burden, limit = (Fraction(str(x)) for x in values)
+    secondary = fault / ratio
+    target = secondary * burden
+    previous = excitation = None
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2 or not all(finite_measure(x) and x >= 0 for x in point):
+            return "INCOMPLETE"
+        voltage, amps = (Fraction(str(x)) for x in point)
+        if previous is not None:
+            low_v, low_a = previous
+            if voltage <= low_v or amps < low_a:
+                return "INCOMPLETE"
+            if low_v <= target <= voltage:
+                excitation = low_a + (amps-low_a) * (target-low_v) / (voltage-low_v)
+        previous = voltage, amps
+    if excitation is None:
+        return "INCOMPLETE"
+    return "PASS" if excitation <= limit * secondary else "FAIL"

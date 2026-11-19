@@ -879,3 +879,15 @@ def creep_deflection_quality(revision, sheet, stress_mpa, temp_c, duration_h, el
         return "INCOMPLETE"
     total = Fraction(str(elastic_mm)) * (1 + factor)
     return "PASS" if total <= Fraction(str(clearance_mm)) else "FAIL"
+
+
+def deck_pad_bending_quality(span_mm, pad_length_mm, pad_width_mm, load_n, moment_limit_nmm_per_mm, rule):
+    """Simply supported one-way strip with a centered uniform rectangular patch."""
+    values = (span_mm, pad_length_mm, pad_width_mm, load_n, moment_limit_nmm_per_mm)
+    if rule != "centered-one-way-strip-v1" or not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    span, length, width, load, limit = (Fraction(str(x)) for x in values)
+    if not 0 < length <= span or width <= 0 or min(load, limit) < 0:
+        return "INCOMPLETE"
+    moment_per_width = load * (2 * span - length) / (8 * width)
+    return "PASS" if moment_per_width <= limit else "FAIL"
