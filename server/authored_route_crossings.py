@@ -11,7 +11,7 @@ def is_route_crossing_request(description):
     ))
 
 
-ROUTE_CROSSINGS_BODY = r"""
+PLANAR_GEOMETRY_BODY = r"""
 import re
 from fractions import Fraction
 
@@ -66,6 +66,10 @@ def location(point, edges):
     return 1 if inside else -1
 
 
+"""
+
+
+ROUTE_CROSSINGS_BODY = PLANAR_GEOMETRY_BODY + r"""
 def classify(points, polygons):
     in_aisles = True
     for a, b in zip(points, points[1:]):

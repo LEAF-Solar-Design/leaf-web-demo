@@ -2195,7 +2195,10 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
                   "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
-              ], 64),
+                  "tests/test_x03_nested_beam_author.py", "tests/test_x03_aisle_detour_author.py",
+                  "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
+                  "tests/test_x03_spatial_route_clearance.py",
+              ], 91),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
         # fail-closed legs, and the browser-edited version write-back (card
@@ -4261,7 +4264,7 @@ def build_suites() -> List[Suite]:
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
               + ["tests/test_integration_tool_routes.py", "tests/test_x03_material_provenance.py",
-                 "tests/test_x03_action_discovery.py"], 36),
+                 "tests/test_x03_action_discovery.py", "tests/test_x03_project_dataset_discovery.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
               _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
