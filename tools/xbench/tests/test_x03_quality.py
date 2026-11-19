@@ -1721,3 +1721,44 @@ def test_pole_slip_counts_full_crossings(projection, limits, outer, inner, oppos
     assert grade(rule, prefix + [(*ends[-1], True), (*inner, True)]) == "PASS"
     assert grade(rule, prefix + [(*ends[-1], False)]) == "FAIL"
     assert grade(dict(rule, trip_count=None), stable) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("priority,threshold,delay", [
+    pytest.param(["charger", "fan", "pump"], 59, 2, id="shed-a-charger-before-a-pump"),
+    pytest.param(["oven", "wash", "alarm"], 49, 0.4, id="preserve-the-plant-alarm"),
+    pytest.param(["lights", "dryer", "radio"], 58, 4, id="retain-radio-in-a-deep-dip"),
+])
+def test_shedding_matches_pickup_delay_and_load_priority(priority, threshold, delay):
+    from benches.x03_quality import load_shedding_quality as grade
+
+    stages = [(threshold, delay, 1), (threshold - 1, delay / 2, 2)]
+    first_half = (delay / 2, threshold, [])
+    recovery = (1, threshold + 1, [])
+    full = [first_half, recovery, first_half, (delay / 2, threshold, priority[:1]),
+            (delay / 2, threshold - 1, priority[:2]), (1, threshold + 1, priority[:2])]
+    assert grade(priority, stages, full) == "PASS"
+    assert grade(priority, stages, [(delay / 2, threshold, priority[:1])]) == "FAIL"
+    assert grade(priority, stages, [(delay, threshold, [])]) == "FAIL"
+    assert grade(priority, stages, [(delay, threshold, priority[-1:])]) == "FAIL"
+    assert grade(priority, None, full) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("state,amps,low_budget,high_budget,first,second", [
+    pytest.param("hot", 10, 200, 400, 1, 2, id="restart-a-hot-pump"),
+    pytest.param("cold", 5, 100, 200, 1, 6, id="accelerate-a-cold-fan"),
+    pytest.param("hot", 4, 64, 128, 3, 2, id="start-a-loaded-conveyor"),
+])
+def test_acceleration_consumes_speed_banded_thermal_duty(state, amps, low_budget, high_budget, first, second):
+    from benches.x03_quality import acceleration_duty_quality as grade
+
+    # The duties are 1/2 + 1/2, 1/4 + 3/4, and 3/4 + 1/4 respectively.
+    active = [(500, low_budget), (1200, high_budget)]
+    other = "cold" if state == "hot" else "hot"
+    factor = 2 if state == "hot" else 0.5
+    curves = {state: active, other: [(rpm, budget * factor) for rpm, budget in active]}
+    trace = [(first, 0, amps), (second, 500, amps)]
+    assert grade(curves, state, trace, 1200) == "PASS"
+    assert grade(curves, other, trace, 1200) == ("PASS" if state == "hot" else "FAIL")
+    assert grade(curves, state, trace + [(0.01, 600, amps)], 1200) == "FAIL"
+    assert grade(curves, state, [(first + second, 0, amps)], 0) == "FAIL"
+    assert grade(curves, None, trace, 1200) == "INCOMPLETE"

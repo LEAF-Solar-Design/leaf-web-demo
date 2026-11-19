@@ -5,6 +5,23 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("aging,hours,original,spacer,recovered,limit", [
+    pytest.param(70, 24, 10, 8, 9.5, 25, id="check-a-cabinet-door-gasket"),
+    pytest.param(100, 72, 4, 3, 3.9, 10, id="review-a-feedthrough-seal"),
+    pytest.param(85, 48, 6, 4, 5.4, 30, id="qualify-a-pump-cover-ring"),
+])
+def test_elastomer_set_under_qualified_aging(aging, hours, original, spacer, recovered, limit):
+    from benches.x03_catalog_oracle import elastomer_set_quality as grade
+
+    rule = dict(revision="lab", aging_c=aging, dwell_h=hours, recovery_min=30, max_set_pct=limit)
+    test = dict(aging_c=aging, dwell_h=hours, recovery_min=30, original_mm=original,
+                spacer_mm=spacer, recovered_mm=recovered)
+    assert grade("lab", rule, test) == "PASS"
+    assert grade("lab", rule, dict(test, recovered_mm=spacer)) == "FAIL"
+    assert grade("lab", rule, dict(test, dwell_h=hours - 1)) == "INCOMPLETE"
+    assert grade("lab", rule, dict(test, recovery_min=None)) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("voltage,tolerance,limit,charges", [
     pytest.param(1000, 0, 10, [2, 10], id="qualify-a-molded-bushing"),
     pytest.param(2500, 25, 5, [5, 2, 1], id="check-a-transformer-terminal"),
@@ -1404,3 +1421,25 @@ def test_shield_radiation_bias_depends_on_ventilation(irradiance, wind, raw, dry
     assert grade("aspiration-4", shield, irradiance, wind, raw, raw) == "FAIL"
     assert grade("aspiration-4", shield, irradiance, 5, raw, dry) == "INCOMPLETE"
     assert grade("aspiration-4", shield, 1000, wind, raw, dry) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("limits,temperatures,labels", [
+    pytest.param((-1, 1), [-1, 0, 1], ["snow", "mixed", "rain"], id="track-a-thaw-through-both-thresholds"),
+    pytest.param((0, 2), [2, 1.5, 0], ["rain", "mixed", "snow"], id="audit-a-cooling-rain-to-snow-event"),
+    pytest.param((-2, 0.5), [-2.1, -2, 0.5, 1], ["snow", "snow", "rain", "rain"],
+                 id="resolve-threshold-ties-in-a-front"),
+])
+def test_precipitation_phase_assigns_wet_bulb_boundaries(limits, temperatures, labels):
+    from benches.x03_weather_oracle import precipitation_phase_quality as grade
+
+    thresholds = dict(boundary_rule="snow-le-rain-ge-v1", snow_max_wet_bulb_c=limits[0],
+                      rain_min_wet_bulb_c=limits[1])
+    trace = list(enumerate(temperatures))
+    report = list(enumerate(labels))
+    assert grade(thresholds, trace, report) == "PASS"
+    for threshold in limits:
+        at_boundary = temperatures.index(threshold)
+        changed = report.copy()
+        changed[at_boundary] = (at_boundary, "mixed")
+        assert grade(thresholds, trace, changed) == "FAIL"
+    assert grade(dict(thresholds, rain_min_wet_bulb_c=None), trace, report) == "INCOMPLETE"

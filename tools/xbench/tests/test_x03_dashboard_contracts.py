@@ -822,3 +822,27 @@ def test_cache_invalidation_reconciles_dependency_digests(key, dependencies, cha
     assert check([first, evict, hit]) == "FAIL"
     assert check([first, change, dict(hit, dependencies=updated)]) == "FAIL"
     assert check([first, dict(hit, dependencies={d: initial[d] for d in dependencies if d != changed})]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cohorts", [
+    pytest.param([["tile-a", "tile-b"], ["tile-a", "tile-b"]], id="release-two-consecutive-render-frames"),
+    pytest.param([["a", "b"], ["b", "c"]], id="replace-a-participant-between-epochs"),
+    pytest.param([["one"], ["one", "two"], ["two"]], id="resize-an-iterative-worker-cohort"),
+])
+def test_reusable_barrier_arrivals_expire_at_release(cohorts):
+    from benches.x03_dashboard_oracle import reusable_barrier_quality as grade
+
+    rule = "all-members-per-generation-v1"
+    events = []
+    for generation, members in enumerate(cohorts):
+        events.extend(("arrive", generation, member) for member in members)
+        events.append(("release", generation, None))
+    assert grade(rule, cohorts, events, complete=True) == "PASS"
+    assert grade(rule, cohorts, events[1:], complete=True) == "FAIL"
+    # Drop one returning member's new arrival. Its last arrival cannot release generation one.
+    returning = next(member for member in cohorts[1] if member in cohorts[0])
+    missing = [e for e in events if e != ("arrive", 1, returning)]
+    assert grade(rule, cohorts, missing, complete=True) == "FAIL"
+    stale = [("arrive", 0, returning) if e == ("arrive", 1, returning) else e for e in events]
+    assert grade(rule, cohorts, stale, complete=True) == "FAIL"
+    assert grade(rule, [cohorts[0], None], events, complete=True) == "INCOMPLETE"

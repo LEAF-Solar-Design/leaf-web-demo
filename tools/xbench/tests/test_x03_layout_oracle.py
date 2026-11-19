@@ -4,6 +4,23 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("depth,shear,steel", [
+    pytest.param(40, 1200, 2500, id="check-a-shallow-rail-anchor"),
+    pytest.param(60, -2200, 3500, id="check-a-bracket-under-reversed-shear"),
+    pytest.param(90, 4100, 6000, id="verify-a-deep-equipment-anchor"),
+])
+def test_concrete_anchor_pryout_before_steel_shear(depth, shear, steel):
+    from benches.x03_layout_oracle import anchor_pryout_quality as grade
+
+    rule = dict(revision="lab", model="linear-pryout-table-v1",
+                depth_mm_capacity_n=[(40, 1200), (80, 3200), (100, 5000)])
+    assert grade("lab", rule, depth, shear) == "PASS"
+    assert abs(shear) + 1 < steel
+    assert grade("lab", rule, depth, abs(shear) + 1) == "FAIL"
+    assert grade("lab", rule, None, shear) == "INCOMPLETE"
+    assert grade("lab", rule, 101, shear) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("flow,pitch,count,resistance", [
     pytest.param(12, 100, 2, 600, id="check-paired-studs-at-a-support"),
     pytest.param(-8, 75, 1, 600, id="verify-reversed-interface-shear"),

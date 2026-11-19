@@ -3,6 +3,26 @@ from fractions import Fraction
 from math import isfinite
 
 
+def elastomer_set_quality(revision, rule, test):
+    """Compare permanent set with the limit for the specified aging and recovery conditions."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision or not isinstance(test, dict):
+        return "INCOMPLETE"
+    conditions = ("aging_c", "dwell_h", "recovery_min")
+    for key in conditions:
+        if not finite_measure(rule.get(key)) or not finite_measure(test.get(key)) or rule[key] != test[key]:
+            return "INCOMPLETE"
+    values = (rule.get("max_set_pct"), test.get("original_mm"), test.get("spacer_mm"), test.get("recovered_mm"))
+    if not all(map(finite_measure, values)) or min(rule["dwell_h"], rule["recovery_min"]) <= 0:
+        return "INCOMPLETE"
+    limit, original, spacer, recovered = (Fraction(str(value)) for value in values)
+    if not 0 <= limit <= 100 or not 0 < spacer < original or recovered <= 0:
+        return "INCOMPLETE"
+    permanent_loss = original - recovered
+    return "PASS" if 100 * permanent_loss <= limit * (original - spacer) else "FAIL"
+
+
 def partial_discharge_quality(revision, procedure, test):
     """Grade maximum apparent charge at the procedure's qualified test voltage."""
     from benches.x03_quality import finite_measure

@@ -1656,3 +1656,49 @@ def cache_invalidation_quality(manifest, initial_digests, events, *, complete):
         if op == "build":
             builds[key] = (output, dict(receipt))
     return "PASS"
+
+
+def reusable_barrier_quality(rule, generations, events, *, complete):
+    """Grade a complete sequence of zero-based all-member barriers.
+
+    Each generation records one arrival per member and a single release.
+    A release resets arrivals before the next cohort can open.
+    """
+    if rule != "all-members-per-generation-v1" or complete is not True:
+        return "INCOMPLETE"
+    if not isinstance(generations, list) or not generations or not isinstance(events, list):
+        return "INCOMPLETE"
+    cohorts = []
+    for members in generations:
+        if not isinstance(members, list) or not members or not all(isinstance(m, str) and m for m in members):
+            return "INCOMPLETE"
+        cohort = set(members)
+        if len(cohort) != len(members):
+            return "INCOMPLETE"
+        cohorts.append(cohort)
+    current = 0
+    arrived = set()
+    for event in events:
+        if not isinstance(event, (tuple, list)) or len(event) != 3:
+            return "INCOMPLETE"
+        kind, generation, member = event
+        if type(generation) is not int or not 0 <= generation < len(cohorts):
+            return "INCOMPLETE"
+        if kind not in ("arrive", "release"):
+            return "INCOMPLETE"
+        if generation != current:
+            return "FAIL"
+        if kind == "arrive":
+            if not isinstance(member, str) or not member:
+                return "INCOMPLETE"
+            if member not in cohorts[current] or member in arrived:
+                return "FAIL"
+            arrived.add(member)
+        else:
+            if member is not None:
+                return "INCOMPLETE"
+            if arrived != cohorts[current]:
+                return "FAIL"
+            arrived.clear()
+            current += 1
+    return "PASS" if current == len(cohorts) else "FAIL"
