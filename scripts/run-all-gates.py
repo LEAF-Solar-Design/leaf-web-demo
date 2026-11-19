@@ -7954,14 +7954,15 @@ def reused_from_problem(reused_from) -> str:
 
 
 def device_verdict_problem(data: dict) -> str:
-    """Validate the staging-only selected proof without inventing suite results."""
+    """Validate selected or full device evidence without inventing suite results."""
     fields = {"schema", "kind", "tree", "mode", "coverage", "device_verdict"}
     if set(data) != fields:
         return f"device proof fields differ: missing {sorted(fields - set(data))}, unexpected {sorted(set(data) - fields)}"
     if type(data["schema"]) is not int:
         return "schema must be integer 2"
-    if data["coverage"] != "selected":
-        return "coverage must be selected"
+    coverage = data["coverage"]
+    if coverage not in ("selected", "full"):
+        return "coverage must be selected or full"
     verdict = data["device_verdict"]
     fields = {"bucket", "key", "version_id", "sha256", "repository", "head_sha",
               "run_id", "verdict_schema", "mode", "state", "shard_total", "shards"}
@@ -7974,7 +7975,7 @@ def device_verdict_problem(data: dict) -> str:
             return f"device_verdict.{key} must be a non-empty string"
     for key, expected in (("repository", "LEAF-Solar-Design/leaf-web-demo"),
                           ("verdict_schema", "leaf.forge-ci.device-verdict.v1"),
-                          ("mode", "selected"), ("state", "success")):
+                          ("mode", coverage), ("state", "success")):
         if verdict[key] != expected:
             return f"device_verdict.{key} must be {expected}"
     match = re.fullmatch(
@@ -7989,8 +7990,9 @@ def device_verdict_problem(data: dict) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", verdict["sha256"]):
         return "device_verdict.sha256 must be 64 hex characters"
     total = verdict["shard_total"]
-    if type(total) is not int or total < 1:
-        return "device_verdict.shard_total must be an integer >= 1"
+    required_total = 3 if coverage == "selected" else 6
+    if type(total) is not int or total != required_total:
+        return f"device_verdict.shard_total must be integer {required_total} for coverage {coverage}"
     shards = verdict["shards"]
     if not isinstance(shards, list) or len(shards) != total:
         return "device_verdict.shards must be a list matching shard_total"
@@ -8014,7 +8016,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
     schema-2 tree-bound gate proof whose tree equals `expect_tree`. Run and
     reused proofs must match THIS checkout's catalog fingerprint and carry
     passing audit_suites. Device-verdict proofs require explicit caller
-    opt-in and selected device evidence instead of suite results. Runs nothing.
+    opt-in and selected or full device evidence instead of suite results. Runs nothing.
 
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
@@ -8063,7 +8065,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
         if problem:
             print(f"NOT VERIFIED: {problem}")
             return 1
-        print("VERIFIED mode: device-verdict coverage=selected")
+        print(f"VERIFIED mode: device-verdict coverage={data['coverage']}")
         return 0
     suites = build_suites()
     if duplicate_suite_ids(suites):
@@ -8918,7 +8920,7 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     ap.add_argument("--allow-device-verdict", action="store_true",
-                    help="allow a staging selected device-verdict proof in proof-check mode")
+                    help="allow a selected or full device-verdict proof in proof-check mode")
     args = ap.parse_args()
 
     if args.allow_device_verdict and not args.verify_gate_proof:
