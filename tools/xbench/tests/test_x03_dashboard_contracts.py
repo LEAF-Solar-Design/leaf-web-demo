@@ -894,3 +894,22 @@ def test_condition_predicate_does_not_strand_waiters(workers, early_signal):
     assert check(encode(prefix + [("source", "unlock")])) == "FAIL"
     assert check(encode(prefix + [("source", "unlock"), ("source", "broadcast")])) == "FAIL"
     assert check(valid[1:]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("quantum,cost,small", [
+    pytest.param(3, 5, 1, id="carry-render-credit-to-a-second-visit"),
+    pytest.param(4, 8, 2, id="dispatch-at-the-exact-budget-of-two-rounds"),
+    pytest.param(6, 7, 5, id="discard-unused-credit-after-a-large-export"),
+])
+def test_deficit_round_robin_reconciles_dispatch_and_idle_reset(quantum, cost, small):
+    from benches.x03_dashboard_oracle import deficit_round_robin_quality as grade
+
+    order, quanta = ["batch", "short"], {"batch": quantum, "short": small + 1}
+    first = dict(arrivals=[("batch", "large", cost), ("short", "quick", small)],
+                 dispatch=["quick"], closing={"batch": quantum, "short": 0})
+    second = dict(arrivals=[], dispatch=["large"], closing={"batch": 0, "short": 0})
+    model = "fifo-deficit-reset-empty-v1"
+    assert grade(model, order, quanta, [first, second]) == "PASS"
+    assert grade(model, order, quanta, [dict(first, dispatch=["large", "quick"]), second]) == "FAIL"
+    assert grade(model, order, quanta, [dict(first, closing={"batch": quantum, "short": 1})]) == "FAIL"
+    assert grade(None, order, quanta, [first, second]) == "INCOMPLETE"

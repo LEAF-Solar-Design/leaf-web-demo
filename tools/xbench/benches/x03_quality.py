@@ -3174,3 +3174,74 @@ def negative_sequence_duty_quality(rule, initial_duty, intervals, *, complete):
             return "INCOMPLETE"
         duty += Fraction(str(seconds)) * (Fraction(str(i2_amps)) / rated) ** 2
     return "PASS" if duty <= Fraction(str(limit)) else "FAIL"
+
+
+def stator_earth_fault_quality(settings, intervals, *, complete):
+    """Held RMS magnitudes. Latch on low neutral / (neutral + terminal) third harmonic.
+
+    Load must be inside the calibration's inclusive kW range for every sample.
+    Trip readback is sampled at the end of each contiguous interval.
+    """
+    if complete is not True or not isinstance(settings, dict) or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    fields = [settings.get(k) for k in ("min_kw", "max_kw", "pickup_fraction", "delay_s")]
+    if not all(map(finite_measure, fields)):
+        return "INCOMPLETE"
+    low, high, pickup, delay = (Fraction(str(v)) for v in fields)
+    if high < low or not 0 < pickup < 1 or delay < 0:
+        return "INCOMPLETE"
+    elapsed = Fraction(0)
+    latched = failed = False
+    for row in intervals:
+        if not isinstance(row, (list, tuple)) or len(row) != 5 or not all(map(finite_measure, row[:4])):
+            return "INCOMPLETE"
+        seconds, kw, neutral, terminal = (Fraction(str(v)) for v in row[:4])
+        if type(row[4]) is not bool or seconds <= 0 or not low <= kw <= high:
+            return "INCOMPLETE"
+        if min(neutral, terminal) < 0 or neutral + terminal == 0:
+            return "INCOMPLETE"
+        if neutral <= pickup * (neutral + terminal):
+            elapsed += seconds
+            latched |= elapsed >= delay
+        else:
+            elapsed = Fraction(0)
+        failed |= row[4] != latched
+    return "FAIL" if failed else "PASS"
+
+
+def motor_start_lockout_quality(window_s, max_starts, history_start_s, prior_starts, requests, *, complete):
+    """Count actual starts in (now-window, now], including each admitted request.
+
+    Prior starts precede the first request. Equal-time requests run in recorded order.
+    """
+    from collections import deque
+
+    if complete is not True or not all(map(finite_measure, (window_s, history_start_s))) or window_s <= 0:
+        return "INCOMPLETE"
+    if type(max_starts) is not int or max_starts <= 0 or not isinstance(prior_starts, list):
+        return "INCOMPLETE"
+    if not isinstance(requests, list) or not requests or not all(map(finite_measure, prior_starts)):
+        return "INCOMPLETE"
+    duration = Fraction(str(window_s))
+    start = Fraction(str(history_start_s))
+    past = deque(Fraction(str(t)) for t in prior_starts)
+    if any(t < start for t in past) or any(b < a for a, b in zip(prior_starts, prior_starts[1:])):
+        return "INCOMPLETE"
+    previous = None
+    failed = False
+    for row in requests:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not finite_measure(row[0]) or type(row[1]) is not bool:
+            return "INCOMPLETE"
+        now, admitted = Fraction(str(row[0])), row[1]
+        if previous is None:
+            if start > now - duration or (past and past[-1] >= now):
+                return "INCOMPLETE"
+        elif now < previous:
+            return "INCOMPLETE"
+        previous = now
+        while past and past[0] <= now - duration:
+            past.popleft()
+        failed |= admitted != (len(past) < max_starts)
+        if admitted:
+            past.append(now)
+    return "FAIL" if failed else "PASS"

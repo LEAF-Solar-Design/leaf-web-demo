@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("seal,high,low,seconds,cycles", [
+    pytest.param("valve", 100, 20, 10, 200, id="check-a-valve-blowdown"),
+    pytest.param("fitting", 60, 0, 30, 1000, id="qualify-a-vented-fitting"),
+    pytest.param("regulator", 150, 50, 25, 500, id="review-a-regulator-release"),
+])
+def test_rapid_decompression_duty_within_qualified_envelope(seal, high, low, seconds, cycles):
+    from benches.x03_catalog_oracle import seal_decompression_quality as grade
+
+    sheet = dict(revision="rgd", static_bar=200, linear_release_envelopes={
+        "valve": [(100, 80, 8, 200)], "fitting": [(60, 60, 2, 1000)], "regulator": [(150, 100, 4, 500)],
+    })
+    assert high < sheet["static_bar"]
+    assert grade("rgd", sheet, seal, high, low, seconds, cycles) == "PASS"
+    assert grade("rgd", sheet, seal, high, low, seconds / 2, cycles) == "FAIL"
+    assert grade("rgd", sheet, seal, high, low, seconds, cycles + 1) == "FAIL"
+    assert grade("rgd", sheet, seal, high, low, None, cycles) == "INCOMPLETE"
+    assert grade("rgd", sheet, "untested", high, low, seconds, cycles) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("contact,amplitude,limit", [
     pytest.param("meter-pin", 5, 10000, id="check-a-vibrating-meter-pin"),
     pytest.param("bus-socket", 30, 5000, id="qualify-a-bus-socket-contact"),
@@ -1514,3 +1533,22 @@ def test_leaf_wetness_uses_observed_interval_union(window, rows, wet, false_tota
     assert grade(rule, window, rows, wet) == "PASS"
     assert grade(rule, window, rows, false_total) == "FAIL"
     assert grade(rule, window, rows[:-1], wet) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("values,expected_mm", [
+    pytest.param((27, 12, 2, 2.4, 1.2, 0.21, 0.065), 4.687218, id="reconcile-a-warm-reference-day"),
+    pytest.param((15, 8, 1, 1.8, 1.6, 0.11, 0.067), 2.006782, id="estimate-a-cool-humid-day"),
+    pytest.param((30, 16, 4, 4.2, 2.1, 0.24, 0.064), 8.090097, id="check-a-windy-arid-day"),
+])
+def test_reference_et_reconciles_daily_depth(values, expected_mm):
+    from benches.x03_weather_oracle import reference_et_quality as grade
+
+    keys = ("mean_c", "net_radiation_mj_m2_day", "wind_2m_m_s", "saturation_kpa", "actual_kpa",
+            "slope_kpa_per_c", "psychrometric_kpa_per_c")
+    day = dict(zip(keys, values), hours=24)
+    model = "fao56-daily-grass-g0-v1"
+    assert grade(model, day, expected_mm, 0.000001) == "PASS"
+    assert grade(model, day, expected_mm / 24, 0.000001) == "FAIL"
+    assert grade(model, day, 1000 * expected_mm, 0.000001) == "FAIL"
+    assert grade(model, dict(day, actual_kpa=None), expected_mm, 0.000001) == "INCOMPLETE"
+    assert grade(model, dict(day, hours=1), expected_mm, 0.000001) == "INCOMPLETE"

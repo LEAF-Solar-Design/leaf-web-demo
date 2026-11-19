@@ -4,6 +4,24 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("timber,area,bearing,shear_limit", [
+    pytest.param("A", 1200, 3600, 8000, id="check-the-rafter-seat"),
+    pytest.param("B", 750, 1875, 5000, id="verify-the-narrow-joist-hanger"),
+    pytest.param("C", 2400, 10800, 15000, id="check-the-girder-bearing-pad"),
+])
+def test_timber_bearing_across_grain(timber, area, bearing, shear_limit):
+    from benches.x03_layout_oracle import timber_bearing_quality as grade
+
+    rule = dict(revision="wood", bearing_mpa={
+        "A": {"perpendicular": 3, "parallel": 10}, "B": {"perpendicular": 2.5}, "C": {"perpendicular": 4.5},
+    })
+    assert grade("wood", rule, timber, "perpendicular", area, bearing) == "PASS"
+    assert bearing + 1 < shear_limit
+    assert grade("wood", rule, timber, "perpendicular", area, bearing + 1) == "FAIL"
+    assert grade("wood", rule, timber, None, area, bearing) == "INCOMPLETE"
+    assert grade("wood", rule, timber, "perpendicular", None, bearing) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("width,depth,notch,strength,capacity,gross", [
     pytest.param(60, 200, 50, 2, 9000, 16000, id="check-the-notched-roof-joist"),
     pytest.param(100, 120, 30, 1.5, 6750, 12000, id="check-a-wide-end-seat"),

@@ -4,6 +4,24 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def timber_bearing_quality(revision, rule, timber, grain_direction, contact_mm2, reaction_n):
+    """Grade local compression on the actual support footprint for recorded timber and grain."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if not all(isinstance(k, str) and k.strip() for k in (timber, grain_direction)):
+        return "INCOMPLETE"
+    ratings = rule.get("bearing_mpa")
+    if not isinstance(ratings, dict) or not isinstance(ratings.get(timber), dict):
+        return "INCOMPLETE"
+    values = (contact_mm2, reaction_n, ratings[timber].get(grain_direction))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    area, force, allowable = (Fraction(str(v)) for v in values)
+    if min(area, allowable) <= 0 or force < 0:
+        return "INCOMPLETE"
+    return "PASS" if force <= area * allowable else "FAIL"
+
+
 def timber_end_notch_quality(revision, rule, width_mm, depth_mm, notch_mm, reaction_n):
     """Reduce rectangular section shear resistance by the pinned remaining-depth factor."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
