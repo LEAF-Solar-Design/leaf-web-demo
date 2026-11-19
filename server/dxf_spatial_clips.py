@@ -30,8 +30,11 @@ def _polygon(points, matrix):
     if len(points) == 2:
         (x, y), (u, v) = points
         points = [(x, y), (u, y), (u, v), (x, v)]
-    elif points[0] == points[-1]:
-        points = points[:-1]
+    else:
+        end = len(points)
+        while end > 1 and points[end-1] == points[0]:
+            end -= 1
+        points = points[:end]
     if len(points) < 3:
         raise ValueError("Invalid clip polygon.")
     a, b, _, dx, c, d, _, dy = matrix[:8]
@@ -46,6 +49,18 @@ def _polygon(points, matrix):
         return (q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0])
     def overlaps(p, q, r, s):
         return max(min(p,q), min(r,s)) <= min(max(p,q), max(r,s))
+    # Remove only intermediate points on straight edges. A reversal is
+    # overlapping boundary geometry, even if its vertices are distinct.
+    corners = []
+    for i, q in enumerate(result):
+        p, r = result[i-1], result[(i+1) % len(result)]
+        if orient(p,q,r) != 0:
+            corners.append(q)
+        elif not all(min(a,b) <= v <= max(a,b) for a,b,v in zip(p,r,q)):
+            raise ValueError("Degenerate or retraced clip boundary.")
+    if len(corners) < 3:
+        raise ValueError("Degenerate clip boundary.")
+    result = corners
     edges = list(zip(result, result[1:]+result[:1]))
     if not any(orient(result[0], p, q) for p, q in edges):
         raise ValueError("Degenerate clip boundary.")
