@@ -1646,3 +1646,37 @@ def test_breaker_failure_backup_clears(wait, clear, dropout):
     assert grade(rule, events[:-1], complete=True) == "INCOMPLETE"
     assert grade(rule, [(0, True, dropout, False)], complete=True) == "PASS"
     assert grade(rule, events, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("sign,motor,delay", [
+    pytest.param("export", -20, 1, id="standby-diesel-motoring"),
+    pytest.param("import", 12, 0.6, id="turbine-meter-with-import-positive"),
+    pytest.param("export", -4, 4, id="hydro-generator-backfeed"),
+])
+def test_reverse_power_needs_continuous_pickup(sign, motor, delay):
+    from benches.x03_quality import reverse_power_quality as grade
+
+    settings = dict(positive_kw=sign, pickup_kw=abs(motor), delay_s=delay)
+    half = (delay / 2, motor, False)
+    recovery = (delay, motor / 2, False)
+    # Two half-delays separated by recovery cannot trip. Two consecutive halves can.
+    good = [half, recovery, half, (delay / 2, motor, True), (1, -motor, True)]
+    assert grade(settings, good, complete=True) == "PASS"
+    assert grade(settings, [half, half], complete=True) == "FAIL"
+    assert grade(settings, [half, recovery, (delay / 2, motor, True)], complete=True) == "FAIL"
+    assert grade(dict(settings, positive_kw=None), good, complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("reach,block,load,fault", [
+    pytest.param([(0,0),(8,0),(8,6),(0,6)], [(4,0),(9,0),(9,2),(4,2)], (4,2), (2,4), id="loaded-feeder"),
+    pytest.param([(-6,-6),(0,-6),(0,0),(-6,0)], [(-6,-2),(-2,-2),(-2,0),(-6,0)], (-4,-1), (-5,-5), id="reverse-line-reach"),
+    pytest.param([(0,0),(8,0),(0,8)], [(3,0),(8,0),(3,3)], (4,1), (1,7), id="triangular-intertie-zone"),
+])
+def test_distance_reach_respects_load_restraint(reach, block, load, fault):
+    from benches.x03_quality import distance_restraint_quality as grade
+
+    settings = dict(trip=[reach], restraint=[block])
+    assert grade(settings, [(*load, False), (*fault, True), (20,20,False)]) == "PASS"
+    assert grade(settings, [(*load, True)]) == "FAIL"
+    assert grade(settings, [(*fault, False)]) == "FAIL"
+    assert grade(dict(trip=[reach]), [(*load, False)]) == "INCOMPLETE"

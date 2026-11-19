@@ -949,3 +949,27 @@ def irradiance_closure_quality(readings, tolerance_w_m2):
     # Allow only floating roundoff in the cosine projection at the boundary.
     bound = tolerance_w_m2 + 2 * ulp(expected)
     return "PASS" if residual <= bound else "FAIL"
+
+
+def pyranometer_thermal_offset_quality(revision, calibration, dome_c, body_c, raw_w_m2, reported_w_m2):
+    """Apply the pinned additive offset a + b*(dome-body), over qualified temperatures."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(calibration, dict):
+        return "INCOMPLETE"
+    if calibration.get("revision") != revision or calibration.get("rule") != "dome-body-linear-offset-v1":
+        return "INCOMPLETE"
+    values = (dome_c, body_c, raw_w_m2, reported_w_m2, calibration.get("offset_w_m2"),
+              calibration.get("slope_w_m2_per_k"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    for name, value in (("dome_c_range", dome_c), ("body_c_range", body_c)):
+        bounds = calibration.get(name)
+        if not isinstance(bounds, (tuple, list)) or len(bounds) != 2 or not all(map(finite_measure, bounds)):
+            return "INCOMPLETE"
+        if not bounds[0] <= value <= bounds[1]:
+            return "INCOMPLETE"
+    dome, body, raw, reported, intercept, slope = (Fraction(str(v)) for v in values)
+    corrected = raw - intercept - slope * (dome - body)
+    return "PASS" if corrected == reported else "FAIL"

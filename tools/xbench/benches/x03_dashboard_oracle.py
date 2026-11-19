@@ -1567,3 +1567,35 @@ def retry_amplification_quality(policy, layers, attempts, *, complete):
         if count > caps[parent_level][0]:
             return "FAIL"
     return "PASS" if all(count <= caps[level - 1][1] for level, count in at_layer.items()) else "FAIL"
+
+
+def speculative_winner_quality(attempts, committed, reported, *, complete):
+    """Reconcile a closed execution ledger against one atomic publish per task.
+
+    Attempts bind attempt IDs to parent task and candidate output ID. Commit
+    receipts and report rows are (task, winning attempt, published output).
+    """
+    if complete is not True or not all(isinstance(x, list) for x in (attempts, committed, reported)):
+        return "INCOMPLETE"
+    for rows in (attempts, committed, reported):
+        for row in rows:
+            if not isinstance(row, (tuple, list)) or len(row) != 3:
+                return "INCOMPLETE"
+            if not all(isinstance(x, str) and x for x in row):
+                return "INCOMPLETE"
+    candidates = {}
+    for attempt, task, output in attempts:
+        if attempt in candidates:
+            return "INCOMPLETE"
+        candidates[attempt] = (task, output)
+    winners, outputs = set(), set()
+    for task, attempt, output in committed:
+        if attempt not in candidates:
+            return "INCOMPLETE"
+        if candidates[attempt] != (task, output) or task in winners or output in outputs:
+            return "FAIL"
+        winners.add(task)
+        outputs.add(output)
+    receipts = {tuple(row) for row in committed}
+    credits = [tuple(row) for row in reported]
+    return "PASS" if len(credits) == len(receipts) and set(credits) == receipts else "FAIL"

@@ -5,6 +5,27 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("material,plated,start,end", [
+    pytest.param("fixture-A", 10, 40, 160, id="qualify-a-plated-fastener-lot"),
+    pytest.param("fixture-B", 58, 70, 115, id="check-a-spring-clip-treatment"),
+    pytest.param("fixture-C", 1400, 1460, 1640, id="check-a-batch-across-midnight"),
+])
+def test_plating_relief_bake_timing(material, plated, start, end):
+    from benches.x03_catalog_oracle import plating_relief_quality as grade
+
+    procedures = {"fixture-A": (30, 120), "fixture-B": (12, 45), "fixture-C": (60, 180)}
+    sheet = dict(revision="lab", material_procedures={
+        name: dict(max_delay_min=delay, min_hold_min=hold, min_c=180, max_c=210)
+        for name, (delay, hold) in procedures.items()
+    })
+    treatment = dict(plating_end_min=plated, soak_start_min=start, soak_end_min=end, low_c=180, high_c=210)
+    assert grade("lab", sheet, material, treatment) == "PASS"
+    assert grade("lab", sheet, material, dict(treatment, soak_start_min=start + 1, soak_end_min=end + 1)) == "FAIL"
+    assert grade("lab", sheet, material, dict(treatment, soak_end_min=end - 1)) == "FAIL"
+    assert grade("lab", sheet, material, dict(treatment, low_c=179)) == "FAIL"
+    assert grade("lab", sheet, material, dict(treatment, soak_end_min=None)) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("exposure,coating,hours,criterion,protocol", [
     pytest.param("sheltered", "zinc", 48, "no binding", "neutral", id="qualify-a-coated-latch"),
     pytest.param("coastal", "epoxy", 240, "no blistering", "cyclic", id="check-a-coastal-enclosure"),
@@ -1333,3 +1354,20 @@ def test_irradiance_closure_requires_simultaneous_channels(zenith, dni, dhi, exp
     assert grade(dict(readings, ghi=(5, expected + tol + 1)), tol) == "FAIL"
     assert grade(dict(readings, dni=(4, dni)), tol) == "INCOMPLETE"
     assert grade({k: v for k, v in readings.items() if k != "dhi"}, tol) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("dome,body,offset,slope,raw,expected", [
+    pytest.param(0, 2, 0, 2, 1, 5, id="recover-a-cold-dome-dawn-reading"),
+    pytest.param(7, 5, 1, 1.5, 12, 8, id="correct-a-warm-dome-at-dusk"),
+    pytest.param(-8, -5, -1, 0.5, -0.5, 2, id="recover-a-negative-raw-reading-in-frost"),
+])
+def test_pyranometer_offset_uses_pinned_thermal_calibration(dome, body, offset, slope, raw, expected):
+    from benches.x03_weather_oracle import pyranometer_thermal_offset_quality as grade
+
+    cal = dict(revision="lab-7", rule="dome-body-linear-offset-v1", offset_w_m2=offset,
+               slope_w_m2_per_k=slope, dome_c_range=(-10, 10), body_c_range=(-7, 6))
+    assert grade("lab-7", cal, dome, body, raw, expected) == "PASS"
+    assert grade("lab-7", cal, dome, body, raw, raw) == "FAIL"
+    assert grade("lab-8", cal, dome, body, raw, expected) == "INCOMPLETE"
+    assert grade("lab-7", cal, dome, 7, raw, expected) == "INCOMPLETE"
+    assert grade("lab-7", dict(cal, slope_w_m2_per_k=None), dome, body, raw, expected) == "INCOMPLETE"

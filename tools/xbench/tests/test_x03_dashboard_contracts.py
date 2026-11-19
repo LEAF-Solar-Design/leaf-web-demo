@@ -777,3 +777,23 @@ def test_retry_amplification_counts_all_parent_branches(widths, layer_totals):
     assert check([*limits[:-1], dict(limits[-1], per_original=layer_totals[-1] - 1)], events) == "FAIL"
     assert check([dict(limits[0], per_parent=widths[0] - 1), *limits[1:]], events) == "FAIL"
     assert check(limits, [events[0], *events[2:]]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("attempts,receipts,losing", [
+    pytest.param([("primary", "map", "o1"), ("backup", "map", "o2")],
+                 [("map", "backup", "o2")], ("map", "primary", "o1"), id="credit-the-faster-backup"),
+    pytest.param([("a", "plot", "p"), ("b", "plot", "q"), ("c", "plot", "r")],
+                 [("plot", "a", "p")], ("plot", "c", "r"), id="publish-once-after-three-siblings"),
+    pytest.param([("x", "fit", "f"), ("y", "fit", "g"), ("z", "draw", "h")],
+                 [("fit", "y", "g"), ("draw", "z", "h")], ("fit", "x", "f"),
+                 id="reconcile-two-tasks-with-one-speculative-retry"),
+])
+def test_speculative_accounting_follows_atomic_winner(attempts, receipts, losing):
+    from benches.x03_dashboard_oracle import speculative_winner_quality as grade
+
+    assert grade(attempts, receipts, list(reversed(receipts)), complete=True) == "PASS"
+    assert grade(attempts, receipts, [losing, *receipts[1:]], complete=True) == "FAIL"
+    assert grade(attempts, [*receipts, losing], receipts, complete=True) == "FAIL"
+    assert grade(attempts, receipts, [*receipts, receipts[0]], complete=True) == "FAIL"
+    missing = [row for row in attempts if row[0] != receipts[0][1]]
+    assert grade(missing, receipts, receipts, complete=True) == "INCOMPLETE"

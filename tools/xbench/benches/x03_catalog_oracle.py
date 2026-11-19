@@ -3,6 +3,30 @@ from fractions import Fraction
 from math import isfinite
 
 
+def plating_relief_quality(revision, sheet, material, treatment):
+    """Check one continuous bake; timestamps are minutes on one recorded process clock."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    procedures = sheet.get("material_procedures")
+    if not isinstance(material, str) or not material.strip() or not isinstance(procedures, dict):
+        return "INCOMPLETE"
+    rule = procedures.get(material)
+    if not isinstance(rule, dict) or not isinstance(treatment, dict):
+        return "INCOMPLETE"
+    limits = [rule.get(k) for k in ("max_delay_min", "min_hold_min", "min_c", "max_c")]
+    measured = [treatment.get(k) for k in ("plating_end_min", "soak_start_min", "soak_end_min", "low_c", "high_c")]
+    if not all(map(finite_measure, limits + measured)):
+        return "INCOMPLETE"
+    delay, hold, low, high = (Fraction(str(x)) for x in limits)
+    plated, start, end, coolest, hottest = (Fraction(str(x)) for x in measured)
+    if delay < 0 or hold <= 0 or low > high or coolest > hottest or end < start:
+        return "INCOMPLETE"
+    qualifies = 0 <= start - plated <= delay and end - start >= hold and low <= coolest <= hottest <= high
+    return "PASS" if qualifies else "FAIL"
+
+
 def salt_fog_quality(revision, sheet, exposure, coating):
     """Require one recorded coating test that meets the pinned exposure-class procedure."""
     from benches.x03_quality import finite_measure

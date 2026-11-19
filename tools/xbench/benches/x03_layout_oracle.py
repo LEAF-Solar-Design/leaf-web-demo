@@ -4,6 +4,21 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def anchor_pullout_quality(revision, rule, head_bearing_mm2, concrete_mpa, uplift_n):
+    """Use the net head bearing area and the pinned coefficient for this anchor and concrete."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "net-head-bearing-v1":
+        return "INCOMPLETE"
+    values = (head_bearing_mm2, concrete_mpa, uplift_n, rule.get("resistance_factor"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    area, strength, uplift, coefficient = (Fraction(str(value)) for value in values)
+    if min(area, strength, coefficient) <= 0 or uplift < 0:
+        return "INCOMPLETE"
+    return "PASS" if uplift <= coefficient * strength * area else "FAIL"
+
+
 def timber_withdrawal_quality(revision, rule, substrate, grain, moisture, threaded_mm, uplift_n):
     """Compare axial uplift with resistance per effective threaded millimetre in the recorded timber."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
