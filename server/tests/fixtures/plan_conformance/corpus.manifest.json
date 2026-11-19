@@ -1,0 +1,812 @@
+{
+  "cases": [
+    {
+      "expected": "expected/cap-ops-20000.json",
+      "name": "cap-ops-20000",
+      "operation_counts": {
+        "REMOVE": 20000
+      },
+      "plan": "plans/cap-ops-20000.plan",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/cap-ops-20001.json",
+      "name": "cap-ops-20001",
+      "plan": "plans/cap-ops-20001.plan",
+      "refusal": "plan_too_large",
+      "source": "synthetic"
+    },
+    {
+      "descriptor": {
+        "generator": "points",
+        "layer": "0",
+        "per_op": 10000,
+        "points": 500000
+      },
+      "expected": {
+        "operations": 50,
+        "points": 500000
+      },
+      "name": "cap-points-500000",
+      "sha256": "491c54344a1283aa3277f317698bd845824787bf2b309a16502643e18271f654",
+      "source": "synthetic"
+    },
+    {
+      "descriptor": {
+        "generator": "points",
+        "layer": "0",
+        "per_op": 10000,
+        "points": 500001
+      },
+      "expected": {
+        "refusal": "plan_too_large"
+      },
+      "name": "cap-points-500001",
+      "sha256": "e3535624dc950970f1716b7ac7a1a9800f72df4c53dc008886f499adeb797d36",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/clearmodel-first-v3.json",
+      "name": "clearmodel-first-v3",
+      "operation_counts": {
+        "ADDLINE": 1,
+        "CLEARMODEL": 1
+      },
+      "plan": "plans/clearmodel-first-v3.plan",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/clearmodel-second-v3.json",
+      "name": "clearmodel-second-v3",
+      "plan": "plans/clearmodel-second-v3.plan",
+      "refusal": "plan_clearmodel_position",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/clearmodel-v2.json",
+      "name": "clearmodel-v2",
+      "plan": "plans/clearmodel-v2.plan",
+      "refusal": "plan_clearmodel_position",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/header-invalid.json",
+      "name": "header-invalid",
+      "plan": "plans/header-invalid.plan",
+      "refusal": "plan_header_invalid",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-add.json",
+      "name": "malformed-add",
+      "plan": "plans/malformed-add.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addarc.json",
+      "name": "malformed-addarc",
+      "plan": "plans/malformed-addarc.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addblockdef.json",
+      "name": "malformed-addblockdef",
+      "plan": "plans/malformed-addblockdef.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addcircle.json",
+      "name": "malformed-addcircle",
+      "plan": "plans/malformed-addcircle.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-adddim.json",
+      "name": "malformed-adddim",
+      "plan": "plans/malformed-adddim.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addinsert.json",
+      "name": "malformed-addinsert",
+      "plan": "plans/malformed-addinsert.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addline.json",
+      "name": "malformed-addline",
+      "plan": "plans/malformed-addline.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-addmleader.json",
+      "name": "malformed-addmleader",
+      "plan": "plans/malformed-addmleader.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-group.json",
+      "name": "malformed-group",
+      "plan": "plans/malformed-group.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-relayer.json",
+      "name": "malformed-relayer",
+      "plan": "plans/malformed-relayer.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-remove.json",
+      "name": "malformed-remove",
+      "plan": "plans/malformed-remove.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-setgeom.json",
+      "name": "malformed-setgeom",
+      "plan": "plans/malformed-setgeom.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-style.json",
+      "name": "malformed-style",
+      "plan": "plans/malformed-style.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/malformed-transform.json",
+      "name": "malformed-transform",
+      "plan": "plans/malformed-transform.plan",
+      "refusal": "plan_malformed",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/non-ascii-v2.json",
+      "name": "non-ascii-v2",
+      "plan": "plans/non-ascii-v2.plan",
+      "refusal": "plan_non_ascii",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/op-add.json",
+      "name": "op-add",
+      "operation_counts": {
+        "ADD": 1
+      },
+      "plan": "plans/op-add.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addarc.json",
+      "name": "op-addarc",
+      "operation_counts": {
+        "ADDARC": 1
+      },
+      "plan": "plans/op-addarc.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addblockdef.json",
+      "name": "op-addblockdef",
+      "operation_counts": {
+        "ADDBLOCKDEF": 1
+      },
+      "plan": "plans/op-addblockdef.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addcircle.json",
+      "name": "op-addcircle",
+      "operation_counts": {
+        "ADDCIRCLE": 1
+      },
+      "plan": "plans/op-addcircle.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-adddimaligned.json",
+      "name": "op-adddimaligned",
+      "operation_counts": {
+        "ADDDIMALIGNED": 1
+      },
+      "plan": "plans/op-adddimaligned.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-adddimlinear.json",
+      "name": "op-adddimlinear",
+      "operation_counts": {
+        "ADDDIMLINEAR": 1
+      },
+      "plan": "plans/op-adddimlinear.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addgroup.json",
+      "name": "op-addgroup",
+      "operation_counts": {
+        "ADDGROUP": 1
+      },
+      "plan": "plans/op-addgroup.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addinsert.json",
+      "name": "op-addinsert",
+      "operation_counts": {
+        "ADDINSERT": 1
+      },
+      "plan": "plans/op-addinsert.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addline.json",
+      "name": "op-addline",
+      "operation_counts": {
+        "ADDLINE": 1
+      },
+      "plan": "plans/op-addline.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addmleader.json",
+      "name": "op-addmleader",
+      "operation_counts": {
+        "ADDMLEADER": 1
+      },
+      "plan": "plans/op-addmleader.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-addopen.json",
+      "name": "op-addopen",
+      "operation_counts": {
+        "ADDOPEN": 1
+      },
+      "plan": "plans/op-addopen.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-blockchild.json",
+      "name": "op-blockchild",
+      "operation_counts": {
+        "ADDBLOCKDEF": 1,
+        "BLOCKCHILD": 1
+      },
+      "plan": "plans/op-blockchild.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-relayer.json",
+      "name": "op-relayer",
+      "operation_counts": {
+        "RELAYER": 1
+      },
+      "plan": "plans/op-relayer.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-remove.json",
+      "name": "op-remove",
+      "operation_counts": {
+        "REMOVE": 1
+      },
+      "plan": "plans/op-remove.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-removegroup.json",
+      "name": "op-removegroup",
+      "operation_counts": {
+        "REMOVEGROUP": 1
+      },
+      "plan": "plans/op-removegroup.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setarc.json",
+      "name": "op-setarc",
+      "operation_counts": {
+        "SETARC": 1
+      },
+      "plan": "plans/op-setarc.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setcircle.json",
+      "name": "op-setcircle",
+      "operation_counts": {
+        "SETCIRCLE": 1
+      },
+      "plan": "plans/op-setcircle.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setcolor.json",
+      "name": "op-setcolor",
+      "operation_counts": {
+        "SETCOLOR": 1
+      },
+      "plan": "plans/op-setcolor.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setlinetype.json",
+      "name": "op-setlinetype",
+      "operation_counts": {
+        "SETLINETYPE": 1
+      },
+      "plan": "plans/op-setlinetype.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setlineweight.json",
+      "name": "op-setlineweight",
+      "operation_counts": {
+        "SETLINEWEIGHT": 1
+      },
+      "plan": "plans/op-setlineweight.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-setpoints.json",
+      "name": "op-setpoints",
+      "operation_counts": {
+        "SETPOINTS": 1
+      },
+      "plan": "plans/op-setpoints.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/op-transform.json",
+      "name": "op-transform",
+      "operation_counts": {
+        "TRANSFORM": 1
+      },
+      "plan": "plans/op-transform.plan",
+      "source": "emit_plan"
+    },
+    {
+      "expected": "expected/unknown-op.json",
+      "name": "unknown-op",
+      "plan": "plans/unknown-op.plan",
+      "refusal": "plan_op_not_supported",
+      "source": "synthetic"
+    },
+    {
+      "expected": "expected/v3-utf8-text.json",
+      "name": "v3-utf8-text",
+      "operation_counts": {
+        "ADDMLEADER": 1
+      },
+      "plan": "plans/v3-utf8-text.plan",
+      "source": "emit_plan"
+    }
+  ],
+  "files": {
+    "expected/cap-ops-20000.json": {
+      "sha256": "fa48290bd5b3d3cb790f8580c3b5ecb8f58519f25f631a95522bc376863d05b9"
+    },
+    "expected/cap-ops-20001.json": {
+      "sha256": "7321b18d8338f4d63836bb432efe84c14f286e6b1507e45b1666ee1ae6a60238"
+    },
+    "expected/clearmodel-first-v3.json": {
+      "sha256": "ea16738de29b026248d51d1aaa504b6c210aeecb0944c8f6d37bbfc2da2ae285"
+    },
+    "expected/clearmodel-second-v3.json": {
+      "sha256": "f41447897b10d44a62f9ba0d6a74340a611919f2a4e4638ae9b1946d8400258a"
+    },
+    "expected/clearmodel-v2.json": {
+      "sha256": "f41447897b10d44a62f9ba0d6a74340a611919f2a4e4638ae9b1946d8400258a"
+    },
+    "expected/header-invalid.json": {
+      "sha256": "67a73f71afeceb9f6fd8e965a4ae417dd3b9f95b1412500d86c00297572cbe52"
+    },
+    "expected/malformed-add.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addarc.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addblockdef.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addcircle.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-adddim.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addinsert.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addline.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-addmleader.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-group.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-relayer.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-remove.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-setgeom.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-style.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/malformed-transform.json": {
+      "sha256": "a50c89e0eae45d17f6995a0d15ec9a24612e6c82d76c801785bf0047982b4ae7"
+    },
+    "expected/non-ascii-v2.json": {
+      "sha256": "4048ca339cd2845b62ed75ee878043d1a4f359ab4982abdc5f719d16d613da40"
+    },
+    "expected/op-add.json": {
+      "sha256": "be5481c3cbc4de3599de027494f85fce639e8cd5e0fcac13643864f3f366dcb8"
+    },
+    "expected/op-addarc.json": {
+      "sha256": "785d37bf0a5c33a55987c42be2f776865789714ed714ab7280b656ad69875a22"
+    },
+    "expected/op-addblockdef.json": {
+      "sha256": "2b0041a62bab4f69ac33edc1184ec49c8873b2c0a8d5bd672e8d3cfad1790dab"
+    },
+    "expected/op-addcircle.json": {
+      "sha256": "2ab8d8087b284e788cdbf587e0f3b2e901b9017596d127237b9e088d67949205"
+    },
+    "expected/op-adddimaligned.json": {
+      "sha256": "6ce52819145ef987878b7bf569577b340e5212253faca671e5582e0812787240"
+    },
+    "expected/op-adddimlinear.json": {
+      "sha256": "dc9bf4c43b17aef5e3699c13c7376c28ea89f91cd549a79768eb8ad4e14b5f5a"
+    },
+    "expected/op-addgroup.json": {
+      "sha256": "01b0b225c0af32fadc484be732ff948661e9bb12b6089880eae8aef75dcda058"
+    },
+    "expected/op-addinsert.json": {
+      "sha256": "bf8c4035ab0da58da50e353c1510b89f7751a0205b5628d5eaa4eb9955833935"
+    },
+    "expected/op-addline.json": {
+      "sha256": "5e1483d54fd4ab22f07d6a87d1d80c7235ac20b64a7f002cca623a5cc80c183d"
+    },
+    "expected/op-addmleader.json": {
+      "sha256": "bc21481c5adadf92e5d781b911d45026fad7cc22905157bcc06f942718c0fee7"
+    },
+    "expected/op-addopen.json": {
+      "sha256": "d2f8130db40f401c2396981f8e7fb6eb144614194dd1576f3c242b3388275f3c"
+    },
+    "expected/op-blockchild.json": {
+      "sha256": "77170251c6e368d2e3237ce370702bf7fbe739245faf364cc10acdc7c4694cad"
+    },
+    "expected/op-relayer.json": {
+      "sha256": "004197bfc300b6327a94ac10c85669ad4f808a566ec2c56861bf0b7ab5996972"
+    },
+    "expected/op-remove.json": {
+      "sha256": "fa48290bd5b3d3cb790f8580c3b5ecb8f58519f25f631a95522bc376863d05b9"
+    },
+    "expected/op-removegroup.json": {
+      "sha256": "57f906d2f91ddf62ebf423d0ad8b429855e303cb138a0815a1e63d402b2a1a18"
+    },
+    "expected/op-setarc.json": {
+      "sha256": "5b14c2afedcf4a30ca9084d751a43e9fce844f0abd96f69b020c57857cb58f96"
+    },
+    "expected/op-setcircle.json": {
+      "sha256": "8ff9d68479e8574bb6f9ac9c91d30504c247561d20e7e00c9a4c27a264c528d9"
+    },
+    "expected/op-setcolor.json": {
+      "sha256": "a55b96fe6cb6ee2fcbcd2df1af8ab4e31676c452851ddcfa8192ef9f998d63e2"
+    },
+    "expected/op-setlinetype.json": {
+      "sha256": "7727407b12345f3e3ac132c8d261e0180bbe14ad4a5c61254126f04ca409804e"
+    },
+    "expected/op-setlineweight.json": {
+      "sha256": "eee6e9bdb8845503d18a9a008161b77e888c1750d3d2e757d07065eeac4aa2c5"
+    },
+    "expected/op-setpoints.json": {
+      "sha256": "13bdad9481421e1bbbb8b4735b92b2cabbc3c7868abdb71fdd69916d02dfe18e"
+    },
+    "expected/op-transform.json": {
+      "sha256": "e6870a59c1b5b8fa38093b6750285c52bed05712504d1700d6effc1e1f389a75"
+    },
+    "expected/unknown-op.json": {
+      "sha256": "8d0e21ddde7b555255a3e3afd3dcba4702c5302fa653bf67a050b15a7d8863b6"
+    },
+    "expected/v3-utf8-text.json": {
+      "sha256": "f852d9d19533a8d2e7ccc19b8da963a7534936c8fc9f22c3b6f83dbd1875b98a"
+    },
+    "plans/cap-ops-20000.plan": {
+      "sha256": "11f90d8b616819a1cb926a6c6d03314bf14ac03a0492d708b379726cbc0143e0"
+    },
+    "plans/cap-ops-20001.plan": {
+      "sha256": "c7c832661daa4ec8c8d66e876ea3f864b826f2dae8236c92b8646743a58cdaa5"
+    },
+    "plans/clearmodel-first-v3.plan": {
+      "sha256": "5b0a46b9ea3dd7fbc7773c3bc2a96e9aaf39ede580c70d003d940b794bc7ff8a"
+    },
+    "plans/clearmodel-second-v3.plan": {
+      "sha256": "f60c189e8f17f5915e7f635d3545eba88ba67054910a5ac46ca629e0f2125bb2"
+    },
+    "plans/clearmodel-v2.plan": {
+      "sha256": "9f6c66fb86705d709f7fc8db338e0186118ee6485f4f13e720973e2e933bf133"
+    },
+    "plans/header-invalid.plan": {
+      "sha256": "348bb72e249f2ac1fa8c254e734c0a5def3ade85e9683d54ad32bb9a608055fd"
+    },
+    "plans/malformed-add.plan": {
+      "sha256": "e167cd92826b1f4ad2dc0da067981cad9c31ad524f633e8fcd94a58002f8a7bc"
+    },
+    "plans/malformed-addarc.plan": {
+      "sha256": "b2eb08f5fd76451be96655af441afb5d7232fc4ed618f7620e9e3f5c43dcd369"
+    },
+    "plans/malformed-addblockdef.plan": {
+      "sha256": "b4eebb05ffe82c4c52f9af0d4d8c6cf5ac359d59fb7cad271c5661d7be37ea37"
+    },
+    "plans/malformed-addcircle.plan": {
+      "sha256": "c786292440df1ccf1448aeb4f92baa6deca370f168a1ef9f9cb69edc53498c83"
+    },
+    "plans/malformed-adddim.plan": {
+      "sha256": "d0fe5ca642ae8116ebd6cb6cae58c1c49ef7507fbd2e9304a6103987e36e0f61"
+    },
+    "plans/malformed-addinsert.plan": {
+      "sha256": "0fd006419272e0596fdb83a9c31c7ee422e9fe6f332ef276ca76460e307f4e45"
+    },
+    "plans/malformed-addline.plan": {
+      "sha256": "2d2d016f3dd6bf108616d3264413931c20eadc92678b246d5c8f46f3b532c951"
+    },
+    "plans/malformed-addmleader.plan": {
+      "sha256": "b24c68b48652d015c04dad88b998f9ff365298b49a2fb5a40d86185c2ba4cfe4"
+    },
+    "plans/malformed-group.plan": {
+      "sha256": "2efde821e49a361e82f62bff3b7f6d340f9ef7dfe6da3fd25aa2011d9ff2cd20"
+    },
+    "plans/malformed-relayer.plan": {
+      "sha256": "ea262bd13e0297735cbc6e51f0c5dd663fd46c82d45e66bbc7522e03d81345d1"
+    },
+    "plans/malformed-remove.plan": {
+      "sha256": "e1be4f8eefc962f4b8836e1c7cf0e35a94c12e2ed1b3fa874575bfc2223ae198"
+    },
+    "plans/malformed-setgeom.plan": {
+      "sha256": "d8fbce5fe739c4a65e2d7f3d7be92196d26ef1728e94ece4bbc5d070668b431a"
+    },
+    "plans/malformed-style.plan": {
+      "sha256": "aa750713e28e9f54b231ca7913af72af605154ed577e8e3045389a3d2124f546"
+    },
+    "plans/malformed-transform.plan": {
+      "sha256": "c20eb2f564e735c0d335e587e98e2a9e8e37ff28cfa6636c758c98dee4afed89"
+    },
+    "plans/non-ascii-v2.plan": {
+      "sha256": "ed79d3680ba809ac48f36a83a49cc4546a838f149a4e0c750ba3552db0a4df30"
+    },
+    "plans/op-add.plan": {
+      "sha256": "fc6539d8c7ba1a50d21361531688ded7b6b08e70045c7b4eb203e961f33dd8c1"
+    },
+    "plans/op-addarc.plan": {
+      "sha256": "ea5c664450086084af8f8969b617909ec102ac68faa990b461a6d7b938fbc7ae"
+    },
+    "plans/op-addblockdef.plan": {
+      "sha256": "d069db0c2b25953dd22d9a0970008bb180b5d5ac056b2cf108d069b205d3c4f3"
+    },
+    "plans/op-addcircle.plan": {
+      "sha256": "63fdd470047440bb9668f6cab708f9e2c675a9f8b2cf9b5a9db361858fcdb49c"
+    },
+    "plans/op-adddimaligned.plan": {
+      "sha256": "07970664d0a65b641fc179e89ff0758b438209241f56f2790296f47c70f4ca99"
+    },
+    "plans/op-adddimlinear.plan": {
+      "sha256": "d29a132f6e4c0c89f8aa38fa8b17393959eecb5f76778a2a6184b94e03991160"
+    },
+    "plans/op-addgroup.plan": {
+      "sha256": "6d340231c90e26e9b787ac188606430b317fed01c77dd96810da353c8d9e1f0c"
+    },
+    "plans/op-addinsert.plan": {
+      "sha256": "97d419176905af0dfed9470f39f1ba7fd169b0dd0301ed744450162eaefb0c65"
+    },
+    "plans/op-addline.plan": {
+      "sha256": "06479edc7c5e6cfbb6a09fffe7bfd042e515208544f1f16a63f3e9ad20d8a369"
+    },
+    "plans/op-addmleader.plan": {
+      "sha256": "8ba6600e725257b99e5bdcee824268dec20bf8b8793dc8d8f75fbf8a0d74f541"
+    },
+    "plans/op-addopen.plan": {
+      "sha256": "62840c222e92f6d511396a1ce060611738071abde6b1bff1ed5e56dab797d3ff"
+    },
+    "plans/op-blockchild.plan": {
+      "sha256": "ddda78f3ac6080c4ec8f357270d938407efae9dbaaf7c11238f0b7f83df8aadd"
+    },
+    "plans/op-relayer.plan": {
+      "sha256": "ab41852f1a79adffa284991cfacd65c864dd40c532a5177108015ea0f466953b"
+    },
+    "plans/op-remove.plan": {
+      "sha256": "962245166cdee770708479769fd7a1887ee692eeda173cf2caa1a9cc261e3dd0"
+    },
+    "plans/op-removegroup.plan": {
+      "sha256": "4e5a749a725dc1695de42be8177bd56c546b407acaf6858c9775514ce8f30c30"
+    },
+    "plans/op-setarc.plan": {
+      "sha256": "5a45c8f4fcdb05e330cde3d40315be5beb45abe54022f92ccf163fec53146dcf"
+    },
+    "plans/op-setcircle.plan": {
+      "sha256": "c8558c4342bb167439b8e8e78059ca17ba5f427ee6c8936c4680c26a5e048d3e"
+    },
+    "plans/op-setcolor.plan": {
+      "sha256": "e261b206f210dfc18cba0ed23f65241a9587e6ae10b9efb3868a61732fbb58ce"
+    },
+    "plans/op-setlinetype.plan": {
+      "sha256": "0e11f63999f0be0de5dd7982c8d62932887712583460fd95df3b5f07e786402f"
+    },
+    "plans/op-setlineweight.plan": {
+      "sha256": "5685292a78e58c39944ef36eb6d389ce3463ca217d54c92f081d8a34224ebcc5"
+    },
+    "plans/op-setpoints.plan": {
+      "sha256": "00ff6bfdc7a789ca2fc73265ed8435710800602be0f96dcc544d28d00ba62b69"
+    },
+    "plans/op-transform.plan": {
+      "sha256": "5bf2dad1dfd50a653685b18e9ad3340a149bbea72bae9e5d9d519bc312c7bca4"
+    },
+    "plans/unknown-op.plan": {
+      "sha256": "06bedd4d82fc63407dcedf10e40612c380a8ca3def8048c203e33e9726bbd967"
+    },
+    "plans/v3-utf8-text.plan": {
+      "sha256": "547b901e7f5cb001fd21a47ec450f15225fcf77f7bc4ce62e0ac247bdc8d044b"
+    }
+  },
+  "initial_state": {
+    "blocks": [
+      {
+        "base": [
+          0,
+          0,
+          0
+        ],
+        "entities": [],
+        "name": "SYMBOL"
+      }
+    ],
+    "entities": [
+      {
+        "closed": true,
+        "elevation": 0.0,
+        "id": "H:A",
+        "kind": "LWPOLYLINE",
+        "layer": "0",
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "points": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            0.0
+          ],
+          [
+            2.0,
+            2.0
+          ],
+          [
+            0.0,
+            2.0
+          ]
+        ],
+        "space": "Model"
+      },
+      {
+        "id": "H:B",
+        "kind": "LINE",
+        "layer": "0",
+        "points": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "space": "Model"
+      },
+      {
+        "center": [
+          1.0,
+          1.0,
+          0.0
+        ],
+        "id": "H:C",
+        "kind": "CIRCLE",
+        "layer": "0",
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "radius": 2.0,
+        "space": "Model"
+      },
+      {
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "end": 1.5707963267948966,
+        "id": "H:D",
+        "kind": "ARC",
+        "layer": "0",
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "radius": 3.0,
+        "space": "Model",
+        "start": 0.0
+      },
+      {
+        "id": "H:E",
+        "kind": "LINE",
+        "layer": "0",
+        "points": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        "space": "Paper"
+      }
+    ],
+    "groups": [
+      {
+        "members": [
+          "H:A",
+          "H:B"
+        ],
+        "name": "G0"
+      }
+    ]
+  },
+  "limits": {
+    "operations": 20000,
+    "points": 500000
+  },
+  "refusal_codes": [
+    "plan_clearmodel_position",
+    "plan_header_invalid",
+    "plan_malformed",
+    "plan_non_ascii",
+    "plan_op_not_supported",
+    "plan_too_large"
+  ],
+  "schema_version": 1
+}
