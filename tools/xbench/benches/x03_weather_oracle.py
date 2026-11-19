@@ -837,3 +837,38 @@ def wind_undercatch_quality(revision, calibration, intervals, reported_mm):
             return "INCOMPLETE"
         corrected += Fraction(str(depth)) / efficiency
     return "PASS" if corrected == Fraction(str(reported_mm)) else "FAIL"
+
+
+def cosine_response_quality(revision, calibration, incidence_deg, measured_w_m2, corrected_w_m2):
+    """Correct beam irradiance using measured/ideal plane-response ratio at incidence."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(calibration, dict):
+        return "INCOMPLETE"
+    if calibration.get("revision") != revision or calibration.get("model") != "linear-measured-to-ideal-v1":
+        return "INCOMPLETE"
+    knots = calibration.get("angle_ratio")
+    if not isinstance(knots, list) or len(knots) < 2:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (incidence_deg, measured_w_m2, corrected_w_m2))) or measured_w_m2 < 0:
+        return "INCOMPLETE"
+    angle = Fraction(str(incidence_deg))
+    previous = None
+    ratio = None
+    for knot in knots:
+        if not isinstance(knot, (tuple, list)) or len(knot) != 2 or not all(map(finite_measure, knot)):
+            return "INCOMPLETE"
+        position, response = (Fraction(str(x)) for x in knot)
+        if not 0 <= position < 90 or response <= 0:
+            return "INCOMPLETE"
+        if previous is not None:
+            left, left_response = previous
+            if left >= position:
+                return "INCOMPLETE"
+            if left <= angle <= position:
+                ratio = left_response + (angle - left) * (response - left_response) / (position - left)
+        previous = position, response
+    if ratio is None:
+        return "INCOMPLETE"
+    return "PASS" if Fraction(str(corrected_w_m2)) * ratio == Fraction(str(measured_w_m2)) else "FAIL"

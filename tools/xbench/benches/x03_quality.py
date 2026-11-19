@@ -2592,3 +2592,69 @@ def tap_sequence_quality(policy, trace, *, complete):
                 failed = True
             last_step, last_step_tick, count = step, tick, 0
     return "FAIL" if failed else "PASS"
+
+
+def grounding_resistor_duty_quality(rule, initial_j, faults):
+    """Adiabatic fault pulses with constant recorded cooling power between pulses.
+
+    Each fault supplies idle seconds before onset, RMS amps and clearing seconds.
+    Energy is checked at every clearing instant, before any subsequent cooling.
+    """
+    if not isinstance(rule, dict) or rule.get("cooling_model") != "constant-idle-watts-v1":
+        return "INCOMPLETE"
+    values = (initial_j, rule.get("resistance_ohm"), rule.get("energy_limit_j"), rule.get("cooling_w"))
+    if not all(map(finite_measure, values)) or not isinstance(faults, list) or not faults:
+        return "INCOMPLETE"
+    energy, resistance, limit, cooling = (Fraction(str(x)) for x in values)
+    if min(energy, cooling) < 0 or min(resistance, limit) <= 0:
+        return "INCOMPLETE"
+    exceeded = energy > limit
+    for fault in faults:
+        if not isinstance(fault, (tuple, list)) or len(fault) != 3 or not all(map(finite_measure, fault)):
+            return "INCOMPLETE"
+        idle, amps, seconds = (Fraction(str(x)) for x in fault)
+        if min(idle, amps) < 0 or seconds <= 0:
+            return "INCOMPLETE"
+        energy = max(0, energy - idle * cooling) + amps ** 2 * resistance * seconds
+        exceeded |= energy > limit
+    return "FAIL" if exceeded else "PASS"
+
+
+def motor_thermal_memory_quality(rule, initial_heat, intervals):
+    """Replay normalized first-order heating when on and exponential cooling when off.
+
+    An initial stopped motor attempts a restart at each off-to-on transition.
+    Its start permissive is evaluated before applying that interval's current.
+    """
+    from math import expm1, log
+
+    if not isinstance(rule, dict) or rule.get("model") != "current-squared-half-life-v1":
+        return "INCOMPLETE"
+    values = [rule.get(key) for key in ("rated_a", "on_half_s", "off_half_s", "trip_heat", "start_heat")]
+    if not all(map(finite_measure, [initial_heat, *values])) or not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    rated, on_half, off_half, trip, restart = values
+    if min(rated, on_half, off_half, trip) <= 0 or not 0 <= restart <= trip or initial_heat < 0:
+        return "INCOMPLETE"
+    heat = initial_heat
+    exceeded = heat > trip
+    running = False
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        on, amps, seconds = row
+        if type(on) is not bool or not all(map(finite_measure, (amps, seconds))):
+            return "INCOMPLETE"
+        if amps < 0 or seconds <= 0 or (not on and amps != 0):
+            return "INCOMPLETE"
+        if on and not running and heat > restart:
+            exceeded = True
+        running = on
+        ratio = amps / rated
+        equilibrium = ratio * ratio
+        if not finite_measure(equilibrium):
+            return "INCOMPLETE"
+        fraction = -expm1(-log(2) * (seconds / (on_half if on else off_half)))
+        heat += (equilibrium - heat) * fraction
+        exceeded |= heat > trip
+    return "FAIL" if exceeded else "PASS"

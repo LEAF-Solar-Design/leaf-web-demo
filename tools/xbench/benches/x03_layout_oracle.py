@@ -4,6 +4,41 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def splice_deflection_quality(revision, rule, span_m, splice_m, tip_force_n, rigidity_nm2, limit_m):
+    """Cantilever tip displacement with one small-angle rotational splice and constant EI."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "cantilever-tip-load-symmetric-splice-v1":
+        return "INCOMPLETE"
+    values = (span_m, splice_m, tip_force_n, rigidity_nm2, limit_m)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    span, position, force, rigidity, limit = (Fraction(str(value)) for value in values)
+    if not 0 <= position < span or rigidity <= 0 or limit < 0:
+        return "INCOMPLETE"
+    curve = rule.get("moment_nm_rotation_rad")
+    if not isinstance(curve, list) or len(curve) < 2:
+        return "INCOMPLETE"
+    points = []
+    for row in curve:
+        if not isinstance(row, (tuple, list)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        moment, rotation = (Fraction(str(value)) for value in row)
+        if points and (moment <= points[-1][0] or rotation < points[-1][1]):
+            return "INCOMPLETE"
+        points.append((moment, rotation))
+    if points[0] != (0, 0):
+        return "INCOMPLETE"
+    arm = span - position
+    demand = abs(force) * arm
+    for (m0, r0), (m1, r1) in zip(points, points[1:]):
+        if demand <= m1:
+            rotation = r0 + (r1 - r0) * (demand - m0) / (m1 - m0)
+            tip_displacement = abs(force) * span**3 / (3 * rigidity) + arm * rotation
+            return "PASS" if tip_displacement <= limit else "FAIL"
+    return "INCOMPLETE"
+
+
 def web_crippling_quality(revision, rule, support, bearing_mm, reaction_n):
     """Interpolate the recorded reaction resistance for this support and rail section."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

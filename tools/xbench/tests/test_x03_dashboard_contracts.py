@@ -674,3 +674,29 @@ def test_token_bucket_accounts_for_bursts(capacity, rate, opening, arrivals, rej
     assert sum(c for _, c, _ in arrivals) <= rate * (arrivals[-1][0] - opening[0])
     assert grade(capacity, rate, opening, altered) == "FAIL"
     assert grade(capacity, rate, None, arrivals) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cohorts,ticks", [
+    pytest.param({"render": ["left", "right"]}, [4], id="start-stereo-render-workers-together"),
+    pytest.param({"solve": ["a", "b", "c"]}, [0], id="reconcile-a-three-shard-launch"),
+    pytest.param({"fit": ["a", "b"], "plot": ["a", "b"]}, [1, 8], id="check-separate-cohort-barriers"),
+])
+def test_gang_start_requires_distinct_reservations_and_all_members(cohorts, ticks):
+    from benches.x03_dashboard_oracle import gang_start_quality as grade
+
+    reservations, events = {}, []
+    for (cohort, members), tick in zip(cohorts.items(), ticks):
+        for index, member in enumerate(members):
+            ticket = f"{cohort}/{index}"
+            reservations[ticket] = cohort, f"worker-{index}", tick, tick + 2
+            events.append((cohort, member, ticket, tick))
+
+    def evaluate(ledger):
+        return grade("all-members-one-tick-v1", cohorts, reservations, ledger, complete=True)
+
+    assert evaluate(events) == "PASS"
+    assert evaluate(events[1:]) == "FAIL"
+    cohort, member, ticket, tick = events[1]
+    assert evaluate([events[0], (cohort, member, events[0][2], tick), *events[2:]]) == "FAIL"
+    assert evaluate([events[0], (cohort, member, ticket, tick + 1), *events[2:]]) == "FAIL"
+    assert grade("all-members-one-tick-v1", {}, reservations, events, complete=True) == "INCOMPLETE"

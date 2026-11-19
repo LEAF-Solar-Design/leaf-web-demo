@@ -1481,3 +1481,42 @@ def test_tap_hunting_and_persistence(low, high, delay, hold, direction):
         assert grade(policy, [(0, first, direction)], complete=True) == "FAIL"
     assert grade({}, initial, complete=True) == "INCOMPLETE"
     assert grade(policy, initial, complete=False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("resistance,amps,duration,cooling,gap,limit", [
+    pytest.param(2, 5, 2, 4, 5, 180, id="two-feeder-ground-faults"),
+    pytest.param(0.5, 20, 0.25, 5, 2, 90, id="short-neutral-resistor-pulses"),
+    pytest.param(4, 3, 1, 6, 3, 54, id="repeated-generator-fault"),
+])
+def test_grounding_resistor_cumulative_duty(resistance, amps, duration, cooling, gap, limit):
+    from benches.x03_quality import grounding_resistor_duty_quality as grade
+
+    # Individual pulses deposit 100, 50 and 36 J. Idle cooling removes 20,
+    # 10 and 18 J respectively before the second pulse reaches the limit.
+    rule = dict(cooling_model="constant-idle-watts-v1", resistance_ohm=resistance,
+                energy_limit_j=limit, cooling_w=cooling)
+    first = (0, amps, duration)
+    assert grade(rule, 0, [first, (gap, amps, duration)]) == "PASS"
+    assert grade(rule, 0, [first, first, (1000, 1, 0.1)]) == "FAIL"
+    assert grade(rule, 1, [first, (gap, amps, duration)]) == "FAIL"
+    assert grade({**rule, "cooling_model": None}, 0, [first]) == "INCOMPLETE"
+    assert grade(rule, 0, [first, (None, amps, duration)]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("rated,heat_half,cool_half,loaded,limit", [
+    pytest.param(10, 4, 12, 20, 1, id="restart-a-pump"),
+    pytest.param(20, 2, 8, 30, 0.5625, id="restart-a-conveyor"),
+    pytest.param(8, 6, 10, 8, 0.25, id="restart-a-ventilation-fan"),
+])
+def test_motor_restart_remembers_heat(rated, heat_half, cool_half, loaded, limit):
+    from benches.x03_quality import motor_thermal_memory_quality as grade
+
+    # One heating half-life from cold, then one cooling half-life, leaves
+    # one quarter of squared load ratio. The restart itself uses rated current.
+    rule = dict(model="current-squared-half-life-v1", rated_a=rated, on_half_s=heat_half,
+                off_half_s=cool_half, trip_heat=3, start_heat=limit)
+    load, restart = (True, loaded, heat_half), (True, rated, 1)
+    assert grade(rule, 0, [load, (False, 0, cool_half), restart]) == "PASS"
+    assert grade(rule, 0, [load, (False, 0, cool_half / 2), restart]) == "FAIL"
+    assert grade(rule, None, [load]) == "INCOMPLETE"
+    assert grade({**rule, "off_half_s": None}, 0, [load]) == "INCOMPLETE"
