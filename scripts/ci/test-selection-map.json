@@ -446,6 +446,8 @@
     "server-catalog-returns-schema",
     "server-lab-capability-coverage",
     "server-lab-surface",
+    "server-estimator-handoff",
+    "server-estimator-surface",
     "server-live-lsp-resolution",
     "server-live-mutation-plan",
     "server-marathon-orchestration",
