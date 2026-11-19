@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import type { ConverseTurnInput, HarnessTurnEvent } from "../src/ports/converse.js";
@@ -9,9 +9,10 @@ import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
 import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
 import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
-import { FileTenantGrantStore, GrantRequiredError, type TenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
-import type { AgentGrant, GrantSettlement, OAuthGrantProvider } from "../src/ports/index.js";
+import { FileTenantGrantStore, GrantPoolUnavailableError, GrantRequiredError, type TenantGrantStore } from "../src/ports/impl/oauthGrantProvider.js";
+import type { AgentGrant, ConverseRunnerEvent, GrantSettlement, OAuthGrantProvider, SpineConverseRunner } from "../src/ports/index.js";
 import { authorGrantSettlement } from "../src/vendor/mushy-author/agent/authorLoop.js";
+import { markUntrustedOrigin, withFailureCategory } from "../src/vendor/mushy-author/agent/captureGuards.js";
 
 class ScriptedEnvFallback implements TenantGrantStore {
   async get(): Promise<AgentGrant | null> {
@@ -111,6 +112,39 @@ describe("terminal grant auth refusals", () => {
     expect((await store.status("acme")).accounts!.filter(a => a.eligible).map(a => a.id)).toEqual([freshId]);
   });
 
+  it("ignores replay of a consumed refusal lease after activation", async () => {
+    const id = await link("a");
+    const lease = await store.acquire("acme");
+    const outcome = { ...refused, usage: { cost_tokens: 17 } };
+    await store.settle("acme", lease.lease_id, outcome);
+    await store.activate("acme", id);
+    await store.settle("acme", lease.lease_id, outcome);
+    expect((await store.status("acme")).accounts![0]).toMatchObject({
+      id, eligible: true, usage_tokens: 17, auth_refused_at: null, auth_refused_code: null,
+    });
+  });
+
+  it("uses the healthy account's remaining cooldown when the other account is refused", async () => {
+    await link("a");
+    await link("b");
+    const first = await store.acquire("acme");
+    await store.settle("acme", first.lease_id, refused);
+    const second = await store.acquire("acme");
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      await store.settle("acme", second.lease_id, {
+        usage: { cost_tokens: 0 }, stop_reason: "llm_quota_exhausted", retry_after_s: 120,
+      });
+      clock.mockReturnValue(now + 30_000);
+      const attempt = store.acquire("acme");
+      await expect(attempt).rejects.toBeInstanceOf(GrantPoolUnavailableError);
+      await expect(attempt).rejects.toMatchObject({ retryAfterS: 90 });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("isolates tenants that link identical tokens", async () => {
     await link("a");
     await link("b");
@@ -125,15 +159,42 @@ describe("terminal grant auth refusals", () => {
     expect(selected.map(item => item.account_id).sort()).toEqual(ids.sort());
   });
 
-  it("reads v3 records written before the refusal fields existed", async () => {
+  function writeV3(fields: Record<string, unknown> = {}) {
     const path = join(dir, "acme.grant.json");
     writeFileSync(path, JSON.stringify({
       version: 3, active_account_id: "old", accounts: [{
         id: "old", label: "old mount", token: "FAKE-old-token", kind: "oauth", plan: "max",
         linked_at: "2026-01-01T00:00:00.000Z", last_used_at: null, cooldown_until: null,
-        usage_tokens: 12, selection_count: 1, leases: [],
+        usage_tokens: 12, selection_count: 1, leases: [], ...fields,
       }],
     }));
+    return path;
+  }
+
+  it.each([
+    { auth_refused_at: "not-a-date", auth_refused_code: "authentication_failed" },
+    { auth_refused_at: "2026-01-01T00:00:00.000Z", auth_refused_code: "BAD-CODE" },
+    { auth_refused_at: "2026-01-01T00:00:00.000Z" },
+  ])("rejects invalid v3 refusal fields %j", async fields => {
+    writeV3(fields);
+    await expect(store.status("acme")).rejects.toThrow(/invalid persisted grant record/);
+  });
+
+  it("accepts explicit nulls and preserves a valid v3 refusal across a write", async () => {
+    writeV3({ auth_refused_at: null, auth_refused_code: null });
+    expect((await store.status("acme")).accounts![0]).toMatchObject({
+      eligible: true, auth_refused_at: null, auth_refused_code: null,
+    });
+    const fields = { auth_refused_at: "2026-01-01T00:00:00.000Z", auth_refused_code: "authentication_failed" };
+    writeV3(fields);
+    await link("new");
+    expect((await store.status("acme")).accounts!.find(account => account.id === "old")).toMatchObject({
+      ...fields, eligible: false,
+    });
+  });
+
+  it("reads v3 records written before the refusal fields existed", async () => {
+    const path = writeV3();
     expect((await store.status("acme")).accounts![0]).toMatchObject({
       auth_refused_at: null, auth_refused_code: null, eligible: true,
     });
@@ -157,9 +218,14 @@ describe("terminal grant auth refusals", () => {
 
 it("classifies author auth refusals and keeps billing errors on the quota path", () => {
   for (const code of ["oauth_org_not_allowed", "authentication_failed"]) {
-    expect(authorGrantSettlement(undefined, new Error(`Agent SDK auth failure: ${code}`))).toEqual({
+    const error = new Error(`Agent SDK auth failure: ${code}`);
+    const plainError = { usage: { cost_tokens: 0 }, stop_reason: "error" };
+    expect(authorGrantSettlement(undefined, error)).toEqual(plainError);
+    withFailureCategory(error, "auth_failure");
+    expect(authorGrantSettlement(undefined, error)).toEqual({
       usage: { cost_tokens: 0 }, stop_reason: "error", error_code: code,
     });
+    expect(authorGrantSettlement(undefined, markUntrustedOrigin(error))).toEqual(plainError);
   }
   expect(authorGrantSettlement(undefined, new Error("Agent SDK auth failure: billing_error"))).toEqual({
     usage: { cost_tokens: 0 }, stop_reason: "llm_quota_exhausted",
@@ -183,7 +249,7 @@ async function drain(gen: AsyncIterable<HarnessTurnEvent>): Promise<HarnessTurnE
   return events;
 }
 
-it("passes the spine runner's error code to the routed grant settlement only when emitted", async () => {
+function routedAdapter(runner: SpineConverseRunner = new FakeConverseRunner()) {
   const settlements: GrantSettlement[] = [];
   const grant: AgentGrant = { kind: "oauth", oauthToken: "FAKE-routed-token" };
   const oauth: OAuthGrantProvider = {
@@ -191,14 +257,44 @@ it("passes the spine runner's error code to the routed grant settlement only whe
     async acquireGrant() { return { grant, account_id: "account", lease_id: "lease" }; },
     async settleGrant(_tenant, _lease, outcome) { settlements.push(outcome); },
   };
-  const runner = new FakeConverseRunner();
   const adapter = new SpineTurnAdapter({
     oauth, appRun: new FakeAppRunClient(), gate: new FakeGateClient(),
     store: new FakeSessionStore(), runnerFor: () => runner,
+    standardServicesResolver: { async resolve() { throw new Error("not called by fake"); } },
   });
+  return { adapter, settlements };
+}
+
+it("passes the spine runner's error code to the routed grant settlement only when emitted", async () => {
+  const { adapter, settlements } = routedAdapter();
   await drain(adapter.runTurn(turnInput({ text: "FAIL:oauth_org_not_allowed" })));
   await drain(adapter.runTurn(turnInput({ text: "hello", turn_id: "app-turn-2" })));
   expect(settlements).toHaveLength(2);
   expect(settlements[0]).toHaveProperty("error_code", "oauth_org_not_allowed");
   expect(settlements[1]).not.toHaveProperty("error_code");
+});
+
+it("keeps a BYO model refusal out of the tenant's standard-service settlement", async () => {
+  const { adapter, settlements } = routedAdapter();
+  await drain(adapter.runTurn(turnInput({
+    text: "FAIL:oauth_org_not_allowed",
+    credential_grant: { kind: "oauth", oauth_token: "FAKE-BYO-model-token" },
+  })));
+  expect(settlements).toEqual([{ usage: { cost_tokens: 0 }, stop_reason: "end_turn" }]);
+});
+
+it.each([7, "", "a".repeat(65)])("omits malformed runner error code %j", async code => {
+  const { adapter, settlements } = routedAdapter({
+    async *run(): AsyncIterable<ConverseRunnerEvent> {
+      yield {
+        type: "done", stopReason: "error", sdkSessionId: null,
+        // Model a malformed event crossing the runner's typed boundary.
+        error: { error_code: code as string, message: "fake failure", retryable: false },
+      };
+    },
+  });
+  await drain(adapter.runTurn(turnInput({ text: "hello" })));
+  expect(settlements).toHaveLength(1);
+  expect(settlements[0]).toMatchObject({ stop_reason: "error" });
+  expect(settlements[0]).not.toHaveProperty("error_code");
 });

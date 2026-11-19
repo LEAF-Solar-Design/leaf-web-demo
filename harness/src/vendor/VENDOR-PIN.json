@@ -3,7 +3,7 @@
   "downstream_overlays": {
     "agent/authorLoop.ts": {
       "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
-      "sha256": "d3dfca96eeea3cebff109eb0a6cd3638e26d343e18c7fcc7d03aed0b7bb415ef"
+      "sha256": "81691920f52f8cd1353dc92fa8b5bb15da9c81afd2c1621571313dee3331eacd"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
@@ -67,7 +67,7 @@
     }
   },
   "files": {
-    "agent/authorLoop.ts": "d3dfca96eeea3cebff109eb0a6cd3638e26d343e18c7fcc7d03aed0b7bb415ef",
+    "agent/authorLoop.ts": "81691920f52f8cd1353dc92fa8b5bb15da9c81afd2c1621571313dee3331eacd",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
