@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("material,group,boundary", [
+    pytest.param("plug-resin", "high", 600, id="qualify-a-plug-insulator"),
+    pytest.param("board-stock", "middle", 400, id="check-the-board-laminate"),
+    pytest.param("terminal-body", "basic", 175, id="qualify-a-terminal-housing"),
+])
+def test_cti_supports_requested_insulation_group(material, group, boundary):
+    from benches.x03_catalog_oracle import tracking_index_quality as grade
+
+    thresholds = {"high": 600, "middle": 400, "basic": 175}
+    record = dict(protocol="lab-a", cti_v=boundary)
+    sheet = dict(revision="r2", protocol="lab-a", group_min_cti_v=thresholds, material_tests={material: record})
+    assert grade("r2", sheet, material, group) == "PASS"
+    record["cti_v"] = boundary - 1
+    assert grade("r2", sheet, material, group) == "FAIL"
+    record["protocol"] = "other"
+    assert grade("r2", sheet, material, group) == "INCOMPLETE"
+    assert grade("r2", sheet, "untested material", group) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("aging,hours,original,spacer,recovered,limit", [
     pytest.param(70, 24, 10, 8, 9.5, 25, id="check-a-cabinet-door-gasket"),
     pytest.param(100, 72, 4, 3, 3.9, 10, id="review-a-feedthrough-seal"),
@@ -1443,3 +1462,19 @@ def test_precipitation_phase_assigns_wet_bulb_boundaries(limits, temperatures, l
         changed[at_boundary] = (at_boundary, "mixed")
         assert grade(thresholds, trace, changed) == "FAIL"
     assert grade(dict(thresholds, rain_min_wet_bulb_c=None), trace, report) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("axis,wind,raw,static", [
+    pytest.param((1, 0), (4, 0), 100004, 100000, id="correct-a-windward-east-port"),
+    pytest.param((0, 1), (2, -4), 98998, 99000, id="recover-pressure-at-a-leeward-port"),
+    pytest.param((0.6, 0.8), (2, 1), 100501, 100500, id="project-oblique-wind-onto-a-tilted-axis"),
+])
+def test_pressure_port_bias_depends_on_wind_vector(axis, wind, raw, static):
+    from benches.x03_weather_oracle import pressure_port_quality as grade
+
+    model = dict(model="axial-dynamic-pressure-v1", revision="port-2", axis_en=axis,
+                 forward_cp=0.5, reverse_cp=-0.25, max_wind_m_s=5)
+    assert grade("port-2", model, wind, 1.0, raw, static) == "PASS"
+    assert grade("port-2", model, wind, 1.0, raw, raw) == "FAIL"
+    assert grade("port-2", model, (4, 4), 1.0, raw, static) == "INCOMPLETE"
+    assert grade("port-1", model, wind, 1.0, raw, static) == "INCOMPLETE"

@@ -4,6 +4,22 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def shear_lag_quality(revision, rule, net_area_mm2, centroid_offset_mm, connection_mm, tension_n):
+    """Use the pinned effective area An(1 - x/L) for a partially connected member."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "linear-offset-shear-lag-v1":
+        return "INCOMPLETE"
+    values = (net_area_mm2, centroid_offset_mm, connection_mm, tension_n, rule.get("allowable_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    area, offset, length, tension, strength = (Fraction(str(value)) for value in values)
+    if min(area, strength) <= 0 or not 0 <= offset < length or tension < 0:
+        return "INCOMPLETE"
+    effective_area = area * (1 - offset / length)
+    return "PASS" if tension <= effective_area * strength else "FAIL"
+
+
 def anchor_pryout_quality(revision, rule, embedment_mm, shear_n):
     """Interpolate the pinned concrete pryout resistance between qualified embedments."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

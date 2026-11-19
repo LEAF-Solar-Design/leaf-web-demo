@@ -1048,3 +1048,28 @@ def precipitation_phase_quality(thresholds, trace, reported):
             return "INCOMPLETE"
         observed.append(tuple(row))
     return "PASS" if observed == expected else "FAIL"
+
+
+def pressure_port_quality(revision, calibration, wind_en_m_s, density_kg_m3, raw_pa, reported_static_pa):
+    """Remove signed port bias from dynamic pressure along a calibrated horizontal axis."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(revision, str) or not revision or not isinstance(calibration, dict):
+        return "INCOMPLETE"
+    if calibration.get("revision") != revision or calibration.get("model") != "axial-dynamic-pressure-v1":
+        return "INCOMPLETE"
+    axis = calibration.get("axis_en")
+    if not all(isinstance(pair, (tuple, list)) and len(pair) == 2 for pair in (axis, wind_en_m_s)):
+        return "INCOMPLETE"
+    values = (*axis, *wind_en_m_s, density_kg_m3, raw_pa, reported_static_pa,
+              calibration.get("forward_cp"), calibration.get("reverse_cp"), calibration.get("max_wind_m_s"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    ax, ay, east, north, density, raw, static, forward, reverse, limit = (Fraction(str(x)) for x in values)
+    if ax * ax + ay * ay != 1 or density <= 0 or raw <= 0 or limit < 0 or east * east + north * north > limit * limit:
+        return "INCOMPLETE"
+    speed = east * ax + north * ay
+    coefficient = forward if speed >= 0 else reverse
+    pressure_bias = coefficient * density * speed * speed / 2
+    return "PASS" if static > 0 and static == raw - pressure_bias else "FAIL"

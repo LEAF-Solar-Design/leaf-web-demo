@@ -846,3 +846,27 @@ def test_reusable_barrier_arrivals_expire_at_release(cohorts):
     stale = [("arrive", 0, returning) if e == ("arrive", 1, returning) else e for e in events]
     assert grade(rule, cohorts, stale, complete=True) == "FAIL"
     assert grade(rule, [cohorts[0], None], events, complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("capacity,opening_grant,acquired,resized,free", [
+    pytest.param(3, 1, 2, 4, 2, id="grow-a-full-worker-pool"),
+    pytest.param(8, 3, 2, 2, 0, id="shrink-to-the-outstanding-permit-count"),
+    pytest.param(5, 2, 1, 3, 2, id="return-a-weighted-reservation-before-resize"),
+])
+def test_semaphore_conserves_owned_permits(capacity, opening_grant, acquired, resized, free):
+    from benches.x03_dashboard_oracle import semaphore_permit_quality as grade
+
+    opening = [("old", "a", opening_grant)]
+    acquire = dict(op="acquire", grant="new", owner="b", permits=acquired)
+    release = dict(op="release", grant="old", owner="a")
+    resize = dict(op="resize", capacity=resized)
+    def check(events, reported, snapshot=opening):
+        return grade("weighted-owner-grants-v1", capacity, snapshot, events, reported, complete=True)
+
+    assert check([acquire, release, resize], free) == "PASS"
+    assert check([acquire, release, release, resize], free) == "FAIL"
+    assert check([acquire, release, resize], free + 1) == "FAIL"
+    assert check([dict(acquire, permits=capacity)], free) == "FAIL"
+    assert check([dict(release, owner="b")], free) == "FAIL"
+    assert check([dict(release, owner=None)], free) == "INCOMPLETE"
+    assert check([], free, snapshot=None) == "INCOMPLETE"

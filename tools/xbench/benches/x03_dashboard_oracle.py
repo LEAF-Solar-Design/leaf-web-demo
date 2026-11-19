@@ -1702,3 +1702,57 @@ def reusable_barrier_quality(rule, generations, events, *, complete):
             arrived.clear()
             current += 1
     return "PASS" if current == len(cohorts) else "FAIL"
+
+
+def semaphore_permit_quality(policy, capacity, opening, events, reported_free, *, complete):
+    """Audit weighted acquire/release with unique grant IDs and owner-only returns.
+
+    Resizing is atomic and cannot revoke outstanding grants. A grant is always
+    released in full, and its ID cannot be reused within the observed epoch.
+    """
+    if policy != "weighted-owner-grants-v1" or complete is not True or type(capacity) is not int or capacity < 0:
+        return "INCOMPLETE"
+    if not isinstance(opening, list) or not isinstance(events, list) or type(reported_free) is not int:
+        return "INCOMPLETE"
+    def named(x):
+        return isinstance(x, str) and bool(x)
+    held = {}
+    for row in opening:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            return "INCOMPLETE"
+        grant, owner, count = row
+        if not named(grant) or not named(owner) or type(count) is not int or count <= 0 or grant in held:
+            return "INCOMPLETE"
+        held[grant] = (owner, count)
+    used = sum(count for _, count in held.values())
+    if used > capacity:
+        return "FAIL"
+    seen = set(held)
+    for event in events:
+        if not isinstance(event, dict):
+            return "INCOMPLETE"
+        op = event.get("op")
+        if op == "resize":
+            capacity = event.get("capacity")
+            if type(capacity) is not int or capacity < 0:
+                return "INCOMPLETE"
+            if used > capacity:
+                return "FAIL"
+            continue
+        grant, owner = event.get("grant"), event.get("owner")
+        if op not in ("acquire", "release") or not named(grant) or not named(owner):
+            return "INCOMPLETE"
+        if op == "acquire":
+            count = event.get("permits")
+            if type(count) is not int or count <= 0:
+                return "INCOMPLETE"
+            if grant in seen or used + count > capacity:
+                return "FAIL"
+            held[grant] = (owner, count)
+            seen.add(grant)
+            used += count
+        else:
+            if grant not in held or held[grant][0] != owner:
+                return "FAIL"
+            used -= held.pop(grant)[1]
+    return "PASS" if reported_free == capacity - used else "FAIL"

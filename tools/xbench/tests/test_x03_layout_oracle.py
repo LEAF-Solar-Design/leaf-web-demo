@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("area,offset,length,stress,capacity", [
+    pytest.param(100, 10, 50, 120, 9600, id="check-a-single-leg-angle"),
+    pytest.param(240, 25, 100, 100, 18000, id="check-a-bolted-channel"),
+    pytest.param(80, 12, 40, 150, 8400, id="check-a-short-welded-tie"),
+])
+def test_tension_member_shear_lag(area, offset, length, stress, capacity):
+    from benches.x03_layout_oracle import shear_lag_quality as grade
+
+    rule = dict(revision="joint", model="linear-offset-shear-lag-v1", allowable_mpa=stress)
+    assert grade("joint", rule, area, offset, length, capacity) == "PASS"
+    assert capacity + 1 < area * stress
+    assert grade("joint", rule, area, offset, length, capacity + 1) == "FAIL"
+    assert grade("joint", rule, area, None, length, capacity) == "INCOMPLETE"
+    assert grade("joint", rule, area, offset, None, capacity) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("depth,shear,steel", [
     pytest.param(40, 1200, 2500, id="check-a-shallow-rail-anchor"),
     pytest.param(60, -2200, 3500, id="check-a-bracket-under-reversed-shear"),
