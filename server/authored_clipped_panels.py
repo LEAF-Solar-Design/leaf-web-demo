@@ -13,7 +13,7 @@ def build_body(description):
     return _BODY
 
 
-_BODY = """
+CLIP_SOURCE = """
 import re
 import math
 """ + TRANSFORM_SOURCE + """
@@ -36,7 +36,10 @@ def clip_accepts(clip, point):
             inside = not inside
     return inside != clip["inverted"]
 
+"""
 
+
+_BODY = CLIP_SOURCE + """
 def run(intake, params):
     counts = {}
     clips = intake.get("insert_clips")

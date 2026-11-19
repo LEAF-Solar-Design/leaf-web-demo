@@ -24,17 +24,19 @@ def matches(description):
 
 
 def build_body(description, *, entry_point="run"):
-    if entry_point not in ("run", "measure_gross_beams"):
+    if entry_point not in ("run", "measure_gross_beams", "collect_spline_segments"):
         raise ValueError("Unsupported beam measurement entry point.")
     for pattern, label, factor in _UNITS:
         if re.search(pattern, description, re.IGNORECASE):
             break
     else:
         label, factor = "drawing_units", 1.0
+    collect_segments = entry_point == "collect_spline_segments"
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
-            .replace("__LIST_MEMBERS__", repr(bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__COLLECT_SPLINES__", repr(collect_segments))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
 
 
 _BODY = """
@@ -105,9 +107,15 @@ def __ENTRY_POINT__(intake, params):
         layer = path.get("layer", "0")
         if layer == "0":
             layer = inherited
-        if path.get("space") == "paper" or path.get("closed"):
+        if __COLLECT_SPLINES__ and path.get("kind") != "SPLINE":
+            return
+        if path.get("space") == "paper":
             return
         if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
+            return
+        if path.get("closed"):
+            if __COLLECT_SPLINES__:
+                raise ValueError("A closed spline has no free ends for a joined beam report.")
             return
         if path.get("kind") == "SPLINE":
             length = spline_length(path, frame)
@@ -136,6 +144,8 @@ def __ENTRY_POINT__(intake, params):
             if not key or key in members:
                 raise ValueError("Individual beam lengths require unique entity handles.")
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
+            if __COLLECT_SPLINES__:
+                members[key]["ends"] = spline_endpoints(path, frame)
 
     for path in intake.get("polylines", []):
         measure(path, identity, "0", (), 1)
@@ -186,9 +196,9 @@ def __ENTRY_POINT__(intake, params):
             raise ValueError("Beam block traversal exceeds 10000 placements.")
         if not __LIST_MEMBERS__:
             copies *= rows * cols
-        # Array offsets and translations cannot affect a centerline length.
-        frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)))
         for index in range(placements):
+            row, column = divmod(index, cols)
+            frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)), row, column)
             branch = prefix
             if __LIST_MEMBERS__:
                 tag = insert.get("handle")
@@ -206,6 +216,8 @@ def __ENTRY_POINT__(intake, params):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if __COLLECT_SPLINES__:
+        result["output_per_drawing_unit"] = factor
     if __LIST_MEMBERS__:
         result["lengths_by_handle"] = members
     return (result, None)

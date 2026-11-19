@@ -115,8 +115,32 @@ def build_body(description):
     return _BODY
 
 
-_BODY = r"""
+VISIBILITY_SOURCE = r"""
 import re
+
+
+def active_children(evidence, name, handle, children):
+    definitions = evidence["definitions"]
+    definition = definitions.get(name)
+    if name.startswith("*u") and not definition:
+        raise ValueError("Unresolved anonymous dynamic block visibility state.")
+    if definition:
+        controlled = set(definition["controlled"])
+        if any(child.get("handle", "").upper() not in controlled for child in children):
+            raise ValueError("Partial visibility coverage for nested INSERTs.")
+        overrides = evidence["overrides"].get(handle, {}).get(definition["tag"], [])
+        if len(overrides) > 1:
+            raise ValueError("Ambiguous visibility override.")
+        state = overrides[0] if overrides else definition["default"]
+        if state not in definition["states"]:
+            raise ValueError("Unresolved visibility state " + state)
+        visible = set(definition["states"][state])
+        children = [child for child in children if child["handle"].upper() in visible]
+    return definition, children
+"""
+
+
+_BODY = VISIBILITY_SOURCE + r"""
 
 
 def run(intake, params):
@@ -144,21 +168,7 @@ def run(intake, params):
         if "nested_inserts" not in block and (block.get("count", 0) > len(block.get("children", []))
                 or any(child.get("type") == "INSERT" for child in block.get("children", []))):
             raise ValueError("Missing nested visibility references.")
-        definition = definitions.get(name)
-        if name.startswith("*u") and not definition:
-            raise ValueError("Unresolved anonymous dynamic block visibility state.")
-        if definition:
-            controlled = set(definition["controlled"])
-            if any(child.get("handle", "").upper() not in controlled for child in children):
-                raise ValueError("Partial visibility coverage for nested INSERTs.")
-            overrides = evidence["overrides"].get(handle, {}).get(definition["tag"], [])
-            if len(overrides) > 1:
-                raise ValueError("Ambiguous visibility override.")
-            state = overrides[0] if overrides else definition["default"]
-            if state not in definition["states"]:
-                raise ValueError("Unresolved visibility state " + state)
-            visible = set(definition["states"][state])
-            children = [child for child in children if child["handle"].upper() in visible]
+        definition, children = active_children(evidence, name, handle, children)
         rows, cols = ref.get("rows", 1), ref.get("columns", 1)
         if type(rows) is not int or type(cols) is not int or min(rows, cols) < 1:
             raise ValueError("Invalid visibility array multiplicity.")

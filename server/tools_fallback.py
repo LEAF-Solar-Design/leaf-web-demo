@@ -524,6 +524,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_action_discovery
     import authored_dynamic_visibility
     import authored_clipped_panels
+    import authored_joined_spline
+    import authored_batch_recipe
+    import authored_material_revision
+    import authored_panel_regions
+    import authored_role_action
     import authored_recipe_edit
     import authored_dataset_discovery
     import authored_multibundle
@@ -542,6 +547,26 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_revision_panel_moves.build_body(description)
         drawing_params = authored_revision_panel_moves.PARAMS
         summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_joined_spline.matches(description):
+        verb, engine_op = "measure", "joined_spline_beams"
+        drawing_body = authored_joined_spline.build_body(description)
+        summary = "measures joined spline beams and checks endpoint continuity"
+    elif authored_batch_recipe.matches(description):
+        verb, engine_op = "edit", "batch_recipe_edit"
+        drawing_body = authored_batch_recipe.build_body(description)
+        summary = "edits selected tables and reports each revision result"
+    elif authored_material_revision.matches(description):
+        verb, engine_op = "compare", "material_revision_diff"
+        drawing_body = authored_material_revision.build_body(description)
+        summary = "compares verified records across pinned import revisions"
+    elif authored_panel_regions.matches(description):
+        verb, engine_op = "measure", authored_panel_regions.operation(description)
+        drawing_body = authored_panel_regions.build_body(description)
+        summary = "evaluates visible panels against nested drawing boundaries"
+    elif authored_role_action.matches(description):
+        verb, engine_op = "compare", "role_action_comparison"
+        drawing_body = authored_role_action.build_body(description)
+        summary = "compares the authorized actions visible to project roles"
     elif authored_dynamic_visibility.matches(description):
         verb, engine_op = "count", "count_visible_state_panels"
         drawing_body = authored_dynamic_visibility.build_body(description)

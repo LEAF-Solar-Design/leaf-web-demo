@@ -549,6 +549,14 @@ class IntegrationToolService:
                 return
             args = {"limit": limit, "after": cursor}
 
+    def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
+        from authored_batch_recipe import edit_table_recipes
+        return edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn)
+
+    def compare_role_actions(self, description, tenant, session, turn, *, policy, limit=50):
+        from authored_role_action import compare_role_actions
+        return compare_role_actions(self, description, tenant, session, turn, policy=policy, limit=limit)
+
     def edit_inspection_recipe(self, description, snapshot, tenant, session, turn):
         from authored_recipe_edit import edit_inspection_recipe
         return edit_inspection_recipe(self, description, snapshot, tenant, session, turn)

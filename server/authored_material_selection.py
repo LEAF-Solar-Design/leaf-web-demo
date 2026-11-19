@@ -1,4 +1,5 @@
 """Author a provenance report for a checker selection bound by its project host."""
+import hashlib
 import json
 import re
 
@@ -35,7 +36,7 @@ def _selected_rows(document, pointer, count):
         parent = value
 
 
-def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context):
+def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context, *, include_row_digests=False):
     """Bind a host-provided selection against a separately authorized material ID."""
     from integration_tool_service import validate_material_context
     import platform_link
@@ -63,8 +64,14 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
     for row in rows:
         identity = row.get("id") if type(row) is dict else None
         identities.append(identity if type(identity) in (str, int) else None)
-    return {**intake, "checker_material_selection": {**source, "records_pointer": pointer,
-                                                      "record_ids": identities}}
+    selection = {**source, "records_pointer": pointer, "record_ids": identities}
+    if include_row_digests:
+        selection["record_sha256"] = [
+            hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                                      allow_nan=False).encode("utf-8")).hexdigest()
+            for row in rows
+        ]
+    return {**intake, "checker_material_selection": selection}
 
 
 def build_body(description):

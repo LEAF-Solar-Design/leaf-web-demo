@@ -505,7 +505,9 @@ def parse_dxf_bytes(
     if include_measurement_evidence:
         from dxf_spatial_clips import attach_clips
         from authored_dynamic_visibility import attach_visibility
+        from authored_panel_regions import attach_footprints
         attach_clips(pairs, out)
+        attach_footprints(pairs, out)
         attach_visibility(pairs, out)
     return out
 
