@@ -4,6 +4,24 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def adhesive_peel_quality(revision, rule, length_mm, width_mm, shear_n, offset_mm):
+    """Pinned rectangular bond with uniform shear and a linear peel stress distribution."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("model") != "rectangular-linear-peel-v1":
+        return "INCOMPLETE"
+    values = (length_mm, width_mm, shear_n, offset_mm, rule.get("max_shear_mpa"), rule.get("max_peel_mpa"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    length, width, force, offset, shear_limit, peel_limit = (Fraction(str(value)) for value in values)
+    if min(length, width, shear_limit, peel_limit) <= 0:
+        return "INCOMPLETE"
+    area = length * width
+    shear = abs(force) / area
+    peel = 6 * abs(force * offset) / (area * length)
+    return "PASS" if shear <= shear_limit and peel <= peel_limit else "FAIL"
+
+
 def splice_deflection_quality(revision, rule, span_m, splice_m, tip_force_n, rigidity_nm2, limit_m):
     """Cantilever tip displacement with one small-angle rotational splice and constant EI."""
     if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:

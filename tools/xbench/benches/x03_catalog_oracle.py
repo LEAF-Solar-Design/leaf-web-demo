@@ -3,6 +3,49 @@ from fractions import Fraction
 from math import isfinite
 
 
+def immunity_band_quality(revision, sheet, band_mhz, exposure_vm, accepted_criteria):
+    """Require qualifying field strength and performance throughout the requested band."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(band_mhz, (list, tuple)) or len(band_mhz) != 2 or not all(map(finite_measure, band_mhz)):
+        return "INCOMPLETE"
+    low, high = band_mhz
+    if not 0 < low < high or not finite_measure(exposure_vm) or exposure_vm <= 0:
+        return "INCOMPLETE"
+    if not isinstance(accepted_criteria, list) or not accepted_criteria or not all(
+        isinstance(value, str) and value.strip() for value in accepted_criteria
+    ):
+        return "INCOMPLETE"
+    tests = sheet.get("tests")
+    if not isinstance(tests, list) or not tests:
+        return "INCOMPLETE"
+    all_bands = []
+    qualified = []
+    for row in tests:
+        if not isinstance(row, (list, tuple)) or len(row) != 4 or not all(map(finite_measure, row[:3])):
+            return "INCOMPLETE"
+        start, end, field, criterion = row
+        if not 0 < start < end or field <= 0 or not isinstance(criterion, str) or not criterion.strip():
+            return "INCOMPLETE"
+        all_bands.append((start, end))
+        if field >= exposure_vm and criterion in accepted_criteria:
+            qualified.append((start, end))
+
+    def covers(intervals):
+        through = low
+        for start, end in sorted(intervals):
+            if start > through:
+                break
+            through = max(through, end)
+        return through >= high
+
+    if not covers(all_bands):
+        return "INCOMPLETE"
+    return "PASS" if covers(qualified) else "FAIL"
+
+
 def connector_latch_quality(revision, sheet, plug, receptacle, latched, pull_loads_n):
     """Grade a mating pair against its pinned latched axial retention rating."""
     from benches.x03_quality import finite_measure

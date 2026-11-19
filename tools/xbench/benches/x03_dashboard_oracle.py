@@ -1412,3 +1412,60 @@ def gang_start_quality(policy, cohorts, reservations, starts, *, complete):
         consumed.add(ticket)
         occupied_ticks.add((worker, tick))
     return "PASS" if all(launched == set(cohorts[c]) for c, (_, launched) in batches.items()) else "FAIL"
+
+
+def service_circuit_breaker_quality(rule, events, *, expected_events):
+    """Replay a consecutive-failure breaker starting closed with zero failures.
+
+    Normal calls finish immediately. After cooldown, the next request starts
+    one probe. Other requests must be rejected until that probe completes.
+    """
+    if not isinstance(rule, dict) or rule.get("policy") != "consecutive-single-probe-v1":
+        return "INCOMPLETE"
+    threshold, cooldown = rule.get("failures"), rule.get("cooldown_ticks")
+    if type(threshold) is not int or threshold < 1 or type(cooldown) is not int or cooldown <= 0:
+        return "INCOMPLETE"
+    if type(expected_events) is not int or not isinstance(events, list) or expected_events != len(events):
+        return "INCOMPLETE"
+    previous_tick = None
+    for serial, event in enumerate(events):
+        if not isinstance(event, (tuple, list)) or len(event) != 4:
+            return "INCOMPLETE"
+        sequence, tick, action, request = event
+        if type(sequence) is not int or sequence != serial or type(tick) is not int:
+            return "INCOMPLETE"
+        if previous_tick is not None and tick < previous_tick:
+            return "INCOMPLETE"
+        if action not in ("ok", "fail", "reject", "probe", "probe-ok", "probe-fail") or not isinstance(request, str) or not request:
+            return "INCOMPLETE"
+        previous_tick = tick
+
+    failures = 0
+    retry_at = None
+    probe = None
+    seen = set()
+    for _, tick, action, request in events:
+        if action in ("probe-ok", "probe-fail"):
+            if request != probe:
+                return "FAIL"
+            failures = 0
+            retry_at = None if action == "probe-ok" else tick + cooldown
+            probe = None
+            continue
+        if request in seen:
+            return "FAIL"
+        seen.add(request)
+        if retry_at is None:
+            if action not in ("ok", "fail"):
+                return "FAIL"
+            failures = failures + 1 if action == "fail" else 0
+            if failures == threshold:
+                retry_at = tick + cooldown
+        elif tick < retry_at or probe is not None:
+            if action != "reject":
+                return "FAIL"
+        else:
+            if action != "probe":
+                return "FAIL"
+            probe = request
+    return "PASS"

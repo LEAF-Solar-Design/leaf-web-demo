@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("length,width,force,offset,peak", [
+    pytest.param(20, 10, 100, 2, 0.3, id="check-the-bonded-rail-tab"),
+    pytest.param(40, 5, 200, -4, 0.6, id="check-a-reverse-offset-bracket"),
+    pytest.param(10, 20, 50, 1, 0.15, id="size-a-wide-sensor-pad"),
+])
+def test_bond_peel_with_acceptable_average_shear(length, width, force, offset, peak):
+    from benches.x03_layout_oracle import adhesive_peel_quality as grade
+
+    rule = dict(revision="bond-r2", model="rectangular-linear-peel-v1", max_shear_mpa=1.5, max_peel_mpa=peak)
+    assert force / (length * width) < rule["max_shear_mpa"]
+    assert grade("bond-r2", rule, length, width, force, offset) == "PASS"
+    assert grade("bond-r2", rule, length, width, force, offset * 2) == "FAIL"
+    assert grade("bond-r2", rule, length, None, force, offset) == "INCOMPLETE"
+    assert grade("old", rule, length, width, force, offset) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("span,position,force,rigidity,rigid_tip,actual_tip", [
     pytest.param(3, 1, 10, 900, 0.10, 0.16, id="check-a-splice-near-the-support"),
     pytest.param(2, 1, -15, 400, 0.10, 0.12, id="check-a-reversed-midspan-load"),

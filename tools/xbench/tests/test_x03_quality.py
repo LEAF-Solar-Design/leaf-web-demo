@@ -1520,3 +1520,49 @@ def test_motor_restart_remembers_heat(rated, heat_half, cool_half, loaded, limit
     assert grade(rule, 0, [load, (False, 0, cool_half / 2), restart]) == "FAIL"
     assert grade(rule, None, [load]) == "INCOMPLETE"
     assert grade({**rule, "off_half_s": None}, 0, [load]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("voltage_angle,center,width,forward,reverse", [
+    pytest.param(350, 30, 15, 5, 185, id="feeder-sector-crosses-north"),
+    pytest.param(120, -45, 20, 95, 275, id="incoming-transformer-lag"),
+    pytest.param(-150, 90, 30, -60, 120, id="ring-main-fault-direction"),
+])
+def test_directional_overcurrent_sector(voltage_angle, center, width, forward, reverse):
+    from benches.x03_quality import directional_overcurrent_quality as grade
+
+    rule = dict(model="current-minus-voltage-sector-v1", min_polarizing_v=5,
+                pickup_a=10, center_deg=center, half_width_deg=width)
+    voltage = (5, voltage_angle)
+    assert grade(rule, voltage, (10, forward), True) == "PASS"
+    assert grade(rule, voltage, (10, forward), False) == "FAIL"
+    assert grade(rule, voltage, (100, reverse), False) == "PASS"
+    assert grade(rule, voltage, (100, reverse), True) == "FAIL"
+    assert grade(rule, voltage, (9, forward), False) == "PASS"
+    assert grade(rule, (4.99, voltage_angle), (10, forward), False) == "INCOMPLETE"
+    assert grade(rule, (5, None), (10, forward), True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("group,shift,hv,lv,ratios,scale", [
+    pytest.param("Yy0", 0, (1, 0), (2, 0), (100, 100), 0.5, id="aligned-wye-bank"),
+    pytest.param("Dyn1", 30, (2, 15), (4, -15), (50, 25), 1, id="lagging-delta-wye"),
+    pytest.param("Dyn11", -30, (4, -175), (1, -145), (25, 50), 2, id="leading-delta-wye"),
+])
+def test_compensated_winding_differential(group, shift, hv, lv, ratios, scale):
+    from benches.x03_quality import winding_differential_quality as grade
+
+    # All through-current fixtures refer to 100 A on each side. Reversing one
+    # winding gives 200 A differential; removing one gives 100 A at pickup.
+    rule = dict(model="balanced-fixed-differential-v1", lv_to_hv_degrees={group: shift},
+                lv_to_hv_current_scale=scale, pickup_a=100)
+    assert grade(rule, group, hv, lv, ratios, False) == "PASS"
+    assert grade(rule, group, hv, lv, ratios, True) == "FAIL"
+    fault = (lv[0], lv[1] + 180)
+    assert grade(rule, group, hv, fault, ratios, True) == "PASS"
+    assert grade(rule, group, hv, fault, ratios, False) == "FAIL"
+    if shift:
+        sensitive = {**rule, "pickup_a": 25}
+        assert grade(sensitive, group, hv, lv, ratios, False) == "PASS"
+        assert grade({**sensitive, "lv_to_hv_degrees": {group: 0}}, group, hv, lv, ratios, False) == "FAIL"
+    assert grade(rule, group, hv, (0, 0), ratios, True) == "PASS"
+    assert grade(rule, "unknown", hv, lv, ratios, False) == "INCOMPLETE"
+    assert grade(rule, group, hv, lv, (None, 50), False) == "INCOMPLETE"

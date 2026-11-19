@@ -700,3 +700,31 @@ def test_gang_start_requires_distinct_reservations_and_all_members(cohorts, tick
     assert evaluate([events[0], (cohort, member, events[0][2], tick), *events[2:]]) == "FAIL"
     assert evaluate([events[0], (cohort, member, ticket, tick + 1), *events[2:]]) == "FAIL"
     assert grade("all-members-one-tick-v1", {}, reservations, events, complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("threshold,cooldown,history,probe_result", [
+    pytest.param(1, 4, ["fail"], "probe-ok", id="recover-from-a-single-failed-service-call"),
+    pytest.param(2, 2, ["fail", "ok", "fail", "fail"], "probe-fail", id="restart-cooldown-after-a-failed-probe"),
+    pytest.param(3, 6, ["ok", "fail", "fail", "fail"], "probe-ok", id="enforce-a-three-strike-breaker"),
+])
+def test_service_breaker_replays_cooldown_and_probe(threshold, cooldown, history, probe_result):
+    from benches.x03_dashboard_oracle import service_circuit_breaker_quality as grade
+
+    rule = dict(policy="consecutive-single-probe-v1", failures=threshold, cooldown_ticks=cooldown)
+    opening = len(history) - 1
+    eligible = opening + cooldown
+    stream = [(tick, outcome, f"call-{tick}") for tick, outcome in enumerate(history)]
+    stream.extend([(eligible - 1, "reject", "early"), (eligible, "probe", "probe-1"),
+                   (eligible, "reject", "parallel"), (eligible + 1, probe_result, "probe-1")])
+    stream.append((eligible + 2, "ok" if probe_result == "probe-ok" else "reject", "later"))
+    def replay(items):
+        return grade(rule, [(i, *e) for i, e in enumerate(items)], expected_events=len(stream))
+
+    assert replay(stream) == "PASS"
+    late = list(stream)
+    late[len(history)] = (eligible - 1, "ok", "early")
+    assert replay(late) == "FAIL"
+    duplicate = list(stream)
+    duplicate[len(history) + 2] = (eligible, "probe", "parallel")
+    assert replay(duplicate) == "FAIL"
+    assert replay(stream[:-1]) == "INCOMPLETE"

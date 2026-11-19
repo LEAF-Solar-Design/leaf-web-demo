@@ -5,6 +5,26 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("band,split,required,criterion", [
+    pytest.param((80, 100), 90, 3, "normal", id="qualify-the-controller-band"),
+    pytest.param((400, 500), 425, 10, "self-recovery", id="check-a-radio-adjacent-meter"),
+    pytest.param((700, 950), 880, 20, "retain-output", id="verify-the-sensor-immunity-claim"),
+])
+def test_immunity_requires_complete_qualified_band(band, split, required, criterion):
+    from benches.x03_catalog_oracle import immunity_band_quality as grade
+
+    low, high = band
+    lower = (low, split, required, criterion)
+    def verdict(upper):
+        sheet = dict(revision="test-record", tests=[upper, lower])
+        return grade("test-record", sheet, band, required, [criterion])
+
+    assert verdict((split, high, required, criterion)) == "PASS"
+    assert verdict((split, high, required - 1, criterion)) == "FAIL"
+    assert verdict((split, high, required, "manual reset")) == "FAIL"
+    assert verdict((split + 1, high, required, criterion)) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("plug,socket,retention,loads", [
     pytest.param("sensor", "board", 12, [3, 12], id="check-a-pulled-sensor-lead"),
     pytest.param("feeder", "cabinet", 90, [90, 45], id="qualify-a-cabinet-connector"),
@@ -1228,3 +1248,18 @@ def test_cosine_response_uses_calibrated_angle(curve, angle, raw, corrected):
     assert grade("lab-12", calibration, angle, raw, raw) == "FAIL"
     assert grade("lab-12", calibration, curve[-1][0] + 1, raw, corrected) == "INCOMPLETE"
     assert grade("lab-13", calibration, angle, raw, corrected) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("acoustic,humidity,dry", [
+    pytest.param(301.53, 0.01, 300, id="correct-a-humid-midday-reading"),
+    pytest.param(281.1424, 0.008, 280, id="recover-a-cool-morning-dry-bulb-temperature"),
+    pytest.param(313.162, 0.02, 310, id="remove-a-tropical-sonic-temperature-bias"),
+])
+def test_sonic_temperature_requires_specific_humidity(acoustic, humidity, dry):
+    from benches.x03_weather_oracle import sonic_dry_bulb_quality as grade
+
+    model = dict(rule="sonic-specific-humidity-0.51-v1", min_q=0, max_q=0.025)
+    assert grade(model, acoustic, humidity, dry) == "PASS"
+    assert grade(model, acoustic, humidity, acoustic) == "FAIL"
+    assert grade(model, acoustic, None, dry) == "INCOMPLETE"
+    assert grade(dict(model, max_q=0.005), acoustic, humidity, dry) == "INCOMPLETE"
