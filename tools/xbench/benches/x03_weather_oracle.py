@@ -412,6 +412,36 @@ def plane_irradiance_quality(revision, model, dni, dhi, zenith_deg, sun_azimuth_
     return "PASS" if reported >= 0 and isclose(reported, expected, rel_tol=1e-9, abs_tol=1e-9) else "FAIL"
 
 
+
+
+def ice_history_quality(start_h, end_h, initial_mm, intervals, melt_mm_per_degree_hour, reported_mm, model):
+    """Water-equivalent retained ice, freezing rain at or below zero, degree-hour melt."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    values = (start_h, end_h, initial_mm, melt_mm_per_degree_hour, reported_mm)
+    if model != "freezing-rain-degree-hour-v1" or not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    if start_h >= end_h or min(initial_mm, melt_mm_per_degree_hour) < 0 or not isinstance(intervals, list):
+        return "INCOMPLETE"
+    cursor, end, retained, melt, reported = (Fraction(str(x)) for x in values)
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 5:
+            return "INCOMPLETE"
+        left, right, phase, temp_c, water_mm = row
+        if phase not in ("rain", "freezing-rain", "dry") or not all(map(finite_measure, (left, right, temp_c, water_mm))):
+            return "INCOMPLETE"
+        left, right, temp, water = (Fraction(str(x)) for x in (left, right, temp_c, water_mm))
+        if left != cursor or not left < right <= end or water < 0 or (phase == "dry" and water):
+            return "INCOMPLETE"
+        if temp <= 0 and phase == "freezing-rain":
+            retained += water
+        retained = max(0, retained - melt * max(0, temp) * (right-left))
+        cursor = right
+    if cursor != end:
+        return "INCOMPLETE"
+    return "PASS" if reported == retained else "FAIL"
+
+
 def psychrometric_quality(revision, model, dry_c, wet_c, pressure_kpa, reported_rh, tolerance_pct):
     """Liquid-water Magnus saturation pressure with a pinned ventilated psychrometer coefficient."""
     from math import exp

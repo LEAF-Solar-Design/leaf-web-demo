@@ -928,6 +928,25 @@ def scheduler_fairness_quality(service, entitlements, allowed_share_error):
     return "PASS"
 
 
+
+
+def latency_bounds_quality(send_s, receive_s, send_offset, receive_offset, reported):
+    """Clock calibration gives local minus reference time as a closed interval."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not all(isinstance(pair, (list, tuple)) and len(pair) == 2 for pair in (send_offset, receive_offset, reported)):
+        return "INCOMPLETE"
+    values = (send_s, receive_s, *send_offset, *receive_offset, *reported)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    send, receive, s_low, s_high, r_low, r_high, lower, upper = (Fraction(str(v)) for v in values)
+    if s_low > s_high or r_low > r_high:
+        return "INCOMPLETE"
+    earliest = max(0, receive-send+s_low-r_high)
+    latest = receive-send+s_high-r_low
+    return "PASS" if latest >= earliest and (lower, upper) == (earliest, latest) else "FAIL"
+
+
 def preemption_quality(events, reported_active):
     """Sum active service from start through completion for one recorded job."""
     from fractions import Fraction

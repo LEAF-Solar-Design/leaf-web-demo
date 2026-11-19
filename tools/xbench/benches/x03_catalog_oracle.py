@@ -662,6 +662,29 @@ def duty_pressure_quality(revision, curve, duty):
     return "PASS"
 
 
+
+
+def acoustic_quality(sources, revision, model, reported_db, limit_db):
+    """Incoherent isotropic point sources in free field, distances in metres."""
+    from math import log10, pi, isclose
+    from benches.x03_quality import finite_measure
+    if not revision or model != "free-field-incoherent-v1" or not isinstance(sources, list) or not sources:
+        return "INCOMPLETE"
+    if not all(map(finite_measure, (reported_db, limit_db))):
+        return "INCOMPLETE"
+    levels = []
+    for row in sources:
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            return "INCOMPLETE"
+        record_revision, power_db, distance_m = row
+        if record_revision != revision or not all(map(finite_measure, (power_db, distance_m))) or distance_m <= 0:
+            return "INCOMPLETE"
+        levels.append(power_db - 10 * log10(4*pi) - 20 * log10(distance_m))
+    peak = max(levels)
+    total = peak + 10 * log10(sum(10 ** ((level-peak)/10) for level in levels))
+    return "PASS" if total <= limit_db and isclose(total, reported_db, rel_tol=0, abs_tol=0.005) else "FAIL"
+
+
 def transport_shock_quality(revision, sheet, package, shape, duration_ms, peak_g):
     """Use recorded qualified duration bands for the actual package and pulse shape."""
     from benches.x03_quality import finite_measure

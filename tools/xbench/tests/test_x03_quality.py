@@ -1036,6 +1036,31 @@ def test_grid_dc_offset_from_signed_interval_means(trace,window,dc):
     assert grade([(0,1,5),(1,2,-5)],[(0,2),(0,1)],1) == "FAIL"
 
 
+
+
+@pytest.mark.parametrize("trace,window,threshold,delay,due", [
+    ([60,60.1,60.2,60.3],1,0.1,2,3),
+    ([50,49.9,49.7,49.6,49.5],2,0.15,1,3),
+    ([60,60.2,60.2,60.4,60.6,60.8],1,0.2,2,5),
+])
+def test_sampled_rocof_trip(trace,window,threshold,delay,due):
+    from benches.x03_quality import rocof_quality as grade
+    samples = list(enumerate(trace))
+    assert grade(samples,window,threshold,delay,due) == "PASS"
+    assert grade(samples,window,threshold,delay,due+1) == "FAIL"
+    assert grade(samples,window,threshold,delay,None) == "FAIL"
+    assert grade(samples,window,threshold,None,due) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("hz,expected,shortcut", [(59.5,58,50),(60.05,50,49),(61.5,40,36)])
+def test_pinned_droop_dispatch(hz,expected,shortcut):
+    from benches.x03_quality import droop_quality as grade
+    args = (hz,60,0.1,50,(20,10))
+    assert grade(*args,(40,60),expected) == "PASS"
+    assert grade(*args,(40,60),shortcut) == "FAIL"
+    assert grade(*args,None,expected) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("amps,polarity,final,shortcut", [
     ((4,-2),"charging-positive",12.5,14),
     ((2,6),"discharging-positive",3,4),

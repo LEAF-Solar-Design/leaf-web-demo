@@ -801,6 +801,21 @@ def weld_throat_quality(welds, resultant_n, allowable_mpa):
     return "PASS" if Fraction(str(resultant_n)) <= area * Fraction(str(allowable_mpa)) else "FAIL"
 
 
+
+
+def bolt_prying_quality(load_n, load_arm_mm, toe_arm_mm, transfer_fraction, limit_n, model):
+    """One bolt under direct tension plus a stiffness-weighted toe reaction."""
+    if model != "lever-stiffness-fraction-v1":
+        return "INCOMPLETE"
+    values = (load_n, load_arm_mm, toe_arm_mm, transfer_fraction, limit_n)
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    load, arm, toe, share, limit = (Fraction(str(x)) for x in values)
+    if min(load, arm) < 0 or min(toe, limit) <= 0 or not 0 <= share <= 1:
+        return "INCOMPLETE"
+    return "PASS" if load * (1 + share * arm / toe) <= limit else "FAIL"
+
+
 def thread_engagement_quality(engaged_mm, pitch_mm, shear_diameter_mm, stripping_width_mm, allowable_mpa, pull_n):
     """Recorded effective shear width per full thread, neglecting partial end threads."""
     values = (engaged_mm, pitch_mm, shear_diameter_mm, stripping_width_mm, allowable_mpa, pull_n)
