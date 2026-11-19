@@ -10,7 +10,7 @@ import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
-import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
 import * as THREE from 'three'
@@ -996,16 +996,16 @@ const Viewer = forwardRef(function Viewer(
       }
       const mode = marqueeMode(start, end)
       const bounds = dom.getBoundingClientRect()
-      const rect = worldRect(unprojectClientToPlane(camera, bounds, start.x, start.y),
-        unprojectClientToPlane(camera, bounds, end.x, end.y))
+      const mapping = marqueeMapping(camera, bounds, start, end,
+        pl => bridge ? null : displayZ(pl) + 0.05)
       clearMarquee()
       const callbacks = marqueeRef.current
-      if (!rect || !callbacks.gate?.()) return
-      const handles = marqueeHandles(polylines, rect, mode,
-        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false)
+      if (!mapping || !callbacks.gate?.()) return
+      const handles = marqueeHandles(polylines, mapping.rect, mode,
+        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false, mapping.project)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
       const pending = armObservation(handles, 'marquee', additive, e)
-      callbacks.select?.(handles, { additive, mode })
+      callbacks.select?.(handles, e.altKey ? { additive, mode, subtract: true } : { additive, mode })
       finishObservation(pending)
     }
     function cancelMarquee(e) {
@@ -1363,12 +1363,17 @@ const Viewer = forwardRef(function Viewer(
     // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
-    setHighlight: (ids, { nativeHandles = false, additive = false } = {}) => {
+    setHighlight: (ids, { nativeHandles = false, additive = false, subtract = false } = {}) => {
       const handles = Array.from(ids || [], (id) => {
         if (nativeHandles) return String(id)
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
       })
-      setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
+      if (subtract) {
+        const removed = new Set(handles)
+        setGroupHighlight(current => current.filter(handle => !removed.has(handle)))
+      } else {
+        setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
+      }
     },
     // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
     // unknown kind or a bad point or size draws nothing.

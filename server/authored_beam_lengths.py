@@ -2,6 +2,7 @@
 import re
 
 from authored_block_transform import TRANSFORM_SOURCE
+from authored_spline_length import SPLINE_LENGTH_SOURCE
 
 
 _GROUPED = re.compile(r"\b(?:by|per|each|every)\s+(?:drawing\s+)?layer\b|\blayer[- ]by[- ]layer\b")
@@ -16,6 +17,9 @@ _UNITS = (
 
 def matches(description):
     prompt = description.casefold()
+    spline = re.search(r"\b(?:splines?|nurbs|knots?)\b", prompt)
+    if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure|how long)\b", prompt):
+        return True
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
                 and (_GROUPED.search(prompt)
@@ -23,23 +27,46 @@ def matches(description):
 
 
 def build_body(description, *, entry_point="run"):
-    if entry_point not in ("run", "measure_gross_beams"):
+    if entry_point not in ("run", "measure_gross_beams", "collect_spline_segments"):
         raise ValueError("Unsupported beam measurement entry point.")
     for pattern, label, factor in _UNITS:
         if re.search(pattern, description, re.IGNORECASE):
             break
     else:
         label, factor = "drawing_units", 1.0
+    collect_segments = entry_point == "collect_spline_segments"
+    requested_budget = re.search(r"\b(?:at most|budget of|limit of)\s+(\d+)\s+(?:spline )?evaluations?\b",
+                                 description, re.I)
+    evaluation_limit = min(int(requested_budget[1]), 1_000_000) if requested_budget else 1_000_000
+    span_detail = entry_point == "run" and bool(re.search(r"\b(?:knots?|spans?|jumps?|discontin\w*)\b", description, re.I))
+    spline_request = span_detail or re.search(r"\b(?:splines?|nurbs)\b", description, re.I)
+    mixed_scope = re.search(
+        r"\b(?:lines?|(?:lw)?polylines?|arcs?|bulges?|straight beams?|"
+        r"(?:all|every) beams?|including (?:rational )?(?:splines?|nurbs))\b", description, re.I)
+    explicit_spline_scope = re.search(
+        r"\b(?:only (?:the )?(?:splines?|nurbs)|(?:splines?|nurbs)(?: beams?)? only)\b", description, re.I)
+    only_splines = collect_segments or bool(spline_request and (explicit_spline_scope or not mixed_scope))
+    periodic = bool(re.search(r"\bperiodic\b", description, re.I))
+    survey = bool(re.search(r"\b(?:georeferenced|survey|large[- ]coordinates?|large[- ]origins?)\b", description, re.I))
+    endpoints = bool(spline_request and re.search(r"\b(?:endpoints?|orientation|direction)\b", description, re.I))
+    list_members = re.search(r"\blist(?:s|ing)?\b|\beach\s+(?:(?:spline|nurbs)\s+)?beam\b", description, re.I)
     return (_BODY.replace("__ENTRY_POINT__", entry_point)
+            .replace("__PERIODIC__", repr(periodic))
+            .replace("__SURVEY__", repr(survey))
             .replace("__OUTPUT_UNIT__", repr(label))
             .replace("__OUTPUT_FACTOR__", repr(factor))
-            .replace("__LIST_MEMBERS__", repr(bool(re.search(r"\blist(?:s|ing)?\b|\beach beam\b", description, re.I)))))
+            .replace("__ONLY_SPLINES__", repr(only_splines))
+            .replace("__COLLECT_SPLINES__", repr(collect_segments))
+            .replace("__EVALUATION_LIMIT__", str(evaluation_limit))
+            .replace("__ENDPOINTS__", repr(endpoints))
+            .replace("__SPAN_DETAIL__", repr(span_detail))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or endpoints or bool(list_members))))
 
 
 _BODY = """
 import math
 import re
-""" + TRANSFORM_SOURCE + """
+""" + TRANSFORM_SOURCE + SPLINE_LENGTH_SOURCE + """
 
 
 LENGTH_RELATIVE_TOLERANCE = 1e-5
@@ -91,37 +118,81 @@ def __ENTRY_POINT__(intake, params):
     metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
                        6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
     source_unit = intake.get("insunits")
+    if intake.get("insunits_error"):
+        raise ValueError(intake["insunits_error"])
     factor = 1.0
     if __OUTPUT_UNIT__ != "drawing_units":
         if source_unit not in metres_per_unit:
             raise ValueError("Set a supported drawing insertion unit before measuring beam lengths.")
         factor = metres_per_unit[source_unit] / __OUTPUT_FACTOR__
     totals = {}
+    evaluation_budget = [__EVALUATION_LIMIT__]
     members = {}
+    span_reports = {}
     identity = identity_frame()
+
+    def distinct_entities(records):
+        # Handles identify siblings within a definition. Each INSERT placement
+        # still visits that definition with its own transform and multiplicity.
+        seen = {}
+        unique = []
+        for record in records:
+            handle = record.get("handle")
+            if handle:
+                key = handle.upper()
+                if key in seen:
+                    if seen[key] != record:
+                        raise ValueError("Conflicting beam evidence for handle " + key)
+                    continue
+                seen[key] = record
+            unique.append(record)
+        return unique
 
     def measure(path, frame, inherited, prefix, copies):
         layer = path.get("layer", "0")
         if layer == "0":
             layer = inherited
-        if path.get("space") == "paper" or path.get("closed"):
+        if __ONLY_SPLINES__ and path.get("kind") != "SPLINE":
+            return
+        if path.get("space") == "paper":
             return
         if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
             return
-        points = path["pts"]
-        bulges = path.get("bulges", [])
-        if bulges and len(bulges) != len(points):
-            raise ValueError("Beam curve lacks per-vertex bulges.")
-        length = 0.0
-        for i in range(len(points) - 1):
-            delta = [b-a for a, b in zip(points[i], points[i+1])]
-            if len(delta) == 2:
-                delta.append(0)
-            bulge = bulges[i] if bulges else 0.0
-            if bulge:
-                length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
-            else:
-                length += math.hypot(*transform_vector(frame, delta))
+        if __PERIODIC__ and not path.get("periodic"):
+            return
+        if path.get("closed") and not (__PERIODIC__ and path.get("periodic")):
+            if __COLLECT_SPLINES__:
+                raise ValueError("A closed spline has no free ends for a joined beam report.")
+            return
+        if path.get("kind") == "SPLINE":
+            if __SURVEY__:
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
+            length, span_report = spline_length(path, frame, factor, __SPAN_DETAIL__, evaluation_budget)
+        else:
+            if path.get("measurement_error"):
+                raise ValueError(path["measurement_error"])
+            points = path["pts"]
+            vectors = path.get("measurement_vectors")
+            bulges = path.get("bulges", [])
+            if __SURVEY__ and any(bulges):
+                raise ValueError("Survey precision bounds require straight beam coordinates.")
+            if bulges and len(bulges) != len(points):
+                raise ValueError("Beam curve lacks per-vertex bulges.")
+            length = 0.0
+            for i in range(len(points) - 1):
+                delta = vectors[i] if vectors is not None else [b-a for a,b in zip(points[i], points[i+1])]
+                if __SURVEY__:
+                    if not any(delta):
+                        raise ValueError("Collapsed beam segment has no measurable length.")
+                    if vectors is None and max(map(abs, (*points[i], *points[i+1]))) > 1e7 * math.hypot(*delta):
+                        raise ValueError("Insufficient source precision for short beam segment.")
+                if len(delta) == 2:
+                    delta.append(0)
+                bulge = bulges[i] if bulges else 0.0
+                if bulge:
+                    length += curved_length(frame, delta, bulge, path.get("nrm", (0, 0, 1)))
+                else:
+                    length += math.hypot(*transform_vector(frame, delta))
         total = totals.get(layer, 0.0) + copies * length * factor
         if not math.isfinite(total):
             raise ValueError("Beam length exceeds the supported numeric range.")
@@ -132,8 +203,15 @@ def __ENTRY_POINT__(intake, params):
             if not key or key in members:
                 raise ValueError("Individual beam lengths require unique entity handles.")
             members[key] = {"layer": layer, __OUTPUT_UNIT__: length * factor}
+            if __SPAN_DETAIL__ and path.get("kind") == "SPLINE":
+                span_reports[key] = span_report
+            if (__COLLECT_SPLINES__ or __ENDPOINTS__) and path.get("kind") == "SPLINE":
+                members[key]["ends"] = spline_endpoints(path, frame, evaluation_budget, require_continuity=__COLLECT_SPLINES__)
 
-    for path in intake.get("polylines", []):
+    for path in distinct_entities(intake.get("polylines", [])):
+        measure(path, identity, "0", (), 1)
+
+    for path in distinct_entities(intake.get("splines", [])):
         measure(path, identity, "0", (), 1)
 
     blocks = {name.casefold(): block for name, block in intake.get("blocks", {}).items()}
@@ -156,7 +234,7 @@ def __ENTRY_POINT__(intake, params):
                 raise ValueError("Beam paths require complete block geometry: " + name)
             paths = []
             for child in children:
-                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                if child.get("type") in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                     raise ValueError("Missing beam geometry in block: " + name)
                 if child.get("type") == "INSERT" and "nested_inserts" not in block:
                     raise ValueError("Missing nested reference in block: " + name)
@@ -179,9 +257,11 @@ def __ENTRY_POINT__(intake, params):
             raise ValueError("Beam block traversal exceeds 10000 placements.")
         if not __LIST_MEMBERS__:
             copies *= rows * cols
-        # Array offsets and translations cannot affect a centerline length.
-        frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)))
+        paths = distinct_entities(paths)
+        nested = distinct_entities(block.get("nested_inserts", []))
         for index in range(placements):
+            row, column = divmod(index, cols)
+            frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)), row, column)
             branch = prefix
             if __LIST_MEMBERS__:
                 tag = insert.get("handle")
@@ -190,15 +270,26 @@ def __ENTRY_POINT__(intake, params):
                 branch = (*prefix, tag)
             for path in paths:
                 measure(path, frame, layer, branch, copies)
-            for child in block.get("nested_inserts", []):
+            for child in nested:
                 visit(child, frame, layer, branch, (*ancestors, name), copies)
 
     if any("unresolved block reference" in message for message in intake.get("parseErrors", [])):
         raise ValueError("Unresolved block reference in beam measurement.")
-    for insert in intake.get("inserts", []):
+    for insert in distinct_entities(intake.get("inserts", [])):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}
+    if evaluation_budget[0] < __EVALUATION_LIMIT__:
+        result["spline_evaluations"] = __EVALUATION_LIMIT__ - evaluation_budget[0]
+        result["spline_evaluation_limit"] = __EVALUATION_LIMIT__
+    if __SURVEY__:
+        result["absolute_error_by_layer"] = {layer: value*LENGTH_RELATIVE_TOLERANCE for layer, value in totals.items()}
+    if __ENDPOINTS__:
+        result["endpoint_units"] = "drawing_units"
+    if __SPAN_DETAIL__:
+        result["spline_spans_by_handle"] = span_reports
+    if __COLLECT_SPLINES__:
+        result["output_per_drawing_unit"] = factor
     if __LIST_MEMBERS__:
         result["lengths_by_handle"] = members
     return (result, None)

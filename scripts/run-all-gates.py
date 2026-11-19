@@ -2195,7 +2195,11 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
                   "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
-                  "tests/test_x03_nested_beam_author.py", "tests/test_x03_aisle_detour_author.py",
+                  "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
+                  "tests/test_x03_joined_spline_author.py",
+                  "tests/test_x03_oblique_spline_author.py",
+                  "tests/test_x03_periodic_spline_author.py", "tests/test_x03_clip_holes_author.py",
+                  "tests/test_x03_clip_empty_author.py", "tests/test_x03_clip_cache_author.py", "tests/test_x03_clip_collinear_author.py", "tests/test_x03_clip_origin_author.py", "tests/test_x03_oblique_clip_author.py", "tests/test_x03_clip_exclusion_union_author.py", "tests/test_x03_clip_regroup_author.py", "tests/test_x03_viewport_panel_author.py", "tests/test_x03_reflected_clip_author.py", "tests/test_x03_clip_contact_author.py", "tests/test_x03_spline_fit_only_author.py", "tests/test_x03_spline_degree_author.py", "tests/test_x03_spline_weight_scale_author.py", "tests/test_x03_spline_shear_author.py", "tests/test_x03_spline_units_author.py", "tests/test_x03_spline_subdivision_author.py", "tests/test_x03_spline_budget_author.py", "tests/test_x03_reversed_spline_author.py", "tests/test_x03_spline_refinement_author.py", "tests/test_x03_spline_parameter_author.py", "tests/test_x03_coincident_beam_author.py", "tests/test_x03_large_coordinate_author.py", "tests/test_x03_discontinuous_spline_author.py", "tests/test_x03_clip_budget_author.py", "tests/test_x03_clipped_area_author.py", "tests/test_x03_state_clip_author.py", "tests/test_x03_clipped_block_author.py", "tests/test_x03_dynamic_visibility_author.py", "tests/test_x03_aisle_detour_author.py",
                   "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
                   "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py",
                   "tests/test_x03_multibundle_author.py", "tests/test_x03_instance_openings_author.py",
@@ -4266,10 +4270,18 @@ def build_suites() -> List[Suite]:
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
               + ["tests/test_integration_tool_routes.py", "tests/test_x03_material_provenance.py",
-                 "tests/test_x03_action_discovery.py", "tests/test_x03_project_dataset_discovery.py",
+                 "tests/test_x03_action_discovery.py", "tests/test_x03_action_discovery_author.py", "tests/test_x03_material_selection_author.py",
+                  "tests/test_x03_material_revision_author.py",
+                  "tests/test_x03_material_array_diff_author.py",
+                  "tests/test_x03_material_three_way_author.py", "tests/test_x03_dataset_filter_author.py", "tests/test_x03_dataset_cursor_budget_author.py", "tests/test_x03_dataset_page_budget_author.py", "tests/test_x03_dataset_sort_ties_author.py", "tests/test_x03_dataset_cancel_author.py", "tests/test_x03_dataset_late_failure_author.py", "tests/test_x03_dataset_empty_page_author.py", "tests/test_x03_dataset_cursor_binding_author.py", "tests/test_x03_dataset_identity_author.py", "tests/test_x03_dataset_snapshot_author.py",
+                  "tests/test_x03_material_pointer_decode_author.py", "tests/test_x03_material_index_author.py", "tests/test_x03_material_patch_budget_author.py", "tests/test_x03_material_move_cycle_author.py", "tests/test_x03_material_patch_guard_author.py", "tests/test_x03_material_copy_isolation_author.py", "tests/test_x03_material_patch_order_author.py", "tests/test_x03_material_numeric_author.py", "tests/test_x03_material_unicode_author.py", "tests/test_x03_material_null_author.py", "tests/test_x03_action_string_length_author.py", "tests/test_x03_action_boolean_schema_author.py", "tests/test_x03_action_enum_author.py", "tests/test_x03_action_pattern_author.py", "tests/test_x03_action_decimal_schema_author.py", "tests/test_x03_action_array_schema_author.py", "tests/test_x03_action_conditional_author.py", "tests/test_x03_action_refs_author.py", "tests/test_x03_action_combinator_author.py", "tests/test_x03_action_extra_fields_author.py", "tests/test_x03_action_schema_author.py", "tests/test_x03_action_revocation_author.py", "tests/test_x03_role_action_author.py", "tests/test_x03_project_dataset_discovery.py",
                  "tests/test_x03_dataset_discovery_author.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
-              _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py"], 4),
+              _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py", "tests/test_x03_recipe_edit_author.py",
+                  "tests/test_x03_batch_recipe_author.py",
+                  "tests/test_x03_recipe_retry_author.py",
+                  "tests/test_x03_recipe_aba_author.py",
+                  "tests/test_x03_recipe_recovery_access_author.py", "tests/test_x03_recipe_key_order_author.py", "tests/test_x03_recipe_retry_scope_author.py", "tests/test_x03_recipe_journal_corruption_author.py", "tests/test_x03_recipe_restart_author.py", "tests/test_x03_recipe_precommit_author.py", "tests/test_x03_recipe_delete_race_author.py", "tests/test_x03_recipe_key_collision_author.py", "tests/test_x03_recipe_concurrent_author.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
               _py_pytest("tests/test_integration_browser.py"), 51),
         Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
@@ -4335,6 +4347,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-tool-envelopes", "server tests/test_tool_envelopes.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_envelopes.py"), 14),
+        Suite("server-branch-package-check", "server tests/test_branch_package_check.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_package_check.py"), 35),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
@@ -7954,14 +7968,15 @@ def reused_from_problem(reused_from) -> str:
 
 
 def device_verdict_problem(data: dict) -> str:
-    """Validate the staging-only selected proof without inventing suite results."""
+    """Validate selected or full device evidence without inventing suite results."""
     fields = {"schema", "kind", "tree", "mode", "coverage", "device_verdict"}
     if set(data) != fields:
         return f"device proof fields differ: missing {sorted(fields - set(data))}, unexpected {sorted(set(data) - fields)}"
     if type(data["schema"]) is not int:
         return "schema must be integer 2"
-    if data["coverage"] != "selected":
-        return "coverage must be selected"
+    coverage = data["coverage"]
+    if coverage not in ("selected", "full"):
+        return "coverage must be selected or full"
     verdict = data["device_verdict"]
     fields = {"bucket", "key", "version_id", "sha256", "repository", "head_sha",
               "run_id", "verdict_schema", "mode", "state", "shard_total", "shards"}
@@ -7974,7 +7989,7 @@ def device_verdict_problem(data: dict) -> str:
             return f"device_verdict.{key} must be a non-empty string"
     for key, expected in (("repository", "LEAF-Solar-Design/leaf-web-demo"),
                           ("verdict_schema", "leaf.forge-ci.device-verdict.v1"),
-                          ("mode", "selected"), ("state", "success")):
+                          ("mode", coverage), ("state", "success")):
         if verdict[key] != expected:
             return f"device_verdict.{key} must be {expected}"
     match = re.fullmatch(
@@ -7989,8 +8004,9 @@ def device_verdict_problem(data: dict) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", verdict["sha256"]):
         return "device_verdict.sha256 must be 64 hex characters"
     total = verdict["shard_total"]
-    if type(total) is not int or total < 1:
-        return "device_verdict.shard_total must be an integer >= 1"
+    required_total = 3 if coverage == "selected" else 6
+    if type(total) is not int or total != required_total:
+        return f"device_verdict.shard_total must be integer {required_total} for coverage {coverage}"
     shards = verdict["shards"]
     if not isinstance(shards, list) or len(shards) != total:
         return "device_verdict.shards must be a list matching shard_total"
@@ -8014,7 +8030,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
     schema-2 tree-bound gate proof whose tree equals `expect_tree`. Run and
     reused proofs must match THIS checkout's catalog fingerprint and carry
     passing audit_suites. Device-verdict proofs require explicit caller
-    opt-in and selected device evidence instead of suite results. Runs nothing.
+    opt-in and selected or full device evidence instead of suite results. Runs nothing.
 
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
@@ -8063,7 +8079,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
         if problem:
             print(f"NOT VERIFIED: {problem}")
             return 1
-        print("VERIFIED mode: device-verdict coverage=selected")
+        print(f"VERIFIED mode: device-verdict coverage={data['coverage']}")
         return 0
     suites = build_suites()
     if duplicate_suite_ids(suites):
@@ -8918,7 +8934,7 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     ap.add_argument("--allow-device-verdict", action="store_true",
-                    help="allow a staging selected device-verdict proof in proof-check mode")
+                    help="allow a selected or full device-verdict proof in proof-check mode")
     args = ap.parse_args()
 
     if args.allow_device_verdict and not args.verify_gate_proof:

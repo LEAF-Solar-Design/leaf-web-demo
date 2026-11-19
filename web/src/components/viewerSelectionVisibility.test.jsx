@@ -1,5 +1,7 @@
-import { createRef } from 'react'
-import { act, cleanup, render } from '@testing-library/react'
+import { createRef, useState } from 'react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { parse } from '@babel/parser'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import Viewer from './Viewer.jsx'
 
@@ -34,6 +36,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   gl.scene = null
 })
@@ -107,5 +110,81 @@ it('filters individual descriptors belonging to the same selected handle', () =>
   expectHighlights(10)
   expect(view.identity.elementId).toBe('entity:A')
   view.layers(undefined)
+  expectHighlights(0, 10)
+})
+
+// Exercise App's project callback with real Viewer state, as in appProjectSolarDrawing.test.jsx.
+const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+function findMarqueeProp(node) {
+  if (node?.type === 'JSXAttribute' && node.name.name === 'onMarqueeSelect') return node.value.expression
+  if (!node || typeof node !== 'object') return
+  for (const child of Object.values(node)) {
+    const found = findMarqueeProp(child)
+    if (found) return found
+  }
+}
+const marqueeProp = findMarqueeProp(parse(appSource, { sourceType: 'module', plugins: ['jsx'] }))
+const projectCallback = Function('projectMode', 'workspaceCardRef', 'viewerRef', 'setSelectedHandle',
+  `return (${appSource.slice(marqueeProp.start, marqueeProp.end)})`)
+
+function mountProject(initialHandle) {
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800)
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
+  const intake = { polylines: [panel('A', 'Roof', 0), panel('B', 'Panels', 10), panel('C', 'Roof', 20)],
+    inserts: [], faces3d: [] }
+  const ref = createRef()
+  function Project({ layers }) {
+    const [selectedHandle, setSelectedHandle] = useState(initialHandle)
+    return <Viewer ref={ref} intake={intake} colorForLayer={colorForLayer} visibleLayers={layers}
+      selectedHandle={selectedHandle} marqueeGate={() => true}
+      onMarqueeSelect={projectCallback(true, { current: null }, ref, setSelectedHandle)} />
+  }
+  const view = render(<Project />)
+  const canvas = view.container.querySelector('canvas')
+  vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 800, height: 600 })
+  return {
+    identity: view.container.firstChild.dataset,
+    layers: layers => view.rerender(<Project layers={layers} />),
+    drag(left, right, modifiers = {}) {
+      const start = ref.current.project(left, 3)
+      const end = ref.current.project(right, -1)
+      for (const [type, point] of [['pointerdown', start], ['pointermove', end], ['pointerup', end]]) {
+        const event = new MouseEvent(type, { bubbles: true, clientX: point.x, clientY: point.y, ...modifiers })
+        Object.defineProperty(event, 'pointerId', { value: 1 })
+        fireEvent(canvas, event)
+      }
+    },
+  }
+}
+
+it('subtracts only the overlap from a mixed-layer group', () => {
+  const view = mountProject()
+  view.drag(-1, 13)
+  expectHighlights(0, 10)
+  view.drag(9, 23, { altKey: true })
+  expect(view.identity.groupHighlight).toBe('A')
+  expectHighlights(0)
+})
+
+it('removes a singly selected panel with Alt-drag', () => {
+  const view = mountProject('B')
+  expectHighlights(10)
+  view.drag(9, 13, { altKey: true })
+  expect(view.identity.elementId).toBeUndefined()
+  expectHighlights()
+})
+
+it('retains hidden selections across disjoint and empty Alt-drags', () => {
+  const view = mountProject()
+  view.drag(-1, 13)
+  view.layers({ Panels: false })
+  expectHighlights(0)
+  view.drag(19, 23, { altKey: true })
+  expect(view.identity.groupHighlight).toBe('A B')
+  expectHighlights(0)
+  view.drag(9, 13, { altKey: true })
+  expect(view.identity.groupHighlight).toBe('A B')
+  expectHighlights(0)
+  view.layers({})
   expectHighlights(0, 10)
 })
