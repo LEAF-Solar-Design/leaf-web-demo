@@ -172,7 +172,8 @@ class AuthorizedLocalActions:
             schema = json.loads(encoded, parse_float=_exact_json_number, parse_constant=_exact_json_number)
             if not isinstance(schema, bool) and (
                 not isinstance(schema, dict) or schema.get("type") != "object"
-                or schema.get("additionalProperties") is not False
+                or (schema.get("additionalProperties") is not False
+                    and schema.get("unevaluatedProperties") is not False)
             ):
                 raise ValueError("Structured action arguments require a boolean or closed object schema")
             Draft202012Validator.check_schema(schema)

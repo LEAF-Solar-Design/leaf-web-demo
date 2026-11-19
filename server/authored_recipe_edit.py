@@ -127,7 +127,7 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
     if not issue_retry_key and retry_key is None and record_attempt is None:
         return service.execute("elements", args, tenant, session, turn)
 
-    from authored_recipe_retry import recover_recipe_save, request_retry_key
+    from authored_recipe_retry import JOURNAL_FORMAT_VERSION, recover_recipe_save, request_retry_key
 
     try:
         authority = service._resolve_operation("elements", tenant, session, turn).authority
@@ -147,7 +147,8 @@ def edit_inspection_recipe(service, description, snapshot, tenant, session, turn
         # The host commits this intent before dispatch. A crash can then lose
         # the entire reply without losing the identity needed for readback.
         try:
-            record_attempt(authority, {"description": description, "snapshot": selected_snapshot,
+            record_attempt(authority, {"format_version": JOURNAL_FORMAT_VERSION,
+                                       "description": description, "snapshot": selected_snapshot,
                                        "retry_key": key})
         except Exception:
             return failure("unavailable")

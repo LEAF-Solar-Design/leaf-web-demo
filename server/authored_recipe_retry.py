@@ -4,6 +4,9 @@ import json
 import re
 
 
+JOURNAL_FORMAT_VERSION = 1
+
+
 def matches(description):
     if not isinstance(description, str):
         return False
@@ -50,8 +53,17 @@ def _journal_request(raw, digest, authority):
         return None
     try:
         intent = strict_json(raw)
-        if type(intent) is not dict or set(intent) != {"description", "snapshot", "retry_key"}:
-            return None
+    except (ValueError, RecursionError, ReadFailure):
+        return None
+    if type(intent) is not dict:
+        return None
+    # Legacy journals had the same fields and semantics without a version tag.
+    version = intent.pop("format_version", 1)
+    if type(version) is not int or version != JOURNAL_FORMAT_VERSION:
+        raise ReadFailure("unsupported_journal_version")
+    if set(intent) != {"description", "snapshot", "retry_key"}:
+        return None
+    try:
         args, _ = prepare_inspection_edit(intent["description"], intent["snapshot"])
         request = normalize("elements", args)
         return request if request_retry_key(authority, request) == intent["retry_key"] else None
