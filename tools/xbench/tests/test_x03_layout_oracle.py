@@ -4,6 +4,22 @@ from shapely.geometry import Polygon, box
 from benches.x03_layout_oracle import layout_quality
 
 
+@pytest.mark.parametrize("flow,pitch,count,resistance", [
+    pytest.param(12, 100, 2, 600, id="check-paired-studs-at-a-support"),
+    pytest.param(-8, 75, 1, 600, id="verify-reversed-interface-shear"),
+    pytest.param(4.5, 200, 3, 300, id="check-a-three-connector-deck-row"),
+])
+def test_composite_beam_connector_demand(flow, pitch, count, resistance):
+    from benches.x03_layout_oracle import composite_connector_quality as grade
+
+    rule = dict(revision="fixture", model="equal-share-tributary-pitch-v1", connector_resistance_n=resistance)
+    lightly_loaded = (1, 10, 1)
+    assert grade("fixture", rule, [lightly_loaded, (flow, pitch, count)]) == "PASS"
+    assert grade("fixture", rule, [lightly_loaded, (flow, pitch + 1, count)]) == "FAIL"
+    assert grade("fixture", rule, [(flow, pitch, 0)]) == "FAIL"
+    assert grade("fixture", rule, [(flow, None, count)]) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("area,strength,coefficient,pullout,steel", [
     pytest.param(50, 20, 2, 2000, 5000, id="check-a-small-headed-rail-anchor"),
     pytest.param(120, 25, 1.5, 4500, 8000, id="check-a-baseplate-anchor"),

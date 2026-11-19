@@ -3,6 +3,29 @@ from fractions import Fraction
 from math import isfinite
 
 
+def partial_discharge_quality(revision, procedure, test):
+    """Grade maximum apparent charge at the procedure's qualified test voltage."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(procedure, dict) or procedure.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(test, dict):
+        return "INCOMPLETE"
+    voltage, tolerance, limit = (procedure.get(key) for key in ("test_v", "tolerance_v", "max_pc"))
+    actual = test.get("voltage_v")
+    if not all(map(finite_measure, (voltage, tolerance, limit, actual))):
+        return "INCOMPLETE"
+    if voltage <= 0 or actual <= 0 or not 0 <= tolerance < voltage or limit < 0:
+        return "INCOMPLETE"
+    magnitudes = test.get("apparent_charge_pc")
+    if not isinstance(magnitudes, list) or not magnitudes:
+        return "INCOMPLETE"
+    if not all(finite_measure(value) and value >= 0 for value in magnitudes):
+        return "INCOMPLETE"
+    delta = abs(Fraction(str(actual)) - Fraction(str(voltage)))
+    return "PASS" if delta <= Fraction(str(tolerance)) and max(magnitudes) <= limit else "FAIL"
+
+
 def plating_relief_quality(revision, sheet, material, treatment):
     """Check one continuous bake; timestamps are minutes on one recorded process clock."""
     from benches.x03_quality import finite_measure

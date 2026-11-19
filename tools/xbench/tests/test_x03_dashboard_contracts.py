@@ -797,3 +797,28 @@ def test_speculative_accounting_follows_atomic_winner(attempts, receipts, losing
     assert grade(attempts, receipts, [*receipts, receipts[0]], complete=True) == "FAIL"
     missing = [row for row in attempts if row[0] != receipts[0][1]]
     assert grade(missing, receipts, receipts, complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("key,dependencies,changed", [
+    pytest.param("preview", ["drawing"], "drawing", id="refresh-a-changed-drawing-preview"),
+    pytest.param("layout", ["drawing", "rules"], "rules", id="evict-a-layout-after-a-rule-update"),
+    pytest.param("report", ["model", "weather", "tariff"], "weather", id="refresh-a-dependent-energy-report"),
+])
+def test_cache_invalidation_reconciles_dependency_digests(key, dependencies, changed):
+    from benches.x03_dashboard_oracle import cache_invalidation_quality as grade
+
+    initial = {dep: f"{dep}-v1" for dep in dependencies}
+    updated = dict(initial, **{changed: f"{changed}-v2"})
+    first = dict(op="build", key=key, dependencies=initial, output="out-1")
+    hit = dict(first, op="reuse")
+    change = dict(op="change", key=changed, digest=updated[changed])
+    evict = dict(op="invalidate", key=key)
+    second = dict(first, dependencies=updated, output="out-2")
+    def check(events):
+        return grade({key: dependencies}, initial, events, complete=True)
+
+    assert check([first, hit, change, evict, second, dict(second, op="reuse")]) == "PASS"
+    assert check([first, change, hit]) == "FAIL"
+    assert check([first, evict, hit]) == "FAIL"
+    assert check([first, change, dict(hit, dependencies=updated)]) == "FAIL"
+    assert check([first, dict(hit, dependencies={d: initial[d] for d in dependencies if d != changed})]) == "INCOMPLETE"

@@ -2935,3 +2935,73 @@ def distance_restraint_quality(settings, observations):
         restrained = any(zone.covers(point) for zone in zones["restraint"])
         failed |= tripped != (in_reach and not restrained)
     return "FAIL" if failed else "PASS"
+
+
+def neutral_displacement_quality(settings, intervals):
+    """Compare latched pickup with held rectangular phase-to-ground RMS phasors."""
+    if not isinstance(settings, dict) or settings.get("reference") != "phase-to-ground":
+        return "INCOMPLETE"
+    pickup, delay = settings.get("pickup_v0_volts"), settings.get("delay_s")
+    if not all(map(finite_measure, (pickup, delay))) or pickup <= 0 or delay < 0:
+        return "INCOMPLETE"
+    if not isinstance(intervals, list) or not intervals:
+        return "INCOMPLETE"
+    threshold_squared = (3 * Fraction(str(pickup))) ** 2
+    delay = Fraction(str(delay))
+    dwell = Fraction(0)
+    latched = failed = False
+    for sample in intervals:
+        if not isinstance(sample, (list, tuple)) or len(sample) != 3:
+            return "INCOMPLETE"
+        seconds, phases, observed = sample
+        if type(observed) is not bool or not finite_measure(seconds) or seconds <= 0:
+            return "INCOMPLETE"
+        if not isinstance(phases, dict) or set(phases) != {"A", "B", "C"}:
+            return "INCOMPLETE"
+        real = imag = Fraction(0)
+        for phasor in phases.values():
+            if not isinstance(phasor, (list, tuple)) or len(phasor) != 2 or not all(map(finite_measure, phasor)):
+                return "INCOMPLETE"
+            real += Fraction(str(phasor[0]))
+            imag += Fraction(str(phasor[1]))
+        if real ** 2 + imag ** 2 >= threshold_squared:
+            dwell += Fraction(str(seconds))
+            latched |= dwell >= delay
+        else:
+            dwell = Fraction(0)
+        failed |= latched != observed
+    return "FAIL" if failed else "PASS"
+
+
+def pole_slip_quality(settings, trajectory):
+    """Count full traversals between parallel blinders on a piecewise-linear R/X path.
+
+    The pinned projection a*R + b*X defines the blinder coordinates. A reversal
+    inside the band adds no crossing. Each full traversal counts in either direction.
+    """
+    if not isinstance(settings, dict) or settings.get("rule") != "full-traversals":
+        return "INCOMPLETE"
+    values = [settings.get(k) for k in ("a", "b", "low", "high")]
+    count = settings.get("trip_count")
+    if not all(map(finite_measure, values)) or type(count) is not int or count < 1:
+        return "INCOMPLETE"
+    a, b, low, high = map(lambda v: Fraction(str(v)), values)
+    if (a == 0 and b == 0) or low >= high or not isinstance(trajectory, list) or not trajectory:
+        return "INCOMPLETE"
+    previous_side = None
+    crossings = 0
+    failed = False
+    for point in trajectory:
+        if not isinstance(point, (list, tuple)) or len(point) != 3:
+            return "INCOMPLETE"
+        r, x, tripped = point
+        if type(tripped) is not bool or not all(map(finite_measure, (r, x))):
+            return "INCOMPLETE"
+        equivalent = a * Fraction(str(r)) + b * Fraction(str(x))
+        if equivalent <= low or equivalent >= high:
+            side = equivalent <= low
+            if previous_side is not None and previous_side != side:
+                crossings += 1
+            previous_side = side
+        failed |= tripped != (crossings >= count)
+    return "FAIL" if failed else "PASS"
