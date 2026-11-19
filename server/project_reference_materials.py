@@ -15,6 +15,7 @@ from uuid import UUID
 
 VIDEO_MAX_BYTES = 64 * 1024 * 1024
 TEXT_MAX_BYTES = 8 * 1024 * 1024
+MATERIAL_JSON_MAX_DEPTH = 128
 CORPUS_MAX_BYTES = 64 * 1024 * 1024
 CORPUS_EXPANDED_MAX_BYTES = 2 * 1024 ** 3
 CORPUS_LINE_MAX_BYTES = 1024 * 1024
@@ -35,6 +36,12 @@ def unique_json_object(pairs):
     if len(result) != len(pairs):
         raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
     return result
+
+
+def check_json_depth(raw):
+    from json_resource_limits import within_depth_budget
+    if not within_depth_budget(raw, MATERIAL_JSON_MAX_DEPTH):
+        raise InvalidReference('Material JSON exceeds its nesting depth limit.')
 
 
 def upload_policy(name, content_type):
@@ -242,6 +249,8 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
     elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
+        if media_type == 'application/json':
+            check_json_depth(raw)
         try:
             text = raw.decode('utf-8-sig')
             if any(unicodedata.category(c) == 'Cc' and c not in '\t\r\n' for c in text):
