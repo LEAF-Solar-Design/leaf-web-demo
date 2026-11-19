@@ -513,6 +513,32 @@ class IntegrationToolService:
         self.decrypt, self.gate, self.clock = decrypt, gate, clock
         self.transport, self.keys = transport, keys
 
+    def iter_dataset_pages(self, tenant, session, turn, *, limit=50):
+        """Read each catalog page under the same turn authority, with bounded cursor history."""
+        authority = self.resolve(tenant, session, turn).authority
+        visited = set()
+        args = {"limit": limit}
+        while True:
+            if self.resolve(tenant, session, turn).authority != authority:
+                raise ReadFailure("denied")
+            reply = self.execute("datasets", args, tenant, session, turn)
+            if self.resolve(tenant, session, turn).authority != authority:
+                raise ReadFailure("denied")
+            if "result" not in reply:
+                raise ReadFailure(reply.get("error", {}).get("code", "denied"))
+            page = reply["result"]
+            cursor = page["next_cursor"]
+            if cursor is not None:
+                if cursor in visited:
+                    raise ReadFailure("invalid_response")
+                if len(visited) >= 1000:
+                    raise ReadFailure("response_too_large")
+                visited.add(cursor)
+            yield page
+            if cursor is None:
+                return
+            args = {"limit": limit, "after": cursor}
+
     def execute(self, operation, value, tenant, session, turn):
         result = None
         code = "unavailable"

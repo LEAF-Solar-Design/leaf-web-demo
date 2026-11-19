@@ -520,15 +520,40 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     the dynamic loader runs THAT FILE, not a hardcoded primitive. Families:
     list_layers | count | measure | highlight (all read-only, deterministic)."""
     description = (description or "").strip()
+    import authored_aisle_detour
+    import authored_revision_panel_moves
+    import authored_spatial_clearance
+    import authored_beam_openings
     import authored_beam_lengths
     import authored_route_crossings
 
     verb, engine_op = _detect_op(description)
     drawing_body = None
-    if authored_beam_lengths.matches(description):
+    drawing_params = {"type": "object", "properties": {}, "required": []}
+    if authored_revision_panel_moves.matches(description):
+        verb, engine_op = "compare", "revision_panel_moves"
+        drawing_body = authored_revision_panel_moves.build_body(description)
+        drawing_params = authored_revision_panel_moves.PARAMS
+        summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_aisle_detour.matches(description):
+        verb, engine_op = "route", "aisle_detour"
+        drawing_body = authored_aisle_detour.build_body(description)
+        summary = "finds legal cable detours along the drawn aisles"
+    elif authored_spatial_clearance.matches(description):
+        verb, engine_op = "check", "spatial_route_clearance"
+        drawing_body = authored_spatial_clearance.build_body(description)
+        summary = "checks vertical separation above and below panel footprints in drawing units"
+        drawing_params = {"type": "object", "properties": {"clearance": {
+            "type": "number", "exclusiveMinimum": 0,
+            "description": "Required vertical separation in drawing units"}}, "required": ["clearance"]}
+    elif authored_beam_openings.matches(description):
+        verb, engine_op = "measure", "installed_steel_by_level"
+        drawing_body = authored_beam_openings.build_body(description)
+        summary = "deducts opening stations from BEAM-<level> centerlines using Openings text marks: OPENING <beam handle> <start> <end>"
+    elif authored_beam_lengths.matches(description):
         verb, engine_op = "measure", "beam_lengths_by_layer"
         drawing_body = authored_beam_lengths.build_body(description)
-        summary = "measures model-space beam centerlines by layer"
+        summary = "measures model-space beam centerlines by layer, including supported block references"
     elif authored_route_crossings.is_route_crossing_request(description):
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
@@ -574,8 +599,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "description": (description or f"{verb} on layer {layer}")[:200],
         "kind": "script",
         "engine_op": engine_op,
-        "params": ({"type": "object", "properties": {}, "required": []}
-                   if drawing_body is not None else _params_schema(engine_op, layer)),
+        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer),
         "returns": {"type": "object"},
         "capabilities": ["drawing.read"],
         "provenance": {"author": "agent", "created": _iso_now()},

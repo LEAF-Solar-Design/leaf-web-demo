@@ -110,6 +110,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
     objects = {}
+    elevation_evidence = []
     model_records = {}
     textstyles = {}
     mleader_records = []
@@ -193,6 +194,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 j += 1
             record = pairs[i + 1:j]
             handle = next((v for c, v in record if c == 5), None)
+            if handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                if _explicit_elevation(pairs, j, value, dict(record)):
+                    elevation_evidence.append(handle)
             if handle:
                 if value == "POLYLINE":
                     vertex_end = j
@@ -296,16 +300,21 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         i += 1
 
+    block_names = {name.casefold(): name for name in blocks}
     resolved_inserts = []
     for entity in inserts:
-        if entity["name"] not in blocks:
+        block_name = block_names.get(entity["name"].casefold())
+        if block_name is None:
             parse_errors.append(
                 f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
         else:
+            entity["name"] = block_name
             resolved_inserts.append(entity)
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if elevation_evidence:
+        out["elevation_evidence"] = elevation_evidence
     if insunits is not None:
         out["insunits"] = insunits
     if active_layer is not None:
@@ -702,6 +711,51 @@ def _parse_block_child(pairs, i, kind):
     return child, end
 
 
+def _explicit_elevation(pairs, end, kind, groups):
+    def finite(raw):
+        try:
+            return math.isfinite(float(raw))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    if kind == "LINE":
+        return finite(groups.get(30)) and finite(groups.get(31))
+    if kind == "LWPOLYLINE":
+        return finite(groups.get(38))
+    flags = _int(groups.get(70, 0))
+    if flags & (16 | 64):
+        return False
+    if not flags & 8:
+        return finite(groups.get(30))
+    count = 0
+    while end < len(pairs) and pairs[end] == (0, "VERTEX"):
+        vertex, end = _entity_groups(pairs, end + 1)
+        if not finite(vertex.get(30)):
+            return False
+        count += 1
+    return count >= 2
+
+
+def _block_measurement_path(pairs, start, end, kind):
+    parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
+    path, _ = parse(pairs, start)
+    path.pop("_properties", None)
+    path.pop("xdata", None)
+    groups, _ = _entity_groups(pairs, start)
+    if kind == "POLYLINE" and int(groups.get(70, 0)) & (16 | 64):
+        return None
+    bulges = []
+    for code, value in pairs[start:end]:
+        if (kind == "LWPOLYLINE" and code == 10) or (kind == "POLYLINE" and (code, value) == (0, "VERTEX")):
+            bulges.append(0.0)
+        elif code == 42 and bulges:
+            bulges[-1] = float(value)
+    if any(bulges):
+        path["bulges"] = bulges
+        path["nrm"] = list(_group_point(groups, 210, (0, 0, 1)))
+    return path
+
+
 def _parse_block(pairs, i, parse_errors):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
@@ -713,6 +767,7 @@ def _parse_block(pairs, i, parse_errors):
             _, i = _entity_groups(pairs, i + 1)
             if block["count"] > len(block["children"]):
                 block.setdefault("nested_inserts", [])
+                block.setdefault("beam_paths", [])
             return name, block, i
         if code == 0 and kind in ("ENDSEC", "BLOCK", "EOF"):
             break
@@ -724,6 +779,14 @@ def _parse_block(pairs, i, parse_errors):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
+            if kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                paths = block.setdefault("beam_paths", [])
+                if len(paths) < 10000:
+                    path = _block_measurement_path(pairs, i + 1, end, kind)
+                    if path is not None and not path.get("closed"):
+                        paths.append(path)
+                else:
+                    block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 insert, _ = _parse_insert(pairs, i + 1)
                 insert.pop("_properties", None)
@@ -734,6 +797,8 @@ def _parse_block(pairs, i, parse_errors):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
+            if kind in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 block["nested_inserts_incomplete"] = True
             parse_errors.append(f"BKE {name} ({kind}): {exc}")
@@ -744,6 +809,7 @@ def _parse_block(pairs, i, parse_errors):
             block["complete"] = False
         if block["count"] <= 60:
             block["children"].append(child)
+    block["beam_paths_incomplete"] = True
     block["nested_inserts_incomplete"] = True
     block["complete"] = False  # unterminated definition
     return name, block, i
@@ -1068,9 +1134,12 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     raw_pts: List[List[float]] = []
     aci = linetype = lineweight = truecolor = None
     n = len(pairs)
+    header_z = None
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
-        if code == 8:
+        if code == 30:
+            header_z = _float(value)
+        elif code == 8:
             layer = value or "0"
         elif code == 5:
             handle = value
@@ -1107,7 +1176,7 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
                 elif c == 30:
                     z = _float(v)
                 i += 1
-            raw_pts.append([x, y, z])
+            raw_pts.append([x, y, header_z if header_z is not None and not wcs_vertices else z])
             continue
         if code == 0 and value == "SEQEND":
             i += 1
