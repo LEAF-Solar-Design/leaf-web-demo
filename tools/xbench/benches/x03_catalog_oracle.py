@@ -694,3 +694,44 @@ def transport_shock_quality(revision, sheet, package, shape, duration_ms, peak_g
     if len(applicable) != 1:
         return "INCOMPLETE"
     return "PASS" if peak_g <= applicable.pop() else "FAIL"
+
+
+def floor_life_quality(revision, sheet, window_h, opening_h, history):
+    """Remaining floor-life at use. Sealed storage pauses exposure, approved completed bakes reset it."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    limit, recipes = sheet.get("floor_hours"), sheet.get("bake_min_hours")
+    if not finite_measure(limit) or limit <= 0 or not isinstance(recipes, dict):
+        return "INCOMPLETE"
+    if not finite_measure(opening_h) or opening_h < 0 or not isinstance(history, list):
+        return "INCOMPLETE"
+    if not isinstance(window_h, (list, tuple)) or len(window_h) != 2 or not all(map(finite_measure, window_h)):
+        return "INCOMPLETE"
+    cursor, stop = window_h
+    if cursor >= stop:
+        return "INCOMPLETE"
+    exposure = Fraction(str(opening_h))
+    for entry in history:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            return "INCOMPLETE"
+        start, end, state, recipe = entry
+        if not all(map(finite_measure, (start,end))) or start != cursor or not start < end <= stop:
+            return "INCOMPLETE"
+        elapsed = Fraction(str(end)) - Fraction(str(start))
+        if state == "exposed":
+            exposure += elapsed
+        elif state == "bake":
+            minimum = recipes.get(recipe) if isinstance(recipe, str) else None
+            if not finite_measure(minimum) or minimum <= 0:
+                return "INCOMPLETE"
+            if elapsed < Fraction(str(minimum)):
+                return "FAIL"
+            exposure = Fraction(0)
+        elif state != "sealed":
+            return "INCOMPLETE"
+        cursor = end
+    if cursor != stop:
+        return "INCOMPLETE"
+    return "PASS" if exposure <= Fraction(str(limit)) else "FAIL"

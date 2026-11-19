@@ -802,3 +802,29 @@ def test_ventilated_wet_bulb_weather_report(dry,wet,pressure,rh):
     assert grade("station",model,dry,wet,pressure,rh-2,0.01) == "FAIL"
     assert grade("station",model,dry,dry+1,pressure,rh,0.01) == "FAIL"
     assert grade("station",model,dry,wet,None,rh,0.01) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("history,opening,limit", [
+    ([(0,3,"exposed",None),(3,6,"sealed",None)],2,5),
+    ([(0,2,"bake","oven"),(2,6,"exposed",None)],9,4),
+    ([(0,1,"exposed",None),(1,4,"sealed",None),(4,6,"exposed",None)],0,3),
+])
+def test_floor_life_at_component_use(history,opening,limit):
+    from benches.x03_catalog_oracle import floor_life_quality as grade
+    sheet = dict(revision="spec",floor_hours=limit,bake_min_hours={"oven":2})
+    assert grade("spec",sheet,(0,6),opening,history) == "PASS"
+    assert grade("spec",dict(sheet,floor_hours=limit-1),(0,6),opening,history) == "FAIL"
+    assert grade("spec",sheet,(0,6),opening,history[:-1]) == "INCOMPLETE"
+    assert grade("spec",sheet,(0,1),opening,[(0,1,"bake","oven")]) == "FAIL"
+
+
+@pytest.mark.parametrize("unit,depth,expected", [("mm",5,6),("cm",0.3,4),("in",0.5,13.7)])
+def test_precipitation_complete_interval_sum(unit,depth,expected):
+    from benches.x03_weather_oracle import precipitation_quality as grade
+    rows = [(0,1,depth,unit,"increment"),(1,3,1,"mm","resolved-reset")]
+    def check(data,total):
+        return grade((0,3),data,"complete-interval-increments",total)
+    assert check(rows,expected) == "PASS"
+    assert check(rows+[rows[0]],expected+1) == "FAIL"
+    assert check(rows[:1],expected) == "INCOMPLETE"
+    assert check([rows[0],(1,3,1,"mm","unknown-reset")],expected) == "INCOMPLETE"

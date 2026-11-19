@@ -959,3 +959,41 @@ def preemption_quality(events, reported_active):
     if state != "done":
         return "INCOMPLETE"
     return "PASS" if active == Fraction(str(reported_active)) else "FAIL"
+
+
+def autoscaler_quality(revision, policy, ticks, opening, prior_change_tick):
+    """One decision per tick. Downscale to the highest demand in the pinned trailing window."""
+    if not revision or not isinstance(policy, dict) or policy.get("revision") != revision:
+        return "INCOMPLETE"
+    window, cooldown = policy.get("down_window_ticks"), policy.get("cooldown_ticks")
+    if any(type(v) is not int for v in (window,cooldown,opening,prior_change_tick)):
+        return "INCOMPLETE"
+    if window < 1 or min(cooldown,opening) < 0 or not isinstance(ticks, list) or not ticks:
+        return "INCOMPLETE"
+    history = []
+    previous = None
+    replicas = opening
+    for row in ticks:
+        if not isinstance(row, (tuple,list)) or len(row) != 3 or any(type(v) is not int for v in row):
+            return "INCOMPLETE"
+        stamp, demand, observed = row
+        if min(demand,observed) < 0 or (previous is not None and stamp != previous+1):
+            return "INCOMPLETE"
+        if previous is None and prior_change_tick >= stamp:
+            return "INCOMPLETE"
+        history.append(demand)
+        expected = replicas
+        if stamp-prior_change_tick >= cooldown:
+            if demand > replicas:
+                expected = demand
+            elif demand < replicas:
+                recent_peak = max(history[-window:])
+                if len(history) < window and recent_peak < replicas:
+                    return "INCOMPLETE"
+                expected = min(replicas, recent_peak)
+        if observed != expected:
+            return "FAIL"
+        if observed != replicas:
+            prior_change_tick = stamp
+        replicas, previous = observed, stamp
+    return "PASS"

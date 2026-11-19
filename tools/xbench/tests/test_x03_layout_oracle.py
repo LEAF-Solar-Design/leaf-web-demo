@@ -415,3 +415,13 @@ def test_internal_thread_pullout_capacity(length,pitch,diameter,width,stress,cap
     assert grade(length,pitch,diameter,width,stress,capacity-0.1) == "PASS"
     assert grade(length,pitch,diameter,width,stress,capacity+0.1) == "FAIL"
     assert grade(length,pitch,None,width,stress,capacity) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("preload,mu,planes,resistance", [
+    ([10000],0.3,1,3000), ([5000,7500],0.4,2,10000), ([8000,8000,4000],0.25,1,5000),
+])
+def test_joint_slip_from_installed_preloads(preload,mu,planes,resistance):
+    from benches.x03_layout_oracle import joint_slip_quality as grade
+    assert grade(preload,mu,planes,-resistance) == "PASS"
+    assert grade(preload,mu,planes,resistance+1) == "FAIL"
+    assert grade(preload,mu,None,resistance) == "INCOMPLETE"

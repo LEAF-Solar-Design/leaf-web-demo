@@ -1855,3 +1855,53 @@ def coulomb_count_quality(window, intervals, initial_ah, reported_ah, polarity):
         charge = -charge
     expected = Fraction(str(initial_ah)) + charge / 3600
     return "PASS" if expected >= 0 and expected == Fraction(str(reported_ah)) else "FAIL"
+
+
+def transformer_flux_quality(window, winding_trace, turns, initial_wb, limit_wb):
+    """Integrate piecewise-constant induced winding voltage and check both ends of every segment."""
+    if type(turns) is not int or turns <= 0 or not all(map(finite_measure, (initial_wb, limit_wb))) or limit_wb <= 0:
+        return "INCOMPLETE"
+    if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(map(finite_measure, window)):
+        return "INCOMPLETE"
+    if window[0] >= window[1] or not isinstance(winding_trace, list):
+        return "INCOMPLETE"
+    flux, limit = Fraction(str(initial_wb)), Fraction(str(limit_wb))
+    peak = abs(flux)
+    cursor, end = window
+    for row in winding_trace:
+        if not isinstance(row, (tuple, list)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        left, right, volts = row
+        if left != cursor or not left < right <= end:
+            return "INCOMPLETE"
+        flux += Fraction(str(volts)) * (Fraction(str(right))-Fraction(str(left))) / turns
+        peak = max(peak, abs(flux))
+        cursor = right
+    if cursor != end:
+        return "INCOMPLETE"
+    return "PASS" if peak <= limit else "FAIL"
+
+
+def contactor_open_quality(command_s, settle_s, observation_end_s, safe_v, feedback):
+    """After the settling deadline the auxiliary contact must stay open and the bus de-energized."""
+    if not all(map(finite_measure, (command_s, settle_s, observation_end_s, safe_v))) or min(settle_s, safe_v) < 0:
+        return "INCOMPLETE"
+    deadline = Fraction(str(command_s)) + Fraction(str(settle_s))
+    if Fraction(str(observation_end_s)) <= deadline or not isinstance(feedback, list):
+        return "INCOMPLETE"
+    isolated = True
+    cursor = command_s
+    for row in feedback:
+        if not isinstance(row, (list, tuple)) or len(row) != 4:
+            return "INCOMPLETE"
+        start, end, aux_open, bus_v = row
+        if type(aux_open) is not bool or not all(map(finite_measure, (start, end, bus_v))):
+            return "INCOMPLETE"
+        if start != cursor or not start < end <= observation_end_s:
+            return "INCOMPLETE"
+        if Fraction(str(end)) > deadline and (not aux_open or abs(bus_v) > safe_v):
+            isolated = False
+        cursor = end
+    if cursor != observation_end_s:
+        return "INCOMPLETE"
+    return "PASS" if isolated else "FAIL"

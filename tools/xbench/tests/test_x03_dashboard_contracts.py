@@ -469,3 +469,18 @@ def test_preempted_jobs_exclude_suspended_time(events,active):
     assert grade(events,events[-1][0]-events[0][0]) == "FAIL"
     assert grade(events[:-1]+[events[-2],events[-1]],active) == "FAIL"
     assert grade(events[:-1],active) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("window,cooldown,rows,wrong", [
+    (2,0,[(1,4,4),(2,1,4),(3,1,1)],[(1,4,4),(2,1,1)]),
+    (1,3,[(1,5,5),(2,1,5),(3,1,5),(4,1,1)],[(1,5,5),(2,1,1)]),
+    (3,2,[(1,4,4),(2,2,4),(3,1,4),(4,1,2)],[(1,4,4),(2,2,4),(3,1,1)]),
+])
+def test_autoscaler_uses_every_decision_tick(window,cooldown,rows,wrong):
+    from benches.x03_dashboard_oracle import autoscaler_quality as grade
+    policy = dict(revision="scale",down_window_ticks=window,cooldown_ticks=cooldown)
+    def check(trace):
+        return grade("scale",policy,trace,4,-10)
+    assert check(rows) == "PASS"
+    assert check(wrong) == "FAIL"
+    assert check(rows[:1]+rows[2:]) == "INCOMPLETE"
