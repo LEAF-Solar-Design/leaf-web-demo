@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("contact,amplitude,limit", [
+    pytest.param("meter-pin", 5, 10000, id="check-a-vibrating-meter-pin"),
+    pytest.param("bus-socket", 30, 5000, id="qualify-a-bus-socket-contact"),
+    pytest.param("control-blade", 17, 25000, id="review-a-control-harness-blade"),
+])
+def test_connector_fretting_within_tested_amplitude(contact, amplitude, limit):
+    from benches.x03_catalog_oracle import connector_fretting_quality as grade
+
+    sheet = dict(revision="fretting-r1", tested_contact_envelopes={
+        "meter-pin": [(5, 10, 10000), (15, 20, 90000)],
+        "bus-socket": [(10, 20, 50000), (25, 30, 5000)],
+        "control-blade": [(10, 20, 25000)],
+    })
+    assert grade("fretting-r1", sheet, contact, amplitude, limit) == "PASS"
+    assert grade("fretting-r1", sheet, contact, amplitude, limit + 1) == "FAIL"
+    assert grade("fretting-r1", sheet, contact, 45, limit) == "INCOMPLETE"
+    assert grade("fretting-r1", sheet, "unknown contact", amplitude, limit) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("material,group,boundary", [
     pytest.param("plug-resin", "high", 600, id="qualify-a-plug-insulator"),
     pytest.param("board-stock", "middle", 400, id="check-the-board-laminate"),
@@ -1478,3 +1497,20 @@ def test_pressure_port_bias_depends_on_wind_vector(axis, wind, raw, static):
     assert grade("port-2", model, wind, 1.0, raw, raw) == "FAIL"
     assert grade("port-2", model, (4, 4), 1.0, raw, static) == "INCOMPLETE"
     assert grade("port-1", model, wind, 1.0, raw, static) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("window,rows,wet,false_total,initial", [
+    pytest.param((0, 8), [(0, 4, 8), (1, 4, 8), (4, 8, 2)], 4, 7, False,
+                 id="deduplicate-overlapping-wet-sensor-intervals"),
+    pytest.param((0, 10), [(0, 2, 9), (2, 5, 2), (5, 7, 5), (7, 10, 8)], 5, 10, False,
+                 id="keep-a-recorded-dry-break-between-showers"),
+    pytest.param((2, 9), [(2, 6, 4), (6, 7, 2), (7, 9, 6)], 4, 6, True,
+                 id="carry-in-wetness-until-the-dry-threshold"),
+])
+def test_leaf_wetness_uses_observed_interval_union(window, rows, wet, false_total, initial):
+    from benches.x03_weather_oracle import leaf_wetness_duration_quality as grade
+
+    rule = dict(policy="inclusive-wet-dry-hysteresis-v1", initially_wet=initial, dry_at=2, wet_at=8)
+    assert grade(rule, window, rows, wet) == "PASS"
+    assert grade(rule, window, rows, false_total) == "FAIL"
+    assert grade(rule, window, rows[:-1], wet) == "INCOMPLETE"

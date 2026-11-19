@@ -1803,3 +1803,36 @@ def test_open_ct_supervision_blocks_only_affected_zones(zones, opened, blocked):
     assert grade(zones, states, pickups, expected_alarms, pickups) == "FAIL"
     del states[opened]
     assert grade(zones, states, pickups, expected_alarms, expected_trips) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("cool_life,hot_life,cool_hours,hot_hours", [
+    pytest.param(1000, 200, 500, 100, id="audit-a-seasonally-loaded-transformer"),
+    pytest.param(400, 40, 100, 30, id="check-a-short-hot-emergency-duty"),
+    pytest.param(800, 80, 600, 20, id="review-life-before-return-to-service"),
+])
+def test_transformer_life_uses_full_hot_spot_history(cool_life, hot_life, cool_hours, hot_hours):
+    from benches.x03_quality import transformer_insulation_life_quality as grade
+
+    curve = dict(revision="winding-A", min_c=0, upper_c_life_h=[(90, cool_life), (120, hot_life)])
+    # Cool/hot damage fractions are 1/2+1/2, 1/4+3/4 and 3/4+1/4.
+    # The last interval is cool in every case, after a finite hot excursion.
+    history = [(120, hot_hours), (90, cool_hours)]
+    assert grade("winding-A", curve, history, complete=True) == "FAIL"
+    assert grade("winding-A", curve, [(120, hot_hours - 1), history[1]], complete=True) == "PASS"
+    assert grade("winding-A", curve, history[1:], complete=False) == "INCOMPLETE"
+    assert grade("winding-A", curve, [(121, 1)], complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("rated,opening,trace,limit", [
+    pytest.param(100, 0, [(4, 50), (4, 25)], 1.25, id="check-a-generator-under-unbalanced-load"),
+    pytest.param(200, 0.5, [(8, 50), (2, 100)], 1.5, id="include-rotor-duty-before-restart"),
+    pytest.param(80, 1, [(1, 40), (16, 10)], 1.5, id="sum-short-and-long-unbalance-periods"),
+])
+def test_generator_sequence_duty_includes_initial_heat(rated, opening, trace, limit):
+    from benches.x03_quality import negative_sequence_duty_quality as grade
+
+    rule = dict(model="adiabatic-i2-pu-v1", rated_a=rated, limit_pu2_s=limit)
+    assert grade(rule, opening, trace, complete=True) == "PASS"
+    assert grade(rule, opening, trace + [(1, 1)], complete=True) == "FAIL"
+    assert grade(rule, None, trace, complete=True) == "INCOMPLETE"
+    assert grade(rule, opening, trace, complete=False) == "INCOMPLETE"

@@ -3,6 +3,33 @@ from fractions import Fraction
 from math import isfinite
 
 
+def connector_fretting_quality(revision, sheet, contact, amplitude_um, cycles):
+    """Use a tested amplitude band and its cycle endurance for the specified contact."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(contact, str) or not contact.strip() or not finite_measure(amplitude_um) or amplitude_um < 0:
+        return "INCOMPLETE"
+    if type(cycles) is not int or cycles < 0:
+        return "INCOMPLETE"
+    records = sheet.get("tested_contact_envelopes")
+    if not isinstance(records, dict) or not isinstance(records.get(contact), list) or not records[contact]:
+        return "INCOMPLETE"
+    applicable = []
+    for row in records[contact]:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        low, high, endurance = row
+        if not all(map(finite_measure, (low, high))) or not 0 <= low <= high or type(endurance) is not int or endurance <= 0:
+            return "INCOMPLETE"
+        if low <= amplitude_um <= high:
+            applicable.append(endurance)
+    if not applicable:
+        return "INCOMPLETE"
+    return "PASS" if cycles <= max(applicable) else "FAIL"
+
+
 def tracking_index_quality(revision, sheet, material, required_group):
     """Check a group's minimum CTI against the same material and test procedure."""
     from benches.x03_quality import finite_measure

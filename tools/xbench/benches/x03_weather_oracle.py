@@ -1073,3 +1073,51 @@ def pressure_port_quality(revision, calibration, wind_en_m_s, density_kg_m3, raw
     coefficient = forward if speed >= 0 else reverse
     pressure_bias = coefficient * density * speed * speed / 2
     return "PASS" if static > 0 and static == raw - pressure_bias else "FAIL"
+
+
+def leaf_wetness_duration_quality(rule, window, intervals, reported_ticks):
+    """Integrate the hysteretic wet state over the union of sensor intervals.
+
+    Each half-open interval holds one sensor value. Identical overlaps are one
+    observation. Unobserved time or conflicting simultaneous values lack coverage.
+    """
+    from collections import Counter, defaultdict
+    from benches.x03_quality import finite_measure
+
+    if not isinstance(rule, dict) or rule.get("policy") != "inclusive-wet-dry-hysteresis-v1":
+        return "INCOMPLETE"
+    wet, low, high = rule.get("initially_wet"), rule.get("dry_at"), rule.get("wet_at")
+    if type(wet) is not bool or not all(map(finite_measure, (low, high))) or low >= high:
+        return "INCOMPLETE"
+    if not isinstance(window, (tuple, list)) or len(window) != 2 or not all(type(t) is int for t in window):
+        return "INCOMPLETE"
+    begin, end = window
+    if end <= begin or not isinstance(intervals, list) or type(reported_ticks) is not int:
+        return "INCOMPLETE"
+    changes = defaultdict(Counter)
+    for row in intervals:
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            return "INCOMPLETE"
+        left, right, signal = row
+        if type(left) is not int or type(right) is not int or not begin <= left < right <= end:
+            return "INCOMPLETE"
+        if not finite_measure(signal):
+            return "INCOMPLETE"
+        changes[left][signal] += 1
+        changes[right][signal] -= 1
+    boundaries = sorted({begin, end, *changes})
+    active = Counter()
+    duration = 0
+    for left, right in zip(boundaries, boundaries[1:]):
+        active.update(changes[left])
+        active = +active
+        if len(active) != 1:
+            return "INCOMPLETE"
+        signal = next(iter(active))
+        if signal >= high:
+            wet = True
+        elif signal <= low:
+            wet = False
+        if wet:
+            duration += right - left
+    return "PASS" if duration == reported_ticks else "FAIL"
