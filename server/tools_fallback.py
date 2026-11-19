@@ -262,8 +262,29 @@ def _detect_op(desc: str) -> Tuple[str, str]:
     return "count", "count_by_layer"
 
 
+# Quoted names remain literal, even when the layer is named "active".
+_QUOTED_LAYER = re.compile(
+    r"""(?:\blayer\s+(?P<q>['"])(?P<after>[^'"\r\n]{1,255})(?P=q)|(?P<p>['"])(?P<before>[^'"\r\n]{1,255})(?P=p)\s+layer\b)""",
+    re.IGNORECASE,
+)
+_RELATIVE_LAYER = re.compile(r"\b(?:active|current)\s+layer\b", re.IGNORECASE)
+
+_PANEL_COUNT_TARGET = re.compile(
+    r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
+    re.IGNORECASE,
+)
+
+_CURRENT_LAYER_BINDING = """    layer = params.get("layer") or intake.get("active_layer")
+    if not layer:
+        raise ValueError("The current layer is unavailable. Supply a layer or use a drawing with a saved current layer.")
+"""
+
+
 def _detect_layer(desc: str) -> str:
     d = desc
+    quoted = _QUOTED_LAYER.search(desc)
+    if quoted:
+        return quoted.group("before") or quoted.group("after")
     # "layer Panels", "layer 'Panel Groups'", "on the Panels layer"
     # Bounded capture ({1,64}), not `+?`: the space inside the class overlaps
     # the `\s+` that follows, which is polynomial backtracking territory on a
@@ -296,7 +317,7 @@ def _slugify(s: str) -> str:
 # AUTHORING TENANT's own directory, server/authored/<sha256(tenant_id)[:32]>/<name>.py
 # (never a flat authored/<name>.py, which every tenant would share); the dynamic
 # loader runs THAT FILE (no re-dispatch to a pre-coded primitive).
-# `__LAYER_DEFAULT__` is injected verbatim.
+# The generator supplies the literal or runtime layer binding for each layer operation.
 _HEADER_TEMPLATE = '''"""Authored tool: {name}
 Generated (templated, no LLM) from description: {description}
 engine_op: {engine_op}  (kind: script; the FILE below IS the tool — it runs
@@ -323,7 +344,7 @@ _BODY_COUNT = """
 
 def run(intake, params):
     params = params or {}
-    layer = params.get("layer", __LAYER_DEFAULT__)
+__LAYER_BINDING__
     counts = {}
     for key in ("polylines", "inserts", "faces3d"):
         for ent in intake.get(key) or []:
@@ -332,6 +353,31 @@ def run(intake, params):
                 continue
             counts[lay] = counts.get(lay, 0) + 1
     return ({"layer": layer, "counts": counts, "total": sum(counts.values())}, None)
+"""
+
+# Direct panel outlines on a declared panel layer, or named module INSERTs.
+_BODY_COUNT_PANELS = """
+import re
+
+def is_module_name(name):
+    words = " ".join(re.findall(r"[a-z0-9]+", name.casefold()))
+    return re.fullmatch(r"(?:(?:pv|solar|photovoltaic) )?(?:panels?|modules?)", words) is not None
+
+
+def run(intake, params):
+    params = params or {}
+__LAYER_BINDING__
+    total = 0
+    if is_module_name(layer):
+        total += sum(1 for poly in intake.get("polylines", [])
+                     if poly.get("layer", "0") == layer and poly.get("closed") and poly.get("pts"))
+    for insert in intake.get("inserts", []):
+        if insert.get("layer", "0") == layer and is_module_name(insert.get("name", "")):
+            rows, columns = insert.get("rows", 1), insert.get("columns", 1)
+            if type(rows) is not int or type(columns) is not int or min(rows, columns) < 1:
+                raise ValueError("Invalid module array size.")
+            total += rows * columns
+    return ({"layer": layer, "counts": {layer: total}, "total": total}, None)
 """
 
 _BODY_MEASURE = """
@@ -350,7 +396,7 @@ def _shoelace(pts):
 
 def run(intake, params):
     params = params or {}
-    layer = params.get("layer", __LAYER_DEFAULT__)
+__LAYER_BINDING__
     polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
     areas = [_shoelace(p.get("pts", [])) for p in polys if p.get("closed")]
     total = sum(areas)
@@ -376,7 +422,7 @@ def _centroid(pts):
 
 def run(intake, params):
     params = params or {}
-    layer = params.get("layer", __LAYER_DEFAULT__)
+__LAYER_BINDING__
     polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
     xs = [pt[0] for p in polys for pt in p.get("pts", [])]
     ys = [pt[1] for p in polys for pt in p.get("pts", [])]
@@ -410,7 +456,7 @@ _BODIES = {
 }
 
 
-def _params_schema(engine_op: str, layer: str) -> Dict[str, Any]:
+def _params_schema(engine_op: str, layer: str | None) -> Dict[str, Any]:
     if engine_op == "list_layers":
         return {
             "type": "object",
@@ -418,17 +464,19 @@ def _params_schema(engine_op: str, layer: str) -> Dict[str, Any]:
                                       "description": "optional: only layers starting with this prefix"}},
             "required": [],
         }
+    layer_schema = ({"type": "string", "default": layer} if layer is not None else
+                    {"type": "string", "description": "Override the current drawing layer"})
     if engine_op == "highlight_near_edge":
         return {
             "type": "object",
-            "properties": {"layer": {"type": "string", "default": layer},
+            "properties": {"layer": layer_schema,
                            "margin": {"type": "number",
                                       "description": "drawing units; default 5% of span"}},
             "required": [],
         }
     return {
         "type": "object",
-        "properties": {"layer": {"type": "string", "default": layer}},
+        "properties": {"layer": layer_schema},
         "required": [],
     }
 
@@ -442,16 +490,29 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     description = (description or "").strip()
     verb, engine_op = _detect_op(description)
 
+    relative_layer = engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
     if engine_op == "list_layers":
         layer = ""
         name = _slugify(description) or "list-layers"
         default_params: Dict[str, Any] = {}
         body = _BODIES["list_layers"]
     else:
-        layer = _detect_layer(description)
-        name = _slugify(f"{verb}-{layer}")
-        default_params = {"layer": layer}
-        body = _BODIES[engine_op].replace("__LAYER_DEFAULT__", repr(layer))
+        if relative_layer:
+            layer = None
+            name = _slugify(f"{verb}-current-layer")
+            default_params = {}
+            binding = _CURRENT_LAYER_BINDING.rstrip()
+        else:
+            layer = _detect_layer(description)
+            name = _slugify(f"{verb}-{layer}")
+            default_params = {"layer": layer}
+            binding = f'    layer = params.get("layer", {layer!r})'
+        body = _BODIES[engine_op]
+        if engine_op == "count_by_layer" and _PANEL_COUNT_TARGET.search(description):
+            body = _BODY_COUNT_PANELS
+            if relative_layer:
+                name = "count-panels-current-layer"
+        body = body.replace("__LAYER_BINDING__", binding)
 
     header = _HEADER_TEMPLATE.format(
         name=name, description=(description.replace('"', "'") or "(none)"), engine_op=engine_op)
@@ -471,7 +532,9 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "default_params": default_params,
     }
 
-    if engine_op == "list_layers":
+    if relative_layer:
+        preview = f"Tool '{name}': runs '{verb}' on the drawing's current layer at execution time."
+    elif engine_op == "list_layers":
         preview = (f"Tool '{name}': lists the distinct layer names in the drawing "
                    f"(engine_op={engine_op}). Read-only; runs its own persisted file.")
     else:

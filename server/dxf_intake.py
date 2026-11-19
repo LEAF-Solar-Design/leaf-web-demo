@@ -116,6 +116,7 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
 
     i = 0
     n = len(pairs)
+    active_layer = None
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -129,6 +130,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             section = None
             i += 1
             continue
+        if section == "HEADER" and code == 9 and value == "$CLAYER":
+            if i + 1 < n and pairs[i + 1][0] == 8 and pairs[i + 1][1]:
+                active_layer = pairs[i + 1][1]
         if section == "OBJECTS" and code == 0:
             j = i + 1
             while j < n and pairs[j][0] != 0:
@@ -295,6 +299,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if active_layer is not None:
+        out["active_layer"] = active_layer
     mlstyles = {}
     for handle, (kind, record) in objects.items():
         if kind == "MLEADERSTYLE":

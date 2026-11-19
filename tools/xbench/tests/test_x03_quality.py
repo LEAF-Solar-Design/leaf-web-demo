@@ -2,6 +2,41 @@ import pytest
 from benches.x03_quality import inverter_quality, route_quality, string_quality
 
 
+@pytest.mark.parametrize("path,inner,outer,transit", [
+    pytest.param([(0, 12), (2, 10), (6, 6)], 6, 10, 4, id="block-the-slow-line-swing"),
+    pytest.param([(0, 20), (10, 0)], 4, 12, 4, id="interpolate-both-circle-crossings"),
+    pytest.param([(0, 16), (2, 12), (6, 8), (12, 2)], 5, 14, 8, id="time-a-two-speed-swing"),
+])
+def test_stable_swing_blocks_distance_trip(path, inner, outer, transit):
+    from benches.x03_quality import power_swing_quality as grade
+
+    rule = dict(model="linear-magnitude-transit-v1", inner_ohm=inner, outer_ohm=outer, min_transit_s=transit)
+    trace = [(t, z, False) for t, z in path]
+    assert grade(rule, trace) == "PASS"
+    trace[-1] = (*path[-1], True)
+    assert grade(rule, trace) == "FAIL"
+    assert grade(dict(rule, min_transit_s=transit + 1), trace) == "PASS"
+    assert grade(dict(rule, inner_ohm=None), trace) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("broken,delay", [
+    pytest.param((False, True, True), 4, id="detect-an-open-trip-coil"),
+    pytest.param((True, False, True), 0.5, id="detect-a-lost-trip-supply"),
+    pytest.param((True, True, False), 2, id="detect-a-broken-series-contact"),
+])
+def test_trip_path_supervision_after_pinned_delay(broken, delay):
+    from benches.x03_quality import trip_continuity_quality as grade
+
+    rule = dict(model="series-path-delay-v1", alarm_delay_s=delay)
+    healthy = (1, True, True, True, False)
+    before_deadline = (delay, *broken, False)
+    history = [before_deadline, healthy, before_deadline]
+    assert grade(rule, [*history, (1, *broken, True)]) == "PASS"
+    assert grade(rule, [*history, (0.25, *broken, False), (1, *broken, True)]) == "FAIL"
+    assert grade(rule, [*history, (1, None, True, True, True)]) == "INCOMPLETE"
+    assert grade(dict(rule, alarm_delay_s=None), history) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("initial,capacity,intervals,peak", [
     (20,100,[(10,100,50)],25), (22,200,[(4,150,50),(4,150,50)],26),
     (24,100,[(10,20,100),(5,150,50)],25)])

@@ -3,6 +3,33 @@ from fractions import Fraction
 from math import isfinite
 
 
+def hail_impact_quality(revision, sheet, assembly, angle_deg, energy_j):
+    """Grade recorded incident energy in the tested angular range measured from normal."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(sheet, dict) or sheet.get("revision") != revision:
+        return "INCOMPLETE"
+    if not isinstance(assembly, str) or not assembly.strip() or not all(map(finite_measure, (angle_deg, energy_j))):
+        return "INCOMPLETE"
+    if not 0 <= angle_deg <= 90 or energy_j < 0:
+        return "INCOMPLETE"
+    tests = sheet.get("qualified_angle_energy")
+    if not isinstance(tests, dict) or not isinstance(tests.get(assembly), list):
+        return "INCOMPLETE"
+    limits = []
+    for row in tests[assembly]:
+        if not isinstance(row, (list, tuple)) or len(row) != 3 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        low, high, ceiling = row
+        if not 0 <= low <= high <= 90 or ceiling <= 0:
+            return "INCOMPLETE"
+        if low <= angle_deg <= high:
+            limits.append(ceiling)
+    if not limits:
+        return "INCOMPLETE"
+    return "PASS" if energy_j <= max(limits) else "FAIL"
+
+
 def seal_decompression_quality(revision, sheet, seal, high_bar, low_bar, release_s, cycles):
     """Match repeated linear pressure releases to one pinned seal-test envelope."""
     from benches.x03_quality import finite_measure
