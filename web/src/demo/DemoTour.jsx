@@ -13,8 +13,10 @@ import './demo.css'
 //
 // Pacing rule: for a beat that has an effect (a prompt, an author beat, a
 // version beat), Next stays disabled until App reports the effect landed via
-// the `landed` prop. We never advance past something the app has not done.
+// the `landed` prop. Only the author beat lets the visitor continue after
+// 60 seconds of waiting for staging.
 
+export const AUTHOR_WAIT_MS = 60000
 const MARGIN = 14
 
 // Phone width (lane 3, one-shell narrow): at or under this width the card is
@@ -256,8 +258,21 @@ export default function DemoTour({
     return () => clearInterval(id)
   }, [step])
 
+  const waitingAuthorId = step?.action === 'author' && !landed ? step.id : null
+  const [timedOutAuthorId, setTimedOutAuthorId] = useState(null)
+  useEffect(() => {
+    setTimedOutAuthorId(null)
+    if (waitingAuthorId == null) return
+    const timer = setTimeout(() => setTimedOutAuthorId(waitingAuthorId), AUTHOR_WAIT_MS)
+    return () => clearTimeout(timer)
+  }, [waitingAuthorId])
+
+  const authorTimedOut = waitingAuthorId != null && timedOutAuthorId === waitingAuthorId
   const needsEffect = !!(step && (step.prompt || step.action === 'author' || step.action === 'version'))
-  const canAdvance = !busy && (!needsEffect || landed)
+  const canAdvance = !busy && (!needsEffect || landed || authorTimedOut)
+  const authorWaitText = authorTimedOut
+    ? 'Staging did not finish here, so this step shows no tool. Select Next to continue the tour.'
+    : 'Staging the tool. Next unlocks when the staged card or an error appears.'
   const readout = landed && !busy ? summarizeTourResult(step, result) : null
   // A stable key, so the card re-measures when the readout changes and not on every render.
   const readoutKey = readout ? readout.map((row) => `${row.label}=${row.value}`).join('|') : ''
@@ -294,7 +309,7 @@ export default function DemoTour({
     if (!el) return
     const h = Math.round(Math.max(el.scrollHeight, el.getBoundingClientRect().height))
     if (h) setCardH((prev) => (prev === h ? prev : h))
-  }, [step, landed, typed, needsEffect, narrow, coachOpen, readoutKey])
+  }, [step, landed, typed, needsEffect, narrow, coachOpen, readoutKey, authorTimedOut])
 
   // NOTE: the tour deliberately does NOT own Escape. A capture-phase Esc listener
   // here terminated the whole walkthrough when the user only meant to dismiss the
@@ -413,7 +428,7 @@ export default function DemoTour({
             a region that mounts with its text is not reliably announced. */}
         <div className="tour-card-wait" role="status" aria-live="polite">
           {needsEffect && !landed ? (step.action === 'author'
-            ? 'Staging the tool. Next unlocks when the staged card or an error appears.'
+            ? authorWaitText
             : 'Running it for real. Next unlocks when the result lands.') : ''}
         </div>
 
