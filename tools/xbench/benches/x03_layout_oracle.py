@@ -4,6 +4,22 @@ from fractions import Fraction
 from benches.x03_quality import finite_measure
 
 
+def rail_interaction_quality(revision, rule, compression_n, moment_nm):
+    """Check concurrent compression and uniaxial bending for one rail section."""
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    if rule.get("interaction") != "linear-uniaxial-v1":
+        return "INCOMPLETE"
+    values = (compression_n, moment_nm, rule.get("compression_rating_n"), rule.get("moment_rating_nm"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    force, moment, force_limit, moment_limit = (Fraction(str(value)) for value in values)
+    if force < 0 or min(force_limit, moment_limit) <= 0:
+        return "INCOMPLETE"
+    utilization = force / force_limit + abs(moment) / moment_limit
+    return "PASS" if utilization <= 1 else "FAIL"
+
+
 def rail_twist_quality(force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad):
     """Single elastic rail with a recorded torque per radian stiffness."""
     values = (force_n, eccentricity_m, stiffness_nm_per_rad, max_rotation_rad)

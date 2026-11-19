@@ -984,3 +984,40 @@ def test_energy_requires_full_daylight_integration(rows,energy):
     assert grade(window,rows,energy) == "PASS"
     assert grade(window,rows,rows[0][2]) == "FAIL"
     assert grade((0,window[1]+1),rows,energy) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("current,drop,max_resistance,temperature", [
+    pytest.param(20, 4, 0.2, 45, id="qualify-control-cabinet-lug"),
+    pytest.param(100, 2.5, 0.025, 65, id="accept-high-current-bus-joint"),
+    pytest.param(2, 3, 1.5, 38, id="review-sensor-terminal-drop"),
+])
+def test_terminal_contact_acceptance(current, drop, max_resistance, temperature):
+    from benches.x03_catalog_oracle import terminal_contact_quality as grade
+
+    rule = dict(revision="dc1", test_current_a=current, max_joint_temp_c=temperature,
+                max_resistance_mohm=max_resistance)
+    assert grade("dc1", rule, current, temperature, drop) == "PASS"
+    assert grade("dc1", rule, current, temperature + 1, drop) == "FAIL"
+    assert grade("dc1", rule, current, temperature, drop + 0.01) == "FAIL"
+    assert grade("dc1", rule, current / 2, temperature, drop) == "INCOMPLETE"
+    assert grade("dc1", rule, current, None, drop) == "INCOMPLETE"
+    assert grade("dc2", rule, current, temperature, drop) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("ground,view,expected", [
+    pytest.param({"soil": (800, 0.25)}, {"soil": 0.5}, 100, id="estimate-rear-ground-reflection"),
+    pytest.param({"soil": (400, 0.2), "snow": (600, 0.8)}, {"soil": 0.4, "snow": 0.1}, 80,
+                 id="compare-snow-and-soil"),
+    pytest.param({"roof": (1000, 0.5), "shade": (0, 0.3)}, {"roof": 0.2, "shade": 0.7}, 100,
+                 id="account-for-shaded-roof"),
+])
+def test_rear_reflected_component_counts_each_patch_once(ground, view, expected):
+    from benches.x03_weather_oracle import rear_reflected_irradiance_quality as grade
+
+    model = "lambertian-ground-patches-v1"
+    assert grade(model, ground, view, expected) == "PASS"
+    assert grade(model, ground, view, 2 * expected) == "FAIL"
+    partial = dict(view)
+    partial.pop(next(iter(partial)))
+    assert grade(model, ground, partial, expected) == "INCOMPLETE"
+    assert grade(None, ground, view, expected) == "INCOMPLETE"

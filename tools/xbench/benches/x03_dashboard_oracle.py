@@ -1119,3 +1119,39 @@ def placement_feasibility_quality(workers, demands, allowed, reported_feasible):
                     return True
         return False
     return "PASS" if fits(0) == reported_feasible else "FAIL"
+
+
+def cross_worker_latency_quality(start, finish, offsets, reported_bounds):
+    """Check tight latency bounds in integer ticks for distinct worker clocks.
+
+    An offset interval bounds local time minus reference time at the event.
+    Each event consists of its worker ID and its local timestamp.
+    """
+    if not isinstance(offsets, dict):
+        return "INCOMPLETE"
+    reference = []
+    for event in (start, finish):
+        if not isinstance(event, (tuple, list)) or len(event) != 2:
+            return "INCOMPLETE"
+        worker, local_tick = event
+        if not isinstance(worker, str) or not worker or type(local_tick) is not int:
+            return "INCOMPLETE"
+        bounds = offsets.get(worker)
+        if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+            return "INCOMPLETE"
+        if not all(type(x) is int for x in bounds) or bounds[0] > bounds[1]:
+            return "INCOMPLETE"
+        reference.append((local_tick - bounds[1], local_tick - bounds[0]))
+    if start[0] == finish[0]:
+        return "INCOMPLETE"
+    earliest = reference[1][0] - reference[0][1]
+    latest = reference[1][1] - reference[0][0]
+    if latest < 0:
+        return "FAIL"
+    if earliest <= 0 <= latest and earliest != latest:
+        return "INCOMPLETE"
+    if not isinstance(reported_bounds, (list, tuple)) or len(reported_bounds) != 2:
+        return "INCOMPLETE"
+    if not all(type(x) is int for x in reported_bounds):
+        return "INCOMPLETE"
+    return "PASS" if tuple(reported_bounds) == (earliest, latest) else "FAIL"

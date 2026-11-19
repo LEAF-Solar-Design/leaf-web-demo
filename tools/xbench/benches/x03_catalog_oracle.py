@@ -2,6 +2,24 @@
 from fractions import Fraction
 from math import isfinite
 
+
+def terminal_contact_quality(revision, rule, current_a, joint_temp_c, drop_mv):
+    """Use a four-wire DC voltage-drop magnitude at the specified test current."""
+    from benches.x03_quality import finite_measure
+
+    if not revision or not isinstance(rule, dict) or rule.get("revision") != revision:
+        return "INCOMPLETE"
+    values = (current_a, joint_temp_c, drop_mv, rule.get("test_current_a"),
+              rule.get("max_joint_temp_c"), rule.get("max_resistance_mohm"))
+    if not all(map(finite_measure, values)):
+        return "INCOMPLETE"
+    current, temp, drop, specified_current, max_temp, max_resistance = (
+        Fraction(str(value)) for value in values
+    )
+    if current != specified_current or current <= 0 or drop < 0 or max_resistance < 0:
+        return "INCOMPLETE"
+    return "PASS" if temp <= max_temp and drop <= current * max_resistance else "FAIL"
+
 # Exact SI scale factors within each supported dimension.
 UNITS = {
     'W': ('power', 1), 'kW': ('power', 1000),
