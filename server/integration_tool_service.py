@@ -583,10 +583,11 @@ class IntegrationToolService:
     def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50):
         return self._run_catalog_report("datasets", description, tenant, session, turn, limit)
 
-    def run_authored_action_report(self, description, tenant, session, turn, *, limit=50):
-        return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit)
+    def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
+        return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
+                                        include_form_digest=include_form_digest)
 
-    def _run_catalog_report(self, operation, description, tenant, session, turn, limit):
+    def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False):
         """Run authored source on bounded catalog metadata, outside the credential-holding process."""
         import tools_fallback
         import tool_loader
@@ -612,6 +613,9 @@ class IntegrationToolService:
             pages += 1
             for entry in page[collection]:
                 row = {key: entry[key] for key in keys}
+                if operation == "action_catalog" and include_form_digest:
+                    from authored_action_revocation import form_digest
+                    row["form_digest"] = form_digest(entry["form"])
                 size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
                 if size > RESPONSE_CAP:
                     raise ReadFailure("response_too_large")

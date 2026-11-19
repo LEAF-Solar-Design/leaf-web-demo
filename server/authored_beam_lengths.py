@@ -114,6 +114,23 @@ def __ENTRY_POINT__(intake, params):
     span_reports = {}
     identity = identity_frame()
 
+    def distinct_entities(records):
+        # Handles identify siblings within a definition. Each INSERT placement
+        # still visits that definition with its own transform and multiplicity.
+        seen = {}
+        unique = []
+        for record in records:
+            handle = record.get("handle")
+            if handle:
+                key = handle.upper()
+                if key in seen:
+                    if seen[key] != record:
+                        raise ValueError("Conflicting beam evidence for handle " + key)
+                    continue
+                seen[key] = record
+            unique.append(record)
+        return unique
+
     def measure(path, frame, inherited, prefix, copies):
         layer = path.get("layer", "0")
         if layer == "0":
@@ -174,10 +191,10 @@ def __ENTRY_POINT__(intake, params):
             if __COLLECT_SPLINES__:
                 members[key]["ends"] = spline_endpoints(path, frame)
 
-    for path in intake.get("polylines", []):
+    for path in distinct_entities(intake.get("polylines", [])):
         measure(path, identity, "0", (), 1)
 
-    for path in intake.get("splines", []):
+    for path in distinct_entities(intake.get("splines", [])):
         measure(path, identity, "0", (), 1)
 
     blocks = {name.casefold(): block for name, block in intake.get("blocks", {}).items()}
@@ -223,6 +240,8 @@ def __ENTRY_POINT__(intake, params):
             raise ValueError("Beam block traversal exceeds 10000 placements.")
         if not __LIST_MEMBERS__:
             copies *= rows * cols
+        paths = distinct_entities(paths)
+        nested = distinct_entities(block.get("nested_inserts", []))
         for index in range(placements):
             row, column = divmod(index, cols)
             frame = insert_frame(parent, insert, block.get("base", (0, 0, 0)), row, column)
@@ -234,12 +253,12 @@ def __ENTRY_POINT__(intake, params):
                 branch = (*prefix, tag)
             for path in paths:
                 measure(path, frame, layer, branch, copies)
-            for child in block.get("nested_inserts", []):
+            for child in nested:
                 visit(child, frame, layer, branch, (*ancestors, name), copies)
 
     if any("unresolved block reference" in message for message in intake.get("parseErrors", [])):
         raise ValueError("Unresolved block reference in beam measurement.")
-    for insert in intake.get("inserts", []):
+    for insert in distinct_entities(intake.get("inserts", [])):
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}

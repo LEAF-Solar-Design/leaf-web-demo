@@ -1,10 +1,12 @@
 """Submit a host-selected action only while its exact operation and grant are current."""
 from dataclasses import dataclass
+from hashlib import sha256
 import json
+import math
 import re
 from threading import RLock
 
-from integration_tool_service import ReadFailure
+from integration_tool_service import ReadFailure, validate_action_catalog
 
 
 def matches(description):
@@ -35,10 +37,57 @@ def _identity(ref):
     return json.dumps(ref, sort_keys=True, separators=(",", ":"))
 
 
+def form_digest(form):
+    """Pin the catalog field definitions independently of the operation version."""
+    return sha256(_identity(form["fields"]).encode("utf-8")).hexdigest()
+
+
+_EMPTY_FORM = {"fields": [], "submit_label": "Submit"}
+
+
+def _valid_value(field, value):
+    if value is None:
+        return field["nullable"]
+    kind = field["kind"]
+    if kind == "text":
+        return (type(value) is str and field.get("min_length", 0) <= len(value)
+                and ("max_length" not in field or len(value) <= field["max_length"]))
+    if kind == "number":
+        return (type(value) in (int, float)
+                and (type(value) is int or math.isfinite(value))
+                and (not field["integer"] or type(value) is int or value.is_integer())
+                and ("minimum" not in field or value >= field["minimum"])
+                and ("maximum" not in field or value <= field["maximum"]))
+    if kind == "boolean":
+        return type(value) is bool
+    if kind == "choice":
+        return any(value == item["value"] for item in field["choices"])
+    return False
+
+
+def _check_arguments(fields, values):
+    by_id = {f["id"]: f for f in fields}
+    if (type(values) is not dict or values.keys() - by_id.keys()
+            or any(f["required"] and f["id"] not in values for f in fields)
+            or any(not _valid_value(by_id[k], v) for k, v in values.items())):
+        raise ReadFailure("invalid_input")
+
+
 @dataclass(frozen=True)
 class Selection:
     authority: object
     reference: str
+    form_digest: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class _Registration:
+    reference: str
+    form_digest: str
+    fields: list
+    handler: object
+    expects_arguments: bool
 
 
 class AuthorizedLocalActions:
@@ -49,10 +98,15 @@ class AuthorizedLocalActions:
         self._role_grants = {}
         self._memberships = {}
 
-    def register(self, tenant, project, reference, handler):
+    def register(self, tenant, project, reference, handler, *, form=None):
         slot = (tenant, project, reference["connection_id"], reference["operation_ref"]["id"])
+        registered_form = json.loads(_identity(_EMPTY_FORM if form is None else form))
+        validate_action_catalog({"actions": [{**reference, "connection_title": "Local",
+                                 "title": "Local", "form": registered_form}], "next_cursor": None}, 1)
         with self._lock:
-            self._handlers[slot] = (_identity(reference), handler)
+            self._handlers[slot] = _Registration(
+                _identity(reference), form_digest(registered_form), registered_form["fields"],
+                handler, form is not None)
 
     def set_role_grants(self, tenant, project, role, references):
         with self._lock:
@@ -62,7 +116,7 @@ class AuthorizedLocalActions:
         with self._lock:
             self._memberships[tenant, project, subject] = frozenset(roles)
 
-    def submit(self, authority, reference):
+    def submit(self, authority, reference, digest=form_digest(_EMPTY_FORM), arguments="{}"):
         ref = json.loads(reference)
         scope = authority.tenant_id, authority.project_id
         slot = (*scope, ref["connection_id"], ref["operation_ref"]["id"])
@@ -70,12 +124,15 @@ class AuthorizedLocalActions:
             binding = self._handlers.get(slot)
             roles = self._memberships.get((*scope, authority.subject), ())
             allowed = any(reference in self._role_grants.get((*scope, role), ()) for role in roles)
-            if binding is None or binding[0] != reference or not allowed:
+            if (binding is None or binding.reference != reference
+                    or binding.form_digest != digest or not allowed):
                 raise ReadFailure("denied")
-            return binding[1]()
+            values = json.loads(arguments)
+            _check_arguments(binding.fields, values)
+            return binding.handler(values) if binding.expects_arguments else binding.handler()
 
 
-def select_action(service, description, tenant, session, turn, *, selected):
+def select_action(service, description, tenant, session, turn, *, selected, arguments=None):
     """Interpret an explicit submit request for the host-selected catalog entry."""
     import tools_fallback
     import tool_loader
@@ -89,7 +146,14 @@ def select_action(service, description, tenant, session, turn, *, selected):
     if status != "ok":
         raise ReadFailure("invalid_input")
     ref, _ = payload
-    return Selection(authority, _identity(ref))
+    values = {} if arguments is None else arguments
+    if type(values) is not dict or any(type(key) is not str for key in values):
+        raise ReadFailure("invalid_input")
+    try:
+        encoded = json.dumps(values, allow_nan=False, separators=(",", ":"))
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise ReadFailure("invalid_input") from exc
+    return Selection(authority, _identity(ref), selected.get("form_digest", form_digest(_EMPTY_FORM)), encoded)
 
 
 def run_selected_action(service, selection, tenant, session, turn, *, host):
@@ -103,7 +167,9 @@ def run_selected_action(service, selection, tenant, session, turn, *, host):
             if _identity(_pins(entry)) == selection.reference:
                 if found:
                     raise ReadFailure("invalid_response")
+                if form_digest(entry["form"]) != selection.form_digest:
+                    raise ReadFailure("denied")
                 found = True
     if not found or service._resolve_operation("action_catalog", tenant, session, turn).authority != authority:
         raise ReadFailure("denied")
-    return host.submit(authority, selection.reference)
+    return host.submit(authority, selection.reference, selection.form_digest, selection.arguments)

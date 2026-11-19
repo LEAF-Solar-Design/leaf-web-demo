@@ -16,7 +16,13 @@ def bezier_span(control, knots, degree, span):
             u = left if r <= degree - j else right
             for i in range(degree, r - 1, -1):
                 k = span - degree + i
-                alpha = (u - knots[k]) / (knots[k + degree - r + 1] - knots[k])
+                lo, hi = knots[k], knots[k + degree - r + 1]
+                width = hi - lo
+                if math.isfinite(width):
+                    alpha = (u - lo) / width
+                else:
+                    # Opposite-sign finite knots can span over one float's range.
+                    alpha = (.5*u - .5*lo) / (.5*hi - .5*lo)
                 net[i] = spline_blend(net[i-1], net[i], alpha)
         result.append(net[-1])
     return result

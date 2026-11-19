@@ -114,8 +114,10 @@ def visible_area(rings):
     cuts = sorted(xs)
     areas = []
     for left, right in zip(cuts, cuts[1:]):
-        x = left + (right-left)*0.5
-        hits = sorted((ordinate(edge,x), edge[2]) for edge in edges if edge[0][0] < x < edge[1][0])
+        # Adjacent floats have no representable interior x. Select edges by
+        # the slab endpoints and integrate their linear height at both ends.
+        hits = sorted(((ordinate(edge,left)+ordinate(edge,right))*0.5, edge[2])
+                      for edge in edges if edge[0][0] <= left and right <= edge[1][0])
         flags = [inverted for _,inverted in rings]
         previous = None
         for y, index in hits:
@@ -148,7 +150,7 @@ def run(intake, params):
         return children
 
     expanded = preflight_expansion(intake.get("inserts", ()), blocks, PLACEMENT_LIMIT, children_for)
-    def visit(ref, inherited, prefix, ancestors, parent, boundaries):
+    def visit(ref, inherited, prefix, ancestors, parent, boundaries, area_scale):
         if ref.get("space") == "paper":
             return
         handle = ref.get("handle", "").upper()
@@ -176,6 +178,12 @@ def run(intake, params):
                 if (frame[1][2] or frame[2][2] or
                         frame[1][0]*frame[2][1] == frame[2][0]*frame[1][1]):
                     raise ValueError("Panel placement requires a nondegenerate XY transform.")
+                scale = area_scale
+                if AREA_MODE and not boundaries and (clip or panel):
+                    # Measure in the first shared clip frame to retain local
+                    # detail even when the site has large world coordinates.
+                    scale = abs(frame[1][0]*frame[2][1] - frame[2][0]*frame[1][1])
+                    frame = identity_frame()
                 chain = boundaries
                 if clip:
                     pts = [transform_point(frame, (*p,0))[:2] for p in clip["points"]]
@@ -186,15 +194,14 @@ def run(intake, params):
                         raise ValueError(outline.get("error","Missing complete panel footprint."))
                     polygon = [transform_point(frame, (*p,0))[:2] for p in outline["points"]]
                     rings = [(polygon,False)] + [(c["points"],c["inverted"]) for c in chain]
-                    area = visible_area(rings)
-                    width = max(p[0] for p in polygon)-min(p[0] for p in polygon)
-                    height = max(p[1] for p in polygon)-min(p[1] for p in polygon)
-                    roundoff = 16 * max(math.ulp(v) for p in polygon for v in p) * (width+height)
+                    area = visible_area(rings) * scale
+                    if not math.isfinite(area):
+                        raise ValueError("Panel footprint area exceeds numeric range.")
                     if PER_PLACEMENT:
                         if path in placement_areas:
                             raise ValueError("Duplicate panel placement path.")
-                        placement_areas[path] = area if area > roundoff else 0.0
-                    if area > roundoff:
+                        placement_areas[path] = area
+                    if area > 0:
                         areas[layer] = areas.get(layer,0) + area
                     else:
                         continue
@@ -204,17 +211,17 @@ def run(intake, params):
                         continue
                 else:
                     for child in children:
-                        visit(child,layer,path+"/",ancestors+(name,),frame,chain)
+                        visit(child,layer,path+"/",ancestors+(name,),frame,chain,scale)
                     continue
                 if path in paths:
                     raise ValueError("Duplicate panel placement path.")
                 paths.add(path)
     for ref in intake.get("inserts", []):
-        visit(ref,"0","",(),identity_frame(),())
+        visit(ref,"0","",(),identity_frame(),(),1)
     if AREA_MODE:
         details = {"area_by_placement": placement_areas} if PER_PLACEMENT else {}
         return {**details, "area_by_layer":areas, "expanded_placements":expanded, "area_units":"square drawing units", "visible_panels":len(paths),
-                "boundary_policy":"edge contact contributes zero footprint area"}, None
+                "boundary_policy":"edge or corner contact contributes zero footprint area"}, None
     return {"visible_paths":sorted(paths), "expanded_placements":expanded, "total":len(paths),
             "boundary_policy":"include panel insertion points on clip edges"}, None
 """

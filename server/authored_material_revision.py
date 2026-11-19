@@ -13,9 +13,15 @@ def matches(description):
     return bool(source and revisions and comparison)
 
 
+def _field_report(description):
+    return bool(re.search(r"\b(?:fields?|properties|keys?|values?|null|missing|absent|boolean|numeric)\b",
+                          description, re.I))
+
+
 def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, prior, current, *,
-                            include_row_values=False):
+                            include_row_values=False, description=""):
     """The host supplies a selected ledger and separately authorized material IDs."""
+    include_row_values = include_row_values or _field_report(description)
     snapshots = []
     for version, mid, selection in (prior, current):
         if type(version) is not int or version < 1:
@@ -40,7 +46,50 @@ def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, pr
 
 
 def build_body(description):
-    return _BODY
+    if _field_report(description):
+        return _FIELDS + _BODY.replace("__FIELD_DETAILS__", "add_field_changes(snapshots, changes)")
+    return _BODY.replace("__FIELD_DETAILS__", "")
+
+
+_FIELDS = """
+import json
+
+
+def add_field_changes(snapshots, changes):
+    missing = object()
+    rows = []
+    for snap in snapshots:
+        values = snap.get("record_values")
+        if type(values) is not list or len(values) != len(snap["record_ids"]):
+            raise ValueError("Verified record values are required for a field comparison.")
+        rows.append(dict(zip(snap["record_ids"], values)))
+
+    def state(base, path, value):
+        item = {"pointer": base["pointer"] + path if base is not None else None,
+                "present": value is not missing}
+        if value is not missing:
+            item["value"] = value
+        return item
+
+    for change in changes:
+        fields = change["fields"] = []
+        identity = change["id"]
+        # Nested lists use JSON Pointer indices. Only the selected records use stable IDs.
+        pending = [("", rows[0].get(identity, missing), rows[1].get(identity, missing))]
+        while pending:
+            path, left, right = pending.pop()
+            if type(left) is dict and type(right) is dict:
+                for key in reversed(sorted(left.keys() | right.keys())):
+                    part = key.replace("~", "~0").replace("/", "~1")
+                    pending.append((path + "/" + part, left.get(key, missing), right.get(key, missing)))
+            elif type(left) is list and type(right) is list:
+                for i in reversed(range(max(len(left), len(right)))):
+                    pending.append((path + "/" + str(i), left[i] if i < len(left) else missing,
+                                    right[i] if i < len(right) else missing))
+            elif left is missing or right is missing or json.dumps(left, sort_keys=True) != json.dumps(right, sort_keys=True):
+                fields.append({"before": state(change["before"], path, left),
+                               "after": state(change["after"], path, right)})
+"""
 
 
 _BODY = """
@@ -73,6 +122,7 @@ def run(intake, params):
         changes.append({"id": identity, "kind": kind, "before": left, "after": right,
                         "moved": present_in_both and left["pointer"] != right["pointer"],
                         "edited": present_in_both and left["sha256"] != right["sha256"]})
+    __FIELD_DETAILS__
     report["changes"] = changes
     return report, None
 """
