@@ -39,6 +39,33 @@ afterEach(() => {
 })
 
 describe('terminal error transcript recovery', () => {
+  it.each([
+    ['oauth_org_not_allowed', "The assistant's Claude account was refused, so it could not answer. Your tools still work. An admin must link an allowed Claude account."],
+    ['authentication_failed', "The assistant's Claude account could not sign in, so it could not answer. Your tools still work. An admin must relink the Claude account."],
+    ['billing_error', "The assistant's Claude account has a billing problem, so it could not answer. Your tools still work. An admin must check that account's plan."],
+  ])('explains %s and shows the idle reconnection banner after the turn ends', async (code, message) => {
+    await setup([
+      event('turn_started', 'broken'),
+      event('error', 'broken', {
+        error: { error_code: code, message: 'Agent service terminal failure', retryable: false },
+      }),
+    ], [{ turnId: 'broken', text: 'hello' }])
+    expect(screen.getByText(message)).toBeTruthy()
+    expect(screen.getByText(code)).toBeTruthy()
+    expect(screen.queryByText('Agent service terminal failure')).toBeNull()
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(false)
+
+    act(() => converse.openStream.mock.calls.at(-1)[2].onConnectionState('retrying'))
+    expect(screen.getByText('The live connection to the assistant dropped. Reconnecting.')).toBeTruthy()
+    expect(screen.queryByText(/You can stop the current reply/)).toBeNull()
+  })
+
+  it('shows the option to stop a running reply while reconnecting', async () => {
+    await setup([event('turn_started', 'live')], [{ turnId: 'live', text: 'hello' }])
+    act(() => converse.openStream.mock.calls.at(-1)[2].onConnectionState('retrying'))
+    expect(screen.getByText('The conversation connection was interrupted. Retrying. You can stop the current reply.')).toBeTruthy()
+  })
+
   it('unlocks replies and question choices after a later completed turn', async () => {
     await setup([
       ...broken,

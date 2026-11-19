@@ -204,6 +204,12 @@ const STOP_NOTES = {
   timeout: 'The reply took too long. Try again.',
 }
 
+const TERMINAL_ERROR_NOTES = Object.freeze({
+  oauth_org_not_allowed: "The assistant's Claude account was refused, so it could not answer. Your tools still work. An admin must link an allowed Claude account.",
+  authentication_failed: "The assistant's Claude account could not sign in, so it could not answer. Your tools still work. An admin must relink the Claude account.",
+  billing_error: "The assistant's Claude account has a billing problem, so it could not answer. Your tools still work. An admin must check that account's plan.",
+})
+
 // Local send/approve failure -> the same calm degraded copy the App banner uses.
 function bannerFor(e) {
   const kind = classifyAgentError(e)
@@ -789,7 +795,7 @@ export default function ConversePanel({
               ? new Date(retryTime).toISOString() : null }
             : null
         } else if (code === 'grant_required') grant = true
-        else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
+        else t.feed.push({ kind: 'error', code, message: humanizeError(TERMINAL_ERROR_NOTES[code] || STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
         if (typeof data.stop_reason === 'string' && data.stop_reason) {
           if (!t.stopReason) t.stopReason = data.stop_reason
           completed.add(t.turnId)
@@ -1375,7 +1381,9 @@ export default function ConversePanel({
             ? 'Your session has expired. Sign in again to continue.'
             : connectionState === 'workspace'
               ? 'Your account cannot access this workspace. Ask your workspace administrator for access.'
-              : 'The conversation connection was interrupted. Retrying. You can stop the current reply.')}</span>
+              : model.active
+                ? 'The conversation connection was interrupted. Retrying. You can stop the current reply.'
+                : 'The live connection to the assistant dropped. Reconnecting.')}</span>
           {connectionState === 'retrying' && <button type="button" className="chip-neutral" onClick={() => { void streamRef.current?.reconcile?.() }}>Retry connection</button>}
         </div>
       )}
