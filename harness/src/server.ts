@@ -78,7 +78,7 @@ import {
   PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT,
   ProjectRepositorySourceUnavailable,
 } from "./ports/index.js";
-import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
+import type { AgentGrant, ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
   InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority,
   ProjectRepositoryInversePreparationRequest, TenantRepoProvider,
   ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
@@ -1868,6 +1868,11 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
   const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
+  const { OpenAiConverseRunner, converseProviderFromEnv } = await import("./ports/impl/openaiConverseRunner.js");
+  const converseProvider = converseProviderFromEnv(process.env);
+  if (converseProvider.provider === "openai") {
+    console.log(`converse_provider=openai model=${converseProvider.model}`);
+  }
   const { HaikuIntentSynthesizer } = await import(
     "./ports/impl/haikuIntentSynthesizer.js"
   );
@@ -1913,15 +1918,22 @@ export async function startReal(port = 8130): Promise<Server> {
         appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
-        runnerFor: (grant) => new ConverseSdkRunner({
-          grant,
-          ...(standardServicesResolver ? { standardServicesResolver } : {}),
-        }),
+        runnerFor: (grant) => converseProvider.provider === "openai"
+          ? new OpenAiConverseRunner({
+              grant, apiKey: converseProvider.apiKey, model: converseProvider.model,
+              ...(standardServicesResolver ? { standardServicesResolver } : {}),
+            })
+          : new ConverseSdkRunner({
+              grant,
+              ...(standardServicesResolver ? { standardServicesResolver } : {}),
+            }),
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
         // Classify the turn's surface (drawing vs the product) with a small
         // fast model instead of matching vocabulary in the prompt. Advisory
         // and fail-open: see HaikuIntentSynthesizer.
-        intentFor: (grant) => new HaikuIntentSynthesizer({ grant }),
+        ...(converseProvider.provider === "anthropic" ? {
+          intentFor: (grant: AgentGrant) => new HaikuIntentSynthesizer({ grant }),
+        } : {}),
         instantExecutor,
       })
     : undefined;
