@@ -17,7 +17,7 @@ def bind_three_way(intake, ledger, org, project, actor, ancestor, branches):
     snapshots = []
     for artifact, tip in branches:
         pair = bind_material_revisions({}, ledger, org, project, actor, artifact, ancestor, tip,
-                                       include_row_values=True)["linked_material_selections"]
+                                       include_row_values=True, exact_numbers=False)["linked_material_selections"]
         base, child = pair
         if child["records_pointer"] != base["records_pointer"]:
             raise ValueError("Select corresponding record arrays at the same JSON pointer.")

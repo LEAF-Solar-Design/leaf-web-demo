@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+from decimal import Decimal
 
 
 def matches(description):
@@ -36,8 +37,33 @@ def _selected_rows(document, pointer, count):
         parent = value
 
 
+def _numeric_projection(value, exact_paths, path=""):
+    """Keep ordinary JSON wire values where exact. Mark lossless decimal strings by pointer."""
+    if isinstance(value, dict):
+        return {key: _numeric_projection(item, exact_paths, path + "/" + key.replace("~", "~0").replace("/", "~1"))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_numeric_projection(item, exact_paths, path + "/" + str(i)) for i, item in enumerate(value)]
+    if not isinstance(value, Decimal):
+        return value
+    if not value:
+        return 0
+    # Bound expansion of compact exponential notation. This covers the host's
+    # supported plain JSON integer range without materializing huge powers of ten.
+    if value.adjusted() < 4300 and value == value.to_integral_value():
+        return int(value)
+    ordinary = float(value)
+    if Decimal(str(ordinary)) == value:
+        return ordinary
+    sign, digits, exponent = value.as_tuple()
+    coefficient = "".join(map(str, digits))
+    trimmed = coefficient.rstrip("0")
+    exact_paths.append(path)
+    return ("-" if sign else "") + trimmed + "e" + str(exponent + len(coefficient) - len(trimmed))
+
+
 def bind_material_selection(intake, org_id, project_id, actor_id, material_id, context, *,
-                            include_row_digests=False, include_row_values=False):
+                            include_row_digests=False, include_row_values=False, exact_numbers=False):
     """Bind a host-provided selection against a separately authorized material ID."""
     from integration_tool_service import validate_material_context
     import platform_link
@@ -55,23 +81,37 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
             or material.get("media_type") != "application/json"
             or material.get("sha256") != source["sha256"] or material.get("byte_size") != source["byte_length"]):
         raise ValueError("Selection does not match the project's original JSON material.")
-    document = json.loads(originals.read_content(org_id, project_id, material).decode("utf-8-sig"))
+    raw = originals.read_content(org_id, project_id, material).decode("utf-8-sig")
+    document = json.loads(raw, parse_float=Decimal if exact_numbers else float)
     pointer = context["selection"]["records_pointer"]
     rows = _selected_rows(document, pointer, context["row_count"])
     # JSON comparison preserves distinctions such as false versus 0.
-    if json.dumps(document, sort_keys=True) != json.dumps(context["envelope"], sort_keys=True):
+    envelope_paths = []
+    envelope = _numeric_projection(document, envelope_paths) if exact_numbers else document
+    advertised = context["envelope"]
+    if exact_numbers:
+        advertised = _numeric_projection(json.loads(json.dumps(advertised), parse_float=Decimal), [])
+    if envelope_paths or json.dumps(envelope, sort_keys=True) != json.dumps(advertised, sort_keys=True):
         raise ValueError("Selection envelope differs from the verified original JSON.")
     identities = []
     for row in rows:
         identity = row.get("id") if type(row) is dict else None
         identities.append(identity if type(identity) in (str, int) else None)
     selection = {**source, "records_pointer": pointer, "record_ids": identities}
+    exact_paths = [[] for _ in rows]
+    if exact_numbers:
+        rows = [_numeric_projection(row, paths) for row, paths in zip(rows, exact_paths)]
+        if include_row_values and any(exact_paths):
+            selection["record_exact_numbers"] = exact_paths
     if include_row_digests:
-        selection["record_sha256"] = [
-            hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                                      allow_nan=False).encode("utf-8")).hexdigest()
-            for row in rows
-        ]
+        selection["record_sha256"] = []
+        for row, paths in zip(rows, exact_paths):
+            canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                                   allow_nan=False).encode("utf-8")
+            if paths:
+                # An unescaped NUL cannot occur in canonical JSON. Bind type as well as value.
+                canonical += b"\0" + json.dumps(sorted(paths), separators=(",", ":")).encode()
+            selection["record_sha256"].append(hashlib.sha256(canonical).hexdigest())
     if include_row_values:
         selection["record_values"] = rows
     return {**intake, "checker_material_selection": selection}

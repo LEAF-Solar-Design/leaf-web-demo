@@ -19,7 +19,7 @@ def _field_report(description):
 
 
 def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, prior, current, *,
-                            include_row_values=False, description=""):
+                            include_row_values=False, description="", exact_numbers=True):
     """The host supplies a selected ledger and separately authorized material IDs."""
     include_row_values = include_row_values or _field_report(description)
     snapshots = []
@@ -27,7 +27,8 @@ def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, pr
         if type(version) is not int or version < 1:
             raise ValueError("Invalid material revision.")
         bound = bind_material_selection({}, org, project, actor, mid, selection,
-                                        include_row_digests=True, include_row_values=include_row_values)
+                                        include_row_digests=True, include_row_values=include_row_values,
+                                        exact_numbers=exact_numbers)
         verified = bound["checker_material_selection"]
         # A digest alone cannot distinguish two materials containing identical bytes.
         revision_ref = {"material_id": str(mid), "sha256": verified["sha256"]}
@@ -42,6 +43,8 @@ def bind_material_revisions(intake, ledger, org, project, actor, artifact_id, pr
                           "record_ids": ids, "record_sha256": verified["record_sha256"]})
         if include_row_values:
             snapshots[-1]["record_values"] = verified["record_values"]
+            if "record_exact_numbers" in verified:
+                snapshots[-1]["record_exact_numbers"] = verified["record_exact_numbers"]
     return {**intake, "linked_material_selections": snapshots}
 
 
@@ -58,22 +61,31 @@ import json
 def add_field_changes(snapshots, changes):
     missing = object()
     rows = []
+    exact = []
     for snap in snapshots:
         values = snap.get("record_values")
         if type(values) is not list or len(values) != len(snap["record_ids"]):
             raise ValueError("Verified record values are required for a field comparison.")
         rows.append(dict(zip(snap["record_ids"], values)))
+        exact.append(dict(zip(snap["record_ids"], snap.get("record_exact_numbers", []))))
 
-    def state(base, path, value):
+    def state(base, path, value, numbers):
         item = {"pointer": base["pointer"] + path if base is not None else None,
                 "present": value is not missing}
         if value is not missing:
             item["value"] = value
+            if path in numbers:
+                item["value_type"] = "decimal"
+            elif type(value) in (dict, list):
+                descendants = sorted(p[len(path):] for p in numbers if p.startswith(path + "/"))
+                if descendants:
+                    item["decimal_pointers"] = descendants
         return item
 
     for change in changes:
         fields = change["fields"] = []
         identity = change["id"]
+        old_numbers, new_numbers = (set(side.get(identity, ())) for side in exact)
         # Nested lists use JSON Pointer indices. Only the selected records use stable IDs.
         pending = [("", rows[0].get(identity, missing), rows[1].get(identity, missing))]
         while pending:
@@ -86,9 +98,10 @@ def add_field_changes(snapshots, changes):
                 for i in reversed(range(max(len(left), len(right)))):
                     pending.append((path + "/" + str(i), left[i] if i < len(left) else missing,
                                     right[i] if i < len(right) else missing))
-            elif left is missing or right is missing or json.dumps(left, sort_keys=True) != json.dumps(right, sort_keys=True):
-                fields.append({"before": state(change["before"], path, left),
-                               "after": state(change["after"], path, right)})
+            elif (left is missing or right is missing or (path in old_numbers) != (path in new_numbers)
+                  or json.dumps(left, sort_keys=True) != json.dumps(right, sort_keys=True)):
+                fields.append({"before": state(change["before"], path, left, old_numbers),
+                               "after": state(change["after"], path, right, new_numbers)})
 """
 
 

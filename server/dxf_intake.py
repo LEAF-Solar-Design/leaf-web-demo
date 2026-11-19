@@ -511,6 +511,8 @@ def parse_dxf_bytes(
         from dxf_spatial_clips import attach_clips
         from authored_dynamic_visibility import attach_visibility
         from authored_panel_regions import attach_footprints
+        from authored_viewport_panels import attach_viewports
+        attach_viewports(pairs, out)
         attach_clips(pairs, out)
         attach_footprints(pairs, out)
         attach_visibility(pairs, out)

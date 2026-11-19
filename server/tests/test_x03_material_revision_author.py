@@ -29,10 +29,11 @@ def digest(data):
     return sha256(data).hexdigest()
 
 
-def pin_selection(scope, version, key, records, ledger, materials):
+def pin_selection(scope, version, key, records, ledger, materials, *, raw=None):
     mid = str(uuid4())
     doc = {key: records}
-    raw = json.dumps(doc, indent=2).encode()
+    if raw is None:
+        raw = json.dumps(doc, indent=2).encode()
     org, project, actor = scope
     stored = originals.prepare_and_store(org, project, "inspection.json", "application/json", raw)
     materials[mid] = dict(stored, org_id=org, project_id=project, material_id=mid)
