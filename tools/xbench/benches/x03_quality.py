@@ -2712,3 +2712,79 @@ def winding_differential_quality(rule, group, hv, lv, ct_ratios, tripped):
     quadrature = sqrt(high) * sqrt(low) * (2 * sin(radians(float(delta)) / 2))
     differential = hypot(high - low, quadrature)
     return "PASS" if tripped == (differential >= pickup) else "FAIL"
+
+
+def overexcitation_quality(envelope, trace, *, complete):
+    """Piecewise-constant RMS voltage and frequency, starting with clear timers.
+
+    Each (V/Hz threshold, maximum seconds) has its own continuous exposure
+    timer. At or below its threshold that timer resets. The maximum calibrated
+    ratio bounds the region covered by the supplied envelope.
+    """
+    if complete is not True or not isinstance(envelope, dict) or envelope.get("model") != "continuous-v-hz-v1":
+        return "INCOMPLETE"
+    upper = envelope.get("max_calibrated_v_hz")
+    limits = envelope.get("limits")
+    if not finite_measure(upper) or not isinstance(limits, list) or not limits:
+        return "INCOMPLETE"
+    thresholds = []
+    for row in limits:
+        if not isinstance(row, (list, tuple)) or len(row) != 2 or not all(map(finite_measure, row)):
+            return "INCOMPLETE"
+        threshold, seconds = (Fraction(str(x)) for x in row)
+        if not 0 < threshold < Fraction(str(upper)) or seconds < 0:
+            return "INCOMPLETE"
+        if thresholds and (threshold <= thresholds[-1][0] or seconds > thresholds[-1][1]):
+            return "INCOMPLETE"
+        thresholds.append((threshold, seconds))
+    if not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    timers = [Fraction(0)] * len(thresholds)
+    exceeded = False
+    for sample in trace:
+        if not isinstance(sample, (list, tuple)) or len(sample) != 3 or not all(map(finite_measure, sample)):
+            return "INCOMPLETE"
+        duration, voltage, frequency = (Fraction(str(x)) for x in sample)
+        if duration <= 0 or voltage < 0 or frequency <= 0:
+            return "INCOMPLETE"
+        ratio = voltage / frequency
+        if ratio > Fraction(str(upper)):
+            return "INCOMPLETE"
+        for i, (threshold, limit) in enumerate(thresholds):
+            timers[i] = timers[i] + duration if ratio > threshold else 0
+            exceeded |= timers[i] > limit
+    return "FAIL" if exceeded else "PASS"
+
+
+def intertrip_quality(policy, last_heartbeat, trace, *, complete):
+    """At each contiguous tick process heartbeat, then fault, then breaker state.
+
+    Channel timeout or a fault starts a latched clearing deadline. A new
+    heartbeat after an unobserved gap cannot clear a trip already latched.
+    """
+    if complete is not True or not isinstance(policy, dict) or policy.get("model") != "latched-heartbeat-trip-v1":
+        return "INCOMPLETE"
+    timeout, clearing = policy.get("timeout_ticks"), policy.get("clearing_ticks")
+    if type(timeout) is not int or timeout <= 0 or type(clearing) is not int or clearing < 0:
+        return "INCOMPLETE"
+    if type(last_heartbeat) is not int or not isinstance(trace, list) or not trace:
+        return "INCOMPLETE"
+    previous = last_heartbeat
+    deadline = None
+    failed = False
+    for sample in trace:
+        if not isinstance(sample, (list, tuple)) or len(sample) != 4:
+            return "INCOMPLETE"
+        tick, heartbeat, fault, closed = sample
+        if type(tick) is not int or tick != previous + 1 or not all(type(v) is bool for v in sample[1:]):
+            return "INCOMPLETE"
+        previous = tick
+        if heartbeat:
+            last_heartbeat = tick
+        if deadline is None and (fault or tick - last_heartbeat >= timeout):
+            deadline = tick + clearing
+        if deadline is not None and tick >= deadline and closed:
+            failed = True
+    if deadline is not None and previous < deadline:
+        return "INCOMPLETE"
+    return "FAIL" if failed else "PASS"

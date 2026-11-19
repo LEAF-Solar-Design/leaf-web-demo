@@ -728,3 +728,28 @@ def test_service_breaker_replays_cooldown_and_probe(threshold, cooldown, history
     duplicate[len(history) + 2] = (eligible, "probe", "parallel")
     assert replay(duplicate) == "FAIL"
     assert replay(stream[:-1]) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("old,new,old_votes,joint_votes,new_votes", [
+    pytest.param(list("abc"), list("cde"), list("ab"), list("abcd"), list("de"),
+                 id="verify-a-two-node-replacement"),
+    pytest.param(list("abcd"), list("defg"), list("abc"), list("abcdef"), list("efg"),
+                 id="reconcile-overlapping-four-voter-configurations"),
+    pytest.param(list("abcde"), list("efghi"), list("abe"), list("abefg"), list("fgi"),
+                 id="audit-majority-certificates-across-a-five-voter-handoff"),
+])
+def test_quorum_transition_certificates_intersect(old, new, old_votes, joint_votes, new_votes):
+    from benches.x03_dashboard_oracle import quorum_transition_quality as grade
+
+    epochs = {"old": [old], "joint": [old, new], "new": [new]}
+    def cert(epoch, voters):
+        return {"epoch": epoch, "value": "same-log-entry", "voters": voters}
+    def check(membership, receipts):
+        return grade("majority-each-config-v1", membership, receipts, complete=True)
+
+    before, handoff, after = cert("old", old_votes), cert("joint", joint_votes), cert("new", new_votes)
+    assert check(epochs, [before, handoff]) == "PASS"
+    assert check(epochs, [handoff, after]) == "PASS"
+    assert check(epochs, [before, after]) == "FAIL"
+    assert check(epochs, [cert("joint", old_votes)]) == "FAIL"
+    assert check({"old": [old]}, [before, handoff]) == "INCOMPLETE"

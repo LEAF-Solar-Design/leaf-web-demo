@@ -1566,3 +1566,43 @@ def test_compensated_winding_differential(group, shift, hv, lv, ratios, scale):
     assert grade(rule, group, hv, (0, 0), ratios, True) == "PASS"
     assert grade(rule, "unknown", hv, lv, ratios, False) == "INCOMPLETE"
     assert grade(rule, group, hv, lv, (None, 50), False) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("rated_v,normal_hz,low_hz,threshold,high,limit", [
+    pytest.param(240, 60, 40, 4, 5, 2, id="feeder-frequency-dip"),
+    pytest.param(120, 60, 30, 2, 3, 4, id="control-transformer-startup"),
+    pytest.param(480, 60, 48, 8, 9, 1, id="generator-run-down"),
+])
+def test_transformer_volts_per_hertz(rated_v, normal_hz, low_hz, threshold, high, limit):
+    from benches.x03_quality import overexcitation_quality as grade
+
+    # RMS voltage stays nominal. The low-frequency ratios are 6, 4 and 10.
+    envelope = dict(model="continuous-v-hz-v1", max_calibrated_v_hz=high + 2,
+                    limits=[(threshold, limit * 2), (high, limit)])
+    normal = (1, rated_v, normal_hz)
+    severe = (limit, rated_v, low_hz)
+    assert grade(envelope, [severe, normal, severe], complete=True) == "PASS"
+    assert grade(envelope, [severe, (0.01, rated_v, low_hz), normal], complete=True) == "FAIL"
+    # Moving to the milder band resets the severe timer only.
+    assert grade(envelope, [severe, (limit + 0.01, high * 10, 10)], complete=True) == "FAIL"
+    assert grade(envelope, [(1, rated_v, 1)], complete=True) == "INCOMPLETE"
+    assert grade({}, [normal], complete=True) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("timeout,clearing,fault_tick,open_tick", [
+    pytest.param(3, 2, None, 5, id="lost-feeder-channel"),
+    pytest.param(5, 1, 2, 3, id="remote-fault-before-timeout"),
+    pytest.param(2, 0, None, 2, id="immediate-islanding-trip"),
+])
+def test_intertrip_loss_and_fault(timeout, clearing, fault_tick, open_tick):
+    from benches.x03_quality import intertrip_quality as grade
+
+    policy = dict(model="latched-heartbeat-trip-v1", timeout_ticks=timeout, clearing_ticks=clearing)
+    events = [(t, t > open_tick, t == fault_tick, t < open_tick) for t in range(1, open_tick + 2)]
+    assert grade(policy, 0, events, complete=True) == "PASS"
+    late = [(*event[:3], event[0] <= open_tick) for event in events]
+    assert grade(policy, 0, late, complete=True) == "FAIL"
+    assert grade(policy, 0, events[:-1] + [(open_tick+1, True, False, True)], complete=True) == "FAIL"
+    assert grade(policy, 0, events[1:], complete=True) == "INCOMPLETE"
+    assert grade(policy, None, events, complete=True) == "INCOMPLETE"
+    assert grade(policy, 0, events, complete=False) == "INCOMPLETE"

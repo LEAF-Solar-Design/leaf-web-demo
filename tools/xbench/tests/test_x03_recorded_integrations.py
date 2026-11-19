@@ -5,6 +5,25 @@ from benches.x03_issue_delivery_oracle import delivery_quality
 from benches.x03_weather_oracle import weather_quality
 
 
+@pytest.mark.parametrize("orders,events", [
+    pytest.param([["A", "B"], ["B", "A"]], [(1, "A"), (1, "B"), (2, "B"), (2, "A")],
+                 id="verify-a-two-bolt-clamp"),
+    pytest.param([["A", "C", "B"], ["A", "B", "C"]], [(1, "A"), (1, "C"), (1, "B"), (2, "A"), (2, "B"), (2, "C")],
+                 id="check-the-bracket-cross-pattern"),
+    pytest.param([["L", "R"], ["R", "L"], ["L", "R"]], [(1, "L"), (1, "R"), (2, "R"), (2, "L"), (3, "L"), (3, "R")],
+                 id="audit-three-flange-passes"),
+])
+def test_tightening_requires_complete_ordered_passes(orders, events):
+    from benches.x03_catalog_oracle import tightening_sequence_quality as grade
+
+    procedure = dict(revision="fixture", pass_orders=orders)
+    assert grade("fixture", procedure, events, True) == "PASS"
+    assert grade("fixture", procedure, [event for event in events if event[0] != 2], True) == "FAIL"
+    assert grade("fixture", procedure, [events[1], events[0], *events[2:]], True) == "FAIL"
+    assert grade("fixture", procedure, events, False) == "INCOMPLETE"
+    assert grade("fixture", procedure, [*events, (2, None)], True) == "INCOMPLETE"
+
+
 @pytest.mark.parametrize("band,split,required,criterion", [
     pytest.param((80, 100), 90, 3, "normal", id="qualify-the-controller-band"),
     pytest.param((400, 500), 425, 10, "self-recovery", id="check-a-radio-adjacent-meter"),
@@ -1263,3 +1282,19 @@ def test_sonic_temperature_requires_specific_humidity(acoustic, humidity, dry):
     assert grade(model, acoustic, humidity, acoustic) == "FAIL"
     assert grade(model, acoustic, None, dry) == "INCOMPLETE"
     assert grade(dict(model, max_q=0.005), acoustic, humidity, dry) == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("elevation,distance,multiplier,bound", [
+    pytest.param(0, 1, 1.2, 0, id="flag-sunlight-at-the-night-boundary"),
+    pytest.param(30, 1, 1, 680, id="check-a-low-sun-horizontal-reading"),
+    pytest.param(90, 2, 1.25, 425, id="scale-the-envelope-for-distance-and-geometry"),
+])
+def test_irradiance_bound_uses_solar_geometry(elevation, distance, multiplier, bound):
+    from benches.x03_weather_oracle import irradiance_plausibility_quality as grade
+
+    model = dict(rule="inverse-square-horizontal-v1", solar_constant_w_m2=1360,
+                 daylight_multiplier=multiplier)
+    assert grade(model, elevation, distance, bound) == "PASS"
+    assert grade(model, elevation, distance, bound + 1) == "FAIL"
+    assert grade(model, -10, distance, 1) == "FAIL"
+    assert grade(model, None, distance, bound) == "INCOMPLETE"

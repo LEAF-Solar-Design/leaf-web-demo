@@ -1469,3 +1469,49 @@ def service_circuit_breaker_quality(rule, events, *, expected_events):
                 return "FAIL"
             probe = request
     return "PASS"
+
+
+def quorum_transition_quality(rule, epochs, commits, *, complete):
+    """Check observed certificates for one log slot in one voting round.
+
+    Each epoch names one active configuration or both sides of a joint epoch.
+    A certificate needs a majority in every named configuration. Concurrent
+    certificates for this slot must intersect, including across epoch names.
+    """
+    if rule != "majority-each-config-v1" or complete is not True:
+        return "INCOMPLETE"
+    if not isinstance(epochs, dict) or not epochs or not isinstance(commits, list) or not commits:
+        return "INCOMPLETE"
+    membership = {}
+    for epoch, configurations in epochs.items():
+        if not isinstance(epoch, str) or not epoch or not isinstance(configurations, list) or not 1 <= len(configurations) <= 2:
+            return "INCOMPLETE"
+        groups = []
+        for group in configurations:
+            if not isinstance(group, list) or not group or not all(isinstance(v, str) and v for v in group):
+                return "INCOMPLETE"
+            if len(group) != len(set(group)):
+                return "INCOMPLETE"
+            groups.append(set(group))
+        membership[epoch] = groups
+    certificates = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            return "INCOMPLETE"
+        epoch, voters, value = commit.get("epoch"), commit.get("voters"), commit.get("value")
+        if not isinstance(epoch, str) or epoch not in membership or not isinstance(value, str) or not value:
+            return "INCOMPLETE"
+        if not isinstance(voters, list) or not all(isinstance(v, str) and v for v in voters):
+            return "INCOMPLETE"
+        certificates.append((membership[epoch], voters, value))
+    accepted = []
+    for groups, voters, value in certificates:
+        support = set(voters)
+        if len(support) != len(voters) or not support <= set.union(*groups):
+            return "FAIL"
+        if any(2 * len(support & group) <= len(group) for group in groups):
+            return "FAIL"
+        if any(value != prior_value or support.isdisjoint(prior) for prior, prior_value in accepted):
+            return "FAIL"
+        accepted.append((support, value))
+    return "PASS"
