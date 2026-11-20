@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import ServiceSessionRenew from './ServiceSessionRenew.jsx'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, productSurfaceStates, surfaceContract, surfaceRailState } from '../site/productSurfaces.js'
 import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
 import { useEstimatorSurfaceStatus } from '../estimator/useEstimatorSurfaceStatus.js'
@@ -72,9 +73,12 @@ export function ContinuityRail({ activeSurface, workspaceProject = null, catalog
 export function AccountSignOut({ signedIn = false, onSignOut = null }) {
   if (!signedIn || typeof onSignOut !== 'function') return null
   return (
-    <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
-      Sign out
-    </button>
+    <>
+      <ServiceSessionRenew />
+      <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
+        Sign out
+      </button>
+    </>
   )
 }
 
