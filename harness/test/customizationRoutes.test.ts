@@ -2,12 +2,16 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
+import { ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { createHarness } from "../src/server.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
@@ -108,6 +112,53 @@ describe("customization routes", () => {
       body: typeof body === "string" ? body : JSON.stringify(body),
     });
   }
+
+  it("exports the private change blob through the pinned reader for an explicitly local tenant", async () => {
+    const tenant = "64444444-4444-4444-8444-444444444444";
+    const root = mkdtempSync(join(tmpdir(), "c02-staged-"));
+    try {
+      const origin = join(root, "origin");
+      const repos = join(root, "repos");
+      const bare = join(repos, tenant + ".git");
+      mkdirSync(origin);
+      mkdirSync(repos);
+      git(origin, ["init", "-b", "main"]);
+      const commit = (message: string) => git(origin, ["-c", "user.name=fixture",
+        "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", message]);
+      commit("Initial fixture");
+      const main = git(origin, ["rev-parse", "HEAD"]);
+      git(root, ["clone", "--bare", origin, bare]);
+      const entry = "tools/route-tool/tool.py";
+      mkdirSync(dirname(join(origin, entry)), { recursive: true });
+      const bytes = Buffer.from("# synthetic read-only fixture\n", "utf8");
+      writeFileSync(join(origin, entry), bytes);
+      git(origin, ["-c", "core.autocrlf=false", "add", entry]);
+      commit("Staged fixture");
+      const staged = git(origin, ["rev-parse", "HEAD"]);
+      const ref = "refs/leaf/changes/" + CHANGE;
+      git(origin, ["push", bare, "HEAD:" + ref]);
+      const refs = () => git(bare, ["for-each-ref", "--format=%(refname):%(objectname)"]);
+      const before = refs();
+      const noRemote = async (): Promise<never> => { throw new Error("unexpected remote access"); };
+      ports.tenantRepo = new TenantRepoProviderImpl({
+        bareBase: repos, authoringMode: "disabled", lease: false,
+        locator: { repoRef: async () => origin },
+        remoteAuthority: new ForgeRemoteAuthority({ locate: noRemote, credentials: noRemote }),
+        isRemoteTenant: id => id !== tenant,
+      });
+      const response = await readRequest({ tenant_id: tenant, changeSetId: CHANGE,
+        stagedCommit: staged, slug: "route-tool" }, { "x-tenant-id": tenant });
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+      expect(response.headers.get("x-leaf-source-commit")).toBe(staged);
+      expect(response.headers.get("x-leaf-source-blob")).toBe(git(origin, ["rev-parse", staged + ":" + entry]));
+      expect(response.headers.get("x-leaf-source-sha256")).toBe(createHash("sha256").update(bytes).digest("hex"));
+      expect(git(bare, ["rev-parse", "refs/heads/main"])).toBe(main);
+      expect(refs()).toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
   it("returns exact bounded source and both digest bindings through the normal provider", async () => {
     const main = git(bareDir, ["rev-parse", "refs/heads/main"]);
