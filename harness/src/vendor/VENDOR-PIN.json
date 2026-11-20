@@ -2,8 +2,8 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "agent/authorLoop.ts": {
-      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
-      "sha256": "81691920f52f8cd1353dc92fa8b5bb15da9c81afd2c1621571313dee3331eacd"
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "3a8bb6a7be7467fd9b335d3ba2efe0135acef89b7ad46718a9944faa48008117"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
@@ -22,8 +22,8 @@
       "sha256": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef"
     },
     "ports/impl/converseSdkRunner.ts": {
-      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted inert action composition from 01c436437255ed81d30b2319552847395076d748; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594.",
-      "sha256": "f0122af3b1890ac92f0217bc26753cd8e634c5b9af50d2bbcecf37b1e66b7ed3"
+      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted inert action composition from 01c436437255ed81d30b2319552847395076d748; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. SBT (#3553): Branch target on assistant author_tool. #3560: logs the redacted runner fault to stderr; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "daa44aa4c5b8c2585067d7ca8ab596ba1d2cb160f6dc28f9bf758a101f147276"
     },
     "ports/impl/forgeRemoteAuthority.ts": {
       "reason": "SEL-316d: initialize passes safe.directory for the bare cache when it sets the tenant origin (root-owned EFS cache under the harness uid); retire when upstream includes equivalent behavior.",
@@ -62,12 +62,28 @@
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior.",
-      "sha256": "484fd46fcf4902d9c48c994d555287d547f470c42c7e2daf2c256aa5dfcd5295"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553): author_tool target branch. #3560: SpineConverseRunner.promptBudgetChars for small-context runners; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "7e9fb761c35f23dfd7d309890e995e42894fc3eb0fe423032e2bc74ad5b497eb"
+    },
+    "agent/branchTargetPrompt.ts": {
+      "reason": "SBT (#3553/#3554): Branch authoring target prompt; downstream-only file, retire when upstream includes equivalent behavior.",
+      "sha256": "7830334733a970c426e3d0495e1ad31fbe6bde31ffcff64e870b3efbc58051d5"
+    },
+    "agent/tools/submitBranchToolProposal.ts": {
+      "reason": "SBT (#3553/#3554): Branch tool proposal submission; downstream-only file, retire when upstream includes equivalent behavior.",
+      "sha256": "f0515e84aec6f390a59c8df30e32cf73ca0cf6b2565be1f8dbffb5b129639962"
+    },
+    "registry/api-allowlist.json": {
+      "reason": "SBT (#3553/#3554): Branch package API allowlist; downstream-only file, retire when upstream includes equivalent behavior.",
+      "sha256": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd"
+    },
+    "registry/branchPackageSchema.ts": {
+      "reason": "SBT (#3553/#3554): Branch package schema; downstream-only file, retire when upstream includes equivalent behavior.",
+      "sha256": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090"
     }
   },
   "files": {
-    "agent/authorLoop.ts": "81691920f52f8cd1353dc92fa8b5bb15da9c81afd2c1621571313dee3331eacd",
+    "agent/authorLoop.ts": "3a8bb6a7be7467fd9b335d3ba2efe0135acef89b7ad46718a9944faa48008117",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -97,7 +113,7 @@
     "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
     "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "f0122af3b1890ac92f0217bc26753cd8e634c5b9af50d2bbcecf37b1e66b7ed3",
+    "ports/impl/converseSdkRunner.ts": "daa44aa4c5b8c2585067d7ca8ab596ba1d2cb160f6dc28f9bf758a101f147276",
     "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
     "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
     "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
@@ -123,7 +139,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantDocumentRepo.ts": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
-    "ports/index.ts": "484fd46fcf4902d9c48c994d555287d547f470c42c7e2daf2c256aa5dfcd5295",
+    "ports/index.ts": "7e9fb761c35f23dfd7d309890e995e42894fc3eb0fe423032e2bc74ad5b497eb",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
     "ports/labDocumentPort.ts": "5af5dd550c66eceffa5321bf32b9525eac26ee9350642977010fafa4420b3578",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
@@ -134,7 +150,11 @@
     "registry/toolPackageSchema.ts": "8342e5c719a4a0640ef0bb0ac038d97e57ccf6f5a1c1976c727a0773f7d090cc",
     "registry/viewChecks.ts": "3857c4fc443dc77216e013122067fd7d95c1463fe6261e897e0c08931ee3fc38",
     "testing/conformance.ts": "8cf4ee5c7433ebc281b4eb7d20a73da93845baa6d64f5402808de182e5050e0a",
-    "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5"
+    "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5",
+    "agent/branchTargetPrompt.ts": "7830334733a970c426e3d0495e1ad31fbe6bde31ffcff64e870b3efbc58051d5",
+    "agent/tools/submitBranchToolProposal.ts": "f0515e84aec6f390a59c8df30e32cf73ca0cf6b2565be1f8dbffb5b129639962",
+    "registry/api-allowlist.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
+    "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090"
   },
   "single_files": {
     "harness/scripts/git-worker.cjs": "0bf589a31f3231fee7304c4fd6e5b23389c827650fc740a2adb4ae3c2e595eac"
