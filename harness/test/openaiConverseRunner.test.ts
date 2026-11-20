@@ -185,3 +185,156 @@ it("runs through the host gates and recovers a missing session with visible hist
   expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "end_turn", sdkSessionReset: true });
   for (const [, init] of fetchImpl.mock.calls) expect(String(init?.body)).not.toContain(apiKey);
 });
+
+function sse(...events: unknown[]) {
+  return events.map(event => `event: x\r\ndata: ${JSON.stringify(event)}\r\n\r\n`).join("");
+}
+function streamResponse(chunks: string[], status = 200) {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  }), { status, headers: { "content-type": "text/event-stream; charset=utf-8" } });
+}
+const completed = (...output: unknown[]) => ({
+  type: "response.completed",
+  response: { status: "completed", model: "local-model", output, usage: { input_tokens: 5, output_tokens: 4 } },
+});
+const deltaTexts = (events: { type: string }[]) => events.filter(event => event.type === "stream_event")
+  .map(event => (event as unknown as { event: { delta: { text: string } } }).event.delta.text);
+
+describe("OpenAI streaming", () => {
+  it("requests a stream and relays split, CRLF-framed deltas once, in order", async () => {
+    const text = sse({ type: "response.created", response: { status: "in_progress" } },
+      { type: "response.output_text.delta", delta: "Job " },
+      { type: "response.output_text.delta", delta: "finished" },
+      completed(answer), "[DONE]");
+    const chunks = [text.slice(0, 7), text.slice(7, 61), text.slice(61, 140), text.slice(140)];
+    const { sdk, options, body } = setup(streamResponse(chunks));
+    const events = await collect(sdk.query({ prompt: "Check job", options }));
+    expect(body(0)).toMatchObject({ stream: true, store: false });
+    expect(deltaTexts(events)).toEqual(["Job ", "finished"]);
+    expect(events).toMatchObject([
+      { type: "stream_event" }, { type: "stream_event" },
+      { type: "assistant", message: { model: "local-model", usage: { input_tokens: 5, output_tokens: 4 } } },
+      { type: "result", subtype: "success", num_turns: 1 },
+    ]);
+  });
+
+  it("relays the completed text once when a stream carries no deltas", async () => {
+    const { sdk, options } = setup(streamResponse([sse(completed(answer))]));
+    expect(deltaTexts(await collect(sdk.query({ prompt: "Check job", options })))).toEqual(["Job finished"]);
+  });
+
+  it("runs streamed tool calls through the gates", async () => {
+    const { sdk, options, handler, body } = setup(
+      streamResponse([sse({ type: "response.output_item.done", item: call }, completed(call))]),
+      streamResponse([sse({ type: "response.output_text.delta", delta: "done" }, completed(answer))]));
+    const events = await collect(sdk.query({ prompt: "Check job", options }));
+    expect(handler).toHaveBeenCalledWith({ job_id: "updated" });
+    expect(body(1).input.at(-1)).toEqual({ type: "function_call_output", call_id: call.call_id, output: "done" });
+    expect(events.at(-1)).toMatchObject({ type: "result", subtype: "success", num_turns: 2 });
+  });
+
+  it("fails closed on failed, malformed and truncated streams without body text", async () => {
+    for (const chunks of [
+      [sse({ type: "response.failed", response: { error: { message: apiKey } } })],
+      [`data: {${apiKey}\n\n`],
+      [sse({ type: "response.output_text.delta", delta: "partial" })],
+    ]) {
+      const { sdk } = setup(streamResponse(chunks));
+      await expect(collect(sdk.query({ prompt: "Hi", options: {} })))
+        .rejects.toThrow(/^OpenAI request failed \(stream\)$/);
+    }
+  });
+
+  it("refuses an event larger than the per-event bound", async () => {
+    const { sdk } = setup(streamResponse(["data: " + "x".repeat(4 * 1024 * 1024 + 1)]));
+    await expect(collect(sdk.query({ prompt: "Hi", options: {} })))
+      .rejects.toThrow(/^OpenAI request failed \(stream\)$/);
+  });
+
+  it("retries one gateway timeout before any output, never two", async () => {
+    const ok = setup(new Response(null, { status: 524 }), reply(answer));
+    expect((await collect(ok.sdk.query({ prompt: "Hi", options: {} }))).at(-1))
+      .toMatchObject({ type: "result", subtype: "success", num_turns: 1 });
+    expect(ok.fetchImpl).toHaveBeenCalledTimes(2);
+    const bad = setup(new Response(null, { status: 524 }), new Response(null, { status: 504 }));
+    await expect(collect(bad.sdk.query({ prompt: "Hi", options: {} })))
+      .rejects.toThrow(/^OpenAI request failed \(504\)$/);
+    expect(bad.fetchImpl).toHaveBeenCalledTimes(2);
+    const other = setup(new Response(null, { status: 500 }));
+    await expect(collect(other.sdk.query({ prompt: "Hi", options: {} }))).rejects.toThrow("(500)");
+    expect(other.fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("fake streaming server", () => {
+  it("streams a slow two-request turn over real HTTP and honours the request deadline", async () => {
+    const { createServer } = await import("node:http");
+    const requests: Record<string, unknown>[] = [];
+    let hang = false;
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", chunk => { raw += chunk; });
+      req.on("end", () => {
+        requests.push(JSON.parse(raw));
+        if (hang) return; // never answers: the per-request deadline must end it
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const events = requests.length === 1
+          ? [{ type: "response.created" }, completed(call)]
+          : [{ type: "response.output_text.delta", delta: "Job " },
+            { type: "response.output_text.delta", delta: "finished" }, completed(answer)];
+        let index = 0;
+        const timer = setInterval(() => {
+          if (index < events.length) res.write(`data: ${JSON.stringify(events[index++])}\n\n`);
+          else { clearInterval(timer); res.end(); }
+        }, 15);
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const runner = new OpenAiConverseRunner({
+        apiKey, model, baseUrl: `http://127.0.0.1:${port}/v1`, turnTimeoutS: 30,
+        grant: { kind: "oauth", oauthToken: "fake-tenant-grant" },
+      });
+      const execute = vi.fn(async () => ({ content: "done" }));
+      const events = await collect(runner.run({
+        systemPrompt: "System", userMessage: "Check job",
+        tools: { list: () => ["job_status"], execute },
+        canUseTool: async (_name, args) => ({ behavior: "allow", updatedInput: args }),
+      }));
+      expect(execute).toHaveBeenCalledWith("job_status", { job_id: "first" });
+      expect(requests.every(request => request.stream === true)).toBe(true);
+      expect(events.filter(event => event.type === "text_delta")).toEqual([
+        { type: "text_delta", text: "Job " }, { type: "text_delta", text: "finished" }]);
+      expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "end_turn" });
+
+      hang = true;
+      const sdk = createOpenAiSdkFacade({ apiKey, model, baseUrl: `http://127.0.0.1:${port}/v1`, requestTimeoutMs: 200 });
+      const started = Date.now();
+      await expect(collect(sdk.query({ prompt: "Hi", options: {} })))
+        .rejects.toThrow(/^OpenAI request failed \(network\)$/);
+      expect(Date.now() - started).toBeLessThan(5000);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("LEAF_OPENAI_TURN_TIMEOUT_S", () => {
+  it("is optional, bounded and fails closed", () => {
+    const openai = { LEAF_CONVERSE_PROVIDER: "openai", OPENAI_API_KEY: apiKey };
+    expect(converseProviderFromEnv(openai)).not.toHaveProperty("turnTimeoutS");
+    expect(converseProviderFromEnv({ ...openai, LEAF_OPENAI_TURN_TIMEOUT_S: " 300 " }))
+      .toMatchObject({ turnTimeoutS: 300 });
+    for (const invalid of ["9", "1801", "1e3", "-5", "12.5", "abc"]) {
+      expect(() => converseProviderFromEnv({ ...openai, LEAF_OPENAI_TURN_TIMEOUT_S: invalid }))
+        .toThrow(/^Invalid LEAF_OPENAI_TURN_TIMEOUT_S$/);
+    }
+  });
+});
