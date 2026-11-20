@@ -136,6 +136,7 @@ function authorityHeader(req: IncomingMessage, name: string): string | undefined
 const CANONICAL_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[a-f0-9]{40}$/;
+const MAX_STAGED_SOURCE_BYTES = 256 * 1024;
 
 function projectSourceRequest(
   req: IncomingMessage,
@@ -1015,6 +1016,60 @@ export function createHarness(ports: HarnessPorts, opts?: {
           res.off("close", onClose);
         }
         return;
+      }
+
+      if (path === "/internal/author/staged-source") {
+        res.setHeader("cache-control", "private, no-store");
+        res.setHeader("x-content-type-options", "nosniff");
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        if (method !== "POST") return send(res, 405, { error: { code: "invalid_request" } });
+        let tenantId: string;
+        let changeSetId: string;
+        let stagedCommit: string;
+        let slug: string;
+        try {
+          if (requestUrl.search) throw new Error();
+          const body = await readJsonBody(req, 1024, true, true);
+          if (!isRecord(body) || Object.keys(body).sort().join(",") !==
+              "changeSetId,slug,stagedCommit,tenant_id" ||
+              typeof body.tenant_id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.tenant_id) ||
+              req.headers["x-tenant-id"] !== body.tenant_id ||
+              typeof body.changeSetId !== "string" || body.changeSetId.length !== 36 || !CANONICAL_UUID.test(body.changeSetId) ||
+              typeof body.stagedCommit !== "string" || body.stagedCommit.length !== 40 || !SHA40.test(body.stagedCommit) ||
+              typeof body.slug !== "string" || body.slug !== body.slug.trim() ||
+              !/^[a-z0-9][a-z0-9-]{0,63}$/.test(body.slug)) throw new Error();
+          tenantId = body.tenant_id;
+          changeSetId = body.changeSetId;
+          stagedCommit = body.stagedCommit;
+          slug = body.slug;
+        } catch (error) {
+          return send(res, error instanceof AuthorLoopError && error.status === 413 ? 413 : 400,
+            { error: { code: "invalid_request" } });
+        }
+        const provider = ports.tenantRepo;
+        if (typeof provider.readStagedToolSource !== "function") {
+          return send(res, 503, { error: { code: "stage_source_unavailable" } });
+        }
+        try {
+          const source = await provider.readStagedToolSource(tenantId, { changeSetId, stagedCommit, slug });
+          if (!source || !(source.bytes instanceof Uint8Array) || source.bytes.length > MAX_STAGED_SOURCE_BYTES ||
+              source.commit !== stagedCommit || typeof source.blob !== "string" || source.blob.length !== 40 || !SHA40.test(source.blob) ||
+              typeof source.sha256 !== "string" || source.sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(source.sha256) ||
+              createHash("sha256").update(source.bytes).digest("hex") !== source.sha256 ||
+              createHash("sha1").update(`blob ${source.bytes.length}\0`).update(source.bytes).digest("hex") !== source.blob) {
+            throw new Error();
+          }
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream", "Content-Length": source.bytes.length,
+            "X-Leaf-Source-Commit": source.commit, "X-Leaf-Source-Blob": source.blob,
+            "X-Leaf-Source-Sha256": source.sha256, "X-Leaf-Tool-Slug": slug,
+          });
+          res.end(source.bytes);
+          return;
+        } catch {
+          return send(res, 503, { error: { code: "stage_source_unavailable" } });
+        }
       }
 
       // F5 caller-auth gate: every non-health route requires the shared secret when the

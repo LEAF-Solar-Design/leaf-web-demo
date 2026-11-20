@@ -68,6 +68,7 @@ from solar_authored_graph import reads_graph
 
 
 CONTRACT = "leaf.customization.v1"
+MAX_STAGED_SOURCE_BYTES = 256 * 1024
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
 _configured_services: dict[str, "CustomizationService"] = {}
@@ -1658,6 +1659,112 @@ class CustomizationService:
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         return self.stage_status_change(change)
+
+    def stage_source(self, *, tenant: Any, change_set_id: str) -> tuple[bytes, dict[str, str]]:
+        """Read only the original author's active, receipt-bound tool source."""
+        def eligible() -> ChangeSet:
+            tenant_id = _tenant_id(tenant)
+            if not enabled(5, tenant_id):
+                raise CustomizationServiceError("customization_stage_disabled", 404)
+            binding = _binding(tenant)
+            if not isinstance(binding.subject, str) or not binding.subject.strip():
+                raise CustomizationServiceError("tenant_identity_binding_unavailable", 403)
+            if binding.role not in {"owner", "editor"}:
+                raise CustomizationServiceError("tenant_role_denied", 403)
+            tier = entitlements.resolve_tier(tenant)
+            roles, elevated = entitlements.resolve_roles(tenant)
+            if not entitlements.entitlements_for(tier, roles, elevated).get("build", False):
+                raise CustomizationServiceError("builder_entitlement_missing", 403)
+            change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+            if (change.tenant_id != tenant_id or change.change_set_id != change_set_id
+                    or not change.author_subject or change.author_subject != binding.subject
+                    or change.state is not ChangeState.STAGED
+                    or change.change_kind not in {"create", "revise"}
+                    or change.tool_target == "branch"
+                    or not isinstance(change.staged_commit, str)
+                    or not re.fullmatch(r"[a-f0-9]{40}", change.staged_commit)
+                    or not isinstance(change.catalog_digest, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", change.catalog_digest)):
+                raise CustomizationServiceError("stage_source_not_available", 404)
+            return change
+
+        def declaration(change: ChangeSet) -> tuple[str, str]:
+            tool = self._staged_tool(change)
+            slug = tool.get("name")
+            is_script = tool.get("kind") == "script"
+            if (not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", slug)
+                    or not is_script or tool.get("entry") != f"tools/{slug}/tool.py"):
+                raise CustomizationServiceError("stage_source_not_available", 404)
+            return slug, tool["entry"]
+
+        change = eligible()
+        slug, path = declaration(change)
+        # Metadata reads can block too. Recheck before crossing the private hop.
+        if eligible() != change:
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        data, headers = self._harness_staged_source(change, slug)
+        if eligible() != change or declaration(change) != (slug, path):
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        if eligible() != change:
+            raise CustomizationServiceError("stage_source_not_available", 404)
+        return data, {**headers, "X-Leaf-Source-Path": path}
+
+    @staticmethod
+    def _harness_staged_source(change: ChangeSet, slug: str) -> tuple[bytes, dict[str, str]]:
+        """Bound the response before buffering; never follow a credential redirect."""
+        if _harness_misconfigured():
+            raise CustomizationServiceError("stage_source_failed", 503)
+        url, secret = _harness_config()
+        response = None
+        try:
+            import requests
+            response = requests.post(
+                f"{url}/internal/author/staged-source", timeout=(5, 30),
+                headers={"X-Harness-Secret": secret, "X-Tenant-Id": change.tenant_id,
+                         "Accept-Encoding": "identity"},
+                json={"tenant_id": change.tenant_id, "changeSetId": change.change_set_id,
+                      "stagedCommit": change.staged_commit, "slug": slug},
+                stream=True, allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise ValueError("source unavailable")
+            length = response.headers.get("Content-Length", "")
+            if not re.fullmatch(r"0|[1-9][0-9]{0,5}", length):
+                raise ValueError("invalid source length")
+            size = int(length)
+            commit = response.headers.get("X-Leaf-Source-Commit", "")
+            blob = response.headers.get("X-Leaf-Source-Blob", "")
+            sha256 = response.headers.get("X-Leaf-Source-Sha256", "")
+            if (size > MAX_STAGED_SOURCE_BYTES or commit != change.staged_commit
+                    or not re.fullmatch(r"[a-f0-9]{40}", blob)
+                    or not re.fullmatch(r"[a-f0-9]{64}", sha256)
+                    or response.headers.get("X-Leaf-Tool-Slug") != slug
+                    or response.headers.get("Content-Encoding", "identity") != "identity"
+                    or response.headers.get("Content-Type") != "application/octet-stream"):
+                raise ValueError("invalid source binding")
+            chunks: list[bytes] = []
+            received = 0
+            while received <= size:
+                chunk = response.raw.read(min(8192, size + 1 - received), decode_content=False)
+                if not chunk:
+                    break
+                if type(chunk) is not bytes or len(chunk) > min(8192, size + 1 - received):
+                    raise ValueError("invalid source chunk")
+                received += len(chunk)
+                if received > size:
+                    raise ValueError("source exceeds declared length")
+                chunks.append(chunk)
+            data = b"".join(chunks)
+            if (received != size or hashlib.sha256(data).hexdigest() != sha256
+                    or hashlib.sha1(f"blob {size}\0".encode("ascii") + data).hexdigest() != blob):
+                raise ValueError("source digest mismatch")
+            return data, {"Content-Length": str(size), "X-Leaf-Source-Commit": commit,
+                          "X-Leaf-Source-Blob": blob, "X-Leaf-Source-Sha256": sha256}
+        except Exception as exc:
+            raise CustomizationServiceError("stage_source_failed", 503) from exc
+        finally:
+            if response is not None:
+                response.close()
 
     def stage_status_change(self, change: ChangeSet) -> dict[str, Any]:
         if change.staged_commit and change.catalog_digest:
