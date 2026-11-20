@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sqlite3
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
@@ -521,3 +523,268 @@ def test_recover_disabled_rollout(recovery, monkeypatch):
         recovery.service.recover_stage(tenant=recovery.tenant, idempotency_key=_key())
     assert caught.value.status_code == 404
     lookup.assert_not_called()
+
+
+SOURCE = b"# exact source\r\nprint('hello')\n\x00\xff"
+SOURCE_PATH = "tools/recovered-tool/tool.py"
+
+
+def _source_response(recovery, change, query="view=source"):
+    return recovery.client.get(f"/api/author/stages/{change.change_set_id}?{query}")
+
+
+def _source_hop(monkeypatch, *, data=SOURCE, headers=None, status=200, read=None):
+    import requests
+
+    raw = io.BytesIO(data)
+    response = SimpleNamespace(status_code=status, headers={
+        "Content-Length": str(len(data)), "Content-Type": "application/octet-stream",
+        "X-Leaf-Source-Commit": STAGED, "X-Leaf-Tool-Slug": "recovered-tool",
+        "X-Leaf-Source-Blob": hashlib.sha1(f"blob {len(data)}\0".encode() + data).hexdigest(),
+        "X-Leaf-Source-Sha256": hashlib.sha256(data).hexdigest(),
+        **(headers or {}),
+    }, raw=SimpleNamespace(read=read or (lambda n, **_kw: raw.read(n))), close=Mock())
+    post = Mock(return_value=response)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.invalid")
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "hermetic-secret")
+    monkeypatch.setattr(requests, "post", post)
+    return post, response
+
+
+def _source_tool(monkeypatch, **fields):
+    tool = {"name": "recovered-tool", "kind": "script", "entry": SOURCE_PATH, **fields}
+    reader = Mock(return_value=tool)
+    monkeypatch.setattr(CustomizationService, "_staged_tool", staticmethod(reader))
+    return reader
+
+
+def test_source_exact_bytes_and_durable_identity(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    tool = _pinned_reads(monkeypatch, change.tenant_id)
+    tool.update(kind="script", entry=SOURCE_PATH)
+    post, response = _source_hop(monkeypatch)
+    before = _snapshot(recovery.store)
+    result = _source_response(recovery, change)
+    assert result.status_code == 200
+    assert result.content == SOURCE
+    assert result.headers["content-type"] == "application/octet-stream"
+    assert result.headers["content-length"] == str(len(SOURCE))
+    assert result.headers["x-leaf-source-path"] == SOURCE_PATH
+    for key in ("X-Leaf-Source-Commit", "X-Leaf-Source-Blob", "X-Leaf-Source-Sha256"):
+        assert result.headers[key] == response.headers[key]
+    assert "no-store" in result.headers["cache-control"]
+    assert result.headers["x-content-type-options"] == "nosniff"
+    post.assert_called_once_with(
+        "http://harness.invalid/internal/author/staged-source", timeout=(5, 30),
+        headers={"X-Harness-Secret": "hermetic-secret", "X-Tenant-Id": change.tenant_id,
+                 "Accept-Encoding": "identity"},
+        json={"tenant_id": change.tenant_id, "changeSetId": change.change_set_id,
+              "stagedCommit": change.staged_commit, "slug": "recovered-tool"},
+        stream=True, allow_redirects=False,
+    )
+    response.close.assert_called_once()
+    assert _snapshot(recovery.store) == before
+
+
+def test_source_default_status_unchanged(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _pinned_reads(monkeypatch, change.tenant_id)
+    post, _ = _source_hop(monkeypatch)
+    response = _source_response(recovery, change, "")
+    assert response.status_code == 200
+    assert response.json() == recovery.service.stage_status_change(change)
+    assert "x-leaf-source-path" not in response.headers
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("query", [
+    "view=source&ref=main", "view=source&repo=elsewhere", "view=source&path=tool.py",
+    "view=source&slug=other", "view=source&tenant_id=tenant-b",
+    "view=source&staged_commit=" + BASE, "view=source&view=source", "view=other",
+])
+def test_source_rejects_caller_authority(recovery, monkeypatch, query):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    reader = _source_tool(monkeypatch)
+    post, _ = _source_hop(monkeypatch)
+    response = _source_response(recovery, change, query)
+    _assert_refusal(response, 422, "invalid_stage_source_request")
+    assert "no-store" in response.headers["cache-control"]
+    reader.assert_not_called()
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("identity,status,reason", [
+    ({"tenant": "tenant-b"}, 404, "stage_source_not_available"),
+    ({"subject": MALLORY}, 404, "stage_source_not_available"),
+    ({"subject": None}, 403, "tenant_identity_binding_unavailable"),
+    ({"subject": "  "}, 403, "tenant_identity_binding_unavailable"),
+    ({"role": "viewer"}, 403, "tenant_role_denied"),
+    ({"tier": "restricted"}, 403, "builder_entitlement_missing"),
+])
+def test_source_identity_refusals(recovery, monkeypatch, identity, status, reason):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    recovery.identity(**identity)
+    reader = _source_tool(monkeypatch)
+    post, _ = _source_hop(monkeypatch)
+    response = _source_response(recovery, change)
+    _assert_refusal(response, status, reason)
+    reader.assert_not_called()
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("state", [state.value for state in ChangeState if state is not ChangeState.STAGED])
+def test_source_requires_active_staged_state(recovery, monkeypatch, state):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _set_columns(recovery, change, f"state = '{state}'")
+    reader = _source_tool(monkeypatch)
+    post, _ = _source_hop(monkeypatch)
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    reader.assert_not_called()
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("fields", [
+    {"name": "../escape"}, {"name": "a/b"}, {"name": "a\\b"}, {"name": "a" * 65},
+    {"entry": "tools/recovered-tool/../secret"}, {"entry": "/etc/passwd"},
+    {"entry": "tools/other/tool.py"}, {"kind": "primitive"},
+])
+def test_source_requires_declared_safe_entry(recovery, monkeypatch, fields):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch, **fields)
+    post, _ = _source_hop(monkeypatch)
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("mutation", ["subject", "tenant", "state", "commit", "binding", "auth", "declaration"])
+def test_source_rechecks_after_read(recovery, monkeypatch, mutation):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    reader = _source_tool(monkeypatch)
+    post, _ = _source_hop(monkeypatch)
+    original = post.return_value
+
+    def mutate(*_args, **_kwargs):
+        if mutation == "subject":
+            _set_columns(recovery, change, f"author_subject = '{MALLORY}'")
+        elif mutation == "tenant":
+            recovery.identity(tenant="tenant-b")
+        elif mutation == "state":
+            _set_columns(recovery, change, "state = 'published'")
+        elif mutation == "commit":
+            _set_columns(recovery, change, f"staged_commit = '{BASE}'")
+        elif mutation == "binding":
+            recovery.identity(role="viewer")
+        elif mutation == "auth":
+            monkeypatch.setattr(deps, "auth_live", lambda: False)
+        else:
+            reader.return_value = {"name": "other", "kind": "script", "entry": "tools/other/tool.py"}
+        return original
+
+    post.side_effect = mutate
+    response = _source_response(recovery, change)
+    assert response.status_code in (403, 404, 503)
+    assert SOURCE not in response.content
+    assert "no-store" in response.headers["cache-control"]
+
+
+@pytest.mark.parametrize("headers", [
+    {"Content-Length": "262145"}, {"Content-Length": "-1"}, {"Content-Length": ""},
+    {"Content-Length": "01"}, {"Content-Length": "1"}, {"Content-Length": "200"},
+    {"X-Leaf-Source-Commit": BASE}, {"X-Leaf-Source-Blob": "0" * 40},
+    {"X-Leaf-Source-Sha256": "0" * 64}, {"X-Leaf-Tool-Slug": "other"},
+    {"Content-Encoding": "gzip"}, {"Content-Type": "text/html"},
+])
+def test_source_refuses_invalid_transport_metadata(recovery, monkeypatch, headers):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch)
+    post, response = _source_hop(monkeypatch, headers=headers)
+    _assert_refusal(_source_response(recovery, change), 503, "stage_source_failed")
+    response.close.assert_called_once()
+
+
+def test_source_cap_precedes_read_and_redirects_release_nothing(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch)
+    read = Mock(side_effect=AssertionError("invalid response was buffered"))
+    for status, headers in ((200, {"Content-Length": "262145"}), (302, {}), (404, {})):
+        _, response = _source_hop(monkeypatch, headers=headers, status=status, read=read)
+        _assert_refusal(_source_response(recovery, change), 503, "stage_source_failed")
+        response.close.assert_called_once()
+    read.assert_not_called()
+
+
+def test_source_exact_cap_and_view_declaration(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch, kind="view", entry="tools/recovered-tool/view.html")
+    data = b"x" * customization_service.MAX_STAGED_SOURCE_BYTES
+    _source_hop(monkeypatch, data=data)
+    response = _source_response(recovery, change)
+    assert response.status_code == 200
+    assert response.content == data
+    assert response.headers["x-leaf-source-path"] == "tools/recovered-tool/view.html"
+
+
+def test_source_missing_row_auth_off_and_disabled(recovery, monkeypatch):
+    change = SimpleNamespace(change_set_id=_key())
+    post, _ = _source_hop(monkeypatch)
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    _assert_refusal(_source_response(recovery, change), 404, "customization_stage_disabled")
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    _assert_refusal(_source_response(recovery, change), 503, "customization_auth_required")
+    post.assert_not_called()
+
+
+def test_source_rejects_misbound_store_row(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    post, _ = _source_hop(monkeypatch)
+    for fields in ({"tenant_id": "tenant-b"}, {"change_set_id": _key()}, {"author_subject": ""},
+                   {"staged_commit": None}, {"catalog_digest": None}, {"tool_target": "branch"}):
+        monkeypatch.setattr(recovery.store, "get_change_set", Mock(return_value=replace(change, **fields)))
+        _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    post.assert_not_called()
+
+
+def test_source_rechecks_after_metadata_before_dispatch(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    reader = _source_tool(monkeypatch)
+    tool = reader.return_value
+
+    def revoke(_change):
+        _set_columns(recovery, change, "state = 'superseded'")
+        return tool
+
+    reader.side_effect = revoke
+    post, _ = _source_hop(monkeypatch)
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    post.assert_not_called()
+
+
+def test_source_requires_existing_secret_and_sanitizes_failures(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch)
+    post, _ = _source_hop(monkeypatch)
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "")
+    _assert_refusal(_source_response(recovery, change), 503, "stage_source_failed")
+    post.assert_not_called()
+    monkeypatch.setenv("LEAF_HARNESS_SECRET", "hermetic-secret")
+    post.side_effect = OSError("secret=do-not-release /private/repo")
+    response = _source_response(recovery, change)
+    _assert_refusal(response, 503, "stage_source_failed")
+    assert "do-not-release" not in response.text
+    assert "/private/repo" not in response.text
+
+
+def test_source_bounds_each_read_before_retaining_chunks(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch)
+    requested = []
+
+    def overrun(n, **_kwargs):
+        requested.append(n)
+        return b"x" * (n + 1)
+
+    _, response = _source_hop(monkeypatch, read=overrun)
+    _assert_refusal(_source_response(recovery, change), 503, "stage_source_failed")
+    assert requested == [len(SOURCE) + 1]
+    response.close.assert_called_once()

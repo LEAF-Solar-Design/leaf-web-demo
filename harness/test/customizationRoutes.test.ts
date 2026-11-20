@@ -1,11 +1,12 @@
 /** HTTP lifecycle boundary: caller auth, non-effective staging, and exact publish. */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createHarness } from "../src/server.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
@@ -20,6 +21,20 @@ const SECRET = "test-harness-secret";
 const TENANT = "route-customization-tenant";
 const CHANGE = "11111111-1111-4111-8111-111111111111";
 const DIGEST = "a".repeat(64);
+const SOURCE_COMMIT = "b".repeat(40);
+const SOURCE_BYTES = Buffer.from([35, 32, 101, 120, 97, 99, 116, 13, 10, 0, 255]);
+
+function sourceResult(bytes = SOURCE_BYTES) {
+  return {
+    bytes, commit: SOURCE_COMMIT,
+    blob: createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+function sourceReader() {
+  return vi.fn(async (_tenant: string, _request: { changeSetId: string; stagedCommit: string; slug: string }) => sourceResult());
+}
 
 function git(dir: string, args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
@@ -48,11 +63,15 @@ describe("customization routes", () => {
   let baseUrl: string;
   let bareDir: string;
   let coordination: Coordination;
+  let ports: HarnessPorts;
+  let readSource: ReturnType<typeof sourceReader>;
 
   beforeEach(async () => {
     const tenantRepo = new FakeTenantRepoProvider(FIXTURE);
+    readSource = sourceReader();
+    Object.assign(tenantRepo, { readStagedToolSource: readSource });
     coordination = new Coordination();
-    const ports: HarnessPorts = {
+    ports = {
       oauth: new FakeOAuthGrantProvider(),
       tenantRepo,
       broker: new FakeBrokerApsClient(),
@@ -77,6 +96,150 @@ describe("customization routes", () => {
       idempotencyKey: `stage-${CHANGE}`,
     };
   }
+
+  function sourceBody() {
+    return { tenant_id: TENANT, changeSetId: CHANGE, stagedCommit: SOURCE_COMMIT, slug: "route-tool" };
+  }
+
+  function readRequest(body: unknown = sourceBody(), headers: Record<string, string> = {}) {
+    return fetch(`${baseUrl}/internal/author/staged-source`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": TENANT, ...headers },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  it("returns exact bounded source and both digest bindings through the normal provider", async () => {
+    const main = git(bareDir, ["rev-parse", "refs/heads/main"]);
+    const refs = git(bareDir, ["for-each-ref", "--format=%(refname):%(objectname)"]);
+    const response = await readRequest();
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(SOURCE_BYTES);
+    expect(response.headers.get("content-type")).toBe("application/octet-stream");
+    expect(response.headers.get("content-length")).toBe(String(SOURCE_BYTES.length));
+    expect(response.headers.get("x-leaf-source-commit")).toBe(SOURCE_COMMIT);
+    expect(response.headers.get("x-leaf-source-blob")).toBe(sourceResult().blob);
+    expect(response.headers.get("x-leaf-source-sha256")).toBe(sourceResult().sha256);
+    expect(response.headers.get("x-leaf-tool-slug")).toBe("route-tool");
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(readSource).toHaveBeenCalledExactlyOnceWith(TENANT, {
+      changeSetId: CHANGE, stagedCommit: SOURCE_COMMIT, slug: "route-tool",
+    });
+    expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
+    expect(git(bareDir, ["for-each-ref", "--format=%(refname):%(objectname)"])).toBe(refs);
+  });
+
+  it.each(["", "wrong"])("requires the existing secret before source reads (%s)", async (secret) => {
+    const response = await readRequest(sourceBody(), { "x-harness-secret": secret });
+    expect(response.status).toBe(401);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "other-tenant"])("requires an exactly matching tenant header (%s)", async (tenant) => {
+    const response = await readRequest(sourceBody(), { "x-tenant-id": tenant });
+    expect(response.status).toBe(400);
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it("requires a secret even when the ordinary harness gate is disabled", async () => {
+    const privateServer = createHarness(ports, { auth: { enabled: false, secret: SECRET } }).listen(0);
+    try {
+      const url = `http://127.0.0.1:${(privateServer.address() as AddressInfo).port}/internal/author/staged-source`;
+      const response = await fetch(url, {
+        method: "POST", headers: { "content-type": "application/json", "x-tenant-id": TENANT },
+        body: JSON.stringify(sourceBody()),
+      });
+      expect(response.status).toBe(401);
+      expect(readSource).not.toHaveBeenCalled();
+    } finally {
+      privateServer.close();
+    }
+  });
+
+  it("refuses when the existing secret is unconfigured", async () => {
+    const privateServer = createHarness(ports, { auth: { enabled: false, secret: "" } }).listen(0);
+    try {
+      const response = await fetch(`http://127.0.0.1:${(privateServer.address() as AddressInfo).port}/internal/author/staged-source`, {
+        method: "POST", headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": TENANT },
+        body: JSON.stringify(sourceBody()),
+      });
+      expect(response.status).toBe(401);
+      expect(readSource).not.toHaveBeenCalled();
+    } finally {
+      privateServer.close();
+    }
+  });
+
+  it.each([
+    { ref: "main" }, { repo: "/some/repo" }, { path: "/etc/passwd" },
+    { slug: "../escape" }, { slug: "a/b" }, { slug: "a\\b" }, { slug: "a".repeat(65) },
+    { slug: "route-tool\n" }, { changeSetId: `${CHANGE}\n` }, { stagedCommit: `${SOURCE_COMMIT}\n` },
+    { changeSetId: "../escape" }, { stagedCommit: "main" }, { tenant_id: "../escape" },
+  ])("refuses caller paths, refs, repositories and invalid fields: %j", async (fields) => {
+    const response = await readRequest({ ...sourceBody(), ...fields });
+    expect(response.status).toBe(400);
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it("refuses missing fields, duplicate JSON keys, query parameters, and oversized bodies", async () => {
+    for (const key of Object.keys(sourceBody())) {
+      const body: Record<string, string> = { ...sourceBody() };
+      delete body[key];
+      expect((await readRequest(body)).status).toBe(400);
+    }
+    const duplicate = JSON.stringify(sourceBody()).replace("{", '{"slug":"other",');
+    expect((await readRequest(duplicate)).status).toBe(400);
+    expect((await readRequest({ ...sourceBody(), extra: "x".repeat(1100) })).status).toBe(413);
+    const query = await fetch(`${baseUrl}/internal/author/staged-source?ref=main`, {
+      method: "POST", headers: { "content-type": "application/json", "x-harness-secret": SECRET, "x-tenant-id": TENANT },
+      body: JSON.stringify(sourceBody()),
+    });
+    expect(query.status).toBe(400);
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it.each(["commit", "blob", "sha256", "oversize"])("refuses invalid provider %s", async (field) => {
+    const source = sourceResult();
+    if (field === "commit") source.commit = "c".repeat(40);
+    if (field === "blob") source.blob = "0".repeat(40);
+    if (field === "sha256") source.sha256 = "0".repeat(64);
+    if (field === "oversize") Object.assign(source, sourceResult(Buffer.alloc(256 * 1024 + 1)));
+    readSource.mockResolvedValue(source);
+    const response = await readRequest();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: { code: "stage_source_unavailable" } });
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(response.headers.has("x-leaf-source-blob")).toBe(false);
+  });
+
+  it("allows the exact byte cap", async () => {
+    const source = sourceResult(Buffer.alloc(256 * 1024, 120));
+    readSource.mockResolvedValue(source);
+    const response = await readRequest();
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(source.bytes);
+  });
+
+  it("refuses absent provider capability without a checkout or bare fallback", async () => {
+    Reflect.deleteProperty(ports.tenantRepo, "readStagedToolSource");
+    const checkout = vi.spyOn(ports.tenantRepo, "checkout");
+    const bare = vi.spyOn(ports.tenantRepo, "bare");
+    const response = await readRequest();
+    expect(response.status).toBe(503);
+    expect(checkout).not.toHaveBeenCalled();
+    expect(bare).not.toHaveBeenCalled();
+  });
+
+  it.each(["symlink", "missing change", "wrong tenant", "wrong commit", "size"])(
+    "sanitizes provider refusal for %s", async (reason) => {
+      readSource.mockRejectedValue(new Error(`${reason}: internal /private/path secret=do-not-release`));
+      const response = await readRequest();
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: { code: "stage_source_unavailable" } });
+    },
+  );
 
   it("requires harness caller auth before staging", async () => {
     const main = git(bareDir, ["rev-parse", "refs/heads/main"]);

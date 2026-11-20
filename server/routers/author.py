@@ -18,8 +18,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Literal
 
-from fastapi import APIRouter, Depends, Header
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
 
 import author_quota
@@ -448,6 +448,9 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
 
 
 _CUSTOMIZATION_ERROR_MESSAGES = {
+    "invalid_stage_source_request": "Invalid staged source request.",
+    "stage_source_not_available": "Staged source is not available.",
+    "stage_source_failed": "Staged source could not be read.",
     "customization_stage_disabled": (
         "Tool authoring is not enabled for this workspace in this environment. "
         "The approved request was not executed."
@@ -550,9 +553,11 @@ _CALLER_DRIVEN_CODES = frozenset({
     # Ordinary request outcomes: a malformed or unsupported request, a lifecycle
     # state the caller polls for, a target that is not eligible. All expected.
     "invalid_stage_request",
+    "invalid_stage_source_request",
     "invalid_publish_request",
     "invalid_publication_request",
     "stage_not_available",
+    "stage_source_not_available",
     "publish_not_available",
     "publication_request_not_available",
     "publication_denial_not_available",
@@ -984,8 +989,30 @@ def recover_stage(
 
 @router.get("/api/author/stages/{change_set_id}")
 def stage_status(
-    change_set_id: str, tenant=Depends(deps.require_tenant)
+    change_set_id: str, request: Request, tenant=Depends(deps.require_tenant)
 ) -> Dict[str, Any]:
+    if "view" in request.query_params:
+        headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+        try:
+            denied = _customization_gate(5, tenant)
+            if denied is not None:
+                denied.headers.update(headers)
+                return denied
+            if (len(request.scope.get("query_string", b"")) > 1024
+                    or request.query_params.multi_items() != [("view", "source")]):
+                raise CustomizationServiceError("invalid_stage_source_request", 422)
+            data, binding = CustomizationService.configured().stage_source(
+                tenant=tenant, change_set_id=change_set_id)
+            return Response(data, media_type="application/octet-stream", headers={**binding, **headers})
+        except ChangeSetNotFoundError:
+            response = _customization_error(CustomizationServiceError("stage_source_not_available", 404))
+        except (CustomizationServiceError, AuthorityError) as exc:
+            response = _customization_error(
+                CustomizationServiceError(exc.reason_code, 403) if isinstance(exc, AuthorityError) else exc)
+        except Exception as exc:
+            response = _customization_error(CustomizationServiceError("stage_source_failed", 503), cause=exc)
+        response.headers.update(headers)
+        return response
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
