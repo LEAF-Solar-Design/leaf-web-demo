@@ -617,6 +617,9 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       // (sol-critic PR #117 round 1 blocker 2, round 2 blocker 1.)
       if (!timedOut && !terminalError) {
         streamFault = redactSecrets((e as Error).message, grantSecrets(this.grant));
+        // The wire error stays generic; the operator log names the (redacted) cause so a
+        // failed turn is diagnosable from the harness log alone.
+        console.error(`[converse] runner fault: ${streamFault.slice(0, 300)}`);
       }
     } finally {
       clearTimeout(timer);
