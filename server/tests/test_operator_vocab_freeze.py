@@ -317,7 +317,7 @@ def test_roles_file_gained_no_operator_role():
 # drawings only; project custody, solves and every other action unchanged; removing
 # that entry restores the preceding a4292136 pin.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "d663ad6d1297b2fff4504c7ca9028bbe1b498ef4022582143701d04f3a1d6b14")
+    "c14ea9da420892be85c7adf51154fc11fd2963e2be669ab2709a6cc4722f7b00")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",

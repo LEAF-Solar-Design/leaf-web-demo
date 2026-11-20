@@ -1345,6 +1345,13 @@
           "target_tool_name": {
             "type": "string"
           },
+          "target": {
+            "type": "string",
+            "enum": [
+              "studio",
+              "branch"
+            ]
+          },
           "confirmation_id": {
             "type": "string"
           }

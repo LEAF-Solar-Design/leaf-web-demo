@@ -138,6 +138,23 @@ def test_invalid_args_deny_names_gate():
     assert res2["reason"].startswith("invalid_args")
 
 
+def test_author_tool_accepts_the_branch_target_and_still_refuses_unknown_fields():
+    """#3553: the harness sends target=branch for AutoCAD tool asks; the gate must pass it."""
+    for target in ("branch", "studio"):
+        res = _gate("author_tool", {"description": "count the blocks", "target": target})
+        assert res["decision"] != "deny", res
+    bad_target = _gate("author_tool", {"description": "count the blocks", "target": "autocad"})
+    assert bad_target["decision"] == "deny" and bad_target["reason"].startswith("invalid_args")
+    unknown = _gate("author_tool", {"description": "count the blocks", "target": "branch", "bogus": 1})
+    assert unknown["decision"] == "deny" and unknown["reason"].startswith("invalid_args")
+
+
+def test_shipped_and_hardcoded_author_tool_schemas_match():
+    shipped = json.loads((SERVER_DIR / "agent_policy.json").read_text(encoding="utf-8"))
+    hardcoded = agent_policy._HARDCODED_DEFAULTS["actions"]["author_tool"]["args_schema"]
+    assert shipped["actions"]["author_tool"]["args_schema"] == hardcoded
+
+
 def test_invalid_args_reason_never_embeds_raw_values():
     """The deny reason lands verbatim in the audit file, so it must name only
     the JSON-pointer path and validator keyword — never the offending value."""

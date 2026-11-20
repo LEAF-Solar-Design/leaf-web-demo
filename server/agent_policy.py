@@ -853,6 +853,8 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                             "properties": {"description": {"type": "string"},
                                            "mode": {"type": "string", "enum": ["build", "one_off"]},
                                            "target_tool_name": {"type": "string"},
+                                           # Optional authoring target (#3553); absent = studio.
+                                           "target": {"type": "string", "enum": ["studio", "branch"]},
                                            "confirmation_id": {"type": "string"}},
                             "required": ["description"], "additionalProperties": False},
             "rate_limit_category": "high", "timeout_s": 600, "audit_extra": [],
