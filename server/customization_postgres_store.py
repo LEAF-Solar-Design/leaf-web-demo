@@ -6,6 +6,8 @@ used by those storage-independent methods. Schema creation is never a runtime
 side effect. Migration 0020 and subsequent additive migrations, including 0108
 for nullable tool_target (NULL means studio), must already be present. The
 inherited reservation and row mapper carry tool_target for both backends.
+The inherited publish_branch transaction uses the same write fence and audit
+CAS as publish, while leaving effective_catalogs untouched.
 """
 from __future__ import annotations
 

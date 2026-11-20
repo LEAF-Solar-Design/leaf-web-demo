@@ -39,10 +39,14 @@ from psycopg import Error as PostgresError
 import author_quota
 import agent_policy
 import change_classifier
+import customization_flags
 import deps
 import entitlements
 import platform_link
 from branch_tools.package_check import check_branch_package
+from branch_tools.dev_publish import (
+    DevPublishError, DevPublishResult, publish_branch_package, read_branch_publication,
+)
 from customization_authority import (
     AuthorityError, BuilderEntitlement, CustomizationAuthority,
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
@@ -2256,7 +2260,14 @@ class CustomizationService:
             "change_set_id": change.change_set_id,
             "status": status,
         }
-        if status == "published":
+        if change.tool_target == "branch":
+            result["target"] = "branch"
+            if change.staged_commit:
+                manifest = CustomizationService._staged_tool(change)
+                result.update(name=manifest["name"], version=manifest["version"])
+            elif change.target_tool_name:
+                result["name"] = change.target_tool_name
+        elif status == "published":
             result["catalog_digest"] = change.catalog_digest
         return result
 
@@ -2294,6 +2305,9 @@ class CustomizationService:
             ) from exc
 
         if change.state is ChangeState.PUBLISHED:
+            if change.tool_target == "branch":
+                self._published_branch_result(change)
+                return self._publication_status(change, "published")
             try:
                 effective = self.store.get_effective_catalog(tenant_id=tenant_id)
             except ChangeSetNotFoundError as exc:
@@ -2306,6 +2320,8 @@ class CustomizationService:
             raise CustomizationServiceError("publish_superseded", 409)
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
             raise CustomizationServiceError("publication_request_not_available")
+        if change.tool_target == "branch":
+            self._branch_dev_root(tenant_id)
 
         # Denial is terminal for the durable request regardless of later
         # account-policy changes. It is resolved before policy or receipt
@@ -2317,6 +2333,9 @@ class CustomizationService:
         publication_enabled, approval_required = self._publication_policy_state(
             tenant_id
         )
+        if change.tool_target == "branch":
+            # "reviewed" in the dev catalog always means independent approval.
+            approval_required = True
         if not publication_enabled:
             raise CustomizationServiceError("tool_publication_disabled", 409)
 
@@ -2489,9 +2508,13 @@ class CustomizationService:
             raise CustomizationServiceError("staged_receipt_mismatch")
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING, ChangeState.PUBLISHED}:
             raise CustomizationServiceError("publish_not_available")
+        if change.tool_target == "branch":
+            self._branch_dev_root(tenant_id)
         self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
         self._verified_record_fields(change, set())
         if change.state is ChangeState.PUBLISHED:
+            if change.tool_target == "branch":
+                return self._published_branch_result(change)
             effective = self._record_fields_pin(tenant_id)
             if self._pin_matches_change(effective, change):
                 return {"contract": CONTRACT, "tenant_id": effective.tenant_id,
@@ -2500,7 +2523,8 @@ class CustomizationService:
                         "platform_release": effective.effective_platform_release,
                         "workspace_contract_digest": effective.workspace_contract_digest}
             raise CustomizationServiceError("publish_not_available")
-        self._verify_record_fields_predecessor(change)
+        if change.tool_target != "branch":
+            self._verify_record_fields_predecessor(change)
         if change.state is ChangeState.PUBLISHING:
             try:
                 confirmation, signature = (
@@ -2525,7 +2549,11 @@ class CustomizationService:
             )
             # Before prepare_publish: a stale addition must leave the change
             # STAGED and its confirmation unconsumed.
-            self._refuse_stale_addition_base(change)
+            if change.tool_target != "branch":
+                self._refuse_stale_addition_base(change)
+        if (change.tool_target == "branch"
+                and confirmation.approver_subject == "leaf:server:auto-publication-policy"):
+            raise CustomizationServiceError("independent_approval_pending", 409)
         publishing = self.store.prepare_publish(
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
@@ -2534,6 +2562,36 @@ class CustomizationService:
             approver_subject=confirmation.approver_subject,
             idempotency_key=idempotency_key,
         )
+        if change.tool_target == "branch":
+            try:
+                files, name = self._branch_package_files(change)
+                result = publish_branch_package(files, name, self._branch_dev_root(tenant_id))
+            except DevPublishError as exc:
+                self.store.supersede_publish(
+                    tenant_id=tenant_id, change_set_id=change.change_set_id,
+                    expected_version=publishing.version,
+                    idempotency_key=idempotency_key, reason_code="branch_" + exc.code,
+                )
+                _LOG.warning(
+                    "customization_publish_superseded: change_set=%s code=%s",
+                    change.change_set_id, exc.code,
+                )
+                raise CustomizationServiceError(
+                    exc.code, 409 if exc.code == "branch_version_conflict" else (
+                        422 if exc.code == "branch_package_invalid" else 503
+                    ), failures=exc.failures,
+                ) from exc
+            except OSError as exc:
+                raise CustomizationServiceError("branch_dev_catalog_unavailable", 503) from exc
+            try:
+                self.store.publish_branch(
+                    tenant_id=tenant_id, change_set_id=change.change_set_id,
+                    expected_version=publishing.version, idempotency_key=idempotency_key,
+                    approver_subject=confirmation.approver_subject,
+                )
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                raise CustomizationServiceError("record_fields_write_failed", 503) from exc
+            return self._branch_publish_result(change, result)
         self.store.verify_removal_predecessor(
             tenant_id=tenant_id, change_set_id=change.change_set_id
         )
@@ -2566,6 +2624,49 @@ class CustomizationService:
                 "catalog_commit": effective.catalog_commit, "catalog_digest": effective.catalog_digest,
                 "platform_release": effective.effective_platform_release,
                 "workspace_contract_digest": effective.workspace_contract_digest}
+
+    @staticmethod
+    def _branch_dev_root(tenant_id: str) -> Path:
+        if tenant_id not in customization_flags.internal_tenants():
+            raise CustomizationServiceError("branch_publish_internal_only", 403)
+        configured = os.environ.get("LEAF_BRANCH_DEV_TOOLS_DIR", "")
+        if os.environ.get("LEAF_BRANCH_DEV_TOOLS") != "1" or not configured.strip():
+            raise CustomizationServiceError("branch_dev_catalog_unavailable", 503)
+        return Path(configured)
+
+    @staticmethod
+    def _branch_package_files(change: ChangeSet) -> tuple[dict[str, bytes], str]:
+        receipt = CustomizationService._branch_receipt_fields(change)
+        package = receipt["package_path"]
+        bare = _bare_repo(change.tenant_id)
+        files = {
+            path[len(package) + 1:]: _git_blob(bare, f"{change.staged_commit}:{path}")
+            for path in receipt["package_files"]
+        }
+        return files, package.split("/")[1]
+
+    @staticmethod
+    def _branch_publish_result(change: ChangeSet, result: DevPublishResult) -> dict[str, Any]:
+        return {
+            "contract": CONTRACT, "tenant_id": change.tenant_id,
+            "change_set_id": change.change_set_id, "target": "branch",
+            "name": result.name, "version": result.version,
+            "package_digest": result.package_digest, "dev_catalog": "/api/tool-envelopes/dev",
+        }
+
+    def _published_branch_result(self, change: ChangeSet) -> dict[str, Any]:
+        root = self._branch_dev_root(change.tenant_id)
+        files, name = self._branch_package_files(change)
+        checked = check_branch_package(files, name)
+        if not checked.ok:
+            raise CustomizationServiceError("branch_package_invalid", 422, failures=checked.failures)
+        try:
+            result = read_branch_publication(name, checked.manifest["version"], root)
+            if result.package_digest != checked.package_digest:
+                raise DevPublishError("branch_version_conflict")
+        except (DevPublishError, OSError) as exc:
+            raise CustomizationServiceError("publish_not_available", 409) from exc
+        return self._branch_publish_result(change, result)
 
     def _refuse_stale_addition_base(self, change: ChangeSet) -> None:
         """Refuse an addition staged on a catalog that is no longer effective.
