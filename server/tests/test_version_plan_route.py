@@ -131,6 +131,31 @@ def test_plan_compares_mtext_tab_spelling_and_preserves_the_upload(client, tmp_p
         assert response.json()["error"]["error_code"] == "no_plan"
 
 
+@pytest.mark.parametrize("word,has_plan", [("ROOF", True), ("WALL", False)])
+def test_plan_tolerates_a_capped_note_whose_tabs_were_respelled(client, tmp_path, word, has_plan):
+    """Real staging case (Nov 19): a long tabbed note is capped at 512 raw characters, so after Studio
+    respells its tabs as spaces the capped head and the capped upload end at different words."""
+    saves._seed_dwg_backed(tmp_path)
+    clause = "1.^IROOF EDGE: ^I3 FT SETBACK FROM EVERY PARAPET AND HATCH. "
+    base_text = ("GENERAL NOTES " + clause * 12).encode("ascii")
+    mtext = b"0\nMTEXT\n5\n59BA\n8\nNew\n10\n0\n20\n0\n40\n1\n1\n" + base_text + b"\n"
+    base = saves.EDITED_DXF.replace(b"0\nENDSEC\n", mtext + b"0\nENDSEC\n")
+    response = client.post(
+        f"/api/drawings/{saves.DWG_DRAWING}/versions/edited",
+        headers={"X-Tenant-Id": saves.TENANT},
+        files={"file": ("roof-site.dxf", io.BytesIO(base), "application/dxf")},
+        data={"parent_version": "1", "source_digest": hashlib.sha256(base).hexdigest()},
+    )
+    assert response.status_code == 201, response.text
+    upload_text = base_text.decode("ascii").replace(": ^I", ": ").replace("^I", " ")
+    upload_text = upload_text.replace("ROOF EDGE", word + " EDGE", 1)
+    uploaded = base.replace(base_text, upload_text.encode("ascii"))
+    response = saves._post(client, saves.DWG_DRAWING, {}, parent=2, data=uploaded)
+    assert response.status_code == 201, response.text
+    response = _get(client, version=3)
+    assert response.status_code == (200 if has_plan else 404), response.text
+
+
 @pytest.mark.parametrize("live", [False, True])
 def test_dwg_parent_digest_and_result_content(client, tmp_path, monkeypatch, live):
     import deps

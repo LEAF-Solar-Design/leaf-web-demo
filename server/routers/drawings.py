@@ -1941,7 +1941,8 @@ def save_plan_version(drawing_id: str,
             # DXF from, so a mismatch is a client defect. Never commit a plan the
             # bytes beside it contradict.
             def text_entities(entities):
-                entries = Counter()
+                # Keyed by everything but the words; the words are compared by texts_agree.
+                entries = {}
                 for entity in entities:
                     point = entity.get("pt") or []
                     xy = [point[index] if index < len(point) else None for index in range(2)]
@@ -1949,23 +1950,53 @@ def save_plan_version(drawing_id: str,
                         write_loop._extractor_round(value, 3)
                         if isinstance(value, (int, float)) and not isinstance(value, bool) else value
                         for value in xy)
-                    text = entity.get("text")
-                    if isinstance(text, str):
-                        text = " ".join(text.replace("^I", " ").split())
-                    entries[(entity.get("kind"),
-                             str(entity["handle"]) if entity.get("handle") is not None else None,
-                             str(entity["layer"]) if entity.get("layer") is not None else None,
-                             *xy, text)] += 1
+                    key = (entity.get("kind"),
+                           str(entity["handle"]) if entity.get("handle") is not None else None,
+                           str(entity["layer"]) if entity.get("layer") is not None else None,
+                           *xy)
+                    entries.setdefault(key, []).append(entity.get("text"))
                 return entries
+
+            def normalized_text(text):
+                # Studio's DXF writer spells MTEXT tab codes (^I) as spaces; the intake already
+                # collapses whitespace runs.
+                return " ".join(text.replace("^I", " ").split()) if isinstance(text, str) else text
+
+            def texts_agree(left, right):
+                # The intake caps a text at dxf_intake._TEXT_MAX_CHARS raw characters, so a capped
+                # note whose tabs were respelled ends at a different word: there a prefix agrees.
+                a, b = normalized_text(left), normalized_text(right)
+                if a == b:
+                    return True
+                if not (isinstance(a, str) and isinstance(b, str)):
+                    return False
+                import dxf_intake
+                capped = max(len(left), len(right)) >= dxf_intake._TEXT_MAX_CHARS
+                return capped and min(len(a), len(b)) > 0 and (a.startswith(b) or b.startswith(a))
+
+            def text_entities_agree(upload_rows, base_rows):
+                up, base = text_entities(upload_rows), text_entities(base_rows)
+                if up.keys() != base.keys():
+                    return False
+                for key, base_texts in base.items():
+                    up_texts = up[key]
+                    if len(up_texts) != len(base_texts):
+                        return False
+                    pending = list(up_texts)
+                    for text in base_texts:
+                        match = next((i for i, cand in enumerate(pending) if texts_agree(cand, text)), None)
+                        if match is None:
+                            return False
+                        pending.pop(match)
+                return True
 
             try:
                 expected_base = copy.deepcopy(base_intake)
                 expected_base["dwg"] = drawing_id
                 uploaded = copy.deepcopy(intake)
                 uploaded["dwg"] = drawing_id
-                if "texts" in base_intake and (
-                    text_entities(uploaded.get("texts") or [])
-                    != text_entities(base_intake.get("texts") or [])
+                if "texts" in base_intake and not text_entities_agree(
+                    uploaded.get("texts") or [], base_intake.get("texts") or []
                 ):
                     raise ValueError("text entities differ from the head")
                 quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)

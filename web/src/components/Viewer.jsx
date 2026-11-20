@@ -571,7 +571,8 @@ const Viewer = forwardRef(function Viewer(
       }
       return groups.get(layer)
     }
-    const hs = dataSpan * 0.02 // base half-size of the glyph
+    // A small marker (0.5% of the span): 88 roof circuit-tag dots at 2% covered a whole array as translucent tiles.
+    const hs = dataSpan * 0.005 // base half-size of the glyph
     let nInserts = 0
     const definitions = blockDefinitions(activeIntake)
     for (const ins of inserts) {
