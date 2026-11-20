@@ -350,6 +350,23 @@ export interface AuthoritativePublishRequest {
 /** Execute one short repository operation only while the current writer lease is valid. */
 export type TenantMutationFence = <T>(operation: () => T | Promise<T>) => Promise<T>;
 
+/** Trusted durable change identity; callers cannot choose a Git ref or file path. */
+export interface StagedToolSourceRequest {
+  readonly changeSetId: string;
+  /** Full commit SHA recorded with the durable change. */
+  readonly stagedCommit: string;
+  /** Declared kebab-case tool name, never an entry path. */
+  readonly slug: string;
+}
+
+/** Exact committed tool.py bytes (at most 256KiB) and their Git/content provenance. */
+export interface StagedToolSource {
+  readonly bytes: Uint8Array;
+  readonly commit: string;
+  readonly blob: string;
+  readonly sha256: string;
+}
+
 export interface TenantRepoProvider {
   /** Provide a checkout of the tenant's repo (git working copy + commit()). */
   checkout(tenantId: string): Promise<TenantRepo>;
@@ -365,6 +382,8 @@ export interface TenantRepoProvider {
   ): Promise<T>;
   /** Read one committed snapshot while excluding a tenant writer. */
   withTenantReadLease?<T>(tenantId: string, action: () => Promise<T>): Promise<T>;
+  /** Read only tools/<slug>/tool.py from an existing, locally bound staged change. */
+  readStagedToolSource?(tenantId: string, request: StagedToolSourceRequest): Promise<StagedToolSource>;
 }
 
 /** Immutable fields bound into the leaf.customization.v1 staged receipt. */
