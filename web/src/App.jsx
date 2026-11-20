@@ -803,6 +803,12 @@ export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runEl
   )
 }
 
+export function headerChromeFor({ studioGround, surface, grant, signedOut, grantLoading, grantErr }) {
+  const drawing = studioGround && surface === 'cad'
+  const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
+  return { cost: !drawing, accounts: !drawing || !linked }
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -4187,6 +4193,7 @@ export default function App() {
   // derivation and one state machine behind it. `isSignedIn` is handed in as a
   // function so the storage read keeps its short circuit.
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
+  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
   // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
   const visibleCatalogErr = signedOut ? null : catalogErr
 
@@ -5604,8 +5611,8 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
-          {!mock && (
+          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+          {!mock && headerChrome.accounts && (
             <ClaudeAccountPanel
               mock={mock}
               signedOut={signedOut}

@@ -54,8 +54,20 @@
   pointer-events: auto;
   top: calc(var(--ck-canvas-top, 140px) + 8px);
   left: calc(var(--ck-pane, 0px) + 512px);
-  right: 132px;
-  max-height: 72px;
+  right: auto;
+  width: fit-content;
+  max-width: min(420px, calc(100vw - var(--ck-pane, 0px) - 160px));
+}
+.drawing-incomplete-view > summary {
+  cursor: pointer;
+  min-height: 24px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.drawing-incomplete-view > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-incomplete-view[open] {
+  max-height: 40dvh;
   overflow: auto;
 }
 @media (max-width: 1023px) {

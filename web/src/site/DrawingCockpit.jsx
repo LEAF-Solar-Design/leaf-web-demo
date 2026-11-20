@@ -646,15 +646,17 @@ export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle 
   // built scene instead of expanding blocks again or counting source rows.
   const scene = viewerRef?.current?.getDrawingScene?.()
   const stats = scene?.ready && scene.intake === shown ? scene.renderStats : null
+  const layers = stats && `${stats.layers} ${stats.layers === 1 ? 'layer' : 'layers'}`
+  const markers = stats?.markerReferences > 0
+    ? ` · ${stats.markerReferences} block ${stats.markerReferences === 1 ? 'reference' : 'references'} shown as markers` : ''
   return (
     <span className="cockpit-status" data-testid="cockpit-status">
       <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>N/A</b></span>
       <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>N/A</b></span>
       <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>N/A</b></span>
       {shown && (
-        <span className="cockpit-count">
-          {stats ? <>{stats.paths} rendered paths · {stats.layers} {stats.layers === 1 ? 'layer' : 'layers'}
-            {stats.markerReferences > 0 && <> · {stats.markerReferences} block {stats.markerReferences === 1 ? 'reference shown' : 'references shown'} as markers</>}
+        <span className="cockpit-count" title={stats ? `${stats.paths} rendered paths · ${layers}${markers}` : undefined}>
+          {stats ? <>{layers}
             {stats.omitted > 0 && <> · preview limited</>}
           </> : 'Drawing preview not ready'}
         </span>

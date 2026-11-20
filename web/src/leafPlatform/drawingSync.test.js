@@ -177,8 +177,9 @@ describe('publish', () => {
       expect(deps.api.releaseCheckout).toHaveBeenCalledWith(drawingStoreId, 'capability')
       return { status: 'applied' }
     })
-    expect(await publish({ ...deps, cursor })).toEqual({ cursor: 5 })
-    expect(deps.api.saveEditedDrawingVersion).toHaveBeenCalledWith(drawingStoreId, new Uint8Array([1, 2]), 4, 'digest', 'capability')
+    expect(await publish({ ...deps, cursor, fileName: 'roof-site.dwg' })).toEqual({ cursor: 5 })
+    expect(deps.api.saveEditedDrawingVersion).toHaveBeenCalledWith(drawingStoreId, new Uint8Array([1, 2]), 4, 'digest', 'capability',
+      { origin: 'autocad', fileName: 'roof-site.dwg' })
     expect(deps.bridge.syncCursor).toHaveBeenCalledWith({ drawingStoreId, version: 5, exportSha256: 'digest' })
   })
   it('leaves the cursor unchanged if native cursor update is stale', async () => {

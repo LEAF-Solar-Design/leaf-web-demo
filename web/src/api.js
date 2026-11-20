@@ -1564,9 +1564,14 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }

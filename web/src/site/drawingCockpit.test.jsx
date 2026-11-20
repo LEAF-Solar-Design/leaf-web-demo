@@ -902,7 +902,7 @@ describe('CockpitStatus', () => {
     const status = screen.getByTestId('cockpit-status')
     const [x, y] = status.querySelectorAll('.cockpit-coord b')
     expect(x.textContent).toBe('N/A')
-    expect(status.textContent).toContain('3 rendered paths · 1 layer')
+    expect(status.querySelector('.cockpit-count').textContent).toBe('1 layer')
     expect(status.textContent).toContain('sel A1')
 
     move(ground, 123.4, 50)
@@ -931,11 +931,9 @@ describe('CockpitStatus', () => {
     const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: shown,
       renderStats: { paths: 2, layers: 1, markerReferences: 1, omitted: 3 } }) } }
     render(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    const text = screen.getByTestId('cockpit-status').textContent
-    expect(text).toContain('2 rendered paths · 1 layer')
-    expect(text).toContain('1 block reference shown as markers')
-    expect(text).toContain('preview limited')
-    expect(text).not.toContain('0 rendered paths')
+    const count = screen.getByTestId('cockpit-status').querySelector('.cockpit-count')
+    expect(count.title).toBe('2 rendered paths · 1 layer · 1 block reference shown as markers')
+    expect(count.textContent).toBe('1 layer · preview limited')
   })
 
   it('waits for the matching lazy viewer scene and rejects stale counts', () => {
@@ -947,13 +945,13 @@ describe('CockpitStatus', () => {
     let scene = { ready: true, intake: { ...shown }, renderStats: stats }
     viewerRef.current = { getDrawingScene: () => scene }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    expect(screen.getByTestId('cockpit-status').textContent).not.toContain('2 rendered paths')
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
     scene = { ready: false, intake: shown, renderStats: stats }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
     expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
     scene = { ready: true, intake: shown, renderStats: stats }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    expect(screen.getByTestId('cockpit-status').textContent).toContain('2 rendered paths · 1 layer')
+    expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').title).toBe('2 rendered paths · 1 layer')
   })
 
   it('reads "no selection" with nothing selected and holds "N/A" without a viewer', async () => {
