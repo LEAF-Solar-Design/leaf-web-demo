@@ -804,7 +804,8 @@ export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runEl
 }
 
 export function headerChromeFor({ studioGround, surface, grant, signedOut, grantLoading, grantErr }) {
-  const drawing = studioGround && surface === 'cad'
+  // The drafting toolbar marks the CAD drawing surface (surface contract, never a surface-id literal).
+  const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
   const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
   return { cost: !drawing, accounts: !drawing || !linked }
 }
