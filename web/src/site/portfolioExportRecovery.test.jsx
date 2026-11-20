@@ -231,3 +231,64 @@ describe('actual exported portfolio image failure recovery', () => {
     expect(screen.getByRole('img', { name: second.alt }).getAttribute('src')).toContain(second.material_id)
   })
 })
+
+
+describe('current material selection after document edits', () => {
+  it('updates caption and alt for the same material without moving retry focus', () => {
+    const view = render(<Gallery page={{}} category={category(first)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.error(within(dialog).getByRole('img'))
+    const retry = within(dialog).getByRole('button', { name: 'Retry photo' })
+    retry.focus()
+    const edited = { ...first, title: 'Fresh multiline caption\nSecond line', alt: 'Fresh portrait description' }
+    view.rerender(<Gallery page={{}} category={category(edited)} />)
+    expect(screen.getByRole('dialog', { name: edited.alt })).toBe(dialog)
+    expect(dialog.querySelector('p').textContent).toBe('The photo could not load. Check your connection and try again.')
+    expect(within(dialog).getByText((_, node) => node.tagName === 'P' && node.textContent === edited.title).textContent).toBe(edited.title)
+    expect(document.activeElement).toBe(retry)
+    expect(within(dialog).getByRole('img', { name: 'Photograph unavailable: ' + edited.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + edited.alt }))
+  })
+
+  it('keeps material identity after reorder and arrows use the new order', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Third synthetic work')
+    const view = render(<Gallery page={{}} category={{ slug: 'work', images: [first, second, third] }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + second.alt }))
+    const edited = { ...second, title: 'Reordered bread', alt: 'Reordered bread portrait' }
+    view.rerender(<Gallery page={{}} category={{ slug: 'work', images: [third, edited, first] }} />)
+    expect(screen.getByRole('dialog', { name: edited.alt })).toBeTruthy()
+    expect(within(screen.getByRole('dialog')).getByText(edited.title)).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByRole('dialog', { name: first.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByRole('dialog', { name: first.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(screen.getByRole('dialog', { name: edited.alt })).toBeTruthy()
+  })
+
+  it('replaces preview failure state by digest and ignores detached old image events', () => {
+    const original = { ...first, preview_sha256: 'a'.repeat(64) }
+    const view = render(<Gallery page={{}} category={category(original)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    const dialog = screen.getByRole('dialog'), old = within(dialog).getByRole('img')
+    fireEvent.error(old)
+    const retry = within(dialog).getByRole('button', { name: 'Retry photo' })
+    retry.focus()
+    const replacement = { ...original, preview_sha256: 'b'.repeat(64), title: 'Replacement preview', alt: 'Replacement preview alt' }
+    view.rerender(<Gallery page={{}} category={category(replacement)} />)
+    const current = within(screen.getByRole('dialog', { name: replacement.alt })).getByRole('img')
+    expect(current).not.toBe(old)
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Close image' }))
+    expect(within(dialog).queryByRole('button', { name: 'Retry photo' })).toBeNull()
+    fireEvent.error(old); fireEvent.load(old)
+    expect(within(dialog).getByRole('img', { name: replacement.alt })).toBe(current)
+    expect(within(dialog).queryByRole('button', { name: 'Retry photo' })).toBeNull()
+    fireEvent.load(current)
+    expect(current.getAttribute('aria-busy')).toBe('false')
+    view.rerender(<Gallery page={{}} category={{ slug: 'cakes', images: [{ ...replacement, display: { hidden: true } }] }} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+})
