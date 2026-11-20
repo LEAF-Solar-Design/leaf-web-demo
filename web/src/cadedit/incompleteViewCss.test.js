@@ -23,5 +23,6 @@ it('positions the warning above the Studio drawing canvas', () => {
   expect(open).toContain('max-height: 40dvh;')
   expect(open).toContain('overflow: auto;')
   expect(rule).toContain('z-index: calc(var(--leaf-layer-base) + 7);')
-  expect(rule).toContain('top: calc(var(--ck-canvas-top, 140px) + 8px);')
+  // GAPS 48: the Objects row below Find, clear of the document-tab row.
+  expect(rule).toContain('top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 82px);')
 })
