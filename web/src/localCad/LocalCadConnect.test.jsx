@@ -31,13 +31,13 @@ it('toggles connect and disconnect through the owner callbacks', () => {
   expect(screen.getByTestId('local-cad-connect').textContent).toBe('Disconnect')
   fireEvent.click(screen.getByTestId('local-cad-connect'))
   expect(disconnected).toHaveBeenCalledTimes(1)
-  expect(screen.getByTestId('local-cad-connect').textContent).toBe('Connect AutoCAD')
+  expect(screen.getByTestId('local-cad-connect').textContent).toBe('AutoCAD live view')
 })
 
 it('announces every status in plain text and preserves the summary verbatim', () => {
   const summary = 'LEAFGENERATE added 108 objects <script>alert(1)</script>'
   const { rerender } = render(<LocalCadConnect />)
-  for (const [status, label] of [['stopped', 'AutoCAD: not connected'],
+  for (const [status, label] of [['stopped', ''],
     ['connecting', 'AutoCAD: connecting'], ['unreachable', 'AutoCAD: not found on this computer'],
     ['waiting', 'AutoCAD: waiting for a drawing'], ['connected', 'Connected to AutoCAD · site.dwg']]) {
     rerender(<LocalCadConnect status={status} drawing="site.dwg" summary={summary} />)

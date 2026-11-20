@@ -57,7 +57,7 @@ export async function pull({ api, bridge, drawingStoreId, cursor }) {
   } catch (error) { return { cursor, applied, reason: reasonFor(error) } }
 }
 
-export async function publish({ api, bridge, drawingStoreId, cursor }) {
+export async function publish({ api, bridge, drawingStoreId, cursor, fileName }) {
   try {
     const { head } = await api.getDrawingVersions(false, drawingStoreId)
     if (!Number.isSafeInteger(head) || head < 1) throw new Error('invalid_head_version')
@@ -68,7 +68,8 @@ export async function publish({ api, bridge, drawingStoreId, cursor }) {
     try {
       if (!checkout.checkout_capability) throw new Error('checkout_capability_missing')
       exported = await bridge.exportDxf()
-      saved = await api.saveEditedDrawingVersion(drawingStoreId, exported.bytes, head, exported.sha256, checkout.checkout_capability)
+      saved = await api.saveEditedDrawingVersion(drawingStoreId, exported.bytes, head, exported.sha256, checkout.checkout_capability,
+        { origin: 'autocad', fileName })
     } finally { await api.releaseCheckout(drawingStoreId, checkout.checkout_capability) }
     const version = saved?.new_version?.version
     if (!Number.isSafeInteger(version) || version < 1) throw new Error('invalid_saved_version')

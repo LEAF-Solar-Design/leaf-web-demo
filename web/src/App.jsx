@@ -803,6 +803,13 @@ export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runEl
   )
 }
 
+export function headerChromeFor({ studioGround, surface, grant, signedOut, grantLoading, grantErr }) {
+  // The drafting toolbar marks the CAD drawing surface (surface contract, never a surface-id literal).
+  const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
+  const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
+  return { cost: !drawing, accounts: !drawing || !linked }
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -4189,6 +4196,8 @@ export default function App() {
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
   // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
   const visibleCatalogErr = signedOut ? null : catalogErr
+  // Take-3 film cleanup: which account chips the CAD drawing header keeps (see headerChromeFor).
+  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -5604,8 +5613,8 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
-          {!mock && (
+          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+          {!mock && headerChrome.accounts && (
             <ClaudeAccountPanel
               mock={mock}
               signedOut={signedOut}

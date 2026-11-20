@@ -77,23 +77,25 @@ describe('AutoCAD palette scene in Studio', () => {
 
   it('shows the drawing sync row and publishes the first version', async () => {
     state = { status: 'connected', ready, selectedObjectId: null }
-    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }],
+      drawing_artifacts: [{ drawing_id: 'other', name: 'other.dwg' }, { drawing_id: 'roof-1', name: 'roof-site.dwg' }] })
     getDrawingVersions.mockResolvedValue({ head: 3 })
     let finish
     publish.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
     render(<LeafPlatformScene />)
     const button = await screen.findByRole('button', { name: 'Publish drawing' })
-    expect(screen.getByText(/Drawing store: roof-1/).textContent).toContain('not synced')
+    expect(screen.getByTitle('roof-1').textContent).toBe('Not published from this drawing yet.')
     expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
     fireEvent.click(button)
     fireEvent.click(button)
     expect(publish).toHaveBeenCalledTimes(1)
-    expect(publish).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: null })
+    expect(publish).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: null, fileName: 'roof-site.dwg' })
     expect(button.disabled).toBe(true)
     await act(async () => { finish({ cursor: 4 }) })
     expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
     expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(false)
-    expect(screen.getByText('Drawing published.')).toBeTruthy()
+    expect(screen.getByText('Published as version 4.')).toBeTruthy()
+    expect(screen.getByTitle('roof-1').textContent).toBe('Up to date with version 4.')
   })
 
   it('keeps drawing sync disabled until the mount tool list finishes', async () => {
@@ -150,16 +152,21 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
   })
 
-  it('starts from the matching native cursor and pulls', async () => {
+  it.each([
+    [[], 2, 'Already up to date.'],
+    [[3], 3, 'Pulled version 3 into AutoCAD.'],
+    [[3, 4], 4, 'Pulled versions 3 to 4 into AutoCAD.'],
+  ])('starts from the matching native cursor and reports applied versions %j', async (applied, cursor, message) => {
     state = { status: 'connected', ready: { ...ready, syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
     openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
     getDrawingVersions.mockResolvedValue({ head: 3 })
-    pull.mockResolvedValue({ cursor: 3, applied: [3], reason: null })
+    pull.mockResolvedValue({ cursor, applied, reason: null })
     render(<LeafPlatformScene />)
     const button = await screen.findByRole('button', { name: 'Pull' })
     expect(button.disabled).toBe(false)
+    await screen.findByText('Studio has version 3. Pull to update AutoCAD.')
     fireEvent.click(button)
-    await screen.findByText('Pulled 1 versions.')
+    await screen.findByText(message)
     expect(pull).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: 2 })
   })
 
@@ -509,7 +516,7 @@ describe('AutoCAD palette scene in Studio', () => {
       drawing_versions: [{ ...version, version_id: orgId, seq: 9 }, version],
       drawing_artifacts: [{ drawing_id: drawingId, name: 'Roof plan' }],
     }) })
-    expect(screen.getByText('Roof plan, Version 3')).toBeTruthy()
+    expect(screen.getByText('Roof plan')).toBeTruthy()
     expect(document.activeElement).toBe(select)
     setBridgeState({ ...state, ready: { ...ready }, selectedObjectId: 'panel:A2' })
     await act(async () => {})
@@ -524,7 +531,7 @@ describe('AutoCAD palette scene in Studio', () => {
     state = { status: 'connected', ready, selectedObjectId: null }
     render(<LeafPlatformScene />)
     await act(async () => {})
-    expect(screen.queryByText(/, Version/)).toBeNull()
+    expect(screen.queryByText('Drawing 33333333')).toBeNull()
     expect(getActionStatus().textContent).toBe('DWG connected.')
     expect(document.body.textContent).not.toContain('private catalog error')
   })
@@ -864,7 +871,7 @@ describe('AutoCAD palette scene in Studio', () => {
     await waitFor(() => expect(region.textContent).toBe('AutoCAD could not find those objects. Select them again in AutoCAD.'))
     expect(screen.getByText(connectionText)).toBe(connection)
     const detail = name ? connection.nextElementSibling : screen.getByRole('button', { name: 'Retry project name' }).nextElementSibling
-    expect(detail.textContent).toBe('Drawing 33333333, Version 3')
+    expect(detail.textContent).toBe('Drawing 33333333')
     expect(detail.nextElementSibling.textContent).toBe('Selected object: panel:A1')
     expect(region).not.toBe(connection)
     for (const element of [connection, region]) {
