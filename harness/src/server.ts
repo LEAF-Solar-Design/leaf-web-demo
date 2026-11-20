@@ -1921,6 +1921,7 @@ export async function startReal(port = 8130): Promise<Server> {
         runnerFor: (grant) => converseProvider.provider === "openai"
           ? new OpenAiConverseRunner({
               grant, apiKey: converseProvider.apiKey, model: converseProvider.model,
+              ...(converseProvider.baseUrl ? { baseUrl: converseProvider.baseUrl } : {}),
               ...(standardServicesResolver ? { standardServicesResolver } : {}),
             })
           : new ConverseSdkRunner({
