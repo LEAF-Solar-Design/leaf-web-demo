@@ -52,7 +52,9 @@
   position: fixed;
   z-index: calc(var(--leaf-layer-base) + 7);
   pointer-events: auto;
-  top: calc(var(--ck-canvas-top, 140px) + 8px);
+  /* GAPS 48 (film take 4): on the Objects row below Find, never on the
+     document-tab row, where it covered "Take edit lock" in a narrow window. */
+  top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 82px);
   left: calc(var(--ck-pane, 0px) + 512px);
   right: auto;
   width: fit-content;
