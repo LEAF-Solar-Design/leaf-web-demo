@@ -599,3 +599,20 @@ def test_bounds_hold(monkeypatch):
     with pytest.raises(intake_dxf.IntakeDxfError):
         intake_dxf.intake_to_dxf({"layers": [], "polylines": [
             {"layer": "A", "closed": False, "pts": [[0, 0], [1, 1], [2, 2]], "handle": "1"}]})
+
+
+# GAPS 51 (film take 4): a frozen or off layer in the source DXF is recorded as
+# hidden, in table order, and the writer emits it off so the round trip keeps it.
+def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
+    dxf = ("0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n3\n"
+           "0\nLAYER\n2\nRAILS\n70\n1\n62\n7\n"
+           "0\nLAYER\n2\nMODULES\n70\n0\n62\n5\n"
+           "0\nLAYER\n2\nTAGS\n70\n0\n62\n-3\n"
+           "0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n").encode()
+    intake = dxf_intake.parse_dxf_bytes(dxf, source_name="x")
+    assert intake["layers"] == ["RAILS", "MODULES", "TAGS"]
+    assert intake["hidden_layers"] == ["RAILS", "TAGS"]
+    again, _ = _roundtrip(intake)
+    assert again["hidden_layers"] == ["RAILS", "TAGS"]
+    shown = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf({"layers": ["A"], "polylines": []}), source_name="x")
+    assert "hidden_layers" not in shown

@@ -14,6 +14,7 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import * as engineContext from './cadedit/EngineSessionProvider.jsx'
 import Viewer from './components/Viewer.jsx'
+import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 
 // Same mounted-Viewer seam as components/viewerSolarOverlay.test.jsx: retain the real
 // imperative state, geometry and effects, replacing only browser graphics facilities.
@@ -116,11 +117,11 @@ function environment(intake = graphIntake(), scene, binding = B) {
     viewerRef: { current: { getDrawingScene: () => scene ?? { intake, drawingKey: keyOf(binding), ready: true } } },
     activeIntake: legacy, shown: legacy, intake: legacy, standaloneVisibleLayers: {}, setStandaloneVisibleLayers: vi.fn(),
     consoleDrawingKey: 'console:legacy', drawingLoad: { drawingId: 'legacy' }, REQUESTED_DRAWING_ID: 'legacy',
-    useMemo, projectSolarDrawingView, buildDrawingObjectIndex }
+    useMemo, projectSolarDrawingView, buildDrawingObjectIndex, withHiddenLayerDefaults }
 }
 function projection(env) {
   const scope = { ...env }
-  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'visibleLayers', 'setVisibleLayers'])
+  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)
   return scope
 }
@@ -283,7 +284,7 @@ async function layerHarness(projectMode) {
     const runtime = useAppProjectSolarRuntime(props)
     const [standalone, setStandalone] = useState({ Panels: true })
     const env = { projectMode: props.projectMode, projectSolarRuntime: runtime, standaloneVisibleLayers: standalone,
-      setStandaloneVisibleLayers: setStandalone, useCallback }
+      setStandaloneVisibleLayers: setStandalone, useCallback, projectHiddenLayers: undefined, withHiddenLayerDefaults }
     env.setVisibleLayers = evaluate(decl('setVisibleLayers').init, env)
     const toggle = evaluate(decl('toggleLayer').init, env)
     return { runtime, standalone, toggle }

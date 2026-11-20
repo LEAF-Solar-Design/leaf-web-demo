@@ -552,9 +552,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         "0", "SECTION", "2", "TABLES",
         "0", "TABLE", "2", "LAYER", "70", str(len(layer_order)),
     ]
+    # GAPS 51: a layer the intake records as hidden is written off (62 -7), so
+    # the parse of this file reads the same hidden_layers back.
+    hidden_in = intake.get("hidden_layers")
+    hidden_set = {h for h in hidden_in if isinstance(h, str)} if isinstance(hidden_in, list) and len(hidden_in) <= MAX_LAYERS else set()
     for name in layer_order:
         out += ["0", "LAYER", "100", "AcDbSymbolTableRecord", "100", "AcDbLayerTableRecord",
-                "2", name, "70", "0", "62", "7", "6", "Continuous"]
+                "2", name, "70", "0", "62", "-7" if name in hidden_set else "7", "6", "Continuous"]
     out += ["0", "ENDTAB"]
     if emit_dimstyle_table:
         out += ["0", "TABLE", "2", "DIMSTYLE", "70", str(len(dimstyle_order))]

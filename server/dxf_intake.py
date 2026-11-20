@@ -87,6 +87,11 @@ def parse_dxf_bytes(
     # upload. Cheap to write, and it was the live-traffic blocker for routing
     # DXF here (see guest_uploads.run_extraction).
     seen_layers: set[str] = set()
+    # GAPS 51 (film take 4): layers the drawing itself hides (frozen, 70 bit
+    # 1, or off, a negative 62 colour), in table order, so a viewer starts
+    # with AutoCAD's own visibility instead of drawing frozen rails and tags.
+    hidden_layers: List[str] = []
+    hidden_seen: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
     splines: List[Dict[str, Any]] = []
@@ -167,11 +172,28 @@ def parse_dxf_bytes(
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
             j = i + 1
+            name, hidden = None, False
             while j < n and pairs[j][0] != 0:
-                if pairs[j][0] == 2 and pairs[j][1] not in seen_layers:
-                    seen_layers.add(pairs[j][1])
-                    layers.append(pairs[j][1])
+                code_j, value_j = pairs[j]
+                if code_j == 2 and name is None:
+                    name = value_j
+                    if value_j not in seen_layers:
+                        seen_layers.add(value_j)
+                        layers.append(value_j)
+                elif code_j == 70:
+                    try:
+                        hidden = hidden or bool(int(value_j.strip()) & 1)
+                    except ValueError:
+                        pass
+                elif code_j == 62:
+                    try:
+                        hidden = hidden or int(value_j.strip()) < 0
+                    except ValueError:
+                        pass
                 j += 1
+            if hidden and name is not None and name not in hidden_seen:
+                hidden_seen.add(name)
+                hidden_layers.append(name)
             i = j
             continue
         if section == "TABLES" and code == 0 and value == "DIMSTYLE":
@@ -344,6 +366,8 @@ def parse_dxf_bytes(
         out["insunits"] = insunits
     if active_layer is not None:
         out["active_layer"] = active_layer
+    if hidden_layers:
+        out["hidden_layers"] = hidden_layers
     mlstyles = {}
     for handle, (kind, record) in objects.items():
         if kind == "MLEADERSTYLE":

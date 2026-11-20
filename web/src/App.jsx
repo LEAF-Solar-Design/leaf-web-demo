@@ -3,6 +3,7 @@ import InviteAccept from './invites/InviteAccept.jsx'
 import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
+import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { createPortal, flushSync } from 'react-dom'
@@ -2525,7 +2526,12 @@ export default function App() {
     engineDocument, engineDirty, canonicalVersionId, projectDrawing.drawingKey])
   const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
+  const projectHiddenLayers = projectMode ? projectDrawing.intake?.hidden_layers : undefined
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
+  // GAPS 51: what the canvas and the layer list show; the drawing's own frozen
+  // or off layers start hidden until the user toggles them (identity-stable,
+  // memoised inside the helper).
+  const shownLayers = withHiddenLayerDefaults(visibleLayers, projectHiddenLayers)
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
   // Context reads can briefly hide the drawing during checkout refresh. Retire
   // selection for a canonical identity change, not that read's pending state.
@@ -2569,7 +2575,7 @@ export default function App() {
   const viewNavigation = useViewNavigation({
     viewerRef, history: viewHistoryRef.current, setHistorySize: setViewHistorySize,
     selectedHandle, selectedLayer: selection?.layer ?? null, setSelectedHandle,
-    visibleLayers, setVisibleLayers, intake: drawingIntake,
+    visibleLayers: shownLayers, setVisibleLayers, intake: drawingIntake,
     navigationSource: navigationSourceRef,
   })
   const {
@@ -4113,8 +4119,8 @@ export default function App() {
   }, [])
 
   const toggleLayer = useCallback((layer) => {
-    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? v[layer] === false : !v[layer] }))
-  }, [projectMode, setVisibleLayers])
+    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? withHiddenLayerDefaults(v, projectHiddenLayers)?.[layer] === false : !v[layer] }))
+  }, [projectMode, setVisibleLayers, projectHiddenLayers])
 
   const applyVersion = useCallback(() => {
     seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
@@ -4976,7 +4982,7 @@ export default function App() {
       onToggleHistory: onToggleHistoryTracked,
     })
     const layers = layersCluster({
-      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
+      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers: shownLayers, onToggle: toggleLayer, colorFor: colorForLayer,
     })
     // Seating (Slice D): the tool rail hides behind the band on drafting
     // surfaces, so the band carries the rail's two affordances: `expand`
@@ -5123,7 +5129,7 @@ export default function App() {
     }
   }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, hasVersions, canUndo, canRedo, versionBusy, running, previewing,
-    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
+    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, shownLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = (() => {
@@ -5231,12 +5237,12 @@ export default function App() {
       inserts,
       faces,
       layers: layers.length,
-      layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
+      layersShown: layers.filter((l) => shownLayers[l] !== false).length,
       extents: drawingExtents(drawingIntake.polylines),
       source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, visibleLayers, mock])
+  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shownLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -6543,7 +6549,7 @@ export default function App() {
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={projectMode ? undefined : solarStringRoutes}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   highlightHandles={projectMode ? undefined : overlay?.highlight_handles}
                   markers={projectMode ? undefined : overlay?.markers}
                   overlayPolylines={projectMode ? undefined : overlay?.polylines}
@@ -6602,7 +6608,7 @@ export default function App() {
                   layers={drawingIntake.layers}
                   counts={layerCounts}
                   colorForLayer={surfaceColorForLayer}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   onToggle={toggleLayer}
                 />
               ) : null
