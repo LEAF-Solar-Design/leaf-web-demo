@@ -954,6 +954,19 @@ describe('CockpitStatus', () => {
     expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').title).toBe('2 rendered paths · 1 layer')
   })
 
+  // GAPS 47: after Save the owner's engine record is a new object while the
+  // canvas keeps its own intake; the scene is judged against the canvas one.
+  it('judges the scene against the canvas intake, not the owner record, after a save', () => {
+    const canvas = { polylines: [], layers: ['Panels'] }
+    const saved = { ...canvas }
+    const stats = { paths: 4, layers: 1, markerReferences: 0, omitted: 0 }
+    const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: canvas, renderStats: stats }) } }
+    const view = render(<CockpitStatus viewerRef={viewerRef} shown={saved} />)
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
+    view.rerender(<CockpitStatus viewerRef={viewerRef} shown={saved} canvasIntake={canvas} />)
+    expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').textContent).toBe('1 layer')
+  })
+
   it('reads "no selection" with nothing selected and holds "N/A" without a viewer', async () => {
     const ground = document.createElement('div')
     document.body.appendChild(ground)

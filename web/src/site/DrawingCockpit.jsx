@@ -639,13 +639,19 @@ export function StatusToggles() {
   )
 }
 
-export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null, canvasSelector = null }) {
+export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs, canvasSelector)
   // App repaints when the lazy Viewer reports scene readiness. Read that
   // built scene instead of expanding blocks again or counting source rows.
+  // GAPS 47 (film take 4): the scene is judged against the intake the Viewer
+  // actually draws (its applyVersion override over its prop), not the
+  // owner's engine record, which is a new object after Save while the canvas
+  // keeps its own; that mismatch left "Drawing preview not ready" up for the
+  // rest of the session. `shown` still gates whether the count shows at all.
   const scene = viewerRef?.current?.getDrawingScene?.()
-  const stats = scene?.ready && scene.intake === shown ? scene.renderStats : null
+  const sceneFor = canvasIntake === undefined ? shown : canvasIntake
+  const stats = scene?.ready && sceneFor != null && scene.intake === sceneFor ? scene.renderStats : null
   const layers = stats && `${stats.layers} ${stats.layers === 1 ? 'layer' : 'layers'}`
   const markers = stats?.markerReferences > 0
     ? ` · ${stats.markerReferences} block ${stats.markerReferences === 1 ? 'reference' : 'references'} shown as markers` : ''
