@@ -1691,9 +1691,9 @@ class CustomizationService:
         def declaration(change: ChangeSet) -> tuple[str, str]:
             tool = self._staged_tool(change)
             slug = tool.get("name")
-            basename = {"script": "tool.py", "view": "view.html"}.get(tool.get("kind"))
+            is_script = tool.get("kind") == "script"
             if (not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", slug)
-                    or basename is None or tool.get("entry") != f"tools/{slug}/{basename}"):
+                    or not is_script or tool.get("entry") != f"tools/{slug}/tool.py"):
                 raise CustomizationServiceError("stage_source_not_available", 404)
             return slug, tool["entry"]
 

@@ -713,15 +713,15 @@ def test_source_cap_precedes_read_and_redirects_release_nothing(recovery, monkey
     read.assert_not_called()
 
 
-def test_source_exact_cap_and_view_declaration(recovery, monkeypatch):
+def test_source_exact_cap_and_script_declaration(recovery, monkeypatch):
     change = _reserve(recovery, state=ChangeState.STAGED)
-    _source_tool(monkeypatch, kind="view", entry="tools/recovered-tool/view.html")
+    _source_tool(monkeypatch, kind="script", entry="tools/recovered-tool/tool.py")
     data = b"x" * customization_service.MAX_STAGED_SOURCE_BYTES
     _source_hop(monkeypatch, data=data)
     response = _source_response(recovery, change)
     assert response.status_code == 200
     assert response.content == data
-    assert response.headers["x-leaf-source-path"] == "tools/recovered-tool/view.html"
+    assert response.headers["x-leaf-source-path"] == "tools/recovered-tool/tool.py"
 
 
 def test_source_missing_row_auth_off_and_disabled(recovery, monkeypatch):
@@ -788,3 +788,9 @@ def test_source_bounds_each_read_before_retaining_chunks(recovery, monkeypatch):
     _assert_refusal(_source_response(recovery, change), 503, "stage_source_failed")
     assert requested == [len(SOURCE) + 1]
     response.close.assert_called_once()
+
+
+def test_view_declaration_cannot_label_a_script_blob(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _source_tool(monkeypatch, kind="view", entry="tools/recovered-tool/view.html")
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
