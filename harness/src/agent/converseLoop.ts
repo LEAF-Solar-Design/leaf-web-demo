@@ -421,6 +421,32 @@ export class ConverseLoop {
     }
   }
 
+  /**
+   * The turn prompt with the newest prior_messages that fit the runner's promptBudgetChars
+   * (no budget = all of them, exactly as before). Binary search over the kept count, so at
+   * most O(log n) prompt builds; the context packet and current message are never trimmed.
+   */
+  private buildPromptWithinBudget(
+    input: ConverseMessageInput,
+    confirmation: ConfirmationRecord | null,
+    packet: Record<string, unknown>,
+    intent: TurnIntent | null,
+  ): string {
+    const prior = input.priorMessages ?? [];
+    const build = (keep: number) => this.buildTurnPrompt(input, confirmation,
+      keep > 0 ? { ...packet, prior_messages: prior.slice(prior.length - keep) } : packet, intent);
+    const budget = this.ports.runner.promptBudgetChars;
+    const full = build(prior.length);
+    if (!prior.length || budget === undefined || full.length <= budget) return full;
+    let low = 0;
+    let high = prior.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (build(mid).length <= budget) low = mid; else high = mid - 1;
+    }
+    return build(low);
+  }
+
   private buildTurnPrompt(
     input: ConverseMessageInput,
     confirmation: ConfirmationRecord | null,
@@ -557,10 +583,9 @@ export class ConverseLoop {
         : session.sdk_session_id;
       if (appSessionId) {
         const { prior_messages: _legacyHistory, ...packet } = input.contextPacket;
-        userMessage = this.buildTurnPrompt(input, confirmation,
-          !resumeSdkSessionId && input.priorMessages?.length
-            ? { ...packet, prior_messages: input.priorMessages }
-            : packet, intent);
+        userMessage = !resumeSdkSessionId
+          ? this.buildPromptWithinBudget(input, confirmation, packet, intent)
+          : this.buildTurnPrompt(input, confirmation, packet, intent);
       }
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
@@ -572,12 +597,10 @@ export class ConverseLoop {
               // Carries `intent` for the same reason the first build does: a
               // stale SDK session must not silently drop the classification
               // and reintroduce the surface confusion this feature fixes.
-              resumeFallbackUserMessage: this.buildTurnPrompt(
+              resumeFallbackUserMessage: this.buildPromptWithinBudget(
                 input,
                 confirmation,
-                input.priorMessages?.length
-                  ? { ...input.contextPacket, prior_messages: input.priorMessages }
-                  : input.contextPacket,
+                input.contextPacket,
                 intent,
               ),
             }
