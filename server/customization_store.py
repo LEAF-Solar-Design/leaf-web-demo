@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   request_graph_input TEXT,
   base_catalog_change_set_id TEXT,
   catalog_record_fields_json TEXT,
+  tool_target TEXT,
   stage_attempt INTEGER NOT NULL DEFAULT 0,
   stage_lease_owner TEXT,
   stage_lease_expires_at INTEGER,
@@ -324,6 +325,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
             conn.execute(
                 "ALTER TABLE customization_change_sets ADD COLUMN target_tool_name TEXT"
             )
+        if "tool_target" not in columns:
+            conn.execute(
+                "ALTER TABLE customization_change_sets ADD COLUMN tool_target TEXT"
+            )
 
     @staticmethod
     def _migrate_stage_jobs(conn: sqlite3.Connection) -> None:
@@ -412,6 +417,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_set_id: Optional[str] = None,
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
+        tool_target: Optional[str] = None,
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
         request_graph_input: Optional[str] = None,
@@ -424,6 +430,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             workspace_contract_digest=workspace_contract_digest,
             author_subject=author_subject, change_set_id=change_set_id,
             change_kind=change_kind, target_tool_name=target_tool_name,
+            tool_target=tool_target,
             request_description=None, request_fingerprint=None,
             authority_session_id=authority_session_id,
             authority_turn_id=authority_turn_id,
@@ -464,6 +471,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         change_set_id: Optional[str] = None,
         change_kind: str = "create",
         target_tool_name: Optional[str] = None,
+        tool_target: Optional[str] = None,
         request_description: Optional[str],
         request_fingerprint: Optional[str],
         authority_session_id: Optional[str] = None,
@@ -505,6 +513,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.author_subject == author_subject
                     and row.change_kind == change_kind
                     and row.target_tool_name == target_tool_name
+                    and row.tool_target == tool_target
                     and row.request_fingerprint == request_fingerprint
                     and row.request_description == request_description
                     and row.authority_session_id == authority_session_id
@@ -530,12 +539,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "INSERT INTO customization_change_sets "
                 "(change_set_id, tenant_id, idempotency_key, state, version, base_commit, "
                 "desired_platform_release, workspace_contract_digest, author_subject, "
-                "request_description, request_fingerprint, authority_session_id, authority_turn_id) "
-                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "request_description, request_fingerprint, authority_session_id, authority_turn_id, tool_target) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (change_set_id, tenant_id, idempotency_key, ChangeState.CREATED.value,
                  base_commit, desired_platform_release, workspace_contract_digest,
                  author_subject, request_description, request_fingerprint,
-                 authority_session_id, authority_turn_id),
+                 authority_session_id, authority_turn_id, tool_target),
             )
             conn.execute(
                 "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ?, "
@@ -1680,6 +1689,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             author_subject=row["author_subject"], approver_subject=row["approver_subject"],
             created_at=row["created_at"], updated_at=row["updated_at"],
             change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
+            tool_target=row["tool_target"] if "tool_target" in row.keys() else None,
             request_description=row["request_description"],
             request_fingerprint=row["request_fingerprint"],
             authority_session_id=row["authority_session_id"],

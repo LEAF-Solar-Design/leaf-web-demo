@@ -4358,6 +4358,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_tool_envelopes.py"), 14),
         Suite("server-branch-package-check", "server tests/test_branch_package_check.py", "pytest", SERVER,
               _py_pytest("tests/test_branch_package_check.py"), 35),
+        Suite("server-customization-tool-target-store", "server tests/test_customization_tool_target_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_tool_target_store.py"), 20),
         Suite("server-branch-dev-catalog", "server tests/test_branch_dev_catalog.py", "pytest", SERVER,
               _py_pytest("tests/test_branch_dev_catalog.py"), 13),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,

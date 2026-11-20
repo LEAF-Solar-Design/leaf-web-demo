@@ -758,6 +758,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "change_kind", "target_tool_name", "request_description", "request_fingerprint",
             "authority_session_id", "authority_turn_id",
             "request_graph_input", "base_catalog_change_set_id", "catalog_record_fields_json",
+            "tool_target",
         },
         "effective_catalogs": {
             "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
