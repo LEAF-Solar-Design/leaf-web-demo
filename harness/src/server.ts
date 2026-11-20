@@ -1597,6 +1597,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
           });
         }
         const body = await readJsonBody(req);
+        if (body.target !== undefined && body.target !== "studio" && body.target !== "branch") {
+          return send(res, 400, { error: { message: 'target must be "studio" or "branch"' } });
+        }
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
         const authority = authorAuthorityForRequest(req, tenant);
@@ -1607,6 +1610,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
             platformRelease: requiredText(body, "platformRelease"),
             workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
             idempotencyKey: requiredText(body, "idempotencyKey"),
+            ...(body.target === "branch" ? { target: "branch" as const } : {}),
             ...(body.targetToolName === undefined
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
