@@ -362,7 +362,12 @@ export interface ConverseProviderIdentity {
 
 export class OpenAiConverseRunner implements SpineConverseRunner {
   constructor(private readonly options: OpenAiOptions & Omit<ConverseSdkRunnerOptions, "sdkImport">
-    & { identity?: ConverseProviderIdentity }) {}
+    & { identity?: ConverseProviderIdentity; promptBudgetChars?: number }) {}
+
+  /** See SpineConverseRunner.promptBudgetChars: set for small-context self-hosted models. */
+  get promptBudgetChars(): number | undefined {
+    return this.options.promptBudgetChars;
+  }
 
   async *run(input: ConverseRunInput) {
     const identity = this.options.identity ?? { provider: "openai" as const };
@@ -376,7 +381,7 @@ export class OpenAiConverseRunner implements SpineConverseRunner {
 
   private async *runInner(input: ConverseRunInput) {
     const { apiKey, model, fetchImpl, baseUrl, requestTimeoutMs: explicitTimeoutMs, identity: _identity,
-      ...hostOptions } = this.options;
+      promptBudgetChars: _budget, ...hostOptions } = this.options;
     // A configured turn deadline also bounds each model request, so a long turn is never cut by
     // the shorter default request deadline. Unset keeps both defaults exactly.
     const requestTimeoutMs = explicitTimeoutMs

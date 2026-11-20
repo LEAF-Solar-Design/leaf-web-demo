@@ -30,6 +30,7 @@ describe("createTenantRunnerFor (shared by serve.ts and server.ts)", () => {
       identity: { provider: "openai_compatible", label: "local on Mac mini" },
     });
     expect(picked?.secrets).toEqual([env.LEAF_PROVIDER_KEY_MINI]);
+    expect(picked?.runner.promptBudgetChars).toBe(16_000);
     expect(await tenantRunnerFor("other-tenant", grant)).toBeNull();
   });
 

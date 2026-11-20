@@ -10,6 +10,14 @@ import type { AgentGrant, SpineConverseRunner } from "../index.js";
 import { OpenAiConverseRunner } from "./openaiConverseRunner.js";
 import { FileTenantProviderStore, resolveTenantProvider } from "./tenantProviderStore.js";
 
+/**
+ * Self-hosted tenant models run small context windows (the Mac mini's llama-server: 16,384
+ * tokens, of which the system prompt and tool schemas take about 8k). Prior conversation is
+ * trimmed oldest-first so the turn prompt stays within this many characters (~4-5k tokens).
+ * Measured Nov 20 2026: an untrimmed Claude-era session sent 18,474 tokens and was refused.
+ */
+export const TENANT_PROVIDER_PROMPT_BUDGET_CHARS = 16_000;
+
 export type TenantRunnerFor = (tenantId: string, grant: AgentGrant) =>
   Promise<{ runner: SpineConverseRunner; secrets: string[] } | null>;
 
@@ -36,6 +44,7 @@ export function createTenantRunnerFor(options: TenantRunnerForOptions): TenantRu
       runner: new OpenAiConverseRunner({
         grant, apiKey, model: override.model, baseUrl: override.base_url,
         identity: { provider: "openai_compatible", label: override.label },
+        promptBudgetChars: TENANT_PROVIDER_PROMPT_BUDGET_CHARS,
         ...(override.turn_timeout_s !== undefined ? { turnTimeoutS: override.turn_timeout_s } : {}),
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
       }),

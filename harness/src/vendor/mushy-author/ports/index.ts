@@ -755,6 +755,12 @@ export interface ConverseRunInput {
  */
 export interface SpineConverseRunner {
   run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent>;
+  /**
+   * Optional prompt budget in characters for a runner with a small context window (a
+   * self-hosted model). When set, the loop drops the OLDEST prior_messages until the built
+   * turn prompt fits; the current message and context packet are always kept. Unset = no trim.
+   */
+  readonly promptBudgetChars?: number;
 }
 
 // --------------------------------------------------------------------------- //
