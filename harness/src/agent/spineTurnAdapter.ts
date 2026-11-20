@@ -292,6 +292,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     let routingUsage = { cost_tokens: 0 };
     let routingStopReason: import("../ports/index.js").ConverseStopReason = "error";
     let routingRetryAfterS: number | undefined;
+    let routingErrorCode: string | undefined;
     const push = (): void => {
       wake?.();
       wake = null;
@@ -311,6 +312,10 @@ export class SpineTurnAdapter implements ConverseRunner {
         const detail = ev.data.error;
         if (detail && typeof detail === "object" && !Array.isArray(detail)) {
           const retryAfter = (detail as Record<string, unknown>).retry_after_s;
+          const errorCode = (detail as Record<string, unknown>).error_code;
+          if (typeof errorCode === "string" && errorCode.length >= 1 && errorCode.length <= 64) {
+            routingErrorCode = errorCode;
+          }
           if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
             routingRetryAfterS = retryAfter;
           }
@@ -362,6 +367,7 @@ export class SpineTurnAdapter implements ConverseRunner {
           await this.ports.oauth.settleGrant(input.tenant_id, lease.lease_id, {
             usage: input.credential_grant ? { cost_tokens: 0 } : routingUsage,
             stop_reason: input.credential_grant ? "end_turn" : routingStopReason,
+            ...(!input.credential_grant && routingErrorCode !== undefined ? { error_code: routingErrorCode } : {}),
             ...(!input.credential_grant && routingRetryAfterS !== undefined
               ? { retry_after_s: routingRetryAfterS }
               : {}),
