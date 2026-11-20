@@ -35,7 +35,7 @@ import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
 import LiveRegion from './LiveRegion.jsx'
-import { contextPct, fmtDetail, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
+import { contextPct, fmtDetail, modelBadge, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { listEngineChanges } from '../engineChanges.js'
 import { moveRovingTab } from '../lib/roving.js'
@@ -1469,6 +1469,15 @@ export default function ConversePanel({
               <div className="converse-turnfoot">
                 {t.stopReason && STOP_NOTES[t.stopReason] && (
                   <span className="dim">{humanizeError(STOP_NOTES[t.stopReason])}</span>
+                )}
+                {t.usage && modelBadge(t.usage) && (
+                  <span
+                    className={modelBadge(t.usage).local ? 'converse-model-badge local' : 'converse-model-badge'}
+                    data-testid="converse-model-badge"
+                    title="The model that answered this reply"
+                  >
+                    {modelBadge(t.usage).text}
+                  </span>
                 )}
                 {t.usage && <span className="converse-usage">{fmtUsage(t.usage)}</span>}
               </div>

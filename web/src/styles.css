@@ -2257,6 +2257,14 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   display: flex; align-items: center; gap: 10px;
   font-size: var(--leaf-size-caption); color: var(--muted-2);
 }
+.converse-model-badge {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted-2);
+  font-size: var(--leaf-size-caption); white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.converse-model-badge.local { border-color: var(--primary); color: var(--primary); }
 .converse-usage {
   margin-left: auto;
   font-size: var(--leaf-size-caption); color: var(--muted-2);
