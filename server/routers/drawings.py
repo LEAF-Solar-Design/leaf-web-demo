@@ -1509,8 +1509,8 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
     """(payload intake, None) or (None, refusal) for a DXF save over `parent_version`.
 
     Each SOLAR_CARRIED_KEYS key the parent's stored intake holds is copied onto the parsed edit, its value
-    unchanged; a key the parent lacks stays absent, and a parent with none of them leaves the parsed intake
-    exactly as it was. A parent version the manifest does not name carries nothing: it cannot be the head,
+    unchanged. A generic edited.dxf upload also inherits the parent's drawing name when available.
+    A parent version the manifest does not name carries nothing: it cannot be the head,
     so the store's compare-and-set refuses the save as before. Every named parent's bytes are checked
     against its manifest digest before parsing, whether or not it carries solar keys. Parent bytes that
     match the digest but are not a JSON object (a DWG source) carry nothing. Fails closed: a named parent
@@ -1544,6 +1544,9 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
         return intake, None
     if type(parent) is not dict:
         return intake, None
+    parent_name = parent.get("dwg")
+    if intake["dwg"].lower() == "edited.dxf" and isinstance(parent_name, str) and parent_name:
+        intake["dwg"] = parent_name
     carried = {name: parent[name] for name in SOLAR_CARRIED_KEYS if name in parent}
     if not carried:
         return intake, None
@@ -1605,7 +1608,8 @@ def save_edited_version(drawing_id: str,
                         parent_version: int = Form(...),
                         source_digest: str = Form(...),
                         tenant_id: str = Depends(deps.require_active_tenant),
-                        x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+                        x_checkout_capability: Optional[str] = Header(default=None),
+                        origin: Optional[str] = Form(default=None)) -> Any:
     """Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION
     of this drawing — the editing surface's write-back into the same
     versioned-control chain every other write uses.
@@ -1672,6 +1676,7 @@ def save_edited_version(drawing_id: str,
         return refused
     intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     intake_digest = hashlib.sha256(intake_payload).hexdigest()
+    autocad = origin == "autocad"
     try:
         with write_loop.drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
@@ -1680,10 +1685,12 @@ def save_edited_version(drawing_id: str,
             new_v = write_loop._put_bytes_version(
                 backend, str(tenant_id), drawing_id, intake_payload,
                 parent_version=int(parent_version),
-                meta={"tool": "cad-edit-surface", "source": "cad_edit",
+                meta={"tool": "autocad-palette" if autocad else "cad-edit-surface",
+                      "source": "autocad_publish" if autocad else "cad_edit",
                       "source_sha256": actual_digest,
                       "intake_sha256": intake_digest,
-                      "note": "browser edit via the isolated engine worker"},
+                      "note": ("published from AutoCAD through the Leaf palette" if autocad else
+                               "browser edit via the isolated engine worker")},
                 holder=holder, fence=fence,
                 require_parent_is_head=True)
     except store.CheckoutDenied as exc:
@@ -1942,10 +1949,13 @@ def save_plan_version(drawing_id: str,
                         write_loop._extractor_round(value, 3)
                         if isinstance(value, (int, float)) and not isinstance(value, bool) else value
                         for value in xy)
+                    text = entity.get("text")
+                    if isinstance(text, str):
+                        text = " ".join(text.replace("^I", " ").split())
                     entries[(entity.get("kind"),
                              str(entity["handle"]) if entity.get("handle") is not None else None,
                              str(entity["layer"]) if entity.get("layer") is not None else None,
-                             *xy, entity.get("text"))] += 1
+                             *xy, text)] += 1
                 return entries
 
             try:
