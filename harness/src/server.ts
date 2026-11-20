@@ -1912,6 +1912,13 @@ export async function startReal(port = 8130): Promise<Server> {
     session: sessionStore ? sessionStore.readiness : null,
     grants: { kind: grantBackend, probe: createFileStoreProbe(grantsDir) },
   });
+  // Per-tenant provider override (default off): a record beside the tenant's grant files routes
+  // only that tenant's turns to an allowlisted OpenAI-compatible server. See tenantProviderStore.ts.
+  const { FileTenantProviderStore, allowedProviderHosts, resolveTenantProvider } = await import(
+    "./ports/impl/tenantProviderStore.js"
+  );
+  const tenantProviderStore = new FileTenantProviderStore(grantsDir);
+  console.log(`tenant_provider_hosts=${allowedProviderHosts(process.env).size}`);
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
         oauth,
@@ -1929,6 +1936,20 @@ export async function startReal(port = 8130): Promise<Server> {
               grant,
               ...(standardServicesResolver ? { standardServicesResolver } : {}),
             }),
+        tenantRunnerFor: async (tenantId, grant) => {
+          const resolved = await resolveTenantProvider(tenantProviderStore, tenantId, process.env);
+          if (!resolved) return null;
+          const { override, apiKey } = resolved;
+          return {
+            secrets: [apiKey],
+            runner: new OpenAiConverseRunner({
+              grant, apiKey, model: override.model, baseUrl: override.base_url,
+              identity: { provider: "openai_compatible", label: override.label },
+              ...(override.turn_timeout_s !== undefined ? { turnTimeoutS: override.turn_timeout_s } : {}),
+              ...(standardServicesResolver ? { standardServicesResolver } : {}),
+            }),
+          };
+        },
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
         // Classify the turn's surface (drawing vs the product) with a small
         // fast model instead of matching vocabulary in the prompt. Advisory

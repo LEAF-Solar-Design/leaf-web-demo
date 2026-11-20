@@ -352,11 +352,31 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
   };
 }
 
+/** Who answered, carried on every usage event so the UI can badge the turn from the real runner. */
+export interface ConverseProviderIdentity {
+  /** "openai" (api.openai.com via env) or "openai_compatible" (a tenant's self-hosted server). */
+  provider: "openai" | "openai_compatible";
+  /** Where the model runs, e.g. "local on Mac mini". Optional. */
+  label?: string;
+}
+
 export class OpenAiConverseRunner implements SpineConverseRunner {
-  constructor(private readonly options: OpenAiOptions & Omit<ConverseSdkRunnerOptions, "sdkImport">) {}
+  constructor(private readonly options: OpenAiOptions & Omit<ConverseSdkRunnerOptions, "sdkImport">
+    & { identity?: ConverseProviderIdentity }) {}
 
   async *run(input: ConverseRunInput) {
-    const { apiKey, model, fetchImpl, baseUrl, requestTimeoutMs: explicitTimeoutMs, ...hostOptions } = this.options;
+    const identity = this.options.identity ?? { provider: "openai" as const };
+    for await (const event of this.runInner(input)) {
+      yield event.type === "usage"
+        ? { ...event, usage: { ...event.usage, provider: identity.provider,
+            ...(identity.label ? { provider_label: identity.label } : {}) } }
+        : event;
+    }
+  }
+
+  private async *runInner(input: ConverseRunInput) {
+    const { apiKey, model, fetchImpl, baseUrl, requestTimeoutMs: explicitTimeoutMs, identity: _identity,
+      ...hostOptions } = this.options;
     // A configured turn deadline also bounds each model request, so a long turn is never cut by
     // the shorter default request deadline. Unset keeps both defaults exactly.
     const requestTimeoutMs = explicitTimeoutMs

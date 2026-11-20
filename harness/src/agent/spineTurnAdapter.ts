@@ -95,6 +95,15 @@ export interface SpineTurnAdapterPorts {
    * exactly as it did before intent synthesis existed.
    */
   intentFor?: (grant: AgentGrant) => IntentSynthesizer;
+  /**
+   * Optional per-tenant provider override (tenantProviderStore.ts). null = the tenant is
+   * unchanged and runnerFor/intentFor apply. A returned runner replaces runnerFor for this
+   * turn only; the intent classifier is skipped (it is Claude-only), and the returned
+   * secrets join the grant's in the inbound scrub. Grant resolution and the services lease
+   * are unchanged. A throw ends the turn before any stream (fails closed, never falls back).
+   */
+  tenantRunnerFor?: (tenantId: string, grant: AgentGrant) =>
+    Promise<{ runner: SpineConverseRunner; secrets: string[] } | null>;
   instantExecutor?: InstantExecutorClient;
   /** When configured, every turn must reserve a tenant-owned mount for services. */
   standardServicesResolver?: StandardServicesResolver;
@@ -161,6 +170,9 @@ export class SpineTurnAdapter implements ConverseRunner {
     if (this.ports.standardServicesResolver && !lease) {
       throw new Error("standard_services_subscription_mount_missing");
     }
+    const tenantRunner = this.ports.tenantRunnerFor
+      ? await this.ports.tenantRunnerFor(input.tenant_id, grant)
+      : null;
 
     // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
     //
@@ -192,7 +204,7 @@ export class SpineTurnAdapter implements ConverseRunner {
         context_packet: capContextPacketDepth(input.context_packet) as Record<string, unknown>,
       };
     }
-    const secrets = grantSecrets(grant).filter(isRedactableSecret);
+    const secrets = [...grantSecrets(grant), ...(tenantRunner?.secrets ?? [])].filter(isRedactableSecret);
     if (secrets.length) {
       const scrubPacket = (value: unknown): unknown => {
         const root: Record<string, unknown> = {};
@@ -243,7 +255,7 @@ export class SpineTurnAdapter implements ConverseRunner {
 
     const loop = new ConverseLoop(
       {
-        runner: this.ports.runnerFor(grant),
+        runner: tenantRunner?.runner ?? this.ports.runnerFor(grant),
         appRun,
         // The loop owns separate durable session/turn ids for SDK resume and
         // confirmation binding. Preserve the authenticated app wire ids as a
@@ -258,7 +270,7 @@ export class SpineTurnAdapter implements ConverseRunner {
         },
         store,
         instantExecutor: this.ports.instantExecutor,
-        ...(this.ports.intentFor ? { intent: this.ports.intentFor(grant) } : {}),
+        ...(this.ports.intentFor && !tenantRunner ? { intent: this.ports.intentFor(grant) } : {}),
       },
       {
         // Per-session model ("mount your LLM"): the wire value wins, then the
