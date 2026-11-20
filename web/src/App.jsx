@@ -4193,9 +4193,10 @@ export default function App() {
   // derivation and one state machine behind it. `isSignedIn` is handed in as a
   // function so the storage read keeps its short circuit.
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
-  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
   // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
   const visibleCatalogErr = signedOut ? null : catalogErr
+  // Take-3 film cleanup: which account chips the CAD drawing header keeps (see headerChromeFor).
+  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
