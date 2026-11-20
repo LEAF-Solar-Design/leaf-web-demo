@@ -10,8 +10,26 @@ interface OpenAiOptions {
   baseUrl?: string;
 }
 
+// OPENAI_BASE_URL points the runner at any OpenAI Responses-compatible server (for example a
+// self-hosted model behind a tunnel). Fails closed: only an absolute https URL with no
+// credentials, query or fragment is accepted; trailing slashes are trimmed. Unset keeps api.openai.com.
+function openAiBaseUrlFromEnv(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Invalid OPENAI_BASE_URL");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("Invalid OPENAI_BASE_URL");
+  }
+  return url.href.replace(/\/+$/, "");
+}
+
 export function converseProviderFromEnv(env: NodeJS.ProcessEnv):
-  { provider: "anthropic" } | { provider: "openai"; apiKey: string; model: string } {
+  { provider: "anthropic" } | { provider: "openai"; apiKey: string; model: string; baseUrl?: string } {
   switch (env.LEAF_CONVERSE_PROVIDER) {
     case undefined:
     case "":
@@ -20,7 +38,11 @@ export function converseProviderFromEnv(env: NodeJS.ProcessEnv):
     case "openai": {
       const apiKey = env.OPENAI_API_KEY?.trim();
       if (!apiKey) throw new Error("LEAF_CONVERSE_PROVIDER=openai needs OPENAI_API_KEY");
-      return { provider: "openai", apiKey, model: env.LEAF_OPENAI_MODEL?.trim() || "gpt-5" };
+      const baseUrl = openAiBaseUrlFromEnv(env.OPENAI_BASE_URL);
+      return {
+        provider: "openai", apiKey, model: env.LEAF_OPENAI_MODEL?.trim() || "gpt-5",
+        ...(baseUrl ? { baseUrl } : {}),
+      };
     }
     default:
       throw new Error("Invalid LEAF_CONVERSE_PROVIDER");

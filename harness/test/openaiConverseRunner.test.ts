@@ -52,6 +52,32 @@ describe("converseProviderFromEnv", () => {
     expect(() => converseProviderFromEnv({ LEAF_CONVERSE_PROVIDER: apiKey }))
       .toThrow(/^Invalid LEAF_CONVERSE_PROVIDER$/);
   });
+
+  it("reads OPENAI_BASE_URL: unset keeps the default, set is trimmed, invalid fails closed", () => {
+    const openai = { LEAF_CONVERSE_PROVIDER: "openai", OPENAI_API_KEY: apiKey };
+    for (const unset of [undefined, "", "   "]) {
+      expect(converseProviderFromEnv({ ...openai, OPENAI_BASE_URL: unset })).not.toHaveProperty("baseUrl");
+    }
+    expect(converseProviderFromEnv({ ...openai, OPENAI_BASE_URL: " https://llm.example.test/v1/ " }))
+      .toEqual({ provider: "openai", apiKey, model: "gpt-5", baseUrl: "https://llm.example.test/v1" });
+    expect(converseProviderFromEnv({ ...openai, OPENAI_BASE_URL: "https://llm.example.test/v1//" }))
+      .toMatchObject({ baseUrl: "https://llm.example.test/v1" });
+    for (const invalid of [
+      "not a url", "http://llm.example.test/v1", "ftp://llm.example.test/v1",
+      "https://user:pass@llm.example.test/v1", "https://llm.example.test/v1?x=1", "https://llm.example.test/v1#f",
+    ]) {
+      expect(() => converseProviderFromEnv({ ...openai, OPENAI_BASE_URL: invalid }))
+        .toThrow(/^Invalid OPENAI_BASE_URL$/);
+    }
+    expect(converseProviderFromEnv({ OPENAI_BASE_URL: "not a url" })).toEqual({ provider: "anthropic" });
+  });
+
+  it("sends requests to the configured base URL", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => reply(answer));
+    const sdk = createOpenAiSdkFacade({ apiKey, model, fetchImpl, baseUrl: "https://llm.example.test/v1" });
+    await collect(sdk.query({ prompt: "Hi", options: {} }));
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://llm.example.test/v1/responses");
+  });
 });
 
 describe("OpenAI SDK facade", () => {
