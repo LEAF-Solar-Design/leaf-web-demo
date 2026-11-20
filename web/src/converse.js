@@ -497,6 +497,7 @@ const POLL_LIMIT = 200
 const POLL_LIMIT_MAX = 10000
 
 export function openStream(sessionId, afterSeq = 0, handlers = {}) {
+  const openedAt = Date.now() // view requests in the opening replay burst never move the view
   let closed = false
   let lastSeq = Number(afterSeq) || 0
   let es = null
@@ -531,7 +532,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       lastSeq = seq
     }
     try {
-      announceViewRequest(envelope, sessionId)
+      announceViewRequest(envelope, sessionId, Date.now(), globalThis, openedAt)
       const h = handlers[envelope.type]
       if (h) h(envelope.data || {}, envelope)
       if (!closed && handlers.onEvent) handlers.onEvent(envelope)

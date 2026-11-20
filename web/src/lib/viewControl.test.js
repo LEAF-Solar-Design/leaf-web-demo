@@ -43,7 +43,7 @@ describe('viewRequestFromEvent', () => {
     expect(viewRequestFromEvent(event(), now - 1)).toEqual({ op: 'fit' })
     expect(viewRequestFromEvent(event(), now - 5000)).toEqual({ op: 'fit' })
     expect(viewRequestFromEvent(event(), now - 5001)).toBeNull()
-    for (const invalid of [undefined, null, 'bad']) {
+    for (const invalid of [null, 'bad']) {
       expect(viewRequestFromEvent({ ...event(), ts: invalid }, now)).toBeNull()
     }
   })
@@ -95,5 +95,24 @@ describe('announceViewRequest', () => {
     expect(listener).toHaveBeenCalledTimes(65)
     send(1)
     expect(listener).toHaveBeenCalledTimes(66)
+  })
+})
+
+describe('envelopes without ts (the live stream shape)', () => {
+  const live = () => { const env = event({ op: 'zoom_to_layer', layer: 'Roof' }); delete env.ts; return env }
+  it('accepts an event that arrives 2 s or more after the stream opened', () => {
+    expect(viewRequestFromEvent(live(), now, now - 2000)).toEqual({ op: 'zoom_to_layer', layer: 'Roof' })
+  })
+  it('ignores the opening replay burst and a missing open time', () => {
+    expect(viewRequestFromEvent(live(), now, now - 1999)).toBeNull()
+    expect(viewRequestFromEvent(live(), now)).toBeNull()
+  })
+  it('announceViewRequest passes the open time through', () => {
+    const target = new EventTarget()
+    const listener = vi.fn()
+    target.addEventListener('cockpit:view', listener)
+    announceViewRequest({ ...live(), seq: 900 }, 'c', now, target, now - 10)
+    announceViewRequest({ ...live(), seq: 901 }, 'c', now, target, now - 5000)
+    expect(listener).toHaveBeenCalledTimes(1)
   })
 })
