@@ -42,6 +42,7 @@ import change_classifier
 import deps
 import entitlements
 import platform_link
+from branch_tools.package_check import check_branch_package
 from customization_authority import (
     AuthorityError, BuilderEntitlement, CustomizationAuthority,
     HmacConfirmationSigner, PublishRequest, StaffAuthority, StagedChange,
@@ -146,6 +147,7 @@ class CustomizationServiceError(RuntimeError):
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
+        failures: list[dict[str, str]] | None = None,
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
@@ -157,6 +159,20 @@ class CustomizationServiceError(RuntimeError):
         self.exception_type = type(cause).__name__ if isinstance(cause, BaseException) else None
         # Legacy readers receive the validated branch code only.
         self.detail = self.diagnostic_code
+        self.failures = [
+            {"rule": str(item.get("rule", ""))[:100],
+             "path": str(item.get("path", ""))[:300],
+             "message": str(item.get("message", ""))[:300]}
+            for item in (failures or [])[:50]
+        ]
+
+
+def _stage_request_fingerprint(description: str, target: str | None = None) -> str:
+    payload = description if target != "branch" else json.dumps(
+        {"description": description, "target": "branch"}, sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 _SCHEMA_IDENTITY_MAX_DEPTH = 128
@@ -943,6 +959,14 @@ class CustomizationService:
             inherited = self._inherited_record_fields(change, seen)
             rows = self._record_fields_rows(change, change.staged_commit or "", change.catalog_digest)
             base = self._record_fields_rows(change, change.base_commit)
+            if change.tool_target == "branch":
+                if change.request_graph_input is not None:
+                    raise CustomizationServiceError("graph_input_consumer_unsupported", 422)
+                if rows != base:
+                    raise CustomizationServiceError("record_fields_invalid", 503)
+                return canonicalize_catalog_record_fields({
+                    "schema": "leaf.customization-record-fields.v1", "tools": inherited,
+                })
             self._verify_raw_graph_declarations(change, base, rows, inherited)
             if removal_target is None:
                 marker = self.store.get_removal_request(
@@ -990,10 +1014,13 @@ class CustomizationService:
     def stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        target: str | None = None,
         authority_session_id: str | None = None,
         authority_turn_id: str | None = None,
         graph_input: Any = None,
     ) -> dict[str, Any]:
+        if target not in (None, "studio", "branch"):
+            raise CustomizationServiceError("invalid_target", 422)
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
@@ -1040,10 +1067,11 @@ class CustomizationService:
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
             change_kind="revise" if target_tool_name else "create",
             target_tool_name=target_tool_name,
+            **({"tool_target": "branch"} if target == "branch" else {}),
             authority_session_id=authority_session_id,
             authority_turn_id=authority_turn_id,
             request_description=description,
-            request_fingerprint=hashlib.sha256(description.encode("utf-8")).hexdigest(),
+            request_fingerprint=_stage_request_fingerprint(description, target),
             request_graph_input=graph_input,
             base_catalog_change_set_id=predecessor,
         )
@@ -1080,11 +1108,14 @@ class CustomizationService:
     def enqueue_stage(
         self, *, tenant: Any, description: str, mode: str,
         idempotency_key: str, target_tool_name: str | None = None,
+        target: str | None = None,
         authority_session_id: str | None = None,
         authority_turn_id: str | None = None,
         graph_input: Any = None,
     ) -> dict[str, Any]:
         """Reserve and charge one exact stage request without calling the harness."""
+        if target not in (None, "studio", "branch"):
+            raise CustomizationServiceError("invalid_target", 422)
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
@@ -1129,7 +1160,7 @@ class CustomizationService:
             tenant_id, idempotency_key, graph_input, release,
             check_harness=True,
         )
-        fingerprint = hashlib.sha256(description.encode("utf-8")).hexdigest()
+        fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
             base_commit=base, desired_platform_release=release.release_id,
@@ -1137,6 +1168,7 @@ class CustomizationService:
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
             change_kind="revise" if target_tool_name else "create",
             target_tool_name=target_tool_name, request_description=description,
+            **({"tool_target": "branch"} if target == "branch" else {}),
             request_fingerprint=fingerprint,
             request_graph_input=graph_input,
             base_catalog_change_set_id=predecessor,
@@ -1400,8 +1432,26 @@ class CustomizationService:
             policy_body = None
         try:
             self._verify_catalog(durable.tenant_id, receipt["staged_commit"], receipt["catalog_digest"])
-            changed = self._verify_bound_stage_policy(proposed, policy_body)
+            changed = self._verify_bound_stage_policy(
+                proposed, {"receipt": receipt} if proposed.tool_target == "branch" else policy_body
+            )
         except CustomizationServiceError as exc:
+            if (durable.tool_target == "branch" and exc.code == "branch_package_invalid"
+                    and durable.state is ChangeState.STAGING):
+                # Both stores bound reason_message to 500 characters, below the
+                # branch contract's 2000-character ceiling. Fail here so sync
+                # calls and harness callbacks retain the same worker diagnostic.
+                message = "; ".join(
+                    f"{item['rule']} {item['path']}: {item['message']}"
+                    for item in exc.failures
+                )[:500]
+                failed = self.store.fail_stage_claim(
+                    tenant_id=durable.tenant_id, change_set_id=durable.change_set_id,
+                    owner=lease_owner if lease_owner is not None else durable.stage_lease_owner,
+                    reason_code=exc.code, retryable=False, reason_message=message or None,
+                )
+                if failed is not None:
+                    finish_stage_authority_for_change(failed)
             if exc.code == "tenant_repository_unavailable" and (
                 durable.request_graph_input is not None
                 or durable.base_catalog_change_set_id is not None
@@ -1513,7 +1563,7 @@ class CustomizationService:
             return not_found
         if (not isinstance(change.request_description, str)
                 or not isinstance(change.request_fingerprint, str)
-                or hashlib.sha256(change.request_description.encode("utf-8")).hexdigest()
+                or _stage_request_fingerprint(change.request_description, change.tool_target)
                 != change.request_fingerprint):
             raise CustomizationServiceError("customization_stage_failed", 503)
         if change.state is ChangeState.CREATED:
@@ -1633,10 +1683,19 @@ class CustomizationService:
         }
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
+        if change.tool_target == "branch":
+            result["target"] = "branch"
+            if change.target_tool_name:
+                result["package_path"] = f"branch-tools/{change.target_tool_name}"
         if status == "staged":
             receipt = self._raw_receipt(change)
             result["receipt"] = receipt
-            result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
+            if change.tool_target == "branch":
+                self._verified_record_fields(change, set())
+                result["package_path"] = receipt["package_path"]
+                result["result"] = {"branch_package": self._staged_tool(change)}
+            else:
+                result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
         elif status == "failed":
             result["error"] = {
                 "reason_code": change.stage_error_code or "customization_stage_failed",
@@ -1652,6 +1711,11 @@ class CustomizationService:
     @staticmethod
     def _staged_tool(change: ChangeSet) -> dict[str, Any]:
         """Read the authored tool from the receipt-bound commit, never main."""
+        if change.tool_target == "branch":
+            package = CustomizationService._branch_receipt_fields(change)["package_path"]
+            return json.loads(_git_blob(
+                _bare_repo(change.tenant_id), f"{change.staged_commit}:{package}/tool.json"
+            ))
         try:
             bare = _bare_repo(change.tenant_id)
             staged_registry = json.loads(_git_blob(
@@ -1789,6 +1853,7 @@ class CustomizationService:
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
                       "idempotencyKey": change.idempotency_key,
+                      **({"target": "branch"} if getattr(change, "tool_target", None) == "branch" else {}),
                       **({"targetToolName": getattr(change, "target_tool_name", None)}
                          if getattr(change, "target_tool_name", None) else {})},
             )
@@ -1829,6 +1894,16 @@ class CustomizationService:
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
         fields = {"contract", "tenant_id", "change_set_id", "state", "base_commit", "staged_commit", "catalog_digest", "platform_release", "workspace_contract_digest", "idempotency_key"}
+        if change.tool_target == "branch":
+            fields |= {"target", "package_path", "package_files"}
+            package_path, package_files = body.get("package_path"), body.get("package_files")
+            if (body.get("target") != "branch" or not isinstance(package_path, str)
+                    or not re.fullmatch(r"branch-tools/[a-z][a-z0-9]*(?:-[a-z0-9]+)*", package_path)
+                    or not isinstance(package_files, list) or not 1 <= len(package_files) <= 64
+                    or any(not isinstance(path, str) or not path.startswith(package_path + "/")
+                           for path in package_files)
+                    or len(set(package_files)) != len(package_files)):
+                raise CustomizationServiceError("invalid_staged_receipt", 502)
         if set(body) != fields or any(body.get(k) != v for k, v in {
             "contract": CONTRACT, "tenant_id": change.tenant_id, "change_set_id": change.change_set_id,
             "state": "staged", "base_commit": change.base_commit, "platform_release": change.desired_platform_release,
@@ -1852,6 +1927,9 @@ class CustomizationService:
         saves ``_receipt`` a second subprocess per staged change just to stamp
         the change class.
         """
+        if change.tool_target == "branch":
+            receipt = body.get("receipt") if body is not None else self._raw_receipt(change)
+            return self._verify_branch_stage_policy(change, self._validate_receipt(receipt, change))
         removal = self.store.get_removal_request(
             tenant_id=change.tenant_id, change_set_id=change.change_set_id
         )
@@ -1868,6 +1946,91 @@ class CustomizationService:
             change, body, removal_target=removal["target_tool_name"],
             graph_bindings=bindings,
         )
+
+    @staticmethod
+    def _branch_receipt_fields(change: ChangeSet) -> dict[str, Any]:
+        """Reconstruct branch receipt fields from the immutable staged Git tree."""
+        bare = _bare_repo(change.tenant_id)
+        changed = [path for path in _git(
+            bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+            change.base_commit, change.staged_commit or "",
+        ).split("\0") if path]
+        roots = {"/".join(path.split("/")[:2]) for path in changed}
+        if len(roots) != 1:
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        package_path = next(iter(roots))
+        if (not re.fullmatch(r"branch-tools/[a-z][a-z0-9]*(?:-[a-z0-9]+)*", package_path)
+                or any(not path.startswith(package_path + "/") for path in changed)):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        files = [path for path in _git(
+            bare, "ls-tree", "-r", "--name-only", "-z", change.staged_commit or "",
+            "--", package_path + "/",
+        ).split("\0") if path]
+        return {"target": "branch", "package_path": package_path, "package_files": sorted(files)}
+
+    @staticmethod
+    def _verify_branch_stage_policy(change: ChangeSet, receipt: Mapping[str, Any]) -> tuple[str, ...]:
+        bare = _bare_repo(change.tenant_id)
+        package_path = receipt["package_path"]
+        changed = tuple(path for path in _git(
+            bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+            change.base_commit, change.staged_commit or "",
+        ).split("\0") if path)
+        if not changed or any(not path.startswith(package_path + "/") for path in changed):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        entries = {}
+        for entry in _git(
+            bare, "ls-tree", "-r", "-z", change.staged_commit or "", "--", package_path + "/",
+        ).split("\0"):
+            if not entry:
+                continue
+            metadata, _, path = entry.partition("\t")
+            mode, kind, oid = metadata.split(" ")
+            if mode not in {"100644", "100755"} or kind != "blob":
+                raise CustomizationServiceError("invalid_staged_paths", 422)
+            entries[path] = oid
+        if sorted(entries) != receipt["package_files"]:
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        base_entries = {}
+        for entry in _git(
+            bare, "ls-tree", "-r", "-z", change.base_commit, "--", package_path,
+        ).split("\0"):
+            if entry:
+                metadata, _, path = entry.partition("\t")
+                base_entries[path] = metadata.split(" ")[0]
+        if any(path not in entries and base_entries.get(path) not in {"100644", "100755"}
+               for path in changed):
+            raise CustomizationServiceError("invalid_staged_paths", 422)
+        if hashlib.sha256(_git_blob(bare, f"{change.base_commit}:registry.json")).hexdigest() != receipt["catalog_digest"]:
+            raise CustomizationServiceError("catalog_digest_mismatch", 409)
+        name = package_path.split("/")[1]
+        if change.target_tool_name and name != change.target_tool_name:
+            raise CustomizationServiceError("branch_target_mismatch", 422)
+        manifest_path = package_path + "/tool.json"
+        if change.target_tool_name:
+            if manifest_path not in base_entries:
+                raise CustomizationServiceError("branch_revise_target_missing", 404)
+        elif base_entries:
+            raise CustomizationServiceError("branch_tool_exists", 409)
+        files = {path[len(package_path) + 1:]: _git_blob(bare, oid) for path, oid in entries.items()}
+        checked = check_branch_package(files, name)
+        if (change.target_tool_name and checked.manifest is not None
+                and isinstance(checked.manifest.get("name"), str)
+                and checked.manifest["name"] != change.target_tool_name):
+            raise CustomizationServiceError("branch_target_mismatch", 422)
+        if not checked.ok:
+            raise CustomizationServiceError("branch_package_invalid", 422, failures=checked.failures)
+        if change.target_tool_name:
+            try:
+                base_manifest = json.loads(_git_blob(bare, f"{change.base_commit}:{manifest_path}"))
+                base_version = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", base_manifest["version"])
+                staged_version = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", checked.manifest["version"])
+                if (not base_version or not staged_version
+                        or tuple(map(int, staged_version.groups())) <= tuple(map(int, base_version.groups()))):
+                    raise ValueError("version must increase")
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+                raise CustomizationServiceError("branch_version_not_greater", 409) from exc
+        return changed
 
     @staticmethod
     def _verify_raw_graph_declarations(
@@ -2623,7 +2786,7 @@ class CustomizationService:
         already validated the paths the key is simply absent; nothing recomputes
         a diff to manufacture it.
         """
-        if (change.request_graph_input is not None
+        if change.tool_target != "branch" and (change.request_graph_input is not None
                 or change.base_catalog_change_set_id is not None
                 or change.catalog_record_fields_json is not None):
             self._verified_record_fields(change, set())
@@ -2640,6 +2803,9 @@ class CustomizationService:
                 extra["tool"] = self._decorate_stage_tool(change, tool)
         body = {"receipt": self._raw_receipt(change),
                 **{k: v for k, v in extra.items() if v is not None}}
+        if change.tool_target == "branch":
+            self._verified_record_fields(change, set())
+            body.update(target="branch", package_path=body["receipt"]["package_path"])
         klass = self._change_class(change, changed)
         if klass is not None:
             body["change_class"] = klass
@@ -2700,7 +2866,8 @@ class CustomizationService:
                 "catalog_digest": change.catalog_digest,
                 "platform_release": change.desired_platform_release,
                 "workspace_contract_digest": change.workspace_contract_digest,
-                "idempotency_key": change.idempotency_key}
+                "idempotency_key": change.idempotency_key,
+                **(CustomizationService._branch_receipt_fields(change) if change.tool_target == "branch" else {})}
 
     @staticmethod
     def _verify_catalog(tenant_id: str, commit: str, digest: str) -> None:
