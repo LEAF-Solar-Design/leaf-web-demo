@@ -3,7 +3,9 @@
 The operation methods remain in ``SQLiteCustomizationStore``. This adapter
 supplies PostgreSQL connections and translates the small SQL dialect surface
 used by those storage-independent methods. Schema creation is never a runtime
-side effect. Migration 0020 must already be present.
+side effect. Migration 0020 and subsequent additive migrations, including 0108
+for nullable tool_target (NULL means studio), must already be present. The
+inherited reservation and row mapper carry tool_target for both backends.
 """
 from __future__ import annotations
 

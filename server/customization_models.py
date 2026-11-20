@@ -89,6 +89,7 @@ class ChangeSet:
     request_graph_input: Optional[str] = None
     base_catalog_change_set_id: Optional[str] = None
     catalog_record_fields_json: Optional[str] = None
+    tool_target: Optional[str] = None
 
 
 @dataclass(frozen=True)
