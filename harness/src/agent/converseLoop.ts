@@ -898,6 +898,7 @@ export class ConverseLoop {
             args: {
               description: String(args.description ?? ""),
               ...(args.mode === "build" || args.mode === "one_off" ? { mode: args.mode } : {}),
+              ...(args.target === "branch" ? { target: "branch" } : {}),
               ...(typeof args.confirmation_id === "string"
                 ? { confirmation_id: args.confirmation_id }
                 : {}),
@@ -1558,6 +1559,7 @@ export class ConverseLoop {
         const normalizedDescription = description.replace(/\s+/g, " ");
         const mode = args.mode === "one_off" ? "one_off" : "build";
         const targetToolName = String(args.target_tool_name ?? "").trim() || undefined;
+        const target = args.target === "branch" ? "branch" : undefined;
         const idempotencyKey = `author:${createHash("sha256")
           .update(JSON.stringify({
             action: "author_tool",
@@ -1566,6 +1568,7 @@ export class ConverseLoop {
             description: normalizedDescription,
             ...(mode === "one_off" ? { mode } : {}),
             ...(targetToolName ? { target_tool_name: targetToolName } : {}),
+            ...(target ? { target } : {}),
           }))
           .digest("hex")}`;
         const authored = await appRun.authorTool(
@@ -1578,6 +1581,7 @@ export class ConverseLoop {
             turnId: ctx.authorityTurnId,
           },
           targetToolName,
+          target,
         );
         return ok(JSON.stringify(authored));
       }
@@ -1972,7 +1976,7 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
     case "view_control":
       return `op=${String(args.op ?? "?")}${args.layer ? ` layer=${String(args.layer).slice(0, 40)}` : ""}`;
     case "author_tool":
-      return `mode=${String(args.mode ?? "build")}`;
+      return `mode=${String(args.mode ?? "build")}${args.target === "branch" ? " target=branch" : ""}`;
     case "request_publication":
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
     case "propose_project_page":

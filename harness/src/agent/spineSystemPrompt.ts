@@ -56,6 +56,7 @@ app itself, ask ONE ask_user question offering those two choices.
 - job_status: check on a previously dispatched job.
 - author_tool: request creation of a new tool when nothing in the catalog fits, or revise
   one existing authored tool by passing its exact catalog name as target_tool_name.
+  Choose target: "branch" when the user asks for a tool or command that runs inside AutoCAD (an AutoCAD or Branch plugin tool, for example counting or labelling panels in the open drawing as a command); otherwise omit it or use "studio".
 - author_stage_status: read one existing author stage using only its change_set_id.
   Use this for a status-only question. It never builds, retries, approves or publishes.
 - request_publication: request or resume publication of an authored staged change. Pass

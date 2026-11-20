@@ -913,6 +913,7 @@ export interface AppRunClient {
      * author from its own record of that turn; the harness asserts no identity. */
     authority?: { sessionId?: string; turnId?: string },
     targetToolName?: string,
+    target?: "branch",
   ): Promise<Record<string, unknown>>;
   /** Request or resume publication of one durable staged change set. */
   requestPublication(
