@@ -65,4 +65,13 @@ describe('resolvePromptInputs', () => {
     const withRadius = { ...prompt, steps: [...prompt.steps, { ask: 'Specify radius:', fields: [['r', 'r']] }] }
     expect(resolvePromptInputs(withRadius, { x: '1', y: '2', sx: '', r: '' }).waitingStep.ask).toBe('Specify radius:')
   })
+
+  // GAPS 46: PLINE gathers points one canvas click at a time; one point is a
+  // waiting step (Run held, no refusal), a malformed pair is not.
+  it('a PLINE list under two points waits for the next point instead of refusing', () => {
+    expect(resolvePromptInputs(PROMPTS.createPolyline, { pts: '' }).waitingStep.ask).toBe('Specify first point:')
+    expect(resolvePromptInputs(PROMPTS.createPolyline, { pts: '12.5,-3' }).waitingStep.ask).toBe('Specify next point:')
+    expect(resolvePromptInputs(PROMPTS.createPolyline, { pts: '12.5,-3 4,5' }).waitingStep).toBeNull()
+    expect(resolvePromptInputs(PROMPTS.createPolyline, { pts: '1,x' }).waitingStep).toBeNull()
+  })
 })
