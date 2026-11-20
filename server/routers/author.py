@@ -69,6 +69,7 @@ class AuthorRequest(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
     mode: Literal["build", "one_off"] = "build"
     target_tool_name: str | None = Field(default=None, min_length=1, max_length=64)
+    target: Literal["studio", "branch"] | None = None
     # Optional presentation the author chooses for the tool record itself (see
     # server/tool_record_fields.py). Length-bounded here as well as validated
     # there, so an over-long body is rejected before any validator runs.
@@ -280,6 +281,8 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     """Generate a tool package from a description, PERSIST its code to a real
     file, register it so it appears in /api/tools, and return
     {tool, code, preview} (contract section 4)."""
+    if req.target == "branch":
+        return _customization_error(CustomizationServiceError("branch_target_unavailable", 422))
     # ENTITLEMENT GATE (§17): the Build lane requires the tenant tier's `build` capability.
     # Enforced FIRST — before the harness delegation or the templater — so a plan without
     # Build cannot author tools via either path. Off-auth/demo tier grants build.
@@ -626,6 +629,7 @@ def _customization_error(
     return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
         "error": error_obj("BAD_PARAMS", message, retryable=False),
         "reason_code": exc.code,
+        **({"failures": exc.failures} if exc.code == "branch_package_invalid" else {}),
     }))
 
 
@@ -771,6 +775,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     _emit_author_event("author.requested", tenant, {
         "mode": req.mode, "desc_len": len(req.description or "")})
     if not deps.auth_live() and not customization_enabled(5, str(tenant).strip()):
+        if req.target == "branch":
+            return _customization_error(CustomizationServiceError("branch_target_unavailable", 422))
         try:
             _validated_record_fields(req)
         except ToolRecordFieldError as exc:
@@ -820,6 +826,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
+            **({"target": "branch"} if req.target == "branch" else {}),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
@@ -896,6 +903,7 @@ def stage(
             } if authority_session_id and authority_turn_id else {}),
             **({"target_tool_name": req.target_tool_name}
                if req.target_tool_name else {}),
+            **({"target": "branch"} if req.target == "branch" else {}),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
