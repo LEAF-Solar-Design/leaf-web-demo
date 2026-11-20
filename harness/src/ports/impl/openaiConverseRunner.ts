@@ -8,6 +8,31 @@ interface OpenAiOptions {
   model: string;
   fetchImpl?: typeof fetch;
   baseUrl?: string;
+  /** Deadline for ONE model request, headers through the last streamed byte. Default 120 s. */
+  requestTimeoutMs?: number;
+}
+
+/** Default per-request deadline; unchanged from the non-streaming runner. */
+export const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 120_000;
+// Bounds on one streamed response. A server that exceeds them is treated as a failed request,
+// so a misbehaving endpoint can never grow the harness heap without limit.
+const MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
+const MAX_SSE_STREAM_BYTES = 32 * 1024 * 1024;
+// Gateway timeouts before any response byte (Cloudflare 524, proxies 502/503/504) are retried
+// once: nothing was yielded yet, and a self-hosted server keeps the prefix it already prefilled.
+const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504, 524]);
+const GATEWAY_RETRIES = 1;
+
+// LEAF_OPENAI_TURN_TIMEOUT_S sets the OpenAI runner's turn deadline and, through it, the
+// per-request deadline. Unset keeps both defaults exactly. Fails closed on anything but an
+// integer from 10 to 1800 seconds.
+export function openAiTurnTimeoutSFromEnv(raw: string | undefined): number | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  if (!/^[0-9]{1,4}$/.test(value)) throw new Error("Invalid LEAF_OPENAI_TURN_TIMEOUT_S");
+  const seconds = Number(value);
+  if (seconds < 10 || seconds > 1800) throw new Error("Invalid LEAF_OPENAI_TURN_TIMEOUT_S");
+  return seconds;
 }
 
 // OPENAI_BASE_URL points the runner at any OpenAI Responses-compatible server (for example a
@@ -29,7 +54,8 @@ function openAiBaseUrlFromEnv(raw: string | undefined): string | undefined {
 }
 
 export function converseProviderFromEnv(env: NodeJS.ProcessEnv):
-  { provider: "anthropic" } | { provider: "openai"; apiKey: string; model: string; baseUrl?: string } {
+  { provider: "anthropic" } |
+  { provider: "openai"; apiKey: string; model: string; baseUrl?: string; turnTimeoutS?: number } {
   switch (env.LEAF_CONVERSE_PROVIDER) {
     case undefined:
     case "":
@@ -39,9 +65,11 @@ export function converseProviderFromEnv(env: NodeJS.ProcessEnv):
       const apiKey = env.OPENAI_API_KEY?.trim();
       if (!apiKey) throw new Error("LEAF_CONVERSE_PROVIDER=openai needs OPENAI_API_KEY");
       const baseUrl = openAiBaseUrlFromEnv(env.OPENAI_BASE_URL);
+      const turnTimeoutS = openAiTurnTimeoutSFromEnv(env.LEAF_OPENAI_TURN_TIMEOUT_S);
       return {
         provider: "openai", apiKey, model: env.LEAF_OPENAI_MODEL?.trim() || "gpt-5",
         ...(baseUrl ? { baseUrl } : {}),
+        ...(turnTimeoutS !== undefined ? { turnTimeoutS } : {}),
       };
     }
     default:
@@ -97,6 +125,70 @@ interface ModelResponse {
   status?: string;
 }
 
+type StreamEvent = { type?: unknown; delta?: unknown; response?: unknown };
+
+// Reads one Responses API server-sent-event stream. Text deltas go to onText as they arrive;
+// the terminal response.completed body is returned. Bounded: one event at most
+// MAX_SSE_EVENT_BYTES, the whole stream at most MAX_SSE_STREAM_BYTES. Fails closed on a
+// failed, incomplete, malformed or truncated stream. Errors never carry body text.
+async function readResponseStream(body: ReadableStream<Uint8Array>,
+  onText: (text: string) => void): Promise<ModelResponse> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let total = 0;
+  const fail = (): never => {
+    void reader.cancel().catch(() => {});
+    throw new Error("OpenAI request failed (stream)");
+  };
+  const handle = (block: string): ModelResponse | undefined => {
+    const data = block.split("\n").filter(line => line.startsWith("data:"))
+      .map(line => line.slice(5).replace(/^ /, "")).join("\n");
+    if (!data || data === "[DONE]") return undefined;
+    let event: StreamEvent;
+    try {
+      event = JSON.parse(data) as StreamEvent;
+    } catch {
+      return fail();
+    }
+    if (event?.type === "response.output_text.delta") {
+      if (typeof event.delta === "string" && event.delta) onText(event.delta);
+      return undefined;
+    }
+    if (event?.type === "response.completed") {
+      const response = event.response as ModelResponse | undefined;
+      if (!response || typeof response !== "object") return fail();
+      return response;
+    }
+    if (event?.type === "error" || event?.type === "response.failed" || event?.type === "response.incomplete") {
+      return fail();
+    }
+    return undefined;
+  };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) {
+      total += value.byteLength;
+      if (total > MAX_SSE_STREAM_BYTES) fail();
+      buffer += decoder.decode(value, { stream: true });
+    }
+    if (done) buffer += decoder.decode() + "\n\n";
+    buffer = buffer.replace(/\r\n?/g, "\n");
+    let boundary: number;
+    while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const completed = handle(block);
+      if (completed) {
+        void reader.cancel().catch(() => {});
+        return completed;
+      }
+    }
+    if (buffer.length > MAX_SSE_EVENT_BYTES) fail();
+    if (done) return fail();
+  }
+}
+
 async function functionOutput(call: FunctionCall, catalog: Map<string, { tool: Tool; qualified: string }>,
   canUseTool: QueryOptions["canUseTool"]): Promise<string> {
   const entry = catalog.get(call.name);
@@ -141,22 +233,35 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
       const input = await promptItems(prompt);
       const total: Usage = {};
       let turns = 0;
+      const requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+      const textEvent = (text: string) => ({ type: "stream_event", session_id,
+        event: { type: "content_block_delta", delta: { type: "text_delta", text } } });
       while (turns < (options.maxTurns ?? 25)) {
-        const deadline = AbortSignal.timeout(120_000);
+        const deadline = AbortSignal.timeout(requestTimeoutMs);
         const signal = options.abortController
           ? AbortSignal.any([deadline, options.abortController.signal]) : deadline;
         let response: Response;
-        try {
-          response = await (opts.fetchImpl ?? fetch)(endpoint, {
-            method: "POST", redirect: "manual", signal,
-            headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({
-              model: opts.model, instructions: options.systemPrompt, tools, input, store: false,
-              include: ["reasoning.encrypted_content"],
-            }),
-          });
-        } catch {
-          throw new Error("OpenAI request failed (network)");
+        for (let attempt = 0; ; attempt++) {
+          try {
+            response = await (opts.fetchImpl ?? fetch)(endpoint, {
+              method: "POST", redirect: "manual", signal,
+              headers: {
+                Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json",
+                Accept: "text/event-stream",
+              },
+              body: JSON.stringify({
+                model: opts.model, instructions: options.systemPrompt, tools, input, store: false,
+                include: ["reasoning.encrypted_content"], stream: true,
+              }),
+            });
+          } catch {
+            throw new Error("OpenAI request failed (network)");
+          }
+          if (attempt < GATEWAY_RETRIES && RETRYABLE_GATEWAY_STATUSES.has(response.status) && !signal.aborted) {
+            void response.body?.cancel().catch(() => {});
+            continue;
+          }
+          break;
         }
         turns++;
         if (response.status === 429) {
@@ -170,18 +275,57 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
         }
         if (!response.ok) throw new Error(`OpenAI request failed (${response.status})`);
         let data: ModelResponse;
-        try {
-          data = await response.json() as ModelResponse;
-        } catch {
-          throw new Error("OpenAI request failed (network)");
+        let streamedText = false;
+        const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+        if (contentType.includes("text/event-stream") && response.body) {
+          // The reader runs ahead and queues deltas; this generator relays them as they land, so
+          // a proxy with an idle limit (Cloudflare's 100 s) stays open while the model generates.
+          const pending: string[] = [];
+          const reading: {
+            wake?: () => void;
+            outcome?: { ok: true; value: ModelResponse } | { ok: false; error: unknown };
+          } = {};
+          void readResponseStream(response.body, text => {
+            pending.push(text);
+            reading.wake?.();
+          }).then(value => { reading.outcome = { ok: true, value }; },
+            error => { reading.outcome = { ok: false, error }; })
+            .finally(() => reading.wake?.());
+          let outcome: { ok: true; value: ModelResponse } | { ok: false; error: unknown };
+          for (;;) {
+            while (pending.length) {
+              streamedText = true;
+              yield textEvent(pending.shift()!);
+            }
+            if (reading.outcome) {
+              outcome = reading.outcome;
+              break;
+            }
+            await new Promise<void>(resolve => { reading.wake = resolve; });
+            reading.wake = undefined;
+          }
+          if (!outcome.ok) {
+            const error = outcome.error;
+            if (!signal.aborted && error instanceof Error && error.message === "OpenAI request failed (stream)") {
+              throw error;
+            }
+            throw new Error("OpenAI request failed (network)");
+          }
+          data = outcome.value;
+        } else {
+          try {
+            data = await response.json() as ModelResponse;
+          } catch {
+            throw new Error("OpenAI request failed (network)");
+          }
         }
         if (!Array.isArray(data?.output) || (data.status && data.status !== "completed")) {
           throw new Error(`OpenAI request failed (${response.status})`);
         }
-        const text = data.output.flatMap(item => item.type === "message"
+        // A stream already relayed its text; a plain JSON body relays it here, once.
+        const text = streamedText ? "" : data.output.flatMap(item => item.type === "message"
           ? item.content.filter(block => block.type === "output_text").map(block => block.text) : []).join("");
-        if (text) yield { type: "stream_event", session_id,
-          event: { type: "content_block_delta", delta: { type: "text_delta", text } } };
+        if (text) yield textEvent(text);
         const usage: Usage = {};
         for (const key of ["input_tokens", "output_tokens"] as const) {
           const count = data.usage?.[key];
@@ -212,14 +356,20 @@ export class OpenAiConverseRunner implements SpineConverseRunner {
   constructor(private readonly options: OpenAiOptions & Omit<ConverseSdkRunnerOptions, "sdkImport">) {}
 
   async *run(input: ConverseRunInput) {
-    const { apiKey, model, fetchImpl, baseUrl, ...hostOptions } = this.options;
+    const { apiKey, model, fetchImpl, baseUrl, requestTimeoutMs: explicitTimeoutMs, ...hostOptions } = this.options;
+    // A configured turn deadline also bounds each model request, so a long turn is never cut by
+    // the shorter default request deadline. Unset keeps both defaults exactly.
+    const requestTimeoutMs = explicitTimeoutMs
+      ?? (hostOptions.turnTimeoutS !== undefined ? hostOptions.turnTimeoutS * 1000 : undefined);
     yield* new ConverseSdkRunner({
       ...hostOptions,
       // The vendor's schema factory uses the one-argument record(value) signature.
       zodImport: hostOptions.zodImport ?? (async () => ({
         z: { ...z, record: (value: z.ZodType) => z.record(z.string(), value) },
       })),
-      sdkImport: async () => createOpenAiSdkFacade({ apiKey, model, fetchImpl, baseUrl }),
+      sdkImport: async () => createOpenAiSdkFacade({
+        apiKey, model, fetchImpl, baseUrl, ...(requestTimeoutMs !== undefined ? { requestTimeoutMs } : {}),
+      }),
     }).run(input);
   }
 }

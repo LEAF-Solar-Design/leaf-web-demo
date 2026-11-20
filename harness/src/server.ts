@@ -1922,6 +1922,7 @@ export async function startReal(port = 8130): Promise<Server> {
           ? new OpenAiConverseRunner({
               grant, apiKey: converseProvider.apiKey, model: converseProvider.model,
               ...(converseProvider.baseUrl ? { baseUrl: converseProvider.baseUrl } : {}),
+              ...(converseProvider.turnTimeoutS !== undefined ? { turnTimeoutS: converseProvider.turnTimeoutS } : {}),
               ...(standardServicesResolver ? { standardServicesResolver } : {}),
             })
           : new ConverseSdkRunner({
