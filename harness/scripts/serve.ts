@@ -60,6 +60,8 @@ import { SdkRepoEditor } from "../src/vendor/mushy-author/ports/impl/repoEditRun
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
+import { allowedProviderHosts } from "../src/ports/impl/tenantProviderStore.js";
+import { createTenantRunnerFor } from "../src/ports/impl/tenantRunnerFor.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
 import { HttpInstantExecutorClient } from "../src/ports/impl/instantExecutorClient.js";
@@ -174,6 +176,7 @@ function tenantRepoDir(tenantId: string): string {
 function spineTurnRunner(
   oauth: OAuthGrantProvider,
   standardServicesResolver: StandardServicesResolver | undefined,
+  grantsDir: string,
 ): ConverseRunner | undefined {
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
@@ -192,6 +195,7 @@ function spineTurnRunner(
   instantExecutorClient = createEnabledProductionInstantExecutorClient(
     (options) => new HttpInstantExecutorClient(options),
   ) ?? null;
+  log(`[harness] tenant_provider_hosts=${allowedProviderHosts(process.env).size}`);
   return new SpineTurnAdapter({
     oauth,
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
@@ -199,6 +203,13 @@ function spineTurnRunner(
     store: sessionStoreHandle.store,
     runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({
       grant,
+      ...(standardServicesResolver ? { standardServicesResolver } : {}),
+    }),
+    // Per-tenant provider override (default off), shared with server.ts startReal: a
+    // `<grantsDir>/<tenant>.provider.json` record routes only that tenant to an allowlisted
+    // OpenAI-compatible server; no record keeps Claude; an unhonourable record fails the turn.
+    tenantRunnerFor: createTenantRunnerFor({
+      grantsDir, env: process.env,
       ...(standardServicesResolver ? { standardServicesResolver } : {}),
     }),
     ...(standardServicesResolver ? { standardServicesResolver } : {}),
@@ -321,7 +332,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }
       : (() => {
-          const spine = spineTurnRunner(oauth, standardServicesResolver);
+          const spine = spineTurnRunner(oauth, standardServicesResolver, grantsDir);
           return spine ? { converseRunner: spine } : {};
         })()),
     ...(customizationCoordination ? { customizationCoordination } : {}),
