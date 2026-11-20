@@ -23,6 +23,7 @@ import {
 } from "../src/vendor/mushy-author/agent/branchTargetPrompt.js";
 import { submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
+import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
   BranchPackageError, prepareBranchPackage, validateBranchPackage,
   type BranchToolProposal,
@@ -261,6 +262,41 @@ describe("branch package proposals", () => {
     expect(() => submitBranchToolProposal(root, proposal)).toThrow("V3:");
     for (const [path, bytes] of Object.entries(first.contents)) expect(readFileSync(join(root, first.package_path, path), "utf8")).toBe(bytes);
     expect(filesUnder(root)).toEqual(first.files);
+  });
+
+  it("keeps directory link counts stable until revision publication on every platform", () => {
+    const root = temp();
+    const proposal = fixture("good-label-writer");
+    submitBranchToolProposal(root, proposal, { now: NOW });
+    const resolvePath = repoPathSafety.resolveContainedRepoPath;
+    const revalidatePath = repoPathSafety.revalidateResolvedRepoPath;
+    const snapshots = new WeakMap<repoPathSafety.ResolvedRepoPath, number[]>();
+    // Counting child directories models Linux directory nlink changes even
+    // where the filesystem reports a constant nlink (for example Windows).
+    const childDirectories = (snapshot: repoPathSafety.ResolvedRepoPath) => snapshot.components
+      .filter(component => component.kind === "directory")
+      .map(component => readdirSync(component.path, { withFileTypes: true }).filter(entry => entry.isDirectory()).length);
+    vi.spyOn(repoPathSafety, "resolveContainedRepoPath").mockImplementation((...args) => {
+      const snapshot = resolvePath(...args);
+      if (snapshot) snapshots.set(snapshot, childDirectories(snapshot));
+      return snapshot;
+    });
+    const revalidate = vi.spyOn(repoPathSafety, "revalidateResolvedRepoPath").mockImplementation(snapshot => {
+      expect(childDirectories(snapshot)).toEqual(snapshots.get(snapshot));
+      const current = revalidatePath(snapshot);
+      snapshots.set(current, childDirectories(current));
+      return current;
+    });
+    const options = { targetToolName: proposal.name, now: NOW };
+    const added = submitBranchToolProposal(root, {
+      ...proposal, version: "1.1.0", lib: { "helper.csx": "// helper\n" },
+    }, options);
+    expect(filesUnder(root)).toEqual(added.files);
+    expect(existsSync(join(root, added.package_path, "lib", "helper.csx"))).toBe(true);
+    const removed = submitBranchToolProposal(root, { ...proposal, version: "1.2.0" }, options);
+    expect(filesUnder(root)).toEqual(removed.files);
+    expect(existsSync(join(root, removed.package_path, "lib"))).toBe(false);
+    expect(revalidate).toHaveBeenCalled();
   });
 
   it.skipIf(process.platform === "win32")("refuses a linked package parent", () => {

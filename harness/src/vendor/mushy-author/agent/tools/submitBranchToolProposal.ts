@@ -69,7 +69,10 @@ export function submitBranchToolProposal(
   revalidateResolvedRepoPath(parent!);
   revalidateResolvedRepoPath(target!);
   mkdirSync(parent!.path, { recursive: true });
-  const staging = mkdtempSync(join(parent!.path, ".branch-package-"));
+  // Stage beside branch-tools: creating a child inside it would change its
+  // directory nlink on Linux and invalidate the captured target identity.
+  // Candidate/lib creation and stale-file cleanup stay outside that snapshot.
+  const staging = mkdtempSync(join(fs.root, ".branch-package-"));
   const candidate = join(staging, "candidate");
   const backup = join(staging, "previous");
   let backedUp = false;
