@@ -916,6 +916,9 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "server-intake-dxf-envelope": [
+      "main-broke"
+    ],
     "server-integration-turn-grant-capture": [
       "hard-harm-sentinel",
       "proposal"
@@ -1063,7 +1066,13 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "server-w4g7b-01s": [
+      "main-broke"
+    ],
     "server-w4g7b-02s": [
+      "main-broke"
+    ],
+    "server-w4g7b-06i": [
       "main-broke"
     ],
     "studio-walk-regressions": [
@@ -1319,6 +1328,7 @@
     "server-entity-scope-transport",
     "server-grant-admin-authority",
     "server-guest-session-auth",
+    "server-intake-dxf-envelope",
     "server-integration-turn-grant-capture",
     "server-integration-turn-grant-lifecycle",
     "server-integration-turn-grants",
@@ -1363,7 +1373,9 @@
     "server-w1c-solve-proposal",
     "server-w2-panel-group-delete",
     "server-w2-string-delete",
+    "server-w4g7b-01s",
     "server-w4g7b-02s",
+    "server-w4g7b-06i",
     "studio-walk-regressions",
     "web-app-wiring",
     "web-author-quota-gate",
