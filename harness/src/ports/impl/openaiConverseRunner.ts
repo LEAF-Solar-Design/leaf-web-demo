@@ -22,6 +22,25 @@ const MAX_SSE_STREAM_BYTES = 32 * 1024 * 1024;
 // once: nothing was yielded yet, and a self-hosted server keeps the prefix it already prefilled.
 const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504, 524]);
 const GATEWAY_RETRIES = 1;
+// A transport failure before any response byte (reset, closed socket, tunnel hiccup) is retried
+// once on the same deadline: nothing was yielded yet, and the server's prefix cache makes the
+// retry cheap. Measured Nov 20 2026: a 43 s prefill behind a tunnel lost its connection at 34 s
+// while the server completed the request.
+const NETWORK_RETRIES = 1;
+
+/**
+ * A value-free description of a transport error for the operator log: error name, the undici
+ * cause code and name, and elapsed time. Never the request body, headers or key; any occurrence
+ * of the key in a message is masked.
+ */
+export function describeNetworkError(error: unknown, elapsedMs: number, apiKey: string): string {
+  const err = error as { name?: unknown; message?: unknown; cause?: { code?: unknown; name?: unknown; message?: unknown } };
+  const pick = (value: unknown) => typeof value === "string" ? value.slice(0, 160) : "";
+  const parts = [pick(err?.name), pick(err?.cause?.code), pick(err?.cause?.name), pick(err?.cause?.message)]
+    .filter(Boolean).join(" ");
+  const masked = apiKey ? parts.split(apiKey).join("[redacted]") : parts;
+  return `${masked || "unknown"} after ${Math.round(elapsedMs)} ms`;
+}
 
 // LEAF_OPENAI_TURN_TIMEOUT_S sets the OpenAI runner's turn deadline and, through it, the
 // per-request deadline. Unset keeps both defaults exactly. Fails closed on anything but an
@@ -241,6 +260,7 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
         const signal = options.abortController
           ? AbortSignal.any([deadline, options.abortController.signal]) : deadline;
         let response: Response;
+        const requestStart = Date.now();
         for (let attempt = 0; ; attempt++) {
           try {
             response = await (opts.fetchImpl ?? fetch)(endpoint, {
@@ -254,7 +274,10 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
                 include: ["reasoning.encrypted_content"], stream: true,
               }),
             });
-          } catch {
+          } catch (error) {
+            console.error(`[openai] request transport failure (attempt ${attempt + 1}, aborted=${signal.aborted}): `
+              + describeNetworkError(error, Date.now() - requestStart, opts.apiKey));
+            if (attempt < NETWORK_RETRIES && !signal.aborted) continue;
             throw new Error("OpenAI request failed (network)");
           }
           if (attempt < GATEWAY_RETRIES && RETRYABLE_GATEWAY_STATUSES.has(response.status) && !signal.aborted) {
@@ -306,6 +329,8 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
           }
           if (!outcome.ok) {
             const error = outcome.error;
+            console.error(`[openai] response stream failure (aborted=${signal.aborted}): `
+              + describeNetworkError(error, Date.now() - requestStart, opts.apiKey));
             if (!signal.aborted && error instanceof Error && error.message === "OpenAI request failed (stream)") {
               throw error;
             }

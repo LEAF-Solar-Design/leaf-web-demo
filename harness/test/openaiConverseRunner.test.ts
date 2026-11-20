@@ -269,6 +269,30 @@ describe("OpenAI streaming", () => {
     await expect(collect(other.sdk.query({ prompt: "Hi", options: {} }))).rejects.toThrow("(500)");
     expect(other.fetchImpl).toHaveBeenCalledTimes(1);
   });
+
+  it("retries one transport failure before any output, logs its cause without the key, never two", async () => {
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => { logged.push(String(line)); });
+    try {
+      const reset = Object.assign(new TypeError("fetch failed"),
+        { cause: Object.assign(new Error(`other side closed ${apiKey}`), { code: "UND_ERR_SOCKET", name: "SocketError" }) });
+      const ok = setup(reply(answer));
+      ok.fetchImpl.mockRejectedValueOnce(reset);
+      expect((await collect(ok.sdk.query({ prompt: "Hi", options: {} }))).at(-1))
+        .toMatchObject({ type: "result", subtype: "success", num_turns: 1 });
+      expect(ok.fetchImpl).toHaveBeenCalledTimes(2);
+      expect(logged.join(" | ")).toContain("UND_ERR_SOCKET SocketError");
+      expect(logged.join(" | ")).not.toContain(apiKey);
+
+      const bad = setup();
+      bad.fetchImpl.mockRejectedValueOnce(reset).mockRejectedValueOnce(reset);
+      await expect(collect(bad.sdk.query({ prompt: "Hi", options: {} })))
+        .rejects.toThrow(/^OpenAI request failed \(network\)$/);
+      expect(bad.fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("fake streaming server", () => {
