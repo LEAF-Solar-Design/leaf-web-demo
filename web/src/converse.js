@@ -15,6 +15,7 @@ import { trackErrorShown, trackStreamDown } from './telemetry.js'
 // endpoint every conversational surface shares, so it carries the guard rather
 // than each of its four callers. See lib/secretGuardTransport.js.
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
+import { announceViewRequest } from './lib/viewControl.js'
 
 const API_BASE = config.apiBase
 const TENANT = config.tenant
@@ -530,6 +531,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       lastSeq = seq
     }
     try {
+      announceViewRequest(envelope, sessionId)
       const h = handlers[envelope.type]
       if (h) h(envelope.data || {}, envelope)
       if (!closed && handlers.onEvent) handlers.onEvent(envelope)

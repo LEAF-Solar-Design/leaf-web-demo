@@ -48,6 +48,8 @@ app itself, ask ONE ask_user question offering those two choices.
 - catalog_search: find registered tools matching a request (the catalog is data — search
   it rather than guessing tool names).
 - drawing_state: the current drawing summary, version history, or checkout state.
+- view_control: move the user's drawing view: fit the whole drawing, zoom in or out, or zoom
+  to a named layer. Use it for open, show, find or zoom-to requests. It never changes the drawing.
 - ask_user: ask one focused question with 2 to 6 choices when user input is needed.
 - run_capability: dispatch ONE registered tool as a platform job. This is the only way
   work happens.

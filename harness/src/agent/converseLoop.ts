@@ -17,7 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
-import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
+import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ViewControlInput, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
 import {
   DEVICE_TOOL_GUIDANCE, DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS,
   DeviceToolResponse, deviceToolError, isDeviceTool,
@@ -759,6 +759,7 @@ export class ConverseLoop {
         case "integration_save_element":
           throw new IntegrationClientError("unavailable");
         case "catalog_search":
+        case "view_control":
           return { action: "read_platform_state", args: { what: "capabilities" } };
         case "drawing_state":
           return { action: "read_platform_state", args: { what: String(args.what ?? "summary") } };
@@ -1025,6 +1026,7 @@ export class ConverseLoop {
       let result: SpineToolResult;
       let pageProposalResult: Record<string, unknown> | undefined;
       let authoredViewResult: Record<string, unknown> | undefined;
+      let viewRequest: ({ contract: "leaf.view-request.v1" } & ViewControlInput) | undefined;
       try {
         if (tool === "propose_project_photo_assignments") {
           args = ProjectPhotoAssignmentRequest.parse(args);
@@ -1188,6 +1190,15 @@ export class ConverseLoop {
           result = deviceResult;
         } else if (hosted) {
           result = ok(JSON.stringify(hosted.result));
+        } else if (tool === "view_control") {
+          const parsed = ViewControlInput.safeParse(args);
+          if (parsed.success) {
+            const { op, layer } = parsed.data;
+            viewRequest = { contract: "leaf.view-request.v1", op, ...(layer ? { layer } : {}) };
+            result = ok(JSON.stringify({ ...viewRequest, applied_by: "client" }));
+          } else {
+            result = err("View control unavailable.");
+          }
         } else if (tool === "propose_project_photo_assignments") {
           const body = ProjectPhotoAssignmentRequest.parse(args);
           const value = await appRun.proposeProjectPhotoAssignments!(tenantId, instant.authoritySessionId!, ProjectPhotoAssignmentRequest.parse(body),
@@ -1253,6 +1264,7 @@ export class ConverseLoop {
         ...(tool === "inspect_project_photo" || tool === "propose_project_photo_assignments"
           ? { photo_reconciliation: photoInspection.reconciliation(proposedPhotoIds) } : {}),
         ...(publicationResult ? { result: publicationResult } : {}),
+        ...(tool === "view_control" && !result.isError && viewRequest ? { result: viewRequest } : {}),
         ...(tool === "run_capability" && !result.isError && authoredViewResult
           ? { result: authoredViewResult } : {}),
         ...((tool === "propose_project_page" || tool === "propose_project_photo_assignments") && !result.isError && pageProposalResult
@@ -1266,7 +1278,7 @@ export class ConverseLoop {
 
   /** Gate said allow — perform the tool's read/dispatch behavior. */
   private async dispatchAllowed(
-    tool: SpineToolName,
+    tool: Exclude<SpineToolName, "view_control">,
     args: Record<string, unknown>,
     ctx: {
       session: SessionRecord;
@@ -1957,6 +1969,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `job_id=${String(args.job_id ?? "?")}`;
     case "author_stage_status":
       return "read author stage status";
+    case "view_control":
+      return `op=${String(args.op ?? "?")}${args.layer ? ` layer=${String(args.layer).slice(0, 40)}` : ""}`;
     case "author_tool":
       return `mode=${String(args.mode ?? "build")}`;
     case "request_publication":

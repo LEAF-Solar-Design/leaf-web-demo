@@ -19,6 +19,7 @@ import ObjectSnapMenu, { SNAP_LIMITED_SENTENCE } from '../cadedit/ObjectSnapMenu
 import { ALL_SNAP_MODES, DEFAULT_SNAP_MODES, isSnapModeMask } from '../cadedit/snapModes.js'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
+import { findLayerName, VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import { humanizeError } from '../errorHumanize.js'
 
 const ZOOM_IN = 1.25
@@ -189,6 +190,37 @@ export function useViewNavigation({
     viewer?.setView?.('home')
     announce('Showing the whole drawing')
   }, [announce, jump, pushView, syncScope, viewerRef])
+
+  useEffect(() => {
+    const moveView = ({ detail }) => {
+      const viewer = viewerRef.current
+      switch (detail?.op) {
+        case 'fit':
+          fit()
+          announce('Showing the whole drawing')
+          break
+        case 'zoom_in':
+        case 'zoom_out':
+          zoomViewer(viewer, detail.op === 'zoom_in' ? ZOOM_IN : ZOOM_OUT)
+          break
+        case 'zoom_to_layer': {
+          const intake = latest.current.intake
+          const name = findLayerName(intake?.layers, detail.layer)
+          if (name === null) {
+            announce(`No layer named ${detail.layer} in this drawing`)
+            break
+          }
+          pushView()
+          const bounds = layerBounds(intake, name)
+          announce(bounds && viewer?.frame?.(bounds, UP_LAYER_SHARE) === true
+            ? `Showing layer ${name}` : 'That layer has nothing to show')
+          break
+        }
+      }
+    }
+    window.addEventListener(VIEW_CONTROL_EVENT, moveView)
+    return () => window.removeEventListener(VIEW_CONTROL_EVENT, moveView)
+  }, [announce, fit, pushView, viewerRef])
 
   return { pushView, fit, back, up, jump, syncScope, announcement }
 }
