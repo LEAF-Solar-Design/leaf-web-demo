@@ -189,7 +189,7 @@ const TOOL_DESCRIPTIONS: Record<SpineToolName, string> = {
     "Dispatch ONE registered catalog tool as a platform job. Args {tool, params?, dwg?}. Read tools may return their result inline; write tools return a proposal requiring user approval (re-invoke with confirmation_id after approval).",
   job_status: "Check a previously dispatched job. Args {job_id}.",
   author_tool:
-    "Request creation of a new tool when nothing in the catalog fits. Args {description, mode?, confirmation_id?}. Re-invoke with the gate-issued confirmation_id after approval.",
+    'Request creation of a new tool when nothing in the catalog fits. Args {description, mode?, target?, confirmation_id?}. Choose target: "branch" when the user asks for a tool or command that runs inside AutoCAD (an AutoCAD or Branch plugin tool, for example counting or labelling panels in the open drawing as a command); otherwise omit it or use "studio". Re-invoke with the gate-issued confirmation_id after approval.',
   request_publication:
     "Request or resume publication of a durable staged change. Args {change_set_id}. This does not grant approval and never accepts a receipt or confirmation.",
   propose_overlay:
@@ -305,6 +305,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
       author_tool: {
         description: z.string(),
         mode: z.enum(["build", "one_off"]).optional(),
+        target: z.enum(["studio", "branch"]).optional(),
         target_tool_name: z.string().optional(),
         confirmation_id: z.string().optional(),
       },
