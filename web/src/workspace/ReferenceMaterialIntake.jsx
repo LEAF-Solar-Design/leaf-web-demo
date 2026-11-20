@@ -270,7 +270,8 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       document.removeEventListener('focusin', moved)
       document.removeEventListener('pointerdown', moved)
       arloRunning.current = false
-      if (current()) setArlo(previous => ({ ...previous, running: false }))
+      if (current()) setArlo(previous => ({ ...previous, running: false,
+        detail: previous?.running ? '' : previous?.detail }))
     }
   }
   const failed = queue.filter(item => item.state === 'failed').length
