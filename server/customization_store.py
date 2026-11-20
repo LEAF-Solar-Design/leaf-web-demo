@@ -220,6 +220,9 @@ class CustomizationRepository:
     def publish(self, **kwargs: object) -> EffectiveCatalog:
         raise NotImplementedError
 
+    def publish_branch(self, **kwargs: object) -> ChangeSet:
+        raise NotImplementedError
+
 
 class SQLiteCustomizationStore(CustomizationRepository):
     def __init__(self, database_path: str | Path) -> None:
@@ -978,6 +981,23 @@ class SQLiteCustomizationStore(CustomizationRepository):
                  published.workspace_contract_digest),
             )
             return self._effective_catalog(conn, tenant_id)
+
+    def publish_branch(
+        self, *, tenant_id: str, change_set_id: str, expected_version: int,
+        idempotency_key: str, approver_subject: str,
+    ) -> ChangeSet:
+        """Finish a dev publication without changing the effective catalog."""
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if row.tool_target != "branch":
+                raise ChangeSetConflictError("branch publication requires a branch change set")
+            if (not row.staged_commit or not row.catalog_digest
+                    or not approver_subject or row.approver_subject != approver_subject):
+                raise ChangeSetConflictError("branch publication requires its prepared approval")
+            return self._transition_row(
+                conn, row, ChangeState.PUBLISHED, expected_version, idempotency_key,
+                expected_state=ChangeState.PUBLISHING, approver_subject=approver_subject,
+            )
 
     def get_effective_catalog(self, *, tenant_id: str) -> EffectiveCatalog:
         self.initialize()
