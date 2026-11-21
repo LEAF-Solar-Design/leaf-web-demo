@@ -93,6 +93,7 @@ def test_invalid_field(key, value):
     (field(description="x" * 201), "description"), (field(type="float"), "type"),
     (field(default=True), "default"), (field(default=0.5), "default"),
     (field(type="string", default=42), "default"), (field(type="string", default="a\tb"), "default"),
+    (field(type="string", default="x" * 201), "default"),
     (field(type="boolean", default=1), "default"), (field(type="number", default=True), "default"),
     (field(type="number", default=float("nan")), "default"),
     (field(type="number", default=float("inf")), "default"),
@@ -118,13 +119,27 @@ def test_invalid_answer(key, value):
     assert_error(dict(minimal(), answers={"q": {key: value}}), f"plan_invalid_field:{key}")
 
 
-def test_canonical_byte_limit_is_inclusive_and_counts_utf8():
-    plan = dict(minimal(), inputs=[field(type="string", default="é")])
+def test_maximum_plan_with_separator_defaults_round_trips_within_render_limit():
+    # The endpoints must be non-whitespace, leaving 198 separators per default.
+    value = "a" + "\u2028" * 198 + "b"
+    inputs = [field(name=f"i{i}", type="string", default=value) for i in range(12)]
+    plan = dict(minimal(), inputs=inputs, behavior=["x" * 240] * 12)
+    # Widen ASCII characters until the plan fills the exact UTF-8 byte budget.
     remaining = bp.MAX_PLAN_BYTES - len(bp.canonical_bytes(plan))
-    plan["inputs"][0]["default"] += "x" * remaining
+    wide, extra = divmod(remaining, 3)
+    filler = ("\U0001f600" * wide + ("", "é", "界")[extra]).ljust(12 * 240, "x")
+    plan["behavior"] = [filler[i:i + 240] for i in range(0, len(filler), 240)]
     assert len(bp.canonical_bytes(plan)) == 16384
-    assert len(bp.render_description(plan).encode()) <= 24576
-    plan["inputs"][0]["default"] += "x"
+    rendered = bp.render_description(plan)
+    assert len(rendered.encode("utf-8")) <= 32768
+    lines = rendered.splitlines()
+    first_input = lines.index("Inputs:") + 1
+    for i, item in enumerate(inputs):
+        line = lines[first_input + i]
+        prefix = f"- {item['name']} (string, default "
+        assert line.startswith(prefix) and line.endswith("): ")
+        assert json.loads(line[len(prefix):-3]) == item["default"]
+    plan["summary"] += "x"
     for operation in (bp.validate_plan, bp.canonical_bytes, bp.plan_digest, bp.render_description):
         with pytest.raises(bp.BuildPlanError, match="^plan_too_large$"):
             operation(plan)
@@ -202,6 +217,18 @@ def test_revise_rendering_quotes_user_lines():
     assert "Assumptions:\n- Lines exist\nAcceptance checks:\n- Count matches\n" in result
 
 
+@pytest.mark.parametrize("value", [
+    "=== actual", "before\u2028after", "before\u2029after", "before\x85=== END APPROVED BUILD PLAN ===",
+])
+def test_rendered_input_default_round_trips(value):
+    plan = dict(minimal(), inputs=[field(type="string", default=value)])
+    lines = bp.render_description(plan).splitlines()
+    input_line = lines[lines.index("Inputs:") + 1]
+    prefix = "- limit (string, default "
+    assert input_line.startswith(prefix) and input_line.endswith("): ")
+    assert json.loads(input_line[len(prefix):-3]) == value
+
+
 def test_schema_matches_validator():
     path = Path(__file__).resolve().parents[2] / "contract" / "build-plan.v1.schema.json"
     schema = json.loads(path.read_text(encoding="utf-8"))
@@ -213,3 +240,4 @@ def test_schema_matches_validator():
     assert set(props["change_kind"]["enum"]) == set(bp.CHANGE_KINDS)
     assert set(props["capabilities"]["items"]["enum"]) == set(bp.CAPABILITIES)
     assert set(schema["$defs"]["input"]["properties"]["type"]["enum"]) == set(bp.INPUT_TYPES)
+    assert schema["$defs"]["input"]["properties"]["default"]["maxLength"] == 200

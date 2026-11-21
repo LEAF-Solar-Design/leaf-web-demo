@@ -74,9 +74,7 @@ def _inputs(value):
         if default is None:
             continue
         if kind == "string":
-            if isinstance(default, str) and len(default) > MAX_PLAN_BYTES:
-                raise BuildPlanError("plan_too_large")
-            _text(default, "default", 0, MAX_PLAN_BYTES)
+            _text(default, "default", 0, 200)
         elif kind == "boolean":
             _require(type(default) is bool, "default")
         elif type(default) is int:
@@ -177,8 +175,8 @@ def render_description(plan: dict) -> str:
     lines.extend(f"{i}. {_quote(item)}" for i, item in enumerate(plan["behavior"], 1))
     lines.append("Inputs:")
     for item in plan["inputs"]:
-        value = item["default"]
-        default = _json(_quote(value) if isinstance(value, str) else value)
+        default = _json(item["default"]).replace("\u2028", r"\u2028").replace("\u2029", r"\u2029")
+        default = default.replace("\x85=== ", r"\u0085=== ")
         lines.append(f"- {item['name']} ({item['type']}, default {default}): {_quote(item['description'])}")
     if not plan["inputs"]:
         lines.append("- none")
@@ -198,5 +196,5 @@ def render_description(plan: dict) -> str:
         lines.append("- none")
     lines.append("=== END APPROVED BUILD PLAN ===")
     result = "\n".join(lines) + "\n"
-    assert len(result.encode("utf-8")) <= 24576
+    assert len(result.encode("utf-8")) <= 32768
     return result

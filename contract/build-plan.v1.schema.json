@@ -47,7 +47,7 @@
       "properties": {
         "name": {"$ref": "#/$defs/text", "pattern": "^[a-z][a-z0-9_]{0,39}$"},
         "type": {"enum": ["string", "integer", "boolean", "number"]},
-        "default": {"type": ["string", "number", "boolean", "null"]},
+        "default": {"type": ["string", "number", "boolean", "null"], "maxLength": 200},
         "description": {"$ref": "#/$defs/text", "maxLength": 200}
       },
       "allOf": [

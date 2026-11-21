@@ -30,7 +30,7 @@ User answers:
 === END APPROVED BUILD PLAN ===
 ```
 
-Number behavior items starting at 1. Repeat each list row for each item. Render empty sections as `- none` and sort answers by key. Prefix delimiter text `=== ` at the start of a user line with `> `. The description has a 24,576-byte UTF-8 limit.
+Number behavior items starting at 1. Repeat each list row for each item. Render empty sections as `- none` and sort answers by key. Prefix delimiter text `=== ` at the start of a user line with `> `. String defaults allow up to 200 characters. Render each default as its original JSON value, escaping U+2028 and U+2029 in the JSON text. The description has a 32,768-byte UTF-8 limit.
 
 ## Tenant rollout
 
