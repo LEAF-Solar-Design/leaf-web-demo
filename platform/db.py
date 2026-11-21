@@ -778,6 +778,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "tenant_id", "change_set_id", "confirmation_id", "status",
             "reason_code", "created_at", "updated_at",
         },
+        "customization_review_decisions": {
+            "tenant_id", "change_set_id", "staged_commit", "catalog_digest",
+            "decision", "approval_kind", "approver_subject", "approver_role",
+            "comment", "confirmation_id", "decided_at",
+        },
         "customization_deployment_snapshots": {
             "snapshot_id", "payload_json", "effective_catalog_digest",
             "platform_release", "idempotency_key", "created_at",
