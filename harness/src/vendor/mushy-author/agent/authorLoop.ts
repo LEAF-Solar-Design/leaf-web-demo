@@ -87,9 +87,17 @@ export interface BranchStageMetadata {
   package_files: string[];
 }
 
+interface BranchCompileAttempt {
+  n: number;
+  decision: BranchCompileFeedback["summary"]["decision"];
+  errors: number;
+  diagnostics: Pick<BranchCompileFeedback["diagnostics"][number], "code" | "file" | "line">[];
+}
+
 export interface StageCustomizationResponse extends Partial<AuthorResponse> {
   receipt: StagedCustomizationReceipt & Partial<BranchStageMetadata>;
   branch_package?: BranchManifest;
+  compile_attempts?: BranchCompileAttempt[];
 }
 
 export interface StageRemovalRequest extends StageCustomizationRequest {
@@ -196,7 +204,7 @@ export class AuthorLoopError extends Error {
     readonly status: number,
     readonly diagnostics?: string[],
     readonly reason?: Readonly<Record<string, string | number>>,
-    readonly compile?: BranchCompileFeedback,
+    readonly compile?: BranchCompileFeedback | (Partial<BranchCompileFeedback> & { compile_attempts: BranchCompileAttempt[] }),
   ) {
     super(message);
     this.name = "AuthorLoopError";
@@ -527,6 +535,7 @@ export class AuthorLoop {
   private async authorBranchInRepo(
     tenantId: string, description: string, repoDir: string,
     request: StageCustomizationRequest, scrub: ScrubState,
+    compileAttempts: BranchCompileAttempt[],
     revision?: { packagePath: string; version: string },
   ): Promise<{ submission: BranchSubmissionResult; run: BranchAuthorResult }> {
     const lease = this.ports.oauth.acquireGrant && this.ports.oauth.settleGrant
@@ -554,6 +563,14 @@ export class AuthorLoop {
             // Keep the checked proposal stable across the asynchronous compiler call.
             proposal = snapshotUntrusted(proposal);
             const outcome = await branchCompileCheck(manifest.name, files);
+            if (compileAttempts.length < 8) {
+              const locations = outcome.status === "refused" ? outcome.structured : [];
+              compileAttempts.push({
+                n: compileAttempts.length + 1, decision: outcome.summary.decision, errors: outcome.summary.errors,
+                diagnostics: locations.filter(d => d.file.length > 0 && d.file.length <= 120)
+                  .slice(0, 10).map(({ code, file, line }) => ({ code, file, line })),
+              });
+            }
             console.error(`[harness] branch compile check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} tenant=${tenantId}`);
             const path = `branch-tools/${manifest.name}/main.csx`;
             if (outcome.status === "unavailable") {
@@ -1353,6 +1370,7 @@ export class AuthorLoop {
       }
       const change = await runFenced(() =>
         changes.createOrResume(request.changeSetId, request.expectedBaseSha));
+      const compileAttempts: BranchCompileAttempt[] = [];
       try {
         if (change.stagedSha !== null) {
           if (request.target !== "branch" && this.branchGit(change.dir, [
@@ -1413,7 +1431,7 @@ export class AuthorLoop {
             ? await runFenced(() => this.prepareBranchRevision(change.dir, name, request.revisionBaseCommit))
             : undefined;
           const { submission, run } = await this.authorBranchInRepo(
-            tenantId, description, change.dir, request, scrub, revision,
+            tenantId, description, change.dir, request, scrub, compileAttempts, revision,
           );
           const { stagedCommit, catalogDigest, metadata } = await runFenced(() => {
             this.verifyBranchSubmission(change.dir, submission);
@@ -1451,6 +1469,7 @@ export class AuthorLoop {
           });
           return {
             receipt, branch_package: submission.manifest,
+            ...(compileAttempts.length ? { compile_attempts: compileAttempts } : {}),
             code: submission.contents["main.csx"], preview: run.preview,
             ...(run.telemetry ? { telemetry: run.telemetry } : {}),
           };
@@ -1503,6 +1522,13 @@ export class AuthorLoop {
           receipt,
           ...(run.telemetry ? { telemetry: run.telemetry } : {}),
         };
+      } catch (error) {
+        if (error instanceof AuthorLoopError && error.status === 422 && compileAttempts.length) {
+          throw new AuthorLoopError(error.message, error.status, error.diagnostics, error.reason, {
+            ...error.compile, compile_attempts: compileAttempts,
+          });
+        }
+        throw error;
       } finally {
         await runFenced(() => changes.cleanupWorktree(change));
       }

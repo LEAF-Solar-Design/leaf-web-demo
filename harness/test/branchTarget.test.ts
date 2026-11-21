@@ -526,6 +526,13 @@ describe("Branch submit compile gate", () => {
     ],
   };
   const reason = { code: "branch_author_package_refused", rule: "V18", turns: 1, submit_calls: 1 };
+  const refusedAttempt = {
+    n: 1, decision: "compile_failed", errors: 2,
+    diagnostics: [
+      { code: "CS0117", file: "main.csx", line: 2 },
+      { code: "scan", file: "lib/a.csx", line: 4 },
+    ],
+  };
 
   it("returns the diagnostics and entity hint, then stages the corrected proposal", async () => {
     const good = fixture("good-label-writer");
@@ -533,8 +540,18 @@ describe("Branch submit compile gate", () => {
     setBranchCompileCheckForTests(async (_name, files) => files["main.csx"] === broken.main_csx ? refusal : {
       status: "accept", ms: 3, allowlistSha256: ALLOWLIST_SHA, summary: { pass: true, decision: "accept", errors: 0 },
     });
-    const { sdk, base, bare, loop } = await setup([broken, good]);
-    const { receipt } = await loop.stage(TENANT, "write label", request(base));
+    const { sdk, base, bare, loop, ports } = await setup([broken, good]);
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    vi.spyOn(harness.loop, "stage").mockImplementation(loop.stage.bind(loop));
+    const server = harness.listen(0);
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/author/stage`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenant_id: TENANT, description: "write label", ...request(base) }),
+    });
+    expect(response.status).toBe(200);
+    const { receipt, compile_attempts } = await response.json() as Awaited<ReturnType<typeof loop.stage>>;
+    expect(compile_attempts).toEqual([refusedAttempt, { n: 2, decision: "accept", errors: 0, diagnostics: [] }]);
     expect(sdk.replies[0].isError).toBe(true);
     expect(sdk.replies[0].content[0].text).toBe("V18: branch-tools/label-writer/main.csx: compile failed: " +
       refusal.diagnostics.join("; ") + " (source contains HTML entities; write C# operators such as && < > literally)");
@@ -574,7 +591,9 @@ describe("Branch submit compile gate", () => {
       message: "branch author session ended without a validated package: last submission refused by V18",
       diagnostics: [],
       reason: { ...reason, submit_calls: 2 },
-      compile: { summary: refusal.summary, diagnostics: refusal.structured },
+      compile: { summary: refusal.summary, diagnostics: refusal.structured, compile_attempts: [
+        { n: 1, decision: "unavailable", errors: 0, diagnostics: [] }, { ...refusedAttempt, n: 2 },
+      ] },
     } });
   });
 });
@@ -619,7 +638,9 @@ describe("POST /author/stage target routing", () => {
       tenant_id: TENANT, description: "count entities", ...request(base), target: "studio", toolName,
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ tool: { name: toolName } });
+    const body = await response.json();
+    expect(body).toMatchObject({ tool: { name: toolName } });
+    expect(body).not.toHaveProperty("compile_attempts");
     expect(studioRun).toHaveBeenCalledOnce();
   });
 

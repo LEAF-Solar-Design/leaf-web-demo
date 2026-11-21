@@ -97,6 +97,7 @@ class ChangeSet:
     plan_json: Optional[str] = None
     plan_digest: Optional[str] = None
     plan_confirmation_id: Optional[str] = None
+    compile_summary_json: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -858,6 +858,7 @@
     "server-branch-dev-publish",
     "server-customization-branch-target",
     "server-customization-inline-review",
+    "server-customization-stage-status-inline",
     "server-customization-tool-target-store",
     "server-build-plan",
     "server-inline-authoring-flags"

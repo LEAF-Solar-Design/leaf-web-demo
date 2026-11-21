@@ -183,6 +183,36 @@ def _stage_request_fingerprint(description: str, target: str | None = None) -> s
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _valid_compile_attempts(attempts: Any) -> bool:
+    def integer(value: Any, low: int, high: int) -> bool:
+        return type(value) is int and low <= value <= high
+
+    if not isinstance(attempts, list) or len(attempts) > 8:
+        return False
+    previous = 0
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.keys() != {"n", "decision", "errors", "diagnostics"}:
+            return False
+        if (not integer(attempt["n"], previous + 1, 8)
+                or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
+                or not integer(attempt["errors"], 0, 10000)):
+            return False
+        previous = attempt["n"]
+        diagnostics = attempt["diagnostics"]
+        if not isinstance(diagnostics, list) or len(diagnostics) > 10:
+            return False
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict) or diagnostic.keys() != {"code", "file", "line"}:
+                return False
+            if (not isinstance(diagnostic["code"], str)
+                    or not re.fullmatch(r"CS[0-9]{4}|scan|unparsed", diagnostic["code"])
+                    or not isinstance(diagnostic["file"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9_./-]{1,120}", diagnostic["file"])
+                    or not integer(diagnostic["line"], 0, 1000000)):
+                return False
+    return True
+
+
 _SCHEMA_IDENTITY_MAX_DEPTH = 128
 _UNCLASSIFIABLE = object()
 
@@ -1849,11 +1879,31 @@ class CustomizationService:
         }
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
+        if change.plan_json and change.plan_digest:
+            plan = json.loads(change.plan_json)
+            result["plan"] = {key: plan[key] for key in ("title", "tool_name", "target", "change_kind")}
+            result["plan"]["digest"] = change.plan_digest
+        if status in ("staged", "failed") and change.compile_summary_json is not None:
+            result["compile"] = {"attempts": json.loads(change.compile_summary_json)}
         if change.tool_target == "branch":
             result["target"] = "branch"
             if change.target_tool_name:
                 result["package_path"] = f"branch-tools/{change.target_tool_name}"
         if status == "staged":
+            key = {"tenant_id": change.tenant_id, "change_set_id": change.change_set_id}
+            review = self.store.get_review_decision(**key, staged_commit=change.staged_commit)
+            if review is not None:
+                result["review"] = {field: review[field] for field in (
+                    "decision", "approval_kind", "approver_role", "decided_at",
+                )}
+            if change.state is ChangeState.PUBLISHED:
+                result["publication"] = {"state": "published", "published_at": change.updated_at}
+            elif change.state in (ChangeState.PUBLISHING, ChangeState.SUPERSEDED, ChangeState.ROLLED_BACK):
+                result["publication"] = {"state": change.state.value}
+            else:
+                publication = self.store.get_publication_request(**key)
+                if publication is not None:
+                    result["publication"] = {"state": publication["status"]}
             receipt = self._raw_receipt(change)
             result["receipt"] = receipt
             if change.tool_target == "branch":
@@ -2078,6 +2128,10 @@ class CustomizationService:
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
                 error.harness_reason = reason
+                if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
+                    refusal = response.json().get("error")
+                    if isinstance(refusal, dict):
+                        self._record_compile_attempts(change, refusal.get("compile"), staged_commit=None)
                 raise error from exc
             raise CustomizationServiceError(
                 "customization_harness_unavailable", 503,
@@ -2088,7 +2142,23 @@ class CustomizationService:
                 "invalid_staged_receipt", 502,
                 diagnostic_code="staged_receipt_not_a_mapping",
             )
+        if getattr(change, "tool_target", None) == "branch" and "compile_attempts" in body:
+            receipt = body.get("receipt")
+            if isinstance(receipt, Mapping):
+                staged_commit = self._validate_receipt(receipt, change)["staged_commit"]
+                self._record_compile_attempts(change, body, staged_commit=staged_commit)
         return body
+
+    def _record_compile_attempts(
+        self, change: ChangeSet, body: Any, *, staged_commit: str | None,
+    ) -> None:
+        if not isinstance(body, Mapping) or "compile_attempts" not in body:
+            return
+        attempts = body["compile_attempts"]
+        if not _valid_compile_attempts(attempts):
+            _LOG.warning("invalid_compile_attempts")
+            return
+        self.store.record_compile_summary(change, json.dumps(attempts), staged_commit=staged_commit)
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
         fields = {"contract", "tenant_id", "change_set_id", "state", "base_commit", "staged_commit", "catalog_digest", "platform_release", "workspace_contract_digest", "idempotency_key"}

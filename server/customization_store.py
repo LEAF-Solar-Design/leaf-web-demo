@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   plan_json TEXT,
   plan_digest TEXT,
   plan_confirmation_id TEXT,
+  compile_summary_json TEXT,
   request_description TEXT,
   request_fingerprint TEXT,
   authority_session_id TEXT,
@@ -380,6 +381,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             "plan_json": "TEXT",
             "plan_digest": "TEXT",
             "plan_confirmation_id": "TEXT",
+            "compile_summary_json": "TEXT",
             "request_fingerprint": "TEXT",
             "authority_session_id": "TEXT",
             "authority_turn_id": "TEXT",
@@ -697,6 +699,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "UPDATE customization_change_sets SET stage_lease_owner = ?, "
                 "stage_lease_expires_at = ?, stage_heartbeat_at = ?, "
                 "stage_attempt = stage_attempt + 1, stage_phase = 'authoring', "
+                "compile_summary_json = NULL, "
                 "stage_error_code = NULL, stage_error_message = NULL, "
                 "stage_error_retryable = ?, "
                 "stage_started_at = COALESCE(stage_started_at, "
@@ -770,6 +773,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             updated = conn.execute(
                 "UPDATE customization_change_sets SET state = ?, version = version + 1, "
                 "authority_session_id = ?, authority_turn_id = ?, stage_phase = 'queued', "
+                "compile_summary_json = NULL, "
                 "stage_next_attempt_at = 0, stage_error_code = NULL, stage_error_message = NULL, "
                 "stage_error_retryable = ?, stage_finished_at = NULL, "
                 "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
@@ -801,6 +805,21 @@ class SQLiteCustomizationStore(CustomizationRepository):
                  ChangeState.STAGING.value, owner, now_ms),
             )
             return result.rowcount == 1
+
+    def record_compile_summary(
+        self, change: ChangeSet, summary_json: str, *, staged_commit: str | None,
+    ) -> None:
+        # The successful harness callback may have already staged this commit
+        # and released the lease before the HTTP response carries its history.
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE customization_change_sets SET compile_summary_json = ? "
+                "WHERE tenant_id = ? AND change_set_id = ? AND tool_target = 'branch' "
+                "AND stage_attempt = ? AND compile_summary_json IS NULL "
+                "AND ((state = 'staging' AND version = ?) OR staged_commit = ?)",
+                (summary_json, change.tenant_id, change.change_set_id,
+                 change.stage_attempt, change.version, staged_commit),
+            )
 
     def complete_stage_claim(
         self, *, tenant_id: str, change_set_id: str, owner: str,
@@ -1918,6 +1937,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
             tool_target=row["tool_target"] if "tool_target" in row.keys() else None,
             plan_json=row["plan_json"], plan_digest=row["plan_digest"],
             plan_confirmation_id=row["plan_confirmation_id"],
+            compile_summary_json=row["compile_summary_json"],
             request_description=row["request_description"],
             request_fingerprint=row["request_fingerprint"],
             authority_session_id=row["authority_session_id"],
