@@ -176,7 +176,7 @@ import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
-  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
+  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake, fetchInlineAuthoringFlags,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
@@ -200,7 +200,7 @@ import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.js
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
-  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+  PLAN_MODE_CONTEXT_KEY, THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -809,6 +809,74 @@ export function headerChromeFor({ studioGround, surface, grant, signedOut, grant
   const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
   const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
   return { cost: !drawing, accounts: !drawing || !linked }
+}
+
+function storedPlanMode(sessionId) {
+  if (!sessionId) return null
+  try {
+    const stored = localStorage.getItem(`leaf.planMode.${sessionId}`)
+    return stored === null ? null : stored === '1'
+  } catch { return null }
+}
+
+export function useComposerPlanMode(sessionId, live, catalogController, startAgentTurn) {
+  const [available, setAvailable] = useState(false)
+  useEffect(() => {
+    if (!live) {
+      setAvailable(false)
+      return
+    }
+    let active = true
+    // Defer the read so a StrictMode mount replay makes one tenant request.
+    Promise.resolve().then(async () => {
+      if (!active) return
+      try {
+        const flags = await fetchInlineAuthoringFlags()
+        if (active) setAvailable(flags?.plan_mode === true)
+      } catch {
+        if (active) setAvailable(false)
+      }
+    })
+    return () => { active = false }
+  }, [live])
+
+  const [choice, setChoice] = useState(() => ({ sessionId, on: storedPlanMode(sessionId) }))
+  if (choice.sessionId !== sessionId) {
+    setChoice({ sessionId, on: storedPlanMode(sessionId) })
+  }
+  const visible = live && available
+  const planMode = visible && choice.on === true
+  useEffect(() => {
+    if (!visible || !choice.sessionId || choice.on === null) return
+    try {
+      localStorage.setItem(`leaf.planMode.${choice.sessionId}`, choice.on ? '1' : '0')
+    } catch { /* Keep the choice for this conversation while mounted. */ }
+  }, [choice, visible])
+
+  useLayoutEffect(() => {
+    if (!planMode) return
+    catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: true })
+    // setContext merges patches. Clear the previous value when leaving Plan.
+    return () => catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: undefined })
+  }, [catalogController, planMode])
+  return {
+    planMode,
+    onTogglePlanMode: visible ? () => setChoice({ sessionId, on: !planMode }) : undefined,
+    startComposerTurn: !sessionId && planMode ? async (...args) => {
+      const turn = await startAgentTurn(...args)
+      const sentSessionId = turn?.session_id
+      if (sentSessionId) {
+        // An attachment alone never inherits the draft. Match the actual turn's
+        // receipt and preserve a choice made while the send was in flight.
+        setChoice(current => {
+          const attachedWithoutChoice = current.sessionId === sentSessionId && current.on === null
+          if (current !== choice && !attachedWithoutChoice) return current
+          return { sessionId: sentSessionId, on: storedPlanMode(sentSessionId) ?? true }
+        })
+      }
+      return turn
+    } : startAgentTurn,
+  }
 }
 
 export default function App() {
@@ -1681,6 +1749,9 @@ export default function App() {
       } : {}),
     },
   })
+  const { planMode, onTogglePlanMode, startComposerTurn } = useComposerPlanMode(
+    agentSessionId, !mock && !knownGuest, catalogController, startAgentTurn,
+  )
   const {
     tools,
     toolsError: toolsErr,
@@ -3046,7 +3117,7 @@ export default function App() {
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
   const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
     sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
-  catalogUiRef.current = { armDecision, startAgentTurn, running,
+  catalogUiRef.current = { armDecision, startAgentTurn: startComposerTurn, running,
     openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
@@ -5444,6 +5515,8 @@ export default function App() {
           skills={catalogSkills}
           commandActions={slashCommandActions}
           sessionId={agentSessionId}
+          planMode={planMode}
+          onTogglePlanMode={onTogglePlanMode}
           // Slice 10b/10c: the act-scope palette's action rows (the ribbon's
           // own live tools, a second time) and the drawing the versions
           // artifact index and the find-scope search are scoped to.
