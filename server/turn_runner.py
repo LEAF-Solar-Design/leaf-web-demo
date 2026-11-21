@@ -2445,7 +2445,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                         try:
                             session_store.create_approval(
                                 confirmation_id=cid, session_id=session_id, tenant_id=tenant_id,
-                                turn_id=turn_id, tool="propose_build_plan", params=None,
+                                turn_id=turn_id, tool=None, params=None,
                                 capability=None, rationale=None, kind="propose_build_plan",
                                 payload=None,
                                 ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),

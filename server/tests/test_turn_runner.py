@@ -543,7 +543,9 @@ def test_plan_proposed_creates_plan_approval_row(monkeypatch, turn_stub):
     assert approval["session_id"] == session_id
     assert approval["tenant_id"] == "tenant-plan"
     assert approval["turn_id"] == turn_id
-    assert approval["tool"] == "propose_build_plan"
+    # No tool: the confirm path treats a tool row as a drawing run and
+    # refuses it without a stored dwg.
+    assert approval["tool"] is None
     assert approval["kind"] == "propose_build_plan"
     assert approval["decided"] is False
 
