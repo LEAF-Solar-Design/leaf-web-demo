@@ -223,7 +223,9 @@ class CustomizationRepository:
     def publish_branch(self, **kwargs: object) -> ChangeSet:
         raise NotImplementedError
 
-    def list_published_branch_change_sets(self, *, tenant_id: str, limit: int = 200) -> list[ChangeSet]:
+    def list_published_branch_change_sets(
+        self, *, tenant_id: str, tool_name: Optional[str] = None, limit: int = 200,
+    ) -> list[ChangeSet]:
         raise NotImplementedError
 
 
@@ -568,16 +570,24 @@ class SQLiteCustomizationStore(CustomizationRepository):
         with self._connection() as conn:
             return self._find_change_set(conn, tenant_id, change_set_id)
 
-    def list_published_branch_change_sets(self, *, tenant_id: str, limit: int = 200) -> list[ChangeSet]:
+    def list_published_branch_change_sets(
+        self, *, tenant_id: str, tool_name: Optional[str] = None, limit: int = 200,
+    ) -> list[ChangeSet]:
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError("limit must be an integer from 1 to 500")
+        query = (
+            "SELECT * FROM customization_change_sets "
+            "WHERE tenant_id = ? AND tool_target = 'branch' AND state = ?"
+        )
+        params = [tenant_id, ChangeState.PUBLISHED.value]
+        if tool_name is not None:
+            query += " AND (target_tool_name = ? OR target_tool_name IS NULL)"
+            params.append(tool_name)
         self.initialize()
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM customization_change_sets "
-                "WHERE tenant_id = ? AND tool_target = 'branch' AND state = ? "
-                "ORDER BY updated_at DESC, change_set_id DESC LIMIT ?",
-                (tenant_id, ChangeState.PUBLISHED.value, limit),
+                query + " ORDER BY updated_at DESC, change_set_id DESC LIMIT ?",
+                (*params, limit),
             ).fetchall()
             return [self._change_set(row) for row in rows]
 

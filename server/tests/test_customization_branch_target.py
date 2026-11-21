@@ -311,6 +311,34 @@ def test_branch_revision_uses_latest_published_tree(lane, multiple):
     assert _git(lane.bare, "rev-parse", "refs/heads/main") == lane.base
 
 
+def test_branch_revision_finds_create_after_205_other_tool_revisions(lane):
+    published = _stored_branch(lane, "1.1.0")
+    other_files = dict(lane.base_files)
+    other_files.update({f"branch-tools/other-tool/{path}": data for path, data in lane.files.items()})
+    other_files["branch-tools/other-tool/tool.json"] = json.dumps(
+        dict(json.loads(lane.files["tool.json"]), name="other-tool")
+    ).encode()
+    other_commit = _commit(lane.bare, other_files, lane.base)
+    with lane.store._transaction() as conn:
+        conn.executemany(
+            """INSERT INTO customization_change_sets (
+                   change_set_id, idempotency_key, tenant_id, state, version, base_commit,
+                   staged_commit, desired_platform_release, workspace_contract_digest,
+                   author_subject, tool_target, change_kind, target_tool_name, updated_at
+               )
+               SELECT ?, ?, tenant_id, state, version, base_commit, ?, desired_platform_release,
+                      workspace_contract_digest, author_subject, tool_target, 'revise', 'other-tool',
+                      strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+1 day')
+               FROM customization_change_sets WHERE change_set_id = ?""",
+            [(f"other-{i}", f"revise-other-{i}", other_commit, published.change_set_id)
+             for i in range(205)],
+        )
+
+    response = lane.service.stage(**_request(lane, target_tool_name=NAME))
+    assert _change(lane, response["receipt"]).state is ChangeState.STAGED
+    assert lane.wires[-1]["revisionBaseCommit"] == published.staged_commit
+
+
 @pytest.mark.parametrize("limit", [True, 0, 501, 1.0])
 def test_published_branch_lookup_requires_bounded_integer(lane, limit):
     with pytest.raises(ValueError):

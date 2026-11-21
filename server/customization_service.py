@@ -2126,7 +2126,7 @@ class CustomizationService:
         if re.fullmatch(r"[0-7]+ blob [0-9a-f]+\t" + re.escape(path), entry):
             return None
         try:
-            published = self.store.list_published_branch_change_sets(tenant_id=tenant_id)
+            published = self.store.list_published_branch_change_sets(tenant_id=tenant_id, tool_name=name)
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError("record_fields_read_failed", 503) from exc
         except ValueError as exc:
@@ -2169,7 +2169,9 @@ class CustomizationService:
             if not paths or any(not p.startswith(package_path + "/") for p in paths):
                 raise ValueError("seed must introduce only the revision package")
             tree = _git(bare, "rev-parse", f"{seed}:{package_path}")
-            published = self.store.list_published_branch_change_sets(tenant_id=change.tenant_id)
+            published = self.store.list_published_branch_change_sets(
+                tenant_id=change.tenant_id, tool_name=change.target_tool_name,
+            )
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError, ValueError) as exc:
             raise missing from exc
         for row in published:
