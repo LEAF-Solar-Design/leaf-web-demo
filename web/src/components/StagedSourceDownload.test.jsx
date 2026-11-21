@@ -66,8 +66,11 @@ describe('saved staged source download', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1)
       expect(fetchMock).toHaveBeenCalledWith(
         `${window.location.origin}/api/author/stages/${staged.receipt.change_set_id}?view=source`,
-        expect.objectContaining({ method: 'GET', headers: { Authorization: `Bearer ${token}` },
+        expect.objectContaining({ method: 'GET',
           cache: 'no-store', redirect: 'error', signal: expect.any(AbortSignal) }))
+      const { headers } = fetchMock.mock.calls[0][1]
+      expect(Object.keys(headers)).toEqual(['Authorization'])
+      expect(headers.Authorization.split(' ')).toEqual(['Bearer', token])
       expect(new Uint8Array(await blobs[0].arrayBuffer())).toEqual(bytesFor(index))
       expect(blobs[0].type).toBe('application/octet-stream')
       expect(downloaded[0].filename).toBe(`${staged.tool.name}.py`)
