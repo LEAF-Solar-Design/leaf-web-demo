@@ -76,6 +76,13 @@ const credential = new RegExp('lco1\\.[0-9a-f]{64}|\\bbearer\\s+\\S+|eyJ[A-Za-z0
 const boundedKey = (value) => typeof value === 'string' && value.trim().length > 0 &&
   new TextEncoder().encode(value).byteLength <= 256 && !credential.test(value)
 
+// Read-only is a normal opening posture. Keep the refusal reason intact for
+// the existing write path, but do not announce it as an idle warning.
+export function projectSolarOpenStatus(code, { attemptedWrite = false } = {}) {
+  if (!attemptedWrite && ['checkout_required', 'checkout_held', 'checkout_expired', 'scope_pending'].includes(code)) return null
+  return projectSolarAppReason(code)
+}
+
 export function createProjectSolarAuthority() {
   let actor = null
   let generation = null

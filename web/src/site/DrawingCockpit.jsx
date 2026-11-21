@@ -21,9 +21,55 @@ import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
 import { findLayerName, VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import { humanizeError } from '../errorHumanize.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 const ZOOM_IN = 1.25
 const ZOOM_OUT = 0.8
+
+export function ShellKpis({ items = [] }) {
+  return <div className="shell-kpis" aria-label="Drawing metrics">{items.filter(({ value }) => value !== null && value !== undefined && value !== '').map(({ label, value }) =>
+    <div key={label}><span>{label}</span><b>{value}</b></div>)}</div>
+}
+
+export function ShellDiagnostics({ customerMode = true, toolCount, plan, costToday }) {
+  if (customerMode) return null
+  return <>
+    <span className="dim">Tools: {toolCount} available · Plan: {plan}</span>
+    {costToday !== undefined && costToday !== null && <span className="dim">${Number(costToday).toFixed(3)} today</span>}
+  </>
+}
+
+export function CheckoutChip({ checkedOut = false, children }) {
+  return <details className="shell-checkout"><summary className={checkedOut ? 'checked-out' : ''}>
+    {checkedOut ? 'Checked out' : 'View only'}
+  </summary><div className="shell-checkout-menu">{children}</div></details>
+}
+
+export function DrawingTabLabel({ name, shortId }) {
+  return <span className="drawing-tab-label" title={shortId ? `${name || 'Drawing'} · ${String(shortId).slice(0, 8)}` : name}>{name || 'Drawing'}</span>
+}
+
+// The Studio command-bar seat can wrap its existing PromptBox and transcript
+// here. CAD keeps the original command line seat.
+export function AgentPanel({ children, enabled = true }) {
+  const [collapsed, setCollapsed] = useState(false)
+  const panelRef = useRef(null)
+  const toggleRef = useRef(null)
+  const panelId = useId()
+  // Collapsing the host comes after dismissing a proposal or cancelling a
+  // command, so one Escape never hides the proposal's assistant panel.
+  useEscapeOwner('studio-agent-panel', enabled && !collapsed, () => {
+    setCollapsed(true)
+    toggleRef.current?.focus()
+  }, { layer: 'focus', scope: panelRef })
+  if (!enabled) return children
+  return <aside className="studio-agent-panel" data-collapsed={collapsed ? 'true' : 'false'} aria-label="Drawing assistant">
+    <button ref={toggleRef} type="button" className="agent-panel-toggle" aria-expanded={!collapsed} aria-controls={panelId} onClick={() => setCollapsed((value) => !value)}>Ask Leaf</button>
+    <div ref={panelRef} id={panelId} hidden={collapsed}>
+      {children}
+    </div>
+  </aside>
+}
 
 // Fixed-precision, sign-stable formatting for a drawing-unit coordinate:
 // tabular in the status bar, never scientific notation, never "-0.00".
@@ -639,7 +685,7 @@ export function StatusToggles() {
   )
 }
 
-export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null }) {
+export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null, customerMode = true }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs, canvasSelector)
   // App repaints when the lazy Viewer reports scene readiness. Read that
@@ -652,6 +698,7 @@ export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = 
   const scene = viewerRef?.current?.getDrawingScene?.()
   const sceneFor = canvasIntake === undefined ? shown : canvasIntake
   const stats = scene?.ready && sceneFor != null && scene.intake === sceneFor ? scene.renderStats : null
+  // shell: main supplies concise layer counts with render diagnostics in the tooltip.
   const layers = stats && `${stats.layers} ${stats.layers === 1 ? 'layer' : 'layers'}`
   const markers = stats?.markerReferences > 0
     ? ` · ${stats.markerReferences} block ${stats.markerReferences === 1 ? 'reference' : 'references'} shown as markers` : ''
@@ -659,8 +706,8 @@ export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = 
     <span className="cockpit-status" data-testid="cockpit-status">
       <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>N/A</b></span>
       <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>N/A</b></span>
-      <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>N/A</b></span>
-      {shown && (
+      {!customerMode && <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>N/A</b></span>}
+      {!customerMode && shown && (
         <span className="cockpit-count" title={stats ? `${stats.paths} rendered paths · ${layers}${markers}` : undefined}>
           {stats ? <>{layers}
             {stats.omitted > 0 && <> · preview limited</>}
