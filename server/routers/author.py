@@ -15,15 +15,21 @@ import logging
 import os
 import re
 import subprocess
+import threading
+import time
+import unicodedata
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any, Dict, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 import author_quota
 import catalog
+import customization_flags
 import customization_service
 import deps
 import entitlements
@@ -117,6 +123,23 @@ class PublicationRequest(BaseModel):
 
     class Config:
         extra = "forbid"
+
+
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    change_set_id: UUID
+    staged_commit: StrictStr = Field(min_length=40, max_length=40, pattern=r"^[0-9a-fA-F]{40}$")
+    catalog_digest: StrictStr = Field(max_length=128)
+    decision: Literal["approve", "request_changes"]
+    comment: StrictStr | None = Field(default=None, max_length=500)
+
+    @field_validator("comment")
+    @classmethod
+    def strip_controls(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return "".join(ch for ch in value if ch == "\n" or unicodedata.category(ch) != "Cc")
 
 
 class RollbackRequest(BaseModel):
@@ -558,6 +581,12 @@ _CALLER_DRIVEN_CODES = frozenset({
     "invalid_stage_source_request",
     "invalid_publish_request",
     "invalid_publication_request",
+    "inline_review_disabled",
+    "approver_role_denied",
+    "review_target_stale",
+    "self_approval_not_allowed",
+    "review_already_decided",
+    "review_rate_limited",
     "stage_not_available",
     "stage_source_not_available",
     "publish_not_available",
@@ -1067,6 +1096,62 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
                 CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(CustomizationServiceError("invalid_publish_request", 422))
+
+
+_review_calls: OrderedDict[str, deque[float]] = OrderedDict()
+_review_calls_lock = threading.Lock()
+
+
+def _admit_review_call(subject: str) -> bool:
+    # Each of the subject's 30 tokens returns one minute after use.
+    with _review_calls_lock:
+        now = time.monotonic()
+        if subject not in _review_calls and len(_review_calls) >= 10_000:
+            _review_calls.popitem(last=False)
+        calls = _review_calls.setdefault(subject, deque())
+        while calls and calls[0] <= now - 60:
+            calls.popleft()
+        if len(calls) >= 30:
+            return False
+        calls.append(now)
+        return True
+
+
+@router.post("/api/author/reviews")
+def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _customization_gate(6, tenant)
+    if denied is not None:
+        return denied
+    if not customization_flags.inline_review_enabled(str(tenant)):
+        return _customization_error(CustomizationServiceError("inline_review_disabled", 404))
+    subject = getattr(tenant, "subject", None)
+    if subject and not _admit_review_call(subject):
+        return _customization_error(CustomizationServiceError("review_rate_limited", 429))
+    try:
+        return CustomizationService.configured().decide_review(
+            tenant=tenant, change_set_id=str(req.change_set_id), staged_commit=req.staged_commit,
+            catalog_digest=req.catalog_digest, decision=req.decision, comment=req.comment,
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
+
+
+@router.get("/api/author/reviews/context")
+def review_context(change_set_id: UUID, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    if not deps.auth_live():
+        return _customization_error(CustomizationServiceError("customization_auth_required", 503))
+    try:
+        return CustomizationService.configured().review_context(tenant=tenant, change_set_id=str(change_set_id))
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
 
 
 @router.post("/api/author/publication-requests")

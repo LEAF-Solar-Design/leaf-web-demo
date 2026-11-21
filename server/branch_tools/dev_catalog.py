@@ -48,6 +48,7 @@ def _entry(directory: Path, name: str, version: str) -> DevEntry:
     if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
         raise ValueError("invalid digest")
     review = "unreviewed"
+    metadata = {}
     try:
         raw = _read(directory / "review.json")
     except FileNotFoundError:
@@ -56,9 +57,13 @@ def _entry(directory: Path, name: str, version: str) -> DevEntry:
         value = json.loads(raw)
         if isinstance(value, dict) and isinstance(value.get("status"), str):
             review = value["status"]
+            if value.get("approval") in ("self", "independent"):
+                metadata["approval"] = value["approval"]
+            if value.get("approver_role") in ("owner", "reviewer"):
+                metadata["approver_role"] = value["approver_role"]
     staged_at = datetime.fromtimestamp(_file(digest_path).st_mtime, timezone.utc)
     return DevEntry({"name": name, "version": version, "package_digest": digest,
-                     "review": review, "staged_at": staged_at.isoformat().replace("+00:00", "Z")},
+                     "review": review, **metadata, "staged_at": staged_at.isoformat().replace("+00:00", "Z")},
                     package)
 
 

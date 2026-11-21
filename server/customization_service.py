@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from copy import copy
 try:  # POSIX advisory locking; the deployed runtime is Linux
     import fcntl
 except ImportError:  # pragma: no cover - Windows
@@ -2494,6 +2495,120 @@ class CustomizationService:
             result["catalog_digest"] = change.catalog_digest
         return result
 
+    def review_context(self, *, tenant: Any, change_set_id: str) -> dict[str, Any]:
+        tenant_id = _tenant_id(tenant)
+        viewer = _binding(tenant)
+        reviewer = viewer.role in {"owner", "reviewer"}
+        try:
+            change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+        except ChangeSetNotFoundError as exc:
+            if not reviewer:
+                raise CustomizationServiceError("approver_role_denied", 403) from exc
+            raise CustomizationServiceError("review_target_stale", 409) from exc
+        is_self = viewer.subject == change.author_subject
+        if not reviewer and not is_self:
+            raise CustomizationServiceError("approver_role_denied", 403)
+        review = None
+        if change.staged_commit:
+            review = self.store.get_review_decision(
+                tenant_id=tenant_id, change_set_id=change_set_id, staged_commit=change.staged_commit,
+            )
+        flags = {
+            "plan_mode": customization_flags.plan_mode_enabled(tenant_id),
+            "inline_review": customization_flags.inline_review_enabled(tenant_id),
+            "self_approval": customization_flags.self_approval_allowed(tenant_id),
+        }
+        may_approve = bool(
+            reviewer and flags["inline_review"] and (not is_self or flags["self_approval"])
+            and change.state is ChangeState.STAGED and change.staged_commit and change.catalog_digest
+            and review is None
+        )
+        return {
+            "viewer_may_approve": may_approve,
+            "approval_kind_if_approved": ("self" if is_self else "independent") if may_approve else None,
+            "review": None if review is None else {
+                key: review[key] for key in ("decision", "approval_kind", "approver_role", "decided_at")
+            },
+            "flags": flags,
+        }
+
+    def _review_target(self, tenant_id: str, change_set_id: str, staged_commit: str, catalog_digest: str) -> ChangeSet:
+        try:
+            change = self.store.get_change_set(tenant_id=tenant_id, change_set_id=change_set_id)
+        except ChangeSetNotFoundError as exc:
+            raise CustomizationServiceError("review_target_stale", 409) from exc
+        if self.store.get_review_decision(
+            tenant_id=tenant_id, change_set_id=change_set_id, staged_commit=staged_commit,
+        ) is not None:
+            raise CustomizationServiceError("review_already_decided", 409)
+        if (change.state is not ChangeState.STAGED or change.staged_commit != staged_commit
+                or change.catalog_digest != catalog_digest):
+            raise CustomizationServiceError("review_target_stale", 409)
+        return change
+
+    def decide_review(self, *, tenant: Any, change_set_id: str, staged_commit: str, catalog_digest: str,
+                      decision: str, comment: str | None) -> dict[str, Any]:
+        tenant_id = _tenant_id(tenant)
+        if not customization_flags.inline_review_enabled(tenant_id):
+            raise CustomizationServiceError("inline_review_disabled", 404)
+        reviewer = _binding(tenant)
+        if reviewer.role not in {"owner", "reviewer"}:
+            raise CustomizationServiceError("approver_role_denied", 403)
+        change = self._review_target(tenant_id, change_set_id, staged_commit, catalog_digest)
+        is_self = reviewer.subject == change.author_subject
+        if is_self and not customization_flags.self_approval_allowed(tenant_id):
+            raise CustomizationServiceError("self_approval_not_allowed", 403)
+        approval_kind = "self" if is_self else "independent"
+        confirmation_id = None
+        if decision == "approve":
+            if not self._publication_policy_state(tenant_id)[0]:
+                raise CustomizationServiceError("tool_publication_disabled", 409)
+            confirmation = self._authority().issue_publish_confirmation(
+                staged_change=StagedChange(
+                    tenant_id, change_set_id, staged_commit, catalog_digest, change.desired_platform_release,
+                    change.workspace_contract_digest, change.author_subject, True,
+                ),
+                author_binding=TenantBinding(tenant_id, change.author_subject, "owner", True),
+                approver_binding=reviewer, allow_self_approval=is_self, approval_kind=approval_kind,
+            )
+            confirmation_id = confirmation.confirmation_id
+        elif decision != "request_changes":
+            raise CustomizationServiceError("invalid_review_request", 422)
+
+        # Recheck under the store's cross-worker fence. Consumption, publish
+        # transitions, the decision and its audit commit together. A failed
+        # continuation rolls back to STAGED and its receipt expires unused.
+        with self.store.review_transaction() as store:
+            service = copy(self)
+            service.store = store
+            change = service._review_target(tenant_id, change_set_id, staged_commit, catalog_digest)
+            request = store.get_or_create_publication_request(tenant_id=tenant_id, change_set_id=change_set_id)
+            if request["status"] == "denied":
+                raise CustomizationServiceError("review_target_stale", 409)
+            if confirmation_id is not None:
+                store.bind_publication_confirmation(
+                    tenant_id=tenant_id, change_set_id=change_set_id, confirmation_id=confirmation_id,
+                )
+                author = deps.TenantContext(tenant_id, subject=change.author_subject)
+                publication = service._continue_publication(author, change, confirmation_id, inline_review=True)
+            else:
+                store.deny_publication_request(
+                    tenant_id=tenant_id, change_set_id=change_set_id, reason_code="reviewer_requested_changes",
+                )
+                publication = service._publication_status(change, "denied")
+            decided_at = store.record_review_decision(
+                tenant_id=tenant_id, change_set_id=change_set_id, staged_commit=staged_commit,
+                catalog_digest=catalog_digest, decision=decision, approval_kind=approval_kind,
+                approver_subject=reviewer.subject, approver_role=reviewer.role, comment=comment,
+                confirmation_id=confirmation_id,
+            )
+        return {
+            **{key: publication[key] for key in ("contract", "change_set_id", "status", "name", "version")
+               if key in publication},
+            "decision": decision, "approval_kind": approval_kind, "approver_role": reviewer.role,
+            "decided_at": decided_at,
+        }
+
     def request_publication(
         self, *, tenant: Any, change_set_id: str
     ) -> dict[str, Any]:
@@ -2557,7 +2672,7 @@ class CustomizationService:
             tenant_id
         )
         if change.tool_target == "branch":
-            # "reviewed" in the dev catalog always means independent approval.
+            # Branch entries always need a human review.
             approval_required = True
         if not publication_enabled:
             raise CustomizationServiceError("tool_publication_disabled", 409)
@@ -2581,12 +2696,19 @@ class CustomizationService:
                     change_set_id=change.change_set_id,
                     confirmation_id=record["confirmation_id"],
                 )
+                if continuation["status"] == "denied":
+                    return self._publication_status(change, "denied")
                 confirmation_id = continuation["confirmation_id"]
         elif confirmation_id is None:
             raise CustomizationServiceError(
                 "publish_recovery_authority_invalid", 403
             )
 
+        return self._continue_publication(tenant, change, confirmation_id)
+
+    def _continue_publication(self, tenant: Any, change: ChangeSet, confirmation_id: str,
+                              *, inline_review: bool = False) -> dict[str, Any]:
+        tenant_id = change.tenant_id
         request = PublishRequest(
             change.change_set_id,
             change.staged_commit or "",
@@ -2609,6 +2731,7 @@ class CustomizationService:
             confirmation_id=confirmation_id,
             idempotency_key=idempotency_key,
             require_actor_binding=False,
+            inline_review=inline_review,
         )
         durable = self.store.get_change_set(
             tenant_id=tenant_id, change_set_id=change.change_set_id
@@ -2698,11 +2821,14 @@ class CustomizationService:
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
         )
-        self.store.deny_publication_request(
-            tenant_id=tenant_id,
-            change_set_id=change.change_set_id,
-            reason_code="independent_approver_denied",
-        )
+        try:
+            self.store.deny_publication_request(
+                tenant_id=tenant_id,
+                change_set_id=change.change_set_id,
+                reason_code="independent_approver_denied",
+            )
+        except ChangeSetConflictError as exc:
+            raise CustomizationServiceError("publication_denial_not_available") from exc
         return self._publication_status(change, "denied")
 
     def publish(self, *, tenant: Any, request: PublishRequest, confirmation_id: str, idempotency_key: str) -> dict[str, Any]:
@@ -2717,6 +2843,7 @@ class CustomizationService:
     def _publish(
         self, *, tenant: Any, request: PublishRequest, confirmation_id: str,
         idempotency_key: str, require_actor_binding: bool,
+        inline_review: bool = False,
     ) -> dict[str, Any]:
         tenant_id = _tenant_id(tenant)
         if not enabled(6, tenant_id):
@@ -2777,6 +2904,8 @@ class CustomizationService:
         if (change.tool_target == "branch"
                 and confirmation.approver_subject == "leaf:server:auto-publication-policy"):
             raise CustomizationServiceError("independent_approval_pending", 409)
+        if confirmation.approval_kind is not None and not inline_review:
+            raise CustomizationServiceError("inline_review_required", 403)
         publishing = self.store.prepare_publish(
             tenant_id=tenant_id,
             change_set_id=change.change_set_id,
@@ -2788,17 +2917,21 @@ class CustomizationService:
         if change.tool_target == "branch":
             try:
                 files, name = self._branch_package_files(change)
-                result = publish_branch_package(files, name, self._branch_dev_root(tenant_id))
+                review = None
+                if confirmation.approval_kind and confirmation.approver_role:
+                    review = {"approval": confirmation.approval_kind, "approver_role": confirmation.approver_role}
+                result = publish_branch_package(files, name, self._branch_dev_root(tenant_id), review=review)
             except DevPublishError as exc:
-                self.store.supersede_publish(
-                    tenant_id=tenant_id, change_set_id=change.change_set_id,
-                    expected_version=publishing.version,
-                    idempotency_key=idempotency_key, reason_code="branch_" + exc.code,
-                )
-                _LOG.warning(
-                    "customization_publish_superseded: change_set=%s code=%s",
-                    change.change_set_id, exc.code,
-                )
+                if not inline_review:
+                    self.store.supersede_publish(
+                        tenant_id=tenant_id, change_set_id=change.change_set_id,
+                        expected_version=publishing.version,
+                        idempotency_key=idempotency_key, reason_code="branch_" + exc.code,
+                    )
+                    _LOG.warning(
+                        "customization_publish_superseded: change_set=%s code=%s",
+                        change.change_set_id, exc.code,
+                    )
                 raise CustomizationServiceError(
                     exc.code, 409 if exc.code == "branch_version_conflict" else (
                         422 if exc.code == "branch_package_invalid" else 503
@@ -2821,7 +2954,7 @@ class CustomizationService:
         try:
             published_commit = self._harness_publish(change)
         except CustomizationServiceError as exc:
-            if exc.status_code == 409 and exc.code in _HARNESS_PUBLISH_LOST:
+            if not inline_review and exc.status_code == 409 and exc.code in _HARNESS_PUBLISH_LOST:
                 # A lost publish never wins on retry, so leaving it PUBLISHING
                 # would hold the tenant's only publish slot forever. End it here.
                 self.store.supersede_publish(
