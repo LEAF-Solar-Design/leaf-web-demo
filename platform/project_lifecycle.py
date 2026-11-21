@@ -158,12 +158,15 @@ def _project_row(
     include_deleted: bool = False,
 ) -> Dict[str, Any]:
     lock_clause = "FOR UPDATE" if lock else ""
-    # Preserve both soft-delete predicates. Only archive/restore/delete opt in
-    # to tombstone reads so they can reject state changes or replay deletion.
+    # Ordinary reads use the authoritative live view. Only archive/restore/delete
+    # need the base-table timestamps and tombstones for transitions and replay.
     cur.execute(
-        "SELECT project_id, org_id, name, status, created_at, updated_at, archived_at, deleted_at "
-        "FROM projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
-        + ("" if include_deleted else "AND status <> 'deleted' AND deleted_at IS NULL ")
+        ("SELECT project_id, org_id, name, status, created_at, updated_at, archived_at, deleted_at "
+         "FROM projects " if include_deleted else
+         "SELECT project_id, org_id, name, status, created_at, updated_at "
+         "FROM live_projects ")
+        + "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        + ("AND (deleted_at IS NULL OR status='deleted') " if include_deleted else "")
         + lock_clause,
         {"org_id": org_id, "project_id": project_id},
     )
@@ -212,13 +215,18 @@ def _require_project_role(
     cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
     actor_binding_id: uuid.UUID, *, write: bool, lock: bool = True,
     allow_archived: bool = False,
+    project: Optional[Dict[str, Any]] = None,
 ) -> str:
     # Tenant identity proves who the actor is. It never grants authority over
     # every project in that tenant. Named-project access comes only from the
     # active project membership so revocation takes effect on the next request.
     _actor_tenant_role(cur, org_id, actor_binding_id, lock=lock)
     if write and not allow_archived:
-        if _project_is_archived(cur, org_id, project_id):
+        # Request-boundary callers already locked and read this project; reuse
+        # that state rather than issuing a second project lookup.
+        archived = (project.get("status") == "archived" if project is not None
+                    else _project_is_archived(cur, org_id, project_id))
+        if archived:
             raise LifecycleConflict("project is archived")
     member_role = _project_membership_role(
         cur, org_id, project_id, actor_binding_id,
@@ -257,10 +265,10 @@ def require_project_role(
             cur.execute(
                 f"SET LOCAL statement_timeout = {int(_PROJECT_ROLE_STATEMENT_TIMEOUT_MS)}"
             )
-            _project_row(cur, org_id, project_id, lock=False)
+            project = _project_row(cur, org_id, project_id, lock=write)
             return _require_project_role(
                 cur, org_id, project_id, actor_binding_id,
-                write=write, lock=False,
+                write=write, lock=False, project=project,
             )
 
     return run_transaction(operation, isolation="repeatable read")
