@@ -42,6 +42,8 @@ const FROZEN_EVENT_TYPES = [
   "proposed_run",
   "confirmation_required",
   "question_required",
+  "questions_required",
+  "plan_proposed",
   "confirmation_resolved",
   "turn_usage",
   "turn_complete",
