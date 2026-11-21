@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 
+from json_resource_limits import within_depth_budget
 
 JOURNAL_FORMAT_VERSION = 1
 JOURNAL_MAX_DEPTH = 64  # The root object counts as the first container.
@@ -44,30 +45,6 @@ def request_retry_key(authority, request):
                     "subject": authority.subject, "request": request})
 
 
-def _within_depth_budget(raw):
-    # JSON structure is ASCII even when a string contains multibyte UTF-8.
-    # Bound the recursive decoder first. strict_json validates the full grammar.
-    depth = 0
-    in_string = escaped = False
-    for byte in raw:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif byte == ord("\\"):
-                escaped = True
-            elif byte == ord('"'):
-                in_string = False
-        elif byte == ord('"'):
-            in_string = True
-        elif byte in b"[{":
-            depth += 1
-            if depth > JOURNAL_MAX_DEPTH:
-                return False
-        elif byte in b"]}":
-            depth -= 1
-    return True
-
-
 def _journal_request(raw, digest, authority):
     """A host-provided checksum pins the bytes; the retry key pins their scoped operation."""
     from authored_recipe_edit import prepare_inspection_edit
@@ -79,7 +56,7 @@ def _journal_request(raw, digest, authority):
         raise ReadFailure("journal_byte_limit")
     if hashlib.sha256(raw).hexdigest() != digest:
         return None
-    if not _within_depth_budget(raw):
+    if not within_depth_budget(raw, JOURNAL_MAX_DEPTH):
         raise ReadFailure("journal_depth_limit")
     try:
         intent = strict_json(raw)
