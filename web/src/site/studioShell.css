@@ -799,32 +799,21 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"] .tc-product-tabs { flex-wrap: nowrap; flex-shrink: 0; height: 22px; min-height: 0; margin: 0; padding: 0; box-sizing: border-box; align-self: flex-start; }
 }
 
-/* Wide desktop: large tool labels stop at two lines with an ellipsis; title and aria-label carry the full name (rule L1). */
-@media (min-width: 1440px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-}
-
-/* Desktop: row tools and profile command rows grow to fit their label, within bounds (rule L1). */
-@media (min-width: 1024px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] { width: auto; min-width: 104px; max-width: 180px; }
-.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool { width: auto; min-width: 168px; max-width: 220px; }
-}
-
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-collapsed="true"] { height: 40px; min-height: 40px; padding: 4px 8px; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon[data-collapsed="true"] > :is(.ribbon-panels, .ribbon-more) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drafting-ribbon:not([data-collapsed="true"]) { height: auto; min-height: 40px; }
-.ribbon-draw-toggle { min-height: 32px; padding: 4px 12px; font-size: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); }
-.ribbon-disabled-more { position: relative; font-size: 12px; }
+.ribbon-draw-toggle { min-height: 32px; padding: 4px 12px; font-size: var(--leaf-size-caption); border: 1px solid var(--border); border-radius: calc(var(--leaf-radius-control) + 2px); background: var(--card); color: var(--foreground); }
+.ribbon-disabled-more { position: relative; font-size: var(--leaf-size-caption); }
 .ribbon-disabled-more > summary { padding: 8px; cursor: pointer; }
-.ribbon-disabled-more[open] { z-index: 20; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool { font-size: 12px; }
+.ribbon-disabled-more[open] { z-index: var(--leaf-layer-sticky); background: var(--card); border: 1px solid var(--border); border-radius: calc(var(--leaf-radius-control) + 2px); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool { font-size: var(--leaf-size-caption); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-text-only="true"] { width: auto; min-width: 64px; padding: 4px 8px; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-text-only="true"] .ribbon-tool-label { display: inline; position: static; width: auto; height: auto; clip: auto; overflow: visible; font-size: 12px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-text-only="true"] .ribbon-tool-label { display: inline; position: static; width: auto; height: auto; clip: auto; overflow: visible; font-size: var(--leaf-size-caption); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool .ci { width: 20px; height: 20px; stroke-width: 1.5px; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-cluster-label { font-size: var(--leaf-size-caption); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drawing-left-rail {
   position: fixed; left: 8px; top: calc(var(--ck-canvas-top-live) + 8px); width: 40px;
-  min-height: 120px; height: auto; box-sizing: border-box; border-radius: 12px;
+  min-height: 120px; height: auto; box-sizing: border-box; border-radius: calc(var(--leaf-radius-card) + 2px);
   background: var(--ck-chrome); border: 1px solid var(--ck-edge); pointer-events: auto;
 }
 .drawing-left-rail > details > summary { display: flex; align-items: center; justify-content: center; height: 40px; cursor: pointer; list-style: none; }
@@ -844,11 +833,22 @@
 .drawing-rail-layer-list { display: flex; flex-direction: column; padding: 8px; max-height: 320px; overflow: auto; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drawing-objects-panel {
   position: fixed; top: calc(var(--ck-canvas-top-live) + 8px); left: 8px; width: 40px;
-  margin: 0; border-radius: 12px; box-sizing: border-box; background: var(--ck-chrome);
+  margin: 0; border-radius: calc(var(--leaf-radius-card) + 2px); box-sizing: border-box; background: var(--ck-chrome);
 }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drawing-objects-panel:not([open]) > summary { width: 40px; height: 40px; min-height: 40px; padding: 0; overflow: hidden; font-size: 0; display: grid; place-items: center; }
-.drawing-objects-panel:not([open]) > summary::after { content: '▦'; font-size: 20px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .drawing-objects-panel:not([open]) > summary { width: 40px; height: 40px; min-height: 40px; padding: 0; overflow: hidden; font-size: calc(var(--leaf-size-caption) * 0); display: grid; place-items: center; }
+.drawing-objects-panel:not([open]) > summary::after { content: '▦'; font-size: calc(var(--leaf-size-heading) + 2px); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .drawing-objects-panel[open] { width: 280px; }
 .studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon[data-collapsed="true"] .ribbon-panels { display: none; }
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool-label { font-size: 12px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool-label { font-size: var(--leaf-size-caption); }
 .drawing-left-rail > details:not([open]) > :not(summary) { display: none; }
+
+/* Wide desktop: large tool labels stop at two lines with an ellipsis; title and aria-label carry the full name (rule L1). */
+@media (min-width: 1440px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+}
+
+/* Desktop: row tools and profile command rows grow to fit their label, within bounds (rule L1). */
+@media (min-width: 1024px) {
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] { width: auto; min-width: 104px; max-width: 180px; }
+.studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool { width: auto; min-width: 168px; max-width: 220px; }
+}
