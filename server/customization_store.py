@@ -36,6 +36,7 @@ from customization_models import (
     EffectiveCatalog,
     IdempotencyReplayError,
     InvalidTransitionError,
+    RetryTargetInvalidError,
     TERMINAL_STATES,
     require_bounded,
     require_nonempty,
@@ -61,6 +62,9 @@ CREATE TABLE IF NOT EXISTS customization_change_sets (
   approver_subject TEXT,
   change_kind TEXT NOT NULL DEFAULT 'create' CHECK (change_kind IN ('create', 'revise')),
   target_tool_name TEXT,
+  plan_json TEXT,
+  plan_digest TEXT,
+  plan_confirmation_id TEXT,
   request_description TEXT,
   request_fingerprint TEXT,
   authority_session_id TEXT,
@@ -373,6 +377,9 @@ class SQLiteCustomizationStore(CustomizationRepository):
         }
         definitions = {
             "request_description": "TEXT",
+            "plan_json": "TEXT",
+            "plan_digest": "TEXT",
+            "plan_confirmation_id": "TEXT",
             "request_fingerprint": "TEXT",
             "authority_session_id": "TEXT",
             "authority_turn_id": "TEXT",
@@ -393,6 +400,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 conn.execute(
                     f"ALTER TABLE customization_change_sets ADD COLUMN {name} {definition}"
                 )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS customization_change_sets_plan_idx "
+            "ON customization_change_sets (tenant_id, plan_confirmation_id) "
+            "WHERE plan_confirmation_id IS NOT NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS customization_stage_claim_idx "
             "ON customization_change_sets "
@@ -480,9 +492,12 @@ class SQLiteCustomizationStore(CustomizationRepository):
         base_catalog_change_set_id: Optional[str] = None,
         **kwargs: object,
     ) -> tuple[ChangeSet, bool]:
-        request_description = require_bounded(
-            request_description, "request_description", 8000
-        )
+        if kwargs.get("plan_json") is not None:
+            require_nonempty(request_description, "request_description")
+            if len(request_description.encode("utf-8")) > 32768:
+                raise ValueError("plan description exceeds 32768 bytes")
+        else:
+            require_bounded(request_description, "request_description", 8000)
         request_fingerprint = require_sha(
             request_fingerprint, 64, "request_fingerprint"
         )
@@ -509,6 +524,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
         tool_target: Optional[str] = None,
         request_description: Optional[str],
         request_fingerprint: Optional[str],
+        plan_json: Optional[str] = None,
+        plan_digest: Optional[str] = None,
+        plan_confirmation_id: Optional[str] = None,
+        retry_of_change_set_id: Optional[str] = None,
         authority_session_id: Optional[str] = None,
         authority_turn_id: Optional[str] = None,
         request_graph_input: Optional[str] = None,
@@ -535,6 +554,14 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 target_tool_name or "", "target_tool_name", 64
             )
         with self._transaction() as conn:
+            if retry_of_change_set_id is not None:
+                failed = conn.execute(
+                    "SELECT 1 FROM customization_change_sets WHERE tenant_id = ? "
+                    "AND change_set_id = ? AND state = ? AND plan_digest = ?",
+                    (tenant_id, retry_of_change_set_id, ChangeState.FAILED.value, plan_digest),
+                ).fetchone()
+                if not failed:
+                    raise RetryTargetInvalidError("retry_target_invalid")
             existing = conn.execute(
                 "SELECT * FROM customization_change_sets WHERE tenant_id = ? AND idempotency_key = ?",
                 (tenant_id, idempotency_key),
@@ -551,6 +578,9 @@ class SQLiteCustomizationStore(CustomizationRepository):
                     and row.tool_target == tool_target
                     and row.request_fingerprint == request_fingerprint
                     and row.request_description == request_description
+                    and row.plan_confirmation_id == plan_confirmation_id
+                    and row.plan_digest == plan_digest
+                    and row.plan_json == plan_json
                     and row.authority_session_id == authority_session_id
                     and row.authority_turn_id == authority_turn_id
                     and row.request_graph_input == request_graph_input
@@ -559,6 +589,13 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 if not same_request:
                     raise IdempotencyReplayError("idempotency key belongs to a different change-set request")
                 return row, False
+            if plan_confirmation_id is not None:
+                spent = conn.execute(
+                    "SELECT 1 FROM customization_change_sets WHERE tenant_id = ? "
+                    "AND plan_confirmation_id = ?", (tenant_id, plan_confirmation_id),
+                ).fetchone()
+                if spent:
+                    raise IdempotencyReplayError("plan already reserved a change set")
             if request_graph_input is not None:
                 validate_graph_input(request_graph_input)
             if base_catalog_change_set_id is not None:
@@ -583,10 +620,11 @@ class SQLiteCustomizationStore(CustomizationRepository):
             )
             conn.execute(
                 "UPDATE customization_change_sets SET change_kind = ?, target_tool_name = ?, "
-                "request_graph_input = ?, base_catalog_change_set_id = ? "
+                "request_graph_input = ?, base_catalog_change_set_id = ?, "
+                "plan_json = ?, plan_digest = ?, plan_confirmation_id = ? "
                 "WHERE change_set_id = ?",
                 (change_kind, target_tool_name, request_graph_input,
-                 base_catalog_change_set_id, change_set_id),
+                 base_catalog_change_set_id, plan_json, plan_digest, plan_confirmation_id, change_set_id),
             )
             row = self._find_change_set(conn, tenant_id, change_set_id)
             self._append_audit(conn, row, None, ChangeState.CREATED, idempotency_key)
@@ -1878,6 +1916,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
             created_at=row["created_at"], updated_at=row["updated_at"],
             change_kind=row["change_kind"], target_tool_name=row["target_tool_name"],
             tool_target=row["tool_target"] if "tool_target" in row.keys() else None,
+            plan_json=row["plan_json"], plan_digest=row["plan_digest"],
+            plan_confirmation_id=row["plan_confirmation_id"],
             request_description=row["request_description"],
             request_fingerprint=row["request_fingerprint"],
             authority_session_id=row["authority_session_id"],

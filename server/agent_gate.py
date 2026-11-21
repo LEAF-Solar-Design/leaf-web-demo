@@ -44,6 +44,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import agent_audit
 import agent_policy
+import build_plan
+import customization_flags
 import tenant_id_validator
 from agent_policy import AgentAction, AgentPolicy, PolicyError
 
@@ -167,7 +169,7 @@ def _approval_path(confirmation_id: str) -> Path:
 
 def _new_pending_record(*, tenant_id: str, session_id: str, turn_id: str,
                         action: AgentAction, args: Dict[str, Any],
-                        ttl_s: int) -> Dict[str, Any]:
+                        ttl_s: int, subject: Optional[str] = None) -> Dict[str, Any]:
     confirmation_id = secrets.token_hex(8)
     now = _now()
     return {
@@ -176,12 +178,13 @@ def _new_pending_record(*, tenant_id: str, session_id: str, turn_id: str,
         "session_id": str(session_id),
         "turn_id": str(turn_id),
         "action": action.name,
+        "proposer_subject": subject,
         "args": dict(args or {}),
         "args_hash": canonical_args_hash(args),
         "policy": action.policy,
         "rung": action.rung,
         "created_at": _iso(now),
-        "expires_at": _iso(now + timedelta(seconds=ttl_s)),
+        "expires_at": _iso(now + timedelta(seconds=action.approval_ttl_s or ttl_s)),
         "granted": False,
         "denied": False,
         "decided_at": None,
@@ -191,16 +194,70 @@ def _new_pending_record(*, tenant_id: str, session_id: str, turn_id: str,
 
 
 def create_pending(*, tenant_id: str, session_id: str, turn_id: str,
-                   action: AgentAction, args: Dict[str, Any], ttl_s: int) -> Dict[str, Any]:
+                   action: AgentAction, args: Dict[str, Any], ttl_s: int,
+                   subject: Optional[str] = None) -> Dict[str, Any]:
     record = _new_pending_record(
         tenant_id=tenant_id, session_id=session_id, turn_id=turn_id,
-        action=action, args=args, ttl_s=ttl_s,
+        action=action, args=args, ttl_s=ttl_s, subject=subject,
     )
     if _using_postgres():
+        if subject is not None:
+            def insert(conn):
+                _pg_insert_subject_pending(conn, record)
+                event = {key: record[key] for key in
+                         ("confirmation_id", "tenant_id", "session_id", "turn_id", "action")}
+                _pg_store()._append_audit_in_transaction(conn, dict(event, kind="approval_created"))
+                return record
+            db, _ = _pg_store()._load_platform()
+            return db.run_transaction(insert, isolation="serializable")
         return _pg_store().create_pending(record)
     _approval_path(record["confirmation_id"]).parent.mkdir(parents=True, exist_ok=True)
     _write_pending(record)
     return record
+
+
+def _pg_insert_subject_pending(conn, record):
+    store = _pg_store()
+    store._insert_pending_in_transaction(conn, record)
+    # The existing args JSONB normalizes numbers such as -0.0 and 1e20.
+    # Preserve their approved spelling for the plan digest and description.
+    plan = (build_plan.canonical_bytes(record["args"]["plan"]).decode("utf-8")
+            if record["action"] == "propose_build_plan" else None)
+    conn.execute(
+        "UPDATE agent_approvals SET proposer_subject = %s, proposed_plan = %s::json "
+        "WHERE confirmation_id = %s", (record["proposer_subject"], plan, record["confirmation_id"]),
+    )
+
+
+def _pg_approval_record(row):
+    record = _pg_store()._approval_record(row)
+    if record is not None:
+        record["proposer_subject"] = row.get("proposer_subject")
+        if row.get("proposed_plan") is not None:
+            record["args"] = {"plan": row["proposed_plan"]}
+        if row.get("consumed_turn_id") is not None:
+            record["consumed_turn_id"] = row["consumed_turn_id"]
+            record["retry_of_change_set_id"] = row["retry_of_change_set_id"]
+    return record
+
+
+def _pg_plan_decision(tenant_id, category, limit, rate_denied_event, operation):
+    """Commit the rate charge, approval mutation and audit together."""
+    store = _pg_store()
+    db, _ = store._load_platform()
+
+    def decide(conn):
+        rate = store._consume_rate_in_transaction(conn, tenant_id, category, limit)
+        if rate.accepted:
+            result, event = operation(conn)
+        else:
+            reason = f"rate_limit_exceeded: {category} ({rate.value}/{limit})"
+            event = dict(rate_denied_event, reason=reason)
+            result = _result("deny", reason=reason, policy=event["policy"], rung=event["rung"])
+        store._append_audit_in_transaction(conn, event)
+        return result
+
+    return db.run_transaction(decide, isolation="serializable")
 
 
 _RECORD_STR_FIELDS = ("confirmation_id", "tenant_id", "session_id", "action",
@@ -241,12 +298,30 @@ def _record_is_wellformed(record: Any, confirmation_id: str) -> bool:
     # written only on consumption, and only ever as an ISO string
     if "consumed_at" in record and not isinstance(record["consumed_at"], str):
         return False
+    if record["action"] == "propose_build_plan":
+        args = record.get("args")
+        if not isinstance(args, dict) or args.keys() != {"plan"}:
+            return False
+        try:
+            build_plan.validate_plan(args["plan"])
+        except build_plan.BuildPlanError:
+            return False
     return True
 
 
 def read_pending(confirmation_id: str) -> Optional[Dict[str, Any]]:
     record, _status = read_pending_strict(confirmation_id)
     return record
+
+
+def session_card_ttl_s(tenant_id: str, confirmation_id: str, default: float) -> float:
+    """A plan card shares the expiry the gate fixed when it recorded the proposal."""
+    if customization_flags.plan_mode_enabled(tenant_id):
+        record = read_pending(confirmation_id)
+        if record and record["tenant_id"] == tenant_id and record["action"] == "propose_build_plan":
+            expires = _parse_iso(record["expires_at"])
+            return max(0.0, (expires - _now()).total_seconds()) if expires else 0.0
+    return default
 
 
 def read_pending_strict(confirmation_id: str) -> tuple:
@@ -263,10 +338,14 @@ def read_pending_strict(confirmation_id: str) -> tuple:
     resume, so proceeding session-only stays fail-safe.
     """
     if _using_postgres():
-        record, status = _pg_store().read_pending_strict(confirmation_id)
+        db, _ = _pg_store()._load_platform()
+        with db.cursor() as cur:
+            cur.execute("SELECT * FROM agent_approvals WHERE confirmation_id = %s",
+                        (confirmation_id,))
+            record = _pg_approval_record(cur.fetchone())
         if record is not None and not _record_is_wellformed(record, confirmation_id):
             return None, "corrupt"
-        return record, status
+        return record, "ok" if record is not None else "absent"
     path = _approval_path(confirmation_id)
     if not path.exists():
         return None, "absent"
@@ -343,6 +422,18 @@ def _decide(record: Dict[str, Any], *, granted: bool, by: str, reason: str) -> D
     return record
 
 
+@contextlib.contextmanager
+def _locked_pending_decision(confirmation_id):
+    with _state_lock:
+        record = read_pending(confirmation_id)
+        if record and record["action"] == "propose_build_plan":
+            # A stale decision writer must never erase another process's consumption stamp.
+            with _snapshot_lock(approvals_dir() / "plan-redemption"):
+                yield read_pending(confirmation_id)
+        else:
+            yield record
+
+
 def grant_approval(confirmation_id: str, *, by: str = "tenant") -> Tuple[bool, Optional[Dict[str, Any]], str]:
     """Mark a pending approval granted. Returns (ok, record, reason). Refuses
     an already-decided or expired record (expiry racing the click auto-denies).
@@ -357,13 +448,26 @@ def grant_approval(confirmation_id: str, *, by: str = "tenant") -> Tuple[bool, O
     needs file locking — out of scope, same as SESSIONS_DB single-writer).
     """
     if _using_postgres():
-        return _pg_store().decide(
-            confirmation_id, granted=True, by=by, reason="approved",
-        )
-    with _state_lock:
-        record = read_pending(confirmation_id)
+        from psycopg.errors import CheckViolation
+        try:
+            result = _pg_store().decide(
+                confirmation_id, granted=True, by=by, reason="approved",
+            )
+        except CheckViolation as exc:
+            if exc.diag.constraint_name != "agent_plan_approver_matches":
+                raise
+            return False, read_pending(confirmation_id), "plan_approver_mismatch"
+        _, record, reason = result
+        if record and record.get("action") == "propose_build_plan":
+            if reason == "already_decided" and record["decided_by"] != by:
+                return False, record, "plan_approver_mismatch"
+        return result
+    with _locked_pending_decision(confirmation_id) as record:
         if record is None:
             return False, None, "not_found"
+        if record["action"] == "propose_build_plan" and (
+                not by or record.get("proposer_subject") != by):
+            return False, record, "plan_approver_mismatch"
         if record.get("granted") or record.get("denied"):
             return False, record, "already_decided"
         if _is_expired(record):
@@ -388,8 +492,7 @@ def deny_approval(confirmation_id: str, *, by: str = "tenant",
         return _pg_store().decide(
             confirmation_id, granted=False, by=by, reason=reason,
         )
-    with _state_lock:
-        record = read_pending(confirmation_id)
+    with _locked_pending_decision(confirmation_id) as record:
         if record is None:
             return False, None, "not_found"
         if record.get("granted") or record.get("denied"):
@@ -723,12 +826,17 @@ def _rate_check_and_record(tenant_id: str, category: str,
 # --------------------------------------------------------------------------- #
 # args-schema validation
 # --------------------------------------------------------------------------- #
-def _validate_args(action: AgentAction, args: Dict[str, Any]) -> Optional[str]:
-    if action.args_schema is None:
+def _validate_args(action: AgentAction, args: Dict[str, Any], *, plan_mode: bool = False) -> Optional[str]:
+    schema = action.args_schema
+    if schema is None:
         return None
+    plan_keys = {"plan_confirmation_id", "retry_of_change_set_id"}
+    if action.name == "author_tool" and not plan_mode and plan_keys.intersection(args):
+        schema = dict(schema, properties={k: v for k, v in schema.get("properties", {}).items()
+                                          if k not in plan_keys})
     try:
         from jsonschema import Draft7Validator
-        errors = list(Draft7Validator(action.args_schema).iter_errors(args))
+        errors = list(Draft7Validator(schema).iter_errors(args))
     except ImportError:
         return None  # jsonschema missing — best-effort skip (mirrors policy load)
     if not errors:
@@ -786,11 +894,73 @@ def _plan_first_session(tenant_id: str, session_id: str) -> bool:
         return True
 
 
+def _plan_refusal(record, tenant_id, session_id, subject, expired):
+    if not record or record["action"] != "propose_build_plan" or record["tenant_id"] != tenant_id:
+        return "plan_not_approved"
+    if record["session_id"] != session_id:
+        return "plan_session_mismatch"
+    if not subject or record.get("proposer_subject") != subject:
+        return "plan_subject_mismatch"
+    if expired:
+        return "plan_expired"
+    if record["granted"] is not True or record["denied"] is not False:
+        return "plan_not_approved"
+    if record.get("decided_by") != subject:
+        return "plan_subject_mismatch"
+    if "consumed_at" in record:
+        return "plan_consumed"
+    if record["args_hash"] != canonical_args_hash(record["args"]):
+        return "plan_not_approved"
+    return None
+
+
+def consumed_build_plan(tenant_id, session_id, turn_id, subject, confirmation_id=None):
+    """Resolve the plan spent by this author in this app turn. Fail closed on ambiguity."""
+    if not (session_id and turn_id and subject):
+        return None
+    if confirmation_id is not None:
+        if not isinstance(confirmation_id, str):
+            return None
+        records = [read_pending(confirmation_id)]
+    elif _using_postgres():
+        db, _ = _pg_store()._load_platform()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM agent_approvals WHERE tenant_id = %s AND session_id = %s "
+                "AND consumed_turn_id = %s AND proposer_subject = %s "
+                "AND action = 'propose_build_plan' LIMIT 2",
+                (tenant_id, session_id, turn_id, subject),
+            )
+            candidates = cur.fetchall()
+        if len(candidates) != 1:
+            return None
+        record = _pg_approval_record(candidates[0])
+        if not _record_is_wellformed(record, candidates[0]["confirmation_id"]):
+            return None
+        records = [record]
+    else:
+        records = (read_pending(path.stem) for path in approvals_dir().glob("*.json")
+                   if path == _approval_path(path.stem))
+    match = None
+    for record in records:
+        if (record and record["action"] == "propose_build_plan"
+                and record["tenant_id"] == tenant_id and record["session_id"] == session_id
+                and record.get("consumed_turn_id") == turn_id and record.get("consumed_at")
+                and record.get("proposer_subject") == subject and record.get("decided_by") == subject
+                and record["granted"] is True and record["denied"] is False
+                and record["args_hash"] == canonical_args_hash(record["args"])):
+            if match is not None:
+                return None
+            match = record
+    return match
+
+
 def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
          args: Optional[Dict[str, Any]], tier_caps: Dict[str, bool], *,
          tier: Optional[str] = None,
          subject: Optional[str] = None,
          policy_session_id: Optional[str] = None,
+         authority_turn_id: Optional[str] = None,
          scope_refusal: Optional[str] = None) -> Dict[str, Any]:
     """Run the full gate chain for one proposed agent action.
 
@@ -851,7 +1021,8 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     except PolicyError as exc:
         return _deny(f"policy_load_failed: {type(exc).__name__}",
                      extra={"gate": "catalog"})
-    if act is None:
+    plan_mode = customization_flags.plan_mode_enabled(str(tenant_id))
+    if act is None or (action == "propose_build_plan" and not plan_mode):
         return _deny("unknown_action", extra={"gate": "catalog"})
     if not act.enabled:
         return _deny("action_disabled", act=act, extra={"gate": "catalog"})
@@ -860,7 +1031,18 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         return _deny(scope_refusal, act=act, extra={"gate": "entity_scope"})
 
     # 3. args-schema validation — fail fast before any budget/approval work.
-    schema_error = _validate_args(act, args)
+    if action == "propose_build_plan":
+        if "confirmation_id" in args:
+            return _deny("plan_confirmation_id_not_allowed", act=act)
+        try:
+            args["plan"] = build_plan.validate_plan(args.get("plan"))
+        except build_plan.BuildPlanError as exc:
+            return _deny(exc.code, act=act, extra={"gate": "args_schema"})
+        if args.keys() != {"plan"}:
+            return _deny("invalid_args: <root>: additionalProperties", act=act)
+        if not subject:
+            return _deny("plan_subject_mismatch", act=act)
+    schema_error = _validate_args(act, args, plan_mode=plan_mode)
     if schema_error is not None:
         return _deny(f"invalid_args: {schema_error}", act=act, extra={"gate": "args_schema"})
 
@@ -884,7 +1066,7 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                      extra={"gate": "revalidate"})
     if act is None or not act.enabled:
         return _deny("action_disabled", act=act, extra={"gate": "revalidate"})
-    schema_error = _validate_args(act, args)
+    schema_error = _validate_args(act, args, plan_mode=plan_mode)
     if schema_error is not None:
         return _deny(f"invalid_args: {schema_error}", act=act, extra={"gate": "revalidate"})
     if not _has_capability(tier_caps, act.required_capability):
@@ -959,9 +1141,11 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
                        confirmation_id=record["confirmation_id"])
 
     def _create_and_await() -> Dict[str, Any]:
+        is_plan = act.name == "propose_build_plan"
         record = _new_pending_record(
-            tenant_id=tenant_id, session_id=session_id, turn_id=turn_id,
-            action=act, args=args, ttl_s=pol.approval_ttl_s,
+            tenant_id=tenant_id, session_id=(policy_session_id or session_id) if is_plan else session_id,
+            turn_id=(authority_turn_id or turn_id) if is_plan else turn_id,
+            action=act, args=args, ttl_s=pol.approval_ttl_s, subject=subject,
         )
         if not postgres_store:
             _approval_path(record["confirmation_id"]).parent.mkdir(
@@ -970,6 +1154,13 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
             return _awaiting(record)
         event = _decision_event(
             "approval_requested", confirmation_id=record["confirmation_id"])
+        if subject is not None:
+            def insert(conn):
+                _pg_insert_subject_pending(conn, record)
+                return _awaiting(record, audit=False), event
+
+            return _pg_plan_decision(tenant_id, rate_category, rate_limit,
+                                     _rate_rejected_event(), insert)
         accepted, stored, info = _pg_store().create_pending_with_rate(
             record, category=rate_category, limit=rate_limit,
             accepted_event=event,
@@ -978,6 +1169,62 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
         if not accepted:
             return _deny_result(info["reason"])
         return _awaiting(stored, audit=False)
+
+    if action == "propose_build_plan":
+        return _create_and_await()
+
+    if plan_mode and action == "author_tool":
+        plan_id = args.get("plan_confirmation_id")
+        if not isinstance(plan_id, str) or not plan_id:
+            return _deny("plan_required", act=act, extra={"gate": "policy"})
+        plan_session = str(policy_session_id or session_id)
+        if plan_session != str(session_id) and not authority_turn_id:
+            # The harness turn cannot identify an app author request.
+            return _deny("plan_session_mismatch", act=act, extra={"gate": "policy"})
+        redeem_turn = str(authority_turn_id or turn_id)
+        retry_id = args.get("retry_of_change_set_id")
+        if "retry_of_change_set_id" in args and (
+                not isinstance(retry_id, str) or not re.fullmatch(
+                    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", retry_id)):
+            return _deny("retry_target_invalid", act=act, extra={"gate": "args_schema"})
+
+        def redeem(conn=None):
+            if conn is None:
+                record = read_pending(plan_id)
+                expired = record is not None and _is_expired(record)
+            else:
+                row = conn.execute(
+                    "SELECT *, expires_at <= NOW() AS is_expired FROM agent_approvals "
+                    "WHERE confirmation_id = %s FOR UPDATE", (plan_id,),
+                ).fetchone()
+                record = _pg_approval_record(row)
+                if record is not None and not _record_is_wellformed(record, plan_id):
+                    record = None
+                expired = row is not None and row["is_expired"]
+            reason = _plan_refusal(record, str(tenant_id), plan_session, subject, expired)
+            if reason:
+                return _deny_result(reason), _decision_event("denied", reason=reason, gate="policy")
+            if conn is None:
+                record.update(consumed_at=_iso(_now()), consumed_turn_id=redeem_turn,
+                              retry_of_change_set_id=retry_id)
+                _write_pending(record)
+            else:
+                conn.execute(
+                    "UPDATE agent_approvals SET consumed_at = NOW(), consumed_turn_id = %s, "
+                    "retry_of_change_set_id = %s WHERE confirmation_id = %s",
+                    (redeem_turn, retry_id, plan_id),
+                )
+            return (_allow("allow_via_approval", plan_id, audit=False),
+                    _decision_event("allowed", policy_outcome="allow_via_approval",
+                                    confirmation_id=plan_id))
+
+        if postgres_store:
+            return _pg_plan_decision(tenant_id, rate_category, rate_limit,
+                                     _rate_rejected_event(), redeem)
+        with _state_lock, _snapshot_lock(approvals_dir() / "plan-redemption"):
+            decision, event = redeem()
+            _audit_append(event)
+            return decision
 
     # 7a. re-invoke path: the resumed call carries confirmation_id inside args.
     confirmation_id = args.get("confirmation_id")
@@ -1113,7 +1360,11 @@ def gate(tenant_id: str, session_id: str, turn_id: str, action: str,
     # deny; an action already requiring approval is unchanged. An unreadable
     # policy leaves today's behavior, which is right for a TIGHTENING feature —
     # failing it closed would block every read on a storage blip.
-    if act.policy == "auto" and _plan_first_session(
+    # ask_user consults read_platform_state with this exact capabilities query.
+    plan_authoring = plan_mode and (
+        action in {"ask_user", "request_publication"} or
+        (action == "read_platform_state" and args == {"what": "capabilities"}))
+    if act.policy == "auto" and not plan_authoring and _plan_first_session(
             tenant_id, policy_session_id or session_id):
         return _create_and_await()
     if act.policy == "auto":

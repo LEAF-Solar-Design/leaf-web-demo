@@ -1318,6 +1318,21 @@
         "to_version"
       ]
     },
+    "propose_build_plan": {
+      "description": "Ask the user to approve an exact tool build plan.",
+      "rung": 5,
+      "required_capability": "build",
+      "policy": "always-confirm",
+      "approval_ttl_s": 1800,
+      "dispatch": {"kind": "none", "routes": []},
+      "args_schema": {
+        "type": "object",
+        "properties": {"plan": {"type": "object"}},
+        "required": ["plan"],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "high"
+    },
     "author_tool": {
       "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6).",
       "rung": 5,
@@ -1345,6 +1360,8 @@
           "target_tool_name": {
             "type": "string"
           },
+          "plan_confirmation_id": {"type": "string"},
+          "retry_of_change_set_id": {"type": "string", "format": "uuid"},
           "target": {
             "type": "string",
             "enum": [

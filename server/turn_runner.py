@@ -2432,7 +2432,7 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                     if isinstance(data.get("dwg"), str)
                                     else None
                                 ), entity_scope), project_execution_context),
-                                ttl_s=approval_ttl_s(),
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row already exists (duplicate line / replay)
@@ -2447,7 +2447,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 params=proposal.get("params"), capability=proposal.get("capability"),
                                 rationale=proposal.get("rationale"), kind=data.get("kind"),
                                 payload=project_context_binding.approval_payload(entity_scope_binding.approval_payload(
-                                    data.get("payload"), entity_scope), project_execution_context), ttl_s=approval_ttl_s(),
+                                    data.get("payload"), entity_scope), project_execution_context),
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row created at proposed_run (pair flow)

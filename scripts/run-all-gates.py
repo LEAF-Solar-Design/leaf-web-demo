@@ -1583,6 +1583,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        Suite("server-agent-gate-build-plan", "server tests/test_agent_gate_build_plan.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_gate_build_plan.py"), 33),
         # TCM-04 cost transparency: tenant direct use and the aps:engine usage
         # observation. Hermetic (fixture rows, tmp_path marathon runs), exact count.
         Suite("server-cost-direct-use", "server tests/test_cost_direct_use.py", "pytest", SERVER,
