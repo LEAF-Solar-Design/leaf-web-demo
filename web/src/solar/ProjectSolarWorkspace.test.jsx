@@ -1827,6 +1827,16 @@ it.each(['solar-panel-groups', 'solar-solaredge-accept'])('explains revoked writ
   expect(h.submit).not.toHaveBeenCalled()
 })
 
+it.each(['project_request_required', 'SIP_R4_WORKER_UNAVAILABLE', 'capability_not_ready'])(
+  'does not describe %s as a write permission denial', (reason) => {
+    const h = fixture('solar-panel-groups')
+    const row = { ...h.row, availability: { ...h.row.availability, entitled: false,
+      entitlement_reason: null, runnable: false, refusal_reasons: [reason] } }
+    h.mount({ openTool: row, projectCatalog: { ...h.catalog, families: [{ capabilities: [row] }] } })
+    expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
+    expect(h.submit).not.toHaveBeenCalled()
+  })
+
 it('does not describe denied read permission as lost write access', () => {
   const h = fixture('solar-string-data')
   const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false } }
