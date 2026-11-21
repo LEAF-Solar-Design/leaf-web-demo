@@ -7,7 +7,7 @@ import { createCatalogController } from './createCatalogController.js'
 const run = { lane: 'run', tool: 'count-modules', confidence: 0.97 }
 const build = { lane: 'build', confidence: 0.9 }
 
-function setup(decision, context) {
+function setup(decision, context, families = []) {
   const adapters = {
     draftStorage: null,
     startAgentTurn: vi.fn(),
@@ -20,7 +20,7 @@ function setup(decision, context) {
   const controller = createCatalogController({
     services: {
       getTools: vi.fn(async () => []),
-      getCapabilities: vi.fn(async () => ({ families: [] })),
+      getCapabilities: vi.fn(async () => ({ families })),
       routePrompt,
     },
     adapters,
@@ -85,6 +85,64 @@ describe('plan mode dispatch', () => {
       expect(adapters.commitDecision).toHaveBeenCalledWith(run)
       expect(adapters.startAgentTurn).not.toHaveBeenCalled()
       expect(controller.getState().route).toEqual(run)
+    },
+  )
+})
+
+describe('plan mode with a refused capability', () => {
+  const tool = 'solar-size-strings'
+  const prompt = 'size the strings'
+  const reason = 'entitlement_required'
+  const decision = { ...run, tool }
+  const capability = {
+    name: tool,
+    capabilities: ['drawing.write'],
+    solar: {
+      schema: 'leaf.solar-tool-view.v1', name: tool, family: 'stringing', wave: 1,
+      order: 20, maturity: 'production', engine: 'cloud-service', adapter: null,
+      entitlement: 'run_write', interaction: { mode: 'form' }, ledger: ['string-sizer'],
+    },
+    availability: {
+      entitled: false, implemented: true, engine_ready: false, input_ready: true,
+      refusal_reasons: [reason],
+    },
+  }
+
+  async function setupRefused(context) {
+    const harness = setup(decision, context, [{ family_id: 'stringing', capabilities: [capability] }])
+    await harness.controller.actions.loadCatalog()
+    harness.controller.actions.setPrompt(prompt)
+    return harness
+  }
+
+  it.each(['resolved', 'rejected'])('passes the refusal reason to a %s agent turn', async outcome => {
+    const { controller, adapters } = await setupRefused({ planMode: true })
+    const error = new Error('agent unavailable')
+    if (outcome === 'rejected') adapters.startAgentTurn.mockRejectedValueOnce(error)
+    await controller.actions.dispatch(undefined, { allowSecretOnce: true })
+
+    expect(adapters.startAgentTurn).toHaveBeenCalledExactlyOnceWith(
+      prompt, { ...decision, rationale: `${tool} is not ready here: ${reason}` }, { allowSecretOnce: true },
+    )
+    expect(adapters.commitDecision).not.toHaveBeenCalled()
+    expect(adapters.openProjectSource).not.toHaveBeenCalled()
+    expect(adapters.openAuthor).not.toHaveBeenCalled()
+    expect(controller.getState()).toMatchObject({ route: null, routeError: null })
+    if (outcome === 'rejected') {
+      expect(adapters.agentBannerFor).toHaveBeenCalledWith(error)
+      expect(controller.getState()).toMatchObject({ prompt, agentBanner: { kind: 'unreachable' } })
+    } else {
+      expect(controller.getState()).toMatchObject({ prompt: '', agentMode: 'primary' })
+    }
+  })
+
+  it.each([{ planMode: false }, { planMode: true, agentDisabled: true }])(
+    'shows the catalog refusal directly with context %j', async context => {
+      const { controller, adapters } = await setupRefused(context)
+      await controller.actions.dispatch()
+      expect(controller.getState()).toMatchObject({ route: null, routeError: reason })
+      expect(adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(adapters.commitDecision).not.toHaveBeenCalled()
     },
   )
 })

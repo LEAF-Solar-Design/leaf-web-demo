@@ -289,14 +289,15 @@ def _explicit_build(text: str) -> bool:
     return _EXPLICIT_BUILD_RE.search(text or "") is not None
 
 
-def _names_tool_exactly(best: "_Score", q_seq: List[str]) -> bool:
+def _names_tool_exactly(best: "_Score", text: str) -> bool:
     """True iff, after stripping authoring scaffolding, the remaining CONTENT tokens are
     all within the matched tool's name tokens — i.e. the text essentially NAMES that
     existing tool exactly (e.g. 'make a tool: count panels'), so the RUN match is honoured
     even under explicit build phrasing. A longer novel description (extra content tokens
     beyond the name, e.g. '... smaller than 10 sqft') is NOT an exact name -> Build."""
     name = set(best.doc.name)
-    residual = [t for t in q_seq if t not in _BUILD_SCAFFOLD]
+    description = _EXPLICIT_BUILD_RE.sub(" ", text, count=1)
+    residual = [t for t in _norm_tokens(description) if t not in _BUILD_SCAFFOLD]
     if not residual:
         return False
     return set(residual) <= name
@@ -546,7 +547,7 @@ def _decide(
         honor_run = False
         if best is not None and best.exact:
             # An explicit build can still just name a registered tool.
-            if not explicit_build or _names_tool_exactly(best, q_seq):
+            if not explicit_build or _names_tool_exactly(best, text):
                 honor_run = True
         if not honor_run:
             strong = _AUTHORING_PHRASE.search(text or "") is not None
