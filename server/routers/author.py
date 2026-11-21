@@ -1178,6 +1178,15 @@ def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Di
         return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
 
 
+@router.get("/api/author/inline-authoring")
+def inline_authoring_flags(tenant=Depends(deps.require_tenant)) -> dict[str, bool]:
+    return {
+        "plan_mode": customization_flags.plan_mode_enabled(tenant),
+        "inline_review": customization_flags.inline_review_enabled(tenant),
+        "self_approval": customization_flags.self_approval_allowed(tenant),
+    }
+
+
 @router.get("/api/author/reviews/context")
 def review_context(change_set_id: UUID, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     denied = _review_gate(tenant)

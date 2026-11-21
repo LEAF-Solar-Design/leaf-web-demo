@@ -38,6 +38,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import catalog as catalog_mod
+import customization_flags
 import deps
 import entitlements
 import jobs
@@ -353,6 +354,8 @@ def build_packet(tenant_id: Any, drawing_id: str,
         "classifier_hint": classifier_hint,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))
+    if customization_flags.plan_mode_enabled(str(tenant_id)):
+        packet["inline_authoring"] = {"plan_mode": True}
     if (project_principal is not None and str(project_principal) == str(tenant_id)
             and session_id and turn_id):
         section = _project_material_context(

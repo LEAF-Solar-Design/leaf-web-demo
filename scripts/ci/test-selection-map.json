@@ -291,6 +291,7 @@
     "server-codeql-barrier-literals",
     "server-completion-broker-file-route",
     "server-context-packet",
+    "server-inline-authoring-context-packet",
     "server-contract-freeze",
     "server-conversation-fence",
     "server-conversation-telemetry",
