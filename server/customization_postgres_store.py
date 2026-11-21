@@ -29,6 +29,7 @@ _TABLES = {
     "customization_audit_events",
     "customization_confirmations",
     "customization_publication_requests",
+    "customization_review_decisions",
     "customization_deployment_snapshots",
     "customization_deployment_audit",
     "customization_removal_requests",

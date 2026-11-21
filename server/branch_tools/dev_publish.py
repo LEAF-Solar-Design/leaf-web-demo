@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 import errno
+import json
 from pathlib import Path
 import re
 import shutil
@@ -61,7 +62,14 @@ def read_branch_publication(name: str, version: str, root: Path) -> DevPublishRe
     return DevPublishResult(name, version, digest, directory, False)
 
 
-def publish_branch_package(files: Mapping[str, bytes], name: str, root: Path) -> DevPublishResult:
+def publish_branch_package(files: Mapping[str, bytes], name: str, root: Path,
+                           review: Mapping[str, str] | None = None) -> DevPublishResult:
+    metadata = {"status": "reviewed"}
+    if review is not None:
+        if (review.get("approval") not in ("self", "independent")
+                or review.get("approver_role") not in ("owner", "reviewer")):
+            raise DevPublishError("branch_review_invalid")
+        metadata.update(approval=review["approval"], approver_role=review["approver_role"])
     files = dict(files)
     checked = check_branch_package(files, name)
     if not checked.ok:
@@ -85,11 +93,25 @@ def publish_branch_package(files: Mapping[str, bytes], name: str, root: Path) ->
     root = Path(root)
     destination = root / name / version
     _safe_path(destination)
-    if destination.exists():
+
+    def existing_publication() -> DevPublishResult:
         existing = read_branch_publication(name, version, root)
         if existing.package_digest != digest:
             raise DevPublishError("branch_version_conflict")
+        if review is not None:
+            receipt = existing.path / "review.json"
+            try:
+                info = receipt.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+                    raise DevPublishError("branch_version_conflict")
+                if json.loads(receipt.read_bytes()) != metadata:
+                    raise DevPublishError("branch_version_conflict")
+            except (FileNotFoundError, ValueError) as exc:
+                raise DevPublishError("branch_version_conflict") from exc
         return existing
+
+    if destination.exists():
+        return existing_publication()
     root.mkdir(mode=0o755, parents=True, exist_ok=True)
     destination.parent.mkdir(mode=0o755, exist_ok=True)
     _safe_path(destination)
@@ -103,7 +125,7 @@ def publish_branch_package(files: Mapping[str, bytes], name: str, root: Path) ->
                 info.external_attr = 0o100644 << 16
                 archive.writestr(info, data)
         (temporary / "digest.txt").write_text(digest + "\n", encoding="ascii", newline="\n")
-        (temporary / "review.json").write_text('{"status": "reviewed"}', encoding="utf-8")
+        (temporary / "review.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
         # mkdtemp is private while incomplete; the finished catalog is readable.
         temporary.chmod(0o755)
         _safe_path(destination)
@@ -113,10 +135,7 @@ def publish_branch_package(files: Mapping[str, bytes], name: str, root: Path) ->
             # A concurrent publisher may have installed this immutable version.
             if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                 raise
-            existing = read_branch_publication(name, version, root)
-            if existing.package_digest != digest:
-                raise DevPublishError("branch_version_conflict") from exc
-            return existing
+            return existing_publication()
         return DevPublishResult(name, version, digest, destination, True)
     finally:
         if temporary.exists():

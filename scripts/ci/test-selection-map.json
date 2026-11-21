@@ -856,6 +856,7 @@
     "server-s02-report-row-angle",
     "server-branch-dev-publish",
     "server-customization-branch-target",
+    "server-customization-inline-review",
     "server-customization-tool-target-store",
     "server-build-plan",
     "server-inline-authoring-flags"

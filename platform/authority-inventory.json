@@ -108,7 +108,8 @@
       "0105",
       "0106",
       "0107",
-      "0108"
+      "0108",
+      "0109"
     ],
     "migration_files": [
       "0001_project_job.sql",
@@ -218,7 +219,8 @@
       "0105_x02_cloud_request_rejected.sql",
       "0106_customization_stage_attempt_history.sql",
       "0107_x07_customer_roles.sql",
-      "0108_customization_change_set_target.sql"
+      "0108_customization_change_set_target.sql",
+      "0109_customization_review_decisions.sql"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -1150,6 +1152,7 @@
         "customization_audit_events",
         "customization_confirmations",
         "customization_publication_requests",
+        "customization_review_decisions",
         "customization_deployment_snapshots",
         "customization_deployment_audit"
       ],
@@ -1207,6 +1210,7 @@
         "customization_audit_events",
         "customization_confirmations",
         "customization_publication_requests",
+        "customization_review_decisions",
         "customization_deployment_snapshots",
         "customization_deployment_audit"
       ],
