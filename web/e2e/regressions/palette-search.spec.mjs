@@ -5,14 +5,6 @@ import { LOCAL_IDENTITY } from '../walk/fixtures.mjs'
 // Match the walk fixture's browser tenant as well as its setup requests.
 test.use({ extraHTTPHeaders: { 'X-Tenant-Id': LOCAL_IDENTITY.tenant } })
 
-// TEMPORARY DIAGNOSTIC (root ruling 3d57336c; removed before landing). Emits only on an unexpected outcome.
-let paletteDiagnostic = null
-test.afterEach(async ({}, testInfo) => {
-  if (paletteDiagnostic && testInfo.status !== testInfo.expectedStatus) {
-    console.log('PALETTE_DIAG ' + JSON.stringify(paletteDiagnostic))
-  }
-})
-
 test('command palette returns a server row for a seeded drawing name', async ({ page }) => {
   // Same private upload recipe as e2e/walk/fixtures.mjs open-private-drawing.
   const name = 'studio-s7a-search.dxf'
@@ -54,23 +46,8 @@ test('command palette returns a server row for a seeded drawing name', async ({ 
   const prompt = page.getByTestId('command-bar')
   await expect(prompt).toBeVisible()
   await page.locator('.bar-scope[aria-haspopup="listbox"]').click()
-  const scopeOption = page.getByRole('listbox', { name: 'Scope', exact: true })
-    .getByRole('option').filter({ hasText: /^find/ })
-  // TEMPORARY DIAGNOSTIC (root ruling 3d57336c; removed before landing): sanitized hit-target evidence only.
-  paletteDiagnostic = await scopeOption.evaluate((target) => {
-    const describe = (node) => {
-      const style = getComputedStyle(node)
-      return { tag: node.tagName.toLowerCase(), role: node.getAttribute('role'), cls: String(node.className || '').slice(0, 80),
-        position: style.position, zIndex: style.zIndex, pointerEvents: style.pointerEvents, overflow: style.overflow }
-    }
-    const chain = (node) => { const out = []; for (let n = node; n && n !== document.documentElement && out.length < 10; n = n.parentElement) out.push(describe(n)); return out }
-    const rect = target.getBoundingClientRect()
-    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
-    return { viewport: { width: innerWidth, height: innerHeight },
-      targetRect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
-      hitIsTarget: hit === target || target.contains(hit), targetChain: chain(target), hitChain: hit ? chain(hit) : null }
-  }).catch((error) => ({ error: String(error && error.message).slice(0, 160) }))
-  await scopeOption.click()
+  await page.getByRole('listbox', { name: 'Scope', exact: true })
+    .getByRole('option').filter({ hasText: /^find/ }).click()
   await prompt.fill(name)
   const results = page.getByRole('listbox', { name: 'Search results', exact: true })
   await expect(results).toBeVisible()
