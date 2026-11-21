@@ -2436,6 +2436,22 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                             )
                         except sqlite3.IntegrityError:
                             pass  # row already exists (duplicate line / replay)
+                elif ev_type == "plan_proposed":
+                    # Plan mode emits plan_proposed ALONE for a propose_build_plan
+                    # confirmation, so the plan card's Approve needs its row here
+                    # too, created before the card is published.
+                    cid = data.get("confirmation_id") if isinstance(data, dict) else None
+                    if isinstance(cid, str) and cid:
+                        try:
+                            session_store.create_approval(
+                                confirmation_id=cid, session_id=session_id, tenant_id=tenant_id,
+                                turn_id=turn_id, tool="propose_build_plan", params=None,
+                                capability=None, rationale=None, kind="propose_build_plan",
+                                payload=None,
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
+                            )
+                        except sqlite3.IntegrityError:
+                            pass  # row already exists (duplicate line / replay)
                 elif ev_type == "confirmation_required":
                     cid = data.get("confirmation_id")
                     if cid:
