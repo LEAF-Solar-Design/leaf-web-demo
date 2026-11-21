@@ -8,10 +8,18 @@ const HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant'
 const local = (value) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname)
 
 async function openLinkedServices(page) {
-  const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
-  await studio.click()
-  await expect(studio).toHaveAttribute('aria-expanded', 'true')
-  await page.locator('.link-svc-trigger').click()
+  await page.getByText('Account', { exact: true }).click()
+  const trigger = page.locator('.link-svc-trigger')
+  await expect(trigger).toBeAttached()
+  // Ops seats integrations in the account row; other profiles keep them
+  // in the Studio sidebar. Preserve both placements in the quiet shell.
+  if (!await trigger.isVisible()) {
+    const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
+    await studio.click()
+    await expect(studio).toHaveAttribute('aria-expanded', 'true')
+  }
+  await expect(trigger).toBeVisible()
+  await trigger.click()
 }
 
 test.use({ serviceWorkers: 'block' })

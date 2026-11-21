@@ -14,6 +14,8 @@ import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
 import RoutePanel from '../components/RoutePanel.jsx'
 import { isCustomerMode } from '../lib/customerMode.js'
 import { ServiceStatus } from '../components/DetailsDrawer.jsx'
+import SurfaceFrame from './SurfaceFrame.jsx'
+import WorkspaceEnvironment, { INERT_VALUE } from './WorkspaceEnvironment.jsx'
 
 // Exercise App's actual JSX expressions with explicit bindings, without
 // mounting its backend/session orchestration.
@@ -95,6 +97,48 @@ describe('quiet Studio shell', () => {
     expect(container.querySelectorAll('.claude-acct')).toHaveLength(1)
     expect(!!container.querySelector('.shell-avatar-menu')).toBe(studioShell)
     if (!studioShell) expect(container.querySelector('.who > .claude-acct')).toBeTruthy()
+  })
+
+  it.each(['cad', 'solar', 'browser', 'ios', 'ops'])('keeps linked services reachable in customer mode for %s', (profile) => {
+    const bindings = customerBindings(true)
+    expect(bindings.studioCustomerMode).toBe(true)
+    // Reuse App's actual rail visibility gates and the real integrations
+    // slot, including Ops' portal into header.top .who.
+    const rail = appSource.match(/<div className="rail-stack"[\s\S]*?aria-hidden=\{[^\n]+/)[0]
+      + '\n<SurfaceFrame.Integrations /></div>'
+    function CustomerShell() {
+      const [browserPanel, setBrowserPanel] = useState('none')
+      const [open, onToggle] = useState(false)
+      return <SurfaceFrame scene="console" activeSurface={profile} studioShell
+        integrations={{ mock: false, servers: [], open, onToggle }}>
+        <div className="studio-shell">
+          <WorkspaceEnvironment scopeKey="customer" profile={profile} panel={browserPanel} onPanel={setBrowserPanel} />
+          <div className="app" data-studio-shell="cockpit" data-surface={profile} data-environment-panel={browserPanel}>
+            <header className="top" data-customer-mode={String(bindings.studioCustomerMode)}>
+              <ShellAccountMenu studioShell><div className="who" /></ShellAccountMenu>
+            </header>
+            {appExpression(rail, { ...bindings, browserPanel, INERT_VALUE, SurfaceFrame })}
+          </div>
+        </div>
+      </SurfaceFrame>
+    }
+    const { container } = render(<CustomerShell />)
+    const trigger = container.querySelector('.link-svc-trigger')
+    expect(trigger).not.toBeVisible()
+    // Match openLinkedServices in the local OAuth e2e: Account first,
+    // then Studio only for profiles whose trigger still lives there.
+    fireEvent.click(screen.getByText('Account', { exact: true }))
+    if (profile !== 'ops') {
+      expect(trigger).not.toBeVisible()
+      const studio = screen.getByRole('navigation', { name: 'Workspace controls' }).querySelector('button[aria-controls="project-workspace-activity"]')
+      fireEvent.click(studio)
+      expect(studio).toHaveAttribute('aria-expanded', 'true')
+    }
+    expect(container.querySelectorAll('.link-svc-trigger')).toHaveLength(1)
+    expect(trigger).toBeVisible()
+    expect(trigger.closest('[hidden], [inert], [aria-hidden="true"]')).toBeNull()
+    fireEvent.click(trigger)
+    expect(screen.getByRole('dialog', { name: 'Linked services', exact: true })).toBeVisible()
   })
 
   it('keeps the CAD cockpit working controls mounted for customer mode', () => {
