@@ -585,11 +585,12 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         orgId: binding.organization_id, projectId: binding.project_id, catalogDigest: intent.catalogDigest,
         idempotencyKey: intent.idempotencyKey, checkoutCapability: capability,
         ...projectSolarIntentExtras(intent.tool, intent) })
-      return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
+      return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body),
+        headers: { ...built.headers, Prefer: 'respond-async' }, signal,
         // A queued run answers with its real job; a synchronous project run answers with a terminal
         // envelope, accepted only when it is bound to this exact captured context and tool.
         validate: (data, selected) => (typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted')
-          || terminalRun(data, selected, intent.tool) })
+          || persistedProjectRead(data, selected, intent) || terminalRun(data, selected, intent.tool) })
     }),
     // Editor Save and Undo restore under the checkout this client already holds. The proof is
     // attached here and never leaves the client. No held checkout answers locally, sending nothing.
@@ -881,6 +882,21 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
   }
   publish()
   return Object.freeze(client)
+}
+
+// Canonical project reads finish inside their submission transaction. Only attach
+// a terminal job if both the stored execution context and its result match the intent.
+function persistedProjectRead(job, binding, intent) {
+  if (!plain(job) || !UUID.test(job.job_id) || !['complete', 'failed'].includes(job.status)
+    || job.kind !== 'run' || job.tool_name !== intent.tool || job.org_id !== binding.organization_id
+    || job.project_id !== binding.project_id || job.input_version_id !== binding.input_version_id) return false
+  const context = job.execution_context
+  const result = job.result
+  return plain(context) && context.schema === 'leaf.project-read-job.v1'
+    && context.catalog_digest === intent.catalogDigest && HEX.test(context.intake_sha256)
+    && ['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => context[key] === binding[key])
+    && terminalRun(result, binding, intent.tool) && result.ok === (job.status === 'complete')
+    && result.project_context.intake_sha256 === context.intake_sha256
 }
 
 // A synchronous project run result: never a job, and bound to the captured project context.

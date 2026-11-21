@@ -823,7 +823,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             default=None, alias="X-Authority-Session-Id"),
         authority_turn_id: Optional[str] = Header(
             default=None, alias="X-Authority-Turn-Id"),
-        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault")):
+        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault"),
+        prefer: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -1120,7 +1121,9 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
             tool, tenant_id, (x_org_id, x_project_id), req, params,
-            persist=persist == 1 or selected_binding is not None,
+            persist=persist == 1 or selected_binding is not None or (
+                isinstance(prefer, str) and "respond-async" in {item.strip().lower() for item in prefer.split(",")}
+            ),
             idempotency_key=idempotency_key, selected_binding=selected_binding)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_write_tool(tool):
