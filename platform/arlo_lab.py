@@ -212,6 +212,71 @@ def _active_input(cur, org_id, project_id, original_id):
         raise lifecycle.LifecycleConflict("ARLO active input reference is invalid.") from None
 
 
+def _select_input(cur, org_id, project_id, binding_id, original_id, target_id):
+    if _active_input(cur, org_id, project_id, original_id) == uuid.UUID(str(target_id)):
+        return
+    content = canonical_text({"input_version_id": str(target_id)})
+    cur.execute(
+        "INSERT INTO project_files (file_id,org_id,project_id,path,media_type,content,"
+        "content_sha256,created_by_binding_id) VALUES (%(file)s,%(org)s,%(project)s,"
+        "%(path)s,'application/json',%(content)s,%(sha)s,%(actor)s) "
+        "ON CONFLICT ON CONSTRAINT project_files_scope_path_unique DO UPDATE SET "
+        "content=EXCLUDED.content, content_sha256=EXCLUDED.content_sha256, "
+        "revision=project_files.revision+1, updated_at=NOW()",
+        {"file": uuid.uuid4(), "org": org_id, "project": project_id,
+         "path": f"arlo/inputs/{original_id}/active.json", "content": content,
+         "sha": hashlib.sha256(content.encode()).hexdigest(), "actor": binding_id})
+
+
+def activate_retained_input(org_id, project_id, binding_id, original_id, target_id):
+    """Select an existing reference input without appending inputs or job receipts."""
+    original_id, target_id = uuid.UUID(str(original_id)), uuid.UUID(str(target_id))
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            _scope(cur, org_id, project_id, binding_id, write=True)
+            original = _input_response(_registered_row(cur, org_id, project_id, original_id))
+            target = _input_response(_registered_row(cur, org_id, project_id, target_id))
+            if original["original_id"] != str(original_id) or original["parent_id"] is not None \
+                    or "material_id" not in original or "material_id" not in target \
+                    or target["original_id"] != str(original_id) \
+                    or target["material_id"] != original["material_id"] \
+                    or target["original_sha256"] != original["original_sha256"]:
+                raise lifecycle.LifecycleConflict("ARLO retained input lineage mismatch")
+            cur.execute(
+                "SELECT sha256 FROM project_reference_materials WHERE org_id = %(org)s "
+                "AND project_id = %(project)s AND material_id = %(material)s",
+                {"org": org_id, "project": project_id,
+                 "material": uuid.UUID(original["material_id"])})
+            material = cur.fetchone()
+            if material is None:
+                raise lifecycle.LifecycleUnavailable("ARLO reference material not found")
+            if material["sha256"] != original["original_sha256"]:
+                raise lifecycle.LifecycleConflict("ARLO reference material digest mismatch")
+            _select_input(cur, org_id, project_id, binding_id, original_id, target_id)
+            return target
+    return run_transaction(operation, isolation="serializable")
+
+
+def _retained_summaries(cur, org_id, project_id, original_id, material_id, active):
+    cur.execute(
+        "SELECT i.input_version_id, i.input_sha256, v.provenance FROM arlo_lab_inputs i "
+        "JOIN drawing_versions v ON v.version_id = i.input_version_id "
+        "AND v.org_id = i.org_id AND v.project_id = i.project_id "
+        "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
+        "AND v.deleted_at IS NULL AND i.example_id = %(source)s "
+        "AND i.example_version = %(material)s AND v.provenance->>'material_id' = %(material)s "
+        "AND COALESCE(v.provenance->>'original_id', i.input_version_id::text) = %(original)s "
+        "ORDER BY (i.input_version_id = %(original)s::uuid) DESC, i.input_version_id",
+        {"org": org_id, "project": project_id, "source": REFERENCE_SOURCE,
+         "material": material_id, "original": str(original_id)})
+    return [{"input_version_id": str(row["input_version_id"]),
+             "input_sha256": row["input_sha256"],
+             "parent_id": row["provenance"].get("parent_id"),
+             "original_id": str(original_id), "active": row["input_version_id"] == active}
+            for row in cur.fetchall()]
+
+
 def read_input(org_id, project_id, binding_id, input_version_id):
     def operation(conn):
         with conn.cursor() as cur:
@@ -222,6 +287,11 @@ def read_input(org_id, project_id, binding_id, input_version_id):
             result = _input_response(_registered_row(cur, org_id, project_id, active))
             if result["original_id"] != str(original_id):
                 raise lifecycle.LifecycleConflict("ARLO active input lineage mismatch")
+            if "material_id" in base:
+                if result.get("material_id") != base["material_id"]:
+                    raise lifecycle.LifecycleConflict("ARLO active input material mismatch")
+                result["retained_inputs"] = _retained_summaries(
+                    cur, org_id, project_id, original_id, base["material_id"], active)
             return result
     return run_transaction(operation, isolation="serializable")
 
@@ -290,17 +360,7 @@ def revise_input(org_id, project_id, binding_id, input_version_id, *, patch=None
                     result = _register_input(org_id, project_id, binding_id, key=key, request=request,
                         example_id=parent["example_id"], example_version=parent["example_version"],
                         source=source, source_kind=parent["provenance"]["source_kind"], conn=conn)
-            content = canonical_text({"input_version_id": result["input_version_id"]})
-            cur.execute(
-                "INSERT INTO project_files (file_id,org_id,project_id,path,media_type,content,"
-                "content_sha256,created_by_binding_id) VALUES (%(file)s,%(org)s,%(project)s,"
-                "%(path)s,'application/json',%(content)s,%(sha)s,%(actor)s) "
-                "ON CONFLICT ON CONSTRAINT project_files_scope_path_unique DO UPDATE SET "
-                "content=EXCLUDED.content, content_sha256=EXCLUDED.content_sha256, "
-                "revision=project_files.revision+1, updated_at=NOW()",
-                {"file": uuid.uuid4(), "org": org_id, "project": project_id,
-                 "path": f"arlo/inputs/{original_id}/active.json", "content": content,
-                 "sha": hashlib.sha256(content.encode()).hexdigest(), "actor": binding_id})
+            _select_input(cur, org_id, project_id, binding_id, original_id, result["input_version_id"])
             lifecycle._write_receipt(cur, org_id, project_id, binding_id, "file_put", key,
                                      fingerprint, {"input_version_id": result["input_version_id"]})
             return result

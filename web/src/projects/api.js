@@ -240,6 +240,16 @@ export function readProjectArloInput(projectId, inputId, { orgId, signal, expect
   return request(`/api/projects/${project}/arlo-inputs/${input}`, { orgId, signal, expectedScope, cache: 'no-store' })
 }
 
+export function activateProjectArloInput(projectId, originalId, inputId, { orgId, signal, expectedScope } = {}) {
+  const project = requireUuid(projectId, 'project')
+  const original = requireUuid(originalId, 'original ARLO input')
+  const input = requireUuid(inputId, 'ARLO input version')
+  const org = requireUuid(orgId, 'organization')
+  return request(`/api/projects/${project}/arlo-inputs/${original}/activate`, {
+    ...mutation('POST', { input_version_id: input }), orgId: org, signal, expectedScope,
+  })
+}
+
 export function reviseProjectArloInput(projectId, inputId, patch, { orgId, key, signal, expectedScope } = {}) {
   const project = requireUuid(projectId, 'project')
   const input = requireUuid(inputId, 'ARLO input version')

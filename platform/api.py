@@ -929,6 +929,20 @@ def restore_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID,
     return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
 
+class ActivateRetainedArloInputBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    input_version_id: uuid.UUID
+
+
+@router.post("/projects/{project_id}/arlo-inputs/{original_id}/activate")
+def activate_retained_arlo_input(project_id: uuid.UUID, original_id: uuid.UUID,
+                                 body: ActivateRetainedArloInputBody,
+                                 actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _lifecycle_response(lambda: arlo_lab.activate_retained_input(
+        actor.org_id, project_id, actor.binding_id, original_id, body.input_version_id))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/projects/{project_id}/arlo-jobs/{job_id}")
 def get_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
                  input_diagnostics: bool = False,
