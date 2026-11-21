@@ -45,6 +45,10 @@ class ChangeSetConflictError(CustomizationStoreError):
     pass
 
 
+class RetryTargetInvalidError(CustomizationStoreError):
+    """The requested retry does not match a failed build of this plan."""
+
+
 class InvalidTransitionError(CustomizationStoreError):
     pass
 
@@ -90,6 +94,9 @@ class ChangeSet:
     base_catalog_change_set_id: Optional[str] = None
     catalog_record_fields_json: Optional[str] = None
     tool_target: Optional[str] = None
+    plan_json: Optional[str] = None
+    plan_digest: Optional[str] = None
+    plan_confirmation_id: Optional[str] = None
 
 
 @dataclass(frozen=True)

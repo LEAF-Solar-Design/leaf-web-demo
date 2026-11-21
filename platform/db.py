@@ -600,6 +600,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "confirmation_id", "tenant_id", "session_id", "turn_id", "action", "args",
             "args_hash", "policy", "rung", "created_at", "expires_at", "granted",
             "denied", "decided_at", "decided_by", "reason", "consumed_at",
+            "proposer_subject", "proposed_plan", "consumed_turn_id", "retry_of_change_set_id",
         },
         "agent_session_grants": {
             "tenant_id", "session_id", "action", "target_key", "granted_at",
@@ -756,6 +757,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "desired_platform_release", "workspace_contract_digest",
             "author_subject", "approver_subject", "created_at", "updated_at",
             "change_kind", "target_tool_name", "request_description", "request_fingerprint",
+            "plan_json", "plan_digest", "plan_confirmation_id",
             "authority_session_id", "authority_turn_id",
             "request_graph_input", "base_catalog_change_set_id", "catalog_record_fields_json",
             "tool_target",
@@ -1638,6 +1640,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "agent": {
         "agent_approvals_pkey": _catalog_contract(
             "agent_approvals", "PRIMARY KEY (confirmation_id)"),
+        "agent_plan_approver_matches": _catalog_contract(
+            "agent_approvals", "CHECK", "propose_build_plan", "NOT granted",
+            "proposer_subject IS NOT NULL", "decided_by IS NOT NULL", "decided_by = proposer_subject"),
         "agent_session_grants_pkey": _catalog_contract(
             "agent_session_grants",
             "PRIMARY KEY (tenant_id, session_id, action, target_key)"),
@@ -2064,6 +2069,9 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "customization": {
         "customization_recovery_idx": _catalog_contract(
             "customization_change_sets", "(state, tenant_id)"),
+        "customization_change_sets_plan_idx": _catalog_contract(
+            "customization_change_sets", "UNIQUE INDEX", "(tenant_id, plan_confirmation_id)",
+            "WHERE", "plan_confirmation_id IS NOT NULL"),
         "customization_confirmation_lookup_idx": _catalog_contract(
             "customization_confirmations",
             "(tenant_id, change_set_id, consumed, created_at DESC)"),

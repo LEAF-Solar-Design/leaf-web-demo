@@ -37,7 +37,9 @@ from uuid import uuid4
 from psycopg import Error as PostgresError
 
 import author_quota
+import agent_gate
 import agent_policy
+import build_plan
 import change_classifier
 import customization_flags
 import deps
@@ -55,7 +57,7 @@ from customization_authority import (
 from customization_flags import RolloutMode, enabled, mode
 from customization_models import (
     ChangeSet, ChangeSetNotFoundError, ChangeState, ChangeSetConflictError,
-    IdempotencyReplayError, InvalidTransitionError,
+    IdempotencyReplayError, InvalidTransitionError, RetryTargetInvalidError, require_uuid,
 )
 from customization_postgres_store import PostgresCustomizationStore
 from customization_store import CustomizationRepository, SQLiteCustomizationStore
@@ -754,6 +756,8 @@ class CustomizationService:
         try:
             change, _created = self.store.reserve_stage(**kwargs)
             return change
+        except RetryTargetInvalidError as exc:
+            raise CustomizationServiceError("retry_target_invalid", 409) from exc
         except IdempotencyReplayError as exc:
             raise CustomizationServiceError("idempotency_replay", 409) from exc
         except (ChangeSetConflictError, ChangeSetNotFoundError) as exc:
@@ -1028,6 +1032,12 @@ class CustomizationService:
         if target not in (None, "studio", "branch"):
             raise CustomizationServiceError("invalid_target", 422)
         tenant_id = _tenant_id(tenant)
+        if customization_flags.plan_mode_enabled(tenant_id):
+            return self.enqueue_stage(
+                tenant=tenant, description=description, mode=mode, idempotency_key=idempotency_key,
+                target=target, target_tool_name=target_tool_name, graph_input=graph_input,
+                authority_session_id=authority_session_id, authority_turn_id=authority_turn_id,
+            )
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
         if mode != "build" or not isinstance(description, str) or not description.strip():
@@ -1120,6 +1130,8 @@ class CustomizationService:
         authority_session_id: str | None = None,
         authority_turn_id: str | None = None,
         graph_input: Any = None,
+        plan_confirmation_id: str | None = None,
+        retry_of_change_set_id: str | None = None,
     ) -> dict[str, Any]:
         """Reserve and charge one exact stage request without calling the harness."""
         if target not in (None, "studio", "branch"):
@@ -1127,8 +1139,42 @@ class CustomizationService:
         tenant_id = _tenant_id(tenant)
         if not enabled(5, tenant_id):
             raise CustomizationServiceError("customization_stage_disabled", 404)
+        plan_fields = {}
+        change_kind = "revise" if target_tool_name else "create"
+        if customization_flags.plan_mode_enabled(tenant_id):
+            record = agent_gate.consumed_build_plan(
+                tenant_id, authority_session_id, authority_turn_id,
+                getattr(tenant, "subject", None), plan_confirmation_id,
+            )
+            if record is None:
+                raise CustomizationServiceError("plan_required", 409)
+            plan = record["args"]["plan"]
+            if ((target is not None and target != plan["target"])
+                    or (target_tool_name is not None and target_tool_name != plan.get("target_tool_name"))
+                    or graph_input is not None):
+                raise CustomizationServiceError("plan_binding_mismatch", 422)
+            target = plan["target"]
+            change_kind = plan["change_kind"]
+            target_tool_name = plan.get("target_tool_name")
+            description = build_plan.render_description(plan)
+            plan_fields = {
+                "plan_confirmation_id": record["confirmation_id"],
+                "plan_digest": build_plan.plan_digest(plan),
+                "plan_json": build_plan.canonical_bytes(plan).decode("utf-8"),
+            }
+            gated_retry = record.get("retry_of_change_set_id")
+            if gated_retry is not None and retry_of_change_set_id not in (None, gated_retry):
+                raise CustomizationServiceError("retry_target_invalid", 409)
+            retry = gated_retry if gated_retry is not None else retry_of_change_set_id
+            if retry is not None:
+                if not isinstance(retry, str):
+                    raise CustomizationServiceError("retry_target_invalid", 409)
+                try:
+                    plan_fields["retry_of_change_set_id"] = require_uuid(retry)
+                except ValueError as exc:
+                    raise CustomizationServiceError("retry_target_invalid", 409) from exc
         if (mode != "build" or not isinstance(description, str)
-                or not description.strip() or len(description) > 8000):
+                or not description.strip() or (not plan_fields and len(description) > 8000)):
             raise CustomizationServiceError("invalid_stage_request", 422)
         if target_tool_name is not None and (
             not isinstance(target_tool_name, str)
@@ -1176,8 +1222,9 @@ class CustomizationService:
             base_commit=base, desired_platform_release=release.release_id,
             workspace_contract_digest=release.workspace_contract_sha256,
             author_subject=binding.subject or "", change_set_id=str(uuid4()),
-            change_kind="revise" if target_tool_name else "create",
+            change_kind=change_kind,
             target_tool_name=target_tool_name, request_description=description,
+            **plan_fields,
             **({"tool_target": "branch"} if target == "branch" else {}),
             request_fingerprint=fingerprint,
             request_graph_input=graph_input,
@@ -1619,6 +1666,9 @@ class CustomizationService:
         tenant_id = _tenant_id(tenant)
         keep_authority = False
         try:
+            if customization_flags.plan_mode_enabled(tenant_id):
+                # Plan retries are new, separately approved enqueue requests.
+                raise CustomizationServiceError("plan_required", 409)
             self._authority().authorize_stage(
                 binding=binding,
                 builder_entitlement=BuilderEntitlement(tenant_id, binding.subject, True, True),
@@ -1998,6 +2048,8 @@ class CustomizationService:
                       "expectedBaseSha": change.base_commit, "platformRelease": change.desired_platform_release,
                       "workspaceContractDigest": change.workspace_contract_digest,
                       "idempotencyKey": change.idempotency_key,
+                      **({"toolName": json.loads(change.plan_json)["tool_name"]}
+                         if getattr(change, "plan_json", None) else {}),
                       **({"target": "branch"} if getattr(change, "tool_target", None) == "branch" else {}),
                       **({"revisionBaseCommit": revision_base[1]} if revision_base else {}),
                       **({"targetToolName": getattr(change, "target_tool_name", None)}
@@ -2219,6 +2271,8 @@ class CustomizationService:
         if hashlib.sha256(_git_blob(bare, f"{change.base_commit}:registry.json")).hexdigest() != receipt["catalog_digest"]:
             raise CustomizationServiceError("catalog_digest_mismatch", 409)
         name = package_path.split("/")[1]
+        if getattr(change, "plan_json", None) and name != json.loads(change.plan_json)["tool_name"]:
+            raise CustomizationServiceError("plan_binding_mismatch", 422)
         if change.target_tool_name and name != change.target_tool_name:
             raise CustomizationServiceError("branch_target_mismatch", 422)
         manifest_path = package_path + "/tool.json"
@@ -2414,6 +2468,8 @@ class CustomizationService:
                 raise CustomizationServiceError("invalid_staged_paths", 422)
         else:
             raise CustomizationServiceError("invalid_staged_catalog_delta", 422)
+        if getattr(change, "plan_json", None) and staged_tool.get("name") != json.loads(change.plan_json)["tool_name"]:
+            raise CustomizationServiceError("plan_binding_mismatch", 422)
         entry = staged_tool.get("entry")
         if (not isinstance(entry, str) or not entry.startswith("tools/")
                 or entry not in changed):

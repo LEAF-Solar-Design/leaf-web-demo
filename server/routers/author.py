@@ -71,7 +71,7 @@ MAX_AUTHOR_DESCRIPTION = 8_000
 DEFAULT_AUTHOR_TIMEOUT_S = 120.0
 
 
-class AuthorRequest(BaseModel):
+class _AuthorFields(BaseModel):
     description: str = Field(..., max_length=MAX_AUTHOR_DESCRIPTION)
     mode: Literal["build", "one_off"] = "build"
     target_tool_name: str | None = Field(default=None, min_length=1, max_length=64)
@@ -86,12 +86,35 @@ class AuthorRequest(BaseModel):
     graph_input: Any = None
 
 
-class StageRequest(AuthorRequest):
+class AuthorRequest(_AuthorFields):
+    # Legacy callers could send arbitrary extras. Interpret these only when
+    # this tenant uses plan-bound authoring.
+    plan_confirmation_id: Any = None
+    retry_of_change_set_id: Any = None
+
+
+class StageRequest(_AuthorFields):
     mode: str = Field(..., max_length=20)
     idempotency_key: str = Field(..., min_length=1, max_length=200)
 
     class Config:
         extra = "forbid"
+
+
+def _stage_targets(req: _AuthorFields, plan_mode: bool) -> dict[str, str]:
+    if plan_mode:
+        targets = {}
+        for field in ("target", "target_tool_name"):
+            if field in req.model_fields_set:
+                value = getattr(req, field)
+                if value is None:
+                    raise CustomizationServiceError("plan_binding_mismatch", 422)
+                targets[field] = value
+        return targets
+    targets = {"target_tool_name": req.target_tool_name} if req.target_tool_name else {}
+    if req.target == "branch":
+        targets["target"] = "branch"
+    return targets
 
 
 class StageRecoveryRequest(BaseModel):
@@ -561,6 +584,7 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
 # detail-free 503s, and those are exactly what an operator must see. Default to
 # visible; demote only what is provably caller-driven.
 _CALLER_DRIVEN_CODES = frozenset({
+    "plan_required", "plan_binding_mismatch", "retry_target_invalid",
     "revision_target_missing",
     # Fixed deployment posture. Monitor these as configuration, not once per public
     # request: auth being off, or a rollout rung being closed, does not vary by call.
@@ -800,6 +824,9 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     authority_turn_id = (
         authority_turn_id if isinstance(authority_turn_id, str) else None
     )
+    plan_mode = customization_flags.plan_mode_enabled(str(tenant).strip())
+    if plan_mode and not (authority_session_id and authority_turn_id):
+        return _customization_error(CustomizationServiceError("plan_required", 409))
     if bool(authority_session_id) != bool(authority_turn_id):
         return _customization_error(
             CustomizationServiceError("invalid_stage_authority", 422)
@@ -835,6 +862,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
     tenant = deps.stage_author_identity(
         tenant, authority_session_id, authority_turn_id)
     if tenant is None:
+        if plan_mode:
+            return _customization_error(CustomizationServiceError("plan_required", 409))
         return _customization_error(
             CustomizationServiceError(
                 "stage_authority_invalid", 409,
@@ -856,13 +885,13 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         result = enqueue(
             tenant=tenant, description=req.description, mode=req.mode,
             idempotency_key=_subject_scoped_key(idempotency_key.strip(), tenant),
+            **({"plan_confirmation_id": req.plan_confirmation_id,
+                "retry_of_change_set_id": req.retry_of_change_set_id} if plan_mode else {}),
             **({
                 "authority_session_id": authority_session_id,
                 "authority_turn_id": authority_turn_id,
             } if authority_session_id and authority_turn_id else {}),
-            **({"target_tool_name": req.target_tool_name}
-               if req.target_tool_name else {}),
-            **({"target": "branch"} if req.target == "branch" else {}),
+            **_stage_targets(req, plan_mode),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
@@ -937,9 +966,7 @@ def stage(
                 "authority_session_id": authority_session_id,
                 "authority_turn_id": authority_turn_id,
             } if authority_session_id and authority_turn_id else {}),
-            **({"target_tool_name": req.target_tool_name}
-               if req.target_tool_name else {}),
-            **({"target": "branch"} if req.target == "branch" else {}),
+            **_stage_targets(req, customization_flags.plan_mode_enabled(str(tenant))),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
