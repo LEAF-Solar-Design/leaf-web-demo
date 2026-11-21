@@ -57,6 +57,36 @@
       "provenance": { "source": "autofill-solver/solver.py", "entry": "solve_targets" }
     },
     {
+      "name": "count-modules",
+      "version": "1.0.0",
+      "description": "Lists candidate module sets by layer and block. Select a listed set and optionally a design window to count one repeated design copy.",
+      "kind": "script",
+      "engine_op": "count_modules",
+      "entry": "builtins/count_modules.py",
+      "local_only": true,
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer_shares": {"type": "boolean", "description": "Return each layer share of the selected physical module total."},
+          "layer_names": {"type": ["array", "null"], "default": null, "minItems": 1, "items": {"type": "string"}, "description": "Exact layer names for named panel selection."},
+          "cumulative_shares": {"type": "boolean", "description": "Return running physical fractions in descending count order, ties by literal layer name."},
+          "coverage_percent": {"type": "number", "minimum": 0, "description": "List every minimum-size layer set reaching this percentage of the selected module total."},
+          "rank_windows": {"type": ["array", "null"], "default": null, "minItems": 2, "maxItems": 2, "items": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}, "description": "Compare competition ranks within two world-XY windows using the same selected module sets."},
+          "compare_selections": {"type": ["object", "null"], "default": null, "properties": {"by": {"type": "string", "enum": ["block", "set_id"]}, "before": {"type": "array", "items": {"type": "string"}}, "after": {"type": "array", "items": {"type": "string"}}}, "required": ["by", "before", "after"], "additionalProperties": false, "description": "Compare exact block names or selected set IDs across two selections. Empty denominators yield undefined deltas."},
+          "top_layers": {"type": "integer", "minimum": 1, "description": "Rank layers by selected physical module count. Include ties at the requested cutoff."},
+          "panel_scope": {"type": "string", "enum": ["all_layers", "roof_layers"], "description": "For a layer breakdown, select explicitly panel-named blocks in this scope. Unknown candidate roles require a pick."},
+          "group_by": {"type": "string", "enum": ["layer"], "description": "Break the selected physical module count down by drawing layer."},
+          "set_id": {"type": "string", "description": "Single set identity from this drawing's listing. Omit to list sets."},
+          "set_ids": {"type": "array", "items": {"type": "string"}, "description": "Choose the listed sets that together form the intended design."},
+          "region": {"type": ["array", "null"], "default": null, "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "Optional world-XY [minimum X, minimum Y, maximum X, maximum Y]. Counts fully contained individual INSERT bounds and eligible outlines. Overlapping boundaries and incomplete geometry refuse as ambiguous. INSERT arrays require whole-set counting."}
+        },
+        "required": []
+      },
+      "returns": {"type": "object"},
+      "capabilities": ["drawing.read"],
+      "provenance": {"author": "user", "created": "2026-11-15T00:00:00Z"}
+    },
+    {
       "name": "count-by-layer",
       "version": "1.0.0",
       "description": "Counts every model-space entity per layer.",
@@ -131,6 +161,8 @@
       "params": {
         "type": "object",
         "properties": {
+          "min_modules_per_string": {"type": "integer", "minimum": 1, "description": "Optional minimum modules per string. Enables bounded adjacency planning."},
+          "max_modules_per_string": {"type": "integer", "minimum": 1, "description": "Optional maximum modules per string, capped by the cold Voc limit. Enables bounded adjacency planning with minimum 1 when supplied alone."},
           "module_model": {
             "type": "string",
             "default": "Q.Peak DUO XL-G11.7 / 425",
@@ -172,6 +204,7 @@
       "returns": {
         "type": "object",
         "properties": {
+          "planning": {"type": "object", "description": "Present for explicit module bounds. Status is complete, infeasible with a proof witness, or unresolved when the deterministic search budget is exhausted. Unsuccessful plans contain no strings."},
           "module": { "type": "object" },
           "electrical": { "type": "object" },
           "strings": { "type": "array" },

@@ -192,6 +192,8 @@ export interface GrantSettlement {
   usage: Pick<ConverseTurnUsage, "cost_tokens">;
   stop_reason: ConverseStopReason;
   retry_after_s?: number;
+  /** The runner's terminal error code for the turn, when emitted (for example oauth_org_not_allowed). */
+  error_code?: string;
 }
 
 // --------------------------------------------------------------------------- //
@@ -260,6 +262,8 @@ export interface GrantAccountStatus {
   eligible?: boolean;
   usage_tokens?: number;
   cooldown_until?: string | null;
+  auth_refused_at?: string | null;
+  auth_refused_code?: string | null;
 }
 
 /** Token-free operational facts about one tenant grant record. */
@@ -346,6 +350,23 @@ export interface AuthoritativePublishRequest {
 /** Execute one short repository operation only while the current writer lease is valid. */
 export type TenantMutationFence = <T>(operation: () => T | Promise<T>) => Promise<T>;
 
+/** Trusted durable change identity; callers cannot choose a Git ref or file path. */
+export interface StagedToolSourceRequest {
+  readonly changeSetId: string;
+  /** Full commit SHA recorded with the durable change. */
+  readonly stagedCommit: string;
+  /** Declared kebab-case tool name, never an entry path. */
+  readonly slug: string;
+}
+
+/** Exact committed tool.py bytes (at most 256KiB) and their Git/content provenance. */
+export interface StagedToolSource {
+  readonly bytes: Uint8Array;
+  readonly commit: string;
+  readonly blob: string;
+  readonly sha256: string;
+}
+
 export interface TenantRepoProvider {
   /** Provide a checkout of the tenant's repo (git working copy + commit()). */
   checkout(tenantId: string): Promise<TenantRepo>;
@@ -361,6 +382,21 @@ export interface TenantRepoProvider {
   ): Promise<T>;
   /** Read one committed snapshot while excluding a tenant writer. */
   withTenantReadLease?<T>(tenantId: string, action: () => Promise<T>): Promise<T>;
+  /** Read only tools/<slug>/tool.py from an existing, locally bound staged change. */
+  readStagedToolSource?(tenantId: string, request: StagedToolSourceRequest): Promise<StagedToolSource>;
+}
+
+export interface StageCustomizationRequest {
+  changeSetId: string;
+  expectedBaseSha: string;
+  platformRelease: string;
+  workspaceContractDigest: string;
+  idempotencyKey: string;
+  /** Exact package name approved in a build plan, for both creates and revisions. */
+  toolName?: string;
+  targetToolName?: string;
+  revisionBaseCommit?: string;
+  target?: "studio" | "branch";
 }
 
 /** Immutable fields bound into the leaf.customization.v1 staged receipt. */
@@ -598,6 +634,7 @@ export const SPINE_TOOL_NAMES = [
   "run_capability",
   "job_status",
   "author_tool",
+  "propose_plan",
   "request_publication",
   "request_confirmation",
   "propose_overlay",
@@ -621,6 +658,8 @@ export type ConverseEventType =
   | "proposed_run"
   | "confirmation_required"
   | "question_required"
+  | "questions_required"
+  | "plan_proposed"
   | "confirmation_resolved"
   | "turn_usage"
   | "turn_complete"
@@ -751,6 +790,12 @@ export interface ConverseRunInput {
  */
 export interface SpineConverseRunner {
   run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent>;
+  /**
+   * Optional prompt budget in characters for a runner with a small context window (a
+   * self-hosted model). When set, the loop drops the OLDEST prior_messages until the built
+   * turn prompt fits; the current message and context packet are always kept. Unset = no trim.
+   */
+  readonly promptBudgetChars?: number;
 }
 
 // --------------------------------------------------------------------------- //
@@ -909,6 +954,7 @@ export interface AppRunClient {
      * author from its own record of that turn; the harness asserts no identity. */
     authority?: { sessionId?: string; turnId?: string },
     targetToolName?: string,
+    target?: "branch",
   ): Promise<Record<string, unknown>>;
   /** Request or resume publication of one durable staged change set. */
   requestPublication(

@@ -33,7 +33,7 @@ import math
 import re
 from typing import Any, Dict, List
 
-from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS
+from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _layout_block_name
 
 # Bounds shared with the write contract (server/mutation_plan.py) so a document
 # the plan could never describe is refused at the same size here.
@@ -425,7 +425,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         name = _layer_name(ent.get("name"), where)
         raw_blocks = intake.get("blocks", {})
         known = raw_blocks if isinstance(raw_blocks, dict) else {}
-        if name.startswith("*") or name not in known:
+        if _layout_block_name(name) or name not in known:
             _fail(f"{where}: unresolved block reference {name}")
         layer = _layer_name(ent.get("layer"), where)
         point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
@@ -552,9 +552,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         "0", "SECTION", "2", "TABLES",
         "0", "TABLE", "2", "LAYER", "70", str(len(layer_order)),
     ]
+    # GAPS 51: a layer the intake records as hidden is written off (62 -7), so
+    # the parse of this file reads the same hidden_layers back.
+    hidden_in = intake.get("hidden_layers")
+    hidden_set = {h for h in hidden_in if isinstance(h, str)} if isinstance(hidden_in, list) and len(hidden_in) <= MAX_LAYERS else set()
     for name in layer_order:
         out += ["0", "LAYER", "100", "AcDbSymbolTableRecord", "100", "AcDbLayerTableRecord",
-                "2", name, "70", "0", "62", "7", "6", "Continuous"]
+                "2", name, "70", "0", "62", "-7" if name in hidden_set else "7", "6", "Continuous"]
     out += ["0", "ENDTAB"]
     if emit_dimstyle_table:
         out += ["0", "TABLE", "2", "DIMSTYLE", "70", str(len(dimstyle_order))]
@@ -592,7 +596,8 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             block = blocks.get(name, {"base": [0.0, 0.0, 0.0], "children": []})
             out += ["0", "BLOCK", "5", fresh_handle(), "330", owner,
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin",
-                    "2", name, "70", "0", *_point_groups(block["base"]), "3", name, "1", ""]
+                    "2", name, "70", "1" if name.startswith("*") and not _layout_block_name(name) else "0",
+                    *_point_groups(block["base"]), "3", name, "1", ""]
             for child in block["children"]:
                 out += _emit_block_child(child, fresh_handle(), owner)
             out += ["0", "ENDBLK", "5", fresh_handle(), "330", owner,
@@ -1019,8 +1024,8 @@ def _validated_blocks(blocks, note_layer):
     result = {}
     for name, block in blocks.items():
         _layer_name(name, "block name")
-        if name.startswith("*"):
-            _fail("reserved or anonymous block name")
+        if _layout_block_name(name):
+            _fail("reserved layout block name")
         if not isinstance(block, dict):
             _fail(f"blocks[{name}]: not an object")
         base = _vector(block.get("base"), f"blocks[{name}].base")
@@ -1055,6 +1060,8 @@ def _validated_blocks(blocks, note_layer):
                                elev=_number(child.get("elev"), where))
                     if not any(row["nrm"]):
                         _fail(f"{where}: nrm must not be the zero vector")
+            elif kind == "POINT":
+                row["pt"] = _vector(child.get("pt"), where)
             elif kind in ("CIRCLE", "ARC"):
                 row.update(c=_vector(child.get("c"), where), r=_number(child.get("r"), where),
                            nrm=_vector(child.get("nrm"), where))
@@ -1086,7 +1093,9 @@ def _emit_block_child(child, handle, owner):
     kind = child["kind"]
     out = ["0", kind, "5", handle, "330", owner, "100", "AcDbEntity", "8", child["layer"]]
     out += _entity_property_groups({handle: child.get("properties", {})}, handle, "block child")
-    if kind == "LINE":
+    if kind == "POINT":
+        out += ["100", "AcDbPoint", *_point_groups(child["pt"])]
+    elif kind == "LINE":
         out += ["100", "AcDbLine", *_point_groups(child["pts"][0]), *_point_groups(child["pts"][1], 11)]
     elif kind == "LWPOLYLINE":
         out += ["100", "AcDbPolyline", "90", str(len(child["pts"])),

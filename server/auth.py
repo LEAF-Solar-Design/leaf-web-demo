@@ -30,6 +30,7 @@ import importlib.util
 import logging
 import os
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -37,7 +38,6 @@ from typing import Any, Dict, Optional
 import jwt
 from fastapi import HTTPException, status
 from jwt import PyJWKClient, PyJWKSet
-from jwt.utils import base64url_decode
 
 # --------------------------------------------------------------------------- #
 # config — env with ROOT-ASSUMED DEFAULTS (see contract/AUTH.md operator section)
@@ -150,20 +150,7 @@ def _peek_unverified(token: str) -> "tuple[Dict[str, Any], Dict[str, Any]]":
     mirrors PyJWT's own split and decoder; a part that does not decode to a JSON
     object reads as {}.
     """
-    try:
-        signing_input, _signature = token.encode("utf-8").rsplit(b".", 1)
-        head, body = signing_input.split(b".", 1)
-    except (ValueError, UnicodeError):
-        return {}, {}
-
-    def part(segment: bytes) -> Dict[str, Any]:
-        try:
-            value = json.loads(base64url_decode(segment))
-        except Exception:  # noqa: BLE001 - classification fails closed to {}
-            return {}
-        return value if isinstance(value, dict) else {}
-
-    return part(head), part(body)
+    return _server_sibling("investor_demo").peek_unverified(token)
 
 
 def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
@@ -178,6 +165,11 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
     fixture = any(isinstance(peek.get(name), str) and
                   peek[name].casefold().startswith(prefix)
                   for name, prefix in (("iss", ISSUER_PREFIX), ("sub", SUBJECT_PREFIX)))
+    investor = _server_sibling("investor_demo")
+    if investor.is_investor_token(header, peek):
+        if fixture:
+            raise HTTPException(401, "invalid investor demo session")
+        return investor.verify_session(token, header, peek)
     if fixture:
         # Refuse before any policy/JWKS file access. This namespace never uses
         # the ordinary issuer or key resolver, including on policy failures.
@@ -238,6 +230,20 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
     # Principal checks run only after ordinary JWT verification has succeeded.
     _validate_service_admin_principal(payload)
     return payload
+
+
+def _server_sibling(name):
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        if exc.name != name:
+            raise
+    # Platform can load this verifier without server on sys.path. Publish a
+    # fully initialized sibling under its normal import name on both legs.
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return sys.modules.setdefault(name, module)
 
 
 def _validate_service_admin_principal(payload: Dict[str, Any]) -> None:

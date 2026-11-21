@@ -14,10 +14,20 @@ import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
+import {
+  BranchAuthorFailure, BranchCompileRefusal, branchTargetPrompt, runBranchTargetSession, type BranchCompileFeedback,
+  type BranchAuthorResult, type BranchAuthorRunner,
+} from "./branchTargetPrompt.js";
+import {
+  prepareBoundBranchPackage, submitBranchToolProposal, type BranchSubmissionResult,
+} from "./tools/submitBranchToolProposal.js";
+import { validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
+import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "./tools/branchCompileCheck.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
 import {
   REVISION_ERROR,
+  assertApprovedToolName,
   revisionSchemaChange,
   revisionVersion,
   submitToolProposal,
@@ -57,6 +67,7 @@ import type {
   GrantSettlement,
   HarnessPorts,
   ResultEnvelope,
+  StageCustomizationRequest,
   StagedCustomizationReceipt,
   TenantMutationFence,
   ToolPackage,
@@ -64,17 +75,29 @@ import type {
   UpstreamCapture,
 } from "../ports/index.js";
 
-export interface StageCustomizationRequest {
-  changeSetId: string;
-  expectedBaseSha: string;
-  platformRelease: string;
-  workspaceContractDigest: string;
-  idempotencyKey: string;
-  targetToolName?: string;
+export type { StageCustomizationRequest } from "../ports/index.js";
+
+function withApprovedToolName(prompt: string, toolName?: string): string {
+  return toolName === undefined ? prompt : `${prompt}\n\nThe approved tool name is ${toolName}. Submit the package with exactly that name.`;
+}
+
+export interface BranchStageMetadata {
+  target: "branch";
+  package_path: string;
+  package_files: string[];
+}
+
+interface BranchCompileAttempt {
+  n: number;
+  decision: BranchCompileFeedback["summary"]["decision"];
+  errors: number;
+  diagnostics: Pick<BranchCompileFeedback["diagnostics"][number], "code" | "file" | "line">[];
 }
 
 export interface StageCustomizationResponse extends Partial<AuthorResponse> {
-  receipt: StagedCustomizationReceipt;
+  receipt: StagedCustomizationReceipt & Partial<BranchStageMetadata>;
+  branch_package?: BranchManifest;
+  compile_attempts?: BranchCompileAttempt[];
 }
 
 export interface StageRemovalRequest extends StageCustomizationRequest {
@@ -180,6 +203,8 @@ export class AuthorLoopError extends Error {
     message: string,
     readonly status: number,
     readonly diagnostics?: string[],
+    readonly reason?: Readonly<Record<string, string | number>>,
+    readonly compile?: BranchCompileFeedback | (Partial<BranchCompileFeedback> & { compile_attempts: BranchCompileAttempt[] }),
   ) {
     super(message);
     this.name = "AuthorLoopError";
@@ -204,7 +229,7 @@ function statusFailureCategory(status: number): FailureCategory {
 }
 
 export function authorGrantSettlement(
-  run: AgentRunResult | undefined,
+  run: Pick<AgentRunResult, "telemetry"> | undefined,
   failure: unknown,
 ): GrantSettlement {
   const inputTokens = Math.max(0, Math.trunc(run?.telemetry?.input_tokens ?? 0));
@@ -224,6 +249,10 @@ export function authorGrantSettlement(
   }
   if (message === "Agent SDK auth failure: billing_error") {
     return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "llm_quota_exhausted" };
+  }
+  const authFailure = /^Agent SDK auth failure: (oauth_org_not_allowed|authentication_failed)$/.exec(message);
+  if (authFailure && failureCategory(failure) === "auth_failure") {
+    return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error", error_code: authFailure[1]! };
   }
   return { usage: { cost_tokens: inputTokens + outputTokens }, stop_reason: "error" };
 }
@@ -404,7 +433,186 @@ function assertRevision(
 }
 
 export class AuthorLoop {
-  constructor(private readonly ports: HarnessPorts) {}
+  constructor(
+    private readonly ports: HarnessPorts,
+    private readonly branchRunner: BranchAuthorRunner = runBranchTargetSession,
+  ) {}
+
+  private branchGit(repoDir: string, args: string[]): string {
+    const resolved = realpathSync(repoDir).replaceAll("\\", "/");
+    return execFileSync("git", [
+      "-c", "safe.directory=", "-c", `safe.directory=${resolved}`, "-C", resolved, ...args,
+    ], { encoding: "utf8", env: scrubSecrets(process.env), maxBuffer: 8 * 1024 * 1024 });
+  }
+
+  /** Reconstruct retry metadata from the immutable tree, never from the prompt. */
+  private branchStageMetadata(change: TenantChangeSet): BranchStageMetadata {
+    const paths = this.branchGit(change.dir, [
+      "diff", "--name-only", "--no-renames", "-z", change.expectedBaseSha, change.stagedSha!,
+    ]).split("\0").filter(Boolean);
+    const match = /^branch-tools\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\//.exec(paths[0] ?? "");
+    const packagePath = match ? `branch-tools/${match[1]}` : "";
+    if (!packagePath || paths.some(path => !path.startsWith(`${packagePath}/`))) {
+      throw new AuthorLoopError("branch stage must change only one branch package", 422);
+    }
+    const entries = this.branchGit(change.dir, [
+      "ls-tree", "-r", "-z", change.stagedSha!, "--", packagePath,
+    ]).split("\0").filter(Boolean);
+    if (entries.length > 64 || entries.some(entry => !/^100(?:644|755) blob /.test(entry))) {
+      throw new AuthorLoopError("V16: branch package must contain at most 64 regular files", 422);
+    }
+    const files = entries.map(entry => entry.slice(entry.indexOf("\t") + 1)).sort();
+    const contents: Record<string, string> = Object.create(null);
+    for (const path of files) {
+      contents[path.slice(packagePath.length + 1)] = this.branchGit(change.dir, ["show", `${change.stagedSha}:${path}`]);
+    }
+    let manifest: unknown;
+    try { manifest = JSON.parse(contents["tool.json"] ?? "null"); }
+    catch { throw new AuthorLoopError("V1: branch manifest is not JSON", 422); }
+    const diagnostics = validateBranchPackage(manifest, contents, match![1]);
+    if (diagnostics.length) throw new AuthorLoopError("branch package failed validation", 422, diagnostics.map(d => `${d.rule}: ${d.path}: ${d.message}`));
+    return { target: "branch", package_path: packagePath, package_files: files };
+  }
+
+  private verifyBranchSubmission(repoDir: string, submission: BranchSubmissionResult): void {
+    const fs = new FsTenantRepo(repoDir);
+    const visit = (dir: string): string[] => fs.listDir(dir).flatMap(name => {
+      const path = `${dir}/${name}`;
+      return name === "lib" && dir === submission.package_path ? visit(path) : [path];
+    });
+    if (!isDeepStrictEqual(visit(submission.package_path).sort(), submission.files)) {
+      throw new AuthorLoopError("branch package contains unexpected files", 422);
+    }
+    for (const [path, source] of Object.entries(submission.contents)) {
+      if (fs.readFile(`${submission.package_path}/${path}`) !== source) {
+        throw new AuthorLoopError("branch package differs from submitted bytes", 422);
+      }
+    }
+    const status = this.branchGit(repoDir, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
+    const changed = intrinsics.parseNulSeparatedPaths(status);
+    if (changed.length === 0 || changed.some(path => !path.startsWith(`${submission.package_path}/`))) {
+      throw new AuthorLoopError("author runner changed files outside the submitted branch package", 422);
+    }
+  }
+
+  private prepareBranchRevision(repoDir: string, name: string, sha?: string) {
+    const missing = new AuthorLoopError("branch revision target is missing", 422, [], {
+      code: "branch_revision_target_missing",
+    });
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name) || name.length > 64) throw missing;
+    const packagePath = `branch-tools/${name}`;
+    const path = `${packagePath}/tool.json`;
+    const fs = new FsTenantRepo(repoDir);
+    const versionPattern = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
+    if (fs.exists(path)) {
+      if (sha !== undefined) throw new AuthorLoopError("revision base conflicts with the checked-out package", 409);
+      // Existing packages continue through the submission validator.
+      try {
+        const version = JSON.parse(fs.readFile(path))?.version;
+        if (typeof version === "string" && versionPattern.test(version)) return { packagePath, version };
+      } catch { /* A malformed legacy manifest has no version for the prompt. */ }
+      return undefined;
+    }
+    if (!sha || !/^[0-9a-f]{40}$/.test(sha)) throw missing;
+    let version: string;
+    try {
+      this.branchGit(repoDir, ["cat-file", "-e", `${sha}^{commit}`]);
+      const entry = this.branchGit(repoDir, ["ls-tree", sha, "--", path]);
+      if (!/^100(?:644|755) blob /.test(entry)) throw missing;
+      this.branchGit(repoDir, ["-c", "core.autocrlf=false", "checkout", "--no-overlay", sha, "--", packagePath]);
+      const manifest = JSON.parse(fs.readFile(path));
+      if (manifest?.name !== name || manifest.entry !== "main.csx" || manifest.provenance?.author !== "agent" ||
+          typeof manifest.version !== "string" || !versionPattern.test(manifest.version)) throw missing;
+      version = manifest.version;
+    } catch {
+      throw missing;
+    }
+    this.branchGit(repoDir, ["-c", `user.name=${HARNESS_IDENTITY.name}`, "-c", `user.email=${HARNESS_IDENTITY.email}`,
+      "commit", "-m", `revision base: ${name}@${version} ${sha}`]);
+    return { packagePath, version };
+  }
+
+  private async authorBranchInRepo(
+    tenantId: string, description: string, repoDir: string,
+    request: StageCustomizationRequest, scrub: ScrubState,
+    compileAttempts: BranchCompileAttempt[],
+    revision?: { packagePath: string; version: string },
+  ): Promise<{ submission: BranchSubmissionResult; run: BranchAuthorResult }> {
+    const lease = this.ports.oauth.acquireGrant && this.ports.oauth.settleGrant
+      ? await this.ports.oauth.acquireGrant(tenantId) : null;
+    const grant = lease?.grant ?? await this.ports.oauth.getGrant(tenantId);
+    scrub.grantResolved = true;
+    for (const key of ["oauthToken", "apiKey"]) {
+      const value = (grant as unknown as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) scrub.held.push(value);
+    }
+    let submission: BranchSubmissionResult | undefined;
+    let sessionOpen = true;
+    let run: BranchAuthorResult | undefined;
+    let failure: unknown;
+    try {
+      run = await this.branchRunner({
+        description, systemPrompt: withApprovedToolName(branchTargetPrompt(revision), request.toolName), repoDir, grant,
+        fsTenantRepo: new FsTenantRepo(repoDir),
+        submitBranchToolProposal: async proposal => {
+          if (submission) throw new AuthorLoopError("V16: only one branch package may be submitted", 422);
+          const session = `branch-author:${request.changeSetId}`;
+          const now = new Date();
+          const { manifest, files } = prepareBoundBranchPackage(proposal, session, now, request.toolName);
+          if (!branchCompileDisabled()) {
+            // Keep the checked proposal stable across the asynchronous compiler call.
+            proposal = snapshotUntrusted(proposal);
+            const outcome = await branchCompileCheck(manifest.name, files);
+            if (compileAttempts.length < 8) {
+              const locations = outcome.status === "refused" ? outcome.structured : [];
+              compileAttempts.push({
+                n: compileAttempts.length + 1, decision: outcome.summary.decision, errors: outcome.summary.errors,
+                diagnostics: locations.filter(d => d.file.length > 0 && d.file.length <= 120)
+                  .slice(0, 10).map(({ code, file, line }) => ({ code, file, line })),
+              });
+            }
+            console.error(`[harness] branch compile check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} tenant=${tenantId}`);
+            const path = `branch-tools/${manifest.name}/main.csx`;
+            if (outcome.status === "unavailable") {
+              throw new BranchCompileRefusal(path, `compile check unavailable (${outcome.code})`, {
+                summary: outcome.summary, diagnostics: [],
+              });
+            }
+            if (outcome.status === "refused") {
+              const hint = Object.entries(files).some(([p, src]) => p.endsWith(".csx") && /&(?:amp|lt|gt|quot);/.test(src))
+                ? " (source contains HTML entities; write C# operators such as && < > literally)" : "";
+              const message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              throw new BranchCompileRefusal(path, message, { summary: outcome.summary, diagnostics: outcome.structured });
+            }
+          }
+          if (!sessionOpen || submission) throw new AuthorLoopError("V16: submission is closed", 422);
+          const result = submitBranchToolProposal(repoDir, proposal, {
+            session, now, targetToolName: request.targetToolName, toolName: request.toolName,
+          });
+          submission = snapshotUntrusted(result) as BranchSubmissionResult;
+          return result;
+        },
+      });
+      run = snapshotUntrusted(run) as BranchAuthorResult | undefined;
+      if (!submission || !run || typeof run.preview !== "string") {
+        throw new AuthorLoopError("branch author did not submit a validated package", 422, [], {
+          code: "branch_author_no_submission", turns: 0, submit_calls: 0,
+        });
+      }
+      this.verifyBranchSubmission(repoDir, submission);
+      return { submission, run };
+    } catch (error) {
+      failure = error;
+      if (error instanceof BranchAuthorFailure) throw new AuthorLoopError(error.message, 422, [], error.reason, error.compile);
+      throw error;
+    } finally {
+      sessionOpen = false;
+      if (lease && this.ports.oauth.settleGrant) {
+        try { await this.ports.oauth.settleGrant(tenantId, lease.lease_id, authorGrantSettlement(run, failure)); }
+        catch { /* Settlement cannot replace the author result. */ }
+      }
+    }
+  }
 
   /**
    * Best-effort push of one authoring event (prompt + what the consumer
@@ -702,16 +910,19 @@ export class AuthorLoop {
   }
 
   /** Build the exactly-three-tool toolset the author session is granted. */
-  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string) {
+  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string, toolName?: string) {
     const revision = targetToolName
       ? readRevisionBase(repoDir, targetToolName) : undefined;
     let previousReceipt: ToolSourceReceipt | undefined = revision?.receipt;
     const toolset: AuthorToolset = {
       fsTenantRepo: new FsTenantRepo(repoDir),
       submitTool: (proposal) => {
-        if (revision) assertRevision(revision, proposal, proposal.source, false);
+        if (revision) {
+          assertApprovedToolName(proposal.name, toolName);
+          assertRevision(revision, proposal, proposal.source, false);
+        }
         const submitted = submitToolProposal(
-          repoDir, proposal, new Date(), previousReceipt,
+          repoDir, proposal, new Date(), previousReceipt, toolName,
         );
         previousReceipt = submitted.receipt;
         return submitted;
@@ -902,8 +1113,8 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
     repoDir: string,
-    targetToolName?: string,
     scrubSink?: ScrubState,
+    { toolName, targetToolName }: Pick<StageCustomizationRequest, "toolName" | "targetToolName"> = {},
   ) {
     // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
     // lease router as conversation turns, while retaining legacy single-grant
@@ -931,7 +1142,7 @@ export class AuthorLoop {
     let failure: unknown;
     try {
       const { toolset, verifyRevision } =
-        this.toolsetFor(repoDir, tenantId, targetToolName);
+        this.toolsetFor(repoDir, tenantId, targetToolName, toolName);
       // THE RUNNER IS THE UNTRUSTED BOUNDARY, so anything it throws is marked
       // here rather than trusted for what it claims about itself. A private
       // symbol is not a capability in-process: the runner can import
@@ -943,7 +1154,7 @@ export class AuthorLoop {
       try {
         run = await this.ports.agentRunner.run({
           description,
-          systemPrompt: AUTHOR_SYSTEM_PROMPT,
+          systemPrompt: withApprovedToolName(AUTHOR_SYSTEM_PROMPT, toolName),
           repoDir,
           grant,
           toolset,
@@ -988,6 +1199,9 @@ export class AuthorLoop {
         );
       }
       run = snapshot;
+      if (toolName !== undefined && run.tool.name !== toolName) {
+        throw new AuthorLoopError(`V-name: tool name must be ${toolName}`, 422);
+      }
       verifyRevision(run);
 
       this.verifySubmittedTool(tenantId, repoDir, run);
@@ -1023,7 +1237,7 @@ export class AuthorLoop {
 
   private async author(tenantId: string, description: string, scrubSink?: ScrubState) {
     const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const run = await this.authorInRepo(tenantId, description, repo.dir, undefined, scrubSink);
+    const run = await this.authorInRepo(tenantId, description, repo.dir, scrubSink);
     return { repo, run };
   }
 
@@ -1112,6 +1326,9 @@ export class AuthorLoop {
     description: string,
     request: StageCustomizationRequest,
   ): Promise<StageCustomizationResponse> {
+    if (request.target !== undefined && request.target !== "studio" && request.target !== "branch") {
+      throw new AuthorLoopError('target must be "studio" or "branch"', 400);
+    }
     const scrub: ScrubState = {
       held: [],
       grantResolved: false,
@@ -1153,8 +1370,20 @@ export class AuthorLoop {
       }
       const change = await runFenced(() =>
         changes.createOrResume(request.changeSetId, request.expectedBaseSha));
+      const compileAttempts: BranchCompileAttempt[] = [];
       try {
         if (change.stagedSha !== null) {
+          if (request.target !== "branch" && this.branchGit(change.dir, [
+            "diff", "--name-only", "--no-renames", "-z", change.expectedBaseSha, change.stagedSha,
+          ]).split("\0").some(path => path.startsWith("branch-tools/"))) {
+            throw new AuthorLoopError("staged branch change cannot be resumed as studio", 409);
+          }
+          const branchMetadata = request.target === "branch"
+            ? await runFenced(() => this.branchStageMetadata(change)) : undefined;
+          if (branchMetadata && request.targetToolName !== undefined &&
+            branchMetadata.package_path !== `branch-tools/${request.targetToolName}`) {
+            throw new AuthorLoopError("branch retry target does not match the staged package", 409);
+          }
           const catalogDigest = await runFenced(() => createHash("sha256")
             .update(readFileSync(join(change.dir, REGISTRY_FILE)))
             .digest("hex"));
@@ -1169,6 +1398,7 @@ export class AuthorLoop {
           platform_release: request.platformRelease,
           workspace_contract_digest: request.workspaceContractDigest,
           idempotency_key: request.idempotencyKey,
+          ...(branchMetadata ?? {}),
         });
           await coordination.recordStaged(receipt);
           // A RESUMED STAGE IS STILL AN INVOCATION, and it was producing zero
@@ -1195,6 +1425,56 @@ export class AuthorLoop {
           });
           return { receipt };
         }
+        if (request.target === "branch") {
+          const name = request.targetToolName;
+          const revision = name
+            ? await runFenced(() => this.prepareBranchRevision(change.dir, name, request.revisionBaseCommit))
+            : undefined;
+          const { submission, run } = await this.authorBranchInRepo(
+            tenantId, description, change.dir, request, scrub, compileAttempts, revision,
+          );
+          const { stagedCommit, catalogDigest, metadata } = await runFenced(() => {
+            this.verifyBranchSubmission(change.dir, submission);
+            const catalogDigest = createHash("sha256").update(
+              this.branchGit(change.dir, ["show", `${request.expectedBaseSha}:${REGISTRY_FILE}`]),
+            ).digest("hex");
+            const stagedCommit = changes.stageCommit(change, `stage branch tool: ${submission.manifest.name}`);
+            const metadata = this.branchStageMetadata(change);
+            if (!isDeepStrictEqual(metadata.package_files, submission.files)) {
+              throw new AuthorLoopError("committed branch package file list differs from submission", 422);
+            }
+            for (const [path, source] of Object.entries(submission.contents)) {
+              const committed = this.branchGit(change.dir, ["show", `${stagedCommit}:${submission.package_path}/${path}`]);
+              if (committed !== source) throw new AuthorLoopError("committed branch package differs from submitted bytes", 422);
+            }
+            return { stagedCommit, catalogDigest, metadata };
+          });
+          const receipt = Object.freeze({
+            contract: "leaf.customization.v1" as const,
+            tenant_id: tenantId,
+            change_set_id: request.changeSetId,
+            state: "staged" as const,
+            base_commit: request.expectedBaseSha,
+            staged_commit: stagedCommit,
+            catalog_digest: catalogDigest,
+            platform_release: request.platformRelease,
+            workspace_contract_digest: request.workspaceContractDigest,
+            idempotency_key: request.idempotencyKey,
+            ...metadata,
+          });
+          const history = compileAttempts.length ? { compile_attempts: compileAttempts } : {};
+          await coordination.recordStaged({ ...receipt, ...history });
+          this.captureUpstream({
+            tenantId, route: "stage", description, scrub,
+            commitSha: stagedCommit, platformRelease: request.platformRelease,
+          });
+          return {
+            receipt, branch_package: submission.manifest,
+            ...history,
+            code: submission.contents["main.csx"], preview: run.preview,
+            ...(run.telemetry ? { telemetry: run.telemetry } : {}),
+          };
+        }
         if (request.targetToolName) {
           const target = findTool(change.dir, request.targetToolName);
           if (!target || target.provenance?.author !== "agent") {
@@ -1202,7 +1482,7 @@ export class AuthorLoop {
           }
         }
         const run = await this.authorInRepo(
-          tenantId, description, change.dir, request.targetToolName, scrub,
+          tenantId, description, change.dir, scrub, request,
         );
         const { stagedCommit, catalogDigest } = await runFenced(() => {
           registerTool(change.dir, run.tool, {
@@ -1243,6 +1523,13 @@ export class AuthorLoop {
           receipt,
           ...(run.telemetry ? { telemetry: run.telemetry } : {}),
         };
+      } catch (error) {
+        if (error instanceof AuthorLoopError && error.status === 422 && compileAttempts.length) {
+          throw new AuthorLoopError(error.message, error.status, error.diagnostics, error.reason, {
+            ...error.compile, compile_attempts: compileAttempts,
+          });
+        }
+        throw error;
       } finally {
         await runFenced(() => changes.cleanupWorktree(change));
       }

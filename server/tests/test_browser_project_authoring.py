@@ -77,9 +77,15 @@ def lane(monkeypatch):
 
     def post(url, *, data, headers, timeout, allow_redirects):
         assert url == 'https://harness.invalid/internal/project-repository-source/author'
-        assert headers == {'X-Harness-Secret': 'fixture-only', 'X-Tenant-Id': ORG, 'Content-Type': 'application/json'}
-        assert timeout == (10, 240) and allow_redirects is False
         body = json.loads(data)
+        expected_headers = {'X-Harness-Secret': 'fixture-only', 'X-Tenant-Id': ORG, 'Content-Type': 'application/json'}
+        if body['source_profile'] == authoring.NATIVE_PROFILE:
+            attempt = headers['X-Source-Author-Attempt']
+            assert str(uuid.UUID(attempt)) == attempt and uuid.UUID(attempt).version == 4
+            expected_headers.update({'X-Source-Author-Attempt': attempt,
+                                     'X-Source-Author-Wire-SHA256': hashlib.sha256(data).hexdigest()})
+        assert headers == expected_headers
+        assert timeout == (10, 240) and allow_redirects is False
         state.posts.append(body)
         receipt = dict(contract='leaf.project-repository-edit.v2', edit_id=EDIT, state='staged',
             operation='edit', source_edit_id=None, actor_binding_id=ACTOR, **authority,
@@ -96,7 +102,11 @@ def lane(monkeypatch):
             state.cancelled = True
         if getattr(state, 'rebind_on_post', False):
             state.authority['repo_key'] = str(uuid.uuid4())
-        return SimpleNamespace(status_code=state.response_status, json=lambda **kwargs: result, close=lambda: None)
+        content = b''
+        if hasattr(state, 'dependency_response'):
+            content = state.dependency_response(headers)
+        return SimpleNamespace(status_code=state.response_status, content=content,
+                               json=lambda **kwargs: result, close=lambda: None)
 
     monkeypatch.setattr(authoring.requests, 'post', post)
 
@@ -117,6 +127,71 @@ def lane(monkeypatch):
 
 def call(lane):
     return authoring.author(lane.tenant, PROJECT, lane.request, cancelled=lambda: lane.cancelled)
+
+
+def dependency_response(headers):
+    return dict(error=dict(code='source_unavailable', message='source is unavailable'), disposition=dict(
+        schema='leaf.project-source-author-disposition.v1', outcome='not_started', stage='author_dependency_gate',
+        attempt_id=headers['X-Source-Author-Attempt'], wire_sha256=headers['X-Source-Author-Wire-SHA256']))
+
+
+def test_native_dependency_refusal_captures_only_matching_rpc_correlation(lane):
+    lane.response_status = 503
+    lane.dependency_response = lambda headers: json.dumps(dependency_response(headers)).encode()
+    with pytest.raises(authoring.AuthorDependencyRefusal) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    error = caught.value
+    assert error.provenance is authoring._VERIFIED_DEPENDENCY_REFUSAL
+    assert error.request == lane.request
+    assert error.binding == dict(lane.authority, actor_binding_id=ACTOR, expected_base_commit=BASE)
+    assert error.disposition['outcome'] == 'not_started'
+    assert len(lane.posts) == 1
+
+
+@pytest.mark.parametrize('change', ['attempt', 'digest', 'stage', 'outcome', 'schema', 'extra',
+                                  'status', 'plain503', 'html', 'duplicate', 'oversized', 'type'])
+def test_dependency_refusal_rejects_foreign_or_malformed_producer_reply(lane, change):
+    lane.response_status = 409 if change == 'status' else 503
+    def response(headers):
+        value = dependency_response(headers)
+        if change in ('attempt', 'digest'):
+            value['disposition']['attempt_id' if change == 'attempt' else 'wire_sha256'] = 'foreign'
+        elif change in ('stage', 'outcome', 'schema'):
+            value['disposition'][change] = 'foreign'
+        elif change == 'extra':
+            value['disposition']['detail'] = 'private provider detail'
+        elif change == 'type':
+            value['disposition']['attempt_id'] = [value['disposition']['attempt_id']]
+        elif change == 'plain503':
+            value.pop('disposition')
+        elif change == 'html':
+            return b'<html>proxy unavailable</html>'
+        elif change == 'duplicate':
+            return b'{"error":{},"error":{},"disposition":{}}'
+        elif change == 'oversized':
+            return b'x' * 4097
+        return json.dumps(value).encode()
+    lane.dependency_response = response
+    with pytest.raises(authoring.AuthoringError) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    assert not isinstance(caught.value, authoring.AuthorDependencyRefusal)
+    assert 'private provider detail' not in str(caught.value)
+
+
+@pytest.mark.parametrize('change', ['repository', 'scope'])
+def test_dependency_refusal_is_not_captured_after_repository_rebind(lane, change):
+    lane.response_status = 503
+    if change == 'repository':
+        lane.rebind_on_post = True
+    else:
+        def revoke(value):
+            lane.revoked = True
+            return value
+        lane.response_mutation = revoke
+    lane.dependency_response = lambda headers: json.dumps(dependency_response(headers)).encode()
+    with pytest.raises(authoring.AuthoringError) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    assert caught.value.code == ('source_changed' if change == 'repository' else 'access_denied')
 
 
 @pytest.mark.parametrize('profile', [authoring.WEB_PROFILE, authoring.NATIVE_PROFILE])

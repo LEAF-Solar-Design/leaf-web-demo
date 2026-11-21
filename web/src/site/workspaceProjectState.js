@@ -26,6 +26,8 @@
 
 // Bounded so an accidental or hostile 10k-character name cannot blow out the
 // header chip's single line. The full name still lives in the switcher menu.
+import { notYetAvailable } from './studioAvailability.js'
+
 const MAX_LABEL = 64
 const MAX_UNAVAILABLE_REASON = 200
 
@@ -88,6 +90,7 @@ function presentId(value) {
  * @param {string?} input.orgId               the workspace org of record
  * @param {string?} input.projectsUnavailable why the project list could not load
  * @param {boolean} input.mock                offline demo build (no platform at all)
+ * @param {boolean} input.drawingAttachable   false when the mounted drawing is the built-in sample
  * @returns {Readonly<object>} frozen state; `kind` is always one of
  *          'project' | 'opening' | 'open-failed' | 'drawing-only' | 'empty'
  */
@@ -98,12 +101,18 @@ export function deriveWorkspaceProjectState({
   orgId = null,
   projectsUnavailable = null,
   mock = false,
+  drawingAttachable = true,
   workspace,
   workspaceLoading = false,
   workspaceError = null,
 } = {}) {
   const drawing = trimmedLabel(drawingName)
   const project = trimmedLabel(projectName)
+  // The mounted drawing is not an account upload (the built-in sample): the
+  // server cannot adopt it into a project, so the action says so up front
+  // (availability manifest, site/studioAvailability.js). Explicit `false`
+  // only: a caller that does not know stays on the old behaviour.
+  const sampleReason = drawingAttachable === false ? notYetAvailable('project.create-from-sample-drawing') : null
   const projectId = presentId(openProjectId)
   const org = presentId(orgId)
 
@@ -149,14 +158,14 @@ export function deriveWorkspaceProjectState({
         label: WORKSPACE_PROJECT_COPY.actionLabel,
         // The suggested name; the caller owns the actual create call.
         projectName: drawing,
-        disabled: Boolean(mock || projectsUnavailable || !org),
+        disabled: Boolean(mock || projectsUnavailable || !org || sampleReason),
         reason: mock
           ? WORKSPACE_PROJECT_COPY.reasonDemo
           : projectsUnavailable
             ? formatProjectsUnavailable(projectsUnavailable)
             : !org
               ? WORKSPACE_PROJECT_COPY.reasonNoOrg
-              : null,
+              : sampleReason,
       }),
     })
   }

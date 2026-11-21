@@ -171,10 +171,18 @@ describe('Leaf workspace guest front door', () => {
 
   it('shows honest pricing copy and routes pricing interest to demand capture', async () => {
     await mountFrontDoor()
-    expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing coming soon.')
+    expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing is not yet available.')
     expect(screen.queryByText(/\$299|14-day trial|Start free trial/)).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: '05 Pricing' }))
-    expect(mocks.navigate).toHaveBeenCalledWith('/sheets#c-201')
+    // On an app host the sheet tabs would leave for the marketing hub, whose
+    // sheets 02 to 06 are not drawn yet (availability manifest, site.sheets):
+    // the tab is disabled, says so, and goes nowhere.
+    const sheetsNote = 'Not yet available. Sheets 02 to 06 will open on the Leaf Automation website.'
+    const pricingTab = screen.getByRole('button', { name: '05 Pricing' })
+    expect(pricingTab.getAttribute('aria-disabled')).toBe('true')
+    expect(pricingTab.getAttribute('title')).toBe(sheetsNote)
+    expect(document.getElementById(pricingTab.getAttribute('aria-describedby')).textContent).toBe(sheetsNote)
+    fireEvent.click(pricingTab)
+    expect(mocks.navigate).not.toHaveBeenCalledWith('/sheets#c-201')
     const email = screen.getByLabelText('Want a workspace that uses your own API key?')
     fireEvent.change(email, { target: { value: 'guest@example.com' } })
     fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))
@@ -183,7 +191,8 @@ describe('Leaf workspace guest front door', () => {
       email: 'guest@example.com', interest: 'Workspace with your own API key',
     })
     expect(mocks.assign).not.toHaveBeenCalled()
-    expect(mocks.navigate).toHaveBeenCalledTimes(1)
+    // Nothing navigated: the disabled Pricing tab above was the only click.
+    expect(mocks.navigate).not.toHaveBeenCalled()
   })
 
   it('keeps the sandbox available when demand capture fails', async () => {

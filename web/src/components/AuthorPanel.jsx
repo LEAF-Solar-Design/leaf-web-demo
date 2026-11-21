@@ -1,3 +1,4 @@
+import { notYetAvailable } from '../site/studioAvailability.js'
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
@@ -226,8 +227,15 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled: buildEntitledByPolicy = true }) {
+  // Availability manifest (site/studioAvailability.js): where the staging walk
+  // proved authoring fails, the panel says so and takes Generate away, on the
+  // same rung the entitlement gate already uses. Recovery of an existing
+  // request stays disabled with it, exactly as it is for an unentitled account.
+  const authorNotYet = notYetAvailable('shared.author-tool')
+  const buildEntitled = buildEntitledByPolicy && !authorNotYet
   const [desc, setDesc] = useState('')
+  const [recoveryId, setRecoveryId] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [err, setErr] = useState(null)
@@ -490,6 +498,28 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
+      {stageActivity?.lookupRequest && !stageActivity.pointer && !authored && (
+        <div className="customization-state author-request-recovery">
+          <label>Existing authoring request ID
+            <input value={recoveryId} onChange={(event) => setRecoveryId(event.target.value)} />
+          </label>
+          <button type="button" disabled={!recoveryId.trim() || authorLocked || !buildEntitled
+            || stageActivity.enabled === false || stageActivity.recoveredRequest?.busy}
+            onClick={() => stageActivity.lookupRequest(recoveryId.trim())}>Check existing request</button>
+          {stageActivity.recoveredRequest?.busy && <p role="status">Checking request...</p>}
+          {stageActivity.recoveredRequest?.message && <p role="status">{stageActivity.recoveredRequest.message}</p>}
+          {stageActivity.recoveredRequest?.job && <p role="status">
+            Request <code>{stageActivity.recoveredRequest.job.change_set_id}</code>: {stageActivity.recoveredRequest.job.status}.
+            {' '}Attempt {stageActivity.recoveredRequest.job.attempt ?? 'unknown'}. No new request was started.
+          </p>}
+          {stageActivity.recoveredRequest?.job?.status === 'failed'
+            && stageActivity.recoveredRequest.job.error?.retryable === true && (
+              <button type="button" disabled={authorLocked || !buildEntitled
+                || stageActivity.enabled === false || stageActivity.recoveredRequest.busy}
+                onClick={() => stageActivity.retryRequest?.()}>Retry this request</button>
+            )}
+        </div>
+      )}
       {draftMessage && <div role="status">{draftMessage}</div>}
       {stageActivity?.previousStagedReceipt && (
         <div className="customization-state" role="status">
@@ -510,7 +540,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             title={stageActivity?.pointer ? 'Finish or discard the current request before cancelling the revision.' : undefined}>Cancel revision</button>
         </div>
       )}
-      {!buildEntitled && !buildGate && <div className="author-gate" role="status">Tool authoring is unavailable for this account or site. Contact your administrator for access.</div>}
+      {!buildEntitled && !buildGate && <div className="author-gate" role="status" data-availability={authorNotYet ? 'unavailable' : undefined}>{authorNotYet || 'Tool authoring is unavailable for this account or site. Contact your administrator for access.'}</div>}
       {buildGate
         ? <BuildGate />
         : quotaGate

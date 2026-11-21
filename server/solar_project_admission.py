@@ -276,6 +276,25 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
     except (platform_link.CanonicalEntitlementDenied, EntitlementDenied) as exc:
         return _response(exc.response)
     except GraphValidationError as exc:
+        # Import lazily because the producer also uses this admission module.
+        from solar_project_solaredge import SolarEdgeGridRefusal
+        if isinstance(exc, SolarEdgeGridRefusal):
+            # Revalidate the typed diagnostic before it crosses the response boundary.
+            try:
+                diagnostic = SolarEdgeGridRefusal(exc.code, exc.frame_ref, exc.candidate_ids, exc.action)
+            except (GraphValidationError, AttributeError):
+                return _refusal("REPORT_INVALID", message="Canonical Solar request was refused.")
+            unmatched = diagnostic.code == "SOLAREDGE_GRID_UNMATCHED"
+            response = _refusal(diagnostic.code,
+                message=("The panel group has no matching SolarEdge grid." if unmatched
+                         else "The panel group matches multiple SolarEdge grids."))
+            response["content"]["error"].update(
+                frame_ref=diagnostic.frame_ref,
+                candidate_ids=diagnostic.candidate_ids,
+                action=diagnostic.action,
+                next_action=("Redraw the panel group, then rebuild the report." if unmatched
+                             else "Select one candidate grid for the panel group."))
+            return response
         panel_filter = None
         if exc.code == "NO_PANELS_RECOGNISED":
             try:

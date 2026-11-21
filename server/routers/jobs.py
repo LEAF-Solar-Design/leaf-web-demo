@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -28,6 +29,7 @@ import deps
 from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor, require_demo_project
 import entitlements
 import entity_scope
+import investor_demo
 import jobs
 import write_loop
 import product_capability_availability as capability_catalog
@@ -37,6 +39,19 @@ import solar_project_admission
 from solar_design_graph import GraphValidationError
 from text_match import text_matches
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
+
+def _nonfinite_param(value, path="params"):
+    """Return the path of the first number that JSON transport cannot encode."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return path
+    if isinstance(value, (dict, list)):
+        items = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in items:
+            invalid = _nonfinite_param(child, f"{path}/{key}")
+            if invalid:
+                return invalid
+    return None
+
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
     import emf_metrics
@@ -640,34 +655,43 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    import project_drawing_editor
+
     def execute_read():
+        intake = context.intake
+        if tool.get("engine_op") == "revision_panel_moves":
+            from authored_revision_panel_moves import bind_project_parent
+            intake = bind_project_parent(tenant, context)
         return tool_loader.run_tool_dynamic(
-            tool, context.intake, params, aps_live=False, da=None,
+            tool, intake, params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
-    if persist:
-        try:
+    try:
+        if persist:
             record = jobs.platform_link.run_project_read_job(
                 tenant, context, {**tool, "catalog_digest": req.catalog_digest},
                 params, idempotency_key, execute_read)
-        except jobs.platform_link.CanonicalEntitlementDenied as exc:
-            return exc.response
-        except jobs.platform_link.ProjectSessionForbidden:
-            return error_response(ErrorCode.FORBIDDEN, "project access denied",
-                                  retryable=False, status_code=403)
-        except solar_project_context.ProjectContextError as exc:
-            def refusal():
-                raise exc
-            return project_drawings._dispatch(refusal)
-        except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                  status_code=400 if "required" in str(exc) else 409)
-        except Exception:
-            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-        return JSONResponse(status_code=202, content=record,
-                            headers={"Cache-Control": "no-store"})
-
-    env = execute_read()
+            return JSONResponse(status_code=202, content=record, headers={"Cache-Control": "no-store"})
+        env = execute_read()
+    except jobs.platform_link.CanonicalEntitlementDenied as exc:
+        return exc.response
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except solar_project_context.ProjectContextError as exc:
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400 if "required" in str(exc) else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     body = {
         key: env[key]
         for key in (
@@ -837,7 +861,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         try:
             xbench_solver_fault.validate(fault_mode)
             if (not deps.auth_live() or session_id is not None or turn_id is not None
-                    or req.tool != "solar-solve-proposal"
+                    or not capability_catalog.is_cloud_proposal(
+                        deps.find_tool(req.tool, str(tenant_id)) or {})
                     or not isinstance(x_org_id, str) or not isinstance(x_project_id, str)):
                 raise GraphValidationError("XBENCH_SOLVER_FAULT_SCOPE_REQUIRED")
         except GraphValidationError as exc:
@@ -1087,6 +1112,10 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
+    invalid = _nonfinite_param(params)
+    if invalid:
+        return error_response(ErrorCode.BAD_PARAMS, f"{invalid} must be a finite number.",
+                              retryable=False, status_code=400)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
@@ -1470,7 +1499,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
 
 @router.get("/api/jobs/{job_id}")
-def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
+def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
+            assembly_input_version: Optional[uuid.UUID] = None):
     tenant_id = _bound_tenant_id(tenant)
     if is_demo_context(tenant):
         rec, denied = _demo_observation(job_id, tenant)
@@ -1484,6 +1514,10 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     denied = _access_error(rec, tenant, job_id)
+    if denied is None and assembly_input_version is not None:
+        from solar_project_solve import readonly_assembly_attribution
+        return with_envelope_fields({"ok": True, "assembly_attribution":
+            readonly_assembly_attribution(tenant, rec, assembly_input_version)})
     return denied if denied is not None else _record_body(_with_client_delivery(rec))
 
 
@@ -1598,6 +1632,8 @@ def _trim_list_body(body):
 
 @router.get("/api/jobs")
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant), summary: bool = False):
+    if investor_demo.is_investor_context(tenant):
+        return with_envelope_fields({"jobs": []})
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     actor = None

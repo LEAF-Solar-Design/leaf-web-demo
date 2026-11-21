@@ -341,9 +341,10 @@ class LiveRuntime:
         call(bar.fill, '/count-by-layer', timed=True)
         commands = call(self.page.get_by_role, 'listbox', name='Tool commands', exact=True)
         call(commands.wait_for, state='visible', timed=True)
-        options = call(commands.get_by_role, 'option')
-        filtered = call(options.filter,
-                        has_text=re.compile(r'(^|\s)/count-by-layer(?:\s|$)'))
+        # Decorative fallback glyphs prefix DOM text but are aria-hidden.
+        # Match the option's accessible name so they cannot hide the command.
+        filtered = call(commands.get_by_role, 'option',
+                        name=re.compile(r'^\/count-by-layer(?:\s|$)'))
         option = call(lambda: filtered.first)
         call(option.click, timed=True)
         control = call(self.page.get_by_role, 'button', name='Run count-by-layer', exact=True)
@@ -385,6 +386,67 @@ class LiveRuntime:
             self._stack.close()
 
 
+def frame_native_modules(runtime, *, max_steps=160):
+    """Prepare the camera with normal pan/wheel input before cold sampling.
+
+    Fit-all includes distant drawing annotations. Keep every entity loaded,
+    but frame the independently bound module extent so gestures have area.
+    """
+    rows = runtime._oracle['modules']
+    bounds = [min(r['bounds'][0] for r in rows), min(r['bounds'][1] for r in rows),
+              max(r['bounds'][2] for r in rows), max(r['bounds'][3] for r in rows)]
+    settle = "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+
+    def project(x, y):
+        point = runtime.canvas.evaluate(_PROJECT, [x, y])
+        if not isinstance(point, dict) or any(type(point.get(k)) not in (int, float)
+                or not isfinite(point[k]) for k in ('x', 'y')):
+            raise ValueError('Native framing projection unavailable')
+        return point
+
+    def box():
+        value = runtime.canvas.bounding_box()
+        if not isinstance(value, dict) or any(type(value.get(k)) not in (int, float)
+                or not isfinite(value[k]) for k in ('x', 'y', 'width', 'height')) or min(value['width'], value['height']) <= 0:
+            raise ValueError('Native framing canvas unavailable')
+        return value
+
+    center = ((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
+    for step in range(max_steps):
+        area = box()
+        point = project(*center)
+        cx, cy = area['x'] + area['width'] / 2, area['y'] + area['height'] / 2
+        if not (area['x'] < point['x'] < area['x'] + area['width'] and
+                area['y'] < point['y'] < area['y'] + area['height']):
+            raise ValueError('Native framing center clipped')
+        if abs(point['x'] - cx) > 1 or abs(point['y'] - cy) > 1:
+            runtime.page.mouse.move(point['x'], point['y'])
+            try:
+                runtime.page.mouse.down(button='right')
+                runtime.page.mouse.move(cx, cy, steps=8)
+            finally:
+                runtime.page.mouse.up(button='right')
+            runtime.page.evaluate(settle)
+            continue
+        low, high = project(bounds[0], bounds[1]), project(bounds[2], bounds[3])
+        coverage = max(abs(high['x'] - low['x']) / area['width'],
+                       abs(high['y'] - low['y']) / area['height'])
+        if 0.55 <= coverage <= 0.8:
+            # The same strict clipping checks used by actual selection input.
+            for x, y in ((bounds[0], bounds[1]), (bounds[2], bounds[3])):
+                runtime._point(x, y)
+            runtime.page.wait_for_function(
+                "expected => document.querySelector('.viewer-canvas canvas')?.closest('.viewer-canvas')"
+                "?.__leafViewerObservation?.snapshot()?.drawingKey === expected",
+                arg=runtime._expected_drawing_key, timeout=10000)
+            return {'native_module_count':len(rows), 'input_steps':step,
+                    'module_viewport_coverage':coverage, 'before_cold_samples':True}
+        runtime.page.mouse.move(cx, cy)
+        runtime.page.mouse.wheel(0, -200 if coverage < 0.55 else 200)
+        runtime.page.evaluate(settle)
+    raise ValueError('Native framing did not converge')
+
+
 def make_live_runtime(ctx):
     """Acquire exactly one owned session and disposable project, in that order."""
     from xbench_session import STAGING_ORIGIN, signed_in, api
@@ -417,11 +479,13 @@ def make_live_runtime(ctx):
             project['org_id'], project['project_id'], adopted['drawing_id'], adopted['version_id']])
         canvas = navigate(page, name, adopted['version_id'],
                           expected_drawing_key=expected_drawing_key)
-        return LiveRuntime(stack, page, canvas, oracle, STAGING_ORIGIN, headed=True,
+        runtime = LiveRuntime(stack, page, canvas, oracle, STAGING_ORIGIN, headed=True,
                            expected_drawing_key=expected_drawing_key,
                            expected_run_binding=dict(org_id=project['org_id'],
                                project_id=project['project_id'], drawing_id=adopted['drawing_id'],
                                version_id=adopted['version_id'], tool='count-by-layer'))
+        runtime.view_preparation = frame_native_modules(runtime)
+        return runtime
     except BaseException as exc:
         try:
             stack.close()

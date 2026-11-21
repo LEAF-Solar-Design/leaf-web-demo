@@ -41,7 +41,7 @@ SUPPORTED = frozenset((
     "solar-panels-from-drawing", "solar-size-strings",
     "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
     "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
-    "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept",
+    "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept", "solar-add-all-inverters",
 ))
 CREATING = {"solar-string-add", "solar-assign-equipment",
             "solar-string-multi-add", "solar-panel-groups"}
@@ -536,6 +536,8 @@ def test_sip_r3e_readiness(monkeypatch):
         policy.assert_refusal(request(manual_a, parent, groups(parent)), "MODULE_POWER_REQUIRED")
     baseline = w1.graph.__wrapped__()
     reasons = {name: row["input_reason"] for name, row in availability.w1_graph_readiness(baseline).items()}
+    assert reasons.pop("solar-add-all-inverters") == "valid_settings_required"
+    assert reasons.pop("solar-assignment-report") == reasons["solar-assign-strings"]
     assert local.digest(reasons) == "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
     ground = deepcopy(ctx.graph)
     ground["project"]["installation_design"] = "Ground"

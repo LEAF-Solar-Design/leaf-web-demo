@@ -1,0 +1,27 @@
+{
+  "name": "panel-gap-check",
+  "version": "1.2.1",
+  "description": "Flags PV panels whose edge gap to the roof boundary is below threshold.",
+  "entry": "main.csx",
+  "family": "panel-checks",
+  "params": {
+    "type": "object",
+    "properties": {
+      "min_gap_in": { "type": "integer", "default": 18 },
+      "layer": { "type": "string", "default": "PANELS" }
+    },
+    "required": []
+  },
+  "returns": { "type": "object" },
+  "capabilities": ["drawing.read"],
+  "hosts": { "min_release": 2023, "min_host_api": 1 },
+  "timeout_ms": 30000,
+  "idempotent": true,
+  "provenance": {
+    "author": "agent",
+    "session": "manifest-v1-freeze-gate-lane",
+    "created": "2026-07-22T00:00:00Z",
+    "modified": "2026-07-22T00:00:00Z"
+  },
+  "review": { "status": "reviewed" }
+}

@@ -11,6 +11,7 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { clearInvestorWorkspace, isInvestorToken } from './investorDemo.js'
 import { readSourceFailureBody, sourceInitializationError } from './lib/sourceFailureDiagnostic.js'
 import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
@@ -376,6 +377,7 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
   let stored = null
   try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
   if (!sentToken || !stored || sentToken !== stored) return response
+  try { if (isInvestorToken(stored)) clearInvestorWorkspace(localStorage) } catch { /* storage unavailable */ }
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
   notifyActiveScopeChanged()
   for (const listener of unauthorizedListeners) {
@@ -1112,6 +1114,18 @@ export async function getEntitlements() {
   }
 }
 
+export async function fetchInlineAuthoringFlags() {
+  const disabled = { plan_mode: false, inline_review: false, self_approval: false }
+  try {
+    const flags = await http('/api/author/inline-authoring', { headers: { 'X-Tenant-Id': TENANT } })
+    if (!Object.keys(disabled).every(key => typeof flags?.[key] === 'boolean')) return disabled
+    const { plan_mode, inline_review, self_approval } = flags
+    return { plan_mode, inline_review, self_approval }
+  } catch {
+    return disabled
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
@@ -1283,6 +1297,11 @@ export function recordToEnvelope(rec) {
     error: err,
     degraded_mode: !!(rec && rec.degraded_mode),
   }
+}
+
+export async function getArloJob(context) {
+  return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}`,
+    { headers: orgHeaders(context.org_id) })
 }
 
 export async function getArloReviews(context) {
@@ -1557,9 +1576,14 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
@@ -2095,6 +2119,41 @@ export function authorRetryDelay(value) {
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
 
+export function getAuthorStage(changeSetId, signal) {
+  return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function getAuthorStageSource(changeSetId, commit, signal) {
+  const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() }, signal, cache: 'no-store', redirect: 'error',
+  }, path)
+  const file = response.headers.get('X-Leaf-Source-Path')
+  if (!response.ok || response.headers.get('X-Leaf-Source-Commit') !== commit
+    || !/(?:^|\/)(main\.csx|tool\.py)$/.test(file || '')) return null
+  return { path: file, text: await response.text() }
+}
+
+export function reviewContext(changeSetId, signal) {
+  return http(`/api/author/reviews/context?change_set_id=${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function postReview({ change_set_id, staged_commit, catalog_digest, decision, comment }) {
+  if (comment != null) {
+    const guard = guardedText(comment)
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
+  return http('/api/author/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ change_set_id, staged_commit, catalog_digest, decision, comment }),
+  })
+}
+
 function authorStageResult(body) {
   if (body?.result?.receipt) return body.result
   if (body?.receipt && body?.result && typeof body.result === 'object') {
@@ -2186,15 +2245,44 @@ const recoveryString = (value) => typeof value === 'string' && value.trim().leng
 // One lookup only. The controller owns admission waits and decides whether a
 // validated absence permits submission of the saved request.
 export async function recoverAuthorStage(idempotencyKey, { signal, changeSetId = null, targetToolName = null } = {}) {
-  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   if (!recoveryString(idempotencyKey) || idempotencyKey.length > 200) throw authorRecoveryError()
+  return readAuthorStageRecovery({ idempotency_key: idempotencyKey }, { signal, changeSetId, targetToolName })
+}
+
+export async function recoverAuthorStageById(changeSetId, { signal } = {}) {
+  if (typeof changeSetId !== 'string'
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(changeSetId)) throw authorRecoveryError()
+  const recovered = await readAuthorStageRecovery({ change_set_id: changeSetId }, { signal, changeSetId })
+  if (recovered.job?.status === 'staged') {
+    const result = authorStageResult(recovered.job)
+    if (result?.receipt?.change_set_id !== changeSetId || !recoveryString(result?.tool?.name)) throw authorRecoveryError()
+    return { ...recovered, result }
+  }
+  return recovered
+}
+
+export async function retryAuthorStage(job, authority, { signal } = {}) {
+  if (job?.status !== 'failed' || job?.error?.retryable !== true
+    || !Number.isInteger(job.version) || job.version < 0
+    || !Number.isInteger(job.attempt) || job.attempt < 0
+    || !recoveryString(authority?.sessionId) || !recoveryString(authority?.turnId)
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(job.change_set_id || '')) throw authorRecoveryError()
+  return readAuthorStageRecovery({ change_set_id: job.change_set_id, retry: true,
+    expected_version: job.version, expected_attempt: job.attempt }, {
+    signal, changeSetId: job.change_set_id, authority,
+  })
+}
+
+async function readAuthorStageRecovery(request, { signal, changeSetId = null, targetToolName = null, authority = null } = {}) {
+  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   let status
   try {
     const path = '/api/author/stage/recover'
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(),
+        ...(authority ? { 'X-Authority-Session-Id': authority.sessionId, 'X-Authority-Turn-Id': authority.turnId } : {}) },
+      body: JSON.stringify(request),
       signal,
     }, path)
     status = res.status

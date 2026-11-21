@@ -245,7 +245,29 @@ export function reviseProjectArloInput(projectId, inputId, patch, { orgId, key, 
   const input = requireUuid(inputId, 'ARLO input version')
   const opts = mutation('POST', { patch })
   if (key) opts.headers['Idempotency-Key'] = key
-  return request(`/api/projects/${project}/arlo-inputs/${input}/revisions`, { ...opts, orgId, signal, expectedScope })
+  // Match only submitted fields and the rules in arlo_lab._patch_constraints.
+  // Capture the serialized patch so later caller edits cannot widen this allowlist.
+  const messages = new Set()
+  for (const [group, fields] of Object.entries(JSON.parse(opts.body).patch || {})) {
+    if (!['requirements', 'budget'].includes(group) || !fields || typeof fields !== 'object' || Array.isArray(fields)) continue
+    for (const name of Object.keys(fields)) {
+      if (!/^[a-z][a-z0-9_]*$/.test(name)) continue
+      const label = `${group}.${name}`
+      const positive = group === 'budget' || ['diameter_m', 'max_support_span_m'].includes(name)
+      for (const rule of ['is not an editable numeric constraint.', 'must be a finite number.',
+        positive ? 'must be greater than zero.' : 'must be nonnegative.',
+        ...(group === 'budget' && name !== 'timeout_seconds' ? ['must be a whole number.'] : [])]) {
+        const text = `${label} ${rule}`
+        if (text.length <= 160) messages.add(text)
+      }
+    }
+  }
+  return request(`/api/projects/${project}/arlo-inputs/${input}/revisions`, { ...opts, orgId, signal, expectedScope }).catch(error => {
+    const structured = error.body?.error
+    if (error.status === 422 && !detailOf(error.body) && structured?.error_code === 'BAD_PARAMS'
+        && messages.has(structured.message)) error.message = structured.message
+    throw error
+  })
 }
 
 export function restoreProjectArloInput(projectId, inputId, { orgId, key, signal, expectedScope } = {}) {
@@ -380,8 +402,24 @@ export async function resetProject(projectId) {
   return request(`/api/projects/${id}/reset`, mutation('POST'))
 }
 
-// DELETE /api/projects/{id} -> {..., receipt}. TERMINAL, same as reset.
-export async function deleteProject(projectId) {
+export async function archiveProject(projectId, key) {
   const id = requireUuid(projectId, 'project')
-  return request(`/api/projects/${id}`, mutation('DELETE'))
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/archive`, opts)
+}
+
+export async function restoreProject(projectId, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/restore`, opts)
+}
+
+// DELETE is permanent and only accepted for an archived project.
+export async function deleteProject(projectId, { confirmName }, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('DELETE', { confirm_name: confirmName })
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}`, opts)
 }

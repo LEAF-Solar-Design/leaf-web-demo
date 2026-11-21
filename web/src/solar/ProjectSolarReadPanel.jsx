@@ -11,6 +11,7 @@ export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
   catalog_unavailable: 'Refresh the Solar tools before reading this output.',
   catalog_refreshing: 'Refreshing the Solar tools. Your inputs are kept.',
   tool_not_admitted: 'This Solar tool is no longer available for this project. Close it to continue.',
+  write_access_required: 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.',
   params_schema_changed: 'This Solar tool changed. Close and reopen it to use the new inputs.',
   unsupported: 'This tool is not available in the project Solar workspace.',
   host_unavailable: 'This editor is not available in the project Solar workspace.',
@@ -60,6 +61,7 @@ export function projectSolarWorkspaceReason(code) {
     case 'catalog_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_unavailable
     case 'catalog_refreshing': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_refreshing
     case 'tool_not_admitted': return PROJECT_SOLAR_WORKSPACE_REASONS.tool_not_admitted
+    case 'write_access_required': return PROJECT_SOLAR_WORKSPACE_REASONS.write_access_required
     case 'params_schema_changed': return PROJECT_SOLAR_WORKSPACE_REASONS.params_schema_changed
     case 'unsupported': return PROJECT_SOLAR_WORKSPACE_REASONS.unsupported
     case 'host_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.host_unavailable
@@ -82,7 +84,7 @@ export function projectSolarWorkspaceReason(code) {
   }
 }
 
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read', 'solar-assignment-report']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const REASON_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype

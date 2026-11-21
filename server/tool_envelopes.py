@@ -9,6 +9,9 @@ from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from threading import Lock
+from uuid import UUID
+
+import customization_flags
 
 SERVER_DIR = Path(__file__).resolve().parent
 
@@ -95,9 +98,43 @@ def _directories(path: Path, limit: int):
                           if entry.is_dir(follow_symlinks=False)), limit)
 
 
+def _audience_pairs(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate audience key")
+        value[key] = item
+    return value
+
+
+def _audience_constant(value: str):
+    raise ValueError("invalid audience constant")
+
+
+def _audience(path: Path) -> frozenset[str] | str:
+    value = json.loads(_read(path, 4096).decode("utf-8"),
+                       object_pairs_hook=_audience_pairs, parse_constant=_audience_constant)
+    if not (isinstance(value, dict) and set(value) == {"schema", "tenants"}
+            and value["schema"] == "leaf.tool-audience.v1"):
+        raise ValueError("invalid audience")
+    tenants = value["tenants"]
+    if tenants == "internal":
+        return "internal"
+    if not (isinstance(tenants, list) and 1 <= len(tenants) <= 1000
+            and all(isinstance(tenant, str) and str(UUID(tenant)) == tenant for tenant in tenants)
+            and len(set(tenants)) == len(tenants)):
+        raise ValueError("invalid audience tenants")
+    return frozenset(tenants)
+
+
+def _visible(audience: frozenset[str] | str, tenant_id: str) -> bool:
+    return tenant_id in (customization_flags.internal_tenants()
+                         if audience == "internal" else audience)
+
+
 class Catalog:
     def __init__(self, root: Path):
-        self._entries: dict[tuple[str, str], tuple[dict, bytes, Path]] = {}
+        self._entries: dict[tuple[str, str], tuple[dict, bytes, Path, frozenset[str] | str]] = {}
         self._revocations: bytes | None = None
         for name_dir in _directories(root, 200):
             if not (3 <= len(name_dir.name) <= 64 and _NAME.fullmatch(name_dir.name)):
@@ -114,7 +151,8 @@ class Catalog:
                     package = version_dir / "package.zip"
                     if package.is_symlink() or not package.is_file() or package.stat().st_size > 8 * 1024 * 1024:
                         raise ValueError("invalid package")
-                    self._entries[(name_dir.name, version_dir.name)] = (value, raw, package)
+                    audience = _audience(version_dir / "audience.json")
+                    self._entries[(name_dir.name, version_dir.name)] = (value, raw, package, audience)
                 except (OSError, ValueError, UnicodeError, RecursionError):
                     _LOG.warning("Skipping published tool entry %s/%s", name_dir.name, version_dir.name)
         revocations = root / "revocations.json"
@@ -127,19 +165,20 @@ class Catalog:
             except (OSError, ValueError, UnicodeError, RecursionError):
                 _LOG.warning("Ignoring invalid published tool revocation list")
 
-    def list(self) -> list[dict]:
+    def list(self, tenant_id: str) -> list[dict]:
         return [{"name": name, "version": version,
                  "package_digest": value["package"]["package_digest"],
                  "tiers": list(value["tiers"]), "signed_at": value["signed_at"]}
-                for (name, version), (value, _, _) in sorted(self._entries.items())]
+                for (name, version), (value, _, _, audience) in sorted(self._entries.items())
+                if _visible(audience, tenant_id)]
 
-    def envelope_bytes(self, name: str, version: str) -> bytes | None:
+    def envelope_bytes(self, name: str, version: str, tenant_id: str) -> bytes | None:
         entry = self._entries.get((name, version))
-        return entry[1] if entry else None
+        return entry[1] if entry and _visible(entry[3], tenant_id) else None
 
-    def package_path(self, name: str, version: str) -> Path | None:
+    def package_path(self, name: str, version: str, tenant_id: str) -> Path | None:
         entry = self._entries.get((name, version))
-        return entry[2] if entry else None
+        return entry[2] if entry and _visible(entry[3], tenant_id) else None
 
     def revocations_bytes(self) -> bytes | None:
         return self._revocations

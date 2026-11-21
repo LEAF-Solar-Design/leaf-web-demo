@@ -146,7 +146,7 @@ def submit(a, **changes):
 
 
 def test_sip_r4_membership_and_worker_choice(monkeypatch):
-    assert graph.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
+    assert graph.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 19
     assert set(worker.ADAPTERS) == {worker.autofill.TOOL_NAME, worker.arlo_design.TOOL_NAME}
     assert inspect.signature(worker.run_once).parameters["tool_name"].default == worker.autofill.TOOL_NAME
     source = inspect.getsource(worker.main)

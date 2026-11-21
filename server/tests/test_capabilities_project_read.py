@@ -92,7 +92,14 @@ def test_solar_rows_keep_their_project_policy(lane):
         "input_version_id": str(lane.s.parent.version_id)}, headers=routes.headers(lane)))
     after = _project_states(lane)
     for name, state in before.items():
-        assert "project_read" not in state
+        if name == "solar-takeoff":  # X10 #3262 deliberately exposes project_read for solar-takeoff.
+            assert isinstance(state.get("project_read"), bool)
+        elif name == "solar-assignment-report":
+            assert state["project_read"] is True
+            assert state["entitled"] is False and state["runnable"] is False
+            assert state["refusal_reasons"] == ["entitlement_required"]
+        else:
+            assert "project_read" not in state
         assert after[name] == state
 
 

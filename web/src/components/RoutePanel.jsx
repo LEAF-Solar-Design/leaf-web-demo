@@ -13,6 +13,7 @@ import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanKey } from '../labels.js'
 import { humanizeError } from '../errorHumanize.js'
+import { catalogToolDisclaimer } from '../site/studioAvailability.js'
 import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
 
 function defaultsOf(schema) {
@@ -104,7 +105,13 @@ export default function RoutePanel({
   // Plan gate (real, enforced server-side): a write tool the tenant's plan
   // doesn't include. Distinct from `locked` (another session holds the checkout).
   const entBlocked = isWrite && !writeEntitled
+  // Availability manifest (site/studioAvailability.js): a tool the staging walk
+  // proved cannot run is never confirmed. This strip is the one place every
+  // run proposal lands (ribbon, catalog rail and a typed request), so the
+  // sentence and the disabled Run live here.
+  const notYet = catalogToolDisclaimer(route?.tool)
   const requestRun = () => {
+    if (notYet) return
     if (outage || belowConfirmFloor(route)) return
     if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
     else if (toolObj) onPickAlternative(toolObj.name)
@@ -253,7 +260,9 @@ export default function RoutePanel({
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim">
             {': '}
-            {locked
+            {notYet
+              ? notYet
+              : locked
               ? (writeLockNote || 'editing is locked by another session; this write tool is paused.')
               : entBlocked
                 ? 'your plan doesn’t include editing tools.'
@@ -267,7 +276,9 @@ export default function RoutePanel({
           type="button"
           className="chip-act"
           aria-label={`Run ${route.tool}`}
-          disabled={running || locked || entBlocked}
+          disabled={running || locked || entBlocked || !!notYet}
+          title={notYet || undefined}
+          data-availability={notYet ? 'unavailable' : undefined}
           onClick={requestRun}
         >
           {running ? 'Running…' : 'Run'}

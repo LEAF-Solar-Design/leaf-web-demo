@@ -117,8 +117,12 @@ def test_explicit_partial_publishes_reopens_and_preserves_unresolved_work(mixed,
 def test_default_acceptance_stays_strict(mixed, extra):
     result = report(mixed)
     before = (mixed.head, len(mixed.versions), deepcopy(mixed.ctx.graph))
-    with pytest.raises(GraphValidationError, match="SOLAREDGE_REPORT_INVALID"):
+    with pytest.raises(GraphValidationError, match="SOLAREDGE_GRID_UNMATCHED") as caught:
         service.accept(mixed.ctx, params(mixed, result, **extra))
+    assert isinstance(caught.value, service.SolarEdgeGridRefusal)
+    assert caught.value.frame_ref in {frame["id"] for frame in mixed.ctx.graph["frames"]}
+    assert caught.value.candidate_ids == []
+    assert caught.value.action == "redraw_frame"
     assert (mixed.head, len(mixed.versions), mixed.ctx.graph) == before
 
 

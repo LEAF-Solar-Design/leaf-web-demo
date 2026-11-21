@@ -819,7 +819,7 @@ def test_x02_worker_records_async_rejection_as_definitive(monkeypatch, x02_reque
     monkeypatch.setattr(cloud, "grant_principal_sha256", lambda *a: "a" * 64)
     monkeypatch.setattr(cloud.requests, "post", lambda *a, **kw: _X02UnreadBody(400))
     with pytest.raises(CloudError) as caught:
-        x02_solve.prepare_job({}, SimpleNamespace(lost=False))
+        x02_solve.prepare_job({"execution_context": {}}, SimpleNamespace(lost=False))
     assert caught.value.classification == "CLOUD_REQUEST_REJECTED"
     assert refusals == ["CLOUD_REQUEST_REJECTED"]
     assert exchange["state"] == "refused"

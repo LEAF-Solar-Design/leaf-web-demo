@@ -310,13 +310,79 @@ Dockerfile.app:1
 ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly
 '''
 
+# 11-20 publisher leaf-studio-native-release:f3e0d733 (tx d10-b734ebf6, 514ada2b),
+# verbatim: a cold frontend pull numbers the pull #2 and cuts it off at '#2 ...',
+# and the image config resolve becomes #3. The warm-only recognizer refused it.
+APP_FRONTEND_COLD_LOG = '''#0 building with "default" instance using docker driver
 
+#1 [internal] load build definition from Dockerfile.app
+#1 transferring dockerfile: 18.55kB done
+#1 DONE 0.0s
+
+#2 docker-image://docker.io/docker/dockerfile:1@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
+#2 resolve docker.io/docker/dockerfile:1@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183 0.0s done
+#2 sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183 9.08kB / 9.08kB done
+#2 sha256:5ced2b5924f16646d161345ccad27201d92ad077c3037ad9eff7b630528fbf12 1.13kB / 1.13kB done
+#2 sha256:9f6532f13aff6f7b95b5a64912de3a4f05c3d902168bcedbc3d385c3cbdefdf9 1.41kB / 1.41kB done
+#2 sha256:03f648a05b5780c2a0e4b43c93eb1838c6b9b32131b25f4199f42a788d106315 15.19MB / 15.19MB 0.2s
+#2 extracting sha256:03f648a05b5780c2a0e4b43c93eb1838c6b9b32131b25f4199f42a788d106315 0.2s done
+#2 ...
+
+#3 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#3 DONE 0.1s
+Dockerfile.app:1
+--------------------
+   1 | >>> # syntax=docker/dockerfile:1
+   2 |     #
+   3 |     # Leaf platform — tenant-facing APP process (FastAPI async job spine + catalog +
+--------------------
+ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly
+'''
+
+# Same publisher, broker image: the first real build vertices after the frontend.
+BUILD_STEP_LINES = '''
+#4 [context python:3.12-slim] load metadata for 807034087062.dkr.ecr.us-east-1.amazonaws.com/public-ecr/docker/library/python:3.12-slim
+#4 ...
+
+#5 [auth] sharing credentials for 807034087062.dkr.ecr.us-east-1.amazonaws.com
+#5 DONE 0.0s
+'''
+
+UNRELATED_ERROR = ('ERROR: failed to build: failed to solve: process "/bin/sh -c apt-get update" '
+                   'did not complete successfully: exit code: 1')
+FRONTEND_ERROR = 'ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly'
+
+
+@pytest.mark.parametrize('log, expected', [
+    pytest.param(APP_FRONTEND_LOG, True, id='warm-crash-retries'),
+    pytest.param(APP_FRONTEND_COLD_LOG, True, id='cold-crash-retries'),
+    pytest.param(APP_FRONTEND_LOG.replace('Dockerfile.app:1', BUILD_STEP_LINES + 'Dockerfile.app:1'), False,
+                 id='warm-crash-after-build-step'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace('Dockerfile.app:1', BUILD_STEP_LINES + 'Dockerfile.app:1'), False,
+                 id='cold-crash-after-build-step'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace(FRONTEND_ERROR, UNRELATED_ERROR), False, id='cold-unrelated-failure'),
+    pytest.param(APP_FRONTEND_LOG.replace(FRONTEND_ERROR, UNRELATED_ERROR), False, id='warm-unrelated-failure'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace('#2 ...\n', ''), False, id='cold-pull-neither-done-nor-cut'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace('#3 DONE 0.1s\n', ''), False, id='cold-config-not-done'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace('#3 resolve image config', '#2 resolve image config')
+                 .replace('#3 DONE', '#2 DONE'), False, id='cold-missing-vertex-3'),
+    pytest.param(APP_FRONTEND_COLD_LOG.replace(
+        '#3 DONE 0.1s\n', '#3 DONE 0.1s\n#2 docker-image://docker.io/docker/dockerfile:1@sha256:' + 'a' * 64 + '\n'),
+        False, id='cold-second-frontend'),
+])
+def test_app_frontend_recognizer_accepts_only_pre_build_shapes(tmp_path, log, expected):
+    path = tmp_path / 'app.log'
+    path.write_text(log, encoding='utf-8')
+    assert producer._app_frontend_closed_before_build(path) is expected
+
+
+@pytest.mark.parametrize('frontend_log', [APP_FRONTEND_LOG, APP_FRONTEND_COLD_LOG], ids=['warm', 'cold'])
 @pytest.mark.parametrize('unchanged', [False, True])
 def test_frontend_app_retries_once_with_refreshed_pins_preserving_siblings(tmp_path, monkeypatch, git_smoke_calls,
-                                                                          capsys, unchanged):
+                                                                          capsys, unchanged, frontend_log):
     # 11-10 publisher a64c6119: the frontend retry reused trixie pins that had moved.
     run, calls, refreshes, _, fresh = pin_race_case(tmp_path, monkeypatch, service="app",
-                                                    markers=APP_FRONTEND_LOG, unchanged=unchanged)
+                                                    markers=frontend_log, unchanged=unchanged)
     images = run()
     assert refreshes == ['app']
     assert {name: len(rows) for name, rows in calls.items()} == {name: 2 if name == 'app' else 1 for name in SERVICES}
@@ -326,7 +392,7 @@ def test_frontend_app_retries_once_with_refreshed_pins_preserving_siblings(tmp_p
         assert calls['app'][1][0] != calls['app'][0][0]
     assert images == {name: {'service': name, 'attempt': 2 if name == 'app' else 1} for name in SERVICES}
     assert git_smoke_calls == [images]
-    assert (tmp_path / 'app.log').read_text() == APP_FRONTEND_LOG
+    assert (tmp_path / 'app.log').read_text(encoding='utf-8') == frontend_log
     state = 'pins unchanged' if unchanged else 'pins refreshed'
     assert capsys.readouterr().out.count(
         f'image app: syntax frontend transport closed before build; rebuilding once with identical source ({state})\n') == 1
@@ -343,10 +409,12 @@ def test_frontend_app_refresh_failure_keeps_original_error_without_retry(tmp_pat
     assert all(len(rows) == 1 for rows in calls.values())
 
 
-@pytest.mark.parametrize('retry_log', [APP_FRONTEND_LOG, 'InRelease: FAILED\ncomputed checksum did NOT match\n'])
-def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeypatch, retry_log):
+@pytest.mark.parametrize('first_log', [APP_FRONTEND_LOG, APP_FRONTEND_COLD_LOG], ids=['warm', 'cold'])
+@pytest.mark.parametrize('retry_log', [APP_FRONTEND_LOG, APP_FRONTEND_COLD_LOG,
+                                       'InRelease: FAILED\ncomputed checksum did NOT match\n'])
+def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeypatch, retry_log, first_log):
     failure = subprocess.CalledProcessError(2, ['docker', 'buildx'])
-    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service='app', markers=APP_FRONTEND_LOG, retry_error=failure)
+    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service='app', markers=first_log, retry_error=failure)
     build = producer.build_image
     def again(*args, **kwargs):
         try:
@@ -365,13 +433,15 @@ def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeyp
 
 @pytest.mark.parametrize('fault', ['missing', 'truncated-start', 'oversized', 'later-step', 'extra-error', 'incomplete',
                                  'wrong-dockerfile', 'wrong-frontend', 'nonprocess', 'broker', 'web'])
-def test_frontend_nonqualifying_failure_remains_terminal(tmp_path, monkeypatch, fault):
-    log = APP_FRONTEND_LOG
+@pytest.mark.parametrize('base', [APP_FRONTEND_LOG, APP_FRONTEND_COLD_LOG], ids=['warm', 'cold'])
+def test_frontend_nonqualifying_failure_remains_terminal(tmp_path, monkeypatch, fault, base):
+    log = base
     if fault == 'truncated-start': log = log[log.index('#1'):]
     if fault == 'oversized': log = 'x' * (producer.BUILD_LOG_TAIL_BYTES + 1) + log
     if fault == 'later-step': log = log.replace('Dockerfile.app:1', '#4 [build 1/1] RUN compile\nDockerfile.app:1')
     if fault == 'extra-error': log = log.replace('Dockerfile.app:1', 'ERROR: source compilation failed\nDockerfile.app:1')
-    if fault == 'incomplete': log = log.replace('#3 DONE 0.3s\n', '')
+    if fault == 'incomplete': log = log.replace('#3 DONE 0.3s\n', '').replace('#3 DONE 0.1s\n', '')
+    assert fault != 'incomplete' or log != base
     if fault == 'wrong-dockerfile': log = log.replace('Dockerfile.app', 'Dockerfile.broker')
     if fault == 'wrong-frontend': log = log.replace('docker/dockerfile:1', 'other/frontend:1')
     error = ValueError('not a build process failure') if fault == 'nonprocess' else None
@@ -634,6 +704,22 @@ def test_forge_full_gate_then_five_images_with_exact_members(tmp_path, monkeypat
                for item in manifest["services"].values())
     assert manifest["gate"]["proof_sha256"] == case.request["gate_proof_sha256"]
     assert not (case.output / "forge-provenance.json").exists()
+
+
+@pytest.mark.parametrize("value", [None, "", "staging", "production", "Staging", "staging "])
+def test_forge_donor_allow_device_verdict_only_for_staging(tmp_path, monkeypatch, value):
+    case = forge_case(tmp_path, monkeypatch)
+    case.env.pop("LEAF_GATE_ALLOW_DEVICE_VERDICT", None)
+    if value is not None:
+        case.env["LEAF_GATE_ALLOW_DEVICE_VERDICT"] = value
+    forge_publisher(case)
+    fan_in = [cmd for cmd in case.calls if "--verify-gate-proof" in cmd]
+    assert len(fan_in) == 1 and "--allow-device-verdict" not in fan_in[0]
+    case.calls.clear()
+    producer.produce_forge(case.env, case.cb, case.s3)
+    donor = [cmd for cmd in case.calls if "--verify-gate-proof" in cmd]
+    assert len(donor) == 1
+    assert ("--allow-device-verdict" in donor[0]) == (value == "staging")
 
 
 @pytest.mark.parametrize("field,value", [
@@ -911,6 +997,15 @@ def test_native_gate_cannot_use_missing_proof(tmp_path, monkeypatch):
     fake_gate(monkeypatch, emit=False)
     with pytest.raises(ValueError, match="did not emit"):
         producer.run_gate(tmp_path, tmp_path / "results", env={})
+
+
+def test_native_fan_in_never_allows_device_verdict(tmp_path, monkeypatch):
+    calls = fake_gate(monkeypatch)
+    producer.run_gate(tmp_path, tmp_path / "results",
+                      env={"LEAF_GATE_ALLOW_DEVICE_VERDICT": "staging"})
+    verifiers = [command for command, _ in calls if "--verify-gate-proof" in command]
+    assert len(verifiers) == 1
+    assert "--allow-device-verdict" not in verifiers[0]
 
 
 def test_gate_restores_canonical_import_path_without_mutating_admission_env(tmp_path, monkeypatch):
@@ -1415,6 +1510,20 @@ def full_release_case(tmp_path, monkeypatch, build):
     monkeypatch.setattr(producer, "package_web_image", lambda *a: inputs["web"])
     env = {"CODEBUILD_SRC_DIR_provider_contract": "/unit/contract", "CODEBUILD_SRC_DIR_autofill_solver": "/unit/solver"}
     return request, env, work
+
+
+@pytest.mark.parametrize("value", [None, "", "staging", "production", "Staging", "staging "])
+def test_release_donor_allow_device_verdict_only_for_staging(tmp_path, monkeypatch, value):
+    request, env, _ = full_release_case(
+        tmp_path, monkeypatch, lambda inputs, root, service, *a, **k: inputs["images"][service])
+    if value is not None:
+        env["LEAF_GATE_ALLOW_DEVICE_VERDICT"] = value
+    calls = []
+    monkeypatch.setattr(producer.subprocess, "run", lambda command, **kwargs: calls.append(command))
+    producer.produce_release(tmp_path, tmp_path / "artifacts", request, env, object(), object())
+    donor = [command for command in calls if "--verify-gate-proof" in command]
+    assert len(donor) == 1
+    assert ("--allow-device-verdict" in donor[0]) == (value == "staging")
 
 
 def test_release_raises_first_failure_in_services_order_after_all_builds(tmp_path, monkeypatch, capsys):

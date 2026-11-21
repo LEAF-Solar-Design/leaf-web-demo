@@ -19,6 +19,7 @@ import ObjectSnapMenu, { SNAP_LIMITED_SENTENCE } from '../cadedit/ObjectSnapMenu
 import { ALL_SNAP_MODES, DEFAULT_SNAP_MODES, isSnapModeMask } from '../cadedit/snapModes.js'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
+import { findLayerName, VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import { humanizeError } from '../errorHumanize.js'
 
 const ZOOM_IN = 1.25
@@ -189,6 +190,37 @@ export function useViewNavigation({
     viewer?.setView?.('home')
     announce('Showing the whole drawing')
   }, [announce, jump, pushView, syncScope, viewerRef])
+
+  useEffect(() => {
+    const moveView = ({ detail }) => {
+      const viewer = viewerRef.current
+      switch (detail?.op) {
+        case 'fit':
+          fit()
+          announce('Showing the whole drawing')
+          break
+        case 'zoom_in':
+        case 'zoom_out':
+          zoomViewer(viewer, detail.op === 'zoom_in' ? ZOOM_IN : ZOOM_OUT)
+          break
+        case 'zoom_to_layer': {
+          const intake = latest.current.intake
+          const name = findLayerName(intake?.layers, detail.layer)
+          if (name === null) {
+            announce(`No layer named ${detail.layer} in this drawing`)
+            break
+          }
+          pushView()
+          const bounds = layerBounds(intake, name)
+          announce(bounds && viewer?.frame?.(bounds, UP_LAYER_SHARE) === true
+            ? `Showing layer ${name}` : 'That layer has nothing to show')
+          break
+        }
+      }
+    }
+    window.addEventListener(VIEW_CONTROL_EVENT, moveView)
+    return () => window.removeEventListener(VIEW_CONTROL_EVENT, moveView)
+  }, [announce, fit, pushView, viewerRef])
 
   return { pushView, fit, back, up, jump, syncScope, announcement }
 }
@@ -607,22 +639,30 @@ export function StatusToggles() {
   )
 }
 
-export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null, canvasSelector = null }) {
+export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs, canvasSelector)
   // App repaints when the lazy Viewer reports scene readiness. Read that
   // built scene instead of expanding blocks again or counting source rows.
+  // GAPS 47 (film take 4): the scene is judged against the intake the Viewer
+  // actually draws (its applyVersion override over its prop), not the
+  // owner's engine record, which is a new object after Save while the canvas
+  // keeps its own; that mismatch left "Drawing preview not ready" up for the
+  // rest of the session. `shown` still gates whether the count shows at all.
   const scene = viewerRef?.current?.getDrawingScene?.()
-  const stats = scene?.ready && scene.intake === shown ? scene.renderStats : null
+  const sceneFor = canvasIntake === undefined ? shown : canvasIntake
+  const stats = scene?.ready && sceneFor != null && scene.intake === sceneFor ? scene.renderStats : null
+  const layers = stats && `${stats.layers} ${stats.layers === 1 ? 'layer' : 'layers'}`
+  const markers = stats?.markerReferences > 0
+    ? ` · ${stats.markerReferences} block ${stats.markerReferences === 1 ? 'reference' : 'references'} shown as markers` : ''
   return (
     <span className="cockpit-status" data-testid="cockpit-status">
       <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>N/A</b></span>
       <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>N/A</b></span>
       <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>N/A</b></span>
       {shown && (
-        <span className="cockpit-count">
-          {stats ? <>{stats.paths} rendered paths · {stats.layers} {stats.layers === 1 ? 'layer' : 'layers'}
-            {stats.markerReferences > 0 && <> · {stats.markerReferences} block {stats.markerReferences === 1 ? 'reference shown' : 'references shown'} as markers</>}
+        <span className="cockpit-count" title={stats ? `${stats.paths} rendered paths · ${layers}${markers}` : undefined}>
+          {stats ? <>{layers}
             {stats.omitted > 0 && <> · preview limited</>}
           </> : 'Drawing preview not ready'}
         </span>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { config, stageAuthorTool as defaultStageAuthorTool, recoverAuthorStage as defaultRecoverAuthorStage, authorRetryDelay, authorPollSleep } from '../api.js'
+import { config, stageAuthorTool as defaultStageAuthorTool, recoverAuthorStage as defaultRecoverAuthorStage, recoverAuthorStageById as defaultRecoverAuthorStageById, retryAuthorStage as defaultRetryAuthorStage, authorRetryDelay, authorPollSleep } from '../api.js'
 import { SecretRefusedError, guardedText } from '../lib/secretGuardTransport.js'
 import {
   AUTHOR_POINTER_TTL_MS,
@@ -129,6 +129,8 @@ export default function useAuthorStageController({
   storage,
   stageAuthorTool = defaultStageAuthorTool,
   recoverAuthorStage = defaultRecoverAuthorStage,
+  recoverAuthorStageById = defaultRecoverAuthorStageById,
+  retryAuthorStage = defaultRetryAuthorStage,
   // Optional turn-authority provider: async () => ({ sessionId, turnId } | null).
   // Called once per initial stage submission (never on a poll/reconnect, which
   // sends no new POST). When supplied, it must resolve a real turn before POST.
@@ -146,6 +148,10 @@ export default function useAuthorStageController({
   const [elapsedMs, setElapsedMs] = useState(pointer && !pointer.terminal_failed && !pointer.draft_only ? Math.max(0, Date.now() - pointer.created_at) : 0)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(pointer?.terminal_failed ? restoredFailure(pointer) : null)
+  const [lookup, setLookup] = useState(null)
+  const [lookupResult, setLookupResult] = useState(null)
+  const lookupRef = useRef({ sequence: 0, abort: null })
+  const retryRef = useRef(null)
   const sequenceRef = useRef(0)
   const resumedRef = useRef(false)
   const abortRef = useRef(null)
@@ -432,6 +438,8 @@ export default function useAuthorStageController({
 
   const stage = useCallback((description, targetToolName = null, { allowSecretOnce = false, newAttempt = false } = {}) => {
     if (!enabled) return Promise.resolve(null)
+    if (retryRef.current) return retryRef.current
+    setLookupResult(null)
     // THE STORAGE BOUNDARY, guarded by the same seam the transport uses.
     // stageAuthorTool is the authority and refuses this text on the wire, but
     // this function writes the description to localStorage FIRST (the durable
@@ -545,7 +553,88 @@ export default function useAuthorStageController({
     return runPointer({ ...pointer, terminal_failed: false }, { reconnecting: true })
   }, [accountScope, enabled, pointer, runPointer])
 
+  // An explicit existing-ID read never creates a local author pointer or turn.
+  const lookupRequest = useCallback(async (changeSetId) => {
+    if (!enabled || mock || runningRef.current || pointerRef.current || retryRef.current) return null
+    lookupRef.current.abort?.abort()
+    const abort = new AbortController()
+    const sequence = ++lookupRef.current.sequence
+    lookupRef.current.abort = abort
+    const scope = authorAccountScope(config.tenant, storageRef.current)
+    const current = () => lookupRef.current.sequence === sequence && !abort.signal.aborted
+      && enabledRef.current && authorAccountScope(config.tenant, storageRef.current) === scope
+      && !pointerRef.current
+    setLookup({ scope, busy: true, job: null, message: null })
+    setLookupResult(null)
+    try {
+      const recovered = await recoverAuthorStageById(changeSetId, { signal: abort.signal })
+      if (!current()) return null
+      setLookup({ scope, busy: false, job: recovered.job || null,
+        message: recovered.status === 'not_found' ? 'Request not found for this account.'
+          : recovered.status === 'admission_pending' ? RECOVERY_WAITING : null })
+      if (recovered.result) {
+        setLookupResult({ scope, value: recovered.result })
+        setPhase('succeeded')
+      }
+      return recovered
+    } catch {
+      if (current()) setLookup({ scope, busy: false, job: null, message: 'Could not check this request. Try again.' })
+      return null
+    }
+  }, [enabled, mock, recoverAuthorStageById])
+
+  const retryRequest = useCallback(() => {
+    if (retryRef.current) return retryRef.current
+    const job = lookup?.scope === accountScope ? lookup?.job : null
+    if (!enabled || mock || pointerRef.current || runningRef.current
+      || job?.status !== 'failed' || job.error?.retryable !== true
+      || !Number.isInteger(job.version) || !Number.isInteger(job.attempt)) return Promise.resolve(null)
+    const abort = new AbortController()
+    lookupRef.current.abort?.abort()
+    lookupRef.current.abort = abort
+    const sequence = ++lookupRef.current.sequence
+    const scope = accountScope
+    const current = () => sequence === lookupRef.current.sequence && !abort.signal.aborted
+      && enabledRef.current && authorAccountScope(config.tenant, storageRef.current) === scope
+      && !pointerRef.current
+    setLookup({ scope, busy: true, job, message: null })
+    const run = (async () => {
+      try {
+        const authority = await authorityProvider?.(`Retry authoring request ${job.change_set_id}`, { forceFresh: true })
+        if (!current()) return null
+        if (!authority?.sessionId || !authority?.turnId) throw new Error('Retry authority unavailable')
+        const recovered = await retryAuthorStage(job, authority, { signal: abort.signal })
+        if (!current()) return null
+        if (recovered.status !== 'found' || recovered.job?.change_set_id !== job.change_set_id
+          || !['queued', 'running'].includes(recovered.job.status)) throw new Error('Retry was not queued')
+        setPhase('reconnecting')
+        setLookup({ scope, busy: true, job: recovered.job, message: null })
+        const staged = await stageAuthorTool(false, '', null, {
+          pollUrl: recovered.job.poll_url, changeSetId: job.change_set_id,
+          signal: abort.signal, isCurrent: current,
+        })
+        if (!current()) return null
+        if (staged?.receipt?.change_set_id !== job.change_set_id) throw new Error('Receipt did not match request')
+        setLookupResult({ scope, value: staged })
+        setPhase('succeeded')
+        setLookup({ scope, busy: false, job: { ...recovered.job, status: 'staged' }, message: null })
+        return staged
+      } catch {
+        if (current()) {
+          setPhase('interrupted')
+          setLookup({ scope, busy: false, job: null, message: 'Could not finish this retry. Check the existing request again.' })
+        }
+        return null
+      }
+    })()
+    const pending = run.finally(() => { if (retryRef.current === pending) retryRef.current = null })
+    retryRef.current = pending
+    return pending
+  }, [accountScope, authorityProvider, enabled, lookup, mock, retryAuthorStage, stageAuthorTool])
+
   const completePublication = useCallback(() => {
+    setLookupResult(null)
+    setLookup(null)
     if (!mock && pointer) clearInflightAuthor(pointer.idempotency_key, storageRef.current)
     updatePointer(null)
   }, [mock, pointer, updatePointer])
@@ -566,6 +655,8 @@ export default function useAuthorStageController({
   }, [phase, pointer?.created_at])
 
   useEffect(() => () => {
+    lookupRef.current.sequence += 1
+    lookupRef.current.abort?.abort()
     sequenceRef.current += 1
     resumedRef.current = false
     abortRef.current?.abort()
@@ -577,7 +668,7 @@ export default function useAuthorStageController({
     phase,
     progress,
     elapsedMs,
-    result,
+    result: lookupResult?.scope === accountScope ? lookupResult.value : result,
     error,
     active,
     enabled,
@@ -591,11 +682,14 @@ export default function useAuthorStageController({
       failed_at: pointer.failed_at,
       failure: pointer.failure,
     } : null,
+    recoveredRequest: lookup?.scope === accountScope ? lookup : null,
+    lookupRequest,
+    retryRequest,
     stage,
     reviseDraft,
     discardDraft,
     resume,
     checkStatus,
     completePublication,
-  }), [active, checkStatus, completePublication, discardDraft, elapsedMs, enabled, error, phase, pointer, progress, result, resume, reviseDraft, stage])
+  }), [accountScope, active, checkStatus, completePublication, discardDraft, elapsedMs, enabled, error, phase, pointer, progress, result, resume, reviseDraft, stage, lookup, lookupResult, lookupRequest, retryRequest])
 }

@@ -77,6 +77,7 @@ def _resolve_upload_identity(
             subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
             platform_tenant_id, platform_tier = (
                 deps.resolve_active_platform_tenant_authority(subject))
+            deps.require_investor_authority(subject, platform_tenant_id, platform_tier)
             deps.require_matching_platform_tenant_claim(
                 claims, platform_tenant_id)
             ws = tenancy.get_store().resolve_workspace(platform_tenant_id)

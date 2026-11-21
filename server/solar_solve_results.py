@@ -20,7 +20,7 @@ from solar_design_graph import (
     COLLECTIONS, MAX_GRAPH_NODES, MAX_NODES, SCHEMA_VERSION,
     GraphValidationError, _bounded_json, entities, new_id, validate_graph,
 )
-from solar_grid_restitch import failed_group_indices, ordered_strings, restitch
+from solar_grid_restitch import _int, _panels, failed_group_indices, ordered_strings, restitch
 from solar_sizing_client import advance, checked_graph
 
 
@@ -312,7 +312,7 @@ def finish_mutation(before, after, tool):
     return advance(after, changed, tool)
 
 
-def accept_candidate(graph, candidate, *, expected_rev):
+def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """Build one graph version; publication remains the write owner's job."""
     before = checked_graph(graph, expected_rev)
     _bounded_json(candidate)
@@ -353,7 +353,7 @@ def accept_candidate(graph, candidate, *, expected_rev):
         ordered_lists.append(refs[offset:offset + length])
         offset += length
     _replace_frame_strings(before, result, frame, previous, ordered_lists,
-                           verified["proof"]["response_sha256"])
+                           verified["proof"]["response_sha256"], plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
@@ -371,11 +371,23 @@ def _previous_frame_strings(result, frame):
     return previous
 
 
-def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256):
+def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           *, plugin_parity=False):
     """Replace the frame's strings with ordered panel lists; shared by both commit paths."""
     members = set(frame["panel_refs"])
     previous_ids = {s["id"] for s in previous}
     panels = {p["id"]: p for p in result["panels"]}
+    if type(plugin_parity) is not bool:
+        raise GraphValidationError("INVALID_PLUGIN_PARITY_MODE")
+    # Faithful Branch replay keeps the recorded order, including native gap hops.
+    # Normal Studio publication retains its physical step guard.
+    if frame["installation_design"] == "Roof" and not plugin_parity:
+        limit = 3 * max(frame["module_width_along_row"], frame["module_height_across_row"])
+        for ordered in ordered_lists:
+            for left, right in zip(ordered, ordered[1:]):
+                distance = math.dist(panels[left]["centre"][:2], panels[right]["centre"][:2])
+                if distance > limit and not math.isclose(distance, limit, rel_tol=1e-9, abs_tol=1e-9):
+                    raise GraphValidationError("DISCONTIGUOUS_SOLVE_STRING", "solve.continuity")
     strings = []
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]
@@ -550,7 +562,17 @@ def complete_split_search(graph, binding, proposals):
             "background_complete": binding["phase"] == "background"}
 
 
-def accept_split_candidate(graph, candidate, *, expected_rev):
+def _sequence_counts(responses):
+    cells = [cell for response in responses
+             for cell in _panels(response["data"]["final_grid"])]
+    sequences = [_int(cell.get("Seq")) for cell in cells if cell.get("Id")]
+    positive = [sequence for sequence in sequences if sequence > 0]
+    return {"identified_cells": len(sequences), "positive_sequences": len(positive),
+            "nonpositive_sequences": len(sequences) - len(positive),
+            "repeated_positive_sequences": len(positive) - len(set(positive))}
+
+
+def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """The plugin's split commit: restitch the pieces, cut strings in final-grid Seq
     order (StringPlacement), then the same graph mutation as accept_candidate."""
     before = checked_graph(graph, expected_rev)
@@ -571,7 +593,7 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
         merged = restitch(responses, [piece["row_indices"] for piece in binding["pieces"]])
         cut = ordered_strings(merged)
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER") from None
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.restitch") from None
     members = set(frame["panel_refs"])
     # StringPlacement commits upper-cased handles; map them back to panel ids.
     by_upper = {ref.upper(): ref for ref in members}
@@ -581,10 +603,25 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     flat = [ref for string in ordered_lists for ref in string]
     if (not ordered_lists or any(not string for string in ordered_lists)
             or None in flat or len(set(flat)) != len(flat) or set(flat) != members):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+        failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.coverage")
+        known = [ref for ref in flat if ref is not None]
+        failure.coverage_attribution = {
+            "empty_extraction": not ordered_lists or any(not string for string in ordered_lists),
+            "unknown_identity": None in flat,
+            "repeated_identity": len(set(known)) != len(known),
+            "missing_members": bool(members - set(known)),
+            "expected_members": len(members), "extracted_members": len(flat),
+            "unknown_members": len(flat) - len(known),
+            "repeated_members": len(known) - len(set(known)),
+            "missing_member_count": len(members - set(known)),
+            "before_restitch": _sequence_counts(responses),
+            "after_restitch": _sequence_counts([merged]),
+        }
+        raise failure
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
-    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)
+    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],

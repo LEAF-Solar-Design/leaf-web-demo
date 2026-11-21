@@ -18,7 +18,7 @@ from lab_registry import KASHBOT_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT / "contract/lab-capability-coverage.v1.json"
-COVERAGE_SHA256 = "6244ee658792fa1f1209f4bdd51f04e450ddd0951cd5d18e0b6258ade7941e13"
+COVERAGE_SHA256 = "183c9c0600e9ecb8fcf727a1bc8ff0a09684ac907719b16c285c0f91bbbd546b"
 STATUSES = {"runnable", "readable", "explicit-handoff", "unavailable-with-reason"}
 
 
@@ -31,8 +31,11 @@ def check_coverage(coverage, families, sources, source_families):
         family = record["family"]
         assert family == families[index], f"family:{family} out of order"
     counts = Counter(entry["source"] for entry in coverage["entries"])
+    missing = sorted(sources - set(counts))
+    unexpected = sorted(set(counts) - sources)
     for source in sorted(sources | set(counts)):
-        assert counts[source] == (1 if source in sources else 0), f"{source} missing, duplicate or unexpected"
+        assert counts[source] == (1 if source in sources else 0), (
+            f"{source} missing, duplicate or unexpected; missing={missing}, unexpected={unexpected}")
     for entry in coverage["entries"] + coverage["families"]:
         source = entry.get("source", "family:" + entry.get("family", ""))
         assert entry.get("status") in STATUSES, source

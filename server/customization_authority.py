@@ -108,6 +108,8 @@ class PublishConfirmation:
     author_subject: str
     approver_subject: str
     expires_at: datetime
+    approval_kind: str | None = None
+    approver_role: str | None = None
 
 
 class ConfirmationSigner(Protocol):
@@ -219,8 +221,12 @@ class CustomizationAuthority:
         approver_binding: TenantBinding | None = None,
         staff_authority: StaffAuthority | None = None,
         ttl: timedelta = timedelta(minutes=10),
+        allow_self_approval: bool = False,
+        approval_kind: str | None = None,
     ) -> PublishConfirmation:
         """Create an always-required R6 confirmation bound to one staged change."""
+        if approval_kind not in (None, "self", "independent"):
+            raise AuthorityError("approval_kind_invalid")
         staged = _validated_staged_change(staged_change)
         author_tenant, author_subject, _ = _verified_binding(author_binding)
         if (author_tenant, author_subject) != (staged.tenant_id, staged.author_subject):
@@ -230,7 +236,12 @@ class CustomizationAuthority:
             approver_binding=approver_binding,
             staff_authority=staff_authority,
         )
-        if staged.high_impact and author_subject == approver_subject:
+        is_self = author_subject == approver_subject
+        if approval_kind is not None and approval_kind != ("self" if is_self else "independent"):
+            raise AuthorityError("approval_kind_invalid")
+        if allow_self_approval and (approval_kind != "self" or approver_binding is None):
+            raise AuthorityError("approval_kind_invalid")
+        if staged.high_impact and is_self and allow_self_approval is not True:
             raise AuthorityError("high_impact_self_approval")
         if not isinstance(ttl, timedelta) or ttl <= timedelta(0):
             raise ValueError("ttl must be positive")
@@ -250,6 +261,10 @@ class CustomizationAuthority:
             "approver_subject": approver_subject,
             "expires_at": expires_at.isoformat(),
         }
+        if approval_kind is not None:
+            payload["approval_kind"] = approval_kind
+            if approver_binding is not None:
+                payload["approver_role"] = approver_binding.role
         self._confirmations.put(
             confirmation_id,
             payload,
@@ -425,6 +440,8 @@ def _parse_expiry(value: object) -> datetime:
 
 
 def _confirmation_from_payload(payload: dict[str, Any]) -> PublishConfirmation:
+    if "approval_kind" in payload and payload["approval_kind"] not in ("self", "independent"):
+        raise AuthorityError("approval_kind_invalid")
     return PublishConfirmation(
         confirmation_id=payload["confirmation_id"],
         tenant_id=payload["tenant_id"],
@@ -436,4 +453,6 @@ def _confirmation_from_payload(payload: dict[str, Any]) -> PublishConfirmation:
         author_subject=payload["author_subject"],
         approver_subject=payload["approver_subject"],
         expires_at=_parse_expiry(payload["expires_at"]),
+        approval_kind=payload.get("approval_kind"),
+        approver_role=payload.get("approver_role"),
     )

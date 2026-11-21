@@ -65,17 +65,19 @@ def client(tmp_path, monkeypatch):
 
 
 def _post(client, *, data: bytes = EDITED_DXF, digest: str | None = None,
-          parent: int | None = None, name: str = "edited.dxf"):
+          parent: int | None = None, name: str = "edited.dxf", origin: str | None = None):
     if parent is None:
         head = client.get(f"/api/drawings/{DRAWING}/versions",
                           headers={"X-Tenant-Id": TENANT}).json()["head"]
         parent = head
+    form = {"parent_version": str(parent), "source_digest": digest or hashlib.sha256(data).hexdigest()}
+    if origin is not None:
+        form["origin"] = origin
     return client.post(
         f"/api/drawings/{DRAWING}/versions/edited",
         headers={"X-Tenant-Id": TENANT},
         files={"file": (name, io.BytesIO(data), "application/dxf")},
-        data={"parent_version": str(parent),
-              "source_digest": digest or hashlib.sha256(data).hexdigest()},
+        data=form,
     )
 
 
@@ -108,6 +110,34 @@ def test_save_advances_the_chain_with_intake_payload_sidecar_and_receipt(client,
     chain = client.get(f"/api/drawings/{DRAWING}/versions",
                        headers={"X-Tenant-Id": TENANT}).json()
     assert chain["head"] == new_v
+
+
+@pytest.mark.parametrize("origin", [None, "autocad", "other", "autocad" + " " * 32])
+def test_save_records_publish_origin_in_history(client, origin):
+    resp = _post(client, origin=origin)
+    assert resp.status_code == 201, resp.text
+    chain = client.get(f"/api/drawings/{DRAWING}/versions",
+                       headers={"X-Tenant-Id": TENANT}).json()
+    entry = chain["versions"][-1]
+    if origin == "autocad":
+        assert entry["tool"] == "autocad-palette"
+        assert entry["note"] == "published from AutoCAD through the Leaf palette"
+    else:
+        assert entry["tool"] == "cad-edit-surface"
+        assert entry["note"] == "browser edit via the isolated engine worker"
+
+
+def test_generic_upload_inherits_parent_drawing_name(client, tmp_path):
+    import store
+    import write_loop
+
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    for filename, expected in [("roof-site.dxf", "roof-site.dxf"), ("edited.dxf", "roof-site.dxf"),
+                               ("new-site.dxf", "new-site.dxf")]:
+        resp = _post(client, name=filename)
+        assert resp.status_code == 201, resp.text
+        _, intake = write_loop.read_intake(backend, TENANT, DRAWING, resp.json()["head"])
+        assert intake["dwg"] == expected
 
 
 def test_digest_mismatch_is_refused_and_writes_nothing(client):

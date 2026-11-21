@@ -437,6 +437,13 @@ def test_ack_prepares_ui_and_returns_final_control_without_running():
 
         def get_by_role(self, role, **kwargs):
             events.append(('role', role, kwargs))
+            assert role == 'option'
+            matcher = kwargs['name']
+            # PromptBox's aria-hidden fallback glyph prefixes textContent.
+            # Its accessible option name still starts with the route label.
+            assert matcher.search('/count-by-layer · Count entities by layer')
+            assert not matcher.search('/count-by-layer-extra · Other command')
+            assert not matcher.search('/other-count-by-layer · Other command')
             return option
 
         def filter(self, **kwargs):
@@ -730,6 +737,12 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
 
     monkeypatch.setattr(live, 'permitted_path', lambda value: tmp_path)
     monkeypatch.setattr(live, 'load_native_oracle', lambda manifest: oracle)
+    def frame(runtime):
+        assert runtime._oracle is oracle and runtime._expected_drawing_key == PROJECT_KEY
+        events.append('frame')
+        return {'before_cold_samples': True}
+
+    monkeypatch.setattr(live, 'frame_native_modules', frame)
     monkeypatch.setattr(live, 'navigate', navigate)
     monkeypatch.setattr(xbench_session, 'signed_in', session)
     monkeypatch.setattr(xbench_session, 'api', api)
@@ -737,7 +750,7 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
     monkeypatch.setattr(xbench_studio, 'disposable_project', project)
     value = live.make_live_runtime(SimpleNamespace(base=xbench_session.STAGING_ORIGIN,
         source_sha='a' * 40, manifest={}, out_dir=tmp_path))
-    assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate']
+    assert events == ['session', 'project', 'upload', 'ready', 'adopt', 'navigate', 'frame']
     assert value.expected_module_handles == ['native']
     assert value._expected_drawing_key == PROJECT_KEY
     assert dict(value.expected_run_binding) == dict(org_id=ORG_ID, project_id=PROJECT_ID,
@@ -780,8 +793,9 @@ def test_ack_preparation_uses_one_budget_and_returns_only_ready_control(mode):
             assert state == 'visible'
             consume(timeout)
 
-        def get_by_role(self, role):
+        def get_by_role(self, role, **kwargs):
             assert role == 'option'
+            assert kwargs['name'].search('/count-by-layer · Count entities')
             return self
 
         def filter(self, **kwargs):

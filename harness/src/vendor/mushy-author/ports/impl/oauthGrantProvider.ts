@@ -216,6 +216,8 @@ interface PersistedGrantAccountV3 extends PersistedGrantAccount {
   selection_count: number;
   last_used_at: string | null;
   cooldown_until: string | null;
+  auth_refused_at?: string;
+  auth_refused_code?: string;
   leases: PersistedGrantLease[];
 }
 
@@ -231,6 +233,14 @@ const LEASE_TTL_MS = 5 * 60 * 1000;
 const LEASE_RESERVATION_TOKENS = 100_000;
 const ELIGIBLE_OAUTH_PLANS: ReadonlySet<GrantPlan> = new Set(["pro", "max", "team", "enterprise"]);
 const DEFAULT_QUOTA_COOLDOWN_S = 15 * 60;
+/**
+ * These provider refusals exclude the account from automatic selection. Relink with put,
+ * or recover the account by activating its id via PATCH /api/tenant/claude-grant.
+ */
+export const TERMINAL_AUTH_ERROR_CODES: ReadonlySet<string> = new Set(["oauth_org_not_allowed", "authentication_failed"]);
+export function isTerminalAuthErrorCode(code: unknown): boolean {
+  return typeof code === "string" && TERMINAL_AUTH_ERROR_CODES.has(code);
+}
 // Key-provider calls yield. Keep each read/modify/publish transaction exclusive,
 // including when multiple store instances address the same record in this process.
 const grantRecordMutations = new Map<string, Promise<unknown>>();
@@ -400,6 +410,12 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
             (typeof account.last_used_at === "string" && !Number.isNaN(Date.parse(account.last_used_at)))) &&
           (account.cooldown_until === null ||
             (typeof account.cooldown_until === "string" && !Number.isNaN(Date.parse(account.cooldown_until)))) &&
+          (account.auth_refused_at == null ||
+            (typeof account.auth_refused_at === "string" &&
+              /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(account.auth_refused_at) &&
+              !Number.isNaN(Date.parse(account.auth_refused_at)))) &&
+          ((account.auth_refused_at == null && account.auth_refused_code == null) ||
+            (typeof account.auth_refused_code === "string" && /^[a-z_]{1,64}$/.test(account.auth_refused_code))) &&
           Array.isArray(leases) && leases.every((lease) => {
             const item = lease as Record<string, unknown>;
             return typeof item.id === "string" && !!item.id &&
@@ -426,6 +442,10 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
           selection_count: account.selection_count as number,
           last_used_at: account.last_used_at as string | null,
           cooldown_until: account.cooldown_until as string | null,
+          ...(typeof account.auth_refused_at === "string" ? {
+            auth_refused_at: account.auth_refused_at,
+            auth_refused_code: account.auth_refused_code as string,
+          } : {}),
           leases: (account.leases as Array<Record<string, unknown>>).map((lease) => ({
             id: lease.id as string,
             expires_at: lease.expires_at as string,
@@ -536,6 +556,7 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     return this.status(tenantId);
   }
 
+  /** Select the account and clear any terminal auth refusal recorded for it. */
   async activate(tenantId: string, accountId: string): Promise<GrantStatus> {
     return this.mutate(tenantId, () => this.activateRecord(tenantId, accountId));
   }
@@ -544,9 +565,12 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
     const existing = await this.readRecord(tenantId);
     if (!existing) throw new Error("grant account not found");
     const record = this.asV3(tenantId, existing);
-    if (!record.accounts.some((account) => account.id === accountId)) {
+    const account = record.accounts.find((candidate) => candidate.id === accountId);
+    if (!account) {
       throw new Error("grant account not found");
     }
+    delete account.auth_refused_at;
+    delete account.auth_refused_code;
     record.active_account_id = accountId;
     await this.writeRecord(tenantId, record);
     return this.status(tenantId);
@@ -578,12 +602,21 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         `tenant ${tenantId} must mount an attested Claude subscription or API key before live conversation`,
       );
     }
-    const eligible = attested.filter(
+    const usable = attested.filter((account) => account.auth_refused_at === undefined);
+    if (!usable.length) {
+      if (changed) await this.writeRecord(tenantId, record);
+      const codes = [...new Set(attested.map((account) => account.auth_refused_code ?? "unknown"))].sort();
+      throw new GrantRequiredError(
+        tenantId,
+        `Every linked Claude account for tenant ${tenantId} was refused by the provider (${codes.join(", ")}). Link another account or reactivate a fixed one.`,
+      );
+    }
+    const eligible = usable.filter(
       (account) => account.cooldown_until === null || Date.parse(account.cooldown_until) <= now,
     );
     if (!eligible.length) {
       if (changed) await this.writeRecord(tenantId, record);
-      const next = Math.min(...attested
+      const next = Math.min(...usable
         .map((account) => account.cooldown_until ? Date.parse(account.cooldown_until) : now)
         .filter(Number.isFinite));
       throw new GrantPoolUnavailableError(Math.max(1, Math.ceil((next - now) / 1000)));
@@ -633,6 +666,10 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
         : DEFAULT_QUOTA_COOLDOWN_S;
       account.cooldown_until = new Date(Date.now() + retryAfterS * 1000).toISOString();
     }
+    if (isTerminalAuthErrorCode(outcome.error_code)) {
+      account.auth_refused_at = new Date().toISOString();
+      account.auth_refused_code = outcome.error_code!;
+    }
     await this.writeRecord(tenantId, record);
   }
 
@@ -662,7 +699,9 @@ export class FileTenantGrantStore implements TenantGrantStore, TenantGrantAdminS
           linked_at: account.linked_at,
           active: account.id === active.id,
           plan: account.plan,
-          eligible: account.kind === "api_key" || account.plan !== null,
+          eligible: (account.kind === "api_key" || account.plan !== null) && account.auth_refused_at === undefined,
+          auth_refused_at: account.auth_refused_at ?? null,
+          auth_refused_code: account.auth_refused_code ?? null,
           usage_tokens: account.usage_tokens,
           cooldown_until: account.cooldown_until && Date.parse(account.cooldown_until) > now
             ? account.cooldown_until
