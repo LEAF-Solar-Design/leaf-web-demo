@@ -1009,8 +1009,12 @@ def stage_status(
         except ChangeSetNotFoundError:
             response = _customization_error(CustomizationServiceError("stage_source_not_available", 404))
         except (CustomizationServiceError, AuthorityError) as exc:
-            response = _customization_error(
-                CustomizationServiceError(exc.reason_code, 403) if isinstance(exc, AuthorityError) else exc)
+            if isinstance(exc, AuthorityError):
+                response = _customization_error(
+                    CustomizationServiceError(exc.reason_code, 403), from_authority=True
+                )
+            else:
+                response = _customization_error(exc)
         except Exception as exc:
             response = _customization_error(CustomizationServiceError("stage_source_failed", 503), cause=exc)
         response.headers.update(headers)
