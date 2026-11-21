@@ -785,6 +785,10 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "decision", "approval_kind", "approver_subject", "approver_role",
             "comment", "confirmation_id", "decided_at",
         },
+        "branch_tool_receipts": {
+            "receipt_id", "tenant_id", "subject", "name", "version", "package_digest",
+            "event", "plugin_version", "duration_ms", "diagnostics_json", "received_at",
+        },
         "customization_deployment_snapshots": {
             "snapshot_id", "payload_json", "effective_catalog_digest",
             "platform_release", "idempotency_key", "created_at",
