@@ -191,6 +191,31 @@ def test_plan_registers_the_app_authority_tuple(monkeypatch):
     assert agent_gate.consumed_build_plan(TENANT, SESSION, "loop-build-turn", SUBJECT) is None
 
 
+
+def test_plan_bound_build_takes_the_harness_binding_without_a_description(monkeypatch):
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "test-secret")
+    sessions = agent_router.session_store
+    monkeypatch.setattr(sessions, "get_session", lambda _: {"tenant_id": TENANT})
+    monkeypatch.setattr(sessions, "turn_started_data", lambda *_: {})
+    monkeypatch.setattr(sessions, "active_turn_tier", lambda *_: "hosted_pro")
+    monkeypatch.setattr(sessions, "active_turn_subject", lambda *_: SUBJECT)
+
+    def gate(action, args, app_turn, harness_turn):
+        request = agent_router.GateRequest(
+            tenant_id=TENANT, session_id="loop-session", turn_id=harness_turn,
+            authority_session_id=SESSION, authority_turn_id=app_turn, action=action, args=args,
+        )
+        return agent_router.internal_gate(request, x_dispatch_secret="test-secret")
+
+    proposal = gate("propose_build_plan", {"plan": create_plan()}, "app-proposal-turn", "loop-proposal-turn")
+    cid = proposal["confirmation_id"]
+    assert agent_gate.read_pending(cid)["turn_id"] == "app-proposal-turn"
+    assert agent_gate.grant_approval(cid, by=SUBJECT)[0]
+    result = gate("author_tool", {"plan_confirmation_id": cid, "mode": "build"}, TURN, "loop-build-turn")
+    assert result["decision"] == "allow"
+    assert agent_gate.consumed_build_plan(TENANT, SESSION, TURN, SUBJECT)["confirmation_id"] == cid
+    assert agent_gate.consumed_build_plan(TENANT, SESSION, "loop-build-turn", SUBJECT) is None
+
 def test_foreign_approver_cannot_mark_the_session_card_approved(monkeypatch):
     sessions = agent_router.session_store
     monkeypatch.setenv("LEAF_SESSIONS_STORE", "legacy")
