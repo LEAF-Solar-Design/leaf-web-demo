@@ -31,6 +31,7 @@ class MemoryTransactions:
     def __init__(self):
         self.inputs, self.versions, self.jobs = {}, {}, {}
         self.files, self.receipts = {}, {}
+        self.materials, self.isolations = {}, []
         self.role, self.live, self.authority = "owner", True, "postgres_canonical"
         self.lock = RLock()
         self.sql = []
@@ -42,6 +43,7 @@ class MemoryTransactions:
 
     def transaction(self, operation, **kwargs):
         with self.lock:
+            self.isolations.append(kwargs.get("isolation"))
             saved = copy.deepcopy((self.inputs, self.versions, self.jobs, self.files, self.receipts))
             try:
                 return operation(self)
@@ -90,11 +92,31 @@ class MemoryCursor:
                         "example_version": params["example_version"], "input_sha256": params["digest"],
                         "request_json": params["request"]}
             self.store.inputs[params["version"]] = dict(self.row)
+        elif sql.startswith("SELECT i.input_version_id, i.input_sha256"):
+            assert "request_json" not in sql and "v.deleted_at IS NULL" in sql
+            rows = []
+            for version_id, entry in self.store.inputs.items():
+                version = self.store.versions[version_id]
+                provenance = version["provenance"]
+                if allowed and entry["org_id"] == org and entry["project_id"] == project \
+                        and version["org_id"] == org and version["project_id"] == project \
+                        and not version.get("deleted") and entry["example_id"] == params["source"] \
+                        and entry["example_version"] == params["material"] \
+                        and provenance.get("material_id") == params["material"] \
+                        and provenance.get("original_id", str(version_id)) == params["original"]:
+                    rows.append({"input_version_id": version_id,
+                                 "input_sha256": entry["input_sha256"], "provenance": provenance})
+            self.row = sorted(rows, key=lambda row: (
+                str(row["input_version_id"]) != params["original"], row["input_version_id"]))
         elif sql.startswith("SELECT i.*"):
             entry = self.store.inputs.get(params["version"])
             version = self.store.versions.get(params["version"])
-            if allowed and entry and version and not version.get("deleted"):
+            if allowed and entry and version and not version.get("deleted") \
+                    and entry["org_id"] == version["org_id"] == org \
+                    and entry["project_id"] == version["project_id"] == project:
                 self.row = {**version, **entry}
+        elif sql.startswith("SELECT sha256 FROM project_reference_materials"):
+            self.row = self.store.materials.get((org, project, params["material"])) if allowed else None
         elif sql.startswith("SELECT content FROM project_files"):
             self.row = self.store.files.get((org, project, params["path"])) if allowed else None
         elif sql.startswith("INSERT INTO project_files"):
@@ -124,6 +146,9 @@ class MemoryCursor:
             raise AssertionError(f"unexpected SQL: {sql}")
 
     def fetchone(self):
+        return copy.deepcopy(self.row)
+
+    def fetchall(self):
         return copy.deepcopy(self.row)
 
 
@@ -309,6 +334,147 @@ def test_revising_back_to_original_constraints_selects_original(client, store):
     assert len(store.inputs) == 2
 
 
+def reference_input(store, key="reference", material_id=None):
+    material_id = material_id or uuid.uuid4()
+    request = arlo_lab.load_example("feeder-lab-v1", "1")
+    raw_sha = hashlib.sha256(json.dumps(request, indent=2).encode()).hexdigest()
+    store.materials[(ORG, PROJECT, material_id)] = {"sha256": raw_sha}
+    return arlo_lab._register_input(ORG, PROJECT, BINDING, key=key, request=request,
+        example_id=arlo_lab.REFERENCE_SOURCE, example_version=str(material_id),
+        source={"contract": arlo_lab.REFERENCE_CONTRACT, "material_id": str(material_id),
+                "original_sha256": raw_sha}, source_kind="project_reference")
+
+
+def revise(response, key):
+    return arlo_lab.revise_input(ORG, PROJECT, BINDING, uuid.UUID(response["input_version_id"]),
+        patch=constraint_patch(response), idempotency_key=key)
+
+
+def activate(original, target):
+    return arlo_lab.activate_retained_input(ORG, PROJECT, BINDING,
+        uuid.UUID(original["input_version_id"]), uuid.UUID(target["input_version_id"]))
+
+
+def test_activate_retained_siblings_grandchildren_and_original_without_new_rows(store):
+    original = reference_input(store)
+    child = revise(original, "child")
+    grandchild = revise(child, "grandchild")
+    restored = arlo_lab.revise_input(ORG, PROJECT, BINDING,
+        uuid.UUID(grandchild["input_version_id"]), restore=True, idempotency_key="restore")
+    assert restored == original
+    sibling = revise(original, "sibling")
+    job_id = job(store, "succeeded")
+    store.jobs[job_id].update(input_version_id=uuid.UUID(grandchild["input_version_id"]),
+                              params=grandchild["request"], result={"saved": True})
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs, store.receipts))
+    for target in (child, grandchild, sibling, original, grandchild):
+        store.sql.clear()
+        assert activate(original, target) == target
+        assert store.isolations[-1] == "serializable"
+        assert (store.inputs, store.versions, store.jobs, store.receipts) == before
+        assert [sql for sql in store.sql if not sql.startswith("SELECT")] == [
+            sql for sql in store.sql if sql.startswith("INSERT INTO project_files")]
+        assert sum(sql.startswith("INSERT INTO project_files") for sql in store.sql) == 1
+        store.sql.clear()
+        assert activate(original, target) == target
+        assert all(sql.startswith("SELECT") for sql in store.sql)
+        view = arlo_lab.read_input(ORG, PROJECT, BINDING, uuid.UUID(child["input_version_id"]))
+        summaries = view.pop("retained_inputs")
+        assert view == target
+        assert [row["input_version_id"] for row in summaries] == [original["input_version_id"]] + sorted(
+            row["input_version_id"] for row in (child, grandchild, sibling))
+        assert [row["input_version_id"] for row in summaries if row["active"]] == [target["input_version_id"]]
+        for row in summaries:
+            assert set(row) == {"input_version_id", "input_sha256", "parent_id", "original_id", "active"}
+        assert arlo_lab.load_registered_request(context(target), target["request"]) == target["request"]
+    # Restore and activation continue to share the same pointer after reactivation.
+    assert arlo_lab.revise_input(ORG, PROJECT, BINDING,
+        uuid.UUID(grandchild["input_version_id"]), restore=True, idempotency_key="restore-again") == original
+    assert activate(original, sibling) == sibling
+    assert (store.inputs, store.versions, store.jobs, store.receipts)[:3] == before[:3]
+
+
+@pytest.mark.parametrize("case", ["wrong_material", "wrong_family", "nonroot", "synthetic",
+    "deleted_original", "deleted_target", "foreign_org", "foreign_project", "missing_target",
+    "missing_material", "foreign_material", "material_digest", "input_digest", "original_digest",
+    "source_digest", "caller_org", "caller_project", "deleted_project", "revoked", "read_only"])
+def test_retained_activation_rejects_scope_lineage_and_missing_sources_atomically(store, case):
+    original = reference_input(store)
+    target = revise(original, "child")
+    original_id, target_id = uuid.UUID(original["input_version_id"]), uuid.UUID(target["input_version_id"])
+    material_id = uuid.UUID(original["material_id"])
+    if case in {"wrong_material", "wrong_family"}:
+        target = reference_input(store, "other-family",
+                                 material_id if case == "wrong_family" else None)
+    elif case == "nonroot":
+        original = target
+    elif case == "synthetic":
+        original = target = register()
+    elif case in {"deleted_original", "deleted_target"}:
+        store.versions[original_id if case == "deleted_original" else target_id]["deleted"] = True
+    elif case in {"foreign_org", "foreign_project"}:
+        field = "org_id" if case == "foreign_org" else "project_id"
+        store.inputs[target_id][field] = store.versions[target_id][field] = uuid.uuid4()
+    elif case == "missing_target":
+        target = {**target, "input_version_id": str(uuid.uuid4())}
+    elif case == "missing_material":
+        del store.materials[(ORG, PROJECT, material_id)]
+    elif case == "foreign_material":
+        store.materials[(ORG, uuid.uuid4(), material_id)] = store.materials.pop((ORG, PROJECT, material_id))
+    elif case == "material_digest":
+        store.materials[(ORG, PROJECT, material_id)]["sha256"] = "0" * 64
+    elif case in {"input_digest", "original_digest"}:
+        store.inputs[target_id if case == "input_digest" else original_id]["request_json"] = "{}"
+    elif case == "source_digest":
+        store.versions[target_id]["provenance"]["original_sha256"] = "0" * 64
+    elif case == "deleted_project":
+        store.live = False
+    elif case in {"caller_org", "caller_project"}:
+        pass
+    else:
+        store.role = None if case == "revoked" else "read_only"
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs, store.files, store.receipts))
+    store.sql.clear()
+    with pytest.raises((arlo_lab.lifecycle.LifecycleUnavailable, arlo_lab.lifecycle.LifecycleConflict,
+                        arlo_lab.lifecycle.LifecycleForbidden)):
+        arlo_lab.activate_retained_input(uuid.uuid4() if case == "caller_org" else ORG,
+            uuid.uuid4() if case == "caller_project" else PROJECT, BINDING,
+            uuid.UUID(original["input_version_id"]), uuid.UUID(target["input_version_id"]))
+    assert (store.inputs, store.versions, store.jobs, store.files, store.receipts) == before
+    assert all(sql.startswith("SELECT") for sql in store.sql)
+    if case in {"revoked", "read_only"}:
+        assert not any(sql.startswith("SELECT i.") for sql in store.sql)
+
+
+@pytest.mark.parametrize("excluded", ["deleted", "material", "family", "org", "project"])
+def test_retained_read_summaries_exclude_unselectable_inputs(store, excluded):
+    original = reference_input(store)
+    child = revise(original, "child")
+    activate(original, original)
+    version_id = uuid.UUID(child["input_version_id"])
+    if excluded == "deleted":
+        store.versions[version_id]["deleted"] = True
+    elif excluded in {"material", "family"}:
+        field = "material_id" if excluded == "material" else "original_id"
+        store.versions[version_id]["provenance"][field] = str(uuid.uuid4())
+    else:
+        field = "org_id" if excluded == "org" else "project_id"
+        store.inputs[version_id][field] = store.versions[version_id][field] = uuid.uuid4()
+    store.role = "read_only"
+    before = copy.deepcopy((store.inputs, store.versions, store.jobs, store.files, store.receipts))
+    store.sql.clear()
+    view = arlo_lab.read_input(ORG, PROJECT, BINDING, uuid.UUID(original["input_version_id"]))
+    assert [row["input_version_id"] for row in view.pop("retained_inputs")] == [original["input_version_id"]]
+    assert view == original
+    assert all(sql.startswith("SELECT") for sql in store.sql)
+    assert (store.inputs, store.versions, store.jobs, store.files, store.receipts) == before
+    store.role = None
+    store.sql.clear()
+    with pytest.raises(arlo_lab.lifecycle.LifecycleForbidden):
+        arlo_lab.read_input(ORG, PROJECT, BINDING, uuid.UUID(original["input_version_id"]))
+    assert not any(sql.startswith("SELECT i.") for sql in store.sql)
+
+
 @pytest.mark.parametrize("action", ["/revisions", "/restore"])
 @pytest.mark.parametrize("case", ["unauthenticated", "foreign_project", "foreign_input", "revoked", "read_only"])
 def test_revision_and_restore_authorization(client, store, action, case):
@@ -410,17 +576,23 @@ def test_project_reference_registration_postgres(tmp_path, monkeypatch):
         revised = revision.json()
         assert revised["parent_id"] == revised["original_id"] == result["input_version_id"]
         assert revised["original_sha256"] == result["original_sha256"]
-        assert web.get(revision_url, headers=headers()).json() == revised
+        reopened = web.get(revision_url, headers=headers()).json()
+        assert len(reopened.pop("retained_inputs")) == 2
+        assert reopened == revised
         revised_url = f"/api/projects/{project}/arlo-inputs/{revised['input_version_id']}"
         rejected = web.post(revised_url + "/revisions", headers=headers("pg-invalid"),
                             json={"patch": {"requirements": {"diameter_m": -1}}})
         assert rejected.status_code == 422 and "diameter_m" in rejected.json()["detail"]
-        assert web.get(revision_url, headers=headers()).json() == revised
+        reopened = web.get(revision_url, headers=headers()).json()
+        assert len(reopened.pop("retained_inputs")) == 2
+        assert reopened == revised
         assert arlo_lab.load_registered_request({"org_id": org.org_id, "project_id": project,
             "input_version_id": revised["input_version_id"]}, revised["request"]) == revised["request"]
         restored = web.post(revised_url + "/restore", headers=headers("pg-restore"))
         assert restored.status_code == 200 and restored.json() == result
-        assert web.get(revision_url, headers=headers()).json() == result
+        reopened = web.get(revision_url, headers=headers()).json()
+        assert len(reopened.pop("retained_inputs")) == 2
+        assert reopened == result
         assert web.get(f"{reference_url}/{material}/content", headers=headers()).content == raw
 
         changed = upload("changed.json", "application/json", json.dumps({**request, "seed": 18}).encode())
