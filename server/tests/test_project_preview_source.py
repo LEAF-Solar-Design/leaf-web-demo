@@ -497,6 +497,18 @@ def test_missing_or_damaged_persisted_objects_fail_closed(custody, monkeypatch, 
         c.read(descriptor)
 
 
+@pytest.mark.parametrize('component', ['_SWIFT', '_PROJECT', '_SCHEME'])
+def test_exporter_change_preserves_first_capture_and_reports_conflict(custody, monkeypatch, component):
+    from leaf_platform import portfolio_ios_template as exporter
+    descriptor = custody.prepare()
+    original = custody.read(descriptor)
+    monkeypatch.setattr(exporter, component, getattr(exporter, component) + '\n')
+    with pytest.raises(lifecycle.LifecycleConflict):
+        custody.prepare()
+    assert custody.exported[1] != original
+    assert custody.read(descriptor) == original
+
+
 def test_descriptor_cannot_manufacture_binding_and_manifest_conflicts_are_immutable(custody):
     c = custody
     descriptor = c.prepare()
@@ -507,7 +519,7 @@ def test_descriptor_cannot_manufacture_binding_and_manifest_conflicts_are_immuta
         c.read(forged)
     conflicting = source._manifest(forged)
     c.backend.put(manifest_key, conflicting)  # simulate corrupt/out-of-band storage, never the public API
-    with pytest.raises(source.SourceStoreUnavailable):
+    with pytest.raises(lifecycle.LifecycleConflict):
         c.prepare()
     assert c.backend.get(manifest_key) == conflicting
     with pytest.raises(source.SourceStoreUnavailable):
