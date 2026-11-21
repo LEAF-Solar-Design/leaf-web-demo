@@ -2,17 +2,17 @@ import React from 'react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import ProjectPageEditor from './ProjectPageEditor.jsx'
-import { loadProjectPage, submitProjectNativePreview } from './projectPageClient.js'
+import { loadProjectPage, loadProjectNativePreview, submitProjectNativePreview } from './projectPageClient.js'
 import * as projectIdentity from '../projects/api.js'
 
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: () => () => {}, subscribeTokenStored: () => () => {} }))
 vi.mock('../auth/activeScope.js', () => ({ readActiveScope: () => 'b02-synthetic', subscribeActiveScope: () => () => {} }))
 vi.mock('../lib/composerDraft.js', () => ({ composerDraftAccountScope: () => 'b02-synthetic' }))
-vi.mock('../api.js', () => ({ config: { apiBase: 'https://fixture.invalid' }, getStoredOrgId: () => 'org-fixture' }))
+vi.mock('../api.js', () => ({ config: { apiBase: 'https://fixture.invalid' }, getStoredOrgId: () => 'org-fixture', authHeaders: () => ({}) }))
 vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => 'actor-fixture' }))
 vi.mock('./PortfolioEditor.jsx', () => ({ default: () => null, PortfolioPreview: () => null }))
 vi.mock('./ElementInspector.jsx', () => ({ default: () => null, InlineText: () => null }))
-vi.mock('./projectPageClient.js', async original => ({ ...await original(), loadProjectPage: vi.fn(), submitProjectNativePreview: vi.fn() }))
+vi.mock('./projectPageClient.js', async original => ({ ...await original(), loadProjectPage: vi.fn(), loadProjectNativePreview: vi.fn(), submitProjectNativePreview: vi.fn() }))
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
 const JOB = '22222222-2222-4222-8222-222222222222'
@@ -72,3 +72,47 @@ it('does not submit when the recovery key cannot be durably saved', async () => 
   expect(submitProjectNativePreview).not.toHaveBeenCalled()
   expect(await screen.findByText('The preview submission identity could not be restored or saved. No build was submitted.')).toBeTruthy()
 })
+
+const previousJob = '33333333-3333-4333-8333-333333333333'
+it('sends only the prior job reference in the recovery request body', async () => {
+  const client = await vi.importActual('./projectPageClient.js')
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    job_id: JOB, status: 'queued', revision: 16, archive_sha256: 'd'.repeat(64), document_sha256: 'a'.repeat(64),
+  }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+  const key = 'recover-page:' + previousJob
+  await client.submitProjectNativePreview(PROJECT, 16, key, { priorJobId: previousJob })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ prior_job_id: previousJob })
+  expect(fetch.mock.calls[0][1].headers['Idempotency-Key']).toBe(key)
+})
+const recover = () => {
+  fireEvent.change(screen.getByLabelText('Failed preview job ID'), { target: { value: previousJob } })
+  fireEvent.click(screen.getByRole('button', { name: 'Recover original iOS preview' }))
+}
+
+it('recovers the same archive only on explicit action, with one stable key across reopen', async () => {
+  loadProjectNativePreview.mockResolvedValue({ job_id: previousJob, status: 'failed', revision: 16,
+    document_sha256: 'a'.repeat(64), archive_sha256: 'd'.repeat(64) })
+  const first = await open()
+  recover()
+  await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(1))
+  first.unmount()
+  await open()
+  expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+  recover()
+  await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(2))
+  for (const call of submitProjectNativePreview.mock.calls) {
+    expect(call.slice(0, 3)).toEqual([PROJECT, 16, 'recover-page:' + previousJob])
+    expect(call[3].priorJobId).toBe(previousJob)
+  }
+})
+
+it.each([{ revision: 15 }, { document_sha256: 'c'.repeat(64) }, { status: 'running' }])(
+  'does not submit a different saved page or a nonterminal preview: %o', async change => {
+    loadProjectNativePreview.mockResolvedValue({ job_id: previousJob, status: 'failed', revision: 16,
+      document_sha256: 'a'.repeat(64), archive_sha256: 'd'.repeat(64), ...change })
+    await open()
+    recover()
+    expect(await screen.findByText('Could not verify a failed preview for this saved page. No build was submitted.')).toBeTruthy()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+  })
