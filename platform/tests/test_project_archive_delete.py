@@ -292,6 +292,55 @@ def test_restore_retention_window(client, project):
     assert response.json()["detail"] == "restore window expired"
 
 
+@pytest.mark.parametrize("reuse", ["create", "rename"])
+def test_restore_refuses_active_normalized_name_collision(client, project, reuse):
+    org_id, owner_id, project_id, name = project
+    assert _action(client, project, "archive").status_code == 200
+    other = client.post("/api/projects/blank",
+        json={"name": name.lower() if reuse == "create" else "Other disposable"},
+        headers=_headers(org_id, owner_id, str(uuid.uuid4())))
+    assert other.status_code == 201, other.text
+    if reuse == "rename":
+        renamed = client.post(f"/api/projects/{other.json()['project']['project_id']}/rename",
+            json={"name": name.lower()},
+            headers=_headers(org_id, owner_id, str(uuid.uuid4())))
+        assert renamed.status_code == 200, renamed.text
+    response = _action(client, project, "restore")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "an active project already uses this name"
+    with cursor() as cur:
+        cur.execute("SELECT status, archived_at FROM projects WHERE project_id=%s", (project_id,))
+        row = cur.fetchone()
+        assert row["status"] == "archived" and row["archived_at"] is not None
+
+
+def test_archived_project_remains_exportable_and_clonable(client, project):
+    org_id, owner_id, project_id, _ = project
+    lifecycle.put_project_file(org_id, uuid.UUID(project_id), owner_id, path="a.txt",
+        content="archived content", media_type="text/plain", idempotency_key="archive-file")
+    assert _action(client, project, "archive").status_code == 200
+    exported = _action(client, project, "export", "archived-export")
+    assert exported.status_code == 200, exported.text
+    assert exported.json()["replayed"] is False
+    assert exported.json()["export"]["files"][0]["content"] == "archived content"
+    cloned = _action(client, project, "clone", "archived-clone", json={"name": "Archived clone"})
+    assert cloned.status_code == 201, cloned.text
+    assert cloned.json()["replayed"] is False
+    clone_id = cloned.json()["project"]["project_id"]
+    assert clone_id != project_id
+    assert cloned.json()["project"]["status"] == "active"
+    clone_export = client.post(f"/api/projects/{clone_id}/export",
+        headers=_headers(org_id, owner_id, "clone-export"))
+    assert clone_export.status_code == 200, clone_export.text
+    assert clone_export.json()["export"]["files"][0]["content"] == "archived content"
+    for action, body, original in (("export", {}, exported),
+                                    ("clone", {"name": "Archived clone"}, cloned)):
+        replay = _action(client, project, action, "archived-" + action, json=body)
+        assert replay.status_code == original.status_code, replay.text
+        assert replay.json()["replayed"] is True
+        assert replay.json()["receipt"] == original.json()["receipt"]
+
+
 @pytest.mark.parametrize("status", ["queued", "running"])
 def test_archive_refuses_active_jobs(client, project, status):
     org_id, _, project_id, _ = project

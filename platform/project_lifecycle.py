@@ -318,10 +318,11 @@ def _receipt_replay(
     )
     row = cur.fetchone()
     if row is None:
-        # Existing receipts are reads. New lifecycle receipts/mutations must
-        # pass the archived gate under the caller's project FOR UPDATE lock.
+        # Existing receipts and export/clone source receipts are reads. New
+        # mutations must pass the archived gate under the project lock.
         if project_id is not None and action not in {
             "project_archived", "project_restored", "project_deleted",
+            "project_exported", "project_cloned",
         }:
             require_project_writable(org_id, project_id, cur=cur)
         return None
@@ -1170,10 +1171,13 @@ def _require_archive_owner(cur, org_id, project_id, actor_binding_id, *, include
     if member_role == "owner":
         return
     if include_revoked:
+        # Delete replay may inspect a lifecycle tombstone as well as live rows;
+        # only an owner revoked at that exact deletion can authorize it.
         cur.execute(
             "SELECT 1 FROM project_member_bindings m JOIN projects p "
             "ON p.org_id=m.org_id AND p.project_id=m.project_id "
             "WHERE m.org_id=%s AND m.project_id=%s AND m.binding_id=%s "
+            "AND (p.deleted_at IS NULL OR p.status='deleted') "
             "AND m.role='owner' AND m.status='revoked' AND m.revoked_at=p.deleted_at",
             (org_id, project_id, actor_binding_id),
         )
@@ -1216,6 +1220,8 @@ def _archive_transition(org_id, project_id, actor_binding_id, *, idempotency_key
                 if (project["archived_at"] is None or
                         cur.fetchone()["observed_at"] > project["archived_at"] + timedelta(days=30)):
                     raise LifecycleConflict("restore window expired")
+                if _active_project_name_taken(cur, org_id, project["name"]):
+                    raise LifecycleConflict("an active project already uses this name")
                 cur.execute(
                     "UPDATE projects SET status='active', archived_at=NULL, updated_at=NOW() "
                     "WHERE org_id=%(org_id)s AND project_id=%(project_id)s", args)
@@ -1303,7 +1309,10 @@ def sweep_project_artifacts(project_id, delete_object, *, store=None):
     """
     def operation(conn):
         with conn.cursor() as cur:
-            cur.execute("SELECT status FROM projects WHERE project_id=%s FOR UPDATE", (project_id,))
+            # Keep the live-row guard, opting in explicitly to lifecycle
+            # tombstones: only status='deleted' may authorize a sweep below.
+            cur.execute("SELECT status FROM projects WHERE project_id=%s "
+                        "AND (deleted_at IS NULL OR status='deleted') FOR UPDATE", (project_id,))
             project = cur.fetchone()
             if project is None or project["status"] != "deleted":
                 return 0

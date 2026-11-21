@@ -85,6 +85,29 @@ def test_sip_r1_pg_archived_project_refused(scope):
     reason("PROJECT_ARCHIVED", lambda: acquire(scope))
 
 
+def test_sip_r1_missing_project_after_scope_refuses_context_not_found(monkeypatch):
+    class MissingProject:
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, args):
+            pass
+
+        def fetchone(self):
+            return None
+
+    monkeypatch.setattr(graph, "_scope", lambda *args, **kwargs: None)
+    reason("CONTEXT_NOT_FOUND", lambda: graph.acquire_checkout(
+        uuid4(), uuid4(), uuid4(), actor_binding_id=uuid4(), holder="Synthetic editor",
+        ttl_s=60, expected_fence=None, conn=MissingProject()))
+
+
 def test_sip_r1_pg_live_conflict(scope):
     prior = acquire(scope)
     scope.now = T0 + timedelta(seconds=10)
