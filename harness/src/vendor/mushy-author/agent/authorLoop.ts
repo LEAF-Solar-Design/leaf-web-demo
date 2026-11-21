@@ -1462,14 +1462,15 @@ export class AuthorLoop {
             idempotency_key: request.idempotencyKey,
             ...metadata,
           });
-          await coordination.recordStaged(receipt);
+          const history = compileAttempts.length ? { compile_attempts: compileAttempts } : {};
+          await coordination.recordStaged({ ...receipt, ...history });
           this.captureUpstream({
             tenantId, route: "stage", description, scrub,
             commitSha: stagedCommit, platformRelease: request.platformRelease,
           });
           return {
             receipt, branch_package: submission.manifest,
-            ...(compileAttempts.length ? { compile_attempts: compileAttempts } : {}),
+            ...history,
             code: submission.contents["main.csx"], preview: run.preview,
             ...(run.telemetry ? { telemetry: run.telemetry } : {}),
           };

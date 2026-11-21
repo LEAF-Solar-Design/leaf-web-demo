@@ -3,7 +3,7 @@
   "downstream_overlays": {
     "agent/authorLoop.ts": {
       "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior. SBT-A (sbt-a-compile-gate): Branch C# compile gate at submit with the vendored Branch2025 tool-check (V18 diagnostics, structured error.compile); downstream only, retire when upstream includes equivalent behavior. SIA-W2-BIND: Bind the Studio and Branch sessions to the approved tool name. Retire when upstream includes equivalent behavior. SIA-W2-STATUS: Report bounded Branch compile attempts when staging finishes. Retire when upstream includes equivalent behavior.",
-      "sha256": "bbf29ab8390045f5a4a7e00b614a55615a79970332c1ab689f56c8caabb661a9"
+      "sha256": "d72fce36010d822965462bd5e6effc1899cb65b7a675dc578cba92c6101eeceb"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior. SIA-W2-BIND: Reject a proposal that differs from the approved name. Retire when upstream includes equivalent behavior.",
@@ -87,7 +87,7 @@
     }
   },
   "files": {
-    "agent/authorLoop.ts": "bbf29ab8390045f5a4a7e00b614a55615a79970332c1ab689f56c8caabb661a9",
+    "agent/authorLoop.ts": "d72fce36010d822965462bd5e6effc1899cb65b7a675dc578cba92c6101eeceb",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",

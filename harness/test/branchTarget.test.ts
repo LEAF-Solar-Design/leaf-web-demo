@@ -540,7 +540,7 @@ describe("Branch submit compile gate", () => {
     setBranchCompileCheckForTests(async (_name, files) => files["main.csx"] === broken.main_csx ? refusal : {
       status: "accept", ms: 3, allowlistSha256: ALLOWLIST_SHA, summary: { pass: true, decision: "accept", errors: 0 },
     });
-    const { sdk, base, bare, loop, ports } = await setup([broken, good]);
+    const { sdk, base, bare, loop, ports, coordination } = await setup([broken, good]);
     const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
     vi.spyOn(harness.loop, "stage").mockImplementation(loop.stage.bind(loop));
     const server = harness.listen(0);
@@ -552,6 +552,8 @@ describe("Branch submit compile gate", () => {
     expect(response.status).toBe(200);
     const { receipt, compile_attempts } = await response.json() as Awaited<ReturnType<typeof loop.stage>>;
     expect(compile_attempts).toEqual([refusedAttempt, { n: 2, decision: "accept", errors: 0, diagnostics: [] }]);
+    expect(coordination.recordStaged).toHaveBeenCalledWith({ ...receipt, compile_attempts });
+    expect(receipt).not.toHaveProperty("compile_attempts");
     expect(sdk.replies[0].isError).toBe(true);
     expect(sdk.replies[0].content[0].text).toBe("V18: branch-tools/label-writer/main.csx: compile failed: " +
       refusal.diagnostics.join("; ") + " (source contains HTML entities; write C# operators such as && < > literally)");

@@ -1496,6 +1496,7 @@ class CustomizationService:
     def _complete_stage(
         self, durable: ChangeSet, receipt: Mapping[str, Any], *,
         body: Mapping[str, Any] | None = None,
+        compile_summary_json: str | None = None,
         lease_owner: str | None = None, lease_attempt: int | None = None,
     ) -> tuple[ChangeSet, tuple[str, ...]]:
         def agreement(winner: ChangeSet, snapshot: str | None) -> None:
@@ -1563,6 +1564,7 @@ class CustomizationService:
                 workspace_contract_digest=receipt["workspace_contract_digest"],
                 stage_lease_owner=lease_owner, stage_attempt=lease_attempt,
                 catalog_record_fields_json=snapshot,
+                compile_summary_json=compile_summary_json,
             )
         except (ChangeSetConflictError, InvalidTransitionError, IdempotencyReplayError) as exc:
             winner = self._record_fields_change(durable.tenant_id, durable.change_set_id)
@@ -2152,13 +2154,19 @@ class CustomizationService:
     def _record_compile_attempts(
         self, change: ChangeSet, body: Any, *, staged_commit: str | None,
     ) -> None:
+        summary = self._compile_summary_json(body)
+        if summary is not None:
+            self.store.record_compile_summary(change, summary, staged_commit=staged_commit)
+
+    @staticmethod
+    def _compile_summary_json(body: Any) -> str | None:
         if not isinstance(body, Mapping) or "compile_attempts" not in body:
-            return
+            return None
         attempts = body["compile_attempts"]
         if not _valid_compile_attempts(attempts):
             _LOG.warning("invalid_compile_attempts")
-            return
-        self.store.record_compile_summary(change, json.dumps(attempts), staged_commit=staged_commit)
+            return None
+        return json.dumps(attempts)
 
     def _validate_receipt(self, body: Mapping[str, Any], change: ChangeSet) -> dict[str, Any]:
         fields = {"contract", "tenant_id", "change_set_id", "state", "base_commit", "staged_commit", "catalog_digest", "platform_release", "workspace_contract_digest", "idempotency_key"}
@@ -3293,8 +3301,12 @@ class CustomizationService:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
         except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
             raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        summary = None
+        if change.tool_target == "branch" and "compile_attempts" in receipt:
+            summary = self._compile_summary_json(receipt)
+            receipt = {key: value for key, value in receipt.items() if key != "compile_attempts"}
         validated = self._validate_receipt(receipt, change)
-        change, _changed = self._complete_stage(change, validated)
+        change, _changed = self._complete_stage(change, validated, compile_summary_json=summary)
         return {"accepted": True, "change_set_id": change.change_set_id}
 
     def authorize_publish_callback(

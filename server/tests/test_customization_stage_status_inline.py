@@ -60,9 +60,58 @@ def test_completed_branch_attempts_survive_worker_and_callback(lane, monkeypatch
     assert "compile_attempts" not in status["receipt"]
 
 
+@pytest.mark.parametrize("lose_response", [True, False])
+def test_staged_callback_commits_attempts_with_receipt(lane, monkeypatch, lose_response):
+    post = requests.post
+    record_staged = lane.store.record_staged
+    staged_rows = []
+
+    def observe_staged(**kwargs):
+        row = record_staged(**kwargs)
+        staged_rows.append(row)
+        return row
+
+    def stage(url, **kwargs):
+        response = post(url, **kwargs)
+        body = response.json()
+        lane.service.record_staged_callback(
+            tenant_id="tenant-a", receipt={**body["receipt"], "compile_attempts": [REFUSAL, ACCEPT]},
+        )
+        if lose_response:
+            raise requests.ConnectionError("stage response lost")
+        body["compile_attempts"] = []
+        return response
+
+    monkeypatch.setattr(lane.store, "record_staged", observe_staged)
+    monkeypatch.setattr(requests, "post", stage)
+    job = lane.service.enqueue_stage(**_request(lane))
+    assert customization_stage_worker.run_once("worker", service=lane.service)
+    staged, = staged_rows
+    assert staged.state is ChangeState.STAGED
+    assert json.loads(staged.compile_summary_json) == [REFUSAL, ACCEPT]
+    status = lane.service.stage_status_change(_change(lane, job))
+    assert status["compile"] == {"attempts": [REFUSAL, ACCEPT]}
+    assert status["receipt"] == lane.bodies[-1]["receipt"]
+
+
+def test_malformed_callback_attempts_drop_only_the_history(lane, caplog):
+    job = lane.service.enqueue_stage(**_request(lane))
+    body = lane.service.dispatch_stage(_change(lane, job))
+    lane.service.record_staged_callback(
+        tenant_id="tenant-a", receipt={**body["receipt"], "compile_attempts": [dict(REFUSAL, message="private")]},
+    )
+    status = lane.service.stage_status_change(_change(lane, job))
+    assert status["status"] == "staged"
+    assert status["receipt"] == body["receipt"]
+    assert "compile" not in status
+    assert "invalid_compile_attempts" in caplog.messages
+    assert "private" not in caplog.text
+
+
 def test_failed_branch_persists_only_locations(lane, monkeypatch):
     job = lane.service.enqueue_stage(**_request(lane))
     response = _HarnessErrorResponse(422, {"error": {
+        "message": "Branch author package refused",
         "reason": {"code": "branch_author_package_refused", "turns": 2, "submit_calls": 1, "rule": "V18"},
         "compile": {"diagnostics": [{"message": "private compiler text"}], "compile_attempts": [REFUSAL]},
     }})

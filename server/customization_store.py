@@ -929,6 +929,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
         stage_lease_owner: Optional[str] = None,
         stage_attempt: Optional[int] = None,
         catalog_record_fields_json: Optional[str] = None,
+        compile_summary_json: Optional[str] = None,
     ) -> ChangeSet:
         validation_failure = None
         try:
@@ -1028,9 +1029,10 @@ class SQLiteCustomizationStore(CustomizationRepository):
             conn.execute(
                 "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
                 "stage_lease_expires_at = NULL, stage_phase = 'staged', "
-                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), "
+                "compile_summary_json = COALESCE(compile_summary_json, ?) "
                 "WHERE tenant_id = ? AND change_set_id = ?",
-                (tenant_id, change_set_id),
+                (compile_summary_json, tenant_id, change_set_id),
             )
             return self._find_change_set(conn, tenant_id, change_set_id)
 
