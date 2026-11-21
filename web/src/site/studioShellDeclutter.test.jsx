@@ -57,11 +57,13 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
-  it('caps the assistant below the header and lifts open account controls above it', () => {
+  it('caps the assistant below the docked controls and lifts open account controls above them', () => {
     const css = readFileSync(`${process.cwd()}/src/site/studioShell.css`, 'utf8')
     const panel = css.match(/\.studio-agent-panel\s*\{([^}]+)\}/)[1]
     const header = css.match(/\.studio-shell header\.top:has\(\.shell-avatar-menu\[open\]\)\s*\{([^}]+)\}/)[1]
-    expect(panel).toMatch(/max-height:\s*calc\(100vh - 120px\);/)
+    // Invariant (PR 3591, offline fixture in leaf-research .../3131-walk-attribution-20261121/geometry): the open assistant ends
+    // 8px below the docked workspace controls (cad/solar strip bottom, 72px elsewhere) above its 48px bottom inset.
+    expect(panel).toMatch(/max-height:\s*calc\(100vh - 48px - var\(--environment-strip-bottom, 72px\) - 8px\);/)
     expect(panel).toMatch(/overflow:\s*auto;/)
     expect(header).toMatch(/position:\s*relative;/)
     // The shell token lint (LS-T4) requires layer tokens, so resolve them to the standard's numbers before comparing.
@@ -74,6 +76,8 @@ describe('quiet Studio shell', () => {
     const headerZIndex = zIndex(header)
     expect(headerZIndex).toBeGreaterThan(panelZIndex)
     expect(headerZIndex).toBeGreaterThan(30)
+    // The open account menu also sits above the workspace environment layer (overlay) that holds the docked controls.
+    expect(headerZIndex).toBeGreaterThan(layers.overlay)
   })
 
   it('defines customer mode once behind the Studio shell gate', () => {
