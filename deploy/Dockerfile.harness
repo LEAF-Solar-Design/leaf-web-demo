@@ -10,6 +10,37 @@
 # LEAF_GRANTS_DIR, or the demo LEAF_GRANT_FILE) — NEVER baked into the image.
 FROM node:22-bookworm AS trust-store
 
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS branch-compile
+WORKDIR /src
+COPY harness/branch-compile/ /src/
+# The workflow exports intermediate layers to its registry cache. Keep both
+# NuGet's package and HTTP caches on a temporary mount during restore/publish.
+RUN --mount=type=tmpfs,target=/root set -eu; \
+    dotnet restore /src/ToolCheckPortable.csproj --locked-mode; \
+    dotnet publish /src/ToolCheckPortable.csproj -c Release --no-restore -o /out/bin; \
+    cd /root/.nuget/packages; \
+    for ref in autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll \
+               autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll \
+               autocad.net/25.0.1/lib/net8.0/AcMgd.dll; do \
+      install -D -m 0444 "$ref" "/out/refs/$ref"; \
+    done; \
+    cd /out/refs; printf '%s\n' \
+      '9bcc52bf57b12728f2c6601d50cc3234a62f3068f7a304b5aa43c2b6c82b414f  autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll' \
+      'd81824ecf10aaea953bdb87823f546a7b773871e36376d0a61d4a36731741300  autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll' \
+      'b85b1f0d01ec1f085a2ff8261bcebdfcaab4a4347c9ae95d935f2dff3e93846e  autocad.net/25.0.1/lib/net8.0/AcMgd.dll' | sha256sum -c -
+
+# The Windows fixtures are indented JSON. Remove structural whitespace from
+# their stdout object while preserving spaces inside diagnostic strings.
+RUN set -eu; for name in good typo-bycli html-escaped-ops allowlist-violation; do \
+      expected="/src/parity/expected/$name.json"; rc=0; \
+      NUGET_PACKAGES=/out/refs /out/bin/tool-check-portable --package "/src/parity/$name.zip" > /tmp/result || rc=$?; \
+      test "$rc" = "$(sed -nE 's/^  "exit_code": ([0-9]+),.*/\1/p' "$expected")"; \
+      sed -E 's/,"framework":"[^"]*"}$/,"framework":"<framework>"}/' /tmp/result > /tmp/actual; \
+      sed -n '/^  "stdout": {/,/^  },/p' "$expected" | tr -d '\r' | \
+        sed -E '1s/.*/{/; $s/.*/}/; s/^ +//; s/^("[a-z0-9_]+":) /\1/' | tr -d '\n' > /tmp/expected; \
+      printf '\n' >> /tmp/expected; cmp /tmp/expected /tmp/actual; \
+    done
+
 FROM node:22-slim AS harness
 
 # The self-hosted build runner cannot reach Debian mirrors over port 80. Seed
@@ -67,6 +98,8 @@ COPY harness/src/     /app/src/
 COPY harness/scripts/ /app/scripts/
 COPY harness/test/    /app/test/
 COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
+COPY --from=branch-compile /out/bin /opt/branch-compile/bin
+COPY --from=branch-compile /out/refs /opt/branch-compile/refs
 
 # Compile TS -> /app/dist (dist/scripts/serve.js + dist/src/**), then drop the
 # dev toolchain (typescript/vitest/@types) — the runtime keeps only the SDK dep.
@@ -76,6 +109,7 @@ COPY server/glug_adoption_manifest.json /app/glug/glug_adoption_manifest.json
 RUN npx tsc -p tsconfig.build.json \
   && npm prune --omit=dev \
   && chmod 0555 /app/scripts/start-harness.sh \
+  && chmod 0555 /opt/branch-compile/bin/tool-check-portable \
   && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
   && test ! -e /usr/local/lib/node_modules/npm && test ! -e /usr/local/bin/npm && test ! -e /usr/local/bin/npx
 
@@ -127,6 +161,8 @@ RUN useradd --system --uid 10002 --user-group --home /home/leaf --create-home le
 # read by node or tsc, so readable is the right bar for them.
 USER 10002:10002
 
+RUN ["/bin/sh", "-c", "test -x /opt/branch-compile/bin/tool-check-portable && test -r /opt/branch-compile/refs/autocad.net.core/25.0.0/lib/net8.0/AcCoreMgd.dll && test -r /opt/branch-compile/refs/autocad.net.model/25.0.0/lib/net8.0/AcDbMgd.dll && test -r /opt/branch-compile/refs/autocad.net/25.0.1/lib/net8.0/AcMgd.dll"]
+
 RUN ["/bin/sh", "-c", "test -f /app/dist/scripts/forgeMaterialize.js && test -s /app/dist/scripts/forgeMaterialize.js && test -r /app/dist/scripts/forgeMaterialize.js && test -d /app/run/forge && test -w /app/run/forge && test -x /app/run/forge"]
 
 RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/drive.ts && test -r /app/scripts/drive.ts && test -f /app/scripts/e2b-tool-exec.mjs && test -s /app/scripts/e2b-tool-exec.mjs && test -r /app/scripts/e2b-tool-exec.mjs && test -f /app/scripts/e2b-vendor-eval.mjs && test -s /app/scripts/e2b-vendor-eval.mjs && test -r /app/scripts/e2b-vendor-eval.mjs && test -f /app/scripts/forgeMaterialize.ts && test -s /app/scripts/forgeMaterialize.ts && test -r /app/scripts/forgeMaterialize.ts && test -f /app/scripts/git-worker.cjs && test -s /app/scripts/git-worker.cjs && test -r /app/scripts/git-worker.cjs && test -f /app/scripts/sealLegacyGrants.ts && test -s /app/scripts/sealLegacyGrants.ts && test -r /app/scripts/sealLegacyGrants.ts && test -f /app/scripts/serve.ts && test -s /app/scripts/serve.ts && test -r /app/scripts/serve.ts && test -f /app/scripts/start-harness.sh && test -s /app/scripts/start-harness.sh && test -r /app/scripts/start-harness.sh && test -x /app/scripts/start-harness.sh"]
@@ -139,6 +175,8 @@ RUN ["/bin/sh", "-c", "test -f /app/scripts/drive.ts && test -s /app/scripts/dri
 ARG LEAF_SOURCE_SHA=unknown
 
 ENV HARNESS_PORT=8150 \
+    LEAF_BRANCH_COMPILE_BIN=/opt/branch-compile/bin/tool-check-portable \
+    LEAF_BRANCH_COMPILE_REFS=/opt/branch-compile/refs \
     LEAF_RUNTIME_ENV=production \
     LEAF_AUTHORED_EXECUTION=0 \
     LEAF_INSTANT_EXECUTION_ENABLED=0 \

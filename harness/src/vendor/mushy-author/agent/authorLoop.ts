@@ -15,13 +15,14 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import {
-  BranchAuthorFailure, branchTargetPrompt, runBranchTargetSession,
+  BranchAuthorFailure, BranchCompileRefusal, branchTargetPrompt, runBranchTargetSession, type BranchCompileFeedback,
   type BranchAuthorResult, type BranchAuthorRunner,
 } from "./branchTargetPrompt.js";
 import {
   submitBranchToolProposal, type BranchSubmissionResult,
 } from "./tools/submitBranchToolProposal.js";
-import { validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
+import { prepareBranchPackage, validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
+import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "./tools/branchCompileCheck.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
 import {
@@ -190,6 +191,7 @@ export class AuthorLoopError extends Error {
     readonly status: number,
     readonly diagnostics?: string[],
     readonly reason?: Readonly<Record<string, string | number>>,
+    readonly compile?: BranchCompileFeedback,
   ) {
     super(message);
     this.name = "AuthorLoopError";
@@ -531,16 +533,39 @@ export class AuthorLoop {
       if (typeof value === "string" && value.trim()) scrub.held.push(value);
     }
     let submission: BranchSubmissionResult | undefined;
+    let sessionOpen = true;
     let run: BranchAuthorResult | undefined;
     let failure: unknown;
     try {
       run = await this.branchRunner({
         description, systemPrompt: branchTargetPrompt(revision), repoDir, grant,
         fsTenantRepo: new FsTenantRepo(repoDir),
-        submitBranchToolProposal: proposal => {
+        submitBranchToolProposal: async proposal => {
           if (submission) throw new AuthorLoopError("V16: only one branch package may be submitted", 422);
+          const session = `branch-author:${request.changeSetId}`;
+          const now = new Date();
+          const { manifest, files } = prepareBranchPackage(proposal, session, now);
+          if (!branchCompileDisabled()) {
+            // Keep the checked proposal stable across the asynchronous compiler call.
+            proposal = snapshotUntrusted(proposal);
+            const outcome = await branchCompileCheck(manifest.name, files);
+            console.error(`[harness] branch compile check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} tenant=${tenantId}`);
+            const path = `branch-tools/${manifest.name}/main.csx`;
+            if (outcome.status === "unavailable") {
+              throw new BranchCompileRefusal(path, `compile check unavailable (${outcome.code})`, {
+                summary: outcome.summary, diagnostics: [],
+              });
+            }
+            if (outcome.status === "refused") {
+              const hint = Object.entries(files).some(([p, src]) => p.endsWith(".csx") && /&(?:amp|lt|gt|quot);/.test(src))
+                ? " (source contains HTML entities; write C# operators such as && < > literally)" : "";
+              const message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              throw new BranchCompileRefusal(path, message, { summary: outcome.summary, diagnostics: outcome.structured });
+            }
+          }
+          if (!sessionOpen || submission) throw new AuthorLoopError("V16: submission is closed", 422);
           const result = submitBranchToolProposal(repoDir, proposal, {
-            session: `branch-author:${request.changeSetId}`, targetToolName: request.targetToolName,
+            session, now, targetToolName: request.targetToolName,
           });
           submission = snapshotUntrusted(result) as BranchSubmissionResult;
           return result;
@@ -556,9 +581,10 @@ export class AuthorLoop {
       return { submission, run };
     } catch (error) {
       failure = error;
-      if (error instanceof BranchAuthorFailure) throw new AuthorLoopError(error.message, 422, [], error.reason);
+      if (error instanceof BranchAuthorFailure) throw new AuthorLoopError(error.message, 422, [], error.reason, error.compile);
       throw error;
     } finally {
+      sessionOpen = false;
       if (lease && this.ports.oauth.settleGrant) {
         try { await this.ports.oauth.settleGrant(tenantId, lease.lease_id, authorGrantSettlement(run, failure)); }
         catch { /* Settlement cannot replace the author result. */ }

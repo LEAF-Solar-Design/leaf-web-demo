@@ -57,6 +57,8 @@ import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { PortfolioProposalService } from "../src/agent/portfolioProposal.js";
 import { SdkProjectVideoInspector } from "../src/agent/projectVideoInspection.js";
 import { SdkRepoEditor } from "../src/vendor/mushy-author/ports/impl/repoEditRunner.js";
+import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
+import { prepareBranchPackage } from "../src/vendor/mushy-author/registry/branchPackageSchema.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
@@ -432,6 +434,24 @@ async function validatePostgresStartup(): Promise<void> {
   }
 }
 
+async function logBranchCompileSelfCheck(): Promise<void> {
+  const start = performance.now();
+  try {
+    const { manifest, files } = prepareBranchPackage({
+      name: "boot-compile-probe", version: "1.0.0", description: "Check ScriptHost compilation at startup.",
+      params: { type: "object" }, returns: { type: "object" }, capabilities: [],
+      hosts: { min_release: 2025, min_host_api: 1 }, timeout_ms: 30000, idempotent: true,
+      main_csx: "return new { ok = true };", lib: {},
+    }, "boot", new Date("2026-11-20T00:00:00Z"));
+    const outcome = await branchCompileCheck(manifest.name, files);
+    const allowlist = outcome.status === "accept" ? outcome.allowlistSha256 : "-";
+    // The fixed-format fields include a validated public SHA-256, which log() redacts as token-shaped.
+    process.stderr.write(`[harness] branch compile self-check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} allowlist=${allowlist}\n`);
+  } catch {
+    log(`[harness] branch compile self-check: decision=unavailable:spawn_failed ms=${Math.round(performance.now() - start)} allowlist=-`);
+  }
+}
+
 async function main(): Promise<void> {
   await validatePostgresStartup();
   const standardServicesConfigured = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
@@ -488,6 +508,7 @@ async function main(): Promise<void> {
         `  tenants_dir=${TENANTS_DIR}  tenant_git_dir=${TENANT_GIT_DIR}  demo_override=${SINGLE_REPO_OVERRIDE || "(none)"}  broker=${BROKER_URL}`,
     );
     log(`[harness] per-tenant grant store active; grant admin at PUT/GET/DELETE /grants/{tenantId} (token never logged).`);
+    if (process.env.LEAF_BRANCH_COMPILE_BIN && !branchCompileDisabled()) void logBranchCompileSelfCheck();
   });
   server.on("error", (err: Error) => {
     log(`[harness] server error: ${err.message}`);

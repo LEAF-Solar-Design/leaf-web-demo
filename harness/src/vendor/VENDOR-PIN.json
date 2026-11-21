@@ -2,8 +2,8 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "agent/authorLoop.ts": {
-      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "a12139b83a9f4197332284a1a560cf10a09d12647e669b8d88b168f526283751"
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior. SBT-A (sbt-a-compile-gate): Branch C# compile gate at submit with the vendored Branch2025 tool-check (V18 diagnostics, structured error.compile); downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "dee1e61292587abf4a5969a1b4d258e13494a86c0784a6dc927864fb5b440b94"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
@@ -66,8 +66,8 @@
       "sha256": "ce169939130b00464fb2cbc754e3dabe5f85c1090edc8764f193a1e7af48f203"
     },
     "agent/branchTargetPrompt.ts": {
-      "reason": "SBT (#3553/#3554): Branch authoring target prompt; downstream-only file, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "d903f7072c9db20c8e643cf6a1a41099d5fd03b6e2be718bac42c064160b61ae"
+      "reason": "SBT (#3553/#3554): Branch authoring target prompt; downstream-only file, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior. SBT-A (sbt-a-compile-gate): Branch C# compile gate at submit with the vendored Branch2025 tool-check (V18 diagnostics, structured error.compile); downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "698ffaf541e42417977cb9fa94f56f1f5bb6c9e52e46a1f744e9742afecfaaf7"
     },
     "agent/tools/submitBranchToolProposal.ts": {
       "reason": "SBT (#3553/#3554): Branch tool proposal submission; downstream-only file, retire when upstream includes equivalent behavior.",
@@ -80,10 +80,14 @@
     "registry/branchPackageSchema.ts": {
       "reason": "SBT (#3553/#3554): Branch package schema; downstream-only file, retire when upstream includes equivalent behavior.",
       "sha256": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090"
+    },
+    "agent/tools/branchCompileCheck.ts": {
+      "reason": "SBT-A (sbt-a-compile-gate): Branch compile gate client for the vendored Branch2025 tool-check; downstream-only file, retire when upstream includes equivalent behavior.",
+      "sha256": "c7c9098df0f4a4df3cb065d595e535e4e095b3f163cd9e3d460ecf96ed9a5aca"
     }
   },
   "files": {
-    "agent/authorLoop.ts": "a12139b83a9f4197332284a1a560cf10a09d12647e669b8d88b168f526283751",
+    "agent/authorLoop.ts": "dee1e61292587abf4a5969a1b4d258e13494a86c0784a6dc927864fb5b440b94",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -151,10 +155,11 @@
     "registry/viewChecks.ts": "3857c4fc443dc77216e013122067fd7d95c1463fe6261e897e0c08931ee3fc38",
     "testing/conformance.ts": "8cf4ee5c7433ebc281b4eb7d20a73da93845baa6d64f5402808de182e5050e0a",
     "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5",
-    "agent/branchTargetPrompt.ts": "d903f7072c9db20c8e643cf6a1a41099d5fd03b6e2be718bac42c064160b61ae",
+    "agent/branchTargetPrompt.ts": "698ffaf541e42417977cb9fa94f56f1f5bb6c9e52e46a1f744e9742afecfaaf7",
     "agent/tools/submitBranchToolProposal.ts": "f0515e84aec6f390a59c8df30e32cf73ca0cf6b2565be1f8dbffb5b129639962",
     "registry/api-allowlist.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
-    "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090"
+    "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090",
+    "agent/tools/branchCompileCheck.ts": "c7c9098df0f4a4df3cb065d595e535e4e095b3f163cd9e3d460ecf96ed9a5aca"
   },
   "single_files": {
     "harness/scripts/git-worker.cjs": "0bf589a31f3231fee7304c4fd6e5b23389c827650fc740a2adb4ae3c2e595eac"

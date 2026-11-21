@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -22,6 +22,7 @@ import {
   type BranchAuthorInput, type BranchAuthorSdk,
 } from "../src/vendor/mushy-author/agent/branchTargetPrompt.js";
 import { submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
+import { setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
 import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
@@ -40,6 +41,8 @@ const dirs: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
+  setBranchCompileCheckForTests(null);
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
   await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
     server.close(error => error ? reject(error) : resolve());
@@ -132,7 +135,9 @@ describe("branch package proposals", () => {
     expect(prompt).toContain("IToolContext");
     expect(prompt).toContain("panel-gap-check");
     expect(prompt).toContain("label-writer");
-    expect(prompt).toContain("server S1 validator is authoritative");
+    expect(prompt).toContain("Branch's ScriptHost compiler against AutoCAD 2025");
+    expect(prompt).toContain("V18 diagnostics");
+    expect(prompt).toContain("Write C# operators literally (&&, <, >); never HTML entities.");
   });
 
   it.each(["good-panel-count", "good-label-writer"])("writes exactly the recorded %s package", name => {
@@ -320,6 +325,7 @@ describe("branch package proposals", () => {
 });
 
 describe("branch stage lifecycle", () => {
+  beforeEach(() => { vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", "off"); });
   it.each(["good-panel-count", "good-label-writer"])("stages %s through the branch SDK tool without registering Python", async name => {
     const proposal = fixture(name);
     const { bare, base, sdk, coordination, studioRun, loop } = await setup([proposal]);
@@ -410,7 +416,7 @@ describe("branch stage lifecycle", () => {
   it("rejects a runner's unrelated edit before committing", async () => {
     const { ports, bare, base } = await setup([]);
     const loop = new AuthorLoop(ports, async input => {
-      input.submitBranchToolProposal(fixture("good-label-writer"));
+      await input.submitBranchToolProposal(fixture("good-label-writer"));
       writeFileSync(join(input.repoDir, "unrelated.txt"), "must not enter the commit");
       return { preview: "test" };
     });
@@ -446,7 +452,7 @@ describe("branch stage lifecycle", () => {
     const settleGrant = vi.fn(async () => {});
     const loop = new AuthorLoop({ ...ports, oauth: { getGrant: vi.fn(), acquireGrant, settleGrant } }, async input => {
       expect(input.grant).toEqual({ kind: "oauth", oauthToken: "fixture-branch-grant" });
-      input.submitBranchToolProposal(fixture("good-panel-count"));
+      await input.submitBranchToolProposal(fixture("good-panel-count"));
       return { preview: "test", telemetry: { input_tokens: 17, output_tokens: 3 } };
     });
     await loop.stage(TENANT, "panels", request(base));
@@ -501,6 +507,75 @@ describe("branch stage lifecycle", () => {
     await expect(loop.stage(TENANT, "label", request(base))).rejects.toMatchObject({
       status: 422, reason: { code: "branch_author_no_submission", turns: 1, submit_calls: 0 },
     });
+  });
+});
+
+describe("Branch submit compile gate", () => {
+  beforeEach(() => {
+    vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", undefined);
+    vi.stubEnv("LEAF_BRANCH_COMPILE_BIN", undefined);
+    vi.stubEnv("LEAF_BRANCH_COMPILE_REFS", undefined);
+  });
+  const refusal: Extract<BranchCompileOutcome, { status: "refused" }> = {
+    status: "refused", decision: "compile_failed", ms: 4,
+    summary: { pass: false, decision: "compile_failed", errors: 2 },
+    diagnostics: ["main.csx(2,3): CS0117: unknown member", "lib/a.csx(4,5): scan: denied namespace: System.IO"],
+    structured: [
+      { file: "main.csx", line: 2, column: 3, code: "CS0117", message: "unknown member" },
+      { file: "lib/a.csx", line: 4, column: 5, code: "scan", message: "denied namespace: System.IO" },
+    ],
+  };
+  const reason = { code: "branch_author_package_refused", rule: "V18", turns: 1, submit_calls: 1 };
+
+  it("returns the diagnostics and entity hint, then stages the corrected proposal", async () => {
+    const good = fixture("good-label-writer");
+    const broken = { ...good, main_csx: "return true &amp;&amp; false;" };
+    setBranchCompileCheckForTests(async (_name, files) => files["main.csx"] === broken.main_csx ? refusal : {
+      status: "accept", ms: 3, allowlistSha256: ALLOWLIST_SHA, summary: { pass: true, decision: "accept", errors: 0 },
+    });
+    const { sdk, base, bare, loop } = await setup([broken, good]);
+    const { receipt } = await loop.stage(TENANT, "write label", request(base));
+    expect(sdk.replies[0].isError).toBe(true);
+    expect(sdk.replies[0].content[0].text).toBe("V18: branch-tools/label-writer/main.csx: compile failed: " +
+      refusal.diagnostics.join("; ") + " (source contains HTML entities; write C# operators such as && < > literally)");
+    expect(sdk.replies[1].isError).toBeUndefined();
+    expect(git(bare.dir, ["show", receipt.staged_commit + ":branch-tools/label-writer/main.csx"])).toBe(good.main_csx.trim());
+  });
+
+  it.each(["spawn_failed", "not_configured"] as const)("refuses %s without a staged commit", async code => {
+    if (code === "spawn_failed") setBranchCompileCheckForTests(async () => ({
+      status: "unavailable", code, ms: 0, summary: { pass: false, decision: "unavailable", errors: 0 },
+    }));
+    const { sdk, base, bare, coordination, loop } = await setup([fixture("good-label-writer")]);
+    await expect(loop.stage(TENANT, "write label", request(base))).rejects.toMatchObject({ status: 422, reason });
+    expect(sdk.replies[0].isError).toBe(true);
+    expect(sdk.replies[0].content[0].text).toContain(`V18: branch-tools/label-writer/main.csx: compile check unavailable (${code})`);
+    expect(git(bare.dir, ["rev-parse", `refs/leaf/changes/${CHANGE}`])).toBe(base);
+    expect(coordination.recordStaged).not.toHaveBeenCalled();
+  });
+
+  it("returns the last compiler summary and diagnostic locations alongside the 422 reason", async () => {
+    const proposal = fixture("good-label-writer");
+    const firstSource = "// first attempt";
+    setBranchCompileCheckForTests(async (_name, files) => files["main.csx"] === firstSource ? {
+      status: "unavailable", code: "busy", ms: 4, summary: { pass: false, decision: "unavailable", errors: 0 },
+    } : refusal);
+    const { base, ports, loop } = await setup([{ ...proposal, main_csx: firstSource }, proposal]);
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    vi.spyOn(harness.loop, "stage").mockImplementation(loop.stage.bind(loop));
+    const server = harness.listen(0);
+    servers.push(server);
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/author/stage`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenant_id: TENANT, description: "write label", ...request(base) }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: {
+      message: "branch author session ended without a validated package: last submission refused by V18",
+      diagnostics: [],
+      reason: { ...reason, submit_calls: 2 },
+      compile: { summary: refusal.summary, diagnostics: refusal.structured },
+    } });
   });
 });
 

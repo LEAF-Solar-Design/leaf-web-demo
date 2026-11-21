@@ -86,6 +86,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
     assert set(overlays) == {
         "agent/authorLoop.ts",
         "agent/branchTargetPrompt.ts",
+        "agent/tools/branchCompileCheck.ts",
         "agent/tools/submitBranchToolProposal.ts",
         "agent/tools/submitToolProposal.ts",
         "ports/converse.ts",
