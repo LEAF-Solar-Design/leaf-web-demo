@@ -819,7 +819,7 @@ function storedPlanMode(sessionId) {
   } catch { return null }
 }
 
-export function useComposerPlanMode(sessionId, live, catalogController) {
+export function useComposerPlanMode(sessionId, live, catalogController, startAgentTurn) {
   const [available, setAvailable] = useState(false)
   useEffect(() => {
     if (!live) {
@@ -842,9 +842,7 @@ export function useComposerPlanMode(sessionId, live, catalogController) {
 
   const [choice, setChoice] = useState(() => ({ sessionId, on: storedPlanMode(sessionId) }))
   if (choice.sessionId !== sessionId) {
-    // The first send can mint the conversation id. Adopt the draft choice
-    // only if the attached conversation has no preference of its own.
-    setChoice({ sessionId, on: storedPlanMode(sessionId) ?? (choice.sessionId ? null : choice.on) })
+    setChoice({ sessionId, on: storedPlanMode(sessionId) })
   }
   const visible = live && available
   const planMode = visible && choice.on === true
@@ -864,6 +862,20 @@ export function useComposerPlanMode(sessionId, live, catalogController) {
   return {
     planMode,
     onTogglePlanMode: visible ? () => setChoice({ sessionId, on: !planMode }) : undefined,
+    startComposerTurn: !sessionId && planMode ? async (...args) => {
+      const turn = await startAgentTurn(...args)
+      const sentSessionId = turn?.session_id
+      if (sentSessionId) {
+        // An attachment alone never inherits the draft. Match the actual turn's
+        // receipt and preserve a choice made while the send was in flight.
+        setChoice(current => {
+          const attachedWithoutChoice = current.sessionId === sentSessionId && current.on === null
+          if (current !== choice && !attachedWithoutChoice) return current
+          return { sessionId: sentSessionId, on: storedPlanMode(sentSessionId) ?? true }
+        })
+      }
+      return turn
+    } : startAgentTurn,
   }
 }
 
@@ -1737,6 +1749,9 @@ export default function App() {
       } : {}),
     },
   })
+  const { planMode, onTogglePlanMode, startComposerTurn } = useComposerPlanMode(
+    agentSessionId, !mock && !knownGuest, catalogController, startAgentTurn,
+  )
   const {
     tools,
     toolsError: toolsErr,
@@ -3102,7 +3117,7 @@ export default function App() {
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
   const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
     sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
-  catalogUiRef.current = { armDecision, startAgentTurn, running,
+  catalogUiRef.current = { armDecision, startAgentTurn: startComposerTurn, running,
     openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
@@ -4455,7 +4470,6 @@ export default function App() {
   }, [])
   // Guest-upload policy fails closed for every standalone caller, including signed-in accounts.
   const standalonePolicyReady = standaloneToken !== null && standalonePolicy?.token === standaloneToken && standalonePolicy.ready === true
-  const { planMode, onTogglePlanMode } = useComposerPlanMode(agentSessionId, !mock && !knownGuest, catalogController)
   useEffect(() => {
     if (projectMode) {
       catalogController.setContext({
