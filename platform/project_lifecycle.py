@@ -173,6 +173,10 @@ def _project_row(
     return row
 
 
+def _project_is_archived(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID) -> bool:
+    return _project_row(cur, org_id, project_id)["status"] == "archived"
+
+
 def require_project_writable(
     org_id: uuid.UUID, project_id: uuid.UUID, *, cur: Any = None,
 ) -> None:
@@ -182,8 +186,7 @@ def require_project_writable(
             with conn.cursor() as project_cursor:
                 require_project_writable(org_id, project_id, cur=project_cursor)
         return run_transaction(operation, isolation="serializable")
-    project = _project_row(cur, org_id, project_id)
-    if project["status"] == "archived":
+    if _project_is_archived(cur, org_id, project_id):
         raise LifecycleConflict("project is archived")
 
 
@@ -215,7 +218,8 @@ def _require_project_role(
     # active project membership so revocation takes effect on the next request.
     _actor_tenant_role(cur, org_id, actor_binding_id, lock=lock)
     if write and not allow_archived:
-        require_project_writable(org_id, project_id, cur=cur)
+        if _project_is_archived(cur, org_id, project_id):
+            raise LifecycleConflict("project is archived")
     member_role = _project_membership_role(
         cur, org_id, project_id, actor_binding_id,
     )

@@ -178,6 +178,7 @@ def test_real_project_access_and_role_policy_gate_both_routes(harness, monkeypat
     # Replace only persistence reads: the production role predicate and the
     # project's tenant binding checks remain load-bearing in this proof.
     monkeypatch.setattr(lifecycle, "_actor_tenant_role", lambda *a, **k: "owner")
+    monkeypatch.setattr(lifecycle, "_project_is_archived", lambda *a, **k: False)
     monkeypatch.setattr(lifecycle, "_project_membership_role", lambda *a, **k: role)
     monkeypatch.setattr(lifecycle, "require_project_role", lambda org, project, actor, *, write:
                         lifecycle._require_project_role(None, org, project, actor, write=write))
