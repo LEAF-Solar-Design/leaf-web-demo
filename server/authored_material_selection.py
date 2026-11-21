@@ -81,8 +81,9 @@ def bind_material_selection(intake, org_id, project_id, actor_id, material_id, c
             or material.get("media_type") != "application/json"
             or material.get("sha256") != source["sha256"] or material.get("byte_size") != source["byte_length"]):
         raise ValueError("Selection does not match the project's original JSON material.")
-    raw = originals.read_content(org_id, project_id, material).decode("utf-8-sig")
-    document = json.loads(raw, parse_float=Decimal if exact_numbers else float,
+    raw = originals.read_content(org_id, project_id, material)
+    originals.check_json_depth(raw)
+    document = json.loads(raw.decode("utf-8-sig"), parse_float=Decimal if exact_numbers else float,
                           object_pairs_hook=originals.unique_json_object)
     pointer = context["selection"]["records_pointer"]
     rows = _selected_rows(document, pointer, context["row_count"])

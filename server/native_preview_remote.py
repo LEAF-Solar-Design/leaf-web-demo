@@ -121,19 +121,32 @@ def submit(org, project, actor, body, key):
     ready()
     binding = binding_for(org, project)
     lifecycle.require_project_role(org, project, binding['actor_id'], write=True)
-    if type(body) is not dict or set(body) not in ({'revision'}, {'source_request_id'}):
+    if type(body) is not dict or set(body) not in ({'revision'}, {'source_request_id'}, {'prior_job_id'}):
         invalid()
-    native_request = 'source_request_id' in body
-    revision = None if native_request else native.source._revision(body['revision'])
-    request_id = native.source._uuid(body['source_request_id']) if native_request else None
     if (type(key) is not str or not 1 <= len(key) <= 200
             or any(ord(c) < 33 or ord(c) > 126 for c in key)):
         invalid()
     budget = jobs.job_max_s()
     if not math.isfinite(budget) or not 0 < budget <= 3600:
         raise ProtocolError(503, 'Native preview budget is unavailable.')
-    descriptor = (native.source.prepare_native_source(org, project, actor, source_request_id=request_id)
-                  if native_request else native.source.prepare_source(org, project, actor, revision=revision))
+    if 'prior_job_id' in body:
+        prior_id = native.source._uuid(body['prior_job_id'])
+        if key != 'recover-page:' + prior_id:
+            invalid()
+        prior, original = record(org, project, prior_id)
+        descriptor = original['source']
+        if original['actor_id'] != actor:
+            raise ProtocolError(404, 'Native preview not found.')
+        if (prior.get('job_id') != prior_id or prior.get('status') != 'failed'
+                or 'lease' not in prior or prior['lease'] is not None
+                or descriptor['schema'] != native.source.SCHEMA):
+            conflict()
+        native.source.read_source(org, project, actor, descriptor)
+    else:
+        if key.startswith('recover-page:'):
+            invalid()
+        descriptor = (native.source.prepare_native_source(org, project, actor, source_request_id=native.source._uuid(body['source_request_id']))
+                      if 'source_request_id' in body else native.source.prepare_source(org, project, actor, revision=native.source._revision(body['revision'])))
     # Publication can block: check current authority and configuration again.
     authorize(org, project, actor, write=True)
     if binding_for(org, project) != binding:

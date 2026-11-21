@@ -5,6 +5,8 @@ import React, { useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { parseExpression } from '@babel/parser'
 import { AgentPanel, CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnostics, ShellKpis, StatusToggles } from './DrawingCockpit.jsx'
+import DraftingRibbon from './DraftingRibbon.jsx'
+import DrawingNavigationTools, { DrawingObjectsMount } from './DrawingNavigationTools.jsx'
 import { projectSolarOpenStatus } from '../solar/solarProjectAppModel.js'
 import { ShellAccountMenu } from '../App.jsx'
 import CostTransparencyPanel from '../components/CostTransparencyPanel.jsx'
@@ -43,6 +45,11 @@ function appExpression(code, bindings) {
   return evaluate(tree)
 }
 
+const navigationFixture = vi.hoisted(() => ({
+  index: { drawingKey: 'test', records: [], byId: new Map(), byHandle: new Map(), intake: { source: 'engine' } },
+  focusId: null,
+}))
+vi.mock('./DrawingObjectsContext.jsx', async (original) => ({ ...await original(), useDrawingObjects: () => navigationFixture }))
 vi.mock('../cadedit/EngineSessionProvider.jsx', async (original) => ({ ...await original(), useEngineSessionOptional: () => null }))
 vi.mock('./SurfaceFrame.jsx', async (original) => ({ ...await original(), useSurfaceFrame: () => ({ contract: { ground: 'drawing' } }) }))
 vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStudioGround: () => ({}) }))
@@ -210,11 +217,30 @@ describe('quiet Studio shell', () => {
     screen.getByRole('button', { name: 'Outside' }).focus()
     expect(menu.open).toBe(false)
   })
+  it('seats Objects beside Find and Layers in the same initially collapsed rail', () => {
+    const { container } = render(<>
+      <DrawingObjectsMount><details className="drawing-objects-panel"><summary>Objects</summary><p>Object list</p></details></DrawingObjectsMount>
+      <DrawingNavigationTools navigation={{ syncScope: vi.fn() }} />
+    </>)
+    const rail = container.querySelector('.drawing-left-rail')
+    expect(rail.querySelector('.drawing-objects-panel')).toBeTruthy()
+    expect(rail.querySelectorAll('details').length).toBe(3)
+    expect(Array.from(rail.querySelectorAll('details')).every((menu) => !menu.open)).toBe(true)
+    expect(container.querySelectorAll('.drawing-objects-panel').length).toBe(1)
+  })
   it('leaves the CAD command dock unwrapped without claiming Escape', () => {
     const { container } = render(<AgentPanel enabled={false}><input aria-label="CAD command" /></AgentPanel>)
     fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
     expect(container.querySelector('.studio-agent-panel')).toBeNull()
     expect(screen.getByRole('textbox')).toBeTruthy()
+  })
+  it('starts Find and Layers closed in the left rail', () => {
+    const { container } = render(<DrawingNavigationTools navigation={{ syncScope: vi.fn() }} />)
+    expect(container.querySelector('.drawing-left-rail').dataset.collapsed).toBe('true')
+    expect(Array.from(container.querySelectorAll('details')).every((menu) => !menu.open)).toBe(true)
+    expect(screen.queryByRole('combobox')).toBeNull()
+    fireEvent.click(container.querySelector('.drawing-rail-find > summary'))
+    expect(screen.getByRole('combobox')).toBeTruthy()
   })
   it('collapses the agent panel to its pill on Escape and preserves its children', () => {
     const { container } = render(<AgentPanel><p>String every roof</p><input aria-label="Ask Leaf" /></AgentPanel>)
@@ -294,5 +320,11 @@ describe('quiet Studio shell', () => {
   it('reserves full checkout refusal copy for attempted writes', () => {
     expect(projectSolarOpenStatus('checkout_required')).toBeNull()
     expect(projectSolarOpenStatus('checkout_required', { attemptedWrite: true })).toBe('Take the project checkout before changing this drawing.')
+  })
+  it('starts with the drafting tools collapsed behind Draw in the Studio shell', () => {
+    const { container } = render(<div className="app" data-studio-shell="cockpit" data-surface="solar"><DraftingRibbon clusters={[]} /></div>)
+    expect(container.querySelector('.drafting-ribbon').dataset.collapsed).toBe('true')
+    fireEvent.click(screen.getByRole('button', { name: 'Draw' }))
+    expect(container.querySelector('.drafting-ribbon').dataset.collapsed).toBeUndefined()
   })
 })

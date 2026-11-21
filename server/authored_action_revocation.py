@@ -14,7 +14,14 @@ from integration_tool_service import ReadFailure, validate_action_catalog
 
 
 SCHEMA_EVALUATION_LIMIT = 16384
+REGEX_ARGUMENT_LIMIT = 16384
 _remaining_evaluations = ContextVar("action_schema_work")
+
+# A fixed-width prefix can contain literals, escapes and simple character
+# classes. Only a start-anchored pattern may repeat its final single atom.
+_PATTERN_ATOM = r"(?:[^\\^$*+?{}\[\]|()]|\\[\\.^$*+?{}\[\]|()dDsSwWnrt]|\[\^?[A-Za-z0-9_ -]+\])"
+_FIXED_PATTERN = re.compile(rf"\^?{_PATTERN_ATOM}*\$?")
+_REPEATED_PATTERN = re.compile(rf"\^{_PATTERN_ATOM}+(?:[+*?]|\{{[0-9]{{1,2}}(?:,[0-9]{{0,2}})?\}})\$?")
 
 
 @cache
@@ -93,15 +100,17 @@ _EMPTY_FORM = {"fields": [], "submit_label": "Submit"}
 def _check_local_schema_refs(schema, registry):
     """Preflight the pinned draft's schema graph without retrieving other resources."""
     from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
     from referencing.exceptions import Unresolvable
     from referencing.jsonschema import DRAFT202012
 
     remaining = 4096
+    has_patterns = False
     active = set()
     dialect = Draft202012Validator.META_SCHEMA["$id"]
 
     def visit(node, resolver):
-        nonlocal remaining
+        nonlocal remaining, has_patterns
         remaining -= 1
         if remaining < 0 or len(active) >= 64:
             raise ValueError("Action schema resolution budget exceeded")
@@ -115,6 +124,14 @@ def _check_local_schema_refs(schema, registry):
             raise ValueError("Unsupported action schema dialect")
         if "$dynamicRef" in node or "$recursiveRef" in node:
             raise ValueError("Action schemas require static draft 2020-12 references")
+        patterns = list(node.get("patternProperties", {}))
+        if "pattern" in node:
+            patterns.append(node["pattern"])
+        for pattern in patterns:
+            if (len(pattern) > 256 or
+                    not (_FIXED_PATTERN.fullmatch(pattern) or _REPEATED_PATTERN.fullmatch(pattern))):
+                raise SchemaError("Unsupported action pattern")
+            has_patterns = True
         active.add(id(node))
         if "$ref" in node:
             ref = node["$ref"]
@@ -130,6 +147,7 @@ def _check_local_schema_refs(schema, registry):
         active.remove(id(node))
 
     visit(schema, registry.resolver_with_root(DRAFT202012.create_resource(schema)))
+    return has_patterns
 
 
 def _valid_value(field, value):
@@ -176,6 +194,7 @@ class _Registration:
     handler: object
     expects_arguments: bool
     argument_validator: object
+    has_patterns: bool
 
 
 class AuthorizedLocalActions:
@@ -192,6 +211,7 @@ class AuthorizedLocalActions:
         validate_action_catalog({"actions": [{**reference, "connection_title": "Local",
                                  "title": "Local", "form": registered_form}], "next_cursor": None}, 1)
         validator = None
+        has_patterns = False
         if argument_schema is not None:
             # A structured local operation advertises the digest of its JSON
             # argument schema in its operation reference. The wire form holds
@@ -211,12 +231,12 @@ class AuthorizedLocalActions:
                 raise ValueError("Structured action arguments require a boolean or closed object schema")
             Draft202012Validator.check_schema(schema)
             registry = Registry()
-            _check_local_schema_refs(schema, registry)
+            has_patterns = _check_local_schema_refs(schema, registry)
             validator = _pinned_validator_type()(schema, registry=registry)
         with self._lock:
             self._handlers[slot] = _Registration(
                 _identity(reference), form_digest(registered_form), registered_form["fields"],
-                handler, form is not None or validator is not None, validator)
+                handler, form is not None or validator is not None, validator, has_patterns)
 
     def set_role_grants(self, tenant, project, role, references):
         with self._lock:
@@ -237,6 +257,10 @@ class AuthorizedLocalActions:
             if (binding is None or binding.reference != reference
                     or binding.form_digest != digest or not allowed):
                 raise ReadFailure("denied")
+            # Selection stores canonical ASCII JSON. This cap bounds both
+            # value strings and every property name before any matching.
+            if binding.has_patterns and len(arguments) > REGEX_ARGUMENT_LIMIT:
+                raise ReadFailure("schema_regex_limit")
             values = json.loads(arguments)
             if binding.argument_validator is None:
                 _check_arguments(binding.fields, values)
