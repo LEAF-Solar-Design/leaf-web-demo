@@ -143,7 +143,7 @@ describe('scope-bound engineering project files', () => {
     for (const expectedRevision of [-1, true, '2', 2.5, NaN, 2147483647]) {
       expect((await client.saveEngineeringTotals({ ...save, expectedRevision })).reason).toBe('SIP_R7_REQUEST_INVALID')
     }
-    for (const idempotencyKey of ['', ' ', 'é'.repeat(129), token()]) {
+    for (const idempotencyKey of ['', ' ', 'ÃƒÂ©'.repeat(129), token()]) {
       expect((await client.saveEngineeringTotals({ ...save, idempotencyKey })).reason).toBe('SIP_R7_REQUEST_INVALID')
     }
     expect((await client.loadEngineeringTotals({ graphSha256: 'bad' })).reason).toBe('SIP_R7_REQUEST_INVALID')
@@ -1368,5 +1368,35 @@ describe('editor publication under the held project checkout', () => {
       expect((await client.publishDrawing(bad)).reason).toBe('SIP_R7_REQUEST_INVALID')
     }
     expect(fetchImpl.mock.calls.length).toBe(before)
+  })
+})
+
+describe('persisted project catalog reads', () => {
+  const sha = '1'.repeat(64)
+  const context = { organization_id: O, project_id: P, drawing_id: D, input_version_id: V, intake_sha256: sha }
+  function record(tool) {
+    return { job_id: J, kind: 'run', status: 'complete', tool_name: tool, org_id: O, project_id: P, input_version_id: V,
+      execution_context: { ...context, schema: 'leaf.project-read-job.v1', catalog_digest: digest },
+      result: { ok: true, tool, version: '1.0.0', project_context: context, result: {}, overlay: null } }
+  }
+  it.each(['measure-extents', 'list-layers', 'count-faces'])('attaches the completed job for %s', async tool => {
+    const { client, fetchImpl, intent } = setup(record(tool), 202)
+    const outcome = await client.submitRun(intent({ tool, params: {} }))
+    expect(url(fetchImpl)).toBe('https://api.test/api/run')
+    expect(init(fetchImpl).headers.Prefer).toBe('respond-async')
+    expect(outcome).toMatchObject({ ok: true, data: { job_id: J, status: 'complete' } })
+  })
+  it.each([
+    ['catalog', job => { job.execution_context.catalog_digest = 'sha256:' + '2'.repeat(64) }],
+    ['drawing', job => { job.execution_context.drawing_id = J }],
+    ['intake', job => { job.result.project_context = { ...context, intake_sha256: '2'.repeat(64) } }],
+    ['outer version', job => { job.input_version_id = J }],
+    ['inner tool', job => { job.result.tool = 'another-tool' }],
+  ])('rejects a wrong %s before attaching the job', async (_label, change) => {
+    const tool = 'measure-extents'
+    const job = record(tool)
+    change(job)
+    const { client, intent } = setup(job, 202)
+    expect(await client.submitRun(intent({ tool }))).toMatchObject({ ok: false, reason: 'SIP_R7_RESPONSE_INVALID' })
   })
 })
