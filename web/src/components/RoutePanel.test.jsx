@@ -108,7 +108,7 @@ describe('proposal and run cards', () => {
     expect(screen.getByText('Planning · 0 s')).toBeTruthy()
     expect(container.querySelector('.proposal-card.is-running')).toBeTruthy()
     expect(container.querySelector('[aria-current="step"]').textContent).toBe('Run')
-    expect(Array.from(container.querySelectorAll('.proposal-metrics dd')).every((node) => node.textContent === '—')).toBe(true)
+    expect(Array.from(container.querySelectorAll('.proposal-metrics dd')).every((node) => node.textContent === '…')).toBe(true)
     expect(handlers.onConfirmIntent).toHaveBeenCalledOnce()
     act(() => vi.advanceTimersByTime(2000))
     expect(screen.getByText('Planning · 2 s')).toBeTruthy()

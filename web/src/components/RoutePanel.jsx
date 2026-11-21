@@ -304,12 +304,12 @@ export default function RoutePanel({
         <dl className="proposal-fields">
           {Object.entries(params).map(([key, value]) => {
             const field = proposalField(key, toolObj.params?.properties?.[key])
-            return <div key={key}><dt>{field.label}</dt><dd>{planning ? '—' : `${typeof value === 'object' ? JSON.stringify(value) : typeof value === 'boolean' ? value ? 'Yes' : 'No' : value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
+            return <div key={key}><dt>{field.label}</dt><dd>{planning ? '…' : `${typeof value === 'object' ? JSON.stringify(value) : typeof value === 'boolean' ? value ? 'Yes' : 'No' : value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
           })}
         </dl>
         {metrics.length > 0 && <dl className="proposal-metrics">{metrics.map(([key, value]) => {
           const field = proposalField(key)
-          return <div key={key}><dt>{field.label}</dt><dd>{planning ? '—' : `${value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
+          return <div key={key}><dt>{field.label}</dt><dd>{planning ? '…' : `${value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
         })}</dl>}
         {planning && <div className="proposal-planning" role="status"><span className="proposal-spinner" aria-hidden="true" />Planning · {elapsed} s</div>}
         {route.stubKind === 'demo' && <span className="dim">This demo matches requests against a limited tool catalog.</span>}
