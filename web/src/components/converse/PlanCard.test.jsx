@@ -72,6 +72,30 @@ it('retries only the missing confirm turn with the original feedback', async () 
   expect(screen.queryByRole('button')).toBeNull()
 })
 
+it('restores the recorded denial feedback on reload and removes it after the confirm turn', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(response(200, { resolved: true }))
+    .mockRejectedValueOnce(new Error('Disconnected'))
+    .mockResolvedValue(response(202, { turn_id: 'resumed' }))
+  vi.stubGlobal('fetch', fetch)
+  const first = render(<PlanCard {...props} />)
+  fireEvent.click(button('Keep planning'))
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Group by layer' } })
+  await act(async () => fireEvent.click(button('Send feedback')))
+  first.unmount()
+
+  const pending = { approved: false, resume_required: true }
+  const reloaded = render(<PlanCard {...props} pending={pending} />)
+  await act(async () => fireEvent.click(button('Resume denial')))
+  expect(fetch).toHaveBeenCalledTimes(3)
+  expect(fetch.mock.calls[2][0]).toBe(fetch.mock.calls[1][0])
+  expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({
+    confirm: { confirmationId: 'plan', approved: false, feedback: 'Group by layer' },
+  })
+  expect(track).toHaveBeenCalledWith('plan.revised')
+  reloaded.unmount()
+  expect(Object.keys(sessionStorage).some(key => sessionStorage.getItem(key).includes('Group by layer'))).toBe(false)
+})
+
 it('expires an outstanding plan while it is visible', () => {
   vi.useFakeTimers()
   render(<PlanCard {...props} expiresAt={Date.now() + 1000} />)

@@ -792,12 +792,12 @@ export default function ConversePanel({
         const result = { ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy }
         if (open) Object.assign(open, result, { statusOnly: false })
         else t.feed.push({ kind: 'tool', chip: { id: data.call_id || env.seq || t.feed.length, tool: data.tool, summary: '', ...result } })
-        if (data.tool === 'author_tool' && data.ok !== false) {
+        if (data.tool === 'author_tool') {
           const id = data.result?.change_set_id || data.result?.receipt?.change_set_id || data.change_set_id
           if (typeof id === 'string' && id && !changeSets.has(id)) {
             changeSets.add(id)
             const planId = data.result?.plan_confirmation_id || open?.args?.plan_confirmation_id || t.planId
-            t.feed.push({ kind: 'authoring', id, proposal: plans.get(planId)?.proposal })
+            t.feed.push({ kind: 'authoring', id, planId })
           }
         }
       } else if (type === 'job_linked') {
@@ -1239,8 +1239,10 @@ export default function ConversePanel({
     }
     if (item.kind === 'authoring') {
       const resume = localTurns.find(turn => turn.turnId === turnId && turn.approvedPlanId)
+      const tiedToBuild = [...model.plans.values()].find(plan => plan.proposal.change_set_id === item.id)
+      const bound = (tiedToBuild ?? model.plans.get(item.planId ?? resume?.approvedPlanId))?.proposal
       return <AuthoringCard key={`authoring-${sessionId}-${item.id}`} sessionId={sessionId} changeSetId={item.id}
-        proposal={item.proposal ?? model.plans.get(resume?.approvedPlanId)?.proposal}
+        proposal={bound?.change_set_id && bound.change_set_id !== item.id ? undefined : bound}
         disabled={busy} active={assistantTab === 'conversation'} onRetry={rememberInlineTurn} />
     }
     if (item.kind === 'text') {
@@ -1450,8 +1452,7 @@ export default function ConversePanel({
     return !last || last.kind === 'job' || (last.kind === 'tool' && last.chip.ok !== null)
   }
 
-  const otherPendingApprovals = pendingApprovals.filter(approval =>
-    approval.kind !== 'propose_build_plan' && !model.plans.has(approval.confirmation_id))
+  const otherPendingApprovals = pendingApprovals.filter(approval => !model.plans.has(approval.confirmation_id))
   const conversation = (
     <>
       {connectionState !== 'connected' && connectionState !== 'connecting' && (

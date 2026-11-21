@@ -6,7 +6,7 @@ import { capabilityLabel } from './PlanCard.jsx'
 import './inlineAuthoring.css'
 
 const notReported = 'Not reported'
-const terminal = new Set(['staged', 'failed', 'published'])
+const stagedPollWindow = 30 * 60 * 1000
 const string = (value) => typeof value === 'string' ? value : ''
 
 function useCardVisibility(ref) {
@@ -44,14 +44,14 @@ function attemptLabel(attempt) {
   return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}`
 }
 
-function BranchReport({ report }) {
+function branchSummary(report) {
   const lines = []
   if (typeof report?.synced === 'boolean') lines.push(report.synced ? 'Synced' : 'Not synced')
   if (resultLabel(report?.compile)) lines.push(`Compile · ${resultLabel(report.compile)}`)
   const run = report?.ran === true ? 'Ran' : resultLabel(report?.run)
   const summary = string(report?.run?.summary || report?.summary)
   if (run || summary) lines.push([run, summary].filter(Boolean).join(' · '))
-  return lines.length ? lines.join(' · ') : 'Branch has not reported yet'
+  return lines.join(' · ')
 }
 
 function DecisionTime({ at }) {
@@ -60,13 +60,29 @@ function DecisionTime({ at }) {
     {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></> : null
 }
 
+function reviewPlan(stage, proposal) {
+  const reported = stage?.plan?.plan || stage?.plan
+  for (const plan of [reported, proposal?.plan]) {
+    if (string(plan?.summary) && Array.isArray(plan.behavior) && Array.isArray(plan.capabilities)) return plan
+  }
+  const manifest = stage?.result?.branch_package || stage?.result?.tool
+  if (!string(manifest?.name) || !string(manifest.description) || !Array.isArray(manifest.capabilities)) return null
+  return {
+    title: [manifest.name, string(manifest.version)].filter(Boolean).join(' · '),
+    summary: manifest.description,
+    capabilities: manifest.capabilities,
+    change_kind: stage.change_kind,
+    target_tool_name: stage.target_tool_name || manifest.name,
+  }
+}
+
 function ReviewDetails({ plan, files, source, loadingSource, compile }) {
   const capabilities = plan?.capabilities || []
   const risks = capabilities.filter((cap) => cap === 'drawing.write' || /^(file|network)/.test(cap)).map(capabilityLabel)
   if (plan?.change_kind === 'revise') risks.push(`Revises the existing tool ${plan.target_tool_name}`)
   const lines = source?.text ? source.text.replace(/\r?\n$/, '').split('\n').length : 0
   return <div className="inline-review-details">
-    <p>{plan?.summary || 'Plan summary not reported'}</p>
+    <p>{plan?.summary || 'Build context not reported'}</p>
     {plan?.behavior?.length > 0 && <ol>{plan.behavior.map((step, i) => <li key={i}>{step}</li>)}</ol>}
     <dl><dt>Files</dt><dd>{files.length ? files.join(', ') : notReported}</dd>
       <dt>Capabilities</dt><dd>{capabilities.map(capabilityLabel).join(', ') || notReported}</dd>
@@ -88,28 +104,39 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const [attempts, setAttempts] = useState([])
   const [context, setContext] = useState(null)
   const [source, setSource] = useState(null)
-  const [readingSource, setReadingSource] = useState(false)
   const [decision, setDecision] = useState(null)
   const [editing, setEditing] = useState(false)
   const [comment, setComment] = useState('')
   const [busy, setBusy] = useState(false)
   const [retried, setRetried] = useState(false)
   const [readError, setReadError] = useState('')
+  const [reviewError, setReviewError] = useState('')
   const [actionError, setActionError] = useState('')
   const [refresh, setRefresh] = useState(0)
   const pollAfter = useRef(0)
-  const stageDone = terminal.has(stage?.status)
+  const pollUntil = useRef(Infinity)
+  const pollStopped = useRef(false)
+  const forceStageRead = useRef(false)
+  const refreshStage = () => {
+    forceStageRead.current = true
+    pollAfter.current = 0
+    setRefresh(n => n + 1)
+  }
+  const denied = context?.review?.decision === 'request_changes'
   useEffect(() => {
-    if (!visible || stageDone) return
+    if (!visible) return
     const controller = new AbortController()
     const { signal } = controller
     let timer
     const poll = async () => {
+      if (!forceStageRead.current && (pollStopped.current || denied || Date.now() >= pollUntil.current)) return
+      forceStageRead.current = false
       let delay = 2000
       try {
         const next = await getAuthorStage(changeSetId, signal)
         if (signal.aborted) return
         if (next?.change_set_id !== changeSetId || (next.receipt && next.receipt.change_set_id !== changeSetId)) {
+          setStage(null)
           setReadError('The stage response did not match this build.')
           return
         }
@@ -121,7 +148,16 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
           for (const row of reported) if (Number.isInteger(row?.attempt)) merged.set(row.attempt, row)
           return [...merged.values()].sort((a, b) => a.attempt - b.attempt)
         })
-        if (terminal.has(next.status)) return
+        const published = [next.status, next.publication?.status, decision?.status].includes('published')
+        pollStopped.current = next.status === 'failed' || denied || next.review?.decision === 'request_changes'
+          || [next.status, next.publication?.status, decision?.status].includes('denied')
+          || (published && !!branchSummary(next.branch))
+        if (pollStopped.current) return
+        if (next.status === 'staged' || published) {
+          const stagedAt = new Date(next.staged_at ?? next.updated_at ?? Date.now()).getTime()
+          const since = Number.isFinite(stagedAt) ? Math.min(Date.now(), stagedAt) : Date.now()
+          pollUntil.current = Math.min(pollUntil.current, since + stagedPollWindow)
+        }
         delay = Math.max(2000, Number(next.retry_after_ms) || 0)
       } catch (e) {
         if (signal.aborted) return
@@ -129,15 +165,17 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         if ([401, 403, 404].includes(e.status)) return
       }
       pollAfter.current = Date.now() + delay
-      timer = setTimeout(poll, delay)
+      if (pollAfter.current < pollUntil.current) timer = setTimeout(poll, delay)
     }
     const remaining = pollAfter.current - Date.now()
     if (remaining > 0) timer = setTimeout(poll, remaining)
     else void poll()
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [changeSetId, visible, stageDone, refresh])
+  }, [changeSetId, visible, denied, decision, refresh])
 
   const receipt = stage?.receipt
+  const reportedReview = stage?.review?.decision
+  const reportedPublication = stage?.publication?.status
   useEffect(() => {
     if (!visible || !receipt?.staged_commit || decision) return
     const controller = new AbortController()
@@ -148,39 +186,42 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
       try {
         const view = await reviewContext(changeSetId, signal)
         if (signal.aborted) return
-        setContext(view)
-        setReadError('')
-        if (view?.viewer_may_approve === true && !view.review) {
-          setReadingSource(true)
+        setContext({ ...view, commit: receipt.staged_commit })
+        setReviewError('')
+        if (view?.viewer_may_approve === true && !view.review && !reportedReview
+          && !['published', 'denied'].includes(reportedPublication)) {
           const file = await getAuthorStageSource(changeSetId, receipt.staged_commit, signal).catch(() => null)
           if (signal.aborted) return
-          setSource(file)
-          setReadingSource(false)
+          setSource({ commit: receipt.staged_commit, file })
         }
       } catch {
         if (!signal.aborted) {
           setContext(null)
-          setReadError('Could not read review status.')
+          setReviewError('Could not read review status.')
         }
       }
     }
     void read()
     return () => controller.abort()
-  }, [changeSetId, receipt?.staged_commit, visible, decision, refresh])
+  }, [changeSetId, receipt?.staged_commit, visible, decision, refresh, reportedReview, reportedPublication])
 
-  const plan = proposal?.plan
-  const review = decision || context?.review
-  const mayApprove = context?.viewer_may_approve === true && !review && !!receipt?.catalog_digest
+  const plan = reviewPlan(stage, proposal)
+  const review = decision || (reportedReview ? stage.review : context?.review)
+  const mayApprove = context?.viewer_may_approve === true && context.commit === receipt?.staged_commit
+    && !review && !!receipt?.catalog_digest && !['published', 'denied'].includes(stage?.publication?.status)
+    && !['published', 'denied'].includes(stage?.status)
+  const sourceReady = !!source && source.commit === receipt?.staged_commit
+  const approvalReady = Boolean(plan && sourceReady)
   const self = context?.approval_kind_if_approved === 'self'
   const latest = attempts.at(-1)
   const studioTest = stage?.test_run || stage?.result?.test_run
   const compile = latest ? attemptLabel(latest) : resultLabel(studioTest)
   const files = receipt?.package_files || stage?.result?.package_files || [stage?.result?.tool?.entry].filter(Boolean)
-  const publication = decision?.status === 'published' ? decision : stage?.publication
+  const publication = reportedPublication === 'published' ? stage.publication : decision
   const failedCompile = ['refused', 'failed', 'compile_failed'].includes(resultLabel(latest))
     || /compile/.test(string(stage?.error?.reason_code))
   const decide = async (choice) => {
-    if (!visible || !mayApprove || busy) return
+    if (!visible || !mayApprove || busy || (choice === 'approve' && !approvalReady)) return
     setBusy(true)
     setActionError('')
     try {
@@ -189,12 +230,13 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         ...(choice === 'request_changes' && comment.trim() ? { comment: comment.trim() } : {}) })
       if (result?.change_set_id !== changeSetId || result.decision !== choice) throw new Error()
       setDecision(result)
+      refreshStage()
       track('review.decided', { decision: choice,
         approval_kind: ['self', 'independent'].includes(result.approval_kind) ? result.approval_kind : undefined })
     } catch (e) {
       setActionError(e.secretRefused ? e.message : 'Could not complete the review. Check the current decision and try again.')
       setContext(null)
-      setRefresh(n => n + 1)
+      refreshStage()
     } finally {
       setBusy(false)
     }
@@ -232,10 +274,10 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         {review.decision === 'approve' ? 'Approved' : 'Changes requested'} by {decision
           ? `you (${review.approver_role})` : review.approver_role}<DecisionTime at={review.decided_at} />
       </p> : mayApprove ? <>
-        <ReviewDetails plan={plan} files={files} source={source} loadingSource={readingSource} compile={compile} />
+        <ReviewDetails plan={plan} files={files} source={sourceReady && source.file} loadingSource={!sourceReady} compile={compile} />
         {self && <p>This will be recorded as a self-approval.</p>}
         <div className="inline-actions">
-          <button type="button" className="chip-act" disabled={busy} onClick={() => decide('approve')}>
+          <button type="button" className="chip-act" disabled={busy || !approvalReady || !visible} onClick={() => decide('approve')}>
             {self ? 'Approve your own tool' : 'Approve'}</button>
           <button type="button" className="chip-neutral" disabled={busy} aria-expanded={editing}
             onClick={() => setEditing(!editing)}>Request changes</button>
@@ -245,12 +287,13 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
               onClick={() => decide('request_changes')}>Send change request</button></div>}
         </div></> : notReported}</dd>
       <dt>Publish</dt><dd>{publication?.status === 'published' || stage?.status === 'published'
-        ? <>Published to the internal dev catalog<DecisionTime at={publication?.published_at || publication?.decided_at || stage?.updated_at} /></>
+        ? <>Published to the internal dev catalog<DecisionTime at={publication?.published_at ?? decision?.decided_at
+          ?? (stage?.status === 'published' ? stage.updated_at : null)} /></>
         : notReported}</dd>
-      <dt>Branch</dt><dd><BranchReport report={stage?.branch} /></dd>
+      <dt>Branch</dt><dd>{branchSummary(stage?.branch) || 'Branch has not reported yet'}</dd>
     </dl>
-    {readError && <p role="alert">{readError} <button type="button" className="chip-neutral"
-      onClick={() => setRefresh(n => n + 1)}>Check again</button></p>}
+    {(readError || reviewError) && <p role="alert">{readError || reviewError} <button type="button" className="chip-neutral"
+      onClick={refreshStage}>Check again</button></p>}
     {actionError && <p role="alert">{actionError}</p>}
   </section>
 }

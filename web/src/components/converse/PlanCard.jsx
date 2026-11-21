@@ -54,7 +54,7 @@ export default function PlanCard({ sessionId, proposal, replacedBy, expiresAt, r
       setDone(approved)
       if (live.current && result.turn_id) onResumed?.(result.turn_id, approved)
       if (approved) track('plan.approved', { revision })
-      else track(note ? 'plan.revised' : 'plan.cancelled')
+      else track(result.planRevised ? 'plan.revised' : 'plan.cancelled')
     } catch (e) {
       if (e.status === 410) setExpired(true)
       else setError(e.secretRefused ? e.message : 'Could not complete the plan decision. Try again.')

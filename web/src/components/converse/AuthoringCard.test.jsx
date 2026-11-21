@@ -77,6 +77,55 @@ it('sends a bound change request and shows an unavailable export honestly', asyn
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'request_changes', approval_kind: 'independent' })
 })
 
+it('uses the stage-bound plan and waits for its staged source before enabling approval', async () => {
+  let finishSource
+  getAuthorStageSource.mockReturnValue(new Promise(resolve => { finishSource = resolve }))
+  getAuthorStage.mockResolvedValue({ ...staged, plan: { ...proposal.plan, summary: 'Place labels on ridgelines' } })
+  await mount({ proposal: undefined })
+  expect(screen.getByText('Place labels on ridgelines')).toBeVisible()
+  expect(screen.getByText('Group by roof layer')).toBeVisible()
+  expect(screen.getByText('Reading source…')).toBeVisible()
+  const approve = button('Approve your own tool')
+  expect(approve).toBeDisabled()
+  fireEvent.click(approve)
+  expect(postReview).not.toHaveBeenCalled()
+  await act(async () => finishSource(null))
+  expect(screen.getByText('source not available')).toBeVisible()
+  expect(approve).toBeEnabled()
+})
+
+it.each(['branch_package', 'tool'])('uses the staged %s manifest in the absence of a plan', async field => {
+  const tool = { name: 'roof-label', version: '1.2.0', description: 'Labels <roof> faces', capabilities: ['drawing.write'] }
+  getAuthorStage.mockResolvedValue({ ...staged, change_kind: 'revise', result: { [field]: tool } })
+  await mount({ proposal: undefined })
+  expect(screen.getByRole('heading', { name: 'roof-label · 1.2.0' })).toBeVisible()
+  expect(screen.getByText('Labels <roof> faces')).toBeVisible()
+  expect(document.querySelector('roof')).toBeNull()
+  expect(screen.getByText('Changes your drawing · Revises the existing tool roof-label')).toBeVisible()
+  expect(button('Approve your own tool')).toBeEnabled()
+})
+
+it('keeps approval disabled without a bound plan or staged manifest, even after reading source', async () => {
+  await mount({ proposal: undefined })
+  expect(screen.getByText(/main\.csx · 2 lines/)).toBeVisible()
+  expect(screen.getByText('Build context not reported')).toBeVisible()
+  expect(button('Approve your own tool')).toBeDisabled()
+})
+
+it('keeps the staged polling deadline across a hidden interval', async () => {
+  vi.useFakeTimers()
+  getAuthorStage.mockResolvedValue({ ...staged, retry_after_ms: 10000, updated_at: Date.now() - 29 * 60000 })
+  const view = await mount()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  const card = active => <AuthoringCard sessionId="session" changeSetId="change" proposal={proposal} active={active} />
+  view.rerender(card(false))
+  await advance(60000)
+  view.rerender(card(true))
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+})
+
 it('renders a historical review by role, a Studio test run and Branch evidence', async () => {
   getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: [], result: { test_run: { status: 'failed', summary: 'No result' } },
     branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Drew 3 labels' } })

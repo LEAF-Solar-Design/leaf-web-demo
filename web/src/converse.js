@@ -15,6 +15,8 @@ import { trackErrorShown, trackStreamDown } from './telemetry.js'
 // endpoint every conversational surface shares, so it carries the guard rather
 // than each of its four callers. See lib/secretGuardTransport.js.
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
+import { composerDraftAccountScope } from './lib/composerDraft.js'
+import { readActiveScope } from './auth/activeScope.js'
 import { announceViewRequest } from './lib/viewControl.js'
 
 const API_BASE = config.apiBase
@@ -488,11 +490,26 @@ export async function resolveApproval(
   confirmationId, owningSessionId, approved, decisionRecorded = false,
   { beforeResume = null, feedback, onRecorded, isCurrent } = {},
 ) {
+  // Keep the feedback in this tab across the gap between the two POSTs.
+  // Only a server-recorded denial can resume with a previously saved note.
+  const scope = readActiveScope() || composerDraftAccountScope()
+  const feedbackKey = scope && 'leaf.planFeedback:' + JSON.stringify([scope, owningSessionId, confirmationId])
+  let storage
+  if (!approved && feedbackKey) {
+    try { storage = globalThis.sessionStorage } catch { /* Tab storage is optional for ordinary denials. */ }
+    if (decisionRecorded && feedback == null) feedback = storage?.getItem(feedbackKey)
+  }
   if (feedback != null) {
     if (approved || typeof feedback !== 'string' || feedback.length > 1000) throw new Error('Invalid plan feedback.')
     guardPlanText(feedback)
   }
   if (!decisionRecorded) {
+    if (feedback != null) {
+      if (!storage) throw new Error('Could not save the pending plan feedback.')
+      storage.setItem(feedbackKey, feedback)
+    } else if (storage?.getItem(feedbackKey) != null) {
+      storage.removeItem(feedbackKey)
+    }
     await approve(confirmationId, approved)
     onRecorded?.()
   }
@@ -500,9 +517,14 @@ export async function resolveApproval(
   if (approved && typeof beforeResume === 'function' && (await beforeResume()) === false) {
     return { held: true, recorded: true }
   }
-  return postMessage(owningSessionId, {
+  const result = await postMessage(owningSessionId, {
     confirm: { confirmationId, approved: !!approved, ...(feedback != null ? { feedback } : {}) },
   })
+  if (feedback != null) {
+    storage?.removeItem(feedbackKey)
+    return { ...result, planRevised: true }
+  }
+  return result
 }
 
 // --- Event stream ---------------------------------------------------------

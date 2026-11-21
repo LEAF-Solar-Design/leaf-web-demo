@@ -36,11 +36,15 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   vi.useFakeTimers()
   const stagePath = '/api/author/stages/' + id
   const reviewPath = '/api/author/reviews'
+  const receipt = { change_set_id: id, staged_commit: commit, catalog_digest: digest,
+    package_files: ['branch-tools/count-panels/main.csx'] }
   const status = [
     { status: 'queued' },
     { status: 'running', compile_attempts: [{ attempt: 1, status: 'refused', diagnostics: ['CS1026 main.csx:50'] }] },
-    { status: 'staged', compile_attempts: [{ attempt: 2, status: 'passed' }],
-      receipt: { change_set_id: id, staged_commit: commit, catalog_digest: digest, package_files: ['branch-tools/count-panels/main.csx'] } },
+    { status: 'staged', receipt, compile_attempts: [{ attempt: 2, status: 'passed' }] },
+    { status: 'staged', receipt, publication: { status: 'published' }, retry_after_ms: 3200 },
+    { status: 'staged', receipt, publication: { status: 'published' },
+      branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Counted 12 panels' } },
   ]
   const requests = []
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
@@ -94,6 +98,11 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   await click('Approve')
   expect(build).toHaveTextContent('Approved by you (reviewer)')
   expect(build).toHaveTextContent('Published to the internal dev catalog')
+  expect(requests.at(-1)).toEqual(['GET', stagePath, undefined])
+  await tick(3199)
+  expect(build).toHaveTextContent('Branch has not reported yet')
+  await tick(1)
+  expect(build).toHaveTextContent('Synced · Compile · passed · Ran · Counted 12 panels')
   await tick(5000)
   expect(requests).toEqual([
     ['POST', '/api/sessions/session/messages', { answers }],
@@ -102,6 +111,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     ['GET', stagePath, undefined], ['GET', stagePath, undefined], ['GET', stagePath, undefined],
     ['GET', reviewPath + '/context?change_set_id=' + id, undefined], ['GET', stagePath + '?view=source', undefined],
     ['POST', reviewPath, { change_set_id: id, staged_commit: commit, catalog_digest: digest, decision: 'approve' }],
+    ['GET', stagePath, undefined], ['GET', stagePath, undefined],
   ])
   expect(track).toHaveBeenCalledWith('plan.approved', { revision: 1 })
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'independent' })
@@ -120,8 +130,46 @@ it('replays submitted answers and supersession with only the current inline deci
   expect(within(screen.getByRole('region', { name: 'Planning questions' })).getByText('Panels')).toBeVisible()
 })
 
-it('settles an open step while reserving the authoring card for the current session', async () => {
-  const fetch = vi.fn(async () => response(200, { change_set_id: id, status: 'failed' }))
+it('keeps a pending plan outside replay history actionable when the poll returns after replay', async () => {
+  let finishPoll
+  listPendingApprovals.mockReturnValueOnce(new Promise(resolve => { finishPoll = resolve }))
+  render(<ConversePanel sessionId="session" />)
+  await push(event('plan_proposed', 'first', proposed), event('turn_complete', 'first'))
+  const pending = { kind: 'propose_build_plan', session_id: 'session', tool: 'propose_plan' }
+  await act(async () => finishPoll([
+    { ...pending, confirmation_id: 'p1', rationale: 'Represented inline' },
+    { ...pending, confirmation_id: 'outside', rationale: 'Older plan awaiting approval' },
+  ]))
+  const list = screen.getByRole('region', { name: 'Pending approvals' })
+  expect(list).not.toHaveTextContent('Represented inline')
+  expect(list).toHaveTextContent('Older plan awaiting approval')
+  expect(within(list).getByRole('button', { name: 'Approve' })).toBeEnabled()
+  expect(screen.getByRole('button', { name: 'Approve and build' })).toBeEnabled()
+})
+
+it('replays the plan bound to this change set even when a newer plan is in the transcript', async () => {
+  vi.stubGlobal('fetch', vi.fn(async url => {
+    if (url.includes('/reviews/context')) return response(200, { viewer_may_approve: true })
+    if (url.includes('?view=source')) return { ...response(404, {}), headers: new Headers() }
+    return response(200, { change_set_id: id, status: 'staged',
+      receipt: { change_set_id: id, staged_commit: commit, catalog_digest: digest } })
+  }))
+  render(<ConversePanel sessionId="session" />)
+  await push(event('plan_proposed', 'first', { ...proposed, change_set_id: id }),
+    event('confirmation_resolved', 'first', { confirmation_id: 'p1', approved: true }),
+    event('plan_proposed', 'second', { ...proposed, confirmation_id: 'p2', change_set_id: 'different',
+      plan: { ...plan, title: 'Draw roof labels' } }),
+    event('tool_result', 'build', { tool: 'author_tool', result: { change_set_id: id } }))
+  const build = screen.getByRole('region', { name: 'Tool authoring' })
+  expect(build).toHaveTextContent('Count panels in the selection')
+  expect(build).not.toHaveTextContent('Draw roof labels')
+  expect(within(build).getByRole('button', { name: 'Approve' })).toBeEnabled()
+})
+
+it('settles the step on a foreign result and mounts the failed build only for the current result', async () => {
+  const fetch = vi.fn(async () => response(200, { change_set_id: id, status: 'failed',
+    error: { reason_code: 'compile_failed', message: 'Review the missing delimiter' },
+    compile_attempts: [{ attempt: 1, status: 'refused', diagnostics: ['CS1026 main.csx:50'] }] }))
   vi.stubGlobal('fetch', fetch)
   const { container } = render(<ConversePanel sessionId="session" />)
   const result = event('tool_result', 'build', {
@@ -133,10 +181,14 @@ it('settles an open step while reserving the authoring card for the current sess
   expect(container).not.toHaveTextContent('Private build summary')
   expect(screen.queryByRole('region', { name: 'Tool authoring' })).toBeNull()
   expect(fetch).not.toHaveBeenCalled()
-  await push({ ...result, data: { ...result.data, summary: 'Current build summary' } })
+  await push({ ...result, data: { ...result.data, ok: false, summary: 'Current build summary' } }, event('turn_complete', 'build'))
   expect(container.querySelectorAll('.converse-step')).toHaveLength(1)
+  expect(container.querySelector('.converse-step')).toHaveAttribute('data-state', 'failed')
   expect(container.querySelector('.converse-step')).toHaveTextContent('Current build summary')
-  expect(screen.getByRole('region', { name: 'Tool authoring' })).toHaveTextContent('failed')
+  const build = screen.getByRole('region', { name: 'Tool authoring' })
+  expect(build).toHaveTextContent('Review the missing delimiter')
+  expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
+  expect(within(build).getByRole('button', { name: 'Fix with these errors' })).toBeEnabled()
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 
