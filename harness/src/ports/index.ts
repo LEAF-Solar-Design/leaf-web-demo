@@ -19,22 +19,11 @@ export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 import { z } from "zod";
 import type { PlanBuildRequest, TurnAnswers } from "../agent/buildPlan.js";
 export { BuildPlan, PLAN_CONFIRMATION_TTL_S, PlanBuildRequest, Questions, TurnAnswers, planDigest, planModeEnabled } from "../agent/buildPlan.js";
-import type {
-  ConverseTurnInput as VendorTurnInput, ConverseEventType as VendorEventType,
-  ConverseEvent as VendorEvent, SessionStore as VendorStore, StoredEvent as VendorStoredEvent,
-} from "../vendor/mushy-author/ports/index.js";
+import type { ConverseTurnInput as VendorTurnInput } from "../vendor/mushy-author/ports/index.js";
 
 export interface ConverseTurnInput extends VendorTurnInput {
   confirm?: NonNullable<VendorTurnInput["confirm"]> & { feedback?: string };
   answers?: TurnAnswers;
-}
-export type ConverseEventType = VendorEventType | "questions_required" | "plan_proposed";
-export interface ConverseEvent extends Omit<VendorEvent, "type"> { type: ConverseEventType }
-export interface StoredEvent extends Omit<VendorStoredEvent, "type"> { type: ConverseEventType }
-export interface SessionStore extends Omit<VendorStore, "appendEvent" | "eventsAfter"> {
-  appendEvent(sessionId: string, turnId: string, type: ConverseEventType,
-    data: Record<string, unknown>): Promise<StoredEvent>;
-  eventsAfter(sessionId: string, afterSeq: number, limit?: number): Promise<StoredEvent[]>;
 }
 
 export const CanonicalChangeSetId = z.string().length(36)
