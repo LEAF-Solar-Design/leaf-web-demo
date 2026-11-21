@@ -1,3 +1,6 @@
+-- Keep the original comment (and denial attribution) across a decision-write retry.
+ALTER TABLE customization_publication_requests ADD COLUMN IF NOT EXISTS review_details_json text;
+
 CREATE TABLE IF NOT EXISTS customization_review_decisions (
     tenant_id text NOT NULL,
     change_set_id uuid NOT NULL,

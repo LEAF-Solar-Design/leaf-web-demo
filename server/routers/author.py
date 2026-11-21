@@ -34,7 +34,7 @@ import customization_service
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
-from customization_models import ChangeSetNotFoundError
+from customization_models import ChangeSetConflictError, ChangeSetNotFoundError, IdempotencyReplayError
 from customization_service import CustomizationServiceError, CustomizationService
 from customization_flags import enabled as customization_enabled
 from deps import fb
@@ -1117,13 +1117,20 @@ def _admit_review_call(subject: str) -> bool:
         return True
 
 
-@router.post("/api/author/reviews")
-def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def _review_gate(tenant: Any) -> JSONResponse | None:
     denied = _customization_gate(6, tenant)
     if denied is not None:
         return denied
     if not customization_flags.inline_review_enabled(str(tenant)):
         return _customization_error(CustomizationServiceError("inline_review_disabled", 404))
+    return None
+
+
+@router.post("/api/author/reviews")
+def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    denied = _review_gate(tenant)
+    if denied is not None:
+        return denied
     subject = getattr(tenant, "subject", None)
     if subject and not _admit_review_call(subject):
         return _customization_error(CustomizationServiceError("review_rate_limited", 429))
@@ -1138,17 +1145,26 @@ def decide_review(req: ReviewRequest, tenant=Depends(deps.require_tenant)) -> Di
                 CustomizationServiceError(exc.reason_code, 403), from_authority=True
             )
         return _customization_error(exc)
+    except (ChangeSetConflictError, IdempotencyReplayError):
+        return _customization_error(CustomizationServiceError("review_target_stale", 409))
     except Exception as exc:
         return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
 
 
 @router.get("/api/author/reviews/context")
 def review_context(change_set_id: UUID, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
-    if not deps.auth_live():
-        return _customization_error(CustomizationServiceError("customization_auth_required", 503))
+    denied = _review_gate(tenant)
+    if denied is not None and denied.status_code != 404:
+        return denied
     try:
-        return CustomizationService.configured().review_context(tenant=tenant, change_set_id=str(change_set_id))
-    except CustomizationServiceError as exc:
+        return CustomizationService.configured().review_context(
+            tenant=tenant, change_set_id=str(change_set_id), gate_open=denied is None,
+        )
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            return _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
         return _customization_error(exc)
     except Exception as exc:
         return _customization_error(CustomizationServiceError("customization_review_failed", 503), cause=exc)
