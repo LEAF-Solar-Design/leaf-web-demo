@@ -34,8 +34,11 @@ import { REASONS } from '../lib/actionRegistry.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import Markdown from './Markdown.jsx'
+import QuestionsCard from './converse/QuestionsCard.jsx'
+import PlanCard from './converse/PlanCard.jsx'
+import AuthoringCard from './converse/AuthoringCard.jsx'
 import LiveRegion from './LiveRegion.jsx'
-import { contextPct, fmtDetail, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
+import { contextPct, fmtDetail, modelBadge, orDash, usageCost, usageCostLabel, usageModel } from '../usage.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { listEngineChanges } from '../engineChanges.js'
 import { moveRovingTab } from '../lib/roving.js'
@@ -482,6 +485,16 @@ export default function ConversePanel({
       onConnectionState: (state) => { if (active) setConnectionState(state) },
       onEvent: (env) => {
         if (!active) return
+        if (env?.session_id && env.session_id !== sessionId) {
+          // The transcript still settles an open tool step. Keep only its status
+          // in this stream's history so the foreign payload cannot drive actions.
+          if (env.type === 'tool_result') {
+            const status = { type: 'transcript_tool_status', session_id: sessionId, turn_id: env.turn_id,
+              data: { tool: env.data?.tool, ok: env.data?.ok !== false } }
+            setEvents(prev => [...prev, status])
+          }
+          return
+        }
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
         notifyPageProposal(env)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
@@ -692,6 +705,10 @@ export default function ConversePanel({
     const turns = []
     const byId = new Map()
     const decisions = new Map() // confirmation_id -> {approved, by}
+    const plans = new Map()
+    const changeSets = new Set()
+    const questionCards = new Map()
+    let openQuestions = []
     const completed = new Set()
     let quota = false
     let quotaRetry = null
@@ -707,8 +724,17 @@ export default function ConversePanel({
       return t
     }
     for (const env of events) {
+      if (env.session_id && env.session_id !== sessionId) continue
       const type = env.type
       const data = env.data || {}
+      if (type === 'transcript_tool_status') {
+        const open = byId.get(env.turn_id)?.openCalls.find(call => call.tool === data.tool && call.ok === null)
+        if (open) {
+          open.ok = data.ok
+          open.statusOnly = true
+        }
+        continue
+      }
       if (type === 'confirmation_resolved') {
         decisions.set(data.confirmation_id, { approved: !!data.approved, by: data.by || null })
         continue
@@ -725,6 +751,16 @@ export default function ConversePanel({
           || type === 'overlay_revoked') continue
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
+          for (const item of openQuestions) {
+            if (item.turnId !== t.turnId) item.closed = true
+          }
+          openQuestions = openQuestions.filter(item => !item.closed)
+          const answered = questionCards.get(data.answers?.question_id)
+          if (answered) {
+            answered.closed = true
+            answered.answers = data.answers.answers
+          }
+          if (data.confirm?.approved) t.planId = data.confirm.confirmation_id || data.confirm.confirmationId
           for (const earlier of turns) {
             if (earlier !== t && earlier.started && !earlier.stopReason) {
               earlier.stopReason = 'superseded'
@@ -751,10 +787,19 @@ export default function ConversePanel({
         t.feed.push({ kind: 'tool', chip })
       } else if (type === 'tool_result') {
         // Pair with the earliest still-open call for the same tool.
-        const open = t.openCalls.find((c) => c.tool === data.tool && c.ok === null)
+        const open = t.openCalls.find((c) => c.tool === data.tool && (c.ok === null || c.statusOnly))
         const writtenBy = writtenByOf(data)
-        if (open) { open.ok = data.ok !== false; open.result = data.summary || ''; open.fullResult = data.result; open.writtenBy = writtenBy }
-        else t.feed.push({ kind: 'tool', chip: { id: data.call_id || env.seq || t.feed.length, tool: data.tool, summary: '', ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy } })
+        const result = { ok: data.ok !== false, result: data.summary || '', fullResult: data.result, writtenBy }
+        if (open) Object.assign(open, result, { statusOnly: false })
+        else t.feed.push({ kind: 'tool', chip: { id: data.call_id || env.seq || t.feed.length, tool: data.tool, summary: '', ...result } })
+        if (data.tool === 'author_tool') {
+          const id = data.result?.change_set_id || data.result?.receipt?.change_set_id || data.change_set_id
+          if (typeof id === 'string' && id && !changeSets.has(id)) {
+            changeSets.add(id)
+            const planId = data.result?.plan_confirmation_id || open?.args?.plan_confirmation_id || t.planId
+            t.feed.push({ kind: 'authoring', id, planId })
+          }
+        }
       } else if (type === 'job_linked') {
         t.feed.push({ kind: 'job', jobId: data.job_id, tool: data.tool || null })
       } else if (type === 'proposed_run') {
@@ -767,6 +812,20 @@ export default function ConversePanel({
         t.feed.push({ kind: 'confirm', id: data.confirmation_id, confirmKind: data.kind || null, payload: data.payload || null })
       } else if (type === 'question_required') {
         t.feed.push({ kind: 'question', id: data.question_id, question: data.question || '', options: data.options || [] })
+      } else if (type === 'questions_required' && data.question_id && Array.isArray(data.questions)
+          && data.questions.length >= 1 && data.questions.length <= 4) {
+        const item = { kind: 'questions', id: data.question_id, questions: data.questions, turnId: t.turnId }
+        questionCards.set(item.id, item)
+        openQuestions.push(item)
+        t.feed.push(item)
+      } else if (type === 'plan_proposed' && data.confirmation_id && data.plan) {
+        const prior = plans.get(data.supersedes)
+        if (prior) prior.replacedBy = data.revision
+        const proposedAt = Date.parse(env.ts)
+        const item = { kind: 'plan', id: data.confirmation_id, proposal: data,
+          expiresAt: data.expires_at ?? (proposedAt + 1800 * 1000) }
+        plans.set(item.id, item)
+        t.feed.push(item)
       } else if (type === 'turn_usage') {
         t.usage = data
       } else if (type === 'turn_complete') {
@@ -815,9 +874,9 @@ export default function ConversePanel({
     // reading, not a per-turn one, so the newest turn_usage is the truth.
     let latestUsage = null
     for (const t of turns) if (t.usage) latestUsage = t.usage
-    return { turns, decisions, completed, quota, quotaRetry, grant, active, latestUsage,
+    return { turns, decisions, plans, completed, quota, quotaRetry, grant, active, latestUsage,
              activeTurnId: activeTurn ? activeTurn.turnId : null }
-  }, [events, stoppedTurns, endedTurns])
+  }, [sessionId, events, stoppedTurns, endedTurns])
 
   // Durable turn text survives remounts. Current App-dispatched turns and
   // panel-sent follow-ups retain their existing precedence, keyed by turn_id.
@@ -1160,7 +1219,32 @@ export default function ConversePanel({
     )
   }
 
+  const rememberInlineTurn = (turnId, approvedPlanId = null) => {
+    if (sessionIdRef.current === sessionId) {
+      setLocalTurns(prev => [...prev, { turnId, text: null, approvedPlanId }])
+    }
+  }
+
   const renderFeedItem = (item, i, turnId) => {
+    if (item.kind === 'questions') return <QuestionsCard key={`questions-${sessionId}-${item.id}`}
+      sessionId={sessionId} questionId={item.id} questions={item.questions}
+      closed={item.closed} answers={item.answers} disabled={busy}
+      onAnswered={rememberInlineTurn} />
+    if (item.kind === 'plan') {
+      const pending = pendingApprovals.find(approval => approval.confirmation_id === item.id)
+      return <PlanCard key={`plan-${sessionId}-${item.id}`} sessionId={sessionId} proposal={item.proposal}
+        resolved={model.decisions.get(item.id)} pending={pending} expiresAt={pending?.expires_at ?? item.expiresAt}
+        replacedBy={item.replacedBy} disabled={busy} onResumed={(turnId, approved) =>
+          rememberInlineTurn(turnId, approved ? item.id : null)} />
+    }
+    if (item.kind === 'authoring') {
+      const resume = localTurns.find(turn => turn.turnId === turnId && turn.approvedPlanId)
+      const tiedToBuild = [...model.plans.values()].find(plan => plan.proposal.change_set_id === item.id)
+      const bound = (tiedToBuild ?? model.plans.get(item.planId ?? resume?.approvedPlanId))?.proposal
+      return <AuthoringCard key={`authoring-${sessionId}-${item.id}`} sessionId={sessionId} changeSetId={item.id}
+        proposal={bound?.change_set_id && bound.change_set_id !== item.id ? undefined : bound}
+        disabled={busy} active={assistantTab === 'conversation'} onRetry={rememberInlineTurn} />
+    }
     if (item.kind === 'text') {
       // Assistant prose renders through the element-only markdown path
       // (Markdown.jsx / markdown.js): fenced code, lists and links become
@@ -1249,6 +1333,7 @@ export default function ConversePanel({
       )
     }
     if (item.kind === 'proposal' || item.kind === 'confirm') {
+      if (model.plans.has(item.id)) return null
       const resolved = model.decisions.get(item.id)
       const localPick = decidedLocal[item.id]
       const settled = resolved || localPick != null
@@ -1367,6 +1452,7 @@ export default function ConversePanel({
     return !last || last.kind === 'job' || (last.kind === 'tool' && last.chip.ok !== null)
   }
 
+  const otherPendingApprovals = pendingApprovals.filter(approval => !model.plans.has(approval.confirmation_id))
   const conversation = (
     <>
       {connectionState !== 'connected' && connectionState !== 'connecting' && (
@@ -1403,14 +1489,14 @@ export default function ConversePanel({
         </div>
       )}
 
-      {(pendingApprovals.length > 0 || pendingApprovalsError) && (
+      {(otherPendingApprovals.length > 0 || pendingApprovalsError) && (
         <section className="converse-pending" aria-label="Pending approvals">
           <div className="converse-pending-head">
             <span className="converse-title">Pending approvals</span>
-            {pendingApprovals.length > 0 && <span className="chip-neutral">{pendingApprovals.length}</span>}
+            {otherPendingApprovals.length > 0 && <span className="chip-neutral">{otherPendingApprovals.length}</span>}
             {pendingApprovalsError && <span className="dim">Could not refresh</span>}
           </div>
-          {pendingApprovals.map(renderPendingApproval)}
+          {otherPendingApprovals.map(renderPendingApproval)}
         </section>
       )}
 
@@ -1469,6 +1555,15 @@ export default function ConversePanel({
               <div className="converse-turnfoot">
                 {t.stopReason && STOP_NOTES[t.stopReason] && (
                   <span className="dim">{humanizeError(STOP_NOTES[t.stopReason])}</span>
+                )}
+                {t.usage && modelBadge(t.usage) && (
+                  <span
+                    className={modelBadge(t.usage).local ? 'converse-model-badge local' : 'converse-model-badge'}
+                    data-testid="converse-model-badge"
+                    title="The model that answered this reply"
+                  >
+                    {modelBadge(t.usage).text}
+                  </span>
                 )}
                 {t.usage && <span className="converse-usage">{fmtUsage(t.usage)}</span>}
               </div>

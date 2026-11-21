@@ -12,15 +12,18 @@ import { PRODUCT_SURFACES } from './productSurfaces.js'
 // and the schema lives one level up, at the repo root's contract/.
 const SCHEMA_PATH = `${process.cwd()}/../contract/surface-config.v1.schema.json`
 const schema = JSON.parse(readFileSync(SCHEMA_PATH, 'utf8'))
+// S1-A11: Estimator stays outside overlays until the mushy-code vendor pin moves.
+const OVERLAY_EXEMPT = Object.freeze(new Set(['estimator']))
 
 describe('Surface Contract — schema', () => {
   it('admits the native Ops profile through the same closed overlay definition', () => {
     expect(schema.properties.ops).toEqual({ $ref: '#/$defs/surfaceOverlay' })
     expect(schema.properties.lab).toEqual({ $ref: '#/$defs/surfaceOverlay' })
+    expect(schema.properties.estimator).toBeUndefined()
   })
-  it('declares exactly the surface ids productSurfaces.js ships', () => {
+  it('declares exactly the non-exempt surface ids productSurfaces.js ships', () => {
     const schemaIds = Object.keys(schema.properties).sort()
-    const contractIds = PRODUCT_SURFACES.map(({ id }) => id).sort()
+    const contractIds = PRODUCT_SURFACES.map(({ id }) => id).filter(id => !OVERLAY_EXEMPT.has(id)).sort()
     expect(schemaIds).toEqual(contractIds)
   })
 

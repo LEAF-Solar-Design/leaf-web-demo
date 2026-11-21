@@ -145,9 +145,14 @@ class LabWorker:
             if reason:
                 for run in self._runs.values():
                     self._suspend(run, reason)
-            elif color == "active" or self.env.get("LEAF_LAB_WORKER_IDLE_CLAIMS") == "1":
+            else:
                 free = self.slots - len(self._runs)
-                for row in self.store.claimable(free, ops_revisions={OPS_REVISION}):
+                # A deployment must not strand an already-admitted interactive
+                # run merely because its submitting build is no longer live.
+                # Idle workers still leave new work and activations alone.
+                recovering_only = color != "active" and self.env.get("LEAF_LAB_WORKER_IDLE_CLAIMS") != "1"
+                for row in self.store.claimable(free, ops_revisions={OPS_REVISION},
+                                                recovering_only=recovering_only):
                     key = (row["tenant_id"], row["run_id"])
                     if key in self._runs:
                         continue

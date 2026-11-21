@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import os
+import unicodedata
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -53,6 +54,25 @@ _FAILURES = {
     "SIP_R4_WORKER_UNAVAILABLE": (503, True),
 }
 _UNAVAILABLE = "Project Solar admission unavailable."
+_REFUSAL_MESSAGES = {
+    "PANEL_LAYER_FILTER_REQUIRED": "No panel layer filter is set (panel_layer_contains). Set it in Solar settings to the layer that holds your panels.",
+    "NO_PANELS_RECOGNISED": "No panels matched the panel layer filter panel_layer_contains.",
+    "INVALID_SEED_REQUEST": "Solar setup was refused.",
+    "UNKNOWN_UNITS": "The drawing units in project.units are not recognised.",
+    "SIP_R1_CHECKOUT_EXPIRED": "Your drawing checkout expired. Take the checkout again, then retry.",
+    "SIP_R1_CHECKOUT_REQUIRED": "This change needs a drawing checkout. Take the checkout, then retry.",
+}
+_REFUSAL_ACTIONS = {
+    "PANEL_LAYER_FILTER_REQUIRED": "Set panel_layer_contains in Solar settings to the layer that holds your panels.",
+    "NO_PANELS_RECOGNISED": "Choose a panel_layer_contains filter in Solar settings that matches your panel layer.",
+    "INVALID_SEED_REQUEST": "Correct the Solar setup field, then retry.",
+    "UNKNOWN_UNITS": "Set recognised drawing units in Solar settings, then retry.",
+    "SIP_R1_CHECKOUT_EXPIRED": "Take the drawing checkout again, then retry.",
+    "SIP_R1_CHECKOUT_REQUIRED": "Take the drawing checkout, then retry.",
+}
+_SEED_FIELDS = frozenset(("units.drawing_units", "units.wcs_to_ucs",
+    "units.elevation_datum", "units.crs", "units", "schema_version",
+    "source_intake_sha256", "tenant_id", "drawing_id", "created_at", "initialize"))
 _RESOLVER_MESSAGES = frozenset((
     "X-Project-Id is required with X-Org-Id",
     "platform database is required for a project-scoped run",
@@ -74,13 +94,23 @@ def project_runs_enabled():
     return os.environ.get("LEAF_SOLAR_PROJECT_RUN_ENABLED", "0") == "1"
 
 
-def _refusal(reason, *, status=409, retryable=False, message=_UNAVAILABLE):
+def _refusal(reason, *, status=409, retryable=False, message=_UNAVAILABLE,
+             path=None, panel_filter=None):
+    message = _REFUSAL_MESSAGES.get(reason, message)
+    if reason == "INVALID_SEED_REQUEST" and type(path) is str and path in _SEED_FIELDS:
+        message = f"Solar setup was refused: {path} is not valid."
+    elif reason == "NO_PANELS_RECOGNISED" and type(panel_filter) is str:
+        value = "".join(c for c in panel_filter
+                        if not unicodedata.category(c).startswith("C"))[:120]
+        message = f'No panels matched the panel layer filter panel_layer_contains="{value}".'
     code = ErrorCode.UNAUTHENTICATED if status == 401 else (
         ErrorCode.FORBIDDEN if status == 403 else (
             ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS))
     body = err_envelope(code, message, retryable)
     if reason is not None:
         body["error"]["reason_code"] = reason
+    if reason in _REFUSAL_ACTIONS:
+        body["error"]["next_action"] = _REFUSAL_ACTIONS[reason]
     return {"status_code": status, "content": body}
 
 
@@ -246,7 +276,37 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
     except (platform_link.CanonicalEntitlementDenied, EntitlementDenied) as exc:
         return _response(exc.response)
     except GraphValidationError as exc:
-        return _refusal(exc.code, message="Canonical Solar request was refused.")
+        # Import lazily because the producer also uses this admission module.
+        from solar_project_solaredge import SolarEdgeGridRefusal
+        if isinstance(exc, SolarEdgeGridRefusal):
+            # Revalidate the typed diagnostic before it crosses the response boundary.
+            try:
+                diagnostic = SolarEdgeGridRefusal(exc.code, exc.frame_ref, exc.candidate_ids, exc.action)
+            except (GraphValidationError, AttributeError):
+                return _refusal("REPORT_INVALID", message="Canonical Solar request was refused.")
+            unmatched = diagnostic.code == "SOLAREDGE_GRID_UNMATCHED"
+            response = _refusal(diagnostic.code,
+                message=("The panel group has no matching SolarEdge grid." if unmatched
+                         else "The panel group matches multiple SolarEdge grids."))
+            response["content"]["error"].update(
+                frame_ref=diagnostic.frame_ref,
+                candidate_ids=diagnostic.candidate_ids,
+                action=diagnostic.action,
+                next_action=("Redraw the panel group, then rebuild the report." if unmatched
+                             else "Select one candidate grid for the panel group."))
+            return response
+        panel_filter = None
+        if exc.code == "NO_PANELS_RECOGNISED":
+            try:
+                # Read the exact admitted parent, never a caller's filter or current head.
+                verified = project.resolve_context(tenant, UUID(str(context["project_id"])),
+                    parent, drawing_id=drawing, write=False)
+                settings = verified.intake["solar_design_graph"]["settings"]
+                panel_filter = settings.get("panel_layer_contains")
+            except Exception:
+                pass  # A diagnostic lookup must not replace the original refusal.
+        return _refusal(exc.code, message="Canonical Solar request was refused.",
+                        path=exc.path, panel_filter=panel_filter)
     except CloudError as exc:
         statuses = {"cloud_request_invalid": 400, "cloud_auth_missing": 401,
                     "cloud_tenant_unauthorized": 403, "cloud_upstream_failure": 502,

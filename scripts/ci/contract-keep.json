@@ -1,0 +1,154 @@
+{
+  "schema": "leaf.ci.contract-keep.v1",
+  "suites": [
+    {
+      "id": "migration-expand-contract",
+      "reason": "main-broke",
+      "added": "2026-11-18",
+      "evidence": {
+        "pr": 3309,
+        "failure": "migration gate never ran on the PR (tier mode omitted catalog suites outside the tier); production full run 13 on 6494349b went RED on it",
+        "job": 10540,
+        "date": "2026-11-18",
+        "note": "requested by the CI owner 01c45d41 with this evidence"
+      }
+    },
+    {
+      "id": "scripts-proof-string-sizer",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "scripts-solar-w1-studio-autofill-solve",
+      "reason": "main-broke",
+      "added": "2026-11-17",
+      "evidence": {
+        "pr": 3332,
+        "failure": "DISCONTIGUOUS_SOLVE_STRING",
+        "date": "2026-11-17",
+        "note": "added by hand on the CI owner's instruction; no second main failure required for this first entry"
+      }
+    },
+    {
+      "id": "server-authored-execution-live-gate",
+      "reason": "main-broke",
+      "added": "2026-11-18",
+      "evidence": {
+        "pr": 3346,
+        "failure": "engine/registry.json string-panels drifted from site_demo.SITE_TOOL; the suite never ran on the PR (outside the tier); production full run 14 on 5420d361 went RED on it",
+        "job": 10654,
+        "date": "2026-11-18",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-capabilities-project-read",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-engine-registry-scripts",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-intake-dxf-envelope",
+      "reason": "main-broke",
+      "added": "2026-11-19",
+      "evidence": {
+        "pr": 3477,
+        "failure": "full run 20 on 107d6439 RED, job 13042: #3477 changed the DXF block intake shape this suite pins",
+        "job": 13042,
+        "date": "2026-11-19",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-lab-capability-coverage",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-solar-design-survives-saves",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-solar-tool-solar-string-reports",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-surface-entitlements",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-catalog-gates",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-cloud-solve-probe",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1-solve-parity",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w1c-solve-proposal",
+      "reason": "contract-keep",
+      "added": "2026-11-18",
+      "evidence": null
+    },
+    {
+      "id": "server-w4g7b-01s",
+      "reason": "main-broke",
+      "added": "2026-11-19",
+      "evidence": {
+        "pr": 3477,
+        "failure": "same #3477 change broke it (8 failures, repaired in #3484); outside the PR tier so only full CI saw it",
+        "job": 12252,
+        "date": "2026-11-19",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-w4g7b-02s",
+      "reason": "main-broke",
+      "added": "2026-11-19",
+      "evidence": {
+        "pr": 3477,
+        "failure": "dxf_intake.py change altered the pinned intake polygon shape; suite outside the PR tier so only production full run 18 on 0b100e2f caught it (second main break of this suite after the dependency-report one fixed earlier)",
+        "job": 12252,
+        "date": "2026-11-19",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-w4g7b-06i",
+      "reason": "main-broke",
+      "added": "2026-11-19",
+      "evidence": {
+        "pr": 3477,
+        "failure": "same #3477 block intake shape change; found by running every dxf_intake test at 107d6439 vs 558de886",
+        "job": 13042,
+        "date": "2026-11-19",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    }
+  ]
+}

@@ -390,17 +390,22 @@ def _color(color):
     return color
 
 
-def claimable(limit, *, ops_revisions):
-    if type(limit) is not int or limit < 0:
+def claimable(limit, *, ops_revisions, recovering_only=False):
+    if type(limit) is not int or limit < 0 or type(recovering_only) is not bool:
         raise ValueError("invalid_lab_queue_limit")
     revisions = {_pin(revision) for revision in ops_revisions}
     if not revisions or limit == 0:
         return []
 
     def operation(sql):
-        rows = sql.execute("SELECT * FROM lab_runs WHERE state='queued' OR"
-                           " (state='running' AND lease_expires_at<=?) ORDER BY created_at,run_id,tenant_id",
-                           (_now().isoformat(),)).fetchall()
+        # Filter before fairness/slot limiting so an older queued run cannot
+        # hide recoverable work from an idle worker. Activation admission keeps
+        # its existing active-build gate.
+        rows = sql.execute("SELECT * FROM lab_runs WHERE (?=0 AND state='queued') OR"
+                           " (state='running' AND lease_expires_at<=? AND"
+                           " (?=0 OR adapter_revision='lab-worker.v1'))"
+                           " ORDER BY created_at,run_id,tenant_id",
+                           (int(recovering_only), _now().isoformat(), int(recovering_only))).fetchall()
         active = {row["tenant_id"]: row["count"] for row in sql.execute(
             "SELECT tenant_id,COUNT(*) AS count FROM lab_runs WHERE state='running' AND lease_expires_at>?"
             " GROUP BY tenant_id", (_now().isoformat(),)).fetchall()}

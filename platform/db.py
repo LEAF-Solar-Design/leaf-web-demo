@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "x07_customers": {"customer_key", "profile_id"},
+    "x07_profile_versions": {
+        "customer_key", "profile_id", "version", "roles_json", "created_at",
+    },
+    "x07_project_applications": {"project_key", "customer_key", "profile_id", "version"},
     "project_checkout_custody": {
         "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
         "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",
@@ -595,6 +600,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "confirmation_id", "tenant_id", "session_id", "turn_id", "action", "args",
             "args_hash", "policy", "rung", "created_at", "expires_at", "granted",
             "denied", "decided_at", "decided_by", "reason", "consumed_at",
+            "proposer_subject", "proposed_plan", "consumed_turn_id", "retry_of_change_set_id",
         },
         "agent_session_grants": {
             "tenant_id", "session_id", "action", "target_key", "granted_at",
@@ -739,14 +745,22 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "customization": {
+        "customization_stage_attempt_history": {
+            "tenant_id", "change_set_id", "failed_version", "attempt",
+            "reason_code", "reason_message", "retryable",
+            "authority_session_id", "authority_turn_id", "finished_at",
+            "retry_authority_session_id", "retry_authority_turn_id",
+        },
         "customization_change_sets": {
             "change_set_id", "tenant_id", "idempotency_key", "state", "version",
             "base_commit", "staged_commit", "catalog_digest",
             "desired_platform_release", "workspace_contract_digest",
             "author_subject", "approver_subject", "created_at", "updated_at",
             "change_kind", "target_tool_name", "request_description", "request_fingerprint",
+            "plan_json", "plan_digest", "plan_confirmation_id", "compile_summary_json",
             "authority_session_id", "authority_turn_id",
             "request_graph_input", "base_catalog_change_set_id", "catalog_record_fields_json",
+            "tool_target",
         },
         "effective_catalogs": {
             "tenant_id", "change_set_id", "catalog_commit", "catalog_digest",
@@ -765,6 +779,15 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         "customization_publication_requests": {
             "tenant_id", "change_set_id", "confirmation_id", "status",
             "reason_code", "created_at", "updated_at",
+        },
+        "customization_review_decisions": {
+            "tenant_id", "change_set_id", "staged_commit", "catalog_digest",
+            "decision", "approval_kind", "approver_subject", "approver_role",
+            "comment", "confirmation_id", "decided_at",
+        },
+        "branch_tool_receipts": {
+            "receipt_id", "tenant_id", "subject", "name", "version", "package_digest",
+            "event", "plugin_version", "duration_ms", "diagnostics_json", "received_at",
         },
         "customization_deployment_snapshots": {
             "snapshot_id", "payload_json", "effective_catalog_digest",
@@ -940,7 +963,8 @@ _REQUIRED_CONSTRAINTS = {
         "candidate_bytes IS NOT NULL", "proof_bytes IS NOT NULL", "response_bytes IS NOT NULL",
         "sender_worker IS NOT NULL", "refusal_code IS NULL", "refusal_code IS NOT NULL",
         "'SOLVE_OUTCOME_UNKNOWN'", "'cloud_request_invalid'", "'cloud_auth_missing'",
-        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'"),
+        "'cloud_tenant_unauthorized'", "'cloud_upstream_failure'", "'cloud_response_invalid'",
+        "'CLOUD_REQUEST_REJECTED'"),
     "demo_sessions_pkey": _catalog_contract(
         "demo_sessions", "PRIMARY KEY (id)"),
     "demo_sessions_subject_key": _catalog_contract(
@@ -1620,6 +1644,9 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "agent": {
         "agent_approvals_pkey": _catalog_contract(
             "agent_approvals", "PRIMARY KEY (confirmation_id)"),
+        "agent_plan_approver_matches": _catalog_contract(
+            "agent_approvals", "CHECK", "propose_build_plan", "NOT granted",
+            "proposer_subject IS NOT NULL", "decided_by IS NOT NULL", "decided_by = proposer_subject"),
         "agent_session_grants_pkey": _catalog_contract(
             "agent_session_grants",
             "PRIMARY KEY (tenant_id, session_id, action, target_key)"),
@@ -1834,6 +1861,12 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
+        "customization_stage_attempt_history_pkey": _catalog_contract(
+            "customization_stage_attempt_history",
+            "PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)"),
+        "customization_stage_attempt_history_change_set_id_fkey": _catalog_contract(
+            "customization_stage_attempt_history", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
         "customization_change_sets_pkey": _catalog_contract(
             "customization_change_sets", "PRIMARY KEY (change_set_id)"),
         "customization_change_sets_tenant_id_idempotency_key_key": _catalog_contract(
@@ -2040,6 +2073,9 @@ _AUTHORITY_REQUIRED_INDEXES = {
     "customization": {
         "customization_recovery_idx": _catalog_contract(
             "customization_change_sets", "(state, tenant_id)"),
+        "customization_change_sets_plan_idx": _catalog_contract(
+            "customization_change_sets", "UNIQUE INDEX", "(tenant_id, plan_confirmation_id)",
+            "WHERE", "plan_confirmation_id IS NOT NULL"),
         "customization_confirmation_lookup_idx": _catalog_contract(
             "customization_confirmations",
             "(tenant_id, change_set_id, consumed, created_at DESC)"),

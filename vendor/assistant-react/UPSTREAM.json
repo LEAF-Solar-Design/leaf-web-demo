@@ -3,12 +3,12 @@
   "upstream": "LEAF-Solar-Design/mushy-code",
   "package": "assistant-react",
   "path": "packages/assistant-react",
-  "commit": "3a02049b17b9f75db1b6876061d6b3f7fdecf828",
-  "tree_sha256": "9f1d57c961d744a54ca76488171b412dd8e6243f79808f630ef8bdaee6c61d4f",
+  "commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48",
+  "tree_sha256": "45fec3673ac0abf5bbbd106d51dc1b094bc81a407699d86be4903292c6df62d8",
   "files": {
-    "README.md": "753ad6276041d3a9a920e35b718753791d406a33594b74e8ef7f9d2c54dc92ce",
-    "package-lock.json": "d9b9d9cd4bf92733aa0c1a64f132a99271a9fffc3a2ce2625abc64727fa4a36f",
-    "package.json": "9faceddfc2d031cccef71a34842fdb925286d3de61564c5300e130d58e419d92",
+    "README.md": "7c1a2fd83b3a404d7d4d8938a40d0f80aec4e70e9617084ec31072f31df64dfd",
+    "package-lock.json": "3c57eb9973d8ff32122cd52d03d27b00a758dc229b116da607a73121924c0671",
+    "package.json": "21869a655eec31f39317bac7179003d42bccc8843a34cad75ff3d9e3dae11d75",
     "src/Thread.tsx": "9a38f597257b8e9b2002557c9ad05d8df6d2c41f1376f4dde9f4bfb4c49caa04",
     "src/actions/IntegrationActionForm.tsx": "709a565aec63eb2dc50820cfbade9880e29d3a4df3f337b6637d3a3221f6e61a",
     "src/actions/IntegrationActionRunStatus.tsx": "70ba9081e6406797c5011a0a351d9c515f06e0723334c331d5f06e04906df0c8",
@@ -32,10 +32,10 @@
     "src/components/ReasonBanner.tsx": "602bb9e862e116f7b18b70e72a1d4d4c568e8c717612543c829c111178481b06",
     "src/components/StateCards.tsx": "97665cae37988bc971e350ada42d4cb8ae2b3d85e1c6235cb80dc8de354b1764",
     "src/datasets/DataTableCore.tsx": "2bc36140af02c940ef6c3257ac0ef7dfd5b0e85f204763f40bc8ce75e9690925",
-    "src/datasets/DatasetElement.tsx": "1f522250c33399372742e0de1be3623d0612444dadf67e21b833322227ef9105",
-    "src/datasets/LineChartCore.tsx": "4ecc24d8b5c7b313319c9554b63e750e0f393a65c7a3a14ee1a45cd4e77a9923",
-    "src/datasets/ProviderPairTable.tsx": "cfdd2ced3f59efe4a78ebd636ba7b568cc0d96126bd787d035a8ce255990c53d",
-    "src/datasets/formatting.ts": "58445e9ab194a61584b6cb0caefc5213081fcbf7f55e4c44b4e05038d3f76cd0",
+    "src/datasets/DatasetElement.tsx": "1d76fe4f9b563fd9361e0430ade3410c7981445cb68d60558fd30eb84a71a163",
+    "src/datasets/LineChartCore.tsx": "117afda586b658d547f8cca4c2f1def9c6eaf3bfd177837d153885a8bb18e3b2",
+    "src/datasets/ProviderPairTable.tsx": "26a67f80fda5513a39bb5b29637a182f34784c674d71897fc2163c80eb2e507e",
+    "src/datasets/formatting.ts": "de02ed0d6eda299e4f6c029a01ee393a954e3503f695aac3a6bc37a7acd5cbe5",
     "src/datasets/index.ts": "3556b05487659e8720d4cc97b25a7f667815c63870ebab28e72a1d96c91cb8e3",
     "src/index.ts": "0742a70a5cbc0ee096ebecaab963f4975a53f0bba28299152a572089c7b7046c",
     "src/leaf-tokens.v1.json": "7dd685dc36a72990da72760b49fc4d54848181564714d48feae5d60d396ead29",
@@ -44,11 +44,11 @@
     "test/action-reconciliation.test.tsx": "245f86fdcb282815c3953454cb7cc4705d3fc99a6a93b6819d07092327de59d0",
     "test/actions.test.tsx": "aacbf9591f43e96167c485d855bd6a86a8631781d92cc0344f0d378ab4145a1d",
     "test/components.test.tsx": "83f6ef58a50d45ccb6416f3e38a1312d4a9dd71653e47000166626786e9b33a6",
-    "test/dataset-formatting.test.ts": "da9d71620e648ac18006e2dd30b96395480474c094519aff2729cc797cbdf484",
-    "test/dataset-rendered-line.test.tsx": "7bf4101a429c1d3fbfea3628feb528a17d1ecd258e184e2978bd2cdaa3621efa",
-    "test/datasets.test.tsx": "d3fb013a3bf71b5e92c705bb9365f8ce0db53e6eb87044a84f90720b0f1b1bea",
+    "test/dataset-formatting.test.ts": "83cf8b06f2d843c7eb3adb8d12745ab96d1cd4ed507d31fac9bfe83a3e488dab",
+    "test/dataset-rendered-line.test.tsx": "07beebc68b09888c7c82d51252596a0f888051fd8f6aff71cfb2ea4a00484a49",
+    "test/datasets.test.tsx": "0a6730d4d35df8d1f7a51beb2737a856ef6b26c9a20158ce5ba23bcee24afe00",
     "test/manual-workflow-status.test.tsx": "21980eecd68fdda156ce689059e98294da22ea1d04783b93b222a3802444ca59",
-    "test/provider-pair-table.test.tsx": "14f703a0f857957b0dabda0fd854cfb92a247b5e59b93fb676f2bb4633564adf",
+    "test/provider-pair-table.test.tsx": "7f6335a7b355b7f76dcce9013df1f1cf71d1b686a61ee7aeaae57830760faf7f",
     "test/self-contained.test.ts": "14e3c635d2a9e8df43524e25b0639acd44ff0356921a05c009bc8e845096488a",
     "test/setup.ts": "3b4fb51b7c8aa9783fc960c2f852dacb6d202533f43ffcb24724094f4093371a",
     "test/states.test.tsx": "f18a2bf0733f27e4021f89f462feb1687f91bf1828ef0864d06c342e4899dada",
@@ -60,5 +60,23 @@
     "vitest.config.ts": "280430823b4590aff599afb473b496e84e8c7fbf7a0e6ef28ea71db72b5a1cb5"
   },
   "protected": [],
-  "synced_by": "scripts/sync-assistant-kit.py"
+  "synced_by": "scripts/sync-assistant-kit.py",
+  "downstream_overlays": {
+    "src/datasets/DatasetElement.tsx": {
+      "sha256": "d1acf24b040ba60f46418afe3d29c8b155b9bca18185c175ef2210d3b4e17f96",
+      "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
+    },
+    "test/datasets.test.tsx": {
+      "sha256": "a9377bbc32eca3ebd79e40bf804b92b2a3abdc878f7eb520a071fa99bf0a3c15",
+      "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
+    },
+    "README.md": {
+      "sha256": "c7f2d6158e06be646eb4a106bd0891422a739e44dd1a27d3b8e874c0e0d2fd0c",
+      "reason": "Preserve reviewed consumer HTTPS source-link behavior/assertions/instructions alongside canonical O01 display183",
+      "upstream_commit": "2cd51758cba309e49dbf80bdd0cc8e5d66a75a48"
+    }
+  },
+  "adoption_scope": "assistant-react only; canonical paired-row PR184 merged; preserve separately pinned assistant-contract and three consumer source-link overlays"
 }

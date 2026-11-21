@@ -790,6 +790,9 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card {
     left: auto !important; right: 14px !important;
     top: auto !important; bottom: 70px !important; width: 260px; max-width: 260px; padding: 10px 12px;
+    /* The pinned seat wins over the centered fallback's translate(-50%, -50%), which
+       otherwise shifted a beat whose target is absent here (the author beat) off the seat. */
+    transform: none !important;
     border-radius: var(--leaf-radius-key); font-family: var(--ck-font);
     /* Chrome on the drawing is dark (two-material rule); the coach is no
        exception once it sits on the canvas. */
@@ -805,6 +808,11 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-actions { gap: 6px; margin-top: 6px; }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot { background: var(--ck-ink-off); }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot.on { background: var(--ck-cmd); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result { background: var(--ck-recess); border-color: var(--ck-edge); border-left-color: var(--ck-cmd); padding: 6px 8px; margin-top: 6px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-head { color: var(--leaf-ink-muted); font: 400 var(--leaf-size-caption)/14px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row { font: 400 var(--leaf-size-caption)/16px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row dt { color: var(--leaf-ink-muted); }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-card-result-row dd { color: var(--leaf-ink); font-weight: 600; }
 }
 
 @media (min-width: 1024px) and (max-width: 1439px) {
@@ -1468,5 +1476,38 @@
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add:hover { background: transparent; color: var(--leaf-ink); }
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button:hover:not(:disabled):not([aria-pressed="true"]) { background: transparent; }
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .legend-row:hover:not(:disabled) { background: transparent; }
+  }
+}
+
+/* Align Properties rows, hide repeated prompt text, and keep the command dock clear of the pane. */
+@media (min-width: 1024px) {
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .dock-properties {
+    display: grid; grid-template-columns: 104px 1fr; grid-auto-rows: 26px; align-items: center;
+    gap: 2px 6px; padding: 0 4px; margin: 2px 0 0;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .dock-properties dt {
+    margin: 0; font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink);
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .dock-properties dd {
+    margin: 0; min-width: 0; height: 20px; line-height: 20px; padding: 0 6px; box-sizing: border-box;
+    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--ck-ink);
+    background: var(--ck-field); border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-key);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  /* Keep the active ask available to screen readers while the strip shows the verb and step label. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt [data-testid="cockpit-active-ask"] {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+  }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-dock:has(.cockpit-prompt) .bar-command-line :is(.bar-field, .bar-input input)::placeholder {
+    color: transparent;
+  }
+
+  /* The second selector outranks studioShell.css's cockpit .bar-dock rule, which loads later. */
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(.properties-dock) .bar-dock,
+  .studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]):has(.properties-dock) .bar-dock {
+    left: max(calc(50% - 360px), calc(var(--ck-pane) + 8px));
+    width: min(720px, calc(100vw - var(--ck-pane) - 16px)); margin-left: 0;
   }
 }

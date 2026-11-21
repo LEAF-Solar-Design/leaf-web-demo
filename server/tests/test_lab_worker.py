@@ -759,3 +759,108 @@ def test_lab_emf_is_best_effort(monkeypatch):
     emf_metrics.emit_lab_run_terminal("finished")
     emf_metrics.emit_lab_lease_takeover()
     emf_metrics.emit_lab_queue_age_max(1)
+
+
+@pytest.mark.parametrize('older_queued', [False, True])
+def test_idle_worker_recovers_expired_interactive_run(rig, monkeypatch, older_queued):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    if older_queued:
+        store.create(rig.tenant, 'doc', 'older-queued', 1, 'a' * 64, worker.OPS_REVISION,
+                     'b' * 64, 'lab-worker.v1', 'previous-build')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    block_id = rig.graph['blocks'][0]['id']
+    assert store.append_events(rig.tenant, 'run', 'previous-worker', lease['fence'], [
+        {'kind': 'value', 'block_id': block_id, 'payload': {'result': {'data': 7}}}])
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    instance = rig.make(slots=1)
+    instance.tick()
+    recovered = store.get(rig.tenant, 'run')
+    assert recovered['lease_fence'] == lease['fence'] + 1
+    terminal(rig)
+    rows = events(rig)
+    assert sum(row['kind'] == 'lease_takeover' for row in rows) == 1
+    assert sum(row['kind'] == 'value' and row['block_id'] == block_id for row in rows) == 1
+    assert store.get(rig.tenant, 'run')['claimed_color'] == 'idle'
+    if older_queued:
+        assert store.get(rig.tenant, 'older-queued')['state'] == 'queued'
+
+
+@pytest.mark.parametrize('gate', ['paused', 'disabled', 'rail-off', 'activation'])
+def test_idle_expired_recovery_preserves_operational_gates(rig, monkeypatch, gate):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    adapter = 'lab-activation.v1' if gate == 'activation' else 'lab-worker.v1'
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, adapter, 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    if gate == 'paused':
+        store.set_paused(True, 'test', 'test')
+    elif gate == 'disabled':
+        rig.env['LEAF_LAB_WORKER_DISABLED'] = '1'
+    elif gate == 'rail-off':
+        monkeypatch.setattr(worker, 'lab_surface_enabled', lambda: False)
+    rig.make().tick()
+    row = store.get(rig.tenant, 'run')
+    assert row['lease_fence'] == lease['fence']
+    assert row['state'] == 'running'
+    assert not any(event['kind'] == 'lease_takeover' for event in events(rig))
+
+
+@pytest.mark.parametrize('refusal', ['graph_pin_mismatch', 'registry_changed'])
+def test_idle_recovery_checks_execution_pins_before_evaluating(rig, monkeypatch, refusal):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    assert store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                       build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    if refusal == 'graph_pin_mismatch':
+        rig.artifact['sha256'] = 'c' * 64
+    else:
+        monkeypatch.setattr(store, 'registry_digest', lambda: 'changed')
+    evaluated = []
+    monkeypatch.setattr(worker, 'evaluate_graph', lambda *args, **kwargs: evaluated.append(True))
+    rig.make().tick()
+    terminal(rig, 'failed')
+    assert not evaluated
+    assert any(event['kind'] == 'failed' and event['payload']['reason'] == refusal
+               for event in events(rig))
+
+
+def test_two_idle_workers_recover_one_expired_run_once(rig, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    ready = threading.Barrier(2)
+    claimable = store.claimable
+    def same_candidate(*args, **kwargs):
+        rows = claimable(*args, **kwargs)
+        assert [row['run_id'] for row in rows] == ['run']
+        ready.wait(timeout=10)
+        return rows
+    monkeypatch.setattr(store, 'claimable', same_candidate)
+    evaluated = []
+    evaluate = worker.evaluate_graph
+    def observed(*args, **kwargs):
+        evaluated.append(True)
+        return evaluate(*args, **kwargs)
+    monkeypatch.setattr(worker, 'evaluate_graph', observed)
+    instances = [rig.make(slots=1), rig.make(slots=1)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda instance: instance.tick(), instances))
+    terminal(rig)
+    assert len(evaluated) == 1
+    assert store.get(rig.tenant, 'run')['lease_fence'] == lease['fence'] + 1
+    assert sum(event['kind'] == 'lease_takeover' for event in events(rig)) == 1

@@ -30,6 +30,7 @@ const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 const RECEIPT = {
   clone: 'rcpt-lifecycle-clone-0001',
   export: 'rcpt-lifecycle-export-0001',
+  archive: 'rcpt-lifecycle-archive-0001',
   delete: 'rcpt-lifecycle-delete-0001',
 }
 const EXPORT_ARTIFACT = {
@@ -42,6 +43,9 @@ const EXPORT_ARTIFACT = {
 function makeLifecycleState() {
   return {
     deleted: false,
+    status: 'active',
+    archived_at: null,
+    restore_until: null,
     projects: [{ project_id: PROJECT_ID, name: PROJECT_NAME, status: 'active' }],
     receipts: [{
       receipt_id: 'rcpt-lifecycle-create-0001', action: 'project.create_blank',
@@ -58,7 +62,10 @@ function receipt(id, action) {
 function lifecycleResponse({ method, path }, state) {
   const json = (body, status = 200) => ({ status, body })
   const gone = () => json({ detail: 'That project is no longer available to you.' }, 404)
-  const project = { project_id: PROJECT_ID, org_id: ORG_ID, name: PROJECT_NAME, status: 'active' }
+  const project = {
+    project_id: PROJECT_ID, org_id: ORG_ID, name: PROJECT_NAME,
+    status: state.status, archived_at: state.archived_at, restore_until: state.restore_until,
+  }
   if (path === '/api/projects' && method === 'GET') return json({ projects: state.projects })
   if (path === `/api/projects/${PROJECT_ID}` && method === 'GET') {
     if (state.deleted) return gone()
@@ -107,7 +114,17 @@ function lifecycleResponse({ method, path }, state) {
       file_count: 1, member_count: 1, receipt: minted,
     })
   }
+  if (path === `/api/projects/${PROJECT_ID}/archive` && method === 'POST') {
+    state.status = 'archived'
+    state.archived_at = '2026-10-01T00:00:00Z'
+    state.restore_until = '2026-10-31T00:00:00Z'
+    state.projects = state.projects.map((p) => p.project_id === PROJECT_ID ? { ...p, status: state.status } : p)
+    const minted = receipt(RECEIPT.archive, 'project.archive')
+    state.receipts = [...state.receipts, minted]
+    return json({ receipt: minted })
+  }
   if (path === `/api/projects/${PROJECT_ID}` && method === 'DELETE') {
+    if (state.status !== 'archived') return json({ detail: 'Archive the project before deleting it permanently.' }, 409)
     state.deleted = true
     state.projects = state.projects.filter((p) => p.project_id !== PROJECT_ID)
     return json({ project_id: PROJECT_ID, deleted: true, receipt: receipt(RECEIPT.delete, 'project.delete') })
@@ -243,19 +260,26 @@ test('export posts with no body and downloads the sanitized artifact', async ({ 
   expectCleanRun(run)
 })
 
-test('delete needs the typed name, sends a bodyless DELETE and returns to the drawing fallback', async ({ page }) => {
+test('permanent delete needs archive first, the typed name, and sends confirm_name, then returns to the drawing fallback', async ({ page }) => {
   const run = await bootLifecyclePanel(page)
   const { panel, mutations } = run
 
+  const archive = panel.locator('.danger-action-archive')
+  await archive.getByRole('button', { name: 'Archive project', exact: true }).click()
+  await archive.getByRole('button', { name: 'Archive project', exact: true }).click()
+
   const zone = panel.locator('.danger-action-delete')
-  await zone.getByRole('button', { name: 'Delete', exact: true }).click()
+  await expect(zone).toBeVisible()
+  expect(mutations).toHaveLength(1)
+  expectMutation(mutations[0], 'POST', `/api/projects/${PROJECT_ID}/archive`)
+  await zone.getByRole('button', { name: 'Delete permanently', exact: true }).click()
   await expect(zone).toContainText("This can't be undone.")
-  const confirm = zone.getByRole('button', { name: 'Delete', exact: true })
+  const confirm = zone.getByRole('button', { name: 'Delete permanently', exact: true })
   const typed = zone.getByLabel('Type the project name to confirm delete')
 
   await typed.fill('Lifecycle')
   await expect(confirm).toBeDisabled()
-  expect(mutations).toHaveLength(0)
+  expect(mutations).toHaveLength(1)
 
   await typed.fill(PROJECT_NAME)
   await expect(confirm).toBeEnabled()
@@ -270,10 +294,10 @@ test('delete needs the typed name, sends a bodyless DELETE and returns to the dr
   await expect(rail).toContainText('no workspace project')
   await expect(page.locator('.proj-switch .proj-chip .tag')).toHaveText('Drawing')
 
-  expect(mutations).toHaveLength(1)
-  const [removed] = mutations
+  expect(mutations).toHaveLength(2)
+  const [, removed] = mutations
   expectMutation(removed, 'DELETE', `/api/projects/${PROJECT_ID}`)
-  expect(removed.raw).toBeNull()
+  expect(JSON.parse(removed.raw)).toEqual({ confirm_name: PROJECT_NAME })
   expect(run.state.deleted).toBe(true)
   expectCleanRun(run)
 })

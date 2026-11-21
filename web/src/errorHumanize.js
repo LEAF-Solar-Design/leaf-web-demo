@@ -7,6 +7,8 @@
 // PURE by contract: no bundler-only globals, no React, no JSON imports — `node` can
 // import it headless (web/scripts/check_errors.mjs does exactly that).
 
+import { compactRefusal } from './errorPresentation.js'
+
 export const MSG_SERVICE = 'The service had a temporary problem. Try again.'
 export const MSG_NETWORK = "Couldn't reach the service. Check the connection and retry."
 export const MSG_GENERIC = 'Something went wrong. Try again.'
@@ -39,6 +41,8 @@ function isPlainEnglish(s) {
  */
 export function humanizeError(errOrString) {
   if (errOrString == null) return MSG_GENERIC
+  const refusal = compactRefusal(errOrString)
+  if (refusal) return refusal.text
 
   // Never throws, whatever the value; unreadable or unconvertible values get the generic sentence.
   try {

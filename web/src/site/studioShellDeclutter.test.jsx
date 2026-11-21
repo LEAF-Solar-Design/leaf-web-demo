@@ -78,6 +78,9 @@ describe('quiet Studio shell', () => {
     const bindings = { ...customerBindings(studioShell),
       mock: false, knownGuest: true, signedOut: true, grant: null, grantLoading: false,
       grantBusy: false, grantErr: null, claudeOpen: false, setClaudeOpen: vi.fn(), onLinkClaude: vi.fn(), onUnlinkClaude: vi.fn(),
+      // Main's headerChromeFor decides account-chip visibility (tested with App); this proves the shell keeps
+      // both panels reachable whenever that gate shows them.
+      headerChrome: { cost: true, accounts: true },
       CostTransparencyPanel, ClaudeAccountPanel }
     const panelsCode = appSource.match(/const accountPanels = ([\s\S]*?)\n  <\/>/)[1] + '\n  </>'
     bindings.accountPanels = appExpression(panelsCode, bindings)

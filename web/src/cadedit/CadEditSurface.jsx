@@ -42,7 +42,7 @@ import { ENV_CAD_EDIT } from './flag.js'
 import { DEFAULT_EDIT_INPUTS, useEngineSessionOptional } from './EngineSessionProvider.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import DrawingObjectList, { objectGeometryDescription } from './DrawingObjectList.jsx'
-import { engineIntake, projectionWarning } from './engineIntake.js'
+import { engineIntake, projectionSummary, projectionWarning } from './engineIntake.js'
 import DrawingCameraControls from '../site/DrawingCameraControls.jsx'
 import { DrawingObjectsMount } from '../site/DrawingNavigationTools.jsx'
 
@@ -86,9 +86,10 @@ export default function CadEditSurface({
     documentId = '', entities = [], entityCount = 0, selectedId = '', selectedIds = [], selected = null,
     status = '', savedBytes = null, busy = false,
   } = session ?? {}
-  const incompleteView = useMemo(() => session?.engineParsed
-    ? projectionWarning(engineIntake(entities, documentId).diagnostics) : '',
+  const diagnostics = useMemo(() => session?.engineParsed
+    ? engineIntake(entities, documentId).diagnostics : null,
   [session?.engineParsed, entities, documentId])
+  const summary = projectionSummary(diagnostics)
 
   const downloadUrl = useMemo(() => {
     if (!savedBytes) return ''
@@ -134,7 +135,10 @@ export default function CadEditSurface({
     </details>
     </DrawingObjectsMount>
     <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} data-testid="drawing-navigation-live">{announcement}</LiveRegion>
-    {incompleteView && <p data-testid="drawing-incomplete-view">{incompleteView}</p>}
+    {summary && <details className="drawing-incomplete-view" data-testid="drawing-incomplete-view">
+      <summary>{summary}</summary>
+      <p>{projectionWarning(diagnostics)}</p>
+    </details>}
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">

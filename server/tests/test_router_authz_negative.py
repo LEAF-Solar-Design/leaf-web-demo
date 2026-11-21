@@ -52,6 +52,7 @@ RUN_CASES = [
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
     pytest.param("GET", "/corpus-options", None, id="corpus-options"),
+    pytest.param("GET", "/private-run/recovery-plan", None, id="recovery-plan"),
 ]
 ACTIVATION_CASES = [
     ("POST", "", {"doc_id": DOC, "interval_s": 60}),
@@ -221,6 +222,7 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/runs"),
         ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
+        ("GET", "/api/lab/runs/{run_id}/recovery-plan"),
         ("GET", "/api/lab/runs/{run_id}/events"),
         ("POST", "/api/lab/runs/{run_id}/cancel"),
         ("POST", "/api/lab/runs/worker/pause"),
@@ -315,7 +317,7 @@ def test_runs_admission_precedes_storage(client, monkeypatch, method, suffix, bo
     assert MARKER not in response.text
 
 
-@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5])
+@pytest.mark.parametrize("method,suffix,body", RUN_CASES[:5] + [RUN_CASES[-1]])
 def test_runs_foreign_tenant_is_not_found(client, owner, method, suffix, body):
     row = run_store.create("tenant-a", DOC, "private-run", 2, "a" * 64, "lab-ops.v1",
                            "b" * 64, "lab-worker.v1", "abc1234")
@@ -669,3 +671,16 @@ def test_b03_build_status_missing_or_invalid_auth_cannot_dispatch(monkeypatch, m
     with TestClient(app) as client:
         for headers in ({},{'Authorization':'Bearer invalid'}):
             assert client.request(method,B03_PREVIEW_ASSET.removesuffix('/asset'),headers=headers,json={} if method=='POST' else None).status_code in (401,403)
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_b03_chart_state_missing_or_invalid_auth_cannot_dispatch(monkeypatch, method):
+    from routers import browser_project
+    import browser_chart_state
+    for name,value in _ENV.items():monkeypatch.setenv(name,value)
+    monkeypatch.setattr(browser_chart_state,'exchange',lambda *a,**kw:pytest.fail('unauthenticated chart state dispatch'))
+    app=FastAPI();app.include_router(browser_project.router)
+    path=B03_PREVIEW_ASSET.removesuffix('/asset')+'/chart-state'
+    with TestClient(app) as client:
+        for headers in ({},{'Authorization':'Bearer invalid'}):
+            assert client.request(method,path,headers=headers,json={} if method=='PUT' else None).status_code in (401,403)

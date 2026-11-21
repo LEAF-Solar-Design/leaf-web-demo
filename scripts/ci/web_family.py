@@ -7,7 +7,8 @@ runner fingerprint dictionaries (id, cwd, command argv, kind), not Suite objects
 Pass unconditional prerequisites as protected IDs too. This module does not
 replace select_tests.py's independently audited read-set selection.
 
-Only the exact independent files below are safe. In particular, neither docs/**
+The audited INDEPENDENT_PREFIX_RULES also cover standalone X-bench Python and Markdown files.
+Only the exact independent files below are otherwise safe. In particular, neither docs/**
 nor server/tests/** is safe: web/test/check_routes.mjs reads DEMO-GOLDEN-PATH.md;
 web/scripts/check_web_container_config.mjs checks CAD-ENGINE-LICENSE-REVIEW.md;
 web/src/solar/SolarToolForm.test.jsx imports docs/parity evidence; and
@@ -26,6 +27,14 @@ SAFE_PATHS = frozenset({
     "docs/adn-membership-reinstate-email-draft.md",
     "server/tests/test_catalog_digest_boundary.py",
 })
+
+# Audit: no file under web/, harness/, dispatch/, vendor/, .codebuild/ or the
+# root web-demo-gate reads or imports anything under tools/xbench; the X-bench
+# graders are standard-library plus ezdxf/shapely Python run only by their own
+# suite. Shared pytest configuration is not covered by this independence rule.
+INDEPENDENT_PREFIX_RULES = (
+    ("tools/xbench/", (".py", ".md"), ("conftest.py",)),
+)
 
 # Deliberately broad dependency boundaries, not a claim of exhaustive read sets:
 # web/walk/stack.mjs launches scripts/start-leaf.py, server, platform, harness;
@@ -110,7 +119,11 @@ def web_family_decision(selected, suites, changed_paths, *, protected_ids=(),
             return retain("malformed changed path")
         if any(part.startswith(".") for part in path.split("/")):
             return retain("hidden/config path: " + path)
-        if path not in SAFE_PATHS:
+        if path not in SAFE_PATHS and not any(
+                path.startswith(prefix)
+                and path.rsplit("/", 1)[-1].endswith(allowed_suffixes)
+                and path.rsplit("/", 1)[-1] not in excluded_names
+                for prefix, allowed_suffixes, excluded_names in INDEPENDENT_PREFIX_RULES):
             category = ("dependency" if path.split("/", 1)[0] in DEPENDENCY_ROOTS
                         or "/" not in path else "unknown")
             return retain(category + " path: " + path)

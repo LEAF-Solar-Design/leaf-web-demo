@@ -100,12 +100,12 @@ def validate_document(document: dict) -> dict:
         slugs.add(slug)
         _text(category["title"], 1, 120)
         _text(category["description"], 0, 1200)
-        _items(category["images"], 1, 200)
+        _items(category["images"], 0, 200)
         total += len(category["images"])
         if total > 200:
             raise ValueError("Portfolio has more than 200 image references")
         hero = category["hero"]
-        if type(hero) is not int or not 0 <= hero < len(category["images"]):
+        if type(hero) is not int or not (0 <= hero < len(category["images"]) if category["images"] else hero == 0):
             raise ValueError("Invalid category hero index")
         seen = set()
         for image in category["images"]:
@@ -441,7 +441,7 @@ struct LoadedPortfolio {
               !document.categories.isEmpty else { throw ContentError.invalidDocument }
         var images: [String: UIImage] = [:]
         for category in document.categories {
-            guard !category.images.isEmpty, category.images.indices.contains(category.hero) else {
+            guard category.images.isEmpty ? category.hero == 0 : category.images.indices.contains(category.hero) else {
                 throw ContentError.invalidDocument
             }
             for photo in category.images where images[photo.id] == nil {
@@ -623,7 +623,11 @@ struct HomeView: View {
                         GalleryView(category: category, images: portfolio.images, document: document)
                     } label: {
                         DesignGrid(columns: category.layout?.columns, mobileColumns: category.layout?.mobileColumns, gap: CGFloat(category.layout?.gap ?? 12)) {
-                            PortfolioImage(photo: category.images[category.hero], images: portfolio.images, root: document.appearance)
+                            if category.images.indices.contains(category.hero) {
+                                PortfolioImage(photo: category.images[category.hero], images: portfolio.images, root: document.appearance)
+                            } else {
+                                Text("No photos in this gallery yet.")
+                            }
                             DesignedText(value: category.title, style: category.textStyles?["title"], root: document.appearance, size: 22, heading: true)
                             DesignedText(value: category.description, style: category.textStyles?["description"], root: document.appearance, muted: true)
                         }.modifier(BoxDesign(value: category.layout))
@@ -644,6 +648,9 @@ struct GalleryView: View {
                     DesignedText(value: category.title, style: category.textStyles?["title"], root: document.appearance, size: 34, heading: true)
                 }
                 DesignedText(value: category.description, style: category.textStyles?["description"], root: document.appearance, muted: true)
+                if category.images.isEmpty {
+                    Text("No photos in this gallery yet.")
+                }
                 DesignGrid(columns: category.layout?.columns ?? document.appearance?.columns ?? (document.galleryLayout == "single" ? 1 : nil),
                            mobileColumns: category.layout?.mobileColumns ?? document.appearance?.mobileColumns,
                            gap: category.layout?.gap.map { CGFloat($0) } ?? document.appearance?.gridGap ?? 32,

@@ -145,8 +145,11 @@ describe('Solar settings wiring rules', () => {
       .toEqual({ drawingId: 'd1', drawingVersion: 3, solarSettingsFormEnabled: true })
   })
 
-  it('SF2 row31 the controller scope resets outside it', () => {
-    for (const override of [{ enabled: false }, { mock: true }, { profile: 'cad' }, { context: { ...C, projectId: 'p1' } }, { context: { ...C, drawingId: '' } }]) {
+  it('SF2 row31 CAD keeps the standalone drawing and invalid scopes reset', () => {
+    expect(solarSettingsScope({ enabled: true, mock: false, profile: 'cad', context: C }))
+      .toEqual({ drawingId: 'd1', drawingVersion: 3, solarSettingsFormEnabled: false })
+    for (const override of [{ enabled: false }, { mock: true }, { context: { ...C, projectId: 'p1' } },
+      { context: { ...C, drawingId: '' } }, { profile: 'cad', context: { ...C, drawingId: '' } }]) {
       const scope = solarSettingsScope({ enabled: true, mock: false, profile: 'solar', context: C, ...override })
       expect(scope).toEqual({ drawingId: undefined, drawingVersion: undefined, solarSettingsFormEnabled: false })
       expect(Object.hasOwn(scope, 'drawingId')).toBe(true)

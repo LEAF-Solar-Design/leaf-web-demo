@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import time
 import uuid
@@ -28,6 +29,7 @@ import deps
 from demo_actor import DemoActorRefused, DemoActorUnavailable, is_demo_context, resolve_demo_actor, require_demo_project
 import entitlements
 import entity_scope
+import investor_demo
 import jobs
 import write_loop
 import product_capability_availability as capability_catalog
@@ -37,6 +39,19 @@ import solar_project_admission
 from solar_design_graph import GraphValidationError
 from text_match import text_matches
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, error_obj, error_response, with_envelope_fields
+
+def _nonfinite_param(value, path="params"):
+    """Return the path of the first number that JSON transport cannot encode."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return path
+    if isinstance(value, (dict, list)):
+        items = value.items() if isinstance(value, dict) else enumerate(value)
+        for key, child in items:
+            invalid = _nonfinite_param(child, f"{path}/{key}")
+            if invalid:
+                return invalid
+    return None
+
 
 try:  # APS domain metrics (CloudWatch EMF); best-effort, optional — mirrors jobs.py
     import emf_metrics
@@ -640,34 +655,43 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    import project_drawing_editor
+
     def execute_read():
+        intake = context.intake
+        if tool.get("engine_op") == "revision_panel_moves":
+            from authored_revision_panel_moves import bind_project_parent
+            intake = bind_project_parent(tenant, context)
         return tool_loader.run_tool_dynamic(
-            tool, context.intake, params, aps_live=False, da=None,
+            tool, intake, params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
-    if persist:
-        try:
+    try:
+        if persist:
             record = jobs.platform_link.run_project_read_job(
                 tenant, context, {**tool, "catalog_digest": req.catalog_digest},
                 params, idempotency_key, execute_read)
-        except jobs.platform_link.CanonicalEntitlementDenied as exc:
-            return exc.response
-        except jobs.platform_link.ProjectSessionForbidden:
-            return error_response(ErrorCode.FORBIDDEN, "project access denied",
-                                  retryable=False, status_code=403)
-        except solar_project_context.ProjectContextError as exc:
-            def refusal():
-                raise exc
-            return project_drawings._dispatch(refusal)
-        except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                  status_code=400 if "required" in str(exc) else 409)
-        except Exception:
-            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-        return JSONResponse(status_code=202, content=record,
-                            headers={"Cache-Control": "no-store"})
-
-    env = execute_read()
+            return JSONResponse(status_code=202, content=record, headers={"Cache-Control": "no-store"})
+        env = execute_read()
+    except jobs.platform_link.CanonicalEntitlementDenied as exc:
+        return exc.response
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except solar_project_context.ProjectContextError as exc:
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400 if "required" in str(exc) else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     body = {
         key: env[key]
         for key in (
@@ -685,6 +709,8 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
     }
     status = 200 if body.get("ok") else DEFAULT_HTTP_STATUS.get(
         (body.get("error") or {}).get("error_code"), 500)
+    if (body.get("error") or {}).get("reason_code") == "LAYER_NOT_FOUND":
+        status = 404
     return JSONResponse(status_code=status, content=body, headers={"Cache-Control": "no-store"})
 
 
@@ -796,7 +822,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         authority_session_id: Optional[str] = Header(
             default=None, alias="X-Authority-Session-Id"),
         authority_turn_id: Optional[str] = Header(
-            default=None, alias="X-Authority-Turn-Id")):
+            default=None, alias="X-Authority-Turn-Id"),
+        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault")):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -828,6 +855,23 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
     session_id = authority_session_id if isinstance(authority_session_id, str) else None
     turn_id = authority_turn_id if isinstance(authority_turn_id, str) else None
+    import xbench_solver_fault
+    fault_mode = x_xbench_solver_fault if isinstance(x_xbench_solver_fault, str) else None
+    if fault_mode is not None:
+        try:
+            xbench_solver_fault.validate(fault_mode)
+            if (not deps.auth_live() or session_id is not None or turn_id is not None
+                    or not capability_catalog.is_cloud_proposal(
+                        deps.find_tool(req.tool, str(tenant_id)) or {})
+                    or not isinstance(x_org_id, str) or not isinstance(x_project_id, str)):
+                raise GraphValidationError("XBENCH_SOLVER_FAULT_SCOPE_REQUIRED")
+        except GraphValidationError as exc:
+            body = with_envelope_fields({"ok": False, "error": error_obj(
+                ErrorCode.FORBIDDEN, "The staging solver fault for this solve is unavailable.",
+                retryable=False)})
+            body["error"].update(reason_code=exc.code,
+                                 next_action="Use an authenticated staging project solve.")
+            return JSONResponse(status_code=403, content=body)
     binding = None
     if session_id is not None or turn_id is not None:
         if session_id is None or turn_id is None:
@@ -1024,15 +1068,21 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     if (solar_project_admission.project_runs_enabled()
             and (isinstance(x_org_id, str) or isinstance(x_project_id, str))
             and tool.get("name") in capability_catalog.SOLAR_CAPABILITIES):
-        response = _project_solar_admission(
-            tool, tenant_id, req, x_org_id, x_project_id, authorization,
-            delegated_checkout if delegated_checkout is not None else x_checkout_capability,
-            idempotency_key=idempotency_key, preview=False,
-            **({"expected_intake_sha256": selected_binding["intake_sha256"]}
-               if delegated_checkout is not None else {}))
+        with xbench_solver_fault.request_mode(fault_mode):
+            response = _project_solar_admission(
+                tool, tenant_id, req, x_org_id, x_project_id, authorization,
+                delegated_checkout if delegated_checkout is not None else x_checkout_capability,
+                idempotency_key=idempotency_key, preview=False,
+                **({"expected_intake_sha256": selected_binding["intake_sha256"]}
+                   if delegated_checkout is not None else {}))
         if wait and response.status_code == 202:
             return _wait_project_solar(response, tenant_id)
         return response
+
+    if fault_mode is not None:
+        return error_response(ErrorCode.FORBIDDEN,
+            "The staging solver fault requires the canonical project solve route.",
+            retryable=False, status_code=403)
 
     # ENTITLEMENT GATE (§17): the tenant's tier must grant the capability this tool needs
     # (run_write for a drawing.write tool, else run_read). Enforced HERE in the execution
@@ -1062,6 +1112,10 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     # merge authored default_params under caller params
     params = dict(tool.get("default_params", {}))
     params.update(req.params or {})
+    invalid = _nonfinite_param(params)
+    if invalid:
+        return error_response(ErrorCode.BAD_PARAMS, f"{invalid} must be a finite number.",
+                              retryable=False, status_code=400)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
@@ -1423,7 +1477,12 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             return JSONResponse(status_code=200, content=rec["result"])
         env = jobs.failed_envelope_from(rec)
         code = env["error"]["error_code"]
-        return JSONResponse(status_code=DEFAULT_HTTP_STATUS.get(code, 500), content=env)
+        status = DEFAULT_HTTP_STATUS.get(code, 500)
+        if (rec.get("error") or {}).get("reason_code") == "LAYER_NOT_FOUND":
+            status = 404
+            env["error"].update(reason_code="LAYER_NOT_FOUND",
+                next_action="Choose a layer from the drawing's layer list.")
+        return JSONResponse(status_code=status, content=env)
 
     body = deps.tenant_echo(
         with_envelope_fields({"job_id": job_id, "status": "submitted"}), tenant_id
@@ -1440,7 +1499,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
 
 @router.get("/api/jobs/{job_id}")
-def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
+def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
+            assembly_input_version: Optional[uuid.UUID] = None):
     tenant_id = _bound_tenant_id(tenant)
     if is_demo_context(tenant):
         rec, denied = _demo_observation(job_id, tenant)
@@ -1454,6 +1514,10 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant)):
         return error_response(ErrorCode.BAD_PARAMS, f"unknown job_id: {job_id}",
                               retryable=False, status_code=404)
     denied = _access_error(rec, tenant, job_id)
+    if denied is None and assembly_input_version is not None:
+        from solar_project_solve import readonly_assembly_attribution
+        return with_envelope_fields({"ok": True, "assembly_attribution":
+            readonly_assembly_attribution(tenant, rec, assembly_input_version)})
     return denied if denied is not None else _record_body(_with_client_delivery(rec))
 
 
@@ -1568,6 +1632,8 @@ def _trim_list_body(body):
 
 @router.get("/api/jobs")
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant), summary: bool = False):
+    if investor_demo.is_investor_context(tenant):
+        return with_envelope_fields({"jobs": []})
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     actor = None

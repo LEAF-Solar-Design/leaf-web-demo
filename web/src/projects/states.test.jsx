@@ -211,13 +211,17 @@ const COMPONENT_REGISTRY = [
     async error() {
       const onDelete = vi.fn().mockRejectedValue({ message: 'Workspace is locked.' })
       const utils = render(<DangerZone projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
-      fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
+      expect(screen.getByRole('button', { name: /^archive project$/i })).toBeTruthy()
+      utils.rerender(<DangerZone projectStatus="archived" projectName="Solar Canopy A" onReset={vi.fn()} onDelete={onDelete} />)
+      fireEvent.click(screen.getByRole('button', { name: /^delete permanently$/i }))
       fireEvent.change(screen.getByLabelText(/type the project name to confirm delete/i), {
         target: { value: 'Solar Canopy A' },
       })
-      const confirmButtons = screen.getAllByRole('button', { name: /^delete$/i })
+      const confirmButtons = screen.getAllByRole('button', { name: /^delete permanently$/i })
       fireEvent.click(confirmButtons[confirmButtons.length - 1])
-      await waitFor(() => expect(screen.getByText(/workspace is locked/i)).toBeTruthy())
+      await waitFor(() => expect(screen.getByText('Workspace is locked.')).toBeTruthy())
+      expect(onDelete).toHaveBeenCalledTimes(1)
+      expect(onDelete).toHaveBeenCalledWith('Solar Canopy A')
       return utils
     },
   },

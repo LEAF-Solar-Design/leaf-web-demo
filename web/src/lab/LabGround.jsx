@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import LabWorkbench from './LabWorkbench.jsx'
 import { isLabEmbedded, parseLabRoute } from './labRoute.js'
@@ -18,8 +18,9 @@ export default function LabGround({ active, mock = false, studioShell = false, o
   const [hostBridge, setHostBridge] = useState(null)
   const route = typeof window === 'undefined' ? null : parseLabRoute(window.location.pathname, window.location.search)
   const embedded = isLabEmbedded(route)
-  // Lab has no product frame to measure; use the ground host and occluders.
-  const win = useGroundWindow(active && !embedded, true, ref, occluders)
+  // The floating command dock must stay outside the scrollable Lab window.
+  const labOccluders = useMemo(() => [...occluders, ['.bar-dock', 'bottom']], [occluders])
+  const win = useGroundWindow(active && !embedded, true, ref, labOccluders)
   const status = useLabSurfaceStatus(mock)
   useEffect(() => {
     if (!embedded || !active || status?.state !== 'on') return undefined

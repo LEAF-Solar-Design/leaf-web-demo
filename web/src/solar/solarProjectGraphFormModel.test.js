@@ -9,6 +9,15 @@ import { PROJECT_SOLAR_GRAPH_TOOLS, PROJECT_SOLAR_GRAPH_REASONS, projectSolarGra
   exactProjectSolarGraphPreview, projectSolarGraphFeedback, panelGroupAngleKey, proposePanelGroups,
   validatePanelGroups, validatePanelGroupDiscovery, panelHandleValid } from './solarProjectGraphFormModel.js'
 
+it('guides graphless panel grouping through setup and import before gap grouping', () => {
+  const guidance = projectSolarGraphReason('graphless', 'solar-panel-groups')
+  expect(guidance).toContain('Settings')
+  expect(guidance).toContain('Panel import')
+  expect(guidance).toContain('Use proposed memberships')
+  expect(guidance).toContain('Gap between groups')
+  expect(projectSolarGraphReason('graphless', 'solar-feeders')).toBe(PROJECT_SOLAR_GRAPH_REASONS.graphless)
+})
+
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
   input_version_id: '44444444-4444-4444-4444-444444444444' }
@@ -511,6 +520,7 @@ it('R13C-14 freezes local and status sentences', () => {
     context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
     graph_unreadable: 'The Solar design stored with this drawing could not be read.',
     graphless: 'Start a Solar design in settings before using this tool.',
+    panel_groups_setup_required: 'Start a Solar design in Settings, then run Panel import. Return here and choose Use proposed memberships to enter Gap between groups.',
     not_current_head: 'Open the newest drawing version before using this tool.',
     version_digest_unavailable: 'This drawing version has no recorded content digest. Reload it before continuing.',
     scope_stale: 'The drawing or session changed. Refresh before continuing.',
@@ -560,7 +570,7 @@ it('R13C-14 freezes local and status sentences', () => {
   expect(Object.isFrozen(PROJECT_SOLAR_GRAPH_REASONS)).toBe(true)
   for (const [code, sentence] of Object.entries(expected)) {
     expect(sentence.length).toBeGreaterThanOrEqual(12)
-    if (['no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
+    if (['panel_groups_setup_required', 'no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
       'panel_groups_stale', 'group_name_invalid', 'group_name_collision', 'group_numbers_invalid',
       'group_gap_invalid', 'group_gap_measurement_invalid', 'group_geometry_invalid', 'group_discovery_invalid'].includes(code)) {
       expect(projectSolarGraphReason(code, 'solar-panel-groups')).toBe(sentence)

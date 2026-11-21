@@ -138,6 +138,23 @@ def test_invalid_args_deny_names_gate():
     assert res2["reason"].startswith("invalid_args")
 
 
+def test_author_tool_accepts_the_branch_target_and_still_refuses_unknown_fields():
+    """#3553: the harness sends target=branch for AutoCAD tool asks; the gate must pass it."""
+    for target in ("branch", "studio"):
+        res = _gate("author_tool", {"description": "count the blocks", "target": target})
+        assert res["decision"] != "deny", res
+    bad_target = _gate("author_tool", {"description": "count the blocks", "target": "autocad"})
+    assert bad_target["decision"] == "deny" and bad_target["reason"].startswith("invalid_args")
+    unknown = _gate("author_tool", {"description": "count the blocks", "target": "branch", "bogus": 1})
+    assert unknown["decision"] == "deny" and unknown["reason"].startswith("invalid_args")
+
+
+def test_shipped_and_hardcoded_author_tool_schemas_match():
+    shipped = json.loads((SERVER_DIR / "agent_policy.json").read_text(encoding="utf-8"))
+    hardcoded = agent_policy._HARDCODED_DEFAULTS["actions"]["author_tool"]["args_schema"]
+    assert shipped["actions"]["author_tool"]["args_schema"] == hardcoded
+
+
 def test_invalid_args_reason_never_embeds_raw_values():
     """The deny reason lands verbatim in the audit file, so it must name only
     the JSON-pointer path and validator keyword — never the offending value."""
@@ -163,6 +180,33 @@ def test_entitlement_denies_without_capability():
     res = _gate("run_read_tool", {"tool": "layer-report"}, caps=caps)
     assert res["decision"] == "deny"
     assert res["reason"] == "entitlement_required: tier lacks 'run_read'"
+
+
+def test_standalone_drawing_edit_requires_write_entitlement():
+    args = {"tool": "add-panel"}
+    assert _gate("run_drawing_edit_tool", args)["decision"] == "allow"
+    denied = _gate("run_drawing_edit_tool", args, caps=dict(FULL_CAPS, run_write=False))
+    assert denied["decision"] == "deny"
+    assert denied["reason"] == "entitlement_required: tier lacks 'run_write'"
+    assert _gate("run_write_tool", args)["decision"] == "awaiting_approval"
+
+
+def test_plan_first_requires_approval_for_standalone_drawing_edit(monkeypatch):
+    import session_policy
+
+    monkeypatch.setattr(session_policy, "get_policy", lambda session, tenant: "plan_first")
+    result = _gate("run_drawing_edit_tool", {"tool": "add-panel"})
+    assert result["decision"] == "awaiting_approval"
+    assert result["confirmation_id"]
+
+
+def test_tenant_can_require_approval_for_standalone_drawing_edit():
+    agent_policy.tenants_file().write_text(json.dumps({
+        "t-tight": {"overlay": {"run_drawing_edit_tool": {"policy": "always-confirm"}}}
+    }), encoding="utf-8")
+    result = _gate("run_drawing_edit_tool", {"tool": "add-panel"}, tenant="t-tight")
+    assert result["decision"] == "awaiting_approval"
+    assert result["confirmation_id"]
 
 
 def test_entitlement_before_rate_limit_denied_calls_never_burn_budget(tmp_path, monkeypatch):
