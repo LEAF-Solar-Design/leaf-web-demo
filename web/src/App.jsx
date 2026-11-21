@@ -25,7 +25,8 @@ import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
-import { CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
+import { AgentPanel, CheckoutChip, DrawingTabLabel, ShellKpis, ShellDiagnostics, CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
+import { isCustomerMode } from './lib/customerMode.js'
 import { createViewHistory } from './lib/viewHistory.js'
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
 // rail it used to spell inline. Every shared chrome gate lives there now.
@@ -787,6 +788,31 @@ function LocalCadEngineHold({ active }) {
 function appSurfaceFromLocation(location, labStatus) {
   return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
+export function ShellAccountMenu({ studioShell, children, customerPanels = null }) {
+  if (!studioShell) return children
+  return <details className="shell-avatar-menu"
+    onKeyDown={(event) => {
+      if (event.key !== 'Escape' || !event.currentTarget.open) return
+      event.preventDefault()
+      event.stopPropagation()
+      event.currentTarget.open = false
+      event.currentTarget.querySelector('summary').focus()
+    }}
+    onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false
+    }}>
+    <summary title="Account">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="8" r="4" />
+        <path d="M4 21v-2a8 8 0 0 1 16 0v2" />
+      </svg>
+      <span>Account</span>
+    </summary>
+    {children}
+    {customerPanels}
+  </details>
 }
 
 export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runElapsedMs, onStop }) {
@@ -4666,6 +4692,7 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  const studioCustomerMode = studioShell && isCustomerMode({ ...session.session, tier })
   // The rail lives in the Studio sidebar on the studio shell, so opening it opens that panel.
   const openToolRail = useCallback(() => {
     setNavExpanded(true)
@@ -5406,6 +5433,58 @@ export default function App() {
     </EngineSessionProvider>
   ) : node)
 
+  const checkoutControls = !mock && !signedOut && (
+    projectMode ? (
+      projectSolar.ready ? (
+        <ProjectSolarCheckoutControls
+          projectClient={projectSolar.projectClient}
+          checkout={projectSolar.checkout}
+          isCurrent={projectSolar.isCurrent}
+        />
+      ) : (
+        <p role="status">
+          {projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
+        </p>
+      )
+    ) : (
+      <CheckoutControls
+        lockedByOther={otherHeldCheckout}
+        staleByOther={lock.staleByOther}
+        legacyByOther={lock.legacyByOther}
+        canTake={lock.canTake}
+        heldByUs={heldByUs}
+        unknown={lock.unknown}
+        readFailed={checkout.readFailed}
+        failure={checkout.failure}
+        busy={checkout.busy}
+        onTake={checkout.actions.take}
+        onRelease={checkout.actions.release}
+        onRetry={checkout.actions.refresh}
+      />
+    )
+  )
+  const studioDrawingTab = studioShell && <DrawingTabLabel
+    name={projectMode ? projectDrawingName : activeDrawingName}
+    shortId={projectMode ? projectSolar.scope.binding?.input_version_id : REQUESTED_DRAWING_ID}
+  />
+
+  // shell: main supplies account visibility through headerChromeFor.
+  const accountPanels = <>
+    {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+    {!mock && headerChrome.accounts && <ClaudeAccountPanel
+      mock={mock}
+      signedOut={signedOut}
+      grant={grant}
+      loading={grantLoading}
+      busy={grantBusy}
+      error={grantErr}
+      open={claudeOpen}
+      onToggle={setClaudeOpen}
+      onLink={onLinkClaude}
+      onUnlink={onUnlinkClaude}
+    />}
+  </>
+
   return (
     // Slice 4a: THE SURFACE FRAME (site/SurfaceFrame.jsx). One wrapper both
     // scenes mount, carrying the normalized shell contract; its slots below
@@ -5528,7 +5607,9 @@ export default function App() {
           // well is the reference's one-line docked "Command:" prompt.
           // Before the ground attaches (and on every non-drafting surface)
           // the prop is false and the well renders its plain form.
-          commandLine={!!studioGround && surfaceSlots.commandLine}
+          commandLine={!!studioGround && surfaceSlots.commandLine && !(studioShell && surfaceSlots.toolbar.profile !== 'cad')}
+          placeholder={studioShell && surfaceSlots.toolbar.profile === 'solar' ? 'String every roof to the coldest-day Voc' : undefined}
+          runLabel={studioShell && surfaceSlots.toolbar.profile !== 'cad' ? 'Send' : undefined}
           armedAsk={armedPromptAsk}
           // Slice 8c: connected Link-a-service servers join the @ mounts
           // list by label, through the same mcpDiscoveryEnabled gate.
@@ -5603,8 +5684,14 @@ export default function App() {
       }}
     >
       <InviteAccept signedIn={signedIn} onAccepted={async ({ org_id }) => { adoptOrgId(org_id); await workspaceController.loadProjects() }} />
-      <header className="top">
+      <header className={`top${studioShell ? ' shell-header-48' : ''}`} data-customer-mode={studioCustomerMode ? 'true' : 'false'}>
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
+        {studioShell && <div className="shell-breadcrumb"><span>Projects / </span>
+          {studioDrawingTab}
+          <CheckoutChip checkedOut={projectMode ? projectSolar.checkout?.ownsCheckout : heldByUs}>
+            {checkoutControls}
+          </CheckoutChip>
+        </div>}
         {/* W4e: on the studio's drafting surfaces the header IS the
             reference's top band: quick access, then the ribbon tabs. The
             engine's Open/Save portal into the band's slot. Every other
@@ -5648,6 +5735,8 @@ export default function App() {
         {investorDemo && <span className="tag amber">View-only demo</span>}
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
+        {studioShell && <ShellKpis items={[{ label: 'Version', value: projectMode ? projectSolar.scope.binding?.input_version_id : null }, { label: 'Selection', value: selectedHandle ? 1 : null }]} />}
+        <ShellAccountMenu studioShell={studioShell} customerPanels={studioCustomerMode ? accountPanels : null}>
         <div className="who">
           {/* Header metadata (org · tenant · tier · spend · API base) is demoted
               behind Details -> the DT2 session drawer, per the standard. */}
@@ -5692,23 +5781,10 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
-          {!mock && headerChrome.accounts && (
-            <ClaudeAccountPanel
-              mock={mock}
-              signedOut={signedOut}
-              grant={grant}
-              loading={grantLoading}
-              busy={grantBusy}
-              error={grantErr}
-              open={claudeOpen}
-              onToggle={setClaudeOpen}
-              onLink={onLinkClaude}
-              onUnlink={onUnlinkClaude}
-            />
-          )}
+          {!studioCustomerMode && accountPanels}
           {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
+        </ShellAccountMenu>
       </header>
 
       {/* Slice 4a: the rail's DOM moved to site/NavRail.jsx byte-identically.
@@ -6376,7 +6452,7 @@ export default function App() {
               <button type="button" className="doc-tab-start" onClick={onOpenStart}>Start</button>
             )}
             <div className="viewer-title">
-              {projectMode ? <>{projectDrawingName} <code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
+              {studioShell ? studioDrawingTab : projectMode ? <>{projectDrawingName}{' · '}<code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
               {activeDrawingName || <span className="dim">—</span>}
@@ -6424,36 +6500,7 @@ export default function App() {
               {!mock && previewing && (
                 <span className="version-note readonly">viewing v{previewing.version} · read-only</span>
               )}
-              {!mock && !signedOut && (
-                projectMode ? (
-                  projectSolar.ready ? (
-                    <ProjectSolarCheckoutControls
-                      projectClient={projectSolar.projectClient}
-                      checkout={projectSolar.checkout}
-                      isCurrent={projectSolar.isCurrent}
-                    />
-                  ) : (
-                    <p role="status">
-                      {projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
-                    </p>
-                  )
-                ) : (
-                  <CheckoutControls
-                    lockedByOther={otherHeldCheckout}
-                    staleByOther={lock.staleByOther}
-                    legacyByOther={lock.legacyByOther}
-                    canTake={lock.canTake}
-                    heldByUs={heldByUs}
-                    unknown={lock.unknown}
-                    readFailed={checkout.readFailed}
-                    failure={checkout.failure}
-                    busy={checkout.busy}
-                    onTake={checkout.actions.take}
-                    onRelease={checkout.actions.release}
-                    onRetry={checkout.actions.refresh}
-                  />
-                )
-              )}
+              {!studioShell && checkoutControls}
               {drawingState && (
                 <>
                   <button
@@ -6914,6 +6961,7 @@ export default function App() {
         {(!studioShell || drafting) && <SurfaceFrame.Entitlement at="inline" />}
         </main>
 
+        <AgentPanel enabled={studioShell && surfaceSlots.toolbar.profile !== 'cad'}>
         <div className="bar-dock">
           <div className="command-transcript-host" data-testid="command-transcript-host" ref={setCommandTranscriptHost} />
           {boardVisible && <p className="start-board-gloss">{START_BOARD_COPY.gloss}{mock && <> {START_BOARD_COPY.mockGloss}</>}</p>}
@@ -6984,6 +7032,7 @@ export default function App() {
           <SurfaceFrame.CommandBar />
           {ENV_CAD_EDIT && studioGround && drafting && <div id="cockpit-engine-status-slot" />}
         </div>
+        </AgentPanel>
 
         {/* The golden path's payoff (result numbers) and the running strip are
             both silent to a screen reader. One PERMANENTLY-mounted polite region
@@ -7084,12 +7133,11 @@ export default function App() {
         )}
         {/* Real statuses get the 6px dot + tinted sentence-case word; counts and
             spend are muted metadata (green is reserved for genuine states). */}
-        <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />
+        {!studioCustomerMode && <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />}
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {gateTier}</span>
-        {!mock && usage && (
-          <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
-        )}
+        <ShellDiagnostics customerMode={studioCustomerMode}
+          toolCount={studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount}
+          plan={gateTier} costToday={!mock && usage ? usage.today?.usd_est || 0 : undefined} />
         {mock && !tourOn && tourAvailable.current && studioShell && (
           <button
             type="button"
@@ -7106,7 +7154,7 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        <span style={{ marginLeft: 'auto' }}>Build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span></span>
+        {!studioCustomerMode && <span style={{ marginLeft: 'auto' }}>Build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span></span>}
         </FootRegion>
         {/* The drawing instruments, anchored at the right edge like the
             reference's. They moved BELOW the build hash in the DOM so the
@@ -7118,7 +7166,7 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake}
+          <CockpitStatus customerMode={studioCustomerMode} ground={studioGround} viewerRef={viewerRef} shown={drawingIntake}
             canvasIntake={solarOverlayCanvasIntake(viewerOverride, projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE)}
             selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}

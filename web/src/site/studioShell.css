@@ -1,5 +1,26 @@
 /* One-shell shared chrome. These bands use the existing cockpit skin.
    Drafting instruments remain in cockpit.css. */
+.strip-decision.proposal-card {
+  box-sizing: border-box; width: 320px; max-width: 100%; padding: 12px;
+  display: flex; flex-wrap: wrap; gap: 8px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--card); font-size: 13px;
+}
+.proposal-card .strip-sentence { flex-basis: 100%; }
+.proposal-card .proposal-title { font-size: 14px; font-weight: 600; }
+.proposal-summary { width: 100%; margin: 0; }
+.proposal-fields, .proposal-metrics { width: 100%; margin: 0; font-variant-numeric: tabular-nums; }
+.proposal-fields > div, .proposal-metrics > div { display: grid; grid-template-columns: 1fr 1fr; align-items: center; min-height: 28px; gap: 8px; }
+.proposal-fields dt, .proposal-metrics dt { color: var(--muted); font-size: 12px; }
+.proposal-fields dd, .proposal-metrics dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.proposal-trail { display: flex; width: 100%; justify-content: space-between; list-style: none; margin: 0; padding: 0; color: var(--muted); font-size: 12px; }
+.proposal-trail li::before { content: ''; display: inline-block; width: 4px; height: 4px; margin-right: 4px; border-radius: 50%; background: currentColor; }
+.proposal-trail [aria-current="step"] { color: var(--primary); }
+.strip-decision.proposal-card.is-running { border-color: var(--primary); }
+.proposal-card .proposal-run { background: var(--primary); color: var(--on-accent); border-color: var(--primary); }
+.proposal-planning { width: 100%; display: flex; align-items: center; gap: 8px; }
+.proposal-spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: proposal-spin 1s linear infinite; }
+@keyframes proposal-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .proposal-spinner { animation: none; } }
 .studio-shell .studio-drawer-tabs { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"] .result-block:has(.result-panel > p.panel-sub) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {
@@ -809,3 +830,68 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="row"] { width: auto; min-width: 104px; max-width: 180px; }
 .studio-shell .app[data-studio-shell="cockpit"] .studio-chrome-host[data-ribbon-context="workspace"] .ribbon-tool { width: auto; min-width: 168px; max-width: 220px; }
 }
+
+/* UI4: a single header and a quiet, optional tool row. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] {
+  --leaf-size-caption: 12px; --leaf-size-dense: 13px;
+  --ck-top: 48px; --ck-ribbon: 0px; --ck-doctabs: 40px;
+  --ck-canvas-top: 88px; --leaf-radius-panel: 8px;
+  font-size: 13px;
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top.shell-header-48 {
+  height: 48px; min-height: 48px; max-height: 48px; flex-wrap: nowrap;
+  display: flex; align-items: center; overflow: visible; padding: 0 12px; gap: 12px; background: var(--ck-chrome);
+}
+.shell-breadcrumb { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 12px; white-space: nowrap; }
+.shell-breadcrumb > span:first-child { color: var(--muted); }
+.drawing-tab-label { overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.shell-checkout { position: relative; font-size: 12px; }
+.shell-checkout > summary { display: flex; align-items: center; height: 20px; padding: 0 8px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); cursor: pointer; list-style: none; }
+.shell-checkout > summary.checked-out::before { content: ''; width: 4px; height: 4px; margin-right: 4px; background: var(--primary); border-radius: 50%; }
+.shell-checkout-menu, .studio-shell .shell-avatar-menu > .who { position: absolute; top: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 100; }
+.shell-checkout-menu { left: 0; min-width: 200px; }
+.studio-shell .shell-avatar-menu { position: relative; flex: 0 0 auto; }
+.studio-shell header.top:has(.shell-avatar-menu[open]) { position: relative; z-index: 40; }
+.studio-shell .shell-avatar-menu > summary { height: 32px; padding: 0 8px; display: flex; align-items: center; gap: 4px; list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: var(--accent-tint); color: var(--primary); }
+.studio-shell .shell-avatar-menu:not([open]) > .who { display: none !important; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .shell-avatar-menu > .who { right: 0; width: 240px; max-width: calc(100vw - 24px); display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .shell-avatar-menu :is(button, .switch) { height: auto; min-height: 32px; font-size: 12px; text-align: left; }
+.shell-kpis { display: flex; align-items: center; gap: 20px; font-variant-numeric: tabular-nums; }
+.shell-kpis:empty { display: none; }
+.shell-kpis > div { display: flex; flex-direction: column; gap: 4px; }
+/* S1 explicitly allows 10px KPI labels; all other chrome is at least 12px. */
+.shell-kpis span { font-size: 10px; opacity: .6; text-transform: uppercase; letter-spacing: .06em; }
+.shell-kpis b { font-size: 14px; font-weight: 500; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav { position: fixed; top: 8px; left: 50%; right: 280px; height: 32px; min-height: 32px; padding: 0; background: transparent; }
+.studio-shell:has(.app[data-studio-shell="cockpit"][data-surface]) .environment-strip { top: 4px; bottom: auto; left: 36%; right: auto; width: auto; height: 40px; border: 0; padding: 0; background: var(--leaf-surface); }
+.studio-shell:has(.app[data-studio-shell="cockpit"][data-surface]) .environment-strip :is(button, select) { min-height: 32px; height: 32px; font-size: 12px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-toolbar { height: 0; min-height: 0; padding: 0; border: 0; overflow: visible; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-toolbar > :is(.viewer-title, .doc-tab-start, .doc-tab-close, .doc-tab-add),
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-actions > .checkout-controls { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(header[data-customer-mode="true"]) :is(.foot-region-docs, .foot-region-system) { display: none; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .cockpit-view { display: none; }
+@media (min-width: 1024px) {
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll > :is(.campaign-panel, .workspace-summary) { display: none; }
+}
+.studio-agent-panel { position: fixed; right: 16px; bottom: 48px; width: 360px; max-width: calc(100vw - 32px); max-height: calc(100vh - 120px); overflow: auto; padding: 12px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 30; }
+.studio-agent-panel[data-collapsed="true"] { width: auto; height: 48px; padding: 4px 12px; border-radius: 24px; }
+.agent-panel-toggle { min-height: 40px; border: 0; background: transparent; color: var(--foreground); font-size: 13px; }
+.agent-message-history { max-height: 240px; overflow: auto; padding: 0; margin: 0 0 8px; list-style: none; font-size: 13px; }
+.agent-message-history li { padding: 8px 0; }
+.studio-agent-panel .bar-dock { position: static !important; width: auto !important; max-width: none !important; margin: 0 !important; padding: 0 !important; }
+.studio-agent-panel .command-transcript-host { max-height: min(320px, 40dvh); overflow: auto; }
+.studio-agent-panel .bar { display: flex; flex-wrap: wrap; border-radius: 12px; }
+.studio-agent-panel .bar-input { width: 100%; min-height: 44px; padding: 4px 8px; }
+.studio-agent-panel .bar-field { min-height: 44px; font-size: 16px; }
+.studio-agent-panel .bar-caret { display: none; }
+.studio-agent-panel .bar-controls .chip-act { background: var(--primary); border-color: var(--primary); color: var(--on-accent); }
+
+/* These are the drawing profiles' final geometry. Earlier responsive skins
+   include more-specific Solar selectors with the old multi-row band height. */
+.studio-shell .app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"]):has(> header.top.shell-header-48) {
+  --ck-canvas-top: 88px;
+  --ck-canvas-top-live: max(88px, var(--cockpit-band-bottom, 0px));
+}
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar { font-size: 12px; }
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:has(header[data-customer-mode="true"]) footer.foot-bar { display: flex; justify-content: flex-end; }
+.shell-checkout:not([open]) > .shell-checkout-menu { display: none; }
