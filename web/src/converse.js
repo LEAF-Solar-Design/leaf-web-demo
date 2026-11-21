@@ -48,6 +48,7 @@ export function projectActivityProjection(value) {
 export const STREAM_EVENT_TYPES = [
   'turn_started', 'text_delta', 'tool_call', 'tool_result', 'job_linked',
   'proposed_run', 'confirmation_required', 'question_required', 'confirmation_resolved',
+  'questions_required', 'plan_proposed',
   'turn_usage', 'turn_complete', 'session_state', 'error',
   // Durable queue events (turn_runner appends them; composer.js reads them).
   'turn_queued', 'turn_queue_dropped',
@@ -309,7 +310,7 @@ function isCompletedJournalReply(res, body, requestId) {
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
-  text, confirm, images, classifier_hint, credential_grant, queue, request_id,
+  text, confirm, answers, images, classifier_hint, credential_grant, queue, request_id,
   entity_scope,
   projectContext,
   // Slice 6b hand-off identity: WHO asked for this background start. Bounded
@@ -334,6 +335,7 @@ export async function postMessage(sessionId, {
   const payload = {}
   if (text != null) payload.text = text
   if (confirm != null) payload.confirm = confirm
+  if (confirm?.feedback != null) guardPlanText(confirm.feedback)
   if (images != null) payload.images = images
   if (classifier_hint != null) payload.classifier_hint = classifier_hint
   if (credential_grant != null) payload.credential_grant = credential_grant
@@ -354,6 +356,14 @@ export async function postMessage(sessionId, {
   if (queue === true && typeof requested_by === 'string') {
     const who = requested_by.trim()
     if (who && who.length <= SCOPE_HANDLE_MAX) payload.requested_by = who
+  }
+  if (answers != null) {
+    if (Object.keys(payload).length) throw new Error('Send answers in a separate turn.')
+    for (const answer of Object.values(answers.answers || {})) {
+      for (const value of answer.labels || []) guardPlanText(value)
+      if (answer.other != null) guardPlanText(answer.other)
+    }
+    payload.answers = answers
   }
   const { res, body } = await post(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
@@ -437,6 +447,15 @@ export async function approve(confirmationId, approved) {
   return body || { resolved: true, approved: !!approved }
 }
 
+function guardPlanText(value) {
+  const guard = guardedText(value)
+  if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+}
+
+export function sendAnswers(sessionId, questionId, answers) {
+  return postMessage(sessionId, { answers: { question_id: questionId, answers } })
+}
+
 export async function listPendingApprovals(sessionId, limit = 100) {
   const bounded = Math.max(1, Math.min(Number(limit) || 100, 100))
   const query = `session_id=${encodeURIComponent(sessionId)}&limit=${bounded}`
@@ -466,16 +485,23 @@ export async function approveStandardService(approvalId, argumentDigest) {
  * nothing runs until the caller permits the resume.
  */
 export async function resolveApproval(
-  confirmationId, owningSessionId, approved, decisionRecorded = false, { beforeResume = null } = {},
+  confirmationId, owningSessionId, approved, decisionRecorded = false,
+  { beforeResume = null, feedback, onRecorded, isCurrent } = {},
 ) {
+  if (feedback != null) {
+    if (approved || typeof feedback !== 'string' || feedback.length > 1000) throw new Error('Invalid plan feedback.')
+    guardPlanText(feedback)
+  }
   if (!decisionRecorded) {
     await approve(confirmationId, approved)
+    onRecorded?.()
   }
+  if (isCurrent && !isCurrent()) return { held: true, recorded: true }
   if (approved && typeof beforeResume === 'function' && (await beforeResume()) === false) {
     return { held: true, recorded: true }
   }
   return postMessage(owningSessionId, {
-    confirm: { confirmationId, approved: !!approved },
+    confirm: { confirmationId, approved: !!approved, ...(feedback != null ? { feedback } : {}) },
   })
 }
 
