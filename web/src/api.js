@@ -2427,6 +2427,77 @@ async function toolManagementPost(mock, path, payload) {
 
 const managementString = (value) => typeof value === 'string' && value.trim().length > 0
 
+export function stagedSourceIdentity(staged) {
+  const receipt = staged?.receipt
+  const tool = staged?.tool
+  if (staged?.demo || staged?.legacy_demo || staged?.published || receipt?.state !== 'staged'
+    || !isSourceUuid(receipt?.change_set_id) || !sourceHash(receipt?.staged_commit, 40)
+    || !sourceHash(receipt?.catalog_digest, 64) || tool?.kind !== 'script'
+    || typeof tool?.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(tool.name)
+    || tool.entry !== `tools/${tool.name}/tool.py`) return null
+  return { changeSetId: receipt.change_set_id, commit: receipt.staged_commit,
+    path: tool.entry, filename: `${tool.name}.py` }
+}
+
+export async function downloadStagedSource(staged, { expectedScope, signal } = {}) {
+  const identity = stagedSourceIdentity(staged)
+  const unavailable = () => new Error('Staged source could not be verified. Refresh the saved request and try again.')
+  const check = () => {
+    if (!identity || !expectedScope || signal?.aborted || readActiveScope() !== expectedScope
+      || !authHeaders().Authorization || isMockConversation()) throw unavailable()
+  }
+  check()
+  const path = `/api/author/stages/${identity.changeSetId}?view=source`
+  const url = new URL(`${API_BASE}${path}`, window.location.origin)
+  if (url.origin !== window.location.origin || url.pathname !== path.split('?')[0]
+    || url.search !== '?view=source' || url.hash || url.username || url.password) throw unavailable()
+  const response = await apiFetch(url.href, { method: 'GET', headers: authHeaders(),
+    cache: 'no-store', redirect: 'error', signal }, path)
+  check()
+  if (response.status !== 200 || response.redirected) throw unavailable()
+  const headers = response.headers
+  const length = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Source-Sha256')
+  const blob = headers.get('X-Leaf-Source-Blob')
+  if (!/^(0|[1-9][0-9]{0,5})$/.test(length || '') || Number(length) > 262144
+    || headers.get('Content-Type') !== 'application/octet-stream'
+    || ![null, 'identity'].includes(headers.get('Content-Encoding'))
+    || headers.get('X-Leaf-Source-Commit') !== identity.commit
+    || headers.get('X-Leaf-Source-Path') !== identity.path
+    || !sourceHash(sha256, 64) || !sourceHash(blob, 40)
+    || !globalThis.crypto?.subtle || !response.body?.getReader) throw unavailable()
+  const reader = response.body.getReader()
+  const bytes = new Uint8Array(Number(length))
+  const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      check()
+      if (done) break
+      if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+        || total + value.byteLength > bytes.length) throw unavailable()
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+    if (total !== bytes.length) throw unavailable()
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+  const prefix = new TextEncoder().encode(`blob ${bytes.length}\0`)
+  const gitBytes = new Uint8Array(prefix.length + bytes.length)
+  gitBytes.set(prefix)
+  gitBytes.set(bytes, prefix.length)
+  const hex = (buffer) => Array.from(new Uint8Array(buffer), (n) => n.toString(16).padStart(2, '0')).join('')
+  const [actualSha, actualBlob] = await Promise.all([
+    crypto.subtle.digest('SHA-256', bytes), crypto.subtle.digest('SHA-1', gitBytes),
+  ])
+  check()
+  if (hex(actualSha) !== sha256 || hex(actualBlob) !== blob) throw unavailable()
+  return { bytes, filename: identity.filename }
+}
+
 export async function getToolRemovalAuthority(mock, toolName) {
   const body = await toolManagementPost(mock, '/api/author/removals/authority', { tool_name: toolName })
   const digest = body?.effective_catalog_digest
