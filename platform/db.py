@@ -315,7 +315,8 @@ _REQUIRED_COLUMNS = {
     "overlay_audit": {"audit_id", "proposal_id", "tenant_id", "from_state",
                       "to_state", "token_count"},
     "orgs": {"org_id", "tier", "status", "account_class"},
-    "projects": {"project_id", "org_id", "status"},
+    "projects": {"project_id", "org_id", "status", "archived_at"},
+    "project_artifact_sweep": {"project_id", "object_key", "object_version_or_sha256", "queued_at", "swept_at"},
     "built_tools": {"tool_id", "project_id", "org_id", "name"},
     "drawing_versions": {
         "version_id", "project_id", "org_id", "drawing_id", "provenance",

@@ -78,6 +78,13 @@ def test_sip_r1_pg_first_acquire(scope):
     assert state(scope).checkout == lease
 
 
+def test_sip_r1_pg_archived_project_refused(scope):
+    with db.cursor() as cur:
+        cur.execute("UPDATE projects SET status = 'archived', archived_at = now() "
+                    "WHERE org_id=%s AND project_id=%s", (scope.org, scope.project))
+    reason("PROJECT_ARCHIVED", lambda: acquire(scope))
+
+
 def test_sip_r1_pg_live_conflict(scope):
     prior = acquire(scope)
     scope.now = T0 + timedelta(seconds=10)
