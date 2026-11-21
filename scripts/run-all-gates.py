@@ -1634,7 +1634,7 @@ def build_suites() -> List[Suite]:
               # ELAPSED lease, pinned in both states. Nothing here skips, so the
               # local count IS the CI count.
               _py_pytest("tests/test_context_packet.py"), 17),
-        Suite("server-context-packet-inline-authoring", "server tests/test_context_packet_inline_authoring.py", "pytest", SERVER,
+        Suite("server-inline-authoring-context-packet", "server tests/test_context_packet_inline_authoring.py", "pytest", SERVER,
               _py_pytest("tests/test_context_packet_inline_authoring.py"), 8),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
