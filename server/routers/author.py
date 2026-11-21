@@ -87,6 +87,9 @@ class _AuthorFields(BaseModel):
 
 
 class AuthorRequest(_AuthorFields):
+    # A plan-bound build sends only the binding; the description comes from the
+    # approved plan. Every other caller must still send one (checked in author()).
+    description: str = Field("", max_length=MAX_AUTHOR_DESCRIPTION)
     # Legacy callers could send arbitrary extras. Interpret these only when
     # this tenant uses plan-bound authoring.
     plan_confirmation_id: Any = None
@@ -825,6 +828,8 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
         authority_turn_id if isinstance(authority_turn_id, str) else None
     )
     plan_mode = customization_flags.plan_mode_enabled(str(tenant).strip())
+    if not plan_mode and "description" not in req.model_fields_set:
+        return _customization_error(CustomizationServiceError("description_required", 422))
     if plan_mode and not (authority_session_id and authority_turn_id):
         return _customization_error(CustomizationServiceError("plan_required", 409))
     if bool(authority_session_id) != bool(authority_turn_id):
