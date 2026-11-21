@@ -694,7 +694,7 @@ def test_retained_arlo_activation_http(monkeypatch, case, status):
     from copy import deepcopy
     from test_arlo_lab_inputs import (
         BINDING, ORG, PROJECT, MemoryTransactions, activate, api, arlo_lab,
-        reference_input, revise,
+        headers as arlo_headers, reference_input, revise,
     )
     from fastapi import HTTPException
 
@@ -723,7 +723,7 @@ def test_retained_arlo_activation_http(monkeypatch, case, status):
     monkeypatch.setattr(api.platform_deps, "_verified_identity", verified)
     app = FastAPI()
     app.include_router(api.router)
-    headers = {} if case == "anonymous" else {"Authorization": "Bearer verified-session"}
+    headers = {} if case == "anonymous" else arlo_headers()
     response = TestClient(app).post(
         f"/api/projects/{project}/arlo-inputs/{original['input_version_id']}/activate",
         headers=headers, json={"input_version_id": target})
