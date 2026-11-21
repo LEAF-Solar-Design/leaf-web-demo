@@ -8,14 +8,20 @@ const HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant'
 const local = (value) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname)
 
 async function openLinkedServices(page) {
-  await page.getByText('Account', { exact: true }).click()
+  // Idempotent: a second call (after linking) must not toggle an already-open Account menu or Studio sidebar shut.
   const trigger = page.locator('.link-svc-trigger')
   await expect(trigger).toBeAttached()
+  if (!await trigger.isVisible()) {
+    const menu = page.locator('.shell-avatar-menu')
+    if (!await menu.evaluate((node) => node.open === true).catch(() => false)) {
+      await page.getByText('Account', { exact: true }).click()
+    }
+  }
   // Ops seats integrations in the account row; other profiles keep them
   // in the Studio sidebar. Preserve both placements in the quiet shell.
   if (!await trigger.isVisible()) {
     const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
-    await studio.click()
+    if (await studio.getAttribute('aria-expanded') !== 'true') await studio.click()
     await expect(studio).toHaveAttribute('aria-expanded', 'true')
   }
   await expect(trigger).toBeVisible()
