@@ -4,14 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import React, { useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { parseExpression } from '@babel/parser'
-import { AgentPanel, CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnostics, ShellKpis, StatusToggles } from './DrawingCockpit.jsx'
+import { CheckoutChip, CockpitStatus, DrawingTabLabel, ShellDiagnostics, ShellKpis, StatusToggles } from './DrawingCockpit.jsx'
 import DraftingRibbon from './DraftingRibbon.jsx'
 import DrawingNavigationTools, { DrawingObjectsMount } from './DrawingNavigationTools.jsx'
 import { projectSolarOpenStatus } from '../solar/solarProjectAppModel.js'
 import { ShellAccountMenu } from '../App.jsx'
 import CostTransparencyPanel from '../components/CostTransparencyPanel.jsx'
 import ClaudeAccountPanel from '../components/ClaudeAccountPanel.jsx'
-import RoutePanel from '../components/RoutePanel.jsx'
 import { isCustomerMode } from '../lib/customerMode.js'
 import { ServiceStatus } from '../components/DetailsDrawer.jsx'
 import SurfaceFrame from './SurfaceFrame.jsx'
@@ -57,14 +56,9 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
-  it('caps the assistant below the docked controls and lifts open account controls above them', () => {
+  it('lifts open account controls above the docked workspace controls', () => {
     const css = readFileSync(`${process.cwd()}/src/site/studioShell.css`, 'utf8')
-    const panel = css.match(/\.studio-agent-panel\s*\{([^}]+)\}/)[1]
     const header = css.match(/\.studio-shell header\.top:has\(\.shell-avatar-menu\[open\]\)\s*\{([^}]+)\}/)[1]
-    // Invariant (PR 3591, offline fixture in leaf-research .../3131-walk-attribution-20261121/geometry): the open assistant ends
-    // 8px below the docked workspace controls (cad/solar strip bottom, 72px elsewhere) above its 48px bottom inset.
-    expect(panel).toMatch(/max-height:\s*calc\(100vh - 48px - var\(--environment-strip-bottom, 72px\) - 8px\);/)
-    expect(panel).toMatch(/overflow:\s*auto;/)
     expect(header).toMatch(/position:\s*relative;/)
     // The shell token lint (LS-T4) requires layer tokens, so resolve them to the standard's numbers before comparing.
     const layers = { base: 0, raised: 10, sticky: 20, header: 30, overlay: 40, popover: 50, modal: 60, toast: 70 }
@@ -72,9 +66,7 @@ describe('quiet Studio shell', () => {
       const [, literal, layer, offset] = rule.match(/z-index:\s*(?:(\d+)|(?:calc\()?var\(--leaf-layer-(\w+)\)(?:\s*\+\s*(\d+)\))?)/)
       return literal !== undefined ? Number(literal) : layers[layer] + Number(offset || 0)
     }
-    const panelZIndex = zIndex(panel)
     const headerZIndex = zIndex(header)
-    expect(headerZIndex).toBeGreaterThan(panelZIndex)
     expect(headerZIndex).toBeGreaterThan(30)
     // The open account menu also sits above the workspace environment layer (overlay) that holds the docked controls.
     expect(headerZIndex).toBeGreaterThan(layers.overlay)
@@ -238,12 +230,6 @@ describe('quiet Studio shell', () => {
     expect(Array.from(rail.querySelectorAll('details')).every((menu) => !menu.open)).toBe(true)
     expect(container.querySelectorAll('.drawing-objects-panel').length).toBe(1)
   })
-  it('leaves the CAD command dock unwrapped without claiming Escape', () => {
-    const { container } = render(<AgentPanel enabled={false}><input aria-label="CAD command" /></AgentPanel>)
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
-    expect(container.querySelector('.studio-agent-panel')).toBeNull()
-    expect(screen.getByRole('textbox')).toBeTruthy()
-  })
   it('starts Find and Layers closed in the left rail', () => {
     const { container } = render(<DrawingNavigationTools navigation={{ syncScope: vi.fn() }} />)
     expect(container.querySelector('.drawing-left-rail').dataset.collapsed).toBe('true')
@@ -251,32 +237,6 @@ describe('quiet Studio shell', () => {
     expect(screen.queryByRole('combobox')).toBeNull()
     fireEvent.click(container.querySelector('.drawing-rail-find > summary'))
     expect(screen.getByRole('combobox')).toBeTruthy()
-  })
-  it('collapses the agent panel to its pill on Escape and preserves its children', () => {
-    const { container } = render(<AgentPanel><p>String every roof</p><input aria-label="Ask Leaf" /></AgentPanel>)
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
-    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('true')
-    expect(screen.getByRole('button', { name: 'Ask Leaf' }).getAttribute('aria-expanded')).toBe('false')
-    fireEvent.click(screen.getByRole('button', { name: 'Ask Leaf' }))
-    expect(screen.getByText('String every roof')).toBeTruthy()
-    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('false')
-    expect(screen.queryByRole('list', { name: 'Message history' })).toBeNull()
-  })
-  it('dismisses an open proposal on Escape before collapsing the agent panel', () => {
-    const dismiss = vi.fn()
-    const tool = { name: 'solar-string', title: 'String the roof', capabilities: ['drawing.read'], params: { properties: {} } }
-    function WithProposal() {
-      const [route, setRoute] = useState({ lane: 'run', confidence: .99, tool: tool.name, runIntent: { tool: tool.name, params: {} } })
-      return <AgentPanel><input aria-label="Ask Leaf" /><RoutePanel route={route} tools={[tool]} running={false}
-        onConfirmIntent={vi.fn()} onDismiss={() => { dismiss(); setRoute(null) }} /></AgentPanel>
-    }
-    const { container } = render(<WithProposal />)
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
-    expect(dismiss).toHaveBeenCalledOnce()
-    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('false')
-    expect(screen.getByRole('button', { name: 'Ask Leaf' })).toHaveAttribute('aria-expanded', 'true')
-    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' })
-    expect(container.querySelector('.studio-agent-panel').dataset.collapsed).toBe('true')
   })
   it('shows coordinates and selection while withholding scale and render diagnostics', () => {
     const viewerRef = { current: null }

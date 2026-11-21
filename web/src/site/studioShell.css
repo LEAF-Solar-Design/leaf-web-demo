@@ -903,18 +903,6 @@
 @media (min-width: 1024px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll > :is(.campaign-panel, .workspace-summary) { display: none; }
 }
-.studio-agent-panel { position: fixed; right: 16px; bottom: 48px; width: 360px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px - var(--environment-strip-bottom, 72px) - 8px); overflow: auto; padding: 12px; box-sizing: border-box; border: 1px solid var(--border); border-radius: calc(var(--leaf-radius-command) + 1px); background: var(--card); box-shadow: var(--shadow-pop); z-index: var(--leaf-layer-header); }
-.studio-agent-panel[data-collapsed="true"] { width: auto; height: 48px; padding: 4px 12px; border-radius: calc(var(--leaf-radius-sheet) + 8px); }
-.agent-panel-toggle { min-height: 40px; border: 0; background: transparent; color: var(--foreground); font-size: var(--leaf-size-dense); }
-.agent-message-history { max-height: 240px; overflow: auto; padding: 0; margin: 0 0 8px; list-style: none; font-size: var(--leaf-size-dense); }
-.agent-message-history li { padding: 8px 0; }
-.studio-agent-panel .bar-dock { position: static !important; width: auto !important; max-width: none !important; margin: 0 !important; padding: 0 !important; }
-.studio-agent-panel .command-transcript-host { max-height: min(320px, 40dvh); overflow: auto; }
-.studio-agent-panel .bar { display: flex; flex-wrap: wrap; border-radius: calc(var(--leaf-radius-command) + 1px); }
-.studio-agent-panel .bar-input { width: 100%; min-height: 44px; padding: 4px 8px; }
-.studio-agent-panel .bar-field { min-height: 44px; font-size: var(--leaf-size-touch); }
-.studio-agent-panel .bar-caret { display: none; }
-.studio-agent-panel .bar-controls .chip-act { background: var(--primary); border-color: var(--primary); color: var(--on-accent); }
 
 /* These are the drawing profiles' final geometry. Earlier responsive skins
    include more-specific Solar selectors with the old multi-row band height. */

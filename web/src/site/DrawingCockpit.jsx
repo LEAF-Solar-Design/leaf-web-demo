@@ -21,7 +21,6 @@ import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
 import { findLayerName, VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import { humanizeError } from '../errorHumanize.js'
-import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 const ZOOM_IN = 1.25
 const ZOOM_OUT = 0.8
@@ -47,28 +46,6 @@ export function CheckoutChip({ checkedOut = false, children }) {
 
 export function DrawingTabLabel({ name, shortId }) {
   return <span className="drawing-tab-label" title={shortId ? `${name || 'Drawing'} · ${String(shortId).slice(0, 8)}` : name}>{name || 'Drawing'}</span>
-}
-
-// The Studio command-bar seat can wrap its existing PromptBox and transcript
-// here. CAD keeps the original command line seat.
-export function AgentPanel({ children, enabled = true }) {
-  const [collapsed, setCollapsed] = useState(false)
-  const panelRef = useRef(null)
-  const toggleRef = useRef(null)
-  const panelId = useId()
-  // Collapsing the host comes after dismissing a proposal or cancelling a
-  // command, so one Escape never hides the proposal's assistant panel.
-  useEscapeOwner('studio-agent-panel', enabled && !collapsed, () => {
-    setCollapsed(true)
-    toggleRef.current?.focus()
-  }, { layer: 'focus', scope: panelRef })
-  if (!enabled) return children
-  return <aside className="studio-agent-panel" data-collapsed={collapsed ? 'true' : 'false'} aria-label="Drawing assistant">
-    <button ref={toggleRef} type="button" className="agent-panel-toggle" aria-expanded={!collapsed} aria-controls={panelId} onClick={() => setCollapsed((value) => !value)}>Ask Leaf</button>
-    <div ref={panelRef} id={panelId} hidden={collapsed}>
-      {children}
-    </div>
-  </aside>
 }
 
 // Fixed-precision, sign-stable formatting for a drawing-unit coordinate:

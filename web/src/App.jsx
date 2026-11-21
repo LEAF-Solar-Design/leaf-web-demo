@@ -25,7 +25,7 @@ import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
-import { AgentPanel, CheckoutChip, DrawingTabLabel, ShellKpis, ShellDiagnostics, CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
+import { CheckoutChip, DrawingTabLabel, ShellKpis, ShellDiagnostics, CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
 import { isCustomerMode } from './lib/customerMode.js'
 import { createViewHistory } from './lib/viewHistory.js'
 // Slice 4a: the ONE shell wrapper both scenes mount, and the console nav
@@ -6961,7 +6961,6 @@ export default function App() {
         {(!studioShell || drafting) && <SurfaceFrame.Entitlement at="inline" />}
         </main>
 
-        <AgentPanel enabled={studioShell && surfaceSlots.toolbar.profile !== 'cad'}>
         <div className="bar-dock">
           <div className="command-transcript-host" data-testid="command-transcript-host" ref={setCommandTranscriptHost} />
           {boardVisible && <p className="start-board-gloss">{START_BOARD_COPY.gloss}{mock && <> {START_BOARD_COPY.mockGloss}</>}</p>}
@@ -7032,7 +7031,6 @@ export default function App() {
           <SurfaceFrame.CommandBar />
           {ENV_CAD_EDIT && studioGround && drafting && <div id="cockpit-engine-status-slot" />}
         </div>
-        </AgentPanel>
 
         {/* The golden path's payoff (result numbers) and the running strip are
             both silent to a screen reader. One PERMANENTLY-mounted polite region
