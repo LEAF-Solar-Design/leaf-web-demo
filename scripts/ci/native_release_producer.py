@@ -751,8 +751,17 @@ def _print_build_logs(work: Path, services, *, retry=False) -> None:
         print(tail, flush=True)
 
 
+APP_SYNTAX_FRONTEND = "docker-image://docker.io/docker/dockerfile:1"
+
+
 def _app_frontend_closed_before_build(path: Path) -> bool:
-    """Recognize only a complete, bounded app syntax-frontend failure log."""
+    """Recognize only a complete, bounded app syntax-frontend failure log.
+
+    Two shapes qualify, both ending before any build step: a warm frontend
+    (#2 resolves the image config, #3 is the cached frontend, all DONE) and a
+    cold pull (#2 pulls the frontend and is cut off at '#2 ...', #3 resolves
+    the image config; 11-20 publisher f3e0d733). Fails closed on anything else.
+    """
     try:
         with path.open("rb") as stream:
             raw = stream.read(BUILD_LOG_TAIL_BYTES + 1)
@@ -765,7 +774,6 @@ def _app_frontend_closed_before_build(path: Path) -> bool:
     if not lines or not lines[0].startswith('#0 building with '):
         return False
     required = ("#1 [internal] load build definition from Dockerfile.app",
-                "#2 resolve image config for docker-image://docker.io/docker/dockerfile:1",
                 "Dockerfile.app:1", "   1 | >>> # syntax=docker/dockerfile:1",
                 "ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly")
     if any(lines.count(line) != 1 for line in required) or lines[-1] != required[-1]:
@@ -779,11 +787,28 @@ def _app_frontend_closed_before_build(path: Path) -> bool:
     if any(line and not line.startswith('#') and line not in ("Dockerfile.app:1", required[-1])
            and re.fullmatch(r"-+|\s+\d+ \|.*", line) is None for line in lines):
         return False
-    frontend = r"#3 docker-image://docker.io/docker/dockerfile:1@sha256:[0-9a-f]{64}"
-    return (sum(re.fullmatch(frontend, line) is not None for line in lines) == 1
-            and any(re.fullmatch(r"#1 DONE [0-9.]+s", line) for line in lines)
-            and any(re.fullmatch(r"#2 DONE [0-9.]+s", line) for line in lines)
-            and any(re.fullmatch(r"#3 DONE [0-9.]+s", line) for line in lines))
+    config = f"resolve image config for {APP_SYNTAX_FRONTEND}"
+    frontend = re.escape(APP_SYNTAX_FRONTEND) + r"@sha256:[0-9a-f]{64}"
+    if (sum(match[2] == config for match in progress) != 1
+            or sum(re.fullmatch(frontend, match[2]) is not None for match in progress) != 1):
+        return False
+    heads: dict[int, str] = {}
+    for match in progress:
+        heads.setdefault(int(match[1]), match[2])
+    if set(heads) != {0, 1, 2, 3}:
+        return False
+    if heads[2] == config and re.fullmatch(frontend, heads[3]):
+        config_vertex, frontend_vertex = 2, 3  # warm: frontend already cached
+    elif re.fullmatch(frontend, heads[2]) and heads[3] == config:
+        config_vertex, frontend_vertex = 3, 2  # cold: frontend pulled first
+    else:
+        return False
+
+    def done(vertex: int) -> bool:
+        return any(re.fullmatch(rf"#{vertex} DONE [0-9.]+s", line) for line in lines)
+
+    return (done(1) and done(config_vertex)
+            and (done(frontend_vertex) or f"#{frontend_vertex} ..." in lines))
 
 
 def _build_images(root: Path, services, source: str, build_number: int,
