@@ -57,6 +57,19 @@ vi.mock('./studioGround.js', async (original) => ({ ...await original(), useStud
 afterEach(cleanup)
 
 describe('quiet Studio shell', () => {
+  it('caps the assistant below the header and lifts open account controls above it', () => {
+    const css = readFileSync(`${process.cwd()}/src/site/studioShell.css`, 'utf8')
+    const panel = css.match(/\.studio-agent-panel\s*\{([^}]+)\}/)[1]
+    const header = css.match(/\.studio-shell header\.top:has\(\.shell-avatar-menu\[open\]\)\s*\{([^}]+)\}/)[1]
+    expect(panel).toMatch(/max-height:\s*calc\(100vh - 120px\);/)
+    expect(panel).toMatch(/overflow:\s*auto;/)
+    expect(header).toMatch(/position:\s*relative;/)
+    const panelZIndex = Number(panel.match(/z-index:\s*(\d+)/)[1])
+    const headerZIndex = Number(header.match(/z-index:\s*(\d+)/)[1])
+    expect(headerZIndex).toBeGreaterThan(panelZIndex)
+    expect(headerZIndex).toBeGreaterThan(30)
+  })
+
   it('defines customer mode once behind the Studio shell gate', () => {
     expect(appSource.match(/\bisCustomerMode\s*\(/g)).toHaveLength(1)
     expect(appSource).toMatch(/const studioCustomerMode = studioShell && isCustomerMode\(\{ \.\.\.session\.session, tier \}\)/)

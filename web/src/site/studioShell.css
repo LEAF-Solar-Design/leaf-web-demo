@@ -851,6 +851,7 @@
 .shell-checkout-menu, .studio-shell .shell-avatar-menu > .who { position: absolute; top: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 100; }
 .shell-checkout-menu { left: 0; min-width: 200px; }
 .studio-shell .shell-avatar-menu { position: relative; flex: 0 0 auto; }
+.studio-shell header.top:has(.shell-avatar-menu[open]) { position: relative; z-index: 40; }
 .studio-shell .shell-avatar-menu > summary { height: 32px; padding: 0 8px; display: flex; align-items: center; gap: 4px; list-style: none; cursor: pointer; border: 1px solid var(--border); border-radius: 8px; background: var(--accent-tint); color: var(--primary); }
 .studio-shell .shell-avatar-menu:not([open]) > .who { display: none !important; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .shell-avatar-menu > .who { right: 0; width: 240px; max-width: calc(100vw - 24px); display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
@@ -911,7 +912,7 @@
 @media (min-width: 1024px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll > :is(.campaign-panel, .workspace-summary) { display: none; }
 }
-.studio-agent-panel { position: fixed; right: 16px; bottom: 48px; width: 360px; max-width: calc(100vw - 32px); padding: 12px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 30; }
+.studio-agent-panel { position: fixed; right: 16px; bottom: 48px; width: 360px; max-width: calc(100vw - 32px); max-height: calc(100vh - 120px); overflow: auto; padding: 12px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-pop); z-index: 30; }
 .studio-agent-panel[data-collapsed="true"] { width: auto; height: 48px; padding: 4px 12px; border-radius: 24px; }
 .agent-panel-toggle { min-height: 40px; border: 0; background: transparent; color: var(--foreground); font-size: 13px; }
 .agent-message-history { max-height: 240px; overflow: auto; padding: 0; margin: 0 0 8px; list-style: none; font-size: 13px; }
