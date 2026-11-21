@@ -67,7 +67,7 @@ class MemoryCursor:
         project = params.get("project", params.get("project_id"))
         allowed = org == ORG and project == PROJECT and self.store.live
         if sql.startswith("SELECT project_id, org_id"):
-            self.row = {"org_id": ORG, "project_id": PROJECT} if allowed else None
+            self.row = {"org_id": ORG, "project_id": PROJECT, "status": "active"} if allowed else None
         elif sql.startswith("SELECT role FROM identity_bindings"):
             self.row = {"role": self.store.role} if org == ORG else None
         elif sql.startswith("SELECT role FROM project_member_bindings"):

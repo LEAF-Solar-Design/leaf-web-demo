@@ -408,14 +408,23 @@ def test_clone_export_reset_delete_are_named_and_tenant_scoped(client, make_org)
         headers=_headers(org_a.org_id, owner_a.binding_id),
     ).json()["files"][0]["path"] == "model/scene.json"
 
-    deleted = client.delete(
+    archived = client.post(
+        f"/api/projects/{clone_id}/archive",
+        headers=_headers(org_a.org_id, owner_a.binding_id, "archive-clone"),
+    )
+    assert archived.status_code == 200, archived.text
+    deleted = client.request(
+        "DELETE",
         f"/api/projects/{clone_id}",
+        json={"confirm_name": "A clone"},
         headers=_headers(org_a.org_id, owner_a.binding_id, "delete-clone"),
     )
     assert deleted.status_code == 200, deleted.text
     assert deleted.json()["status"] == "deleted"
-    retry = client.delete(
+    retry = client.request(
+        "DELETE",
         f"/api/projects/{clone_id}",
+        json={"confirm_name": "A clone"},
         headers=_headers(org_a.org_id, owner_a.binding_id, "delete-clone"),
     )
     assert retry.status_code == 200, retry.text
@@ -774,8 +783,15 @@ def test_live_auth_project_factory_creator_can_delete_what_it_created(
     assert snapshot.status_code == 200, snapshot.text
     assert snapshot.json()["viewer"]["role"] == "owner"
 
-    deleted = client.delete(
+    archived = client.post(
+        f"/api/projects/{project_id}/archive",
+        headers=_bearer(org.org_id, subject, f"archive-{uuid.uuid4()}"),
+    )
+    assert archived.status_code == 200, archived.text
+    deleted = client.request(
+        "DELETE",
         f"/api/projects/{project_id}",
+        json={"confirm_name": created.json()["project"]["name"]},
         headers=_bearer(org.org_id, subject, f"delete-{uuid.uuid4()}"),
     )
     assert deleted.status_code == 200, deleted.text
@@ -850,7 +866,7 @@ def test_project_factory_dev_seam_binds_an_opted_in_actor(client, make_org):
     assert client.delete(
         f"/api/projects/{project_id}",
         headers=_headers(org.org_id, editor.binding_id, f"delete-{uuid.uuid4()}"),
-    ).status_code == 200
+    ).status_code == 403
 
 
 def test_project_factory_replay_backfills_an_orphan_but_never_a_revoked_member(
