@@ -625,8 +625,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const decision = solveRunDecision(routed)
       const unmatched = isUnmatchedDecision(decision)
       const confidence = Number(decision.confidence) || 0
+      const planMode = current.planMode === true && !current.agentDisabled
       const reason = decision.lane === 'run' && !unmatched && solarRefusal(decision.tool, decision.params)
-      if (reason) {
+      if (reason && !planMode) {
         if (current.agentDisabled || projectScope() || typeof adapters.startAgentTurn !== 'function' ||
             reason.split('; ').some((code) => code === 'entitlement_required' || code === 'entitlement_policy_unavailable')) {
           return commitDecision(decision, { requestText: text })
@@ -653,14 +654,14 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       // An unmatched photo-inspection request uses existing agent tools. A
       // build-lane classifier result must not turn it into new repository source.
       const photoInspection = !current.agentDisabled && isPhotoInspectionRequest(originalText)
-      if (decision.lane === 'build' && adapters.openProjectSource && !photoInspection) {
+      if (!planMode && decision.lane === 'build' && adapters.openProjectSource && !photoInspection) {
         const handled = await adapters.openProjectSource(originalText, { allowSecretOnce,
           ...(Array.isArray(images) && images.length ? { images } : {}) })
         if (!requestIsCurrent()) return undefined
         if (handled) return decision
       }
       const chipOnly = current.agentDisabled ||
-        (decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
+        (!planMode && decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
       if (chipOnly) {
         commitDecision(decision, { requestText: text })
@@ -670,11 +671,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
           lane: decision.lane,
           tool: decision.tool || null,
           confidence,
-          rationale: decision.rationale || null,
+          rationale: reason ? `${decision.tool} is not ready here: ${reason}` : decision.rationale || null,
         }
         publish({ agentBanner: null })
         if (!requestIsCurrent()) return undefined
-        if (decision.lane === 'run' && !unmatched && !!decision.tool &&
+        if (!planMode && decision.lane === 'run' && !unmatched && !!decision.tool &&
             (confidence >= thresholds.RACE_MIN || decision.routedLane === 'solve')) {
           commitDecision(decision, { requestText: text })
           try {
@@ -700,7 +701,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
           } catch (error) {
             if (!requestIsCurrent()) return undefined
             if (isSecretRefused(error)) throw error
-            if (!photoInspection) {
+            if (!planMode && !photoInspection) {
               commitDecision(decision, { requestText: text })
               if (!requestIsCurrent()) return undefined
               if (decision.lane === 'build') openAuthorFlow(text)
