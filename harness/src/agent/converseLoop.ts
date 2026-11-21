@@ -1379,10 +1379,14 @@ export class ConverseLoop {
       const publicationResult = tool === "request_publication" && !result.isError
         ? projectPublicationResult(result.content)
         : undefined;
+      const authoredStage = tool === "author_tool" && !result.isError
+        ? projectAuthorStageResult(result.content)
+        : undefined;
       await emit("tool_result", {
         tool,
         ok: !result.isError,
         summary: resultSummary(tool, result),
+        ...(authoredStage ? { result: authoredStage } : {}),
         ...(tool === "inspect_project_photo" || tool === "propose_project_photo_assignments"
           ? { photo_reconciliation: photoInspection.reconciliation(proposedPhotoIds) } : {}),
         ...(publicationResult ? { result: publicationResult } : {}),
@@ -2433,6 +2437,29 @@ function validatePageProposal(value: unknown, source: PageProposalSource): Recor
 }
 
 /** Project only the validated service fields, never the human-facing summary. */
+/** The authoring card mounts from this: the change set id, never the app's whole answer. */
+function projectAuthorStageResult(content: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const response = parsed as Record<string, unknown>;
+  const boundedString = (value: unknown): value is string =>
+    typeof value === "string" && value.length >= 1 && value.length <= 128 && value.trim() === value;
+  if ((response.contract !== "leaf.customization-stage-job.v1" && response.contract !== "leaf.customization.v1")
+      || !boundedString(response.change_set_id)) {
+    return undefined;
+  }
+  return {
+    contract: response.contract,
+    change_set_id: response.change_set_id,
+    ...(boundedString(response.plan_confirmation_id) ? { plan_confirmation_id: response.plan_confirmation_id } : {}),
+  };
+}
+
 function projectPublicationResult(content: string): Record<string, unknown> | undefined {
   let parsed: unknown;
   try {
