@@ -25,6 +25,7 @@ const TENANT = config.tenant
 //   RACE_MIN..CHIP_ONLY (lane run)      -> chip AND an agent turn race
 //   below RACE_MIN / build / solve      -> ConversePanel primary
 export const THRESHOLDS = { CHIP_ONLY: 0.80, RACE_MIN: 0.55 }
+export const PLAN_MODE_CONTEXT_KEY = 'planMode'
 
 const EMPTY_ACTIVITY = Object.freeze({ queued: 0, executing: 0, total: 0 })
 

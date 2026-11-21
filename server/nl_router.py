@@ -105,12 +105,15 @@ _AUTHORING_NOUNS: Set[str] = {
 # strong, unambiguous authoring phrasing (verb-independent).
 _AUTHORING_PHRASE = re.compile(r"\btools?\s+(that|to|which|for)\b", re.IGNORECASE)
 
-# EXPLICIT build phrasing (Contract 4b BUILD-INTENT BOOST): "make/build/create/author
-# (me )?a tool (that|to) ...". When this is present the request is a NEW tool even if a
-# registered tool partially matches — UNLESS the text essentially names an existing tool
-# exactly (see _names_tool_exactly).
+# Explicit requests for a new tool can contain the name of a registered tool.
 _EXPLICIT_BUILD_RE = re.compile(
-    r"\b(make|build|create|author)(\s+me)?\s+an?\s+tools?\s+(that|to)\b", re.IGNORECASE
+    r"\b(?:make|build|create|author|write|add|need|want|develop|code)"
+    r"(?:\s+(?:me|us))?(?:\s+(?:a|an|the|new|one))?"
+    r"(?:\s+(?:new|brand-new|branch|autocad|c#|csharp|custom|small|simple|quick|studio|cad|plugin)){0,3}"
+    r"\s+(?:tools?|commands?|script|plugin|macro)\b"
+    r"|^\s*new\s+(?:(?:branch|autocad|studio)\s+)?(?:tool|command)\s*:"
+    r"|\b(?:brand-new\s+tool|new\s+branch\s+tool|new\s+autocad\s+command)\b",
+    re.IGNORECASE,
 )
 # Scaffolding tokens stripped before checking whether the text just NAMES an existing
 # tool (normalised vocabulary — matches _norm_tokens output).
@@ -282,7 +285,7 @@ def _alternatives(ranked: List[_Score], exclude_first: bool) -> List[Dict[str, A
 
 
 def _explicit_build(text: str) -> bool:
-    """Explicit authoring phrasing: 'make/build/create/author (me )?a tool (that|to)'."""
+    """Whether the request explicitly frames its description as a new tool."""
     return _EXPLICIT_BUILD_RE.search(text or "") is not None
 
 
@@ -538,15 +541,12 @@ def _decide(
 ) -> Classification:
     # 1. AUTHORING intent -> Build lane (unless the user named an EXISTING tool
     #    almost exactly, in which case honour the run match).
-    if _is_authoring(text, raw_toks):
+    explicit_build = _explicit_build(text)
+    if explicit_build or _is_authoring(text, raw_toks):
         honor_run = False
         if best is not None and best.exact:
-            # A contiguous tool-name match. Under EXPLICIT build phrasing ("make/build/
-            # create/author (me )?a tool that|to ..."), honour it as a RUN ONLY when the
-            # text essentially NAMES that tool exactly; otherwise the explicit build
-            # intent wins even though a tool partially matched (Contract 4b BUILD-INTENT
-            # BOOST — fixes "make a tool that counts panels smaller than 10 sqft" -> build).
-            if not _explicit_build(text) or _names_tool_exactly(best, q_seq):
+            # An explicit build can still just name a registered tool.
+            if not explicit_build or _names_tool_exactly(best, q_seq):
                 honor_run = True
         if not honor_run:
             strong = _AUTHORING_PHRASE.search(text or "") is not None
