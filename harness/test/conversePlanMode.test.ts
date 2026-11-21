@@ -128,7 +128,13 @@ describe("converse inline authoring", () => {
   it("rejects invalid proposals and unbound builds before consulting the gate", async () => {
     const { turn, check } = await setup();
     await turn({ text: "Plan" }, async ({ tools }) => {
-      for (const invalid of [{ ...plan, extra: true }, { ...plan, change_kind: "revise" }, { ...plan, title: " " }]) {
+      const revision = { ...plan, change_kind: "revise", target_tool_name: plan.tool_name };
+      expect(BuildPlan.safeParse(revision).success).toBe(true);
+      const rename = { ...revision, target_tool_name: "original" };
+      expect(BuildPlan.safeParse(rename).error?.issues).toContainEqual(expect.objectContaining({
+        path: ["tool_name"], message: "plan_invalid_field:tool_name",
+      }));
+      for (const invalid of [rename, { ...plan, extra: true }, { ...plan, change_kind: "revise" }, { ...plan, title: " " }]) {
         expect((await tools.execute("propose_plan", { plan: invalid })).isError).toBe(true);
       }
       expect((await tools.execute("propose_plan", { plan, confirmation_id: "fabricated" })).content)

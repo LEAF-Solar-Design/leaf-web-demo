@@ -580,6 +580,76 @@ describe("Branch submit compile gate", () => {
 });
 
 describe("POST /author/stage target routing", () => {
+  function stageRequest(server: Server, body: Record<string, unknown>) {
+    return fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/author/stage`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+  }
+
+  it("refuses malformed approved names before starting an author session", async () => {
+    const { ports, base } = await setup([]);
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    const stage = vi.spyOn(harness.loop, "stage");
+    const server = harness.listen(0);
+    servers.push(server);
+    for (const toolName of [null, 42, "", "Wrong", "a--b", "a".repeat(65), "count-lines\n"]) {
+      const response = await stageRequest(server, { tenant_id: TENANT, description: "count", ...request(base), toolName });
+      expect(response.status).toBe(400);
+    }
+    expect(stage).not.toHaveBeenCalled();
+  });
+
+  it("lets the Studio author correct a name refused by the approved plan", async () => {
+    const { ports, base, studioRun } = await setup([]);
+    const toolName = "approved-counter";
+    studioRun.mockImplementationOnce(input => {
+      expect(input.systemPrompt).toContain(`The approved tool name is ${toolName}.`);
+      return new FakeAgentRunner().run({ ...input, toolset: {
+        ...input.toolset,
+        submitTool(proposal) {
+          expect(() => input.toolset.submitTool(proposal)).toThrow(`V-name: tool name must be ${toolName}`);
+          return input.toolset.submitTool({ ...proposal, name: toolName });
+        },
+      } });
+    });
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    const server = harness.listen(0);
+    servers.push(server);
+    const response = await stageRequest(server, {
+      tenant_id: TENANT, description: "count entities", ...request(base), target: "studio", toolName,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ tool: { name: toolName } });
+    expect(studioRun).toHaveBeenCalledOnce();
+  });
+
+  it("lets the Branch author correct a name before the compiler sees the package", async () => {
+    const toolName = "approved-counter";
+    const proposal = fixture("good-panel-count");
+    const { base, sdk, ports, loop } = await setup([
+      proposal, { ...proposal, name: "Bad Name" }, { ...proposal, name: toolName },
+    ]);
+    vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", undefined);
+    const compile = vi.fn(async (_name: string): Promise<BranchCompileOutcome> => ({
+      status: "accept", ms: 3, allowlistSha256: ALLOWLIST_SHA, summary: { pass: true, decision: "accept", errors: 0 },
+    }));
+    setBranchCompileCheckForTests(compile);
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    vi.spyOn(harness.loop, "stage").mockImplementation(loop.stage.bind(loop));
+    const server = harness.listen(0);
+    servers.push(server);
+    const response = await stageRequest(server, { tenant_id: TENANT, description: "count panels", ...request(base), toolName });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ receipt: { package_path: `branch-tools/${toolName}` } });
+    expect(sdk.prompt()).toContain(`The approved tool name is ${toolName}.`);
+    for (const reply of sdk.replies.slice(0, 2)) {
+      expect(reply).toMatchObject({ isError: true, content: [{ text: `V-name: tool name must be ${toolName}` }] });
+    }
+    expect(sdk.replies[2].isError).toBeUndefined();
+    expect(compile.mock.calls.map(([name]) => name)).toEqual([toolName]);
+    expect(sdk.run).toHaveBeenCalledOnce();
+  });
+
   it("validates and forwards the revision base and returns a typed loop refusal", async () => {
     const { ports, base } = await setup([]);
     const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });

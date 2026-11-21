@@ -392,6 +392,8 @@ export interface StageCustomizationRequest {
   platformRelease: string;
   workspaceContractDigest: string;
   idempotencyKey: string;
+  /** Exact package name approved in a build plan, for both creates and revisions. */
+  toolName?: string;
   targetToolName?: string;
   revisionBaseCommit?: string;
   target?: "studio" | "branch";

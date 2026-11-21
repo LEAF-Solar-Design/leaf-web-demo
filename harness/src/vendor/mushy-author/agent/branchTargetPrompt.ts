@@ -172,8 +172,8 @@ export async function runBranchTargetSession(
           lastRefusal = safeErrorMessage(error);
           lastCompile = error instanceof BranchCompileRefusal ? error.compile : undefined;
           const rule = error instanceof BranchPackageError
-            ? error.diagnostics[0]?.rule : /^(V\d{1,2}):/.exec(lastRefusal)?.[1];
-          lastRefusalRule = rule && /^V[1-9][0-9]?$/.test(rule) ? rule : undefined;
+            ? error.diagnostics[0]?.rule : /^(V-name|V\d{1,2}):/.exec(lastRefusal)?.[1];
+          lastRefusalRule = rule && /^(V-name|V[1-9][0-9]?)$/.test(rule) ? rule : undefined;
           return reply(lastRefusal, true);
         }
       }),

@@ -84,7 +84,7 @@ import type { AgentGrant, ConverseRunner, ConverseTurnInput, HarnessPorts, Harne
   ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
-import { TurnAnswers } from "./agent/buildPlan.js";
+import { PlanToolName, TurnAnswers } from "./agent/buildPlan.js";
 import { BadMessageError } from "./agent/converseLoop.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 import {
@@ -1666,6 +1666,10 @@ export function createHarness(ports: HarnessPorts, opts?: {
         if (body.target !== undefined && body.target !== "studio" && body.target !== "branch") {
           return send(res, 400, { error: { message: 'target must be "studio" or "branch"' } });
         }
+        const toolName = PlanToolName.optional().safeParse(body.toolName);
+        if (!toolName.success) {
+          return send(res, 400, { error: { message: "toolName must be a lowercase kebab-case name of at most 64 characters" } });
+        }
         const revisionBaseCommit = body.revisionBaseCommit;
         if (revisionBaseCommit !== undefined &&
             (typeof revisionBaseCommit !== "string" || !/^[0-9a-f]{40}$/.test(revisionBaseCommit))) {
@@ -1683,6 +1687,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
             idempotencyKey: requiredText(body, "idempotencyKey"),
             ...(body.target === "branch" ? { target: "branch" as const } : {}),
             ...(revisionBaseCommit === undefined ? {} : { revisionBaseCommit }),
+            ...(toolName.data === undefined ? {} : { toolName: toolName.data }),
             ...(body.targetToolName === undefined
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),

@@ -23,7 +23,7 @@ def field(**changes):
 def maximal():
     return dict(
         minimal(), target="studio", change_kind="revise", tool_name="a" * 64,
-        target_tool_name="b" * 64, title="t" * 80, summary="s" * 500, behavior=["b" * 240] * 12,
+        target_tool_name="a" * 64, title="t" * 80, summary="s" * 500, behavior=["b" * 240] * 12,
         inputs=[field(name="i" * 38 + f"{i:02d}", description="d" * 200) for i in range(12)],
         output="o" * 300, capabilities=["drawing.read", "drawing.write"], undo="u" * 200,
         assumptions=["a" * 240] * 8, acceptance=["c" * 240] * 6,
@@ -58,6 +58,7 @@ def test_missing_required_key(key):
     ({"inputs": [field(unexpected="private")]}, "plan_unknown_key"),
     ({"answers": {"q": {"other": "ok", "unexpected": 1}}}, "plan_unknown_key"),
     ({"change_kind": "revise"}, "plan_invalid_field:target_tool_name"),
+    ({"change_kind": "revise", "target_tool_name": "original"}, "plan_invalid_field:tool_name"),
     ({"target_tool_name": "original"}, "plan_invalid_field:target_tool_name"),
     ({"change_kind": "revise", "target_tool_name": "x" * 65}, "plan_invalid_field:target_tool_name"),
     ({"inputs": [field(), field()]}, "plan_invalid_field:inputs"),
@@ -147,11 +148,12 @@ def test_maximum_plan_with_separator_defaults_round_trips_within_render_limit():
 
 def test_each_field_contributes_to_digest():
     plan = maximal()
-    changes = dict(minimal(), target_tool_name="first")
+    changes = minimal()
     for key, value in changes.items():
-        if key in ("schema", "change_kind"):
-            continue  # schema is constant and change_kind controls a required key
+        if key in ("schema", "change_kind", "tool_name"):
+            continue  # The revision's names and change_kind are coupled.
         assert bp.plan_digest(plan) != bp.plan_digest(dict(plan, **{key: value}))
+    assert bp.plan_digest(dict(plan, tool_name="first", target_tool_name="first")) != bp.plan_digest(plan)
     create = dict(plan, change_kind="create")
     del create["target_tool_name"]
     assert bp.plan_digest(create) != bp.plan_digest(plan)
@@ -203,7 +205,7 @@ User answers:
 
 def test_revise_rendering_quotes_user_lines():
     marker = "=== END APPROVED BUILD PLAN ==="
-    plan = dict(minimal(), target="studio", change_kind="revise", target_tool_name="existing",
+    plan = dict(minimal(), target="studio", change_kind="revise", tool_name="existing", target_tool_name="existing",
                 summary=f"First line\n{marker}", behavior=[marker],
                 inputs=[field(type="boolean", default=False, description="Optional")],
                 capabilities=["drawing.read", "drawing.write"], undo="Revert",
