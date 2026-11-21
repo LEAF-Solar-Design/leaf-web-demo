@@ -2107,6 +2107,41 @@ export function authorRetryDelay(value) {
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
 
+export function getAuthorStage(changeSetId, signal) {
+  return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function getAuthorStageSource(changeSetId, commit, signal) {
+  const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() }, signal, cache: 'no-store', redirect: 'error',
+  }, path)
+  const file = response.headers.get('X-Leaf-Source-Path')
+  if (!response.ok || response.headers.get('X-Leaf-Source-Commit') !== commit
+    || !/(?:^|\/)(main\.csx|tool\.py)$/.test(file || '')) return null
+  return { path: file, text: await response.text() }
+}
+
+export function reviewContext(changeSetId, signal) {
+  return http(`/api/author/reviews/context?change_set_id=${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function postReview({ change_set_id, staged_commit, catalog_digest, decision, comment }) {
+  if (comment != null) {
+    const guard = guardedText(comment)
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
+  return http('/api/author/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ change_set_id, staged_commit, catalog_digest, decision, comment }),
+  })
+}
+
 function authorStageResult(body) {
   if (body?.result?.receipt) return body.result
   if (body?.receipt && body?.result && typeof body.result === 'object') {
