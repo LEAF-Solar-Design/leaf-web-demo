@@ -757,7 +757,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "desired_platform_release", "workspace_contract_digest",
             "author_subject", "approver_subject", "created_at", "updated_at",
             "change_kind", "target_tool_name", "request_description", "request_fingerprint",
-            "plan_json", "plan_digest", "plan_confirmation_id",
+            "plan_json", "plan_digest", "plan_confirmation_id", "compile_summary_json",
             "authority_session_id", "authority_turn_id",
             "request_graph_input", "base_catalog_change_set_id", "catalog_record_fields_json",
             "tool_target",
