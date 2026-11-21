@@ -2421,13 +2421,15 @@ export async function downloadStagedSource(staged, { expectedScope, signal } = {
     || !globalThis.crypto?.subtle || !response.body?.getReader) throw unavailable()
   const reader = response.body.getReader()
   const bytes = new Uint8Array(Number(length))
+  const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
   let total = 0
   try {
     while (true) {
       const { done, value } = await reader.read()
       check()
       if (done) break
-      if (!(value instanceof Uint8Array) || total + value.byteLength > bytes.length) throw unavailable()
+      if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+        || total + value.byteLength > bytes.length) throw unavailable()
       bytes.set(value, total)
       total += value.byteLength
     }
