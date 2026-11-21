@@ -1911,7 +1911,20 @@ class CustomizationService:
             if change.tool_target == "branch":
                 self._verified_record_fields(change, set())
                 result["package_path"] = receipt["package_path"]
-                result["result"] = {"branch_package": self._staged_tool(change)}
+                if change.state is ChangeState.PUBLISHED:
+                    from branch_tools import sync_receipts
+                    from branch_tools.vendor.cad_tool_package.runner import package_digest
+
+                    files, name = self._branch_package_files(change)
+                    manifest = json.loads(files["tool.json"])
+                    branch = sync_receipts.latest(
+                        self.store, change.tenant_id, name, manifest["version"], package_digest(files),
+                    )
+                    if branch is not None:
+                        result["branch"] = branch
+                else:
+                    manifest = self._staged_tool(change)
+                result["result"] = {"branch_package": manifest}
             else:
                 result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
         elif status == "failed":

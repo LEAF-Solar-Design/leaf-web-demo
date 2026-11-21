@@ -10,8 +10,9 @@ from __future__ import annotations
 from typing import Any, Dict
 import os
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import customization_service
 import customization_flags
@@ -21,7 +22,7 @@ import investor_demo
 import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
-from branch_tools import dev_catalog
+from branch_tools import dev_catalog, sync_receipts
 
 router = APIRouter()
 
@@ -87,6 +88,29 @@ def dev_package(name: str, version: str, tenant=Depends(deps.require_active_tena
         if entry.metadata["name"] == name and entry.metadata["version"] == version:
             return FileResponse(entry.package, media_type="application/zip", headers=_DEV_CACHE)
     return _dev_missing()
+
+
+def _dev_receipt_tenant(name: str, version: str, tenant=Depends(deps.require_active_tenant)):
+    if not _dev_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        # Match the dev transport's plain 404 before validating receipt fields.
+        raise StarletteHTTPException(404, detail="tool_not_published", headers=_DEV_CACHE)
+    return tenant
+
+
+@router.post("/api/tool-envelopes/dev/{name}/{version}/receipts", status_code=204)
+def dev_receipt(name: str, version: str, receipt: sync_receipts.Receipt = Body(...),
+                tenant=Depends(_dev_receipt_tenant)) -> Response:
+    digest = receipt["package_digest"].lower()
+    entries = (entry.metadata for entry in dev_catalog.read_catalog() or [])
+    if not any(entry["name"] == name and entry["version"] == version and entry["package_digest"] == digest
+               for entry in entries):
+        return _dev_missing()
+    subject = getattr(tenant, "subject", None) or f"tenant:{tenant}"
+    if not sync_receipts.limiter.admit(subject):
+        return JSONResponse({"detail": "rate_limited"}, status_code=429, headers=_DEV_CACHE)
+    store = customization_service.CustomizationService.configured().store
+    sync_receipts.append(store, str(tenant), subject, name, version, receipt)
+    return Response(status_code=204, headers=_DEV_CACHE)
 
 
 @router.get("/api/tool-envelopes/{name:path}/{version}/envelope")
