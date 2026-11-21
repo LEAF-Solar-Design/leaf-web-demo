@@ -64,8 +64,14 @@ describe('quiet Studio shell', () => {
     expect(panel).toMatch(/max-height:\s*calc\(100vh - 120px\);/)
     expect(panel).toMatch(/overflow:\s*auto;/)
     expect(header).toMatch(/position:\s*relative;/)
-    const panelZIndex = Number(panel.match(/z-index:\s*(\d+)/)[1])
-    const headerZIndex = Number(header.match(/z-index:\s*(\d+)/)[1])
+    // The shell token lint (LS-T4) requires layer tokens, so resolve them to the standard's numbers before comparing.
+    const layers = { base: 0, raised: 10, sticky: 20, header: 30, overlay: 40, popover: 50, modal: 60, toast: 70 }
+    const zIndex = (rule) => {
+      const [, literal, layer, offset] = rule.match(/z-index:\s*(?:(\d+)|(?:calc\()?var\(--leaf-layer-(\w+)\)(?:\s*\+\s*(\d+)\))?)/)
+      return literal !== undefined ? Number(literal) : layers[layer] + Number(offset || 0)
+    }
+    const panelZIndex = zIndex(panel)
+    const headerZIndex = zIndex(header)
     expect(headerZIndex).toBeGreaterThan(panelZIndex)
     expect(headerZIndex).toBeGreaterThan(30)
   })
