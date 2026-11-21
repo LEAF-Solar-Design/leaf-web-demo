@@ -1114,6 +1114,18 @@ export async function getEntitlements() {
   }
 }
 
+export async function fetchInlineAuthoringFlags() {
+  const disabled = { plan_mode: false, inline_review: false, self_approval: false }
+  try {
+    const flags = await http('/api/author/inline-authoring', { headers: { 'X-Tenant-Id': TENANT } })
+    if (!Object.keys(disabled).every(key => typeof flags?.[key] === 'boolean')) return disabled
+    const { plan_mode, inline_review, self_approval } = flags
+    return { plan_mode, inline_review, self_approval }
+  } catch {
+    return disabled
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
