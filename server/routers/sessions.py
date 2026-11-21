@@ -653,6 +653,7 @@ class MessageRequest(BaseModel):
     entity_scope: Any = None
     text: Optional[str] = None
     confirm: Optional[Dict[str, Any]] = None
+    answers: Any = None
     # Inline image attachments are bounded before the entitlement and approval
     # gates. They are recorded in the transcript and sent to the harness, but
     # never enter the busy-turn queue (which is in-memory).
@@ -1287,7 +1288,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
         return _session_not_found(session_id)
 
     if turn_runner.is_stage_authority_hint(req.classifier_hint) and (
-        req.confirm is not None or req.images or req.credential_grant is not None
+        req.confirm is not None or req.images or req.answers is not None or req.credential_grant is not None
         or req.queue is True
     ):
         return error_response(
@@ -1318,6 +1319,10 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
     # attachment set instead of silently losing part of it.
     try:
         images = _validate_images(req.images)
+        if "answers" in req.model_fields_set:
+            turn_runner.validate_answers(req.answers)
+            if req.model_fields_set.intersection({"text", "images", "confirm"}) or req.queue:
+                raise ValueError("answers must be the only input on an unqueued turn")
     except ValueError as exc:
         return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=400)
 
@@ -1336,13 +1341,13 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             ErrorCode.BAD_PARAMS, "exactly one of `text` or `confirm` is required",
             retryable=False, status_code=409,
         )
-    if not has_confirm and not has_text and not has_images:
+    if not has_confirm and not has_text and not has_images and req.answers is None:
         # 409, not 400: this is the SAME "neither" refusal deployed clients
         # already classify (web/src/converse.js classifyAgentError keys on the
         # 409+BAD_PARAMS pair). Adding `images` widened WHAT satisfies the rule;
         # it must not change the answer when nothing does.
         return error_response(
-            ErrorCode.BAD_PARAMS, "one of `text`, `images`, or `confirm` is required",
+            ErrorCode.BAD_PARAMS, "one of `text`, `images`, `confirm`, or `answers` is required",
             retryable=False, status_code=409,
         )
 
@@ -1627,6 +1632,9 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             "approved": bool(approval.get("approved")),  # STORED value, never the client's
             "proposal": proposal,
         }
+        if (approval.get("kind") == "propose_build_plan" and not confirm_payload["approved"]
+                and isinstance(req.confirm.get("feedback"), str)):
+            confirm_payload["feedback"] = req.confirm["feedback"]
 
     # 5. dispatch the turn.
     integration_capture = None
@@ -1640,6 +1648,7 @@ def post_message(session_id: str, req: MessageRequest, request: Request,
             tenant, session_id,
             text=req.text, confirm=confirm_payload, classifier_hint=req.classifier_hint,
             model=req.model, credential_grant=validated_grant, images=images,
+            **({"answers": req.answers} if req.answers is not None else {}),
             request_id=journal_request_id,
             **({"integration_capture": integration_capture} if integration_capture is not None else {}),
             **({"entity_scope": frozen_scope} if frozen_scope is not None else {}),

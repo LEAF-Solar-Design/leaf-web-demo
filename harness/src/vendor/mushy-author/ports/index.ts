@@ -632,6 +632,7 @@ export const SPINE_TOOL_NAMES = [
   "run_capability",
   "job_status",
   "author_tool",
+  "propose_plan",
   "request_publication",
   "request_confirmation",
   "propose_overlay",
@@ -655,6 +656,8 @@ export type ConverseEventType =
   | "proposed_run"
   | "confirmation_required"
   | "question_required"
+  | "questions_required"
+  | "plan_proposed"
   | "confirmation_resolved"
   | "turn_usage"
   | "turn_complete"

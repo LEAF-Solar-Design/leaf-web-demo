@@ -84,6 +84,8 @@ import type { AgentGrant, ConverseRunner, ConverseTurnInput, HarnessPorts, Harne
   ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
+import { TurnAnswers } from "./agent/buildPlan.js";
+import { BadMessageError } from "./agent/converseLoop.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 import {
   withAuthorStandardServicesAuthority,
@@ -596,7 +598,7 @@ function validateImages(value: unknown): { ok: true; images: NonNullable<Convers
 
 /**
  * Minimal validation of ConverseTurnInput: the four required id fields, and
- * exactly one of (`text` and/or `images`) | `confirm` to drive the turn.
+ * one of a text/image message, a confirmation, or a structured answer card.
  * Deliberately does not validate deeper into `confirm.proposal` — that is the
  * runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
@@ -630,8 +632,12 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   // writes the confirmation mirror before the loop ever sees the body: leaving
   // `text + confirm` to the loop turned a boundary 400 into a post-side-effect
   // 500. Refusing images-with-confirm but not text-with-confirm was the gap.
-  if (!hasText && !hasConfirm && !images?.length) {
-    return { ok: false, message: "one of text, images, or confirm is required" };
+  const hasAnswers = body.answers !== undefined;
+  if (hasAnswers && (body.text !== undefined || body.images !== undefined || body.confirm !== undefined)) {
+    return { ok: false, message: "answers must be the only input on a turn" };
+  }
+  if (!hasText && !hasConfirm && !images?.length && !hasAnswers) {
+    return { ok: false, message: "one of text, images, confirm, or answers is required" };
   }
   if (hasConfirm && (hasText || images?.length)) {
     return { ok: false, message: "a turn carries either text/images or confirm, not both" };
@@ -642,6 +648,11 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
     : [];
 
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
+  if (hasAnswers) {
+    const parsed = TurnAnswers.safeParse(body.answers);
+    if (!parsed.success) return { ok: false, message: "invalid answers" };
+    input.answers = parsed.data;
+  }
   if (body.context_packet !== undefined) {
     if (!isRecord(body.context_packet)) {
       return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
@@ -1785,6 +1796,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
       console.error("[harness] request error:", redactTokens((err as Error).stack ?? String(err)));
       // Missing per-tenant grant -> a clean 401 with a machine-detectable marker the app
       // proxy maps to GRANT_REQUIRED (frontend prompts "sign in with Claude"). No token.
+      if (err instanceof BadMessageError) return send(res, 400, { error: { message: err.message } });
       if (err instanceof GrantRequiredError) {
         return send(res, 401, {
           grant_required: true,
