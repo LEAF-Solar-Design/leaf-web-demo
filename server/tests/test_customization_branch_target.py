@@ -114,7 +114,14 @@ def lane(tmp_path, monkeypatch):
         files = dict(state.base_files)
         files.update({f"{package_path}/{path}": data for path, data in state.files.items()})
         files.update(state.extra_files)
-        staged = _commit(bare, files, wire["expectedBaseSha"], state.modes)
+        parent = wire["expectedBaseSha"]
+        if "revisionBaseCommit" in wire:
+            # The fixture's published tree is main plus exactly this package.
+            tree = _git(bare, "rev-parse", wire["revisionBaseCommit"] + "^{tree}")
+            parent = _git(bare, "commit-tree", tree, "-p", parent, data=b"revision base\n")
+            if state.edit_seed:
+                parent = state.edit_seed(parent)
+        staged = _commit(bare, files, parent, state.modes)
         receipt = {
             "contract": "leaf.customization.v1", "tenant_id": "tenant-a",
             "change_set_id": wire["changeSetId"], "state": "staged",
@@ -133,6 +140,7 @@ def lane(tmp_path, monkeypatch):
         return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body)
 
     monkeypatch.setattr(requests, "post", post)
+    state.edit_seed = None
     return state
 
 
@@ -227,7 +235,7 @@ def test_branch_revision_requires_strict_semver_increase(lane, version, accepted
 
 @pytest.mark.parametrize(("scenario", "code", "status"), [
     ("exists", "branch_tool_exists", 409),
-    ("missing", "branch_revise_target_missing", 404),
+    ("missing", "revision_target_missing", 422),
     ("mismatch", "branch_target_mismatch", 422),
     ("manifest-mismatch", "branch_target_mismatch", 422),
 ])
@@ -246,8 +254,143 @@ def test_branch_target_identity(lane, scenario, code, status):
         lane.files["tool.json"] = json.dumps(manifest).encode()
     else:
         kwargs["target_tool_name"] = "another-tool"
+        lane.base_files["branch-tools/another-tool/tool.json"] = lane.files["tool.json"]
+        lane.seed()
     with pytest.raises(CustomizationServiceError) as caught:
         lane.service.stage(**_request(lane, **kwargs))
+    assert (caught.value.code, caught.value.status_code) == (code, status)
+
+
+def _stored_branch(lane, version="1.2.0", *, tenant="tenant-a", published=True, manifest_edit=None):
+    manifest = dict(json.loads(lane.files["tool.json"]), version=version)
+    manifest.update(manifest_edit or {})
+    package = dict(lane.files)
+    package["tool.json"] = json.dumps(manifest).encode()
+    files = dict(lane.base_files)
+    files.update({f"{PACKAGE}/{path}": data for path, data in package.items()})
+    commit = _commit(lane.bare, files, lane.base)
+    row = lane.store.create_change_set(
+        tenant_id=tenant, idempotency_key=f"create-{version}", base_commit=lane.base,
+        desired_platform_release="release-a", workspace_contract_digest=WORKSPACE,
+        author_subject=lane.tenant.subject, tool_target="branch",
+    )
+
+    def transition(state):
+        return lane.store.transition(
+            tenant_id=tenant, change_set_id=row.change_set_id, expected_version=row.version,
+            next_state=state, idempotency_key=f"{state.value}-{version}",
+            approver_subject="reviewer" if state is ChangeState.APPROVED else None,
+        )
+
+    row = transition(ChangeState.STAGING)
+    row = lane.store.record_staged(
+        tenant_id=tenant, change_set_id=row.change_set_id, expected_version=row.version,
+        idempotency_key=f"stage-{version}", staged_commit=commit,
+        catalog_digest=hashlib.sha256(files["registry.json"]).hexdigest(),
+        platform_release="release-a", workspace_contract_digest=WORKSPACE,
+    )
+    if published:
+        for state in (ChangeState.AWAITING_APPROVAL, ChangeState.APPROVED,
+                      ChangeState.PUBLISHING, ChangeState.PUBLISHED):
+            row = transition(state)
+    return row
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_branch_revision_uses_latest_published_tree(lane, multiple):
+    if multiple:
+        _stored_branch(lane, "1.0.0")
+    latest = _stored_branch(lane, "1.1.0")
+    response = lane.service.stage(**_request(lane, target_tool_name=NAME))
+    change = _change(lane, response["receipt"])
+    assert change.state is ChangeState.STAGED and change.change_kind == "revise"
+    assert lane.wires[-1]["revisionBaseCommit"] == latest.staged_commit
+    seed = _git(lane.bare, "rev-parse", change.staged_commit + "^")
+    assert _git(lane.bare, "rev-parse", seed + "^") == lane.base
+    assert _git(lane.bare, "rev-parse", f"{seed}:{PACKAGE}") == _git(lane.bare, "rev-parse", f"{latest.staged_commit}:{PACKAGE}")
+    assert _git(lane.bare, "rev-parse", "refs/heads/main") == lane.base
+
+
+def test_branch_revision_finds_create_after_205_other_tool_revisions(lane):
+    published = _stored_branch(lane, "1.1.0")
+    other_files = dict(lane.base_files)
+    other_files.update({f"branch-tools/other-tool/{path}": data for path, data in lane.files.items()})
+    other_files["branch-tools/other-tool/tool.json"] = json.dumps(
+        dict(json.loads(lane.files["tool.json"]), name="other-tool")
+    ).encode()
+    other_commit = _commit(lane.bare, other_files, lane.base)
+    with lane.store._transaction() as conn:
+        conn.executemany(
+            """INSERT INTO customization_change_sets (
+                   change_set_id, idempotency_key, tenant_id, state, version, base_commit,
+                   staged_commit, desired_platform_release, workspace_contract_digest,
+                   author_subject, tool_target, change_kind, target_tool_name, updated_at
+               )
+               SELECT ?, ?, tenant_id, state, version, base_commit, ?, desired_platform_release,
+                      workspace_contract_digest, author_subject, tool_target, 'revise', 'other-tool',
+                      strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+1 day')
+               FROM customization_change_sets WHERE change_set_id = ?""",
+            [(f"other-{i}", f"revise-other-{i}", other_commit, published.change_set_id)
+             for i in range(205)],
+        )
+
+    response = lane.service.stage(**_request(lane, target_tool_name=NAME))
+    assert _change(lane, response["receipt"]).state is ChangeState.STAGED
+    assert lane.wires[-1]["revisionBaseCommit"] == published.staged_commit
+
+
+@pytest.mark.parametrize("limit", [True, 0, 501, 1.0])
+def test_published_branch_lookup_requires_bounded_integer(lane, limit):
+    with pytest.raises(ValueError):
+        lane.store.list_published_branch_change_sets(tenant_id="tenant-a", limit=limit)
+
+
+@pytest.mark.parametrize("method", ["stage", "enqueue_stage"])
+@pytest.mark.parametrize("source", ["missing", "unpublished", "other-tenant", "invalid-latest"])
+def test_revision_admission_refuses_before_reservation_or_charge(lane, monkeypatch, method, source):
+    if source == "unpublished":
+        _stored_branch(lane, published=False)
+    elif source == "other-tenant":
+        _stored_branch(lane, tenant="tenant-b")
+    elif source == "invalid-latest":
+        _stored_branch(lane, "1.0.0")
+        _stored_branch(lane, manifest_edit={"entry": "wrong.csx"})
+    with lane.store._connection() as conn:
+        before = conn.execute("SELECT count(*) FROM customization_change_sets").fetchone()[0]
+    charges = []
+    monkeypatch.setattr(customization_service.author_quota, "enforce", lambda *a, **kw: charges.append(a))
+    with pytest.raises(CustomizationServiceError) as caught:
+        getattr(lane.service, method)(**_request(lane, target_tool_name=NAME))
+    assert (caught.value.code, caught.value.status_code) == ("revision_target_missing", 422)
+    with lane.store._connection() as conn:
+        assert conn.execute("SELECT count(*) FROM customization_change_sets").fetchone()[0] == before
+    assert not charges and not lane.wires
+
+
+@pytest.mark.parametrize(("seed", "code", "status"), [
+    ("wrong-tree", "branch_revise_target_missing", 404),
+    ("outside", "branch_revise_target_missing", 404),
+    ("no-seed", "branch_revise_target_missing", 404),
+    ("equal-version", "branch_version_not_greater", 409),
+])
+def test_published_revision_policy(lane, seed, code, status):
+    published = _stored_branch(lane)
+    if seed == "wrong-tree":
+        files = dict(lane.base_files)
+        files.update({f"{PACKAGE}/{path}": data for path, data in lane.files.items()})
+        files[f"{PACKAGE}/main.csx"] += b"\n// different seed\n"
+        lane.edit_seed = lambda _: _commit(lane.bare, files, lane.base)
+    elif seed == "outside":
+        files = dict(lane.base_files)
+        for path in lane.files:
+            key = f"{PACKAGE}/{path}"
+            files[key] = customization_service._git_blob(lane.bare, f"{published.staged_commit}:{key}")
+        files[f" {PACKAGE}/unrelated"] = b"seed only"
+        lane.edit_seed = lambda _: _commit(lane.bare, files, lane.base)
+    elif seed == "no-seed":
+        lane.edit_seed = lambda _: lane.base
+    with pytest.raises(CustomizationServiceError) as caught:
+        lane.service.stage(**_request(lane, target_tool_name=NAME))
     assert (caught.value.code, caught.value.status_code) == (code, status)
 
 
