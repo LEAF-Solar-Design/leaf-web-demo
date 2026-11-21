@@ -44,6 +44,7 @@ import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import DrawingObjectList, { objectGeometryDescription } from './DrawingObjectList.jsx'
 import { engineIntake, projectionSummary, projectionWarning } from './engineIntake.js'
 import DrawingCameraControls from '../site/DrawingCameraControls.jsx'
+import { DrawingObjectsMount } from '../site/DrawingNavigationTools.jsx'
 
 function fmt(n) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2)
@@ -123,6 +124,7 @@ export default function CadEditSurface({
 
   return (
     <>
+    <DrawingObjectsMount>
     <details className="drawing-objects-panel" data-nav-objects
       onToggle={(event) => setObjectsOpen(event.currentTarget.open)}>
       <summary>Objects</summary>
@@ -131,6 +133,7 @@ export default function CadEditSurface({
         {entities.length > 0 ? <DrawingObjectList session={session} announce={announce} /> : <p>No drawing objects are loaded.</p>}
       </div>}
     </details>
+    </DrawingObjectsMount>
     <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} data-testid="drawing-navigation-live">{announcement}</LiveRegion>
     {summary && <details className="drawing-incomplete-view" data-testid="drawing-incomplete-view">
       <summary>{summary}</summary>
