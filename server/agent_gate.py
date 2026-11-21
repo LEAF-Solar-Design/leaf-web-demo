@@ -834,6 +834,10 @@ def _validate_args(action: AgentAction, args: Dict[str, Any], *, plan_mode: bool
     if action.name == "author_tool" and not plan_mode and plan_keys.intersection(args):
         schema = dict(schema, properties={k: v for k, v in schema.get("properties", {}).items()
                                           if k not in plan_keys})
+    elif action.name == "author_tool" and plan_mode and "plan_confirmation_id" in args:
+        # A plan-bound build carries only the binding; the app renders the
+        # description from the approved plan, so it is not required here.
+        schema = dict(schema, required=[k for k in schema.get("required", []) if k != "description"])
     try:
         from jsonschema import Draft7Validator
         errors = list(Draft7Validator(schema).iter_errors(args))
