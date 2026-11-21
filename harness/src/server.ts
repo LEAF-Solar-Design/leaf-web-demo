@@ -1655,6 +1655,11 @@ export function createHarness(ports: HarnessPorts, opts?: {
         if (body.target !== undefined && body.target !== "studio" && body.target !== "branch") {
           return send(res, 400, { error: { message: 'target must be "studio" or "branch"' } });
         }
+        const revisionBaseCommit = body.revisionBaseCommit;
+        if (revisionBaseCommit !== undefined &&
+            (typeof revisionBaseCommit !== "string" || !/^[0-9a-f]{40}$/.test(revisionBaseCommit))) {
+          return send(res, 400, { error: { message: "revisionBaseCommit must be a 40-hex commit" } });
+        }
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
         const authority = authorAuthorityForRequest(req, tenant);
@@ -1666,6 +1671,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
             workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
             idempotencyKey: requiredText(body, "idempotencyKey"),
             ...(body.target === "branch" ? { target: "branch" as const } : {}),
+            ...(revisionBaseCommit === undefined ? {} : { revisionBaseCommit }),
             ...(body.targetToolName === undefined
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
@@ -1794,7 +1800,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
       }
       if (err instanceof AuthorLoopError) {
         return send(res, err.status, {
-          error: { message: err.message, diagnostics: err.diagnostics ?? [] },
+          error: { message: err.message, diagnostics: err.diagnostics ?? [],
+            ...(err.reason === undefined ? {} : { reason: err.reason }) },
         });
       }
       // Class name only for the unclassified catch-all: an arbitrary error's

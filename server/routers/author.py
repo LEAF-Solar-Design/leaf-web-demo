@@ -448,6 +448,7 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
 
 
 _CUSTOMIZATION_ERROR_MESSAGES = {
+    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
     "invalid_stage_source_request": "Invalid staged source request.",
     "stage_source_not_available": "Staged source is not available.",
     "stage_source_failed": "Staged source could not be read.",
@@ -537,6 +538,7 @@ def _subject_scoped_key(idempotency_key: str, tenant: Any) -> str:
 # detail-free 503s, and those are exactly what an operator must see. Default to
 # visible; demote only what is provably caller-driven.
 _CALLER_DRIVEN_CODES = frozenset({
+    "revision_target_missing",
     # Fixed deployment posture. Monitor these as configuration, not once per public
     # request: auth being off, or a rollout rung being closed, does not vary by call.
     "customization_auth_required",

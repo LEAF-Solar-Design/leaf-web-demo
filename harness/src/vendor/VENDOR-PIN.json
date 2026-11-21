@@ -2,8 +2,8 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "agent/authorLoop.ts": {
-      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "3a8bb6a7be7467fd9b335d3ba2efe0135acef89b7ad46718a9944faa48008117"
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "a12139b83a9f4197332284a1a560cf10a09d12647e669b8d88b168f526283751"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior.",
@@ -62,12 +62,12 @@
       "sha256": "eaed4fe69cf4d1571ff8c57784c1461b13c6d2d4c9b2219aa7e0569ec8225e9d"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553): author_tool target branch. #3560: SpineConverseRunner.promptBudgetChars for small-context runners; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "aba9abffaa2763c90415617df9f15353de7c127780ae2710ed2bd5d32d4592ed"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594. BSP52: incrementally adopted bounded platform source ranges from protected merged mushy-code 3a7ad5346ca6a97e0a26ef84fed5bfdd90b9d407 using prior protected adoption 0bc80de1f37530aeb4cd0456643a3acffb2d9594. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553): author_tool target branch. #3560: SpineConverseRunner.promptBudgetChars for small-context runners; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "ce169939130b00464fb2cbc754e3dabe5f85c1090edc8764f193a1e7af48f203"
     },
     "agent/branchTargetPrompt.ts": {
-      "reason": "SBT (#3553/#3554): Branch authoring target prompt; downstream-only file, retire when upstream includes equivalent behavior.",
-      "sha256": "7830334733a970c426e3d0495e1ad31fbe6bde31ffcff64e870b3efbc58051d5"
+      "reason": "SBT (#3553/#3554): Branch authoring target prompt; downstream-only file, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "d903f7072c9db20c8e643cf6a1a41099d5fd03b6e2be718bac42c064160b61ae"
     },
     "agent/tools/submitBranchToolProposal.ts": {
       "reason": "SBT (#3553/#3554): Branch tool proposal submission; downstream-only file, retire when upstream includes equivalent behavior.",
@@ -83,7 +83,7 @@
     }
   },
   "files": {
-    "agent/authorLoop.ts": "3a8bb6a7be7467fd9b335d3ba2efe0135acef89b7ad46718a9944faa48008117",
+    "agent/authorLoop.ts": "a12139b83a9f4197332284a1a560cf10a09d12647e669b8d88b168f526283751",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",
@@ -139,7 +139,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantDocumentRepo.ts": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a",
     "ports/impl/tenantRepoProvider.ts": "eaed4fe69cf4d1571ff8c57784c1461b13c6d2d4c9b2219aa7e0569ec8225e9d",
-    "ports/index.ts": "aba9abffaa2763c90415617df9f15353de7c127780ae2710ed2bd5d32d4592ed",
+    "ports/index.ts": "ce169939130b00464fb2cbc754e3dabe5f85c1090edc8764f193a1e7af48f203",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
     "ports/labDocumentPort.ts": "5af5dd550c66eceffa5321bf32b9525eac26ee9350642977010fafa4420b3578",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
@@ -151,7 +151,7 @@
     "registry/viewChecks.ts": "3857c4fc443dc77216e013122067fd7d95c1463fe6261e897e0c08931ee3fc38",
     "testing/conformance.ts": "8cf4ee5c7433ebc281b4eb7d20a73da93845baa6d64f5402808de182e5050e0a",
     "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5",
-    "agent/branchTargetPrompt.ts": "7830334733a970c426e3d0495e1ad31fbe6bde31ffcff64e870b3efbc58051d5",
+    "agent/branchTargetPrompt.ts": "d903f7072c9db20c8e643cf6a1a41099d5fd03b6e2be718bac42c064160b61ae",
     "agent/tools/submitBranchToolProposal.ts": "f0515e84aec6f390a59c8df30e32cf73ca0cf6b2565be1f8dbffb5b129639962",
     "registry/api-allowlist.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
     "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090"

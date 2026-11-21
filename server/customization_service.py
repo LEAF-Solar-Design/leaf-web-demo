@@ -97,6 +97,7 @@ _DANGLING_RECHECK_S = 0.25
 # expected-head CAS, a remote that did not accept). Only these end a change
 # SUPERSEDED; anything else, including an unreadable 409, stays recoverable.
 _HARNESS_PUBLISH_LOST = frozenset({"publish_conflict", "publish_not_accepted"})
+_BRANCH_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 _DIAGNOSTIC_CODES = frozenset({
@@ -426,7 +427,7 @@ def _git_trust(*paths: Path) -> list[str]:
     return flags
 
 
-def _git(bare: Path, *args: str) -> str:
+def _git(bare: Path, *args: str, strip: bool = True) -> str:
     try:
         result = subprocess.run(
             ["git", *_git_trust(bare), "--git-dir", str(bare), *args],
@@ -438,7 +439,7 @@ def _git(bare: Path, *args: str) -> str:
             "tenant_repository_unavailable", 503,
             diagnostic_code="git_failed", cause=exc,
         ) from exc
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
 
 
 def _git_blob(bare: Path, object_name: str) -> bytes:
@@ -1065,6 +1066,8 @@ class CustomizationService:
         base, predecessor = self._stage_admission_base(
             tenant_id, idempotency_key, graph_input, release
         )
+        if target == "branch" and target_tool_name:
+            self._branch_revision_base(tenant_id, base, target_tool_name)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key, base_commit=base,
             desired_platform_release=release.release_id,
@@ -1165,6 +1168,8 @@ class CustomizationService:
             tenant_id, idempotency_key, graph_input, release,
             check_harness=True,
         )
+        if target == "branch" and target_tool_name:
+            self._branch_revision_base(tenant_id, base, target_tool_name)
         fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -1910,6 +1915,8 @@ class CustomizationService:
         if not isinstance(body, dict):
             return False, None
         error = body.get("error")
+        if isinstance(error, dict) and "reason" in error:
+            return True, cls._branch_failure_message(error["reason"])
         message = None
         if isinstance(error, dict) and isinstance(error.get("message"), str):
             message = error["message"]
@@ -1934,6 +1941,30 @@ class CustomizationService:
             return True, cleaned
         return True, None
 
+    @staticmethod
+    def _branch_failure_message(reason: Any) -> str | None:
+        if not isinstance(reason, dict):
+            return None
+        code = reason.get("code")
+        if code == "branch_revision_target_missing" and reason.keys() == {"code"}:
+            return "The Branch tool to revise has no published version to start from."
+        turns = reason.get("turns")
+        if type(turns) is not int or not 0 <= turns <= 10000:
+            return None
+        if code == "branch_author_unsuccessful" and reason.keys() == {"code", "turns"}:
+            return f"The Branch author session did not finish successfully (turns={turns})."
+        attempts = reason.get("submit_calls")
+        if type(attempts) is not int or not 0 <= attempts <= 10000:
+            return None
+        counts = f"(turns={turns}, submit attempts={attempts})."
+        if code == "branch_author_no_submission" and reason.keys() == {"code", "turns", "submit_calls"}:
+            return f"The Branch author session ended without submitting a package {counts}"
+        rule = reason.get("rule")
+        if (code == "branch_author_package_refused" and reason.keys() == {"code", "turns", "submit_calls", "rule"}
+                and isinstance(rule, str) and re.fullmatch(r"V[1-9][0-9]?", rule)):
+            return f"The Branch author's last package submission was refused by rule {rule} {counts}"
+        return None
+
     def _harness_stage(self, tenant_id: str, description: str, change: ChangeSet) -> Mapping[str, Any]:
         active_subject = deps.active_stage_author_subject(
             tenant_id,
@@ -1949,6 +1980,9 @@ class CustomizationService:
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
+        revision_base = None
+        if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
+            revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
         try:
             import requests
             response = requests.post(
@@ -1965,6 +1999,7 @@ class CustomizationService:
                       "workspaceContractDigest": change.workspace_contract_digest,
                       "idempotencyKey": change.idempotency_key,
                       **({"target": "branch"} if getattr(change, "tool_target", None) == "branch" else {}),
+                      **({"revisionBaseCommit": revision_base[1]} if revision_base else {}),
                       **({"targetToolName": getattr(change, "target_tool_name", None)}
                          if getattr(change, "target_tool_name", None) else {})},
             )
@@ -1974,7 +2009,7 @@ class CustomizationService:
             response = getattr(exc, "response", None)
             # Class-qualified: _harness_stage is also exercised unbound
             # (self=None), a convention test_customization_refusal_observability
-            # pins, so no attribute lookup may go through self.
+            # pins for studio requests.
             answered, reason = (
                 CustomizationService._harness_job_failure(response)
                 if response is not None else (False, None)
@@ -2079,8 +2114,75 @@ class CustomizationService:
         ).split("\0") if path]
         return {"target": "branch", "package_path": package_path, "package_files": sorted(files)}
 
-    @staticmethod
-    def _verify_branch_stage_policy(change: ChangeSet, receipt: Mapping[str, Any]) -> tuple[str, ...]:
+    def _branch_revision_base(self, tenant_id: str, base_commit: str, name: str) -> tuple[str, str] | None:
+        bare = _bare_repo(tenant_id)
+        package = f"branch-tools/{name}"
+        path = f"{package}/tool.json"
+        missing = CustomizationServiceError("revision_target_missing", 422)
+        try:
+            entry = _git(bare, "ls-tree", base_commit, "--", path)
+        except CustomizationServiceError as exc:
+            raise missing from exc
+        if re.fullmatch(r"[0-7]+ blob [0-9a-f]+\t" + re.escape(path), entry):
+            return None
+        try:
+            published = self.store.list_published_branch_change_sets(tenant_id=tenant_id)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+            raise CustomizationServiceError("record_fields_read_failed", 503) from exc
+        except ValueError as exc:
+            raise missing from exc
+        for row in published:
+            if row.tenant_id != tenant_id:
+                continue
+            try:
+                fields = self._branch_receipt_fields(row)
+            except CustomizationServiceError:
+                continue
+            if fields["package_path"] != package:
+                continue
+            try:
+                manifest = json.loads(_git_blob(bare, f"{row.staged_commit}:{path}"))
+            except (CustomizationServiceError, ValueError, RecursionError) as exc:
+                raise missing from exc
+            if (row.staged_commit and isinstance(manifest, dict) and manifest.get("name") == name
+                    and manifest.get("entry") == "main.csx" and isinstance(manifest.get("provenance"), dict)
+                    and manifest["provenance"].get("author") == "agent" and isinstance(manifest.get("version"), str)
+                    and _BRANCH_VERSION.fullmatch(manifest["version"])):
+                return row.change_set_id, row.staged_commit
+            raise missing
+        raise missing
+
+    def _published_branch_seed(self, change: ChangeSet, bare: Path, package_path: str) -> str:
+        missing = CustomizationServiceError("branch_revise_target_missing", 404)
+        try:
+            parents = _git(bare, "rev-list", "--parents", "-n", "1", change.staged_commit or "").split()
+            if len(parents) != 2:
+                raise ValueError("expected one seed parent")
+            seed = parents[1]
+            if _git(bare, "rev-list", "--parents", "-n", "1", seed).split() != [seed, change.base_commit]:
+                raise ValueError("seed must descend directly from the base")
+            # Whitespace is significant in NUL-delimited Git paths.
+            paths = [path for path in _git(
+                bare, "diff-tree", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z",
+                change.base_commit, seed, strip=False,
+            ).split("\0") if path]
+            if not paths or any(not p.startswith(package_path + "/") for p in paths):
+                raise ValueError("seed must introduce only the revision package")
+            tree = _git(bare, "rev-parse", f"{seed}:{package_path}")
+            published = self.store.list_published_branch_change_sets(tenant_id=change.tenant_id)
+        except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError, ValueError) as exc:
+            raise missing from exc
+        for row in published:
+            if row.tenant_id != change.tenant_id or row.change_set_id == change.change_set_id or not row.staged_commit:
+                continue
+            try:
+                if tree == _git(bare, "rev-parse", f"{row.staged_commit}:{package_path}"):
+                    return seed
+            except CustomizationServiceError:
+                continue
+        raise missing
+
+    def _verify_branch_stage_policy(self, change: ChangeSet, receipt: Mapping[str, Any]) -> tuple[str, ...]:
         bare = _bare_repo(change.tenant_id)
         package_path = receipt["package_path"]
         changed = tuple(path for path in _git(
@@ -2118,9 +2220,10 @@ class CustomizationService:
         if change.target_tool_name and name != change.target_tool_name:
             raise CustomizationServiceError("branch_target_mismatch", 422)
         manifest_path = package_path + "/tool.json"
+        revision_base = change.base_commit
         if change.target_tool_name:
             if manifest_path not in base_entries:
-                raise CustomizationServiceError("branch_revise_target_missing", 404)
+                revision_base = self._published_branch_seed(change, bare, package_path)
         elif base_entries:
             raise CustomizationServiceError("branch_tool_exists", 409)
         files = {path[len(package_path) + 1:]: _git_blob(bare, oid) for path, oid in entries.items()}
@@ -2133,9 +2236,20 @@ class CustomizationService:
             raise CustomizationServiceError("branch_package_invalid", 422, failures=checked.failures)
         if change.target_tool_name:
             try:
-                base_manifest = json.loads(_git_blob(bare, f"{change.base_commit}:{manifest_path}"))
-                base_version = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", base_manifest["version"])
-                staged_version = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", checked.manifest["version"])
+                try:
+                    base_manifest = json.loads(_git_blob(bare, f"{revision_base}:{manifest_path}"))
+                except CustomizationServiceError as exc:
+                    if revision_base == change.base_commit:
+                        raise
+                    raise CustomizationServiceError("branch_revise_target_missing", 404) from exc
+                if revision_base != change.base_commit and (
+                    not isinstance(base_manifest, dict) or base_manifest.get("entry") != "main.csx"
+                    or not isinstance(base_manifest.get("provenance"), dict)
+                    or base_manifest["provenance"].get("author") != "agent"
+                ):
+                    raise CustomizationServiceError("branch_revise_target_missing", 404)
+                base_version = _BRANCH_VERSION.fullmatch(base_manifest["version"])
+                staged_version = _BRANCH_VERSION.fullmatch(checked.manifest["version"])
                 if (not base_version or not staged_version
                         or tuple(map(int, staged_version.groups())) <= tuple(map(int, base_version.groups()))):
                     raise ValueError("version must increase")

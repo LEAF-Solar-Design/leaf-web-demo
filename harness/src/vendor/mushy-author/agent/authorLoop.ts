@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { AUTHOR_SYSTEM_PROMPT } from "./systemPrompt.js";
 import {
-  branchTargetPrompt, runBranchTargetSession,
+  BranchAuthorFailure, branchTargetPrompt, runBranchTargetSession,
   type BranchAuthorResult, type BranchAuthorRunner,
 } from "./branchTargetPrompt.js";
 import {
@@ -65,6 +65,7 @@ import type {
   GrantSettlement,
   HarnessPorts,
   ResultEnvelope,
+  StageCustomizationRequest,
   StagedCustomizationReceipt,
   TenantMutationFence,
   ToolPackage,
@@ -72,15 +73,7 @@ import type {
   UpstreamCapture,
 } from "../ports/index.js";
 
-export interface StageCustomizationRequest {
-  changeSetId: string;
-  expectedBaseSha: string;
-  platformRelease: string;
-  workspaceContractDigest: string;
-  idempotencyKey: string;
-  targetToolName?: string;
-  target?: "studio" | "branch";
-}
+export type { StageCustomizationRequest } from "../ports/index.js";
 
 export interface BranchStageMetadata {
   target: "branch";
@@ -196,6 +189,7 @@ export class AuthorLoopError extends Error {
     message: string,
     readonly status: number,
     readonly diagnostics?: string[],
+    readonly reason?: Readonly<Record<string, string | number>>,
   ) {
     super(message);
     this.name = "AuthorLoopError";
@@ -486,9 +480,47 @@ export class AuthorLoop {
     }
   }
 
+  private prepareBranchRevision(repoDir: string, name: string, sha?: string) {
+    const missing = new AuthorLoopError("branch revision target is missing", 422, [], {
+      code: "branch_revision_target_missing",
+    });
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name) || name.length > 64) throw missing;
+    const packagePath = `branch-tools/${name}`;
+    const path = `${packagePath}/tool.json`;
+    const fs = new FsTenantRepo(repoDir);
+    const versionPattern = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
+    if (fs.exists(path)) {
+      if (sha !== undefined) throw new AuthorLoopError("revision base conflicts with the checked-out package", 409);
+      // Existing packages continue through the submission validator.
+      try {
+        const version = JSON.parse(fs.readFile(path))?.version;
+        if (typeof version === "string" && versionPattern.test(version)) return { packagePath, version };
+      } catch { /* A malformed legacy manifest has no version for the prompt. */ }
+      return undefined;
+    }
+    if (!sha || !/^[0-9a-f]{40}$/.test(sha)) throw missing;
+    let version: string;
+    try {
+      this.branchGit(repoDir, ["cat-file", "-e", `${sha}^{commit}`]);
+      const entry = this.branchGit(repoDir, ["ls-tree", sha, "--", path]);
+      if (!/^100(?:644|755) blob /.test(entry)) throw missing;
+      this.branchGit(repoDir, ["-c", "core.autocrlf=false", "checkout", "--no-overlay", sha, "--", packagePath]);
+      const manifest = JSON.parse(fs.readFile(path));
+      if (manifest?.name !== name || manifest.entry !== "main.csx" || manifest.provenance?.author !== "agent" ||
+          typeof manifest.version !== "string" || !versionPattern.test(manifest.version)) throw missing;
+      version = manifest.version;
+    } catch {
+      throw missing;
+    }
+    this.branchGit(repoDir, ["-c", `user.name=${HARNESS_IDENTITY.name}`, "-c", `user.email=${HARNESS_IDENTITY.email}`,
+      "commit", "-m", `revision base: ${name}@${version} ${sha}`]);
+    return { packagePath, version };
+  }
+
   private async authorBranchInRepo(
     tenantId: string, description: string, repoDir: string,
     request: StageCustomizationRequest, scrub: ScrubState,
+    revision?: { packagePath: string; version: string },
   ): Promise<{ submission: BranchSubmissionResult; run: BranchAuthorResult }> {
     const lease = this.ports.oauth.acquireGrant && this.ports.oauth.settleGrant
       ? await this.ports.oauth.acquireGrant(tenantId) : null;
@@ -503,7 +535,7 @@ export class AuthorLoop {
     let failure: unknown;
     try {
       run = await this.branchRunner({
-        description, systemPrompt: branchTargetPrompt(), repoDir, grant,
+        description, systemPrompt: branchTargetPrompt(revision), repoDir, grant,
         fsTenantRepo: new FsTenantRepo(repoDir),
         submitBranchToolProposal: proposal => {
           if (submission) throw new AuthorLoopError("V16: only one branch package may be submitted", 422);
@@ -515,11 +547,16 @@ export class AuthorLoop {
         },
       });
       run = snapshotUntrusted(run) as BranchAuthorResult | undefined;
-      if (!submission || !run || typeof run.preview !== "string") throw new AuthorLoopError("branch author did not submit a validated package", 422);
+      if (!submission || !run || typeof run.preview !== "string") {
+        throw new AuthorLoopError("branch author did not submit a validated package", 422, [], {
+          code: "branch_author_no_submission", turns: 0, submit_calls: 0,
+        });
+      }
       this.verifyBranchSubmission(repoDir, submission);
       return { submission, run };
     } catch (error) {
       failure = error;
+      if (error instanceof BranchAuthorFailure) throw new AuthorLoopError(error.message, 422, [], error.reason);
       throw error;
     } finally {
       if (lease && this.ports.oauth.settleGrant) {
@@ -1334,8 +1371,12 @@ export class AuthorLoop {
           return { receipt };
         }
         if (request.target === "branch") {
+          const name = request.targetToolName;
+          const revision = name
+            ? await runFenced(() => this.prepareBranchRevision(change.dir, name, request.revisionBaseCommit))
+            : undefined;
           const { submission, run } = await this.authorBranchInRepo(
-            tenantId, description, change.dir, request, scrub,
+            tenantId, description, change.dir, request, scrub, revision,
           );
           const { stagedCommit, catalogDigest, metadata } = await runFenced(() => {
             this.verifyBranchSubmission(change.dir, submission);

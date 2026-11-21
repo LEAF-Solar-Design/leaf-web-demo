@@ -11,7 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHarness } from "../src/server.js";
-import { AuthorLoop } from "../src/agent/authorLoop.js";
+import { AuthorLoop, AuthorLoopError } from "../src/agent/authorLoop.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
@@ -453,9 +453,81 @@ describe("branch stage lifecycle", () => {
     expect(acquireGrant).toHaveBeenCalledWith(TENANT);
     expect(settleGrant).toHaveBeenCalledWith(TENANT, "branch-lease", { usage: { cost_tokens: 20 }, stop_reason: "end_turn" });
   });
+
+  it.each(["1.1.0", "1.0.0"])("revises a published tree off main with proposal version %s", async version => {
+    const proposal = fixture("good-label-writer");
+    const { base, bare, loop, ports } = await setup([proposal]);
+    const first = await loop.stage(TENANT, "create label writer", request(base));
+    const sha = first.receipt.staged_commit;
+    const pkg = "branch-tools/label-writer";
+    const transport = sdkTransport([{ ...proposal, version }]);
+    const revisedLoop = new AuthorLoop(ports, async input => {
+      expect(input.fsTenantRepo.exists(pkg + "/tool.json")).toBe(true);
+      expect(input.fsTenantRepo.readFile(pkg + "/main.csx")).toBe(proposal.main_csx);
+      expect(input.systemPrompt).toContain("This is a revision of branch-tools/label-writer (current version 1.0.0)");
+      return transport.run(input);
+    });
+    const revision = revisedLoop.stage(TENANT, "revise label writer", {
+      ...request(base, SECOND), targetToolName: proposal.name, revisionBaseCommit: sha,
+    });
+    if (version === "1.0.0") {
+      await expect(revision).rejects.toMatchObject({ status: 422,
+        reason: { code: "branch_author_package_refused", rule: "V4", turns: 1, submit_calls: 1 } });
+      expect(git(bare.dir, ["rev-parse", "refs/leaf/changes/" + SECOND])).toBe(base);
+      return;
+    }
+    const staged = (await revision).receipt.staged_commit;
+    const seed = git(bare.dir, ["rev-parse", staged + "^"]);
+    expect(git(bare.dir, ["rev-parse", seed + "^"])).toBe(base);
+    expect(git(bare.dir, ["rev-parse", seed + ":" + pkg])).toBe(git(bare.dir, ["rev-parse", sha + ":" + pkg]));
+    expect(git(bare.dir, ["diff", "--name-only", base, staged]).split("\n").every(path => path.startsWith(pkg + "/"))).toBe(true);
+    expect(git(bare.dir, ["rev-parse", "refs/heads/main"])).toBe(base);
+  });
+
+  it.each(["absent", "unresolvable", "no-package"])("refuses a revision with %s base before authoring", async mode => {
+    const { base, bare, sdk, loop, ports } = await setup([]);
+    const grant = vi.spyOn(ports.oauth, "getGrant");
+    await expect(loop.stage(TENANT, "revise missing label writer", {
+      ...request(base), targetToolName: "label-writer",
+      ...(mode === "absent" ? {} : { revisionBaseCommit: mode === "unresolvable" ? "0".repeat(40) : base }),
+    })).rejects.toMatchObject({ status: 422, reason: { code: "branch_revision_target_missing" } });
+    expect(sdk.run).not.toHaveBeenCalled();
+    expect(grant).not.toHaveBeenCalled();
+    expect(git(bare.dir, ["rev-parse", "refs/leaf/changes/" + CHANGE])).toBe(base);
+  });
+
+  it("reports the counted assistant turns when the session ends without a proposal", async () => {
+    const { base, loop } = await setup([]);
+    await expect(loop.stage(TENANT, "label", request(base))).rejects.toMatchObject({
+      status: 422, reason: { code: "branch_author_no_submission", turns: 1, submit_calls: 0 },
+    });
+  });
 });
 
 describe("POST /author/stage target routing", () => {
+  it("validates and forwards the revision base and returns a typed loop refusal", async () => {
+    const { ports, base } = await setup([]);
+    const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });
+    const reason = { code: "branch_revision_target_missing" };
+    const stage = vi.spyOn(harness.loop, "stage").mockRejectedValue(new AuthorLoopError("missing", 422, [], reason));
+    const server = harness.listen(0);
+    servers.push(server);
+    const url = "http://127.0.0.1:" + (server.address() as AddressInfo).port + "/author/stage";
+    const send = (revisionBaseCommit: string) => fetch(url, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenant_id: TENANT, description: "revise", ...request(base),
+        targetToolName: "label-writer", revisionBaseCommit }),
+    });
+    const invalid = await send("xyz");
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: { message: "revisionBaseCommit must be a 40-hex commit" } });
+    expect(stage).not.toHaveBeenCalled();
+    const refused = await send(base);
+    expect(stage).toHaveBeenCalledWith(TENANT, "revise", { ...request(base), targetToolName: "label-writer", revisionBaseCommit: base });
+    expect(refused.status).toBe(422);
+    expect(await refused.json()).toEqual({ error: { message: "missing", diagnostics: [], reason } });
+  });
+
   it.each([undefined, "studio", "branch"])("passes target %s without adding a studio option", async target => {
     const { ports, base } = await setup([]);
     const harness = createHarness(ports, { auth: { enabled: false, secret: "" } });

@@ -8,11 +8,12 @@ import {
 import { grantSecrets, redactSecrets } from "../redact.js";
 import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "./captureGuards.js";
 import type { BranchSubmissionResult } from "./tools/submitBranchToolProposal.js";
+import { BranchPackageError } from "../registry/branchPackageSchema.js";
 
-export function branchTargetPrompt(): string {
+export function branchTargetPrompt(revision?: { packagePath: string; version: string }): string {
   // The explicit import also makes tsc copy the artifact into the harness dist.
   const allowlist = branchApiAllowlist;
-  return `You author cad-tool-package v1 C# scripts for Branch's ScriptHost.
+  const prompt = `You author cad-tool-package v1 C# scripts for Branch's ScriptHost.
 Submit one package using submitBranchToolProposal with exactly these keys:
 name, version, description, params, returns, capabilities, hosts, timeout_ms,
 idempotent, main_csx, lib. lib maps <file>.csx to its complete source text.
@@ -82,6 +83,15 @@ return new { added = 1 };
 
 Pinned API allowlist (types, members, namespaces, denials and capability gates):
 ${JSON.stringify(allowlist, null, 2)}`;
+  if (!revision) return prompt;
+  return `${prompt}\n\nThis is a revision of ${revision.packagePath} (current version ${revision.version}). Read its tool.json, main.csx and lib files with fs_tenant_repo, edit them, keep the package name, and submit the complete package with a strictly greater version.`;
+}
+
+export class BranchAuthorFailure extends Error {
+  constructor(message: string, readonly reason: Readonly<Record<string, string | number>>) {
+    super(message);
+    this.name = "BranchAuthorFailure";
+  }
 }
 
 export interface BranchAuthorInput {
@@ -117,6 +127,8 @@ export async function runBranchTargetSession(
     });
     let submitted = false;
     let lastRefusal: string | undefined;
+    let lastRefusalRule: string | undefined;
+    let submitCalls = 0;
     const tools = [
       sdk.tool("fs_tenant_repo", "Read-only repository inspection.", {
         action: z.enum(["read", "list", "exists"]), path: z.string(),
@@ -139,6 +151,7 @@ export async function runBranchTargetSession(
         timeout_ms: z.number(), idempotent: z.boolean(), main_csx: z.string(),
         lib: z.record(z.string(), z.string()),
       }), async proposal => {
+        submitCalls++;
         try {
           if (submitted) return reply("V16: only one successful package submission is allowed", true);
           const result = input.submitBranchToolProposal(proposal);
@@ -146,6 +159,9 @@ export async function runBranchTargetSession(
           return reply({ status: "VALID", manifest: result.manifest, files: result.files, package_digest: result.package_digest });
         } catch (error) {
           lastRefusal = safeErrorMessage(error);
+          const rule = error instanceof BranchPackageError
+            ? error.diagnostics[0]?.rule : /^(V\d{1,2}):/.exec(lastRefusal)?.[1];
+          lastRefusalRule = rule && /^V[1-9][0-9]?$/.test(rule) ? rule : undefined;
           return reply(lastRefusal, true);
         }
       }),
@@ -199,8 +215,21 @@ export async function runBranchTargetSession(
       }
     });
     const final = result as Record<string, unknown> | null;
-    if (!final || final.is_error || final.subtype !== "success") throw new Error("branch author session did not finish successfully");
-    if (!submitted) throw new Error(`branch author session ended without a validated package${lastRefusal ? `: ${lastRefusal}` : ""}`);
+    if (!final || final.is_error || final.subtype !== "success") {
+      throw new BranchAuthorFailure("branch author session did not finish successfully", {
+        code: "branch_author_unsuccessful", turns,
+      });
+    }
+    if (!submitted && lastRefusalRule) {
+      throw new BranchAuthorFailure(`branch author session ended without a validated package: last submission refused by ${lastRefusalRule}`, {
+        code: "branch_author_package_refused", rule: lastRefusalRule, turns, submit_calls: submitCalls,
+      });
+    }
+    if (!submitted) {
+      throw new BranchAuthorFailure("branch author session ended without submitting a package", {
+        code: "branch_author_no_submission", turns, submit_calls: submitCalls,
+      });
+    }
     const usage = (final.usage ?? {}) as Record<string, number>;
     return {
       preview: "Branch C# package authored; awaiting server validation and review.",
@@ -212,6 +241,7 @@ export async function runBranchTargetSession(
       },
     };
   } catch (error) {
+    if (error instanceof BranchAuthorFailure) throw error;
     const message = redactSecrets(safeErrorMessage(error), grantSecrets(input.grant));
     const wrapped = new Error(message);
     wrapped.stack = `${wrapped.name}: ${message}`;

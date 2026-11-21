@@ -386,6 +386,17 @@ export interface TenantRepoProvider {
   readStagedToolSource?(tenantId: string, request: StagedToolSourceRequest): Promise<StagedToolSource>;
 }
 
+export interface StageCustomizationRequest {
+  changeSetId: string;
+  expectedBaseSha: string;
+  platformRelease: string;
+  workspaceContractDigest: string;
+  idempotencyKey: string;
+  targetToolName?: string;
+  revisionBaseCommit?: string;
+  target?: "studio" | "branch";
+}
+
 /** Immutable fields bound into the leaf.customization.v1 staged receipt. */
 export interface StagedCustomizationReceipt {
   readonly contract: "leaf.customization.v1";
