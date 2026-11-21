@@ -1801,7 +1801,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
       if (err instanceof AuthorLoopError) {
         return send(res, err.status, {
           error: { message: err.message, diagnostics: err.diagnostics ?? [],
-            ...(err.reason === undefined ? {} : { reason: err.reason }) },
+            ...(err.reason === undefined ? {} : { reason: err.reason }),
+            ...(err.compile === undefined ? {} : { compile: err.compile }) },
         });
       }
       // Class name only for the unclassified catch-all: an arbitrary error's

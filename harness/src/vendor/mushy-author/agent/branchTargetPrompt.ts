@@ -8,6 +8,7 @@ import {
 import { grantSecrets, redactSecrets } from "../redact.js";
 import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "./captureGuards.js";
 import type { BranchSubmissionResult } from "./tools/submitBranchToolProposal.js";
+import type { BranchCompileDiagnostic, BranchCompileSummary } from "./tools/branchCompileCheck.js";
 import { BranchPackageError } from "../registry/branchPackageSchema.js";
 
 export function branchTargetPrompt(revision?: { packagePath: string; version: string }): string {
@@ -27,8 +28,10 @@ Only drawing.read and drawing.write capabilities are allowed. No files.* or net.
 No #r directives, BOM or bidi controls. #load must be a whole line naming an
 existing lib/<file>.csx. No other paths, subdirectories, Python files or registry edits.
 Inspect with fs_tenant_repo; it is read-only. Fix rule diagnostics before resubmitting.
-After a successful submission, finish. The server S1 validator is authoritative;
-submission does not prove compilation or CAD execution. Do not call an APS Python test.
+Every submission is compiled with Branch's ScriptHost compiler against AutoCAD 2025
+reference assemblies. Fix compile and API-allowlist errors reported as V18 diagnostics and resubmit.
+Write C# operators literally (&&, <, >); never HTML entities.
+After a successful submission, finish. Success still does not prove CAD execution. Do not call an APS Python test.
 
 ToolGlobals exposes Ctx (IToolContext): Db (Database), Doc (Document), Ed (Editor,
 identity only), Args (JObject), Cancel (CancellationToken), Log (IToolLog), and Service.
@@ -87,8 +90,15 @@ ${JSON.stringify(allowlist, null, 2)}`;
   return `${prompt}\n\nThis is a revision of ${revision.packagePath} (current version ${revision.version}). Read its tool.json, main.csx and lib files with fs_tenant_repo, edit them, keep the package name, and submit the complete package with a strictly greater version.`;
 }
 
+export interface BranchCompileFeedback { summary: BranchCompileSummary; diagnostics: BranchCompileDiagnostic[] }
+export class BranchCompileRefusal extends BranchPackageError {
+  constructor(path: string, message: string, readonly compile: BranchCompileFeedback) {
+    super([{ rule: "V18", path, message }]);
+  }
+}
+
 export class BranchAuthorFailure extends Error {
-  constructor(message: string, readonly reason: Readonly<Record<string, string | number>>) {
+  constructor(message: string, readonly reason: Readonly<Record<string, string | number>>, readonly compile?: BranchCompileFeedback) {
     super(message);
     this.name = "BranchAuthorFailure";
   }
@@ -100,7 +110,7 @@ export interface BranchAuthorInput {
   repoDir: string;
   grant: AgentGrant;
   fsTenantRepo: ReadonlyFsTenantRepoTool;
-  submitBranchToolProposal(proposal: unknown): BranchSubmissionResult;
+  submitBranchToolProposal(proposal: unknown): BranchSubmissionResult | Promise<BranchSubmissionResult>;
 }
 export interface BranchAuthorResult { preview: string; telemetry?: AuthorTelemetry }
 export type BranchAuthorRunner = (input: BranchAuthorInput) => Promise<BranchAuthorResult>;
@@ -128,6 +138,7 @@ export async function runBranchTargetSession(
     let submitted = false;
     let lastRefusal: string | undefined;
     let lastRefusalRule: string | undefined;
+    let lastCompile: BranchCompileFeedback | undefined;
     let submitCalls = 0;
     const tools = [
       sdk.tool("fs_tenant_repo", "Read-only repository inspection.", {
@@ -143,7 +154,7 @@ export async function runBranchTargetSession(
       }),
       // A raw shape is wrapped in a stripping object by the SDK. Preserve
       // unknown keys so the submission validator can refuse them with V2.
-      sdk.tool("submitBranchToolProposal", "Validate V1..V17 feedback and publish exactly one branch package; returns rule diagnostics on refusal.", z.looseObject({
+      sdk.tool("submitBranchToolProposal", "Validate V1..V18 feedback and publish exactly one branch package; returns rule diagnostics on refusal.", z.looseObject({
         name: z.string(), version: z.string(), description: z.string(),
         params: z.record(z.string(), z.unknown()), returns: z.record(z.string(), z.unknown()),
         capabilities: z.array(z.string()),
@@ -154,11 +165,12 @@ export async function runBranchTargetSession(
         submitCalls++;
         try {
           if (submitted) return reply("V16: only one successful package submission is allowed", true);
-          const result = input.submitBranchToolProposal(proposal);
+          const result = await input.submitBranchToolProposal(proposal);
           submitted = true;
           return reply({ status: "VALID", manifest: result.manifest, files: result.files, package_digest: result.package_digest });
         } catch (error) {
           lastRefusal = safeErrorMessage(error);
+          lastCompile = error instanceof BranchCompileRefusal ? error.compile : undefined;
           const rule = error instanceof BranchPackageError
             ? error.diagnostics[0]?.rule : /^(V\d{1,2}):/.exec(lastRefusal)?.[1];
           lastRefusalRule = rule && /^V[1-9][0-9]?$/.test(rule) ? rule : undefined;
@@ -223,7 +235,7 @@ export async function runBranchTargetSession(
     if (!submitted && lastRefusalRule) {
       throw new BranchAuthorFailure(`branch author session ended without a validated package: last submission refused by ${lastRefusalRule}`, {
         code: "branch_author_package_refused", rule: lastRefusalRule, turns, submit_calls: submitCalls,
-      });
+      }, lastCompile);
     }
     if (!submitted) {
       throw new BranchAuthorFailure("branch author session ended without submitting a package", {
