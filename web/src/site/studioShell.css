@@ -895,12 +895,6 @@
 .shell-kpis span { font-size: var(--leaf-size-caption); opacity: .6; text-transform: uppercase; letter-spacing: .06em; }
 .shell-kpis b { font-size: calc(var(--leaf-size-caption) + 2px); font-weight: 500; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav { position: fixed; top: 8px; left: 50%; right: 280px; height: 32px; min-height: 32px; padding: 0; background: transparent; }
-.studio-shell:has(.app[data-studio-shell="cockpit"][data-surface]) .environment-strip { top: 4px; bottom: auto; left: 36%; right: auto; width: auto; height: 40px; border: 0; padding: 0; background: var(--leaf-surface); }
-.studio-shell:has(.app[data-studio-shell="cockpit"][data-surface]) .environment-strip :is(button, select) { min-height: 32px; height: 32px; font-size: var(--leaf-size-caption); }
-/* The workspace controls start at 36% of the header row, so the ribbon tab band ends before them (it scrolls past that) and neither covers the other. */
-@media (min-width: 1024px) {
-.studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top .cockpit-band { max-width: calc(36vw - 144px); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
-}
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-toolbar { height: 0; min-height: 0; padding: 0; border: 0; overflow: visible; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-toolbar > :is(.viewer-title, .doc-tab-start, .doc-tab-close, .doc-tab-add),
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .viewer-actions > .checkout-controls { display: none; }
