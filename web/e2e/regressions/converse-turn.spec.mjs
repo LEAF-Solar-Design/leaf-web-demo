@@ -1,3 +1,4 @@
+// Baseline probe (a05b87a2, root ruling 71285354): comment-only, never merged.
 import { test, expect, unsupportedLocal } from './_harness.mjs'
 
 test('Converse creates a session, streams a reply and cancels to idle', async ({ page, stack }) => {
