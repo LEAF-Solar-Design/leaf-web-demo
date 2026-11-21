@@ -146,6 +146,26 @@ describe("converse inline authoring", () => {
     expect(check).not.toHaveBeenCalled();
   });
 
+  it("hands the authoring card its change set id on the author_tool result", async () => {
+    const { turn, authorToolFromPlan } = await setup();
+    await turn({ text: "Plan" }, async ({ tools }) => {
+      await tools.execute("propose_plan", { plan });
+    });
+    authorToolFromPlan.mockResolvedValueOnce({
+      contract: "leaf.customization-stage-job.v1", change_set_id: "f88b5f37-653a-492b-a217-299ad5d5320b",
+      plan_confirmation_id: "plan-1", status: "queued",
+    });
+    const events = await turn({ confirm: { confirmationId: "plan-1", approved: true } }, async input => {
+      await input.tools.execute("author_tool", { plan_confirmation_id: "plan-1", mode: "build" });
+    });
+    const authored = events.find(e => e.type === "tool_result" && e.data.tool === "author_tool");
+    expect(authored?.data.result).toEqual({
+      contract: "leaf.customization-stage-job.v1",
+      change_set_id: "f88b5f37-653a-492b-a217-299ad5d5320b",
+      plan_confirmation_id: "plan-1",
+    });
+  });
+
   it("mirrors each proposal, binds approval to the plan and scopes retry keys", async () => {
     const { turn, store, check, authorToolFromPlan } = await setup();
     async function propose() {
