@@ -3782,6 +3782,11 @@ def build_suites() -> List[Suite]:
                   # B-C6 conversation e2e: Postgres-gated (needs a live
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
+                  # SBT-A compile gate: four real-binary parity cases need a
+                  # built Branch checker (LEAF_BRANCH_COMPILE_BIN/REFS). The
+                  # harness image build runs the same four packages against the
+                  # Windows goldens and fails on any mismatch.
+                  ("test/branchCompileCheck.test.ts", 4),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
