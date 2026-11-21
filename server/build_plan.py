@@ -125,6 +125,8 @@ def _validated_bytes(value):
     for key in tool_name_keys:
         _text(value[key], key, 1, 64)
         _require(_TOOL_NAME.fullmatch(value[key]), key)
+    if revise:
+        _require(value["tool_name"] == value["target_tool_name"], "tool_name")
     for key, minimum, maximum in (
         ("title", 1, 80), ("summary", 1, 500), ("output", 1, 300), ("undo", 0, 200),
     ):

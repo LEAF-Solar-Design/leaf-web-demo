@@ -2,11 +2,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isProxy } from "node:util/types";
 import {
   BranchPackageError, prepareBranchPackage, validateBranchPackage,
   type BranchManifest,
 } from "../../registry/branchPackageSchema.js";
 import { FsTenantRepo } from "./fsTenantRepo.js";
+import { assertApprovedToolName } from "./submitToolProposal.js";
 import { isWindowsUnsafeRepoComponent, resolveContainedRepoPath, revalidateResolvedRepoPath } from "./repoPathSafety.js";
 
 export interface BranchSubmissionResult {
@@ -26,12 +28,21 @@ export function branchPackageDigest(files: Record<string, string>): string {
   return createHash("sha256").update(lines).digest("hex");
 }
 
+export function prepareBoundBranchPackage(proposal: unknown, session: string, now?: Date, toolName?: string) {
+  if (toolName !== undefined && proposal !== null && typeof proposal === "object" && !isProxy(proposal)) {
+    // Read only a data property. The package validator handles accessors and malformed objects.
+    const name = Object.getOwnPropertyDescriptor(proposal, "name")?.value;
+    if (typeof name === "string") assertApprovedToolName(name, toolName);
+  }
+  return prepareBranchPackage(proposal, session, now);
+}
+
 export function submitBranchToolProposal(
   repoDir: string,
   proposal: unknown,
-  options: { session?: string; now?: Date; targetToolName?: string } = {},
+  options: { session?: string; now?: Date; targetToolName?: string; toolName?: string } = {},
 ): BranchSubmissionResult {
-  const { manifest, files } = prepareBranchPackage(proposal, options.session ?? "agent-sdk", options.now);
+  const { manifest, files } = prepareBoundBranchPackage(proposal, options.session ?? "agent-sdk", options.now, options.toolName);
   const refuse = (rule: string, message: string): never => {
     throw new BranchPackageError([{ rule, path: `branch-tools/${manifest.name}`, message }]);
   };

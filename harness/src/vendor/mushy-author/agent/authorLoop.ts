@@ -19,14 +19,15 @@ import {
   type BranchAuthorResult, type BranchAuthorRunner,
 } from "./branchTargetPrompt.js";
 import {
-  submitBranchToolProposal, type BranchSubmissionResult,
+  prepareBoundBranchPackage, submitBranchToolProposal, type BranchSubmissionResult,
 } from "./tools/submitBranchToolProposal.js";
-import { prepareBranchPackage, validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
+import { validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
 import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "./tools/branchCompileCheck.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
 import {
   REVISION_ERROR,
+  assertApprovedToolName,
   revisionSchemaChange,
   revisionVersion,
   submitToolProposal,
@@ -75,6 +76,10 @@ import type {
 } from "../ports/index.js";
 
 export type { StageCustomizationRequest } from "../ports/index.js";
+
+function withApprovedToolName(prompt: string, toolName?: string): string {
+  return toolName === undefined ? prompt : `${prompt}\n\nThe approved tool name is ${toolName}. Submit the package with exactly that name.`;
+}
 
 export interface BranchStageMetadata {
   target: "branch";
@@ -538,13 +543,13 @@ export class AuthorLoop {
     let failure: unknown;
     try {
       run = await this.branchRunner({
-        description, systemPrompt: branchTargetPrompt(revision), repoDir, grant,
+        description, systemPrompt: withApprovedToolName(branchTargetPrompt(revision), request.toolName), repoDir, grant,
         fsTenantRepo: new FsTenantRepo(repoDir),
         submitBranchToolProposal: async proposal => {
           if (submission) throw new AuthorLoopError("V16: only one branch package may be submitted", 422);
           const session = `branch-author:${request.changeSetId}`;
           const now = new Date();
-          const { manifest, files } = prepareBranchPackage(proposal, session, now);
+          const { manifest, files } = prepareBoundBranchPackage(proposal, session, now, request.toolName);
           if (!branchCompileDisabled()) {
             // Keep the checked proposal stable across the asynchronous compiler call.
             proposal = snapshotUntrusted(proposal);
@@ -565,7 +570,7 @@ export class AuthorLoop {
           }
           if (!sessionOpen || submission) throw new AuthorLoopError("V16: submission is closed", 422);
           const result = submitBranchToolProposal(repoDir, proposal, {
-            session, now, targetToolName: request.targetToolName,
+            session, now, targetToolName: request.targetToolName, toolName: request.toolName,
           });
           submission = snapshotUntrusted(result) as BranchSubmissionResult;
           return result;
@@ -888,16 +893,19 @@ export class AuthorLoop {
   }
 
   /** Build the exactly-three-tool toolset the author session is granted. */
-  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string) {
+  private toolsetFor(repoDir: string, tenantId: string, targetToolName?: string, toolName?: string) {
     const revision = targetToolName
       ? readRevisionBase(repoDir, targetToolName) : undefined;
     let previousReceipt: ToolSourceReceipt | undefined = revision?.receipt;
     const toolset: AuthorToolset = {
       fsTenantRepo: new FsTenantRepo(repoDir),
       submitTool: (proposal) => {
-        if (revision) assertRevision(revision, proposal, proposal.source, false);
+        if (revision) {
+          assertApprovedToolName(proposal.name, toolName);
+          assertRevision(revision, proposal, proposal.source, false);
+        }
         const submitted = submitToolProposal(
-          repoDir, proposal, new Date(), previousReceipt,
+          repoDir, proposal, new Date(), previousReceipt, toolName,
         );
         previousReceipt = submitted.receipt;
         return submitted;
@@ -1088,8 +1096,8 @@ export class AuthorLoop {
     tenantId: string,
     description: string,
     repoDir: string,
-    targetToolName?: string,
     scrubSink?: ScrubState,
+    { toolName, targetToolName }: Pick<StageCustomizationRequest, "toolName" | "targetToolName"> = {},
   ) {
     // Concern 2 grant ONLY (never the platform JWT). Use the same mounted-account
     // lease router as conversation turns, while retaining legacy single-grant
@@ -1117,7 +1125,7 @@ export class AuthorLoop {
     let failure: unknown;
     try {
       const { toolset, verifyRevision } =
-        this.toolsetFor(repoDir, tenantId, targetToolName);
+        this.toolsetFor(repoDir, tenantId, targetToolName, toolName);
       // THE RUNNER IS THE UNTRUSTED BOUNDARY, so anything it throws is marked
       // here rather than trusted for what it claims about itself. A private
       // symbol is not a capability in-process: the runner can import
@@ -1129,7 +1137,7 @@ export class AuthorLoop {
       try {
         run = await this.ports.agentRunner.run({
           description,
-          systemPrompt: AUTHOR_SYSTEM_PROMPT,
+          systemPrompt: withApprovedToolName(AUTHOR_SYSTEM_PROMPT, toolName),
           repoDir,
           grant,
           toolset,
@@ -1174,6 +1182,9 @@ export class AuthorLoop {
         );
       }
       run = snapshot;
+      if (toolName !== undefined && run.tool.name !== toolName) {
+        throw new AuthorLoopError(`V-name: tool name must be ${toolName}`, 422);
+      }
       verifyRevision(run);
 
       this.verifySubmittedTool(tenantId, repoDir, run);
@@ -1209,7 +1220,7 @@ export class AuthorLoop {
 
   private async author(tenantId: string, description: string, scrubSink?: ScrubState) {
     const repo = await this.ports.tenantRepo.checkout(tenantId);
-    const run = await this.authorInRepo(tenantId, description, repo.dir, undefined, scrubSink);
+    const run = await this.authorInRepo(tenantId, description, repo.dir, scrubSink);
     return { repo, run };
   }
 
@@ -1451,7 +1462,7 @@ export class AuthorLoop {
           }
         }
         const run = await this.authorInRepo(
-          tenantId, description, change.dir, request.targetToolName, scrub,
+          tenantId, description, change.dir, scrub, request,
         );
         const { stagedCommit, catalogDigest } = await runFenced(() => {
           registerTool(change.dir, run.tool, {

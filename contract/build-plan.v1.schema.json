@@ -31,7 +31,12 @@
     }
   },
   "if": {"properties": {"change_kind": {"const": "revise"}}},
-  "then": {"required": ["target_tool_name"]},
+  "then": {
+    "required": ["target_tool_name"],
+    "properties": {
+      "tool_name": {"description": "Must equal target_tool_name. Both runtime validators enforce this cross-field constraint."}
+    }
+  },
   "else": {"not": {"required": ["target_tool_name"]}},
   "$defs": {
     "multiline": {

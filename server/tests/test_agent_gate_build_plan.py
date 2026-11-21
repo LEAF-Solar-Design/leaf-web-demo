@@ -99,6 +99,13 @@ def test_proposal_refuses_invalid_plan_without_jsonschema(monkeypatch):
     assert not agent_gate.list_pending()
 
 
+def test_revision_cannot_request_approval_for_a_different_name():
+    plan = dict(create_plan(), change_kind="revise", target_tool_name="existing-tool")
+    result = call("propose_build_plan", {"plan": plan})
+    assert result["decision"] == "deny" and result["reason"] == "plan_invalid_field:tool_name"
+    assert not agent_gate.list_pending()
+
+
 @pytest.mark.parametrize("cid", ["", "existing"])
 def test_proposal_never_accepts_confirmation_id(cid):
     result = call("propose_build_plan", {"plan": create_plan(), "confirmation_id": cid})
@@ -271,6 +278,35 @@ def test_route_refuses_an_unspent_plan(author_api):
     response = post(plan_confirmation_id=cid)
     assert response.status_code == 409 and response.json()["reason_code"] == "plan_required"
     assert not charges
+
+
+def test_two_plans_consumed_in_one_turn_require_the_exact_id(author_api):
+    post, store, charges = author_api
+    plans = [create_plan(), dict(create_plan(), tool_name="other-tool")]
+    ids = [approve(plan) for plan in plans]
+    for cid in ids:
+        assert redeem(cid)["decision"] == "allow"
+    for body in ({}, {"plan_confirmation_id": "absent"}):
+        response = post(**body)
+        assert response.status_code == 409 and response.json()["reason_code"] == "plan_required"
+    assert not charges
+    for cid, plan in zip(ids, plans):
+        response = post(key=cid, plan_confirmation_id=cid)
+        assert response.status_code == 202, response.text
+        row = store.get_change_set(tenant_id=TENANT, change_set_id=response.json()["change_set_id"])
+        assert row.plan_confirmation_id == cid and json.loads(row.plan_json) == plan
+        assert charges[-1] == row.change_set_id
+    assert len(charges) == 2
+
+
+@pytest.mark.parametrize("tenant,session,turn,subject", [
+    ("other-tenant", SESSION, TURN, SUBJECT), (TENANT, "other-session", TURN, SUBJECT),
+    (TENANT, SESSION, "other-turn", SUBJECT), (TENANT, SESSION, TURN, "other-subject"),
+])
+def test_exact_plan_id_still_requires_the_redeeming_authority(tenant, session, turn, subject):
+    cid = approve()
+    assert redeem(cid)["decision"] == "allow"
+    assert agent_gate.consumed_build_plan(tenant, session, turn, subject, cid) is None
 
 
 @pytest.mark.parametrize("body", [

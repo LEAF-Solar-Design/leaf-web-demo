@@ -27,7 +27,7 @@ const planText = (min: number, max: number, multiline = false) => bounded(min, m
   .refine(value => !/[\x00-\x09\x0b-\x1f\x7f\p{Cs}]/u.test(value) &&
     !/^\p{White_Space}|\p{White_Space}(?![\s\S])/u.test(value) && (multiline || !value.includes("\n")))
   .meta({ minLength: min, maxLength: max });
-const toolName = planText(1, 64).regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/).meta({ minLength: 1, maxLength: 64 });
+export const PlanToolName = planText(1, 64).regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/).meta({ minLength: 1, maxLength: 64 });
 const item = planText(1, 240);
 const planAnswer = z.union([
   z.strictObject({ labels: z.array(planText(1, 60)).min(1).max(4) }),
@@ -74,8 +74,8 @@ export const BuildPlan = z.strictObject({
   schema: z.literal("leaf.build-plan.v1"),
   target: z.enum(["branch", "studio"]),
   change_kind: z.enum(["create", "revise"]),
-  tool_name: toolName,
-  target_tool_name: toolName.optional(),
+  tool_name: PlanToolName,
+  target_tool_name: PlanToolName.optional(),
   title: planText(1, 80),
   summary: planText(1, 500, true),
   behavior: z.array(item).min(1).max(12),
@@ -88,6 +88,8 @@ export const BuildPlan = z.strictObject({
   answers: planAnswers,
 }).refine(plan => (plan.change_kind === "revise") === (plan.target_tool_name !== undefined),
   "target_tool_name is required only for revisions")
+  .refine(plan => plan.change_kind !== "revise" || plan.target_tool_name === undefined || plan.tool_name === plan.target_tool_name,
+    { path: ["tool_name"], message: "plan_invalid_field:tool_name" })
   .refine(plan => new Set(plan.inputs.map(field => field.name)).size === plan.inputs.length,
     "input names must be unique")
   .refine(plan => new Set(plan.capabilities).size === plan.capabilities.length, "capabilities must be unique")
