@@ -316,8 +316,10 @@ def test_roles_file_gained_no_operator_role():
 # assistant-compliance B adds run_drawing_edit_tool: auto drawing edits on standalone
 # drawings only; project custody, solves and every other action unchanged; removing
 # that entry restores the preceding a4292136 pin.
+# PR3593 adds the contract-defined optional table row_grouping schema.
+# Removing that member restores the preceding a90f8637 policy digest.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "a90f863770d8753f9dd86efe5eab68786ad93b137da22834e41c1fe9bbc10c58")
+    "46cb1b1ebbfc81bcd7ba948789fe2a1ca72ab5a9879d966cdebbfcfb5f946edc")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
