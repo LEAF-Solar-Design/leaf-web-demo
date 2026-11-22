@@ -26,7 +26,7 @@ function download(snapshot) {
   }
 }
 
-export function SavedDatasetViewExport({ projectId, record, dataset, read, preferences, unavailable, guard, scopeKey }) {
+export function SavedDatasetViewExport({ projectId, record, dataset, read, preferences, unavailable, guard, scopeKey, readIdentity }) {
   const operation = useRef(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -37,11 +37,13 @@ export function SavedDatasetViewExport({ projectId, record, dataset, read, prefe
       operation.current?.abort()
       operation.current = null
     }
-  }, [projectId, scopeKey, record, dataset, read, preferences, unavailable])
+  }, [projectId, scopeKey, readIdentity, record, dataset, read, preferences, unavailable])
 
   if (record?.element.kind !== 'dataset.table' || !isImportedMaterialDataset(dataset) ||
       !sameReference(dataset.reference, record.element.dataset_ref)) return null
-  const ready = !unavailable && completeRead(read, dataset.reference)
+  // readView binds each completed query to the scope and the exact saved recipe.
+  const ready = !unavailable && Boolean(scopeKey) &&
+    readIdentity === JSON.stringify([scopeKey, record.revision, record.element]) && completeRead(read, dataset.reference)
   async function save() {
     if (!ready || operation.current) return
     const controller = new AbortController()

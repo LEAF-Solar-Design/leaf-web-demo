@@ -10,11 +10,12 @@ const element = { kind: 'dataset.table', id: 'quota-table', dataset_ref: referen
   query: { fields: ['quota'], limit: 100 }, props: { columns: ['quota'] } }
 const record = { revision: 3, element }
 const dataset = { reference, revision: 2, material_lineage: material, material_context: { envelope: 'private source bytes' } }
-const preferences = { timezone: 'UTC', locale: 'en-US', hourFormat: '24' }
+const preferences = { timezone: 'UTC', locale: 'en-US', hourFormat: '24h' }
 const read = { dataset_ref: reference, status: 'ready', fields: [{ id: 'quota' }],
   rows: [{ key: 'one', values: { quota: 75 } }], next_cursor: null,
   query_coverage: { kind: 'complete_materialization', matching_rows: 1, offset: 0 } }
-const props = { projectId: 'project', record, dataset, read, preferences, guard: async () => {}, scopeKey: 'session-a' }
+const props = { projectId: 'project', record, dataset, read, preferences, guard: async () => {}, scopeKey: 'session-a',
+  readIdentity: JSON.stringify(['session-a', record.revision, element]) }
 const create = vi.fn(() => 'blob:local')
 const revoke = vi.fn()
 let click
@@ -42,6 +43,12 @@ it.each([{ status: 'stale' }, { next_cursor: 'page2' }, { query_coverage: undefi
   render(<SavedDatasetViewExport {...props} read={{ ...read, ...changes }} />)
   expect(screen.getByRole('button').disabled).toBe(true)
   expect(create).toHaveBeenCalledTimes(0)
+})
+
+it.each([{ record: { ...record, revision: 4 } }, { record: { ...record, element: { ...element, id: 'other-view' } } },
+  { unavailable: true }, { scopeKey: 'replaced-session' }])('withholds a result outside the current completed saved view', change => {
+  render(<SavedDatasetViewExport {...props} {...change} />)
+  expect(screen.getByRole('button').disabled).toBe(true)
 })
 
 it('aborts a pending download when the scope changes and coalesces repeated clicks', async () => {
