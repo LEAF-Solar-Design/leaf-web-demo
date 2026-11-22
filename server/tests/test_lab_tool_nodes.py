@@ -765,3 +765,284 @@ def test_corpus_failure_report_projects_only_fixed_categories(monkeypatch, failu
         {'project_id': 'project', 'corpus': {}, 'suite': {}}, None)
     assert output == {'error': expected}
     assert 'synthetic-private-label' not in str(output)
+
+
+def independent_corpus_rig(monkeypatch, labels=('slow', 'fast')):
+    """Real graph admission and adapter, with inert native custody/job boundaries."""
+    import lab_corpus_executor as corpus
+
+    monkeypatch.setenv('LEAF_LAB_TOOL_NODES', '1')
+    manifest, trusted = lab_tool_manifests.corpus_capability()
+    authority = {'tenant_id': TENANT, 'project_id': OTHER_TENANT, 'actor_id': 'actor',
+                 'doc_id': 'doc', 'graph_revision': 2, 'graph_sha256': 'a' * 64}
+    material = {'material_id': TENANT, 'sha256': 'b' * 64, 'byte_size': 1}
+    graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [
+        {'id': label, 'registry': {'id': 'corpus-evaluator', 'version': '1.0.0',
+            'code_sha256': manifest['version']['code_sha256']},
+         'settings': {'project_id': OTHER_TENANT, 'corpus': dict(material), 'suite': dict(material)}}
+        for label in labels], 'pipes': [],
+        'outputs': {label: {'node': label, 'port': 'result'} for label in labels}}
+    registry = {'corpus-evaluator@1.0.0': manifest}
+    rig = SimpleNamespace(graph=graph, registry=registry, trusted=trusted, authority=authority,
+        now=0, owned=True, requested=False, trace=[], durable={}, creates=[], cancels=[],
+        receipts={}, durations={label: (len(labels) - index) * 0.25 for index, label in enumerate(labels)})
+    monkeypatch.setattr(lab_tool_manifests, 'trusted_for', lambda *args: trusted)
+    monkeypatch.setattr(corpus, 'validate_context', lambda value: value)
+    monkeypatch.setattr(corpus, 'compile_policy', lambda auth, block, settings:
+                        {'digest': 'policy-' + block, 'block_id': block})
+
+    def read(context):
+        rig.trace.append(('custody', context['policy']['block_id']))
+        return {'suite': b'{}'}
+
+    def submit(context, *, idempotency_key):
+        rig.trace.append(('submit', idempotency_key))
+        if idempotency_key not in rig.durable:
+            block = context['policy']['block_id']
+            job_id = 'job-' + block
+            value = {'context': context, 'job_id': job_id, 'worker_id': 'native', 'attempt': 1,
+                'row_count': 1, 'rows_sha256': 'c' * 64, 'result_sha256': 'd' * 64,
+                'evaluated_suite_sha256': 'e' * 64, 'result': {'verdict': 'pass', 'reasons': []}}
+            rig.durable[idempotency_key] = {'tenant_id': TENANT, 'status': 'complete',
+                'job_id': job_id, 'result': {'result': value}, 'ready_at': rig.now + rig.durations[block]}
+            rig.creates.append(idempotency_key)
+        return rig.durable[idempotency_key]['job_id']
+
+    def get(job_id):
+        rig.trace.append(('observe', job_id))
+        row = next(row for row in rig.durable.values() if row['job_id'] == job_id)
+        return dict(row, status='submitted') if rig.now < row['ready_at'] else row
+
+    def cancel(block, job_id, deadline):
+        rig.cancels.append((block, job_id, deadline))
+        if not rig.owned:
+            return None
+        tag = {'block_id': block, 'fence': 1}
+        rig.receipts[job_id] = {'cancel': tag, 'not_started': True}
+        return tag
+
+    def sleep(seconds):
+        rig.now += seconds
+
+    monkeypatch.setattr(corpus, 'read_sources', read)
+    monkeypatch.setattr(corpus, 'compiled_suite', lambda *args: b'{}')
+    monkeypatch.setattr(corpus, 'submit_policy', submit)
+    monkeypatch.setattr(corpus, 'validate_result', lambda *args: None)
+    monkeypatch.setattr(jobs, 'get_job', get)
+    monkeypatch.setattr(jobs, 'corpus_cleanup', lambda job, tenant: rig.receipts.get(job))
+    rig.options = dict(cancelled=lambda: rig.requested, corpus_authority=authority,
+        corpus_owned=lambda: rig.owned, corpus_requested=lambda: rig.requested,
+        corpus_cancel=cancel, monotonic=lambda: rig.now, sleep=sleep)
+    rig.adapter = nodes.ToolNodeAdapter(TENANT, 'run', **rig.options)
+    return rig
+
+
+@pytest.mark.parametrize('labels', [('slow', 'fast'), ('z', 'm', 'a')])
+def test_independent_corpus_admits_all_before_ordered_observation(monkeypatch, labels):
+    import json
+    rig = independent_corpus_rig(monkeypatch, labels)
+    assert rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    # Every material was checked before the first durable admission, with no waits.
+    assert [kind for kind, _ in rig.trace] == ['custody'] * len(labels) + ['submit'] * len(labels)
+    committed = []
+    evaluate_graph(rig.graph, rig.registry, tool_adapter=rig.adapter,
+        trusted_lookup=lambda *args: rig.trusted, clock=lambda: rig.now,
+        on_block=lambda block, values: committed.append((block, values['result'].data)))
+    assert [block for block, _ in committed] == list(labels)
+    assert rig.creates == [f'lab:run:{block}:corpus:v1' for block in labels]
+    assert sum(kind == 'submit' for kind, _ in rig.trace) == len(labels)
+    assert rig.now == max(rig.durations.values())
+    for block, encoded in committed:
+        value = json.loads(encoded)
+        assert value['block_id'] == block
+        assert value['job_id'] == 'job-' + block
+        assert value['run_id'] == 'run'
+        assert value['graph_sha256'] == rig.authority['graph_sha256']
+        assert value['policy_digest'] == 'policy-' + block
+    assert rig.adapter.cleanup_corpus() is True
+    assert not rig.cancels
+
+
+@pytest.mark.parametrize('bad', ['project', 'settings', 'pin', 'registry', 'custody'])
+def test_corpus_preflight_rejects_entire_graph_before_first_intent(monkeypatch, bad):
+    import lab_corpus_executor as corpus
+    rig = independent_corpus_rig(monkeypatch)
+    second = rig.graph['blocks'][1]
+    if bad == 'project':
+        second['settings']['project_id'] = TENANT
+    elif bad == 'settings':
+        del second['settings']['suite']
+    elif bad == 'pin':
+        second['registry']['code_sha256'] = 'f' * 64
+    elif bad == 'registry':
+        monkeypatch.setattr(lab_tool_manifests, 'trusted_for', lambda *args: None)
+    else:
+        read = corpus.read_sources
+        def refuse(context):
+            if context['policy']['block_id'] == 'fast':
+                raise ValueError('foreign material')
+            return read(context)
+        monkeypatch.setattr(corpus, 'read_sources', refuse)
+    with pytest.raises((ValueError, GraphRefused)):
+        rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    assert not rig.creates
+
+
+@pytest.mark.parametrize('shape', ['mixed', 'connected'])
+def test_corpus_priming_leaves_other_graphs_on_serial_path(monkeypatch, shape):
+    rig = independent_corpus_rig(monkeypatch)
+    if shape == 'mixed':
+        rig.graph['blocks'][1]['registry']['id'] = 'constant-number'
+    else:
+        rig.graph['pipes'] = [{'from': {'node': 'slow', 'port': 'result'},
+                               'to': {'node': 'fast', 'port': 'input'}}]
+    assert rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600) is False
+    assert rig.trace == []
+
+
+@pytest.mark.parametrize('stop', ['cancel', 'deadline', 'lease'])
+def test_partial_priming_stops_before_next_submission(monkeypatch, stop):
+    import lab_corpus_executor as corpus
+    rig = independent_corpus_rig(monkeypatch)
+    rig.durations['slow'] = 1000
+    submit = corpus.submit_policy
+    def first_only(*args, **kwargs):
+        job = submit(*args, **kwargs)
+        if stop == 'cancel':
+            rig.requested = True
+        elif stop == 'deadline':
+            rig.now = 600
+        else:
+            rig.owned = False
+        return job
+    monkeypatch.setattr(corpus, 'submit_policy', first_only)
+    with pytest.raises(RunBudgetExceeded if stop == 'deadline' else RunCancelled):
+        rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    assert rig.creates == ['lab:run:slow:corpus:v1']
+    assert list(rig.adapter._corpus_jobs) == ['slow']
+    assert rig.adapter.cleanup_corpus(deadline=stop == 'deadline') is (stop != 'lease')
+    assert len(rig.cancels) == (0 if stop == 'lease' else 1)
+
+
+@pytest.mark.parametrize('stop', ['cancel', 'deadline'])
+def test_cleanup_covers_unobserved_intents_after_committed_value(monkeypatch, stop):
+    rig = independent_corpus_rig(monkeypatch, ('a', 'b', 'c'))
+    rig.durations.update(a=0, b=1000, c=1000)
+    rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    committed = []
+    def publish(block, values):
+        committed.append((block, values['result'].data))
+        if stop == 'cancel':
+            rig.requested = True
+        else:
+            rig.now = 600
+    with pytest.raises(RunCancelled if stop == 'cancel' else RunBudgetExceeded):
+        evaluate_graph(rig.graph, rig.registry, tool_adapter=rig.adapter,
+            trusted_lookup=lambda *args: rig.trusted, clock=lambda: rig.now,
+            cancelled=lambda: rig.requested, on_block=publish)
+    retained = list(committed)
+    assert rig.adapter.cleanup_corpus(deadline=stop == 'deadline')
+    assert committed == retained and [block for block, _ in committed] == ['a']
+    assert rig.cancels == [('b', 'job-b', stop == 'deadline'), ('c', 'job-c', stop == 'deadline')]
+    assert rig.creates == [f'lab:run:{block}:corpus:v1' for block in ('a', 'b', 'c')]
+
+
+def test_corpus_takeover_reuses_durable_intents_and_stale_owner_cannot_cancel(monkeypatch):
+    rig = independent_corpus_rig(monkeypatch)
+    old = rig.adapter
+    old.prime_corpus(rig.graph, rig.registry, deadline=600)
+    successor = nodes.ToolNodeAdapter(TENANT, 'run', **rig.options)
+    successor.prime_corpus(rig.graph, rig.registry, deadline=600)
+    assert successor._corpus_jobs == old._corpus_jobs
+    assert len(rig.creates) == 2
+    rig.owned = False
+    with pytest.raises(RunCancelled):
+        old._corpus('slow', rig.graph['blocks'][0]['settings'], 600)
+    assert old.cleanup_corpus(deadline=True) is False
+    assert rig.cancels == []
+    rig.owned = True
+    rig.now = 1
+    before = successor._corpus('slow', rig.graph['blocks'][0]['settings'], 600)
+    replay = nodes.ToolNodeAdapter(TENANT, 'run', **rig.options)
+    replay.prime_corpus(rig.graph, rig.registry, deadline=600)
+    assert replay._corpus('slow', rig.graph['blocks'][0]['settings'], 600) == before
+    assert len(rig.creates) == 2
+
+
+def test_corpus_cleanup_uses_one_receipt_budget_and_never_claims_confirmation(monkeypatch):
+    rig = independent_corpus_rig(monkeypatch, ('a', 'b', 'c'))
+    rig.durations = dict.fromkeys(('a', 'b', 'c'), 1000)
+    rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    monkeypatch.setattr(jobs, 'corpus_cleanup', lambda *args: None)
+    assert rig.adapter.cleanup_corpus(deadline=True) is False
+    assert rig.now == 10
+    assert len(rig.cancels) == 3
+    assert rig.adapter.cleanup_corpus(deadline=True) is False
+    assert rig.now == 10 and len(rig.cancels) == 3
+
+
+@pytest.mark.parametrize('observed', [False, True])
+@pytest.mark.parametrize('receipt_state', ['absent', 'delayed', 'wrong_fence'])
+def test_failed_corpus_with_existing_cancel_requires_matching_reap(monkeypatch, observed, receipt_state):
+    rig = independent_corpus_rig(monkeypatch, ('failed',))
+    rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    row = rig.durable['lab:run:failed:corpus:v1']
+    row.update(status='failed', ready_at=0, error={'corpus_failure': 'lease_or_budget'})
+    tag = {'run_id': 'run', 'fence': 1, 'block_id': 'failed', 'attempt': 1, 'reason': 'cancel'}
+    row['corpus_cancel_json'] = tag
+
+    def existing_cancel(block, job, deadline):
+        rig.cancels.append((block, job, deadline))
+        return row['corpus_cancel_json']
+
+    def receipt(job, tenant):
+        assert (job, tenant) == ('job-failed', TENANT)
+        if receipt_state == 'delayed' and rig.now >= 0.5:
+            return {'cancel': tag, 'reaped': True}
+        if receipt_state == 'wrong_fence':
+            return {'cancel': dict(tag, fence=2), 'reaped': True}
+        return None
+
+    rig.adapter.corpus_cancel = existing_cancel
+    monkeypatch.setattr(jobs, 'corpus_cleanup', receipt)
+    if observed:
+        assert rig.adapter._corpus('failed', rig.graph['blocks'][0]['settings'], 600) == {
+            'error': 'lab_corpus_failed_lease_or_budget'}
+    assert list(rig.adapter._corpus_jobs) == ['failed']
+    assert rig.adapter.cleanup_corpus(deadline=True) is (receipt_state == 'delayed')
+    assert rig.cancels == [('failed', 'job-failed', True)]
+    assert rig.now == (0.5 if receipt_state == 'delayed' else 10)
+    assert list(rig.adapter._corpus_jobs) == ([] if receipt_state == 'delayed' else ['failed'])
+    assert row['corpus_cancel_json'] == tag
+
+
+@pytest.mark.parametrize('race', ['cancel', 'terminal_read', 'receipt'])
+def test_failed_corpus_cleanup_rechecks_ownership_on_races(monkeypatch, race):
+    rig = independent_corpus_rig(monkeypatch, ('failed',))
+    rig.adapter.prime_corpus(rig.graph, rig.registry, deadline=600)
+    row = rig.durable['lab:run:failed:corpus:v1']
+    row.update(status='failed', ready_at=0)
+    tag = {'block_id': 'failed', 'fence': 1}
+
+    def cancel(*args):
+        if race == 'cancel':
+            rig.owned = False
+        return None if race != 'receipt' else tag
+
+    reads = []
+    def get(job):
+        reads.append(job)
+        if race == 'terminal_read' and len(reads) == 2:
+            rig.owned = False
+        return row
+
+    def receipt(*args):
+        rig.owned = False
+        return {'cancel': tag, 'reaped': True}
+
+    rig.adapter.corpus_cancel = cancel
+    monkeypatch.setattr(jobs, 'get_job', get)
+    monkeypatch.setattr(jobs, 'corpus_cleanup', receipt)
+    assert rig.adapter.cleanup_corpus(deadline=True) is False
+    assert list(rig.adapter._corpus_jobs) == ['failed']
+    assert rig.now == 0
