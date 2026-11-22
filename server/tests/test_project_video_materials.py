@@ -154,6 +154,10 @@ def test_running_child_has_resource_namespace_bounds_and_is_reaped_on_cancel(mon
     out = tmp_path / 'output'
     out.mkdir()
     calls = []
+    library_mounts = ['--dir', '/etc/alternatives', '--symlink',
+                      '/usr/lib/x86_64-linux-gnu/blas/libblas.so.3',
+                      '/etc/alternatives/libblas.so.3-x86_64-linux-gnu']
+    monkeypatch.setattr(video, '_library_symlinks', lambda: library_mounts)
     child = SimpleNamespace(pid=123456, returncode=None, poll=lambda: None,
                             wait=lambda **kwargs: calls.append(('wait', kwargs)))
     def popen(argv, **kwargs):
@@ -176,6 +180,8 @@ def test_running_child_has_resource_namespace_bounds_and_is_reaped_on_cancel(mon
     assert '--cpu=30' in argv and '--nofile=64' in argv and '--nproc=32' in argv
     assert '--unshare-all' in argv and '--cap-drop' in argv and '--clearenv' in argv
     assert '--ro-bind' in argv and '--die-with-parent' in argv
+    start = argv.index('/etc/alternatives') - 1
+    assert argv[start:start + len(library_mounts)] == library_mounts
     assert kwargs['shell'] is False and kwargs['start_new_session'] is True
     assert kwargs['env'] == {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
     assert calls[-1][0] == 'wait'
@@ -364,3 +370,59 @@ def test_sandbox_diagnostic_operation_is_closed():
     result = video._process_diagnostic('sandbox', 1, io.BytesIO(b'bwrap: PRIVATE'))
     assert result['operation'] == 'sandbox'
     assert 'PRIVATE' not in str(result)
+
+
+@pytest.fixture
+def library_paths(monkeypatch):
+    links = {}
+    targets = {}
+    monkeypatch.setattr(Path, 'is_symlink', lambda path: path in links)
+    monkeypatch.setattr(Path, 'exists', lambda path: False)
+    monkeypatch.setattr(Path, 'readlink', lambda path: links[path])
+    monkeypatch.setattr(Path, 'resolve', lambda path, **kwargs: targets[path])
+    monkeypatch.setattr(Path, 'is_file', lambda path: True)
+    return links, targets
+
+
+@pytest.mark.parametrize('libraries', [('libblas',), ('liblapack',), ('libblas', 'liblapack')])
+def test_only_supported_library_links_are_recreated(library_paths, libraries):
+    links, targets = library_paths
+    expected = ['--dir', '/etc/alternatives']
+    for library, directory in (('libblas', 'blas'), ('liblapack', 'lapack')):
+        if library not in libraries:
+            continue
+        link = Path(f'/etc/alternatives/{library}.so.3-x86_64-linux-gnu')
+        target = Path(f'/usr/lib/x86_64-linux-gnu/{directory}/{library}.so.3')
+        links[link] = target
+        targets[target] = target.with_name(library + '.so.3.12.1')
+        expected.extend(['--symlink', str(target), str(link)])
+    assert video._library_symlinks() == expected
+
+
+def test_direct_library_runtime_adds_no_etc_exposure(library_paths):
+    assert video._library_symlinks() == []
+
+
+@pytest.mark.parametrize('mode', ['unexpected-link', 'escape', 'missing', 'cycle', 'directory', 'regular-entry'])
+def test_invalid_library_dependency_fails_closed(library_paths, monkeypatch, mode):
+    links, targets = library_paths
+    link = Path('/etc/alternatives/libblas.so.3-x86_64-linux-gnu')
+    target = Path('/usr/lib/x86_64-linux-gnu/blas/libblas.so.3')
+    links[link] = target
+    targets[target] = target.with_name('libblas.so.3.12.1')
+    if mode == 'unexpected-link':
+        links[link] = Path('/etc/private-library')
+    elif mode == 'escape':
+        targets[target] = Path('/outside/libblas.so.3')
+    elif mode in ('missing', 'cycle'):
+        error = FileNotFoundError() if mode == 'missing' else RuntimeError('cycle')
+        def failure(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(Path, 'resolve', failure)
+    elif mode == 'directory':
+        monkeypatch.setattr(Path, 'is_file', lambda path: False)
+    else:
+        links.clear()
+        monkeypatch.setattr(Path, 'exists', lambda path: path == link)
+    with pytest.raises(video.VideoError, match='^video_unavailable$'):
+        video._library_symlinks()
