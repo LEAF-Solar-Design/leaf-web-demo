@@ -85,38 +85,39 @@ def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
 
 @pytest.fixture
 def manifest_only_rig(rig, monkeypatch):
-    import lab_corpus_executor as corpus
-    lab_runs.platform_link._ensure_platform_package()
-    from leaf_platform import project_lifecycle, project_reference_materials
-    monkeypatch.setattr(lab_runs.lab_tool_nodes, 'enabled', lambda: True)
-    monkeypatch.setattr(corpus, 'require_executor', lambda: None)
-    rig.context.org_id = rig.tenant
-    rig.context.authority_resolved = True
-    binding = SimpleNamespace(platform_tenant_id=rig.tenant, binding_id='manifest-reader')
+    with monkeypatch.context() as scoped:
+        import lab_corpus_executor as corpus
+        lab_runs.platform_link._ensure_platform_package()
+        from leaf_platform import project_lifecycle, project_reference_materials
+        scoped.setattr(lab_runs.lab_tool_nodes, 'enabled', lambda: True)
+        scoped.setattr(corpus, 'require_executor', lambda: None)
+        rig.context.org_id = rig.tenant
+        rig.context.authority_resolved = True
+        binding = SimpleNamespace(platform_tenant_id=rig.tenant, binding_id='manifest-reader')
 
-    def resolve(provider, subject):
-        assert (provider, subject) == ('auth0', 'run-actor')
-        return binding
+        def resolve(provider, subject):
+            assert (provider, subject) == ('auth0', 'run-actor')
+            return binding
 
-    monkeypatch.setattr(lab_runs.platform_link, 'platform_store', lambda: SimpleNamespace(
-        resolve_active_identity_binding=resolve))
-    project = '11111111-2222-4333-8444-555555555555'
-    reads = []
-    state = {'revoked': False}
+        scoped.setattr(lab_runs.platform_link, 'platform_store', lambda: SimpleNamespace(
+            resolve_active_identity_binding=resolve))
+        project = '11111111-2222-4333-8444-555555555555'
+        reads = []
+        state = {'revoked': False}
 
-    def role(tenant, target, actor, *, write):
-        reads.append((str(tenant), str(target), actor, write))
-        if state['revoked']:
-            raise project_lifecycle.LifecycleForbidden('synthetic revoked membership')
+        def role(tenant, target, actor, *, write):
+            reads.append((str(tenant), str(target), actor, write))
+            if state['revoked']:
+                raise project_lifecycle.LifecycleForbidden('synthetic revoked membership')
 
-    def unneeded(*args, **kwargs):
-        raise AssertionError('Manifest hydration must not depend on full project/material discovery')
+        def unneeded(*args, **kwargs):
+            raise AssertionError('Manifest hydration must not depend on full project/material discovery')
 
-    monkeypatch.setattr(project_lifecycle, 'require_project_role', role)
-    monkeypatch.setattr(lab_runs.platform_link, 'platform_db', unneeded)
-    monkeypatch.setattr(project_reference_materials, 'list_materials', unneeded)
-    return SimpleNamespace(rig=rig, project=project, binding=binding, state=state, reads=reads,
-                           materials=project_reference_materials)
+        scoped.setattr(project_lifecycle, 'require_project_role', role)
+        scoped.setattr(lab_runs.platform_link, 'platform_db', unneeded)
+        scoped.setattr(project_reference_materials, 'list_materials', unneeded)
+        yield SimpleNamespace(rig=rig, project=project, binding=binding, state=state, reads=reads,
+                               materials=project_reference_materials, patch=scoped)
 
 
 def test_manifest_only_skips_unneeded_catalog_discovery(manifest_only_rig):
@@ -154,7 +155,7 @@ def test_manifest_only_retains_current_admission(manifest_only_rig, refusal):
         assert response.json() == {'detail': 'lab_corpus_authority_required'}
 
 
-def test_manifest_only_keeps_default_full_picker(manifest_only_rig, monkeypatch):
+def test_manifest_only_keeps_default_full_picker(manifest_only_rig):
     from contextlib import contextmanager
     lane = manifest_only_rig
 
@@ -170,14 +171,14 @@ def test_manifest_only_keeps_default_full_picker(manifest_only_rig, monkeypatch)
     def cursor():
         yield Cursor()
 
-    monkeypatch.setattr(lab_runs.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=cursor))
+    lane.patch.setattr(lab_runs.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=cursor))
     material = {'material_id': 'synthetic-material', 'name': 'Original corpus'}
 
     def materials(tenant, project, actor):
         assert (tenant, str(project), actor) == (lane.rig.tenant, lane.project, 'manifest-reader')
         return {'materials': [material]}
 
-    monkeypatch.setattr(lane.materials, 'list_materials', materials)
+    lane.patch.setattr(lane.materials, 'list_materials', materials)
     response = lane.rig.http.get('/api/lab/runs/corpus-options', params={'project_id': lane.project})
     assert response.status_code == 200, response.text
     assert response.json()['projects'] == [{'project_id': lane.project, 'name': 'Synthetic project'}]
