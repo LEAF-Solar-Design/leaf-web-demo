@@ -661,7 +661,7 @@ def test_durable_history_retains_terminal_identity(rig, durable_history, state, 
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text
     assert response.json() == {"runs": [active, recent, saved]}
-    assert store.get(rig.tenant, saved["run_id"])["created_at"] == (
+    assert jsonable_encoder(store.get(rig.tenant, saved["run_id"])["created_at"]) == (
         durable_history.now - age).isoformat()
     # Saved history is durable; the same expired identity cannot create or reconcile.
     with pytest.raises(store.SubmissionConflict, match="lab_submission_expired"):
