@@ -22,7 +22,7 @@ describe('Lab Studio parity adapter', () => {
   it('imports the adapter immediately after the layered tokens', () => {
     const statements = stripComments(labCSS).trim().split(';').slice(0, 2).map(value => `${value.trim()};`)
     expect(statements).toEqual([
-      "@import './contract/sources/leaf-tokens.css' layer(leaf-lab-tokens);",
+      "@import './labTokensLayer.css';",
       "@import './studioParityAdapter.css';",
     ])
   })
