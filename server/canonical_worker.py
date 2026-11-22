@@ -317,7 +317,7 @@ def main() -> None:
     # parser accepted (--p for --poll-seconds) still resolves to the same option.
     parser.add_argument("--readiness", dest="project_readiness", action="store_true")
     parser.add_argument("--worker-id", type=_worker_id_argument)
-    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS),
+    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS | {"video-decode"}),
                         action=_ToolAction, default=autofill.TOOL_NAME)
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--max-age-seconds", type=float)
@@ -326,6 +326,12 @@ def main() -> None:
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
     tools = [args.tool] if isinstance(args.tool, str) else args.tool
+    if "video-decode" in tools:
+        if tools != ["video-decode"] or args.health or args.project_readiness:
+            parser.error("video-decode requires a dedicated decoder worker")
+        import video_decode_worker
+        video_decode_worker.main(["--once"] if args.once else [])
+        return
     multi_tool = len(tools) > 1
     if len(set(tools)) != len(tools):
         parser.error("duplicate --tool values are refused even with LEAF_CANONICAL_MULTI_TOOL=1")
