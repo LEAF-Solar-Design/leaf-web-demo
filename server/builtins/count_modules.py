@@ -291,6 +291,7 @@ def _compare_selections(intake, spec):
                  if first and second else None)
         changes[layer] = None if value is None else {"numerator": value.numerator,
                                                      "denominator": value.denominator}
+    result["schema_version"] = 1
     result["share_change"] = {"totals": [first, second], "percentage_points": changes,
                               "defined": bool(first and second)}
     result["selection_required"] = False
@@ -311,6 +312,7 @@ def run(intake, params):
         if _selection_region({"region": bounds}) is None:
             raise InputValidationError("Choose two complete windows.")
     base, overlay = _run(intake, dict(params, group_by="layer"))
+    base["schema_version"] = 1
     if not base["selected_sets"]:
         return base, overlay
     ids = [s["set_id"] for s in base["selected_sets"]]

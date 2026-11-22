@@ -646,3 +646,31 @@ def test_share_change_by_literal_layer(left, right, expected):
         "by": "block", "before": ["Before"], "after": ["After"]}})
     changes = result["share_change"]["percentage_points"]
     assert {k: (v["numerator"], v["denominator"]) for k, v in changes.items()} == expected
+
+
+@pytest.mark.parametrize("wire_version", ["absent", 1, 2, None, True, "1"])
+@pytest.mark.parametrize("params", [
+    {"compare_selections": {"by": "block", "before": [], "after": ["Panel"]}},
+    {"rank_windows": [[0, 0, 2, 2], [3, 3, 5, 5]]},
+])
+def test_comparison_schema_at_broker_reader(monkeypatch, params, wire_version):
+    from unittest.mock import Mock
+    import broker_client
+
+    drawing = {"inserts": [{"name": "Panel", "handle": "1", "layer": "Roof"}]}
+    result, overlay = module.run(drawing, params)
+    assert result["schema_version"] == 1
+    if wire_version == "absent":
+        del result["schema_version"]
+    else:
+        result["schema_version"] = wire_version
+    envelope = {"ok": True, "result": result, "overlay": overlay, "version": "1.0"}
+    response = Mock(status_code=200)
+    response.json.return_value = json.loads(json.dumps(envelope))
+    monkeypatch.setattr(broker_client.requests, "post", lambda *args, **kwargs: response)
+    got = broker_client.run_via_broker("fixture", {"name": "count-modules"}, params, "roof", False)
+    if wire_version == "absent" or type(wire_version) is int and wire_version == 1:
+        assert got == envelope
+    else:
+        assert got["ok"] is False and got["result"] is None and got["overlay"] is None
+        assert "Unsupported module comparison schema_version" in got["error"]["message"]
