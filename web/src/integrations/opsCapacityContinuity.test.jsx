@@ -45,7 +45,7 @@ function response(value) {
       controller.enqueue(new TextEncoder().encode(JSON.stringify(value))); controller.close()
     } }) }
 }
-function harness(initial) {
+function harness(initial, datasetMetadata = metadata) {
   let stored = initial
   let imported
   const authority = { subject: 'synthetic-subject', projectId }
@@ -58,13 +58,13 @@ function harness(initial) {
     if (url.pathname.endsWith('/scope')) return response({ tenantId: projectId, projectId: authority.projectId,
       platformUserId: projectId, bindingId: projectId, projectRole: 'owner',
       externalAuthority: 'auth0', externalSubject: authority.subject })
-    if (url.pathname.endsWith('/datasets')) return response({ records: [metadata], nextCursor: null })
+    if (url.pathname.endsWith('/datasets')) return response({ records: [datasetMetadata], nextCursor: null })
     if (url.pathname.endsWith('/dataset-imports')) {
       imported = JSON.parse(options.body)
       return response({ reference, revision: 1, rowCount: 6, status: 'complete' })
     }
     if (url.pathname.endsWith(`/datasets/${reference.id}/versions/1`)) {
-      return response({ ...metadata, fields: imported?.definition.fields || fields })
+      return response({ ...datasetMetadata, fields: imported?.definition.fields || fields })
     }
     if (url.pathname.endsWith('/elements') && options.method === 'GET') return response({ records: stored ? [stored] : [], nextCursor: null })
     if (url.pathname.endsWith('/elements') && options.method === 'POST') {
@@ -192,6 +192,33 @@ const existing = () => ({ revision: 1, element: { schema_version: 1, id: 'capaci
   dataset_ref: reference, query: { fields: ids, limit: 100 }, kind: 'dataset.table',
   props: { columns: ids, row_limit: 100, row_grouping: { kind: 'provider_pairs', pair_key_field: 'pair_key',
     provider_field: 'provider', providers: ['Claude', 'Codex'] } } } })
+
+it('downloads the selected material-backed capacity recipe and all six queried rows', async () => {
+  vi.stubGlobal('TextDecoder', TextDecoder)
+  vi.stubGlobal('TextEncoder', TextEncoder)
+  vi.stubGlobal('Blob', Blob)
+  const create = vi.fn(() => 'blob:capacity')
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = vi.fn() })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const material = { kind: 'project_material', material_id: projectId, sha256: 'b'.repeat(64), byte_length: 1200 }
+  const h = harness(existing(), { ...metadata, material_lineage: material, lastAttempt: { outcome: 'success', row_count: 6 } })
+  try {
+    render(<OpsWorkspaceGround {...h.props} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Capacity view · revision 1' }))
+    await expectSixRecords()
+    const button = screen.getByRole('button', { name: 'Download view snapshot (JSON)' })
+    await waitFor(() => expect(button).toBeEnabled())
+    const before = h.calls.length
+    fireEvent.click(button)
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(h.calls.slice(before).map(call => [call.method, call.path.split('/').pop()])).toEqual([['GET', 'scope']])
+    expect(JSON.parse(await create.mock.calls[0][0].text())).toEqual({
+      schema: 'leaf.saved-dataset-view.v1', project_id: projectId, view: h.saved(),
+      dataset: { reference, revision: 1, material_lineage: material }, query_result: read,
+      display_preferences: { locale: 'en-US', timezone: 'UTC', hourFormat: '24h' },
+    })
+  } finally { click.mockRestore() }
+})
 
 it.each(['account', 'scope', 'removed', 'session', 'project', 'signout'])('does not restore a capacity view after %s changes while hidden', async (change) => {
   vi.stubGlobal('TextDecoder', TextDecoder)
