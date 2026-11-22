@@ -1767,7 +1767,6 @@ class CustomizationService:
                     or not change.author_subject or change.author_subject != binding.subject
                     or change.state is not ChangeState.STAGED
                     or change.change_kind not in {"create", "revise"}
-                    or change.tool_target == "branch"
                     or not isinstance(change.staged_commit, str)
                     or not re.fullmatch(r"[a-f0-9]{40}", change.staged_commit)
                     or not isinstance(change.catalog_digest, str)
@@ -1776,6 +1775,14 @@ class CustomizationService:
             return change
 
         def declaration(change: ChangeSet) -> tuple[str, str]:
+            if change.tool_target == "branch":
+                # A Branch package's source is its one main.csx in the receipt-bound tree.
+                fields = self._branch_receipt_fields(change)
+                package = fields["package_path"]
+                entry = f"{package}/main.csx"
+                if entry not in fields["package_files"]:
+                    raise CustomizationServiceError("stage_source_not_available", 404)
+                return package.split("/", 1)[1], entry
             tool = self._staged_tool(change)
             slug = tool.get("name")
             is_script = tool.get("kind") == "script"
@@ -1789,12 +1796,28 @@ class CustomizationService:
         # Metadata reads can block too. Recheck before crossing the private hop.
         if eligible() != change:
             raise CustomizationServiceError("stage_source_not_available", 404)
-        data, headers = self._harness_staged_source(change, slug)
+        if change.tool_target == "branch":
+            data, headers = self._branch_staged_source(change, path)
+        else:
+            data, headers = self._harness_staged_source(change, slug)
         if eligible() != change or declaration(change) != (slug, path):
             raise CustomizationServiceError("stage_source_not_available", 404)
         if eligible() != change:
             raise CustomizationServiceError("stage_source_not_available", 404)
         return data, {**headers, "X-Leaf-Source-Path": path}
+
+    @staticmethod
+    def _branch_staged_source(change: ChangeSet, path: str) -> tuple[bytes, dict[str, str]]:
+        """Read the Branch source blob from the staged commit; bounded, digest-bound."""
+        try:
+            data = _git_blob(_bare_repo(change.tenant_id), f"{change.staged_commit}:{path}")
+        except CustomizationServiceError as exc:
+            raise CustomizationServiceError("stage_source_failed", 503) from exc
+        if type(data) is not bytes or len(data) > MAX_STAGED_SOURCE_BYTES:
+            raise CustomizationServiceError("stage_source_failed", 503)
+        blob = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+        return data, {"Content-Length": str(len(data)), "X-Leaf-Source-Commit": change.staged_commit or "",
+                      "X-Leaf-Source-Blob": blob, "X-Leaf-Source-Sha256": hashlib.sha256(data).hexdigest()}
 
     @staticmethod
     def _harness_staged_source(change: ChangeSet, slug: str) -> tuple[bytes, dict[str, str]]:

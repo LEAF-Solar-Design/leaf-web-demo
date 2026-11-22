@@ -70,3 +70,15 @@ def test_flags_follow_request_principal(monkeypatch, tenant, review_mode, expect
         response = client.get("/api/author/inline-authoring", params={"tenant_id": "tenant-a"})
     assert response.status_code == 200
     assert response.json() == expected
+
+
+@pytest.mark.parametrize("tenant,review_mode,expected", [
+    ("tenant-a", "internal", {"plan_mode": True, "inline_review": True, "self_approval": True}),
+    ("tenant-b", "internal", {"plan_mode": True}),
+    ("tenant-b", "all", {"plan_mode": True, "inline_review": True, "self_approval": False}),
+])
+def test_packet_tells_the_harness_where_review_happens(monkeypatch, packet_inputs, tenant, review_mode, expected):
+    monkeypatch.setenv("LEAF_STUDIO_PLAN_MODE", "all")
+    monkeypatch.setenv("LEAF_STUDIO_INLINE_REVIEW", review_mode)
+    packet = context_packet.build_packet(tenant, "drawing-a", entitlements_override={})
+    assert packet["inline_authoring"] == expected
