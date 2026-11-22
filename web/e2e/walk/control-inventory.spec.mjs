@@ -8,10 +8,13 @@ import { writeFileSync } from 'node:fs'
 const map = buildFeatureMap()
 const recorded = new Map()
 
+// Playwright refuses use({ trace }) inside a describe group (it forces a new
+// worker), which made this file fail collection and the walk select 0 tests.
+test.use({ trace: CENSUS_TRACE })
+
 // Keep both observations in one worker. Record mode replaces the destination
 // with this run's union, rather than preserving rows from an earlier run.
 test.describe('rendered control census', () => {
-  test.use({ trace: CENSUS_TRACE })
   test.describe.configure({ mode: 'serial' })
   for (const state of ['ready', 'failed-load']) {
     test(`control-census:studio [${state}] @desktop`, async ({ page, stack, walkEvidence }, testInfo) => {
