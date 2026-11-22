@@ -662,8 +662,16 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
         if tool.get("engine_op") == "revision_panel_moves":
             from authored_revision_panel_moves import bind_project_parent
             intake = bind_project_parent(tenant, context)
+        # The project request also carries the drawing selector for binding and
+        # idempotency. A closed tool schema can exclude it from its own inputs.
+        schema = tool.get("params") or {}
+        tool_params = params
+        if ("drawing_id" in params and schema.get("additionalProperties") is False
+                and "drawing_id" not in schema.get("properties", {})
+                and not schema.get("patternProperties")):
+            tool_params = {key: value for key, value in params.items() if key != "drawing_id"}
         return tool_loader.run_tool_dynamic(
-            tool, intake, params, aps_live=False, da=None,
+            tool, intake, tool_params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
     try:
