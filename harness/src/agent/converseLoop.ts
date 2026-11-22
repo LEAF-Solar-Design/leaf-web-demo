@@ -15,7 +15,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { PLAN_MODE_PROMPT, SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
+import { PLAN_MODE_PROMPT, SPINE_SYSTEM_PROMPT, inlineReviewPrompt } from "./spineSystemPrompt.js";
 import { BuildPlan, PLAN_CONFIRMATION_TTL_S, PlanBuildRequest, Questions, TurnAnswers, planDigest, planModeEnabled } from "../ports/index.js";
 import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
 import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ViewControlInput, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
@@ -651,7 +651,7 @@ export class ConverseLoop {
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
           "\nFor requested photo inspection use inspect_project_photo: catalog automatically traverses every page, then request previews for every unassigned original by stable material ID and preview digest. Group preview tool calls in parallel to cover the catalog within the turn budget; the host serializes witness validation. Continue with other photos if one preview fails; transport retries are bounded by the host. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Reconcile every catalog ID against inspected, proposed and saved IDs; report each unresolved photo and its reason, including proposals awaiting explicit save. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos." + DEVICE_TOOL_GUIDANCE +
-          (planMode ? PLAN_MODE_PROMPT : ""),
+          (planMode ? PLAN_MODE_PROMPT : "") + inlineReviewPrompt(input.contextPacket),
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId

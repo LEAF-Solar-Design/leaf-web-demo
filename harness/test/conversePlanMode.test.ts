@@ -166,6 +166,32 @@ describe("converse inline authoring", () => {
     });
   });
 
+  it("asks before proposing when a short request leaves out a choice that changes the build", async () => {
+    const { turn } = await setup();
+    await turn({ text: "make a Branch tool that labels the panels" }, async ({ systemPrompt }) => {
+      expect(systemPrompt).toContain("A short request often leaves out a choice that changes what gets built");
+      expect(systemPrompt).toContain("ask about it with ask_user before proposing");
+    });
+  });
+
+  it("tells the user to approve on the build card when inline review allows self-approval", async () => {
+    const { turn } = await setup();
+    const prompts: string[] = [];
+    for (const inline_authoring of [
+      { plan_mode: true, inline_review: true, self_approval: true },
+      { plan_mode: true, inline_review: true, self_approval: false },
+      { plan_mode: true },
+    ]) {
+      await turn({ text: "Plan", contextPacket: { inline_authoring } }, async ({ systemPrompt }) => {
+        prompts.push(systemPrompt);
+      });
+    }
+    expect(prompts[0]).toContain("The user can approve it there themselves");
+    expect(prompts[0]).toContain("Do not say an independent approver must act");
+    expect(prompts[1]).toContain("A reviewer on the account approves it there.");
+    expect(prompts[2]).not.toContain("Publication review in this workspace");
+  });
+
   it("mirrors each proposal, binds approval to the plan and scopes retry keys", async () => {
     const { turn, store, check, authorToolFromPlan } = await setup();
     async function propose() {
