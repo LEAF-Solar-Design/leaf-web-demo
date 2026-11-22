@@ -524,7 +524,7 @@ describe('Strategy revision ledger', () => {
     fetchImpl.mockImplementationOnce(() => pending.promise)
     act(() => globalThis.dispatchEvent(new CustomEvent(SAVED_REVISION_EVENT, { detail: { doc_id: 'strategy' } })))
     act(() => client.setDocId('B'))
-    await waitFor(() => expect(screen.queryByText('Loading history…')).toBeNull())
+    await waitFor(() => expect(screen.queryByText('Loading historyâ€¦')).toBeNull())
     expect(screen.getByLabelText('Before revision')).toHaveValue('')
     expect(screen.getByLabelText('After revision')).toHaveValue('')
     expect(screen.queryByText('Compared revisions.')).toBeNull()
@@ -566,7 +566,7 @@ describe('Strategy revision ledger', () => {
     const initial = deferred()
     fetchImpl.mockImplementationOnce(() => initial.promise)
     render(<HistoryView client={client} />)
-    expect(screen.getByText('Loading history…')).toBeVisible()
+    expect(screen.getByText('Loading historyâ€¦')).toBeVisible()
     await act(async () => initial.resolve(response({ revisions: copy(ledgerRows()) })))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Publish r2' })).toBeEnabled())
     fireEvent.change(screen.getByLabelText('Before revision'), { target: { value: '1' } })
@@ -574,7 +574,7 @@ describe('Strategy revision ledger', () => {
     const pending = deferred()
     fetchImpl.mockImplementationOnce(() => pending.promise)
     act(() => globalThis.dispatchEvent(new CustomEvent(SAVED_REVISION_EVENT, { detail: { doc_id: 'strategy' } })))
-    expect(screen.getByText('Loading history…')).toBeVisible()
+    expect(screen.getByText('Loading historyâ€¦')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Compare', exact: true })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Restore', exact: true })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Publish r2' })).toBeDisabled()
@@ -628,8 +628,8 @@ describe('Strategy revision ledger', () => {
       save.rerender(<LabSaveBar document={second} ready client={client} />)
       fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
       await waitFor(() => expect(client.state.head).toBe(2))
-      expect(screen.getByText('Saved r2 · 22222222')).toBeVisible()
-      expect(screen.getByText('Save p50 0 ms · p99 0 ms')).toBeVisible()
+      expect(screen.getByText('Saved r2 Â· 22222222')).toBeVisible()
+      expect(screen.getByText('Save p50 0 ms Â· p99 0 ms')).toBeVisible()
       const saves = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/save'))
       expect(saves.map(([, init]) => JSON.parse(init.body).expected_head)).toEqual([null, 1])
       render(<HistoryView client={client} />)
@@ -875,7 +875,7 @@ describe('Strategy revision ledger', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }))
       await waitFor(() => expect(client.state.head).toBe(revision))
     }
-    expect(screen.getByText('Save p50 20 ms · p99 30 ms')).toBeVisible()
+    expect(screen.getByText('Save p50 20 ms Â· p99 30 ms')).toBeVisible()
   })
 
   it('loads only when shown and reloads after saved-revision events', async () => {
@@ -913,7 +913,7 @@ describe('original export response text', () => {
     const producer = bundle.parts.evaluations[0].complete_results['job-1']
     producer.result.candidates[1].score = -0
     if (variant === 'larger multilingual report') {
-      producer.result.reasons = ['策略 🌱, 15 分钟, 250 mV, توقيت UTC. '.repeat(2000)]
+      producer.result.reasons = ['ç­–ç•¥ ðŸŒ±, 15 åˆ†é’Ÿ, 250 mV, ØªÙˆÙ‚ÙŠØª UTC. '.repeat(2000)]
     }
     const producerText = canonicalJSON(producer.result)
       .replace('"score":2', '"score":2e0')
