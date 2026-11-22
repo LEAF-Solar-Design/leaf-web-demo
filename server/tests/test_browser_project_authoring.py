@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import browser_project_authoring as authoring
+import project_author_diagnostics as diagnostics
 import project_reference_materials as originals
 from project_repository_edit_contract import parse_staged_receipt, staged_receipt_digest
 
@@ -76,9 +77,15 @@ def lane(monkeypatch):
 
     def post(url, *, data, headers, timeout, allow_redirects):
         assert url == 'https://harness.invalid/internal/project-repository-source/author'
-        assert headers == {'X-Harness-Secret': 'fixture-only', 'X-Tenant-Id': ORG, 'Content-Type': 'application/json'}
-        assert timeout == (10, 240) and allow_redirects is False
         body = json.loads(data)
+        expected_headers = {'X-Harness-Secret': 'fixture-only', 'X-Tenant-Id': ORG, 'Content-Type': 'application/json'}
+        if body['source_profile'] == authoring.NATIVE_PROFILE:
+            attempt = headers['X-Source-Author-Attempt']
+            assert str(uuid.UUID(attempt)) == attempt and uuid.UUID(attempt).version == 4
+            expected_headers.update({'X-Source-Author-Attempt': attempt,
+                                     'X-Source-Author-Wire-SHA256': hashlib.sha256(data).hexdigest()})
+        assert headers == expected_headers
+        assert timeout == (10, 240) and allow_redirects is False
         state.posts.append(body)
         receipt = dict(contract='leaf.project-repository-edit.v2', edit_id=EDIT, state='staged',
             operation='edit', source_edit_id=None, actor_binding_id=ACTOR, **authority,
@@ -95,7 +102,11 @@ def lane(monkeypatch):
             state.cancelled = True
         if getattr(state, 'rebind_on_post', False):
             state.authority['repo_key'] = str(uuid.uuid4())
-        return SimpleNamespace(status_code=state.response_status, json=lambda **kwargs: result, close=lambda: None)
+        content = b''
+        if hasattr(state, 'dependency_response'):
+            content = state.dependency_response(headers)
+        return SimpleNamespace(status_code=state.response_status, content=content,
+                               json=lambda **kwargs: result, close=lambda: None)
 
     monkeypatch.setattr(authoring.requests, 'post', post)
 
@@ -116,6 +127,179 @@ def lane(monkeypatch):
 
 def call(lane):
     return authoring.author(lane.tenant, PROJECT, lane.request, cancelled=lambda: lane.cancelled)
+
+
+def dependency_response(headers):
+    return dict(error=dict(code='source_unavailable', message='source is unavailable'), disposition=dict(
+        schema='leaf.project-source-author-disposition.v1', outcome='not_started', stage='author_dependency_gate',
+        attempt_id=headers['X-Source-Author-Attempt'], wire_sha256=headers['X-Source-Author-Wire-SHA256']))
+
+
+def test_native_dependency_refusal_captures_only_matching_rpc_correlation(lane):
+    lane.response_status = 503
+    lane.dependency_response = lambda headers: json.dumps(dependency_response(headers)).encode()
+    with pytest.raises(authoring.AuthorDependencyRefusal) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    error = caught.value
+    assert error.provenance is authoring._VERIFIED_DEPENDENCY_REFUSAL
+    assert error.request == lane.request
+    assert error.binding == dict(lane.authority, actor_binding_id=ACTOR, expected_base_commit=BASE)
+    assert error.disposition['outcome'] == 'not_started'
+    assert len(lane.posts) == 1
+
+
+@pytest.mark.parametrize('change', ['attempt', 'digest', 'stage', 'outcome', 'schema', 'extra',
+                                  'status', 'plain503', 'html', 'duplicate', 'oversized', 'type'])
+def test_dependency_refusal_rejects_foreign_or_malformed_producer_reply(lane, change):
+    lane.response_status = 409 if change == 'status' else 503
+    def response(headers):
+        value = dependency_response(headers)
+        if change in ('attempt', 'digest'):
+            value['disposition']['attempt_id' if change == 'attempt' else 'wire_sha256'] = 'foreign'
+        elif change in ('stage', 'outcome', 'schema'):
+            value['disposition'][change] = 'foreign'
+        elif change == 'extra':
+            value['disposition']['detail'] = 'private provider detail'
+        elif change == 'type':
+            value['disposition']['attempt_id'] = [value['disposition']['attempt_id']]
+        elif change == 'plain503':
+            value.pop('disposition')
+        elif change == 'html':
+            return b'<html>proxy unavailable</html>'
+        elif change == 'duplicate':
+            return b'{"error":{},"error":{},"disposition":{}}'
+        elif change == 'oversized':
+            return b'x' * 4097
+        return json.dumps(value).encode()
+    lane.dependency_response = response
+    with pytest.raises(authoring.AuthoringError) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    assert not isinstance(caught.value, authoring.AuthorDependencyRefusal)
+    assert 'private provider detail' not in str(caught.value)
+
+
+@pytest.mark.parametrize('change', ['repository', 'scope'])
+def test_dependency_refusal_is_not_captured_after_repository_rebind(lane, change):
+    lane.response_status = 503
+    if change == 'repository':
+        lane.rebind_on_post = True
+    else:
+        def revoke(value):
+            lane.revoked = True
+            return value
+        lane.response_mutation = revoke
+    lane.dependency_response = lambda headers: json.dumps(dependency_response(headers)).encode()
+    with pytest.raises(authoring.AuthoringError) as caught:
+        authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+    assert caught.value.code == ('source_changed' if change == 'repository' else 'access_denied')
+
+
+@pytest.mark.parametrize('profile', [authoring.WEB_PROFILE, authoring.NATIVE_PROFILE])
+@pytest.mark.parametrize('status', [401, 503, True, '503'])
+def test_refused_author_records_only_closed_http_status(lane, monkeypatch, profile, status):
+    lane.response_status = status
+    closed = []
+    original_post = authoring.requests.post
+    def post(*args, **kwargs):
+        response = original_post(*args, **kwargs)
+        def private_body(**kwargs):
+            raise AssertionError('Refused response bodies must not be read for diagnostics')
+        response.json = private_body
+        response.close = lambda: closed.append(True)
+        return response
+    monkeypatch.setattr(authoring.requests, 'post', post)
+    token = diagnostics.begin()
+    try:
+        with pytest.raises(authoring.AuthoringError) as caught:
+            authoring.author(lane.tenant, PROJECT, lane.request, source_profile=profile)
+        assert caught.value.code == 'author_unavailable' and caught.value.status == 503
+        assert str(caught.value) == 'Project author service is unavailable.'
+        expected = {'author_subphase': 'author_http'}
+        if type(status) is int:
+            expected['author_http_status'] = status
+        assert diagnostics.snapshot() == expected
+        assert set(vars(caught.value)) == {'code', 'status', 'author_subphase'}
+        assert closed == [True]
+    finally:
+        diagnostics.end(token)
+    assert diagnostics.snapshot() == {}
+
+
+@pytest.mark.parametrize('status', [200, 409])
+def test_success_and_conflict_do_not_record_unavailable_status(lane, status):
+    lane.response_status = status
+    token = diagnostics.begin()
+    try:
+        if status == 200:
+            assert call(lane)['receipt']['staged_head_commit'] == HEAD
+        else:
+            with pytest.raises(authoring.AuthoringError) as caught:
+                call(lane)
+            assert caught.value.code == 'source_changed' and caught.value.status == 409
+        assert diagnostics.snapshot() == {}
+    finally:
+        diagnostics.end(token)
+
+
+@pytest.mark.parametrize('kind, expected', [
+    ('initialization', 'initialization'), ('missing_url', 'missing_binding'),
+    ('missing_headers', 'missing_binding'), ('http', 'author_http'),
+    ('json', 'author_response'), ('oversize', 'author_response'),
+    ('transport', 'transport'),
+])
+def test_unavailable_author_has_safe_subphase_and_preserves_cleanup(lane, monkeypatch, kind, expected):
+    detail = 'private failure detail must not escape'
+    closed = []
+    if kind == 'initialization':
+        def initialize(*args):
+            raise RuntimeError(detail)
+        monkeypatch.setattr(authoring.source, 'initialize_project_source', initialize)
+    elif kind == 'missing_url':
+        monkeypatch.delenv('LEAF_AUTHOR_HARNESS_URL', raising=False)
+    elif kind == 'missing_headers':
+        monkeypatch.setattr(authoring.broker_client, 'harness_headers', lambda: {})
+    elif kind == 'transport':
+        def post(*args, **kwargs):
+            raise authoring.requests.Timeout(detail)
+        monkeypatch.setattr(authoring.requests, 'post', post)
+    else:
+        original_post = authoring.requests.post
+        def post(*args, **kwargs):
+            response = original_post(*args, **kwargs)
+            response.close = lambda: closed.append(True)
+            if kind == 'json':
+                def invalid_json(**kwargs):
+                    raise ValueError(detail)
+                response.json = invalid_json
+            if kind == 'oversize':
+                response.content = b'x' * (256 * 1024 + 1)
+            return response
+        monkeypatch.setattr(authoring.requests, 'post', post)
+        if kind == 'http':
+            lane.response_status = 502
+    with pytest.raises(authoring.AuthoringError) as caught:
+        if kind == 'oversize':
+            authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.NATIVE_PROFILE)
+        else:
+            call(lane)
+    error = caught.value
+    assert error.code == 'author_unavailable' and error.status == 503
+    assert str(error) == 'Project author service is unavailable.'
+    assert error.author_subphase == expected
+    assert detail not in repr(vars(error))
+    assert closed == ([True] if kind in {'http', 'json', 'oversize'} else [])
+    assert len(lane.posts) == (1 if kind in {'http', 'json', 'oversize'} else 0)
+
+
+@pytest.mark.parametrize('subphase', ['initialization', 'missing_binding', 'author_http',
+                                   'author_response', 'transport', 'unknown', None, 503, []])
+def test_author_subphase_is_closed_and_only_for_unavailable(subphase):
+    error = authoring.AuthoringError('author_unavailable', author_subphase=subphase)
+    allowed = isinstance(subphase, str) and subphase in {
+        'initialization', 'missing_binding', 'author_http', 'author_response', 'transport'}
+    assert error.author_subphase == (subphase if allowed else None)
+    other = authoring.AuthoringError('source_changed', author_subphase=subphase)
+    assert other.status == 409 and other.author_subphase is None
 
 
 @pytest.mark.parametrize('operation', ['create', 'edit'])

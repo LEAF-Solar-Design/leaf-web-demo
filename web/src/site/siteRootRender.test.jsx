@@ -10,6 +10,7 @@
 // under jsdom); the REAL module under test is SiteRoot's scene logic. Every
 // mount resets the module registry and sets the global BEFORE the dynamic
 // import, so a module-eval read of it could not hide behind a cached module.
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -83,7 +84,7 @@ describe('SiteRoot renders the one studio shell', () => {
     vi.useRealTimers()
     expect(await screen.findByTestId('app-stub')).toBeTruthy()
     expect(window.location.pathname).toBe(path)
-  }, 20_000)
+  }, scaleTimeout(20_000))
 
   it.each(['reject', 'timeout'])('drops the callback error page (%s) when history navigates to another path', async outcome => {
     window.history.replaceState({}, '', '/?code=x&state=y')
@@ -117,7 +118,7 @@ describe('SiteRoot renders the one studio shell', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.getByTestId('app-stub')).toBeTruthy()
     expect(callback).toHaveBeenCalledTimes(1)
-  }, 20_000)
+  }, scaleTimeout(20_000))
 
   it('removes callback parameters before saving the page URL for a sign-in retry after timeout', async () => {
     window.history.replaceState({ page: 'drawing' }, '', '/app?surface=cad&code=x&state=y&drawing=roof#details')
@@ -151,7 +152,7 @@ describe('SiteRoot renders the one studio shell', () => {
     expect(window.location.pathname + window.location.search + window.location.hash).toBe('/app?surface=cad&drawing=roof#details')
     expect(new URL(window.location.href).searchParams.has('code')).toBe(false)
     expect(new URL(window.location.href).searchParams.has('state')).toBe(false)
-  }, 20_000)
+  }, scaleTimeout(20_000))
 
   // Cold dynamic imports of the SiteRoot graph after vi.resetModules() can take several seconds on a loaded runner.
   it('SSD1-B row1: a passive decision strip never blocks the Escape eject, an owned one still does', async () => {
@@ -179,7 +180,7 @@ describe('SiteRoot renders the one studio shell', () => {
       strip.remove()
       navigate.mockRestore()
     }
-  }, 20_000)
+  }, scaleTimeout(20_000))
 
   it('absent, 0 and 1 legacy flag values all mount the console INSIDE the one studio shell with its ground', async () => {
     for (const flagValue of [undefined, '0', '1']) {
@@ -196,5 +197,5 @@ describe('SiteRoot renders the one studio shell', () => {
       expect(document.querySelector('.stage-stub'), label).toBeNull()
       cleanup()
     }
-  }, 20_000)
+  }, scaleTimeout(20_000))
 })

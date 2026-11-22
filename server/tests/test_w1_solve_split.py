@@ -7,6 +7,9 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from dataclasses import replace
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -22,6 +25,35 @@ from solar_design_graph import (
     GraphValidationError, deserialize_graph, serialize_graph, validate_graph,
 )
 from test_w1_design_graph import entity, graph  # noqa: F401
+
+
+def test_project_solve_preparation_is_derived_and_read_only(graph):
+    from solar_project_solve_preparation import prepare_solve
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    before = copy.deepcopy(intake)
+    frame = graph["frames"][0]
+    result = prepare_solve(intake, frame["id"], is_head=True)
+    assert result["available"] is True
+    assert result["frame_ref"] == frame["id"]
+    assert result["graph_revision"] == graph["rev"]
+    assert result["request"] == solve_request.build_stringer_request(
+        graph, frame["id"], max_string_length=graph["settings"]["panels_in_sequence"],
+        dwgname=graph["project"]["name"], full_frame=True)
+    assert result["frames"][0]["panel_count"] == len(frame["panel_refs"])
+    assert "grant_ref" not in result
+    assert intake == before
+
+
+def test_project_solve_preparation_refuses_stale_corrupt_and_missing_frame(graph):
+    from solar_project_solve_preparation import prepare_solve
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    assert prepare_solve(intake, None, is_head=False)["reason"] == "STALE_VERSION"
+    assert prepare_solve({}, None, is_head=True)["reason"] == "GRAPH_REQUIRED"
+    bad = dict(intake, solar_design_graph_sha256="0" * 64)
+    assert prepare_solve(bad, None, is_head=True)["reason"] == "GRAPH_DIGEST_MISMATCH"
+    assert prepare_solve(intake, "missing", is_head=True)["reason"] == "MISSING_FRAME"
+    choices = prepare_solve(intake, None, is_head=True)
+    assert choices["available"] and "request" not in choices
 
 
 FIXTURES = SERVER / "tests/fixtures"
@@ -180,6 +212,19 @@ def test_replayed_pieces_commit_the_plugin_strings(graph, group, monkeypatch):
     binding = bind(solved, pieces)
     candidate = solve.complete_split_search(solved, binding, recorded_envelopes(binding, group, handles))
     assert candidate["accepted"] is False
+    if group["group_block"] == "A5FA":
+        # Preserve the historical order evidence, while refusing its known long jumps.
+        merged = solve.restitch([p["proposal"] for p in candidate["proposals"]],
+                                [piece["row_indices"] for piece in pieces])
+        strings = [[{key.upper(): value for key, value in handles.items()}[ref].upper() for ref in refs]
+                   for refs in solve.ordered_strings(merged)]
+        assert len(strings) == len(group["plugin_strings"])
+        assert sorted(strings) == sorted(group["plugin_strings"])
+        assert sum(map(len, strings)) == group["panel_count"]
+        with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+            commit.commit_solve(solved, {"expected_rev": solved["rev"]}, candidate=candidate)
+        assert solved == before
+        return
     result = commit.commit_solve(solved, {"expected_rev": solved["rev"]}, candidate=candidate)
     assert solved == before and result["rev"] == solved["rev"] + 1
     reopened = deserialize_graph(serialize_graph(result))
@@ -450,3 +495,397 @@ def test_split_candidate_is_refused_after_the_graph_moves(graph, monkeypatch):
 def test_unsplit_frame_keeps_the_single_request_path(graph):
     assert not solve_request.needs_split_solve(
         graph, graph["frames"][0]["id"], max_string_length=MAX_STRING_LENGTH)
+
+
+def synthetic_response(request):
+    """A contract-valid answer calculated from this piece, without fixture routes."""
+    grid = copy.deepcopy(request.wire_payload()["grid"])
+    cells = [(r, c) for r, row in enumerate(grid["Rows"])
+             for c in (range(len(row["Panels"])) if r % 2 == 0
+                       else reversed(range(len(row["Panels"])))) if row["Panels"][c]["Code"] == 1]
+    for seq, (r, c) in enumerate(cells, 1):
+        grid["Rows"][r]["Panels"][c]["Seq"] = seq
+    lengths, counts = request.grid.Sequences
+    sizes = [length for length, count in zip(lengths, counts) for _ in range(count)]
+    info = dict(steps_taken=len(cells), sequence_length=sizes, num_panels=float(len(cells)),
+        visited_path=[[r + 1, c + 1] for r, c in reversed(cells)], steps_taken_in_string=0,
+        horizontal_movements=0, vertical_movements=0, invalid_vertical_movements=0,
+        distance_total=0.0, vertical_sequential=0, diagonal_movements=0,
+        allow_one_gap_hops=False, max_gap_hop=0, gap_hop_movements=0, vertical_temp=0,
+        remaining_string_length=0, sequence_length_index=0, str_length_state_index=0,
+        terminated=True, last_agent_x=1, last_agent_y=1)
+    return {"status": "completed", "job_id": "synthetic-result", "data": {
+        "status": "completed", "best_result": dict(last_action=0, terminated=True, info=info,
+            beam_idx=0, grid_id="synthetic-result", model_id="synthetic", gumbel_scale=0.0,
+            string_start_split_count=0, model="synthetic"), "final_grid": grid,
+        "model_used": "synthetic", "gumbel_scale_used": 0.0, "distance_total": 0.0,
+        "total_valid_solutions": 1, "gumbel_summary": {}, "first_pass_best_distance": 0.0,
+        "improvement": None, "second_pass_triggered": False}}
+
+
+@pytest.fixture
+def sequenced_piece():
+    params, _ = real_piece()
+    source = params["request"]["grid"]
+    cells = copy.deepcopy(source["Rows"][0]["Panels"][:3])
+    blank = dict(cells[0], Code=0, Id="", Seq=0, X=0.0, Y=0.0, Angle=0.0)
+    source.update(Sequences=[[3, 0], [1, 0]], Rows=[
+        {"Panels": cells[:2]}, {"Panels": [cells[2], blank]},
+    ])
+    request = cloud.validate_piece_params(params).request
+    return params, synthetic_response(request)
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["full", "partial"])
+@pytest.mark.parametrize("sequence", [0, -1], ids=["zero", "negative"])
+def test_piece_refuses_required_nonpositive_sequence(sequenced_piece, monkeypatch, partial, sequence):
+    params, response = sequenced_piece
+    if partial:
+        response = as_partial_beam(response)
+    response["data"]["final_grid"]["Rows"][0]["Panels"][0]["Seq"] = sequence
+    before = copy.deepcopy(response)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args: cloud.canonical_bytes(response))
+    with pytest.raises(CloudError) as refused:
+        cloud.piece_proposal(params, TENANT, "job")
+    assert refused.value.classification == "cloud_response_invalid"
+    assert response == before
+
+
+@pytest.mark.parametrize("partial", [False, True], ids=["full", "partial"])
+def test_piece_keeps_positive_members_and_zero_blank(sequenced_piece, monkeypatch, partial):
+    params, response = sequenced_piece
+    if partial:
+        response = as_partial_beam(response)
+    before = copy.deepcopy(response)
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args: cloud.canonical_bytes(response))
+    result = cloud.piece_proposal(params, TENANT, "job")
+    proof = cloud.piece_proposal_provenance(result, params, TENANT, "job")
+    assert proof["partial_beam"] is partial
+    assert len(result["visited_path"]) == (0 if partial else 3)
+    grid = result["proposal"]["data"]["final_grid"]
+    assert grid["Rows"][1]["Panels"][1]["Code"] == 0
+    assert grid["Rows"][1]["Panels"][1]["Seq"] == 0
+    assert response == before
+
+
+class PieceStore:
+    """Unit protocol double. The PostgreSQL suite proves durable concurrency."""
+    def __init__(self):
+        self.rows = {}
+
+    def __getattr__(self, name):
+        from leaf_platform import project_solve_store as real
+        from test_w1c_solve_proposal import Store
+        if name not in {"get_exchange", "prepare_exchange", "resume_exchange", "begin_send",
+                "capture_response", "complete_exchange", "refuse_exchange", "record_outcome_unknown"}:
+            return getattr(real, name)
+
+        def operation(scope, *args, **kwargs):
+            row = self.rows.setdefault(scope, Store())
+            result = getattr(row, name)(scope, *args, **kwargs)
+            if name == "prepare_exchange" and isinstance(scope, real.PieceExchangeScope):
+                row.exchange.update(piece_index=scope.piece_index, source_hash=scope.source_hash)
+                result = copy.deepcopy(row.exchange)
+            return result
+        return operation
+
+    def read_completed_piece_exchange(self, scope, *, conn):
+        if scope not in self.rows:
+            raise self.ExchangeNotFound()
+        return self.rows[scope].read_completed_exchange(conn=conn)
+
+    def read_completed_exchange(self, org, project, drawing, job, *, conn):
+        scope = self.ExchangeScope(org, project, drawing, job)
+        return self.rows[scope].read_completed_exchange(conn=conn)
+
+    def complete_split_manifest(self, scope, lease, **values):
+        row = self.rows[scope]
+        if row.exchange["state"] == "completed":
+            assert all(row.exchange[key] == value for key, value in values.items())
+        else:
+            row.begin_send(scope, lease)
+            row.capture_response(scope, lease, **{key: value for key, value in values.items()
+                if key.startswith("response_") or key.startswith("solver_")})
+            row.complete_exchange(scope, lease, **{key: value for key, value in values.items()
+                if key.startswith("candidate_") or key.startswith("proof_")})
+        return copy.deepcopy(row.exchange)
+
+
+@pytest.fixture
+def canonical_split(graph, monkeypatch):
+    import deps
+    import platform_link
+    import solar_project_graph
+    import solar_project_jobs
+    import solar_project_solve as canonical
+    import solar_sizing_client
+    import solar_tools
+    from leaf_platform import canonical_jobs
+
+    # A generated rectangle crosses the kernel's split threshold; no drawing
+    # counts, original handles or recorded solver paths enter this case.
+    value, _ = group_graph(graph, {"group_grid": [
+        [f"cell-{r}-{c}" for c in range(16)] for r in range(16)]})
+    value["settings"]["panels_in_sequence"] = 14
+    value["settings"]["voc_cold"] = solar_sizing_client.manual_voltage()
+    value["settings"]["extra"]["string_sizing"] = solar_sizing_client.manual_sizing_evidence(value)
+    context = SimpleNamespace(graph=value, organization_id=uuid4(), project_id=uuid4(),
+        drawing_id=uuid4(), parent_version_id=uuid4(), intake_sha256="c" * 64)
+    params = {"grant_ref": "synthetic-grant", "request": solve_request.build_stringer_request(
+        value, value["frames"][0]["id"], max_string_length=14, dwgname="synthetic-frame")}
+    binding = {"frame_ref": value["frames"][0]["id"], "expected_rev": value["rev"], "phase": "initial"}
+    plan = canonical.plan_request(context, params, binding)
+    manifest = deps.catalog_tool_digest(solar_tools.trusted_record(canonical.TOOL_NAME))
+    row = {"job_id": str(uuid4()), "org_id": str(context.organization_id),
+        "project_id": str(context.project_id), "input_version_id": str(context.parent_version_id),
+        "request_tenant_id": str(context.organization_id), "kind": "run", "tool_name": canonical.TOOL_NAME,
+        "params": plan["normalized_params"], "status": "running", "attempt": 1, "max_attempts": 3,
+        "lease_owner": "synthetic-worker", "provenance": None,
+        "execution_context": {"schema": canonical_jobs.PROJECT_GRAPH_JOB_SCHEMA,
+            "authority_mode": "postgres_canonical", "execution_path": "local",
+            "drawing_id": str(context.drawing_id), "actor_binding_id": str(uuid4()),
+            "checkout_fence": "1", "tool_manifest_sha256": manifest,
+            "parent_intake_sha256": context.intake_sha256, "initialized": False,
+            "solve_binding": plan["solve_binding"]}}
+    a = SimpleNamespace(context=context, row=row, store=PieceStore(), binding=binding,
+                        guard=SimpleNamespace(lost=False), calls=[], canonical=canonical)
+    monkeypatch.setattr(canonical, "_store", lambda: a.store)
+    monkeypatch.setattr(canonical, "SOLVE_CLASSIFICATION", "synthetic")
+    monkeypatch.setattr(canonical, "SOLVE_ASYNC_PROTOCOL_ENABLED", False)
+    monkeypatch.setattr(platform_link, "platform_db", lambda: SimpleNamespace(
+        run_transaction=lambda operation: operation(None)))
+    monkeypatch.setattr(solar_project_jobs, "_job_context", lambda *args: context)
+    monkeypatch.setattr(solar_project_graph, "_stored_job", lambda *args: copy.deepcopy(row))
+    monkeypatch.setattr(cloud, "resolve_grant", lambda ref, tenant: CloudGrant(tenant, "synthetic-token"))
+
+    def send(request, grant, *, preserve_uncertainty):
+        assert preserve_uncertainty
+        assert grant.tenant_id == str(context.organization_id)
+        a.calls.append(request)
+        return cloud.canonical_bytes(synthetic_response(request))
+    a.send = send
+    monkeypatch.setattr(cloud, "post_stringer", send)
+    return a
+
+
+def test_canonical_split_durable_coverage_native_cut_polarity_and_repeat(canonical_split):
+    a = canonical_split
+    before = copy.deepcopy(a.context.graph)
+    result = a.canonical.prepare_job(a.row, a.guard)
+    assert len(a.calls) >= 2
+    assert all(1 <= item["panel_count"] <= 14 for item in result["candidate_summary"])
+    evidence = a.canonical.project_solve_job_provenance(UUID(a.row["job_id"]), result, conn=None)
+    candidate = evidence["candidate"]["candidate"]
+    accepted = solve.accept_split_candidate(before, candidate, expected_rev=before["rev"])
+    flat = [ref for string in accepted["strings"] for ref in string["ordered_panel_refs"]]
+    assert len(flat) == len(set(flat)) == len(before["panels"])
+    assert set(flat) == {panel["id"] for panel in before["panels"]}
+    # Native cuts follow final-grid Seq, despite deliberately reversed visited_path.
+    expected = [cell["Id"] for proposal in candidate["proposals"]
+                for cell in sorted((cell for row in proposal["proposal"]["data"]["final_grid"]["Rows"]
+                                    for cell in row["Panels"] if cell["Code"] == 1),
+                                   key=lambda cell: cell["Seq"])]
+    assert flat == expected
+    by_id = {panel["id"]: panel for panel in before["panels"]}
+    for string in accepted["strings"]:
+        refs = string["ordered_panel_refs"]
+        assert 1 <= len(refs) <= 14
+        assert string["extra"]["polarity"]["negative_panel_ref"] == refs[0]
+        assert string["extra"]["polarity"]["positive_panel_ref"] == refs[-1]
+        assert string["route"] == [by_id[ref]["centre"] for ref in refs]
+    calls = len(a.calls)
+    assert a.canonical.prepare_job(a.row, a.guard) == result
+    assert len(a.calls) == calls
+    assert a.context.graph == before
+    assert all(row.exchange["state"] == "completed" for row in a.store.rows.values())
+
+
+def test_canonical_split_reconciles_captured_piece_before_retry(canonical_split, monkeypatch):
+    a = canonical_split
+    complete = a.store.complete_exchange
+    crashed = []
+
+    def crash(scope, lease, **values):
+        if not crashed:
+            crashed.append(scope)
+            raise RuntimeError("after durable response capture")
+        return complete(scope, lease, **values)
+    monkeypatch.setattr(a.store, "complete_exchange", crash)
+    with pytest.raises(RuntimeError, match="durable response"):
+        a.canonical.prepare_job(a.row, a.guard)
+    assert len(a.calls) == 1
+    assert a.store.rows[crashed[0]].exchange["state"] == "responded"
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    assert a.canonical.prepare_job(a.row, a.guard)["schema"] == a.canonical.RESULT_SCHEMA
+    assert len(a.calls) == len(a.store.rows) - 1
+
+
+def test_canonical_split_unknown_piece_is_partial_and_never_resent(canonical_split, monkeypatch):
+    import solar_project_jobs
+    a = canonical_split
+
+    def uncertain(request, grant, **options):
+        if a.calls:
+            a.calls.append(request)
+            raise CloudError("solve_outcome_unknown", 502)
+        return a.send(request, grant, **options)
+    monkeypatch.setattr(cloud, "post_stringer", uncertain)
+    with pytest.raises(CloudError) as first:
+        a.canonical.prepare_job(a.row, a.guard)
+    error = solar_project_jobs._preparation_error(first.value)
+    assert error["reason_code"] == "solve_outcome_unknown"
+    assert error["solve_progress"]["status"] == "partial"
+    assert error["solve_progress"]["completed_pieces"] == 1
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    with pytest.raises(CloudError) as second:
+        a.canonical.prepare_job(a.row, a.guard)
+    assert second.value.classification == "solve_outcome_unknown"
+    assert len(a.calls) == 2
+    parent = next(row.exchange for scope, row in a.store.rows.items()
+                  if type(scope) is a.store.ExchangeScope)
+    assert parent["state"] == "prepared" and parent["candidate_bytes"] is None
+
+
+@pytest.mark.parametrize("key", ["proposals", "proofs", "split_state", "pieces", "row_indices"])
+@pytest.mark.parametrize("location", ["params", "context"])
+def test_canonical_split_refuses_nested_caller_artifacts(canonical_split, key, location):
+    a = canonical_split
+    params, context = copy.deepcopy(a.row["params"]), copy.deepcopy(a.binding)
+    (params if location == "params" else context)["nested"] = [{key: []}]
+    with pytest.raises(GraphValidationError, match="SOLVE_SPLIT_UNSUPPORTED"):
+        a.canonical.plan_request(a.context, params, context)
+    assert not a.calls and not a.store.rows
+
+
+def test_canonical_split_piece_custody_is_tenant_and_revision_scoped(canonical_split):
+    a = canonical_split
+    a.canonical.prepare_job(a.row, a.guard)
+    scope = next(scope for scope in a.store.rows if isinstance(scope, a.store.PieceExchangeScope))
+    for field, value in (("org_id", uuid4()), ("project_id", uuid4()), ("drawing_id", uuid4()),
+            ("job_id", uuid4()), ("graph_revision", scope.graph_revision + 1),
+            ("graph_sha256", "d" * 64), ("source_hash", "e" * 64)):
+        with pytest.raises(a.store.ExchangeNotFound):
+            a.store.read_completed_piece_exchange(replace(scope, **{field: value}), conn=None)
+
+
+def test_canonical_split_admits_frame_larger_than_upstream_wire_limit(canonical_split):
+    import solar_sizing_client
+    a = canonical_split
+    value, _ = group_graph(a.context.graph, {"group_grid": [
+        [f"wide-cell-{r}-{c}" for c in range(8)] for r in range(33)]})
+    value["settings"]["extra"]["string_sizing"] = solar_sizing_client.manual_sizing_evidence(value)
+    a.context.graph = value
+    a.row["params"]["request"] = solve_request.build_stringer_request(value,
+        value["frames"][0]["id"], max_string_length=14, dwgname="synthetic-tall-frame", full_frame=True)
+    with pytest.raises(ValueError):
+        cloud.StringerRequest.model_validate(a.row["params"]["request"])
+    plan = a.canonical.plan_request(a.context, a.row["params"], a.binding)
+    a.row["params"] = plan["normalized_params"]
+    a.row["execution_context"]["solve_binding"] = plan["solve_binding"]
+    result = a.canonical.prepare_job(a.row, a.guard)
+    assert len(a.calls) >= 2
+    assert sum(item["panel_count"] for item in result["candidate_summary"]) == len(value["panels"])
+    for request in a.calls:
+        cloud.StringerRequest.model_validate(request.wire_payload())
+
+
+def test_canonical_split_piece_inputs_use_graph_sizing_not_caller_sequences(canonical_split):
+    a = canonical_split
+    params = copy.deepcopy(a.row["params"])
+    count = len(a.context.graph["panels"])
+    params["request"]["grid"]["Sequences"] = [[count, count - 1], [1, 0]]
+    plan = a.canonical.plan_request(a.context, params, a.binding)
+    for piece in plan["split_binding"]["pieces"]:
+        lengths, counts = piece["request"]["grid"]["Sequences"]
+        assert all(1 <= length <= 14 for length, count in zip(lengths, counts) if count)
+    assert plan["split_binding"]["pieces"] == a.canonical.plan_request(
+        a.context, a.row["params"], a.binding)["split_binding"]["pieces"]
+
+
+def test_canonical_split_parent_settlement_replay_does_not_resubmit(canonical_split, monkeypatch):
+    a = canonical_split
+    finish = a.store.complete_split_manifest
+
+    def uncertain(*args, **kwargs):
+        finish(*args, **kwargs)
+        raise RuntimeError("commit acknowledgement lost")
+    monkeypatch.setattr(a.store, "complete_split_manifest", uncertain)
+    assert a.canonical.prepare_job(a.row, a.guard) is None
+    calls = len(a.calls)
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    monkeypatch.setattr(a.store, "complete_split_manifest", finish)
+    assert a.canonical.prepare_job(a.row, a.guard)["schema"] == a.canonical.RESULT_SCHEMA
+    assert len(a.calls) == calls
+
+
+@pytest.mark.parametrize("change", ["response", "proof", "revision"])
+def test_canonical_split_offline_proof_checks_every_piece(canonical_split, change):
+    a = canonical_split
+    a.canonical.prepare_job(a.row, a.guard)
+    child = next(row.exchange for scope, row in a.store.rows.items()
+                 if isinstance(scope, a.store.PieceExchangeScope))
+    if change == "revision":
+        child["graph_revision"] += 1
+    else:
+        child[change + "_bytes"] += b" "
+    with pytest.raises((ValueError, a.store.SolveExchangeError)):
+        a.canonical.project_solve_job_provenance(UUID(a.row["job_id"]), conn=None)
+
+
+def roof_seam_candidate(graph, monkeypatch, *, long_step):
+    """One partial cell then a full three-cell piece; the first string crosses the seam."""
+    value, _ = group_graph(graph, {"group_grid": [["a", "b", "c", "d"]]})
+    frame = value["frames"][0]
+    frame.update(module_width_along_row=2.0, module_height_across_row=1.0)
+    positions = [0.0, 40.0, 41.0, 100.0] if long_step else [39.0, 40.0, 41.0, 100.0]
+    for panel, x in zip(value["panels"], positions, strict=True):
+        panel["centre"] = [x, 0.0]
+        frame["matrix"][0][panel["matrix_cell"]["col"]].update(x=x, y=0.0)
+    request = solve_request.build_stringer_request(value, frame["id"],
+        max_string_length=3, dwgname=DWG, full_frame=True)
+    pieces, envelopes = [], []
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    for index, cells in enumerate((request["grid"]["Rows"][0]["Panels"][:1],
+                                  request["grid"]["Rows"][0]["Panels"][1:])):
+        grid = copy.deepcopy(request["grid"])
+        grid.update(Rows=[{"Panels": cells}], Sequences=[[len(cells), 0], [1, 0]])
+        params = {"grant_ref": "fixture-grant", "request": {"grid": grid}}
+        parsed = cloud.validate_piece_params(params).request
+        response = synthetic_response(parsed)
+        if index == 0:
+            response = as_partial_beam(response)
+        monkeypatch.setattr(cloud, "post_stringer", lambda *args, response=response: cloud.canonical_bytes(response))
+        envelopes.append(cloud.piece_proposal(params, TENANT, solve.piece_job_id(JOB, index)))
+        pieces.append({"request": params["request"], "row_indices": [0]})
+    binding = bind(value, pieces)
+    return value, solve.complete_split_search(value, binding, envelopes)
+
+
+@pytest.mark.parametrize("long_step", [False, True])
+def test_roof_continuity_split_seam_and_partial_cut_reset(graph, monkeypatch, long_step):
+    value, proposal = roof_seam_candidate(graph, monkeypatch, long_step=long_step)
+    before = copy.deepcopy((value, proposal))
+    if long_step:
+        with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+            solve.accept_split_candidate(value, proposal, expected_rev=0)
+    else:
+        result = solve.accept_split_candidate(value, proposal, expected_rev=0)
+        refs = value["frames"][0]["panel_refs"]
+        assert [string["ordered_panel_refs"] for string in result["strings"]] == [refs[:3], refs[3:]]
+        assert result["extra"]["solve_coverage"] == {
+            "duplicate_panel_refs": [], "unassigned_panel_refs": []}
+    assert (value, proposal) == before
+
+
+def test_plugin_parity_split_preserves_recorded_cut_across_long_seam(graph, monkeypatch):
+    value, proposal = roof_seam_candidate(graph, monkeypatch, long_step=True)
+    before = copy.deepcopy((value, proposal))
+    result = solve.accept_split_candidate(value, proposal, expected_rev=0, plugin_parity=True)
+    refs = value["frames"][0]["panel_refs"]
+    assert [string["ordered_panel_refs"] for string in result["strings"]] == [refs[:3], refs[3:]]
+    assert not any(solve.coverage(result).values())
+    with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+        solve.accept_split_candidate(value, proposal, expected_rev=0)
+    assert (value, proposal) == before

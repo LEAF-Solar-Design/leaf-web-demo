@@ -1,0 +1,82 @@
+{
+  "schema": "leaf.tool-proof-cases.v1",
+  "cases": [
+    {
+      "id": "positive",
+      "package": "proof/panel-gap-check",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "accept"
+    },
+    {
+      "id": "tampered-envelope",
+      "package": "proof/panel-gap-check",
+      "operation": "flip_signature_hex_char",
+      "seat": "subscribed_self_hosted",
+      "expect": "signature_invalid"
+    },
+    {
+      "id": "tampered-package",
+      "package": "proof/panel-gap-check",
+      "operation": "flip_lib_byte",
+      "seat": "subscribed_self_hosted",
+      "expect": "digest_mismatch"
+    },
+    {
+      "id": "revoked",
+      "package": "proof/panel-gap-check",
+      "operation": "revoke_digest",
+      "seat": "subscribed_self_hosted",
+      "expect": "revoked"
+    },
+    {
+      "id": "stale-revocations",
+      "package": "proof/panel-gap-check",
+      "operation": "revocations_issued_8_days_ago",
+      "seat": "subscribed_self_hosted",
+      "expect": "stale_revocation_list"
+    },
+    {
+      "id": "unentitled",
+      "package": "proof/panel-gap-check",
+      "operation": "none",
+      "seat": "no_subscription",
+      "expect": "unentitled"
+    },
+    {
+      "id": "unreviewed",
+      "package": "negative/unreviewed-tool",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "unreviewed"
+    },
+    {
+      "id": "host-api-too-low",
+      "package": "negative/needs-host-api-2",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "host_api_too_low"
+    },
+    {
+      "id": "capability-violation",
+      "package": "negative/write-without-capability",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "capability_violation"
+    },
+    {
+      "id": "timeout",
+      "package": "negative/slow-loop",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "timeout"
+    },
+    {
+      "id": "script-error",
+      "package": "negative/throws-error",
+      "operation": "none",
+      "seat": "subscribed_self_hosted",
+      "expect": "script_error"
+    }
+  ]
+}

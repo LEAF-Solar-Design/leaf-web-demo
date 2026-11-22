@@ -21,6 +21,7 @@ import catalog
 import converse_registry
 import customization_service
 import deps
+import investor_demo
 import mcp_tool_projection
 import product_capability_availability as availability
 import solar_project_admission
@@ -124,6 +125,16 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_project_id: _Header = None,
                  authorization: _Header = None,
                  x_checkout_capability: _Header = None) -> Any:
+    if investor_demo.is_investor_context(tenant):
+        tools = [deps.catalog_tool_view(tool) for tool in deps.shared_tools()]
+        families = catalog.build_catalog(tools, include_internal=False)
+        for family in families:
+            for row in family["capabilities"]:
+                row["availability"] = {
+                    "entitled": False, "engine_ready": False, "runnable": False,
+                    "refusal_reasons": ["entitlement_required"],
+                }
+        return with_envelope_fields({"families": families, "cad_engine": cad_engine_selector()})
     return _capabilities(
         x_internal_role=x_internal_role, x_ops_secret=x_ops_secret, tenant=tenant,
         drawing_id=drawing_id, project_id=project_id, drawing_version=drawing_version,
@@ -256,6 +267,9 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
         names = {row.get("name") for family in families
                  for row in family.get("capabilities") or []
                  if row.get("name") in availability.SOLAR_CAPABILITIES}
+        # Takeoff uses the synchronous exact-version read lane, never worker admission.
+        names.discard("solar-takeoff")
+        names.discard("solar-assignment-report")
         try:
             requests = _project_requests(project_runs, names, drawing_id)
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -268,6 +282,12 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                     continue
                 if name not in states:
                     tool = raw_by_name.get(name, {})
+                    if name == "solar-solaredge-tracking-read":
+                        from solar_project_solaredge import tracking_read_catalog_availability
+                        states[name] = tracking_read_catalog_availability(
+                            tool, tenant, input_version_id)
+                        row["availability"] = deepcopy(states[name])
+                        continue
                     state = solar_project_admission.project_catalog_availability(tool, enabled=True)
                     entry = requests.get(name)
                     if entry is not None and state["engine_ready"]:
@@ -304,6 +324,30 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                     continue
                 if name not in drawing_states:
                     tool = raw_by_name.get(name, {})
+                    if name == "solar-assignment-report":
+                        import solar_project_read
+                        state = solar_project_read.assignment_report_catalog_availability(
+                            tool, tenant, project_id=selected_project, drawing_id=drawing_id,
+                            input_version_id=input_version_id)
+                        drawing_states[name] = state
+                        row["availability"] = deepcopy(state)
+                        continue
+                    if name == "solar-takeoff":
+                        import solar_project_read
+                        trusted = False
+                        try:
+                            solar_project_read._trusted(tenant, name, deps.catalog_tool_digest(tool))
+                            trusted = True
+                        except (ValueError, TypeError, UnicodeError, RecursionError,
+                                solar_project_read.GraphValidationError):
+                            pass
+                        state = solar_project_admission.project_drawing_tool_availability(
+                            tool, tenant, read_tool=trusted, exact_version=exact_version)
+                        state["engine_ready"] = state["engine_ready"] and state["entitled"]
+                        state["project_read"] = state["project_read"] and state["entitled"]
+                        drawing_states[name] = state
+                        row["availability"] = deepcopy(state)
+                        continue
                     drawing_states[name] = solar_project_admission.project_drawing_tool_availability(
                         tool, tenant, read_tool=jobs_router._is_project_read_tool(tool),
                         exact_version=exact_version,

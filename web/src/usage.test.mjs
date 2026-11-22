@@ -120,3 +120,22 @@ describe('fmtDetail', () => {
     assert.equal(typeof fmtDetail(() => {}), 'string')
   })
 })
+
+describe('modelBadge: who answered a turn', () => {
+  it('reads the runner-reported model and provider, never a constant', async () => {
+    const { modelBadge, modelDisplayName } = await import('./usage.js')
+    assert.equal(modelDisplayName('claude-sonnet-5-5'), 'Claude Sonnet 5.5')
+    assert.equal(modelDisplayName('claude-opus-5'), 'Claude Opus 5')
+    assert.equal(modelDisplayName('qwen3.8-27b'), 'Qwen3.8-27B')
+    assert.equal(modelDisplayName('gpt-5'), 'gpt-5')
+    assert.equal(modelDisplayName(''), null)
+    assert.deepEqual(modelBadge({ models: ['qwen3.8-27b'], provider: 'openai_compatible', provider_label: 'local on Mac mini' }),
+      { name: 'Qwen3.8-27B', where: 'local on Mac mini', local: true, text: 'Qwen3.8-27B · local on Mac mini' })
+    assert.equal(modelBadge({ models: ['qwen3.8-27b'], provider: 'openai_compatible' }).text, 'Qwen3.8-27B · self-hosted')
+    assert.equal(modelBadge({ models: ['gpt-5'], provider: 'openai' }).text, 'gpt-5 · OpenAI')
+    assert.equal(modelBadge({ models: ['claude-sonnet-5-5'] }).text, 'Claude Sonnet 5.5')
+    assert.equal(modelBadge({ cost_tokens: 3 }), null)
+    assert.equal(modelBadge(null), null)
+    assert.equal(modelBadge({ models: ['m'], provider: 'openai_compatible', provider_label: 'x'.repeat(200) }).where.length, 64)
+  })
+})

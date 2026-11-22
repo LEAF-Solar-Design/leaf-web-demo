@@ -2,11 +2,13 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { authHeaders, config, createProjectDrawingEditorTransport, getDrawingIntake, noteUnauthorized, runToolAsync } from '../api.js'
 import { createSolarLandxmlClient } from './solarLandxmlClient.js'
 import SolarLandxmlUpload from './SolarLandxmlUpload.jsx'
+import SolarGroundInputForm from './SolarGroundInputForm.jsx'
 import SolarCombinerIntake from './SolarCombinerIntake.jsx'
 import { createSolarCombinerIntakeClient } from './solarCombinerIntakeClient.js'
 import SolarTerrainPanel from './SolarTerrainPanel.jsx'
 import { createSolarTerrainClient } from './solarTerrainClient.js'
 import SolarCivilPanel from './SolarCivilPanel.jsx'
+import SolarFrameInspector from './SolarFrameInspector.jsx'
 import SolarPhysicalReadPanel from './SolarPhysicalReadPanel.jsx'
 import { createSolarCivilClient } from './solarCivilClient.js'
 import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS } from './SolarTrackerRowsPanel.jsx'
@@ -142,7 +144,7 @@ export default function SolarWorkspaceTools({
 
   return (
     <ToolsForScope
-      key={JSON.stringify([drawingId ?? null, projectId ?? null])}
+      key={JSON.stringify([drawingId ?? null, projectId ?? null, projectScope?.organization_id ?? null])}
       drawingId={drawingId}
       projectId={projectId}
       projectScope={projectScope} getProjectScope={getProjectScope}
@@ -189,6 +191,8 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [initialBoundary, setInitialBoundary] = useState('')
   const [initialPreset, setInitialPreset] = useState('')
   const [initialUnits, setInitialUnits] = useState('m')
+  const [inputMode, setInputMode] = useState('structured')
+  const [structuredParameters, setStructuredParameters] = useState(null)
   const [originalIntake, setOriginalIntake] = useState(null)
   const [gridLongAxis, setGridLongAxis] = useState('150')
   const initialProject = JSON.stringify([projectScope?.organization_id, projectId])
@@ -196,8 +200,10 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   let initialParameters = null
   let originalSummary = null
   if (selectedOriginal) {
-    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis))
+    initialParameters = originalSolarParameters(selectedOriginal.text, Number(gridLongAxis), selectedOriginal.producerSemantics)
     if (initialParameters) originalSummary = JSON.parse(selectedOriginal.text.replace(/^\uFEFF/, ''))
+  } else if (inputMode === 'structured') {
+    initialParameters = structuredParameters
   } else {
     try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
   }
@@ -605,7 +611,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
-    const selection = { project: initialProject, name: file.name }
+    const selection = { project: initialProject, name: file.name, producerSemantics: 'historical-list-reuse' }
     setOriginalIntake(selection)
     try {
       if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('invalid size')
@@ -629,11 +635,13 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       if (!['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => publicationCurrent.current.scope?.[key] === scope[key])) {
         setPublication({ phase: 'idle', message: 'The selected drawing changed. Read its current layout again.' }); return
       }
-      if (result?.ok) setPublicationReadback(result.value)
+      setPublicationReadback(result?.ok ? result.value : null)
       setPublication({ phase: 'idle', message: result?.ok
         ? result.value.writer_available === false ? 'The current layout is ready, but the licensed drawing writer is unavailable.'
           : 'Current layout read. Review it before publishing.'
-        : result?.code === 'PROJECT_LAYOUT_INITIAL_UNAVAILABLE' ? 'Initial project drawing publication is not connected yet.'
+        : result?.code === 'PROJECT_LAYOUT_STALE_VERSION'
+          ? 'This saved version is not the current drawing head. To download it, choose Insert, then Download DXF.'
+          : result?.code === 'PROJECT_LAYOUT_INITIAL_UNAVAILABLE' ? 'Initial project drawing publication is not connected yet.'
           : 'The current layout is unavailable. Read it again before publishing.' })
     } catch {
       if (activeScope.current) setPublication({ phase: 'idle', message: 'The current layout could not be read. Try again.' })
@@ -764,13 +772,15 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   }
 
   const hasProjectPublication = projectId !== null && (flow === 'ground-physical' || flow === 'project-publication')
+  const publicationInputsLocked = publication.phase === 'pending' || publication.phase === 'unknown'
   if (!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
       hidden={!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
       data-physical-head-index={physicalHead?.index ?? undefined}>
       {hasProjectPublication && <div aria-label="Project layout publication">
-        {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <div>
+        {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <fieldset disabled={publicationInputsLocked}>
+          <legend>Initial project layout</legend>
           <label>Original layout intake (JSON)<input type="file" accept=".json,application/json"
             disabled={publication.phase === 'pending'} onChange={chooseOriginalIntake} /></label>
           {selectedOriginal ? <>
@@ -781,9 +791,23 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Terrain grid cells on longer axis<input type="number" min={2} max={300} step={1}
               value={gridLongAxis} onChange={event => setGridLongAxis(event.target.value)} /></label>
             <p>This layout is terrain-free. The grid setting is recorded for provenance.</p>
+            <label>Preset loading<select value={selectedOriginal.producerSemantics ?? 'historical-list-reuse'}
+              disabled={publication.phase === 'pending'} onChange={event => {
+                const producerSemantics = event.target.value
+                setOriginalIntake(current => current?.project === initialProject ? { ...current, producerSemantics } : current)
+              }}>
+              <option value="current-native">Current native loading</option>
+              <option value="historical-list-reuse">Historical collection reuse</option>
+            </select></label>
             <button type="button" disabled={publication.phase === 'pending'}
               onClick={() => setOriginalIntake(null)}>Clear original intake</button>
           </> : <>
+            <button type="button" onClick={() => setInputMode(current => current === 'structured' ? 'advanced' : 'structured')}>
+              {inputMode === 'structured' ? 'Advanced JSON' : 'Structured inputs'}</button>
+            <div hidden={inputMode !== 'structured'}>
+              <SolarGroundInputForm disabled={publicationInputsLocked} onParameters={setStructuredParameters} />
+            </div>
+            <div hidden={inputMode !== 'advanced'}>
             <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}
               onChange={event => setInitialBoundary(event.target.value)} /></label>
             <label>Complete preset (JSON)<textarea value={initialPreset} maxLength={2000000}
@@ -791,9 +815,10 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             <label>Drawing units for publication<select value={initialUnits} onChange={event => setInitialUnits(event.target.value)}>
               <option value="m">Metres</option><option value="ft">Feet</option>
             </select></label>
+            </div>
           </>}
-        </div>}
-        <button type="button" disabled={publication.phase === 'pending' || busy || !projectScope}
+        </fieldset>}
+        <button type="button" disabled={publicationInputsLocked || busy || !projectScope}
           onClick={readPublicationHead}>Read current layout for publication</button>
         <button type="button" disabled={publication.phase === 'pending' || busy
           || !publicationReadback || !projectScope || (projectScope.input_version_id === null && !initialParameters)
@@ -802,6 +827,11 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
             : projectScope?.input_version_id === null ? 'Generate editable project drawing' : 'Publish layout as editable drawing'}</button>
         {!projectScope && <p>Select a canonical project drawing version before publishing.</p>}
         <p role="status">{publication.message}</p>
+        {projectScope?.drawing_id && projectScope?.input_version_id && <p>
+          To download this saved layout, choose Insert, then Download DXF. Generated layouts include their source-input provenance.
+        </p>}
+        {projectScope?.drawing_id && projectScope?.input_version_id && <SolarFrameInspector
+          scope={projectScope} client={publicationClient} disabled={busy || publication.phase === 'pending'} />}
       </div>}
       {hasCivil && <button type="button" ref={civilTrigger} aria-expanded={openPanel === 'civil'}
         onClick={() => { if (openPanel === 'civil') civilHeading.current?.focus(); else setOpenPanel('civil') }}>Civil operations</button>}

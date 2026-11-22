@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { scaleTimeout } from '../testTimeScale.js'
 import { describe, expect, it } from 'vitest'
 import { parse } from '@babel/parser'
 import { spawnSync } from 'node:child_process'
@@ -65,7 +66,7 @@ function withResolverFixture(run) {
 
 const resolverScript = fileURLToPath(new URL('../../scripts/resolve_element_ref.mjs', import.meta.url))
 function runResolver(args, cwd = dirname(dirname(resolverScript))) {
-  return spawnSync(process.execPath, [resolverScript, ...args], { cwd, encoding: 'utf8', timeout: 60_000 })
+  return spawnSync(process.execPath, [resolverScript, ...args], { cwd, encoding: 'utf8', timeout: scaleTimeout(60_000) })
 }
 
 describe('element source stamp transform', () => {
@@ -158,7 +159,7 @@ describe('element source stamp transform', () => {
       if (previous === undefined) delete process.env.LEAF_ELEMENT_REF_STAMP
       else process.env.LEAF_ELEMENT_REF_STAMP = previous
     }
-  }, 60_000)
+  }, scaleTimeout(60_000))
 
   it('the LEAF_ELEMENT_REF_STAMP kill switch drops refs and a malformed value fails the config', async () => {
     const previous = process.env.LEAF_ELEMENT_REF_STAMP
@@ -178,7 +179,7 @@ describe('element source stamp transform', () => {
       if (previous === undefined) delete process.env.LEAF_ELEMENT_REF_STAMP
       else process.env.LEAF_ELEMENT_REF_STAMP = previous
     }
-  }, 60_000)
+  }, scaleTimeout(60_000))
 
   it('resolveElementRefs maps refs back to stamps and skips tests and dependencies', () => {
     withResolverFixture((fixtureRoot) => {
@@ -221,7 +222,7 @@ describe('element source stamp transform', () => {
         expect(result.stderr.length).toBeGreaterThan(0)
       }
     })
-  }, 60_000)
+  }, scaleTimeout(60_000))
 
   it('the resolver CLI resolves a real stamp in this tree', () => {
     const result = runResolver(['002e75b5da50'])
@@ -229,7 +230,7 @@ describe('element source stamp transform', () => {
     expect(result.status).toBe(0)
     expect(result.stderr).toBe('')
     expect(result.stdout).toBe('002e75b5da50\tsrc/site/CockpitTopBand.jsx:QuickButton\n')
-  }, 60_000)
+  }, scaleTimeout(60_000))
 
   it('stamps each identified element with its nearest named component', () => {
     const instance = plugin()

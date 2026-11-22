@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AppRunClientError,
   HttpAppRunClient,
+  ProjectPhotoClientError,
 } from "../src/ports/impl/appRunClient.js";
 
 describe("bounded current-project photo callback", () => {
@@ -32,15 +33,61 @@ describe("bounded current-project photo callback", () => {
       if (kind === "origin") Object.defineProperty(response, "url", { value: "https://foreign.invalid/inspect" });
       if (kind === "redirected") Object.defineProperty(response, "redirected", { value: true });
       await expect(client(async () => response).inspectProjectPhoto(org, authority.sessionId, body, authority))
-        .rejects.toMatchObject({ message: "Project photo inspection unavailable." });
+        .rejects.toMatchObject({ message: "Project photo inspection unavailable.", status: 502,
+          photoFailureClass: kind === "status" ? "transport" : "integrity" });
+      expect(response.body?.locked).toBe(false);
+    },
+  );
+  it.each([
+    [401, "authorization"], [403, "authorization"], [404, "unavailable"], [409, "source_changed"],
+    [408, "transport"], [429, "transport"], [503, "transport"], [504, "transport"],
+    [413, "integrity"], [422, "integrity"], [500, "integrity"], [502, "integrity"],
+  ])("preserves a typed failure for HTTP %s while retaining status 502", async (status, kind) => {
+    const response = new Response("PRIVATE backend detail", { status: Number(status) });
+    const error = await client(async () => response).inspectProjectPhoto(org, authority.sessionId, body, authority).catch(error => error);
+    expect(error).toBeInstanceOf(AppRunClientError);
+    expect(error).toBeInstanceOf(ProjectPhotoClientError);
+    expect(error).toMatchObject({ message: "Project photo inspection unavailable.", status: 502, photoFailureClass: kind });
+    expect(JSON.stringify(error)).not.toContain("PRIVATE");
+    expect(error.cause).toBeUndefined();
+    expect(response.body?.locked).toBe(false);
+  });
+  it.each([false, true])("classifies recognized network failures, including fetch causes (nested=%s)", async nested => {
+    const network = Object.assign(new Error("PRIVATE socket detail"), { code: "ECONNRESET" });
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(nested ? new TypeError("fetch failed", { cause: network }) : network);
+    const error = await client(fetcher).inspectProjectPhoto(org, authority.sessionId, body, authority).catch(error => error);
+    expect(error).toMatchObject({ status: 502, photoFailureClass: "transport" });
+    expect(error.cause).toBeUndefined();
+    expect(error.message).toBe("Project photo inspection unavailable.");
+    expect(JSON.stringify(error)).not.toContain("PRIVATE");
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([
+    new TypeError("fetch failed", { cause: new Error("unexpected redirect") }),
+    Object.assign(new Error("PRIVATE opaque failure"), { status: 503 }),
+  ])("keeps opaque fetch failures and rejected redirects non-retryable (%#)", async failure => {
+    await expect(client(async () => { throw failure; }).inspectProjectPhoto(org, authority.sessionId, body, authority))
+      .rejects.toMatchObject({ status: 502, photoFailureClass: "integrity" });
+  });
+  it.each([["ECONNRESET", "transport"], ["Z_DATA_ERROR", "integrity"], ["", "integrity"]])(
+    "distinguishes stream network failures from corrupt or opaque streams (%s)", async (code, kind) => {
+      const response = new Response(new ReadableStream<Uint8Array>({
+        start(controller) { controller.error(new TypeError("PRIVATE stream failure", {
+          cause: Object.assign(new Error("PRIVATE cause"), { code }),
+        })); },
+      }), { headers: { "content-type": "application/json" } });
+      const error = await client(async () => response).inspectProjectPhoto(org, authority.sessionId, body, authority).catch(error => error);
+      expect(error).toMatchObject({ status: 502, photoFailureClass: kind });
+      expect(error.cause).toBeUndefined();
       expect(response.body?.locked).toBe(false);
     },
   );
   it("rejects malformed bodies and mismatched authority before any fetch", async () => {
     const fetcher = vi.fn<typeof fetch>();
-    await expect(client(fetcher).inspectProjectPhoto(org, "other", body, authority)).rejects.toThrow("Project photo inspection unavailable.");
+    await expect(client(fetcher).inspectProjectPhoto(org, "other", body, authority))
+      .rejects.toMatchObject({ status: 502, photoFailureClass: "authorization" });
     await expect(client(fetcher).inspectProjectPhoto(org, authority.sessionId,
-      { ...body, project_id: "foreign" } as typeof body, authority)).rejects.toThrow("Project photo inspection unavailable.");
+      { ...body, project_id: "foreign" } as typeof body, authority)).rejects.toMatchObject({ status: 502, photoFailureClass: "integrity" });
     expect(fetcher).not.toHaveBeenCalled();
   });
   it("cancels stalled response streams at the total 45-second deadline", async () => {
@@ -52,7 +99,7 @@ describe("bounded current-project photo callback", () => {
     try {
       const pending = client(async (_url, init) => { signal = init?.signal as AbortSignal; return response; })
         .inspectProjectPhoto(org, authority.sessionId, body, authority);
-      const rejected = expect(pending).rejects.toThrow("Project photo inspection unavailable.");
+      const rejected = expect(pending).rejects.toMatchObject({ status: 502, photoFailureClass: "transport" });
       await vi.advanceTimersByTimeAsync(45000);
       await rejected;
       expect(signal?.aborted).toBe(true);

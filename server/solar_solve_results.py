@@ -17,9 +17,10 @@ from leaf_cloud_client import (
 )
 from solar_dependencies import affected_entities
 from solar_design_graph import (
+    COLLECTIONS, MAX_GRAPH_NODES, MAX_NODES, SCHEMA_VERSION,
     GraphValidationError, _bounded_json, entities, new_id, validate_graph,
 )
-from solar_grid_restitch import failed_group_indices, ordered_strings, restitch
+from solar_grid_restitch import _int, _panels, failed_group_indices, ordered_strings, restitch
 from solar_sizing_client import advance, checked_graph
 
 
@@ -33,9 +34,40 @@ SETTINGS_FIELDS = {
 HOMERUN_KINDS = ("start homerun", "end homerun")
 
 
+def _is_design_graph(value):
+    return (type(value) is dict
+            and type(value.get("graph_schema_version")) is int
+            and value["graph_schema_version"] == SCHEMA_VERSION
+            and all(key in value for key in ("project", "settings", *COLLECTIONS)))
+
+
 def digest(value):
-    _bounded_json(value)
+    try:
+        _bounded_json(value)
+    except GraphValidationError as exc:
+        if exc.code != "GRAPH_LIMIT_EXCEEDED" or not _is_design_graph(value):
+            raise
+        # Only a valid full graph may use the validator's larger node budget.
+        # Its byte, depth and collection guards still apply.
+        validate_graph(value)
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _bounded_companion_json(value):
+    try:
+        _bounded_json(value)
+    except GraphValidationError as exc:
+        if (exc.code != "GRAPH_LIMIT_EXCEEDED" or type(value) is not dict
+                or not _is_design_graph(value.get("solar_design_graph"))):
+            raise
+        validate_graph(value["solar_design_graph"])
+        envelope = dict(value)
+        envelope["solar_design_graph"] = None
+        # The CAD/envelope remains generic JSON, with its unchanged 500k cap.
+        _bounded_json(envelope)
+        # Check combined bytes/depth too; separate valid budgets cannot double
+        # the allowed intake bytes or add an unchecked graph nesting level.
+        _bounded_json(value, max_nodes=MAX_NODES + MAX_GRAPH_NODES)
 
 
 def _slot_tables(graph):
@@ -97,10 +129,10 @@ def _upstream_basis(graph, tables):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
-def _frame_request(graph, frame_ref, request):
+def _frame_request(graph, frame_ref, request, *, request_model=StringerRequest):
     """Bind original (not truncated) cells to application-owned panel ids."""
     try:
-        parsed = StringerRequest.model_validate(request)
+        parsed = request_model.model_validate(request)
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
         panels = {p["id"]: p for p in graph["panels"]}
         if (len(parsed.grid.Rows) != frame["module_rows"]
@@ -127,7 +159,7 @@ def _frame_request(graph, frame_ref, request):
 
 
 def bind_request(graph, request, *, expected_rev, frame_ref, tenant_id, job_id,
-                 phase="initial"):
+                 phase="initial", request_model=StringerRequest):
     """Capture before submission, then persist with the authenticated job.
 
     tenant_id and job_id come from the broker, never from caller parameters.
@@ -139,7 +171,7 @@ def bind_request(graph, request, *, expected_rev, frame_ref, tenant_id, job_id,
             or any(type(v) is not str or not 1 <= len(v) <= 256
                    for v in (tenant_id, job_id))):
         raise GraphValidationError("INVALID_SOLVE_BINDING")
-    frame, parsed = _frame_request(graph, frame_ref, request)
+    frame, parsed = _frame_request(graph, frame_ref, request, request_model=request_model)
     if phase == "background" and not frame["extra"].get("solve", {}).get("initial_complete"):
         raise GraphValidationError("INITIAL_SOLVE_REQUIRED")
     return {"source_rev": graph["rev"], "source_hash": graph["source_hash"],
@@ -280,7 +312,7 @@ def finish_mutation(before, after, tool):
     return advance(after, changed, tool)
 
 
-def accept_candidate(graph, candidate, *, expected_rev):
+def accept_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """Build one graph version; publication remains the write owner's job."""
     before = checked_graph(graph, expected_rev)
     _bounded_json(candidate)
@@ -321,7 +353,7 @@ def accept_candidate(graph, candidate, *, expected_rev):
         ordered_lists.append(refs[offset:offset + length])
         offset += length
     _replace_frame_strings(before, result, frame, previous, ordered_lists,
-                           verified["proof"]["response_sha256"])
+                           verified["proof"]["response_sha256"], plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
@@ -339,11 +371,23 @@ def _previous_frame_strings(result, frame):
     return previous
 
 
-def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256):
+def _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           *, plugin_parity=False):
     """Replace the frame's strings with ordered panel lists; shared by both commit paths."""
     members = set(frame["panel_refs"])
     previous_ids = {s["id"] for s in previous}
     panels = {p["id"]: p for p in result["panels"]}
+    if type(plugin_parity) is not bool:
+        raise GraphValidationError("INVALID_PLUGIN_PARITY_MODE")
+    # Faithful Branch replay keeps the recorded order, including native gap hops.
+    # Normal Studio publication retains its physical step guard.
+    if frame["installation_design"] == "Roof" and not plugin_parity:
+        limit = 3 * max(frame["module_width_along_row"], frame["module_height_across_row"])
+        for ordered in ordered_lists:
+            for left, right in zip(ordered, ordered[1:]):
+                distance = math.dist(panels[left]["centre"][:2], panels[right]["centre"][:2])
+                if distance > limit and not math.isclose(distance, limit, rel_tol=1e-9, abs_tol=1e-9):
+                    raise GraphValidationError("DISCONTIGUOUS_SOLVE_STRING", "solve.continuity")
     strings = []
     tags = {s["circuit_tag"] for s in result["strings"] if s["id"] not in previous_ids}
     number = result["settings"]["string_number"]
@@ -518,7 +562,17 @@ def complete_split_search(graph, binding, proposals):
             "background_complete": binding["phase"] == "background"}
 
 
-def accept_split_candidate(graph, candidate, *, expected_rev):
+def _sequence_counts(responses):
+    cells = [cell for response in responses
+             for cell in _panels(response["data"]["final_grid"])]
+    sequences = [_int(cell.get("Seq")) for cell in cells if cell.get("Id")]
+    positive = [sequence for sequence in sequences if sequence > 0]
+    return {"identified_cells": len(sequences), "positive_sequences": len(positive),
+            "nonpositive_sequences": len(sequences) - len(positive),
+            "repeated_positive_sequences": len(positive) - len(set(positive))}
+
+
+def accept_split_candidate(graph, candidate, *, expected_rev, plugin_parity=False):
     """The plugin's split commit: restitch the pieces, cut strings in final-grid Seq
     order (StringPlacement), then the same graph mutation as accept_candidate."""
     before = checked_graph(graph, expected_rev)
@@ -539,7 +593,7 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
         merged = restitch(responses, [piece["row_indices"] for piece in binding["pieces"]])
         cut = ordered_strings(merged)
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER") from None
+        raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.restitch") from None
     members = set(frame["panel_refs"])
     # StringPlacement commits upper-cased handles; map them back to panel ids.
     by_upper = {ref.upper(): ref for ref in members}
@@ -549,10 +603,25 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
     flat = [ref for string in ordered_lists for ref in string]
     if (not ordered_lists or any(not string for string in ordered_lists)
             or None in flat or len(set(flat)) != len(flat) or set(flat) != members):
-        raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+        failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.coverage")
+        known = [ref for ref in flat if ref is not None]
+        failure.coverage_attribution = {
+            "empty_extraction": not ordered_lists or any(not string for string in ordered_lists),
+            "unknown_identity": None in flat,
+            "repeated_identity": len(set(known)) != len(known),
+            "missing_members": bool(members - set(known)),
+            "expected_members": len(members), "extracted_members": len(flat),
+            "unknown_members": len(flat) - len(known),
+            "repeated_members": len(known) - len(set(known)),
+            "missing_member_count": len(members - set(known)),
+            "before_restitch": _sequence_counts(responses),
+            "after_restitch": _sequence_counts([merged]),
+        }
+        raise failure
     proofs = verified["proofs"]
     response_sha256 = digest([proof["response_sha256"] for proof in proofs])
-    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256)
+    _replace_frame_strings(before, result, frame, previous, ordered_lists, response_sha256,
+                           plugin_parity=plugin_parity)
     frame["extra"]["solve"] = {
         "initial_complete": True, "background_complete": verified["background_complete"],
         "accepted_phase": binding["phase"], "source_rev": before["rev"],
@@ -571,6 +640,37 @@ def accept_split_candidate(graph, candidate, *, expected_rev):
         "upstream_sha256": upstream_basis(result),
     }
     return finish_mutation(before, result, "solar-commit-solve")
+
+
+def _refresh_corrected_geometry(graph, strings, changed_ids, source_rev):
+    # Only routes produced from panel centres can be reconstructed from membership.
+    # Measured/manual routes remain stale for their own producer to repair.
+    panels = {panel["id"]: panel for panel in graph["panels"]}
+    for ref in changed_ids:
+        string = strings[ref]
+        provenance = string["extra"].get("length_provenance")
+        if (not isinstance(provenance, dict) or provenance.get("source") != "derived"
+                or provenance.get("rule") != "panel-centre-path"):
+            continue
+        refs = string["ordered_panel_refs"]
+        if any(ref not in panels for ref in refs):
+            continue  # Compact slot routes retain their existing producer boundary.
+        points = [copy.deepcopy(panels[ref]["centre"]) for ref in refs]
+        length_m = sum(math.dist(a + [0] * (3 - len(a)), b + [0] * (3 - len(b)))
+                       for a, b in zip(points, points[1:]))
+        string.update(route=points, length_ft=length_m / 0.3048)
+        provenance.update(source_rev=source_rev, writer="solar-correct-string")
+        if not refs:
+            string["extra"].pop("polarity", None)
+            continue
+        old = string["extra"].get("polarity")
+        polarity = copy.deepcopy(old) if isinstance(old, dict) else {}
+        # A manual ordering change is no longer described by the solver response hash.
+        polarity.pop("response_sha256", None)
+        polarity.update(source="derived", rule="ordered-membership-first-negative-last-positive",
+                        negative_panel_ref=refs[0], positive_panel_ref=refs[-1],
+                        source_rev=source_rev)
+        string["extra"]["polarity"] = polarity
 
 
 def correct_graph(graph, params):
@@ -608,6 +708,8 @@ def correct_graph(graph, params):
         result["settings"]["extra"].pop("string_sizing", None)
         changed.append(result["settings"]["id"])
     sync_assignments(result)
+    _refresh_corrected_geometry(result, strings,
+        [edit["string_ref"] for edit in memberships], before["rev"])
     invalidate_dependents(before, result, changed)
     return finish_mutation(before, result, "solar-correct-string")
 
@@ -674,7 +776,7 @@ def require_current_export(graph):
 
 def version_companion(intake, before, after):
     """Embed graph and digest in the existing intake, without dropping CAD data."""
-    _bounded_json(intake)
+    _bounded_companion_json(intake)
     if before is None:
         after = validate_graph(after)
         if type(intake) is not dict:
@@ -696,7 +798,7 @@ def version_companion(intake, before, after):
         raise GraphValidationError("STALE_GRAPH_COMPANION")
     result = copy.deepcopy(intake)
     result.update(solar_design_graph=after, solar_design_graph_sha256=digest(after))
-    _bounded_json(result)
+    _bounded_companion_json(result)
     return result
 
 

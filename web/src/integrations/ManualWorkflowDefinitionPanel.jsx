@@ -49,13 +49,34 @@ function definitionFrom(draft) {
     }) })
 }
 
-export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard, onForbidden, mode = 'light' }) {
+function draftFrom(definition, actions) {
+  if (!Number.isSafeInteger(definition.version + 1)) throw new Error('Version exhausted.')
+  const draft = { id: definition.id, title: definition.title, version: String(definition.version + 1),
+    steps: definition.steps.map((step, index) => {
+      const action = actions.find((entry) => actionKey(entry) === actionKey(step))
+      if (!action || Object.keys(step.arguments).some((id) => !action.form.fields.some((field) => field.id === id))) throw new Error('Saved action unavailable.')
+      return { key: index + 1, id: step.id, action, fields: Object.fromEntries(action.form.fields.map((field) => {
+        const present = Object.hasOwn(step.arguments, field.id)
+        const value = step.arguments[field.id]
+        return [field.id, { mode: !present ? 'omit' : value === null ? 'null' : 'value',
+          value: !present || value === null ? field.kind === 'boolean' ? 'false' : '' : String(value) }]
+      })) }
+    }) }
+  // Refuse a stale form instead of silently dropping or coercing saved arguments.
+  const restored = definitionFrom(draft)
+  if (definition.steps.some((step, index) => Object.entries(step.arguments).some(([id, value]) =>
+    restored.steps[index].arguments[id] !== value))) throw new Error('Saved arguments incompatible.')
+  return draft
+}
+
+export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard, onForbidden, mode = 'light', reopen }) {
   const [draft, setDraft] = useState(blank)
   const [catalog, setCatalog] = useState(null)
   const [pending, setPending] = useState('')
   const [error, setError] = useState('')
   const [unknown, setUnknown] = useState(false)
   const [result, setResult] = useState(null)
+  const [source, setSource] = useState(null)
   const binding = useRef(null)
   const feedback = useRef(null)
   const formRef = useRef(null)
@@ -65,23 +86,25 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     binding.current = ctx
     const clear = () => {
       ctx.controller.abort(); ctx.intent = null
-      setDraft(blank()); setCatalog(null); setPending(''); setError(''); setUnknown(false); setResult(null)
+      setDraft(blank()); setCatalog(null); setPending(''); setError(''); setUnknown(false); setResult(null); setSource(null)
     }
-    setDraft(blank()); setCatalog(null); setPending(''); setError(''); setUnknown(false); setResult(null)
+    setDraft(blank()); setCatalog(null); setPending(''); setError(''); setUnknown(false); setResult(null); setSource(null)
     signal.addEventListener('abort', clear, { once: true })
     if (signal.aborted) clear()
     return () => { ctx.controller.abort(); ctx.intent = null; signal.removeEventListener('abort', clear); if (binding.current === ctx) binding.current = null }
-  }, [client, projectId, signal])
+  }, [client, projectId, signal, reopen])
+  useLayoutEffect(() => { if (reopen) operate('Reopen') }, [client, projectId, signal, reopen])
   useLayoutEffect(() => {
-    if (error || result) {
+    if (error || result || source) {
       const control = [...(formRef.current?.querySelectorAll('[data-validation]') || [])].find((node) => node.dataset.validation === invalidControl.current)
       ;(control || feedback.current)?.focus()
     }
-  }, [error, result, pending])
+  }, [error, result, pending, source])
 
   async function operate(kind) {
     const ctx = binding.current
-    if (!ctx || ctx.busy || ctx.controller.signal.aborted || result || (ctx.intent && kind !== 'Retry')) return
+    if (!ctx || ctx.busy || ctx.controller.signal.aborted || (result && kind !== 'Reopen') || (ctx.intent && kind !== 'Retry')) return
+    if (reopen && !ctx.source && kind !== 'Reopen') return
     if (kind === 'Next' && (!catalog?.next_cursor || ctx.cursors.has(catalog.next_cursor) || ctx.cursors.size >= 20)) return
     ctx.busy = true; setPending(kind); setError(''); invalidControl.current = null
     const controller = new AbortController()
@@ -93,6 +116,31 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     let dispatched = false, conflict = false, timer, cancel
     try {
       const work = async () => {
+        if (kind === 'Reopen') {
+          if (reopen.projectId !== projectId) throw new Error('Project mismatch.')
+          const reference = IntegrationRefV1.parse(reopen.reference)
+          await guarded()
+          const definition = IntegrationManualWorkflowDefinitionV1.parse(await client.getManualWorkflowDefinition(projectId, reference, { signal: controller.signal }))
+          assertCurrent(); await guarded()
+          if (definition.id !== reference.id || definition.version !== reference.version) throw new Error('Reference mismatch.')
+          const actions = [], cursors = new Set()
+          let after, page
+          do {
+            await guarded()
+            page = IntegrationActionCatalogV1.parse(await client.getActionCatalog(projectId, { signal: controller.signal, limit: 25, after }))
+            assertCurrent(); await guarded()
+            actions.push(...page.actions)
+            if (definition.steps.every((step) => actions.some((action) => actionKey(action) === actionKey(step)))) break
+            after = page.next_cursor
+            if (after && (cursors.has(after) || cursors.size >= 20)) throw new Error('Catalog limit.')
+            if (after) cursors.add(after)
+          } while (after)
+          const restored = draftFrom(definition, actions)
+          assertCurrent()
+          ctx.source = reference; ctx.nextStep = restored.steps.length + 1; ctx.cursors.clear()
+          setDraft(restored); setCatalog(page); setSource(reference); invalidControl.current = 'title'
+          return
+        }
         if (kind === 'Open' || kind === 'Next') {
           await guarded()
           const after = kind === 'Next' ? catalog.next_cursor : undefined
@@ -105,6 +153,9 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
         }
         const serialized = kind === 'Retry' ? ctx.intent : boundedIntegrationBody(definitionFrom(draft), 65536)
         if (!serialized) throw new Error('Missing original definition.')
+        if (ctx.source && JSON.parse(serialized).id === ctx.source.id && JSON.parse(serialized).version <= ctx.source.version) {
+          throw validation('Choose a version greater than the saved version. The original is immutable.', 'version')
+        }
         await guarded()
         ctx.intent = serialized
         assertCurrent()
@@ -133,7 +184,7 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
       if (!current()) return
       if (failure?.status === 401 || failure?.status === 403) {
         ctx.controller.abort(); ctx.intent = null
-        setDraft(blank()); setCatalog(null); setPending(''); setError(''); setUnknown(false); setResult(null)
+        setDraft(blank()); setCatalog(null); setPending(''); setError('You are not authorized to access this workflow.'); setUnknown(false); setResult(null); setSource(null)
         onForbidden(); return
       }
       if (conflict) {
@@ -145,7 +196,7 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
       } else {
         ctx.intent = null
         invalidControl.current = failure.validationField || null
-        setError(failure.validationField ? humanizeError(failure) : kind === 'Open' || kind === 'Next' ? 'The action catalog could not be verified. Retry the catalog read.' :
+        setError(kind === 'Reopen' ? 'The saved workflow could not be reopened. Its project, exact reference and action fields must be authorized and verifiable.' : failure.validationField ? humanizeError(failure) : kind === 'Open' || kind === 'Next' ? 'The action catalog could not be verified. Retry the catalog read.' :
           'The definition was not saved. Check the entered values and try again.')
       }
     } finally {
@@ -155,16 +206,19 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     }
   }
 
-  const locked = Boolean(pending || unknown || result)
+  const locked = Boolean(pending || unknown || result || signal.aborted || (reopen && !source))
   const updateStep = (key, patch) => setDraft((old) => ({ ...old, steps: old.steps.map((step) => step.key === key ? { ...step, ...patch } : step) }))
   const move = (index, offset) => setDraft((old) => {
     const steps = [...old.steps]
     ;[steps[index], steps[index + offset]] = [steps[index + offset], steps[index]]
     return { ...old, steps }
   })
-  return <section className="integration-setup" aria-label="Create manual workflow" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-    <h2>Create manual workflow</h2>
+  return <section className="integration-setup" aria-label={reopen ? 'Edit saved workflow as new version' : 'Create manual workflow'} style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+    <h2>{reopen ? 'Edit saved workflow as new version' : 'Create manual workflow'}</h2>
     <p>Fields are saved business data. Credentials belong in connection setup. The host validates business semantics. Saving a definition does not start a run.</p>
+    {reopen && !source && <button type="button" disabled={Boolean(pending) || signal.aborted || binding.current?.controller.signal.aborted}
+      onClick={() => operate('Reopen')}>Retry opening saved workflow</button>}
+    {source && <p>Editing a new version of {source.id}, version {source.version}, digest {source.digest}. The saved version is unchanged.</p>}
     <button disabled={locked} onClick={() => operate('Open')}>Open action catalog</button>
     {catalog && <>
       {!catalog.actions.length && <p>No actions are available on this catalog page. Choose an action before saving.</p>}

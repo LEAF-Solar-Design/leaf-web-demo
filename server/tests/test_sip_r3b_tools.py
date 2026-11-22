@@ -28,7 +28,7 @@ from test_project_solar_materialization import fresh  # noqa: F401
 # Canonical Solar includes tracking acceptance; creation tools remain unchanged.
 TOOLS = {"solar-settings", "solar-design-presets", "solar-trackers-to-panel-groups", "solar-panels-from-drawing", "solar-size-strings",
          "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept"}
+         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept", "solar-add-all-inverters"}
 HASHES = (
     "c9b8f4d3b108024f0ca3d889282fc23df485aca605c4b675a2ca2ffc9e826004",
     "76637c9607c2e780a91070d2e928c234092a0ef09b185aeaffe2381f1d5ae489",

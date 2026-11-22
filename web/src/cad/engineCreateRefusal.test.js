@@ -10,6 +10,7 @@
 // FENCE NOTE: the worker's vendored path is spelled ONLY inside the one
 // literal `new Worker(new URL(...))` shape below; the on-disk path is
 // derived from it through a throwaway Worker double.
+import { scaleTimeout } from '../testTimeScale.js'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -75,10 +76,10 @@ describe('the browser worker refuses create ops an engine cannot perform', () =>
   // A real node child under host load: the bound is generous because a
   // MISSING reply still fails, only later (the 5 s default is a flake
   // generator when the full suite runs beside a build).
-  it('names the missing create explicitly, per op, and leaves ordinary edits untouched', { timeout: 60_000 }, () => {
+  it('names the missing create explicitly, per op, and leaves ordinary edits untouched', { timeout: scaleTimeout(60_000) }, () => {
     const raw = execFileSync(process.execPath, ['--input-type=module', '-e', SCRIPT, WORKER_PATH], {
       encoding: 'utf8',
-      timeout: 60_000,
+      timeout: scaleTimeout(60_000),
     })
     const { loaded, out, calls } = JSON.parse(raw)
     expect(loaded.type).toBe('documentLoaded')

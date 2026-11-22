@@ -11,6 +11,8 @@
 // see the same shape the old synchronous /api/run used to return.
 
 import { createRunSubmissionRequest } from './runIntent.js'
+import { clearInvestorWorkspace, isInvestorToken } from './investorDemo.js'
+import { readSourceFailureBody, sourceInitializationError } from './lib/sourceFailureDiagnostic.js'
 import { isSolarReasonCode } from './solar/solarSettingsWire.js'
 import { runMock } from './mock/mockEngine.js'
 import { authorMock } from './mock/mockAuthor.js'
@@ -59,6 +61,24 @@ export const config = { apiBase: API_BASE, get mockDefault() { return serviceSta
 const SOURCE_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const sourceHash = (value, size) => typeof value === 'string' && new RegExp(`^[0-9a-f]{${size}}$`).test(value)
 const sourceUnavailable = () => new Error('Project source is unavailable. Refresh to review its current state.')
+const preGenerationRefusals = new WeakMap()
+const VIDEO_REFUSAL_MESSAGE = 'Private video decoding is unavailable. Source generation did not start.'
+const refusalKeys = ['schema', 'project_id', 'source_request_id', 'source_profile', 'action',
+  'authority_session_id', 'authority_turn_id', 'stage']
+const closedSourceObject = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
+export function isProjectSourcePreGenerationRefusal(error, expected) {
+  const witness = preGenerationRefusals.get(error)
+  return !!witness && closedSourceObject(expected, refusalKeys)
+    && refusalKeys.every((key) => witness[key] === expected[key])
+}
+function readVideoRefusal(value, expected) {
+  if (!closedSourceObject(value, ['error', 'refusal']) || !closedSourceObject(value.error, ['code', 'message'])
+    || value.error.code !== 'video_unavailable' || value.error.message !== VIDEO_REFUSAL_MESSAGE
+    || !closedSourceObject(value.refusal, refusalKeys)
+    || refusalKeys.some((key) => value.refusal[key] !== expected[key])) return null
+  return Object.freeze({ ...value.refusal })
+}
 export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
 function sourceId(value) {
   if (!isSourceUuid(value)) throw sourceUnavailable()
@@ -127,6 +147,9 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   if (requestId !== null) sourceId(requestId)
   if (action) {
     sourceBody(action, body, sourceContext)
+    if (action === 'request' && Array.isArray(materialMetadata)
+      && materialMetadata.some((row) => row?.media_type === 'video/quicktime')
+      && (sourceContext !== 'native' || body.source_operation !== 'create')) throw sourceUnavailable()
     if (sourceContext === 'native' && action === 'request' && materialMetadata !== undefined) {
       if (!Array.isArray(materialMetadata) || materialMetadata.length !== body.material_refs.length
         || body.material_refs.some((ref) => {
@@ -134,9 +157,14 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
           const row = rows[0]
           return rows.length !== 1 || row.project_id !== projectId || !isSourceUuid(row.org_id)
             || !isSourceUuid(row.actor_binding_id) || row.sha256 !== ref.sha256 || typeof row.name !== 'string' || !row.name.trim()
-            || !['text/plain', 'application/json'].includes(row.media_type)
-            || !Number.isInteger(row.byte_size) || row.byte_size < 1 || row.byte_size > 1048576
-        }) || materialMetadata.reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
+            || !['text/plain', 'application/json', 'video/quicktime'].includes(row.media_type)
+            || !Number.isInteger(row.byte_size) || row.byte_size < 1
+            || row.byte_size > (row.media_type === 'video/quicktime' ? 64 * 1024 * 1024 : 1048576)
+        }) || materialMetadata.filter((row) => row.media_type === 'video/quicktime').length > 1
+        || (materialMetadata.some((row) => row.media_type === 'video/quicktime')
+          && !materialMetadata.some((row) => ['text/plain', 'application/json'].includes(row.media_type)))
+        || materialMetadata.filter((row) => row.media_type !== 'video/quicktime')
+          .reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
     }
     if (action === 'request') {
       const verdict = guardedText(body.requirements, { allowSecretOnce })
@@ -149,10 +177,25 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   const path = `/api/projects/${projectId}/${profile.route}/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
   const headers = { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json',
     'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } : {}) }
+  const refusalExpected = sourceContext === 'native' && action === 'request' && body.source_operation === 'create'
+    ? { schema: 'leaf.native-source-pre-generation-refusal.v1', project_id: projectId,
+      source_request_id: body.source_request_id, source_profile: 'ios-swiftui-xcodegen-v1', action: 'create',
+      authority_session_id: authority.session_id, authority_turn_id: authority.turn_id, stage: 'before_generation' } : null
   const response = await apiFetch(`${API_BASE}${path}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
     redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
   if (!current()) throw sourceUnavailable()
   if (!response.ok) {
+    const failureBody = await readSourceFailureBody(response)
+    const refusal = refusalExpected && readVideoRefusal(failureBody, refusalExpected)
+    if (!current()) throw sourceUnavailable()
+    if (refusal) {
+      const error = new Error(VIDEO_REFUSAL_MESSAGE)
+      error.status = 503
+      preGenerationRefusals.set(error, refusal)
+      throw error
+    }
+    const initialization = action === 'request' && sourceInitializationError(failureBody, body.source_request_id)
+    if (initialization) throw initialization
     const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
       : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
     error.status = response.status
@@ -334,6 +377,7 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
   let stored = null
   try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
   if (!sentToken || !stored || sentToken !== stored) return response
+  try { if (isInvestorToken(stored)) clearInvestorWorkspace(localStorage) } catch { /* storage unavailable */ }
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
   notifyActiveScopeChanged()
   for (const listener of unauthorizedListeners) {
@@ -1070,6 +1114,18 @@ export async function getEntitlements() {
   }
 }
 
+export async function fetchInlineAuthoringFlags() {
+  const disabled = { plan_mode: false, inline_review: false, self_approval: false }
+  try {
+    const flags = await http('/api/author/inline-authoring', { headers: { 'X-Tenant-Id': TENANT } })
+    if (!Object.keys(disabled).every(key => typeof flags?.[key] === 'boolean')) return disabled
+    const { plan_mode, inline_review, self_approval } = flags
+    return { plan_mode, inline_review, self_approval }
+  } catch {
+    return disabled
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
@@ -1241,6 +1297,11 @@ export function recordToEnvelope(rec) {
     error: err,
     degraded_mode: !!(rec && rec.degraded_mode),
   }
+}
+
+export async function getArloJob(context) {
+  return http(`/api/projects/${encodeURIComponent(context.project_id)}/arlo-jobs/${encodeURIComponent(context.job_id)}`,
+    { headers: orgHeaders(context.org_id) })
 }
 
 export async function getArloReviews(context) {
@@ -1515,9 +1576,14 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
@@ -2053,6 +2119,41 @@ export function authorRetryDelay(value) {
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
 
+export function getAuthorStage(changeSetId, signal) {
+  return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function getAuthorStageSource(changeSetId, commit, signal) {
+  const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() }, signal, cache: 'no-store', redirect: 'error',
+  }, path)
+  const file = response.headers.get('X-Leaf-Source-Path')
+  if (!response.ok || response.headers.get('X-Leaf-Source-Commit') !== commit
+    || !/(?:^|\/)(main\.csx|tool\.py)$/.test(file || '')) return null
+  return { path: file, text: await response.text() }
+}
+
+export function reviewContext(changeSetId, signal) {
+  return http(`/api/author/reviews/context?change_set_id=${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function postReview({ change_set_id, staged_commit, catalog_digest, decision, comment }) {
+  if (comment != null) {
+    const guard = guardedText(comment)
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
+  return http('/api/author/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ change_set_id, staged_commit, catalog_digest, decision, comment }),
+  })
+}
+
 function authorStageResult(body) {
   if (body?.result?.receipt) return body.result
   if (body?.receipt && body?.result && typeof body.result === 'object') {
@@ -2144,15 +2245,44 @@ const recoveryString = (value) => typeof value === 'string' && value.trim().leng
 // One lookup only. The controller owns admission waits and decides whether a
 // validated absence permits submission of the saved request.
 export async function recoverAuthorStage(idempotencyKey, { signal, changeSetId = null, targetToolName = null } = {}) {
-  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   if (!recoveryString(idempotencyKey) || idempotencyKey.length > 200) throw authorRecoveryError()
+  return readAuthorStageRecovery({ idempotency_key: idempotencyKey }, { signal, changeSetId, targetToolName })
+}
+
+export async function recoverAuthorStageById(changeSetId, { signal } = {}) {
+  if (typeof changeSetId !== 'string'
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(changeSetId)) throw authorRecoveryError()
+  const recovered = await readAuthorStageRecovery({ change_set_id: changeSetId }, { signal, changeSetId })
+  if (recovered.job?.status === 'staged') {
+    const result = authorStageResult(recovered.job)
+    if (result?.receipt?.change_set_id !== changeSetId || !recoveryString(result?.tool?.name)) throw authorRecoveryError()
+    return { ...recovered, result }
+  }
+  return recovered
+}
+
+export async function retryAuthorStage(job, authority, { signal } = {}) {
+  if (job?.status !== 'failed' || job?.error?.retryable !== true
+    || !Number.isInteger(job.version) || job.version < 0
+    || !Number.isInteger(job.attempt) || job.attempt < 0
+    || !recoveryString(authority?.sessionId) || !recoveryString(authority?.turnId)
+    || !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(job.change_set_id || '')) throw authorRecoveryError()
+  return readAuthorStageRecovery({ change_set_id: job.change_set_id, retry: true,
+    expected_version: job.version, expected_attempt: job.attempt }, {
+    signal, changeSetId: job.change_set_id, authority,
+  })
+}
+
+async function readAuthorStageRecovery(request, { signal, changeSetId = null, targetToolName = null, authority = null } = {}) {
+  if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
   let status
   try {
     const path = '/api/author/stage/recover'
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() },
-      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders(),
+        ...(authority ? { 'X-Authority-Session-Id': authority.sessionId, 'X-Authority-Turn-Id': authority.turnId } : {}) },
+      body: JSON.stringify(request),
       signal,
     }, path)
     status = res.status
@@ -2296,6 +2426,77 @@ async function toolManagementPost(mock, path, payload) {
 }
 
 const managementString = (value) => typeof value === 'string' && value.trim().length > 0
+
+export function stagedSourceIdentity(staged) {
+  const receipt = staged?.receipt
+  const tool = staged?.tool
+  if (staged?.demo || staged?.legacy_demo || staged?.published || receipt?.state !== 'staged'
+    || !isSourceUuid(receipt?.change_set_id) || !sourceHash(receipt?.staged_commit, 40)
+    || !sourceHash(receipt?.catalog_digest, 64) || tool?.kind !== 'script'
+    || typeof tool?.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(tool.name)
+    || tool.entry !== `tools/${tool.name}/tool.py`) return null
+  return { changeSetId: receipt.change_set_id, commit: receipt.staged_commit,
+    path: tool.entry, filename: `${tool.name}.py` }
+}
+
+export async function downloadStagedSource(staged, { expectedScope, signal } = {}) {
+  const identity = stagedSourceIdentity(staged)
+  const unavailable = () => new Error('Staged source could not be verified. Refresh the saved request and try again.')
+  const check = () => {
+    if (!identity || !expectedScope || signal?.aborted || readActiveScope() !== expectedScope
+      || !authHeaders().Authorization || isMockConversation()) throw unavailable()
+  }
+  check()
+  const path = `/api/author/stages/${identity.changeSetId}?view=source`
+  const url = new URL(`${API_BASE}${path}`, window.location.origin)
+  if (url.origin !== window.location.origin || url.pathname !== path.split('?')[0]
+    || url.search !== '?view=source' || url.hash || url.username || url.password) throw unavailable()
+  const response = await apiFetch(url.href, { method: 'GET', headers: authHeaders(),
+    cache: 'no-store', redirect: 'error', signal }, path)
+  check()
+  if (response.status !== 200 || response.redirected) throw unavailable()
+  const headers = response.headers
+  const length = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Source-Sha256')
+  const blob = headers.get('X-Leaf-Source-Blob')
+  if (!/^(0|[1-9][0-9]{0,5})$/.test(length || '') || Number(length) > 262144
+    || headers.get('Content-Type') !== 'application/octet-stream'
+    || ![null, 'identity'].includes(headers.get('Content-Encoding'))
+    || headers.get('X-Leaf-Source-Commit') !== identity.commit
+    || headers.get('X-Leaf-Source-Path') !== identity.path
+    || !sourceHash(sha256, 64) || !sourceHash(blob, 40)
+    || !globalThis.crypto?.subtle || !response.body?.getReader) throw unavailable()
+  const reader = response.body.getReader()
+  const bytes = new Uint8Array(Number(length))
+  const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      check()
+      if (done) break
+      if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+        || total + value.byteLength > bytes.length) throw unavailable()
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+    if (total !== bytes.length) throw unavailable()
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+  const prefix = new TextEncoder().encode(`blob ${bytes.length}\0`)
+  const gitBytes = new Uint8Array(prefix.length + bytes.length)
+  gitBytes.set(prefix)
+  gitBytes.set(bytes, prefix.length)
+  const hex = (buffer) => Array.from(new Uint8Array(buffer), (n) => n.toString(16).padStart(2, '0')).join('')
+  const [actualSha, actualBlob] = await Promise.all([
+    crypto.subtle.digest('SHA-256', bytes), crypto.subtle.digest('SHA-1', gitBytes),
+  ])
+  check()
+  if (hex(actualSha) !== sha256 || hex(actualBlob) !== blob) throw unavailable()
+  return { bytes, filename: identity.filename }
+}
 
 export async function getToolRemovalAuthority(mock, toolName) {
   const body = await toolManagementPost(mock, '/api/author/removals/authority', { tool_name: toolName })

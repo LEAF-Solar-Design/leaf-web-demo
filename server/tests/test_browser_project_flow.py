@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import uuid
 import sys
 import threading
 from datetime import datetime, timezone
@@ -104,6 +106,94 @@ def lane(monkeypatch):
 
 def execute(body=BODY, action='request'):
     return flow.mutate('tenant', PROJECT, 'session', 'turn', action, EDIT, copy.deepcopy(body))
+
+
+def dependency_capture_lane(lane, monkeypatch, change=None):
+    import native_project_authoring as native
+    sid, tid = str(uuid.uuid4()), str(uuid.uuid4())
+    body = dict(BODY, material_refs=[dict(material_id=LEASE, sha256='a' * 64)])
+    lane.active = tid
+    lane.events[0]['turn_id'] = tid
+    lane.hint = flow._hint('create', EDIT, body, source_profile=flow.NATIVE_PROFILE)
+    lane.events[0]['data']['classifier_hint'] = copy.deepcopy(lane.hint)
+    monkeypatch.setattr(flow.authoring, 'validate_native_materials', lambda *a, **kw: None)
+    def refuse(tenant, project, request, **kwargs):
+        lane.author_calls += 1
+        error = flow.authoring.AuthorDependencyRefusal(dict(
+            schema='leaf.project-source-author-disposition.v1', outcome='not_started', stage='author_dependency_gate',
+            attempt_id=str(uuid.uuid4()), wire_sha256='9' * 64), request=request,
+            binding=dict(BOUND, actor_binding_id=ACTOR, expected_base_commit='1' * 40),
+            provenance=flow.authoring._VERIFIED_DEPENDENCY_REFUSAL)
+        if change == 'request':
+            error.request['requirements'] = 'Foreign requirements'
+        elif change == 'material':
+            error.request['material_refs'][0]['sha256'] = '0' * 64
+        elif change == 'repository':
+            error.binding['repo_key'] = str(uuid.uuid4())
+        elif change == 'actor':
+            error.binding['actor_binding_id'] = str(uuid.uuid4())
+        elif change == 'provenance':
+            error.provenance = None
+        elif change == 'revoked':
+            lane.allowed = False
+        elif change == 'marker':
+            lane.events[1]['data']['payload_digest'] = '0' * 64
+        elif change == 'extra':
+            error.disposition['extra'] = 'private detail'
+        raise error
+    monkeypatch.setattr(native, 'author', refuse)
+    def run(turn=tid):
+        return flow.mutate('tenant', PROJECT, sid, turn, 'request', EDIT, copy.deepcopy(body), source_profile=flow.NATIVE_PROFILE)
+    return run, sid, tid
+
+
+def test_native_dependency_disposition_captures_original_marker_without_replay_permission(lane, monkeypatch):
+    run, sid, tid = dependency_capture_lane(lane, monkeypatch)
+    with pytest.raises(flow.FlowError) as caught:
+        run()
+    assert caught.value.status == 503
+    events = [event for event in lane.events if event['type'] == 'native_source_author_disposition']
+    assert len(events) == 1
+    marker = lane.events[1]
+    data = events[0]['data']
+    assert data['authority_session_id'] == sid and data['authority_turn_id'] == tid
+    assert data['marker_seq'] == marker['seq'] and data['marker_digest'] == marker['data']['payload_digest']
+    assert data['source_request_id'] == EDIT and data['source_profile'] == flow.NATIVE_PROFILE
+    assert data['repo_key'] == REPO and data['actor_binding_id'] == ACTOR
+    assert data['outcome'] == 'not_started' and data['stage'] == 'author_dependency_gate'
+    assert set(data) == {'schema', 'attempt_id', 'wire_sha256', 'outcome', 'stage', 'tenant_id',
+        'organization_id', 'project_id', 'repo_key', 'actor_binding_id', 'expected_base_commit',
+        'source_request_id', 'source_profile', 'authority_session_id', 'authority_turn_id', 'marker_seq', 'marker_digest'}
+    assert 'requirements' not in data and 'material_refs' not in data
+    assert lane.finished == [tid] and lane.author_calls == 1 and not lane.rows
+    lane.active = tid
+    with pytest.raises(flow.FlowError) as duplicate:
+        run()
+    assert duplicate.value.status == 409 and lane.author_calls == 1
+    later = str(uuid.uuid4())
+    lane.active = later
+    lane.append(sid, later, 'turn_started', copy.deepcopy(lane.events[0]['data']))
+    with pytest.raises(flow.FlowError) as retry:
+        run(later)
+    assert retry.value.status == 409 and lane.author_calls == 1
+
+
+@pytest.mark.parametrize('change', ['request', 'material', 'repository', 'actor', 'provenance', 'revoked', 'marker', 'extra', 'cas'])
+def test_dependency_capture_requires_fresh_original_authority_and_server_cas(lane, monkeypatch, change):
+    run, _, _ = dependency_capture_lane(lane, monkeypatch, change)
+    if change == 'cas':
+        append = flow.session_store.append_event
+        def fail(sid, tid, kind, data, **kwargs):
+            if kind == 'native_source_author_disposition':
+                assert kwargs.get('expected_seq') == len(lane.events) + 1
+                raise RuntimeError('synthetic sequence race')
+            return append(sid, tid, kind, data, **kwargs)
+        monkeypatch.setattr(flow.session_store, 'append_event', fail)
+    with pytest.raises(flow.FlowError):
+        run()
+    assert not any(event['type'] == 'native_source_author_disposition' for event in lane.events)
+    assert lane.author_calls == 1 and not lane.rows
+    assert any(event['type'] == 'browser_source_dispatch' for event in lane.events)
 
 
 @pytest.mark.parametrize('operation', ['create', 'edit'])
@@ -450,3 +540,175 @@ def test_default_web_hint_key_and_claim_keep_original_shape(lane):
     assert set(marker) == {'action', 'source_request_id', 'payload_digest'}
     assert marker['payload_digest'] == hashlib.sha256(flow.canonical(dict(
         action='create', source_request_id=EDIT, payload=BODY))).hexdigest()
+
+
+@pytest.mark.parametrize('code', ['material_too_large', 'cancelled', 'author_unavailable'])
+def test_forward_diagnostic_preserves_typed_stage_failure(lane, monkeypatch, code):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError(code)
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    event = [item for item in lane.events if item['type'] == 'browser_source_error']
+    assert len(event) == 1
+    data = event[0]['data']
+    assert caught.value.status == flow.authoring._ERRORS[code][0]
+    assert data == dict(source_request_id=EDIT, phase='stage', code=code,
+        status=caught.value.status, correlation_id=data['correlation_id'],
+        text='Source outcome unavailable. Review the saved source state before retrying.')
+    assert str(uuid.UUID(data['correlation_id'])) == data['correlation_id']
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private-exception-text' not in json.dumps(event)
+    assert BODY['requirements'] not in json.dumps(event)
+    assert lane.author_calls == 0 and lane.finished == ['turn']
+
+
+def test_forward_diagnostic_readback_uses_canonical_flow_error(lane, monkeypatch):
+    def fail(*args, **kwargs):
+        error = flow.FlowError(409)
+        error.code = 'fixture-private-code'
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow, 'representation', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    data = [item['data'] for item in lane.events if item['type'] == 'browser_source_error'][0]
+    assert caught.value.status == 409
+    assert (data['phase'], data['code'], data['status']) == ('result_readback', 'source_changed', 409)
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private' not in json.dumps(data)
+    assert lane.rows[EDIT]['state'] == 'awaiting_confirmation'
+    assert lane.author_calls == 1 and lane.finished == ['turn']
+
+
+@pytest.mark.parametrize('typed', [False, True])
+def test_forward_diagnostic_unknown_failure_is_generic_and_secret_free(lane, monkeypatch, typed):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError('author_unavailable') if typed else RuntimeError()
+        if typed:
+            error.code = 'fixture-private-code'
+        error.args = ('fixture-private-exception-text',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught:
+        execute()
+    data = [item['data'] for item in lane.events if item['type'] == 'browser_source_error'][0]
+    assert caught.value.status == 503
+    assert (data['phase'], data['code'], data['status']) == ('stage', 'service_unavailable', 503)
+    assert uuid.UUID(data['correlation_id']).version == 4
+    assert 'fixture-private' not in json.dumps(data)
+    assert lane.rows == {} and lane.finished == ['turn']
+
+
+@pytest.mark.parametrize('subphase,status', [('initialize_http', 503), ('initialize_authority', None)])
+def test_subphase_and_correlated_warning_preserve_failure_contract(lane, monkeypatch, caplog, subphase, status):
+    import project_author_diagnostics as diagnostics
+    def fail(*args, **kwargs):
+        diagnostics.record_failure(subphase, http_status=status)
+        error = flow.authoring.AuthoringError('author_unavailable')
+        error.args = ('fixture-private-author-error',)
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError) as caught: execute()
+    assert caught.value.status == 503
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == subphase
+    assert data['phase'] == 'stage' and data['code'] == 'author_unavailable' and data['status'] == 503
+    assert data.get('author_http_status') == status
+    records = [record for record in caplog.records if record.name == 'browser_project_flow']
+    assert len(records) == 1
+    logged = json.loads(records[0].getMessage())
+    assert set(logged) == {'event','project_id','source_request_id','correlation_id','phase','code','status','author_subphase'} | ({'author_http_status'} if status else set())
+    assert logged['event'] == 'project_author_failure'
+    assert logged['source_request_id'] == EDIT and logged['project_id'] == PROJECT
+    assert logged['correlation_id'] == data['correlation_id'] and logged['author_subphase'] == subphase
+    assert 'fixture-private' not in json.dumps(data) + records[0].getMessage()
+    assert BODY['requirements'] not in records[0].getMessage()
+    assert lane.finished == ['turn'] and diagnostics.snapshot() == {}
+
+
+def test_diagnostic_context_is_closed_and_nested():
+    import project_author_diagnostics as diagnostics
+    diagnostics.record_failure('author_http', http_status=503)
+    assert diagnostics.snapshot() == {}
+    outer = diagnostics.begin()
+    try:
+        diagnostics.record_failure('initialize_http', http_status=502)
+        diagnostics.record_failure('author_transport')
+        assert diagnostics.snapshot() == dict(author_subphase='initialize_http', author_http_status=502)
+        inner = diagnostics.begin()
+        try:
+            diagnostics.record_failure('fixture-private')
+            assert diagnostics.snapshot() == {}
+            diagnostics.record_failure('author_http', http_status='fixture-private')
+            assert diagnostics.snapshot() == dict(author_subphase='author_http')
+        finally:
+            diagnostics.end(inner)
+        assert diagnostics.snapshot() == dict(author_subphase='initialize_http', author_http_status=502)
+    finally:
+        diagnostics.end(outer)
+    assert diagnostics.snapshot() == {}
+
+
+def test_diagnostic_context_isolated_between_threads_and_copied_contexts():
+    import concurrent.futures
+    import contextvars
+    import project_author_diagnostics as diagnostics
+    barrier = threading.Barrier(2)
+    def isolated(subphase):
+        token = diagnostics.begin()
+        try:
+            diagnostics.record_failure(subphase)
+            barrier.wait(timeout=5)
+            return diagnostics.snapshot()
+        finally:
+            diagnostics.end(token)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(isolated, name) for name in ('author_http','initialize_http')]
+        assert [f.result() for f in futures] == [dict(author_subphase=name) for name in ('author_http','initialize_http')]
+    token = diagnostics.begin()
+    try:
+        child = contextvars.copy_context()
+        child.run(diagnostics.record_failure, 'author_http', http_status=500)
+        assert child.run(diagnostics.snapshot) == dict(author_subphase='author_http', author_http_status=500)
+        assert diagnostics.snapshot() == {}
+    finally:
+        diagnostics.end(token)
+
+
+@pytest.mark.parametrize('subphase', ['initialization','missing_binding','author_http','author_response','transport'])
+def test_closed_optional_author_subphase_attribute(lane, monkeypatch, subphase):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError('author_unavailable')
+        error.author_subphase = subphase
+        raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == subphase
+    assert data['status'] == 503 and data['code'] == 'author_unavailable'
+
+
+@pytest.mark.parametrize('code,subphase', [('author_unavailable','fixture-private-text'),
+    ('invalid_request','author_http'), ('cancelled','transport')])
+def test_unknown_or_noncanonical_author_subphase_is_not_retained(lane, monkeypatch, code, subphase):
+    def fail(*args, **kwargs):
+        error = flow.authoring.AuthoringError(code); error.author_subphase = subphase; raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert 'author_subphase' not in data and 'author_http_status' not in data
+    assert 'fixture-private' not in json.dumps(data)
+
+
+def test_initializer_evidence_precedes_optional_coarse_author_attribution(lane, monkeypatch):
+    import project_author_diagnostics as diagnostics
+    def fail(*args, **kwargs):
+        diagnostics.record_failure('initialize_http', http_status=502)
+        error = flow.authoring.AuthoringError('author_unavailable'); error.author_subphase = 'initialization'; raise error
+    monkeypatch.setattr(flow.authoring, 'author', fail)
+    with pytest.raises(flow.FlowError): execute()
+    data = [event['data'] for event in lane.events if event['type'] == 'browser_source_error'][0]
+    assert data['author_subphase'] == 'initialize_http' and data['author_http_status'] == 502

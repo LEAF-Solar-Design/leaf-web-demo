@@ -32,10 +32,12 @@ import io
 import itertools
 import math
 import os
+import zlib
 from dataclasses import dataclass, field
 
 from pdfminer.pdfdevice import PDFTextDevice
-from pdfminer.pdfdocument import PDFDocument
+from pdfminer.cmapdb import CMapParser, FileUnicodeMap
+from pdfminer.pdfdocument import PDFDocument, PDFStreamParser
 from pdfminer.pdffont import PDFCIDFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFContentParser, PDFPageInterpreter, PDFResourceManager
 from pdfminer.pdfpage import PDFPage
@@ -52,6 +54,12 @@ MAX_PATHS = 1_000_000
 MAX_SEGMENTS = 4_000_000
 MAX_LETTERS = 1_000_000
 MAX_FORM_DEPTH = 8
+MAX_OBJECT_STREAM_BYTES = 8 * 1024 * 1024
+MAX_OBJECT_STREAM_OBJECTS = 8192
+MAX_CMAP_BYTES = 2 * 1024 * 1024
+MAX_CMAP_ENTRIES = 65536
+MAX_CMAP_REPLACEMENT = 256
+MAX_TEXT_CHARACTERS = 1_000_000
 
 BLACK = (0.0, 0.0, 0.0)
 
@@ -62,6 +70,79 @@ class SolarEdgePdfError(ValueError):
     def __init__(self, code, detail=""):
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+
+
+def _bounded_auxiliary_data(stream, limit):
+    """Decode only the proven plain/Flate subset, stopping before expansion exceeds limit."""
+    if stream.data is not None:
+        data = stream.data
+    else:
+        if stream.decipher is not None:
+            raise SolarEdgePdfError("AUXILIARY_FILTER_UNSUPPORTED", "encrypted stream")
+        filters = stream.get_filters()
+        raw = stream.rawdata or b""
+        if not filters:
+            data = raw
+        elif len(filters) == 1 and literal_name(filters[0][0]) in ("FlateDecode", "Fl") and not filters[0][1]:
+            decoder = zlib.decompressobj()
+            data = decoder.decompress(raw, limit + 1)
+            if len(data) > limit or decoder.unconsumed_tail:
+                raise SolarEdgePdfError("RESOURCE_LIMIT", "auxiliary decoded bytes")
+            if not decoder.eof or decoder.unused_data.strip(b"\x00\t\n\x0c\r "):
+                raise SolarEdgePdfError("MALFORMED_PDF", "auxiliary Flate stream")
+        else:
+            raise SolarEdgePdfError("AUXILIARY_FILTER_UNSUPPORTED")
+    if len(data) > limit:
+        raise SolarEdgePdfError("RESOURCE_LIMIT", "auxiliary decoded bytes")
+    stream.data = data
+    stream.rawdata = None
+    return data
+
+
+class _BoundedPDFDocument(PDFDocument):
+    """Bound compressed-object decoding and index cardinality per document."""
+
+    def __init__(self, *args, **kwargs):
+        self.object_stream_bytes = 0
+        self.object_stream_objects = 0
+        super().__init__(*args, **kwargs)
+
+    def _get_objects(self, stream):
+        count, first = stream.get("N"), stream.get("First")
+        if type(count) is not int or count < 1 or type(first) is not int or first < 0:
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream header")
+        if self.object_stream_objects + count > MAX_OBJECT_STREAM_OBJECTS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "object stream object count")
+        data = _bounded_auxiliary_data(stream, MAX_OBJECT_STREAM_BYTES - self.object_stream_bytes)
+        self.object_stream_bytes += len(data)
+        self.object_stream_objects += count
+        if first > len(data):
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream offset")
+        tokens = data[:first].split(None, count * 2)
+        if len(tokens) != count * 2 or any(len(token) > 12 or not token.isdigit() for token in tokens):
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream index")
+        header = [int(token) for token in tokens]
+        ids, offsets = header[::2], header[1::2]
+        if len(set(ids)) != count or any(value <= 0 for value in ids) or offsets[0] != 0:
+            raise SolarEdgePdfError("MALFORMED_PDF", "object stream index")
+        ends = offsets[1:] + [len(data) - first]
+        objects = list(header)
+        for start, end in zip(offsets, ends):
+            if start >= end or end > len(data) - first:
+                raise SolarEdgePdfError("MALFORMED_PDF", "object stream object bounds")
+            parser = PDFStreamParser(data[first + start:first + end])
+            parser.set_document(self)
+            try:
+                _, obj = parser.nextobject()
+                try:
+                    parser.nextobject()
+                except PSEOF:
+                    objects.append(obj)
+                else:
+                    raise SolarEdgePdfError("MALFORMED_PDF", "extra object stream object")
+            except PSEOF as exc:
+                raise SolarEdgePdfError("MALFORMED_PDF", "missing object stream object") from exc
+        return objects, count
 
 
 @dataclass
@@ -130,10 +211,52 @@ def _bezier_extent(p1, p2, p3, p4):
 MAX_FONT_BYTES = 32 * 1024 * 1024
 
 
+class _BoundedUnicodeMap(FileUnicodeMap):
+    def __init__(self, manager):
+        super().__init__()
+        self.manager = manager
+
+    def add_cid2unichr(self, cid, code):
+        # Check the encoded value before FileUnicodeMap allocates its Unicode string.
+        if ((isinstance(code, bytes) and len(code) > MAX_CMAP_REPLACEMENT * 2)
+                or (isinstance(code, PSLiteral) and len(str(code.name)) > MAX_CMAP_REPLACEMENT)):
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap replacement")
+        self.manager.cmap_entries += 1
+        if self.manager.cmap_entries > MAX_CMAP_ENTRIES:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap entries")
+        super().add_cid2unichr(cid, code)
+        self.manager.cmap_characters += len(self.cid2unichr.get(cid, ""))
+        if self.manager.cmap_characters > MAX_TEXT_CHARACTERS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "CMap characters")
+
+
+class _BoundedCMapParser(CMapParser):
+    def do_keyword(self, pos, token):
+        if token is self.KEYWORD_USECMAP:
+            raise SolarEdgePdfError("CMAP_INHERITANCE_UNSUPPORTED")
+        return super().do_keyword(pos, token)
+
+
 class _ResourceManager(PDFResourceManager):
     """Keeps each CID font's descendant dictionary, which pdfminer discards, for its hmtx."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.cmap_entries = 0
+        self.cmap_characters = 0
+        self.cmap_bytes = 0
+        self.checked_cmaps = set()
+
     def get_font(self, objid, spec):
+        if isinstance(spec, dict) and spec.get("ToUnicode") is not None:
+            cmap = resolve1(spec["ToUnicode"])
+            if isinstance(cmap, PDFStream) and id(cmap) not in self.checked_cmaps:
+                if cmap.get("UseCMap") is not None:
+                    raise SolarEdgePdfError("CMAP_INHERITANCE_UNSUPPORTED")
+                data = _bounded_auxiliary_data(cmap, MAX_CMAP_BYTES - self.cmap_bytes)
+                self.cmap_bytes += len(data)
+                _BoundedCMapParser(_BoundedUnicodeMap(self), io.BytesIO(data)).run()
+                self.checked_cmaps.add(id(cmap))
         # A Type0 spec recurses here with its descendant, which is the dictionary we keep.
         font = super().get_font(objid, spec)
         if isinstance(font, PDFCIDFont) and not hasattr(font, "leaf_cid_spec"):
@@ -198,6 +321,7 @@ class _PrimitiveDevice(PDFTextDevice):
         self.segments = 0
         self.paint_colors = None  # set by the interpreter before each paint
         self._cid_metrics = {}
+        self.text_characters = 0
 
     def paint_path(self, graphicstate, stroke, fill, evenodd, path):
         paths = self.out.paths
@@ -262,6 +386,9 @@ class _PrimitiveDevice(PDFTextDevice):
             value = font.to_unichr(cid)
         except PDFUnicodeNotDefined:
             value = f"(cid:{cid})"
+        if self.text_characters + len(value) > MAX_TEXT_CHARACTERS:
+            raise SolarEdgePdfError("RESOURCE_LIMIT", "extracted text characters")
+        self.text_characters += len(value)
         a, b, c, d, e, f = matrix
         x = c * rise + e
         y = d * rise + f
@@ -329,6 +456,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
 
     # ---- execution with bounds and strict operands ----
     def execute(self, streams):
+        streams = [resolve1(stream) for stream in streams]
         total = 0
         for stream in streams:
             if not isinstance(stream, PDFStream):
@@ -544,13 +672,17 @@ def extract_primitives(pdf_bytes):
     if not bytes(pdf_bytes[:1024]).lstrip().startswith(b"%PDF-"):
         raise SolarEdgePdfError("NOT_A_PDF")
     try:
-        doc = PDFDocument(PDFParser(io.BytesIO(bytes(pdf_bytes))))
+        doc = _BoundedPDFDocument(PDFParser(io.BytesIO(bytes(pdf_bytes))))
         pages = _count_pages(doc)
         if pages == 0:
             raise SolarEdgePdfError("NO_PAGES")
         if pages > MAX_PAGES:
             raise SolarEdgePdfError("TOO_MANY_PAGES", str(MAX_PAGES))
         page = next(PDFPage.create_pages(doc))
+        # Raw-coordinate parity is proven only for default units. Never silently scale labels.
+        unit = page.attrs.get("UserUnit", 1)
+        if type(unit) not in (int, float) or unit != 1:
+            raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
         x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
         crop = tuple(_num(v) for v in page.cropbox)
         if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):

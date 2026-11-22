@@ -167,7 +167,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   </div>
 }
 
-export function LabWorkbench({ route, hidden = false, status, embedded = false, createHostBridge }) {
+export function LabWorkbench({ route, hidden = false, status, embedded = false, createHostBridge, projectId, accountScope }) {
   const views = registerLabViews()
   const [liveStatus, setLiveStatus] = useState(null)
   const [signingIn, setSigningIn] = useState(false)
@@ -243,7 +243,7 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
         return (
           <div key={id} data-lab-view={id} role="region" aria-label={`${label} view`} hidden={inactive}>
             {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} onBridge={setBridge} route={viewRoute} />
-              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} requestPublication={embedded && bridge ? (request) => bridge.publishWidget(request) : undefined} />
+              : id === 'widgets' ? <View projectId={projectId} accountScope={accountScope} hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} requestPublication={embedded && bridge ? (request) => bridge.publishWidget(request) : undefined} />
                 : id === 'test-trade' ? <View hidden={inactive} provider={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} revision={hostSource?.revision} requestTestTrade={embedded && bridge ? () => bridge.requestTestTrade() : undefined} />
                   : id === 'graph' ? <View hidden={inactive} route={viewRoute} /> : <View hidden={inactive} />}
           </div>

@@ -65,10 +65,10 @@ import type {
 } from "../ports/index.js";
 import type { StandardServicesResolver } from "../vendor/mushy-author/index.js";
 
-/** The 9 event types the frozen wire admits (ports/converse.ts). The loop's
+/** Events the app relays from the spine, including plan-mode display events. The loop's
  *  turn_started / confirmation_resolved / session_state are the turn engine's
  *  to emit on its own hop and are dropped here, not relayed twice. */
-const WIRE_EVENT_TYPES = new Set<HarnessTurnEvent["type"]>([
+const WIRE_EVENT_TYPES = new Set<ConverseEvent["type"]>([
   "text_delta",
   "tool_call",
   "tool_result",
@@ -76,6 +76,8 @@ const WIRE_EVENT_TYPES = new Set<HarnessTurnEvent["type"]>([
   "proposed_run",
   "confirmation_required",
   "question_required",
+  "questions_required",
+  "plan_proposed",
   "turn_usage",
   "turn_complete",
   "error",
@@ -95,6 +97,15 @@ export interface SpineTurnAdapterPorts {
    * exactly as it did before intent synthesis existed.
    */
   intentFor?: (grant: AgentGrant) => IntentSynthesizer;
+  /**
+   * Optional per-tenant provider override (tenantProviderStore.ts). null = the tenant is
+   * unchanged and runnerFor/intentFor apply. A returned runner replaces runnerFor for this
+   * turn only; the intent classifier is skipped (it is Claude-only), and the returned
+   * secrets join the grant's in the inbound scrub. Grant resolution and the services lease
+   * are unchanged. A throw ends the turn before any stream (fails closed, never falls back).
+   */
+  tenantRunnerFor?: (tenantId: string, grant: AgentGrant) =>
+    Promise<{ runner: SpineConverseRunner; secrets: string[] } | null>;
   instantExecutor?: InstantExecutorClient;
   /** When configured, every turn must reserve a tenant-owned mount for services. */
   standardServicesResolver?: StandardServicesResolver;
@@ -161,6 +172,9 @@ export class SpineTurnAdapter implements ConverseRunner {
     if (this.ports.standardServicesResolver && !lease) {
       throw new Error("standard_services_subscription_mount_missing");
     }
+    const tenantRunner = this.ports.tenantRunnerFor
+      ? await this.ports.tenantRunnerFor(input.tenant_id, grant)
+      : null;
 
     // Scrub the credential out of the INBOUND CONTENT, exactly once, here.
     //
@@ -192,7 +206,7 @@ export class SpineTurnAdapter implements ConverseRunner {
         context_packet: capContextPacketDepth(input.context_packet) as Record<string, unknown>,
       };
     }
-    const secrets = grantSecrets(grant).filter(isRedactableSecret);
+    const secrets = [...grantSecrets(grant), ...(tenantRunner?.secrets ?? [])].filter(isRedactableSecret);
     if (secrets.length) {
       const scrubPacket = (value: unknown): unknown => {
         const root: Record<string, unknown> = {};
@@ -218,6 +232,10 @@ export class SpineTurnAdapter implements ConverseRunner {
       input = {
         ...input,
         ...(input.text !== undefined ? { text: stripSecrets(input.text, secrets) } : {}),
+        ...(input.answers ? { answers: scrubPacket(input.answers) as ConverseTurnInput["answers"] } : {}),
+        ...(typeof input.confirm?.feedback === "string" ? {
+          confirm: { ...input.confirm, feedback: stripSecrets(input.confirm.feedback, secrets) },
+        } : {}),
         messages: input.messages.map((m) => ({ ...m, text: stripSecrets(m.text, secrets) })),
         ...(input.context_packet !== undefined
           ? { context_packet: scrubPacket(input.context_packet) as Record<string, unknown> }
@@ -243,7 +261,7 @@ export class SpineTurnAdapter implements ConverseRunner {
 
     const loop = new ConverseLoop(
       {
-        runner: this.ports.runnerFor(grant),
+        runner: tenantRunner?.runner ?? this.ports.runnerFor(grant),
         appRun,
         // The loop owns separate durable session/turn ids for SDK resume and
         // confirmation binding. Preserve the authenticated app wire ids as a
@@ -258,7 +276,7 @@ export class SpineTurnAdapter implements ConverseRunner {
         },
         store,
         instantExecutor: this.ports.instantExecutor,
-        ...(this.ports.intentFor ? { intent: this.ports.intentFor(grant) } : {}),
+        ...(this.ports.intentFor && !tenantRunner ? { intent: this.ports.intentFor(grant) } : {}),
       },
       {
         // Per-session model ("mount your LLM"): the wire value wins, then the
@@ -292,6 +310,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     let routingUsage = { cost_tokens: 0 };
     let routingStopReason: import("../ports/index.js").ConverseStopReason = "error";
     let routingRetryAfterS: number | undefined;
+    let routingErrorCode: string | undefined;
     const push = (): void => {
       wake?.();
       wake = null;
@@ -301,8 +320,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     // observes `aborted` and returns.
     opts?.signal?.addEventListener("abort", push, { once: true });
     const onEvent = (ev: ConverseEvent): void => {
-      const type = ev.type as HarnessTurnEvent["type"];
-      if (!WIRE_EVENT_TYPES.has(type)) return;
+      if (!WIRE_EVENT_TYPES.has(ev.type)) return;
       if (ev.type === "turn_usage" && typeof ev.data.cost_tokens === "number") {
         routingUsage = { cost_tokens: Math.max(0, Math.trunc(ev.data.cost_tokens)) };
       } else if (ev.type === "turn_complete" && typeof ev.data.stop_reason === "string") {
@@ -311,12 +329,17 @@ export class SpineTurnAdapter implements ConverseRunner {
         const detail = ev.data.error;
         if (detail && typeof detail === "object" && !Array.isArray(detail)) {
           const retryAfter = (detail as Record<string, unknown>).retry_after_s;
+          const errorCode = (detail as Record<string, unknown>).error_code;
+          if (typeof errorCode === "string" && errorCode.length >= 1 && errorCode.length <= 64) {
+            routingErrorCode = errorCode;
+          }
           if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
             routingRetryAfterS = retryAfter;
           }
         }
       }
-      queue.push({ type, data: ev.data });
+      // The upstream transport types predate the two additive display events.
+      queue.push({ type: ev.type as HarnessTurnEvent["type"], data: ev.data });
       push();
     };
 
@@ -327,11 +350,13 @@ export class SpineTurnAdapter implements ConverseRunner {
       tenantId: input.tenant_id,
       ...(input.text !== undefined ? { text: input.text } : {}),
       ...(input.images?.length ? { images: input.images } : {}),
+      ...(input.answers !== undefined ? { answers: input.answers } : {}),
       ...(input.confirm
         ? {
             confirm: {
               confirmationId: input.confirm.confirmation_id,
               approved: input.confirm.approved,
+              ...(typeof input.confirm.feedback === "string" ? { feedback: input.confirm.feedback } : {}),
             },
           }
         : {}),
@@ -354,6 +379,16 @@ export class SpineTurnAdapter implements ConverseRunner {
           }
         : {}),
       onEvent,
+    }).catch(async error => {
+      if (input.answers && lease && this.ports.oauth.settleGrant) {
+        // A rejected card used no model tokens. Release the reservation even
+        // though there is no running turn to settle in the completion path.
+        await this.ports.oauth.settleGrant(input.tenant_id, lease.lease_id, {
+          usage: { cost_tokens: 0 }, stop_reason: "end_turn",
+        }).catch(() => {});
+      }
+      opts?.signal?.removeEventListener("abort", push);
+      throw error;
     });
     void (async () => {
       try {
@@ -362,6 +397,7 @@ export class SpineTurnAdapter implements ConverseRunner {
           await this.ports.oauth.settleGrant(input.tenant_id, lease.lease_id, {
             usage: input.credential_grant ? { cost_tokens: 0 } : routingUsage,
             stop_reason: input.credential_grant ? "end_turn" : routingStopReason,
+            ...(!input.credential_grant && routingErrorCode !== undefined ? { error_code: routingErrorCode } : {}),
             ...(!input.credential_grant && routingRetryAfterS !== undefined
               ? { retry_after_s: routingRetryAfterS }
               : {}),

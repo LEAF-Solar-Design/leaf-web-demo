@@ -30,7 +30,7 @@ def _jobs():
 
 
 def _submission_fingerprint(org, proj, drawing, parent, tenant, actor, tool, params, manifest,
-                            solve_context=None, proposal_job_id=None):
+                            solve_context=None, proposal_job_id=None, solver_fault=None):
     return _jobs()._fingerprint("canonical-project-graph-submission", {
         "schema": _jobs().PROJECT_GRAPH_JOB_SCHEMA,
         "organization_id": str(org), "project_id": str(proj), "drawing_id": str(drawing),
@@ -38,6 +38,7 @@ def _submission_fingerprint(org, proj, drawing, parent, tenant, actor, tool, par
         "actor_binding_id": str(actor), "tool_name": tool, "parameters": params,
         "tool_manifest_sha256": manifest, "initialized": "initialize" in params,
         "max_attempts": 3,
+        **({"xbench_solver_fault": solver_fault} if solver_fault is not None else {}),
         **({"solve_context": solve_context} if tool == solve.TOOL_NAME else {}),
         **({"proposal_job_id": proposal_job_id} if tool == solve.COMMIT_TOOL else {}),
     })
@@ -79,6 +80,10 @@ def submit_project_graph_job(
         if reason:
             raise project.ProjectContextError(reason)
     org, actor = project._access(tenant, project_id, write=True)
+    import xbench_solver_fault
+    solver_fault = xbench_solver_fault.current_mode()
+    if solver_fault is not None and tool_name != solve.TOOL_NAME:
+        raise GraphValidationError("XBENCH_SOLVER_FAULT_INVALID")
     if not isinstance(drawing_id, UUID) or not isinstance(input_version_id, UUID):
         project.refuse("INVALID_BINDING")
     if not isinstance(actor, UUID):
@@ -88,9 +93,10 @@ def submit_project_graph_job(
     jobs = _jobs()
     if tool_name == solve.TOOL_NAME:
         solve.refuse_split(params, solve_context)
-    existing = platform_link.platform_db().run_transaction(lambda conn:
-        jobs.get_project_graph_job_by_key(org, project_id, idempotency_key, conn=conn))
-    if existing is not None:
+    def replay_existing(conn):
+        existing = jobs.get_project_graph_job_by_key(org, project_id, idempotency_key, conn=conn)
+        if existing is None:
+            return None
         if existing.get("deleted_at") is not None:
             project.refuse("CONTEXT_NOT_FOUND")
         if expected_intake_sha256 is not None and (
@@ -100,7 +106,7 @@ def submit_project_graph_job(
         normalized = graph._parameters(SimpleNamespace(drawing_id=drawing_id), params)
         if tool_name == solve.TOOL_NAME:
             try:
-                normalized = solve.cloud.validate_params(normalized).model_dump()
+                normalized = solve.normalize_params(normalized, full_frame=True).model_dump()
             except solve.cloud.CloudError:
                 pass
         if graph._global_sizing(tool_name, normalized):
@@ -118,8 +124,16 @@ def submit_project_graph_job(
                         "requests": {target: parsed.request.wire()},
                         "cancel": normalized.get("cancel", False)}
         fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
-            tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id)
+            tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id,
+            solver_fault=solver_fault)
         return jobs._graph_replay(existing, fingerprint)
+
+    # Keep request/principal/source comparison under the existing row lock.
+    # Replays return before admission IO, child reservation or submission. The
+    # store repeats this check in its insertion transaction for concurrent misses.
+    existing = platform_link.platform_db().run_transaction(replay_existing)
+    if existing is not None:
+        return existing
     admission = project.verify_at_admission(tenant, project_id, drawing_id, input_version_id,
                                            checkout_capability=checkout_capability)
     if (expected_intake_sha256 is not None
@@ -170,11 +184,13 @@ def submit_project_graph_job(
         "actor_binding_id": str(actor), "checkout_fence": str(admission.checkout.fence),
         "tool_manifest_sha256": tool_manifest_sha256,
         "parent_intake_sha256": context.intake_sha256, "initialized": initialized,
+        **({"xbench_solver_fault": solver_fault} if solver_fault is not None else {}),
         **({"solve_binding": plan["solve_binding"]} if tool_name == solve.TOOL_NAME else {}),
         **({"trusted_proposal": trusted_proposal} if tool_name == solve.COMMIT_TOOL else {}),
     }
     fingerprint = _submission_fingerprint(org, project_id, drawing_id, input_version_id,
-        tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id)
+        tenant, actor, tool_name, normalized, tool_manifest_sha256, solve_context, proposal_job_id,
+        solver_fault=solver_fault)
     with project.write_loop.drawing_mutation_refusal_guard() as refusal:
         if refusal is not None:
             project.refuse("WRITES_DRAINED")
@@ -186,11 +202,15 @@ def submit_project_graph_job(
             raise project.ProjectContextError("SIP_R4_WORKER_UNAVAILABLE")
         if preview:
             return {"admissible": True, "replay": False}
-        return platform_link.platform_db().run_transaction(lambda conn:
-            jobs.submit_project_graph_job(org, project_id, str(tenant), tool_name, normalized,
+        def submit(conn):
+            existing = replay_existing(conn)
+            if existing is not None:
+                return existing
+            return jobs.submit_project_graph_job(org, project_id, str(tenant), tool_name, normalized,
                 idempotency_key, input_version_id=input_version_id,
                 execution_context=execution_context, submission_fingerprint=fingerprint,
-                pinned_tier=stored_org.tier if stored_org is not None else None, conn=conn))
+                pinned_tier=stored_org.tier if stored_org is not None else None, conn=conn)
+        return platform_link.platform_db().run_transaction(submit)
 
 
 def _job_context(job, conn):
@@ -330,9 +350,11 @@ def _preparation_error(exc):
     if isinstance(exc, cloud.CloudError):
         allowed = {"cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
                    "cloud_upstream_failure", "cloud_response_invalid", "sizing_outcome_unknown",
-                   "solve_outcome_unknown"}
+                   "solve_outcome_unknown", "CLOUD_REQUEST_REJECTED"}
         reason = (exc.classification if exc.classification in allowed
                   else "cloud_upstream_failure").upper()
+        if exc.classification == "solve_outcome_unknown":
+            reason = "solve_outcome_unknown"
     if isinstance(reason, str) and reason.startswith("SIP_R14_EXCHANGE_"):
         reason = "SIP_R14_EVIDENCE_REJECTED"
     retryable = isinstance(exc, _TRANSPORT_FAILURES) or reason in {
@@ -344,6 +366,17 @@ def _preparation_error(exc):
         error["reason_code"] = reason
     if isinstance(exc, _ColdVoltageFailed):
         error["cold_voltage"] = exc.cold_voltage
+    if hasattr(exc, "solve_progress"):
+        error["solve_progress"] = exc.solve_progress
+        if exc.solve_progress["status"] == "partial":
+            error["message"] = "canonical Solar solve partially completed"
+    if reason == "CLOUD_REQUEST_REJECTED":
+        error.update(message="The solar solve request was rejected by the solver.",
+                     next_action="Review the solve inputs before submitting again.",
+                     upstream_status=400, retryable=False)
+    elif reason == "solve_outcome_unknown":
+        error.update(message="The solar solve outcome is unknown.",
+                     next_action="Reconcile its existing job before retrying.", retryable=False)
     return error
 
 

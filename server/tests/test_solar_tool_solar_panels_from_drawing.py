@@ -185,6 +185,71 @@ def test_declaration_pins_the_capability():
     assert len(availability.W1_CAPABILITIES) == 9
 
 
+def test_portrait_outline_keeps_long_axis_orientation(builtin, g1):
+    intake = {"polylines": [{"layer": "Panels", "closed": True, "handle": "A1",
+        "pts": [[0, 0], [1, 0], [1, 2], [0, 2]]}]}
+    before = copy.deepcopy(intake)
+    result = builtin.run(g1, {"expected_rev": g1["rev"]}, source_intake=intake)
+    assert result["panels"][0]["angle"] == 90.0
+    assert result["panels"][0]["centre"] == [.5, 1.0]
+    assert result["panels"][0]["provenance"]["source_handle"] == "A1"
+    assert intake == before
+
+
+def large_panel_intake(kind, count):
+    outline = [[0, 0], [2, 0], [2, 1], [0, 1]]
+    entities = []
+    for index in range(count):
+        entity = {"layer": "Panels", "handle": f"{index + 1:08x}"}
+        if kind == "polylines":
+            entity.update(closed=True, pts=[[x + 3 * index, y] for x, y in outline])
+        else:
+            entity.update(name="module", x=3 * index, y=0, z=0, rot=0,
+                          scale=[1, 1, 1], nrm=[0, 0, 1])
+        entities.append(entity)
+    intake = {kind: entities}
+    if kind == "inserts":
+        intake["blocks"] = {"module": {
+            "complete": True, "count": 1, "base": [0, 0, 0],
+            "children": [{"kind": "LWPOLYLINE", "closed": True,
+                          "nrm": [0, 0, 1], "elev": 0, "pts": outline}],
+        }}
+    return intake
+
+
+@pytest.mark.parametrize("kind", ["polylines", "inserts"])
+def test_large_panel_import_at_bound(builtin, g1, kind):
+    intake = large_panel_intake(kind, 10_000)
+    params = {"expected_rev": g1["rev"]}
+    before = copy.deepcopy((g1, params, intake))
+
+    result = builtin.run(g1, params, source_intake=intake)
+
+    assert len(result["panels"]) == 10_000
+    assert len({panel["id"] for panel in result["panels"]}) == 10_000
+    assert result["panels"] == [
+        expected_panel(g1, entity["handle"], [3 * index + 1, .5], 0.0)
+        for index, entity in enumerate(intake[kind])
+    ]
+    assert result["rev"] == g1["rev"] + 1
+    assert result["parent_rev"] == g1["rev"]
+    assert {k: v for k, v in result.items() if k not in ("panels", "rev", "parent_rev")} == {
+        k: v for k, v in g1.items() if k not in ("panels", "rev", "parent_rev")}
+    assert (g1, params, intake) == before
+
+
+@pytest.mark.parametrize("kind", ["polylines", "inserts"])
+def test_large_panel_import_over_bound(builtin, g1, kind):
+    intake = large_panel_intake(kind, 10_001)
+    params = {"expected_rev": g1["rev"]}
+    before = copy.deepcopy((g1, params, intake))
+
+    with refused("PANEL_LIMIT_EXCEEDED"):
+        builtin.run(g1, params, source_intake=intake)
+
+    assert (g1, params, intake) == before
+
+
 @pytest.mark.parametrize("adapter,seedable", [
     ("local-graph-commit", True), (None, False),
     ("cloud-proposal", False), ("local-graph-read", False),

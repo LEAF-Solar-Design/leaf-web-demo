@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { scaleTimeout } from './testTimeScale.js'
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -21,7 +22,7 @@ function runBudgetGate(assets, baseline) {
     for (const [name, buffer] of Object.entries(assets)) {
       writeFileSync(join(assetDirectory, name), buffer)
     }
-    return spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 30000 })
+    return spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: scaleTimeout(30000) })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

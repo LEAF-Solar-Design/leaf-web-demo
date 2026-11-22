@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 
 import requests
@@ -14,7 +15,9 @@ import requests
 import broker_client
 import deps
 import platform_link
+import project_author_diagnostics as author_diagnostics
 import project_reference_materials as originals
+import project_video_materials as videos
 import project_repository_source as source
 from project_repository_edit_contract import parse_staged_receipt, receipt_digest_matches
 
@@ -38,14 +41,59 @@ _ERRORS = {
     'material_too_large': (413, 'Text and JSON references must total at most 8 MiB.'),
     'unsupported_material': (422, 'Browser author accepts original UTF-8 text and JSON; video is not consumed.'),
     'author_unavailable': (503, 'Project author service is unavailable.'),
+    'video_unavailable': (503, 'Private video decoding is unavailable.'),
+    'video_changed': (409, 'Original video changed.'),
+    'video_incomplete': (422, 'Original video could not be completely decoded.'),
+    'video_timeout': (422, 'Original video exceeded its decode budget.'),
+    'video_too_large': (413, 'Video observations exceed the supported visual input budget.'),
+    'video_cleanup_failed': (503, 'Private video decoding could not finish safely.'),
 }
 
 
 class AuthoringError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, *, author_subphase=None):
         self.code = code
         self.status, message = _ERRORS[code]
+        self.author_subphase = author_subphase if (
+            code == 'author_unavailable' and type(author_subphase) is str
+            and author_subphase in {'initialization', 'missing_binding', 'author_http',
+                                    'author_response', 'transport'}) else None
         super().__init__(message)
+
+
+_VERIFIED_DEPENDENCY_REFUSAL = object()
+
+
+class AuthorDependencyRefusal(AuthoringError):
+    """Trusted RPC gate disposition, with caller-supplied wire correlation."""
+    def __init__(self, disposition, *, request, binding, provenance=None):
+        super().__init__('author_unavailable', author_subphase='author_http')
+        self.disposition = copy.deepcopy(disposition)
+        self.request = copy.deepcopy(request)
+        self.binding = copy.deepcopy(binding)
+        self.provenance = provenance
+
+
+def _dependency_refusal(response, request, wire, attempt_id, wire_digest):
+    """Capture a closed gate response. Echoed hashes are not byte verification."""
+    if type(response.status_code) is not int or response.status_code != 503:
+        return None
+    try:
+        raw = getattr(response, 'content', b'')
+        if type(raw) is not bytes or not raw or len(raw) > 4096:
+            return None
+        value = json.loads(raw, object_pairs_hook=source._closed_pairs)
+        expected = dict(schema='leaf.project-source-author-disposition.v1', attempt_id=attempt_id,
+                        wire_sha256=wire_digest, outcome='not_started', stage='author_dependency_gate')
+        if (type(value) is not dict or set(value) != {'error', 'disposition'}
+                or value['error'] != dict(code='source_unavailable', message='source is unavailable')
+                or value['disposition'] != expected):
+            return None
+        binding = {key: wire[key] for key in (*_AUTHORITY, 'actor_binding_id', 'expected_base_commit')}
+        return AuthorDependencyRefusal(expected, request=request, binding=binding,
+                                       provenance=_VERIFIED_DEPENDENCY_REFUSAL)
+    except Exception:
+        return None  # An unreadable optional disposition retains the unknown outcome.
 
 
 def _uuid(value):
@@ -150,11 +198,11 @@ def _result(result, body):
         raise AuthoringError('source_changed') from None
 
 
-def _materials(request, scope, recheck, source_profile):
+def _materials(request, scope, recheck, source_profile, *, consume_video=False, deadline=None):
     platform_link._ensure_platform_package()
     from leaf_platform import project_reference_materials as metadata
 
-    materials, total = [], 0
+    materials, total, movies = [], 0, 0
     for ref in request['material_refs']:
         recheck()
         try:
@@ -168,16 +216,24 @@ def _materials(request, scope, recheck, source_profile):
             raise AuthoringError('unavailable')
         if row.get('sha256') != ref['sha256']:
             raise AuthoringError('source_changed')
-        if row.get('media_type') not in ('text/plain', 'application/json'):
+        movie = source_profile == NATIVE_PROFILE and row.get('media_type') == 'video/quicktime'
+        if not movie and row.get('media_type') not in ('text/plain', 'application/json'):
             raise AuthoringError('unsupported_material')
         size = row.get('byte_size')
-        per_file = 1048576 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
-        aggregate = 4194304 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
-        if type(size) is not int or not 0 < size <= per_file or total + size > aggregate:
-            raise AuthoringError('material_too_large')
-        total += size
+        if movie:
+            movies += 1
+            if movies > 1 or type(size) is not int or not 0 < size <= 64 * 1024 * 1024:
+                raise AuthoringError('material_too_large')
+        else:
+            per_file = 1048576 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
+            aggregate = 4194304 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
+            if type(size) is not int or not 0 < size <= per_file or total + size > aggregate:
+                raise AuthoringError('material_too_large')
+            total += size
         materials.append(copy.deepcopy(row))
-    wire_material = []
+    if movies and not any(row['media_type'] in ('text/plain', 'application/json') for row in materials):
+        raise AuthoringError('invalid_request')
+    wire_material, video_input = [], None
     for row in materials:
         recheck()
         try:
@@ -194,16 +250,39 @@ def _materials(request, scope, recheck, source_profile):
                 raise AuthoringError('source_changed')
         if type(raw) is not bytes or len(raw) != row['byte_size'] or hashlib.sha256(raw).hexdigest() != row['sha256']:
             raise AuthoringError('source_changed')
+        if row['media_type'] == 'video/quicktime':
+            video_input = (row, raw)
+            continue
         suffix = '.json' if row['media_type'] == 'application/json' else '.txt'
         wire_material.append({'path': row['material_id'] + suffix,
             'key': 'reference:' + scope[1] + ':' + row['material_id'] + ':' + row['sha256'],
             'sha256': row['sha256'], 'size_bytes': len(raw), 'product_b64': base64.b64encode(raw).decode('ascii')})
+    visual = None
+    if video_input is not None and consume_video:
+        row, raw = video_input
+        transcripts = [dict(material_id=entry['material_id'], sha256=entry['sha256'], size_bytes=entry['byte_size'])
+                       for entry in materials if entry['media_type'] in ('text/plain', 'application/json')]
+        try:
+            visual = videos.decode(raw, row, identity=dict(tenant_id=scope[0], organization_id=scope[0],
+                project_id=scope[1], actor_binding_id=scope[2], edit_id=request['edit_id']),
+                transcripts=transcripts, recheck=recheck, deadline=deadline)
+        except videos.VideoError as exc:
+            raise AuthoringError(exc.code) from None
+        recheck()
+        for entry in materials:
+            try:
+                fresh = metadata.get_material(*scope, entry['material_id'])
+            except Exception:
+                raise AuthoringError('unavailable') from None
+            if fresh != entry:
+                raise AuthoringError('source_changed')
     recheck()
-    return wire_material
+    return wire_material, visual
 
 
 def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PROFILE):
     """Stage complete immutable text/JSON assets; publication stays caller-owned."""
+    deadline = time.monotonic() + 240
     request = _request(request, source_profile=source_profile)
     scope = _scope(tenant, project_id)
 
@@ -213,7 +292,10 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
         if _scope(tenant, project_id) != scope:
             raise AuthoringError('access_denied')
 
-    wire_material = _materials(request, scope, recheck, source_profile)
+    wire_material, visual = _materials(request, scope, recheck, source_profile,
+                                      consume_video=True, deadline=deadline)
+    if visual is not None and time.monotonic() >= deadline:
+        raise AuthoringError('video_timeout')
     if request['source_operation'] == 'edit':
         _repo(scope)  # Never initialize a missing edit target.
     try:
@@ -221,7 +303,7 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
     except source.SourceConflict:
         raise AuthoringError('source_changed') from None
     except Exception:
-        raise AuthoringError('author_unavailable') from None
+        raise AuthoringError('author_unavailable', author_subphase='initialization') from None
     recheck()
     authority = _repo(scope)
     base = initialized.get('source_commit') if isinstance(initialized, dict) else None
@@ -234,35 +316,55 @@ def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PR
         source_profile=source_profile, source_operation=request['source_operation'])
     if source_profile == NATIVE_PROFILE:
         body['commit_message'] = 'Author native project'
+    if visual is not None:
+        body['video'] = visual
+        body['budget_ms'] = int((deadline - time.monotonic()) * 1000)
+        if body['budget_ms'] <= 0:
+            raise AuthoringError('video_timeout')
     encoded = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if len(encoded) > WIRE_LIMIT:
         raise AuthoringError('material_too_large')
     url = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
     headers = broker_client.harness_headers()
     if not url or not headers.get('X-Harness-Secret'):
-        raise AuthoringError('author_unavailable')
+        raise AuthoringError('author_unavailable', author_subphase='missing_binding')
     headers = dict(headers, **{'X-Tenant-Id': scope[0], 'Content-Type': 'application/json'})
+    attempt_id, wire_digest = None, None
+    if source_profile == NATIVE_PROFILE:
+        attempt_id, wire_digest = str(uuid.uuid4()), hashlib.sha256(encoded).hexdigest()
+        headers.update({'X-Source-Author-Attempt': attempt_id, 'X-Source-Author-Wire-SHA256': wire_digest})
     recheck()
     if _repo(scope) != authority:
         raise AuthoringError('source_changed')
     response = None
     try:
+        remaining = deadline - time.monotonic() if visual is not None else 240
+        if remaining <= 0:
+            raise AuthoringError('video_timeout')
+        connect = min(10, remaining / 2) if visual is not None else 10
+        read = remaining - connect if visual is not None else 240
         response = requests.post(url + '/internal/project-repository-source/author', data=encoded,
-                                 headers=headers, timeout=(10, 240), allow_redirects=False)
+                                 headers=headers, timeout=(connect, read), allow_redirects=False)
         recheck()
         if _repo(scope) != authority:
             raise AuthoringError('source_changed')
         if response.status_code == 409:
             raise AuthoringError('source_changed')
         if response.status_code != 200:
-            raise AuthoringError('author_unavailable')
+            author_diagnostics.record_failure('author_http', http_status=response.status_code)
+            if source_profile == NATIVE_PROFILE:
+                refusal = _dependency_refusal(response, request, body, attempt_id, wire_digest)
+                if refusal is not None:
+                    raise refusal
+            raise AuthoringError('author_unavailable', author_subphase='author_http')
         if source_profile == NATIVE_PROFILE and len(getattr(response, 'content', b'')) > 256 * 1024:
-            raise AuthoringError('author_unavailable')
+            raise AuthoringError('author_unavailable', author_subphase='author_response')
         return _result(response.json(object_pairs_hook=source._closed_pairs), body)
     except (requests.RequestException, ValueError) as exc:
         if isinstance(exc, AuthoringError):
             raise
-        raise AuthoringError('author_unavailable') from None
+        raise AuthoringError('author_unavailable', author_subphase=(
+            'author_response' if response is not None else 'transport')) from None
     finally:
         if response is not None:
             response.close()

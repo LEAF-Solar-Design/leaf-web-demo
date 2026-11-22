@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import itertools
 import json
 import math
 import sys
@@ -28,7 +29,7 @@ def _load_string_panels():
 
 
 string_panels = _load_string_panels()
-INCH_DIGEST = "0ba07e51b7c4dbc61b201f3f59d8ea78fb6bb161500bb3839275258c72ac022b"
+INCH_DIGEST = "ea1d6371cf45ad84b99e7b51b3f4cd18c0ce1e973b8a986ad3b7b6a3d0b8f9f9"
 PARAM_ERROR = "meters_per_unit must be a finite number greater than 0 and at most 1000"
 GRAPH_ERROR = (
     "the drawing's Solar design does not declare a usable meters_per_unit; "
@@ -111,7 +112,7 @@ def baseline(intake):
     return run(intake, {})
 
 
-def test_string_panels_units_inch_default_unchanged(intake, baseline):
+def test_string_panels_units_inch_continuity_result(intake, baseline):
     for drawing, params in [
         (intake, {}), (intake, {"meters_per_unit": 0.0254}),
         (intake, {"meters_per_unit": None}),
@@ -121,11 +122,11 @@ def test_string_panels_units_inch_default_unchanged(intake, baseline):
         assert digest(run(drawing, params)) == INCH_DIGEST
     result = baseline[0]
     assert result["stats"]["bank_count"] == 11
-    assert result["stats"]["string_count"] == 135
-    assert result["stats"]["full_string_count"] == 124
-    assert result["stats"]["total_wire_ft"] == 15475.5
-    assert result["strings"][0]["length_ft"] == 115.7
-    assert result["strings"][0]["modules"] == 18
+    assert result["stats"]["string_count"] == 169
+    assert result["stats"]["full_string_count"] == 20
+    assert result["stats"]["total_wire_ft"] == 13916.3
+    assert result["strings"][0]["length_ft"] == 94.2
+    assert result["strings"][0]["modules"] == 15
 
 
 @pytest.mark.parametrize("f,mpu", SCALES)
@@ -142,7 +143,7 @@ def test_string_panels_units_explicit_scale_matches_inch(intake, baseline, f, mp
 
 def test_string_panels_units_today_was_wrong(intake):
     metres = run(scaled(intake, 0.0254), {"meters_per_unit": 0.0254})[0]
-    assert metres["stats"]["total_wire_ft"] == 391.2
+    assert metres["stats"]["total_wire_ft"] == 352.8
     millimetres = run(scaled(intake, 25.4), {"meters_per_unit": 0.0254})[0]
     assert millimetres["stats"]["string_count"] == 2345
     assert millimetres["stats"]["total_wire_ft"] == 0.0
@@ -193,7 +194,7 @@ def test_string_panels_units_bounds_accepted(intake):
         assert stats["bank_count"] == 2345
         assert stats["total_wire_ft"] == 0.0
     tiny = run(intake, {"meters_per_unit": 5e-324})
-    assert tiny[0]["stats"]["string_count"] == 135
+    assert tiny[0]["stats"]["string_count"] == 169
     assert tiny[0]["stats"]["bank_count"] == 11
     # Not the inch reading: every length collapses and every point returns to the origin.
     assert tiny[0]["stats"]["total_wire_ft"] == 0.0
@@ -208,7 +209,7 @@ def test_string_panels_units_overflow_refused(intake):
                  if pl.get("layer") == "Panels" and pl.get("closed"))
     first["pts"][0][0] = 1e308
     assert_refused(drawing, {"meters_per_unit": 1000}, OVERFLOW_ERROR)
-    assert run(drawing, {})[0]["stats"]["string_count"] == 136
+    assert run(drawing, {})[0]["stats"]["string_count"] == 171
 
 
 def test_string_panels_units_result_overflow_refused():
@@ -228,20 +229,20 @@ def test_string_panels_units_result_overflow_refused():
 def test_string_panels_units_cluster_threshold_tie_is_a_declared_limit():
     # DECLARED LIMIT, not a guarantee. Two panels exactly 200 inches apart sit on the inclusive
     # neighbour window. A feet drawing stores 200/12, the scale is 12.000000000000002, and the
-    # product lands one float step outside the window, so the two units disagree at the tie.
-    # One inch inside the window they agree.
+    # product lands one float step outside the window, so bank counts disagree at the tie.
+    # Continuity still prevents a 100-module step even within a connected bank.
     def summary(drawing, params):
         result = run(drawing, params)[0]
-        return ([s["modules"] for s in result["strings"]],
+        return (result["stats"]["bank_count"], [s["modules"] for s in result["strings"]],
                 [s["length_ft"] for s in result["strings"]])
 
     feet = {"meters_per_unit": 0.3048}
-    assert summary({"polylines": [rect(0, 2, 1), rect(200, 2, 1)]}, {}) == ([2], [16.7])
+    assert summary({"polylines": [rect(0, 2, 1), rect(200, 2, 1)]}, {}) == (1, [1, 1], [0.0, 0.0])
     assert summary({"polylines": [rect(0, 2, 1, 1 / 12), rect(200, 2, 1, 1 / 12)]}, feet) == (
-        [1, 1], [0.0, 0.0])
-    assert summary({"polylines": [rect(0, 2, 1), rect(199, 2, 1)]}, {}) == ([2], [16.6])
+        2, [1, 1], [0.0, 0.0])
+    assert summary({"polylines": [rect(0, 2, 1), rect(199, 2, 1)]}, {}) == (1, [1, 1], [0.0, 0.0])
     assert summary({"polylines": [rect(0, 2, 1, 1 / 12), rect(199, 2, 1, 1 / 12)]}, feet) == (
-        [2], [16.6])
+        1, [1, 1], [0.0, 0.0])
 
 
 def test_string_panels_units_intake_not_mutated(intake):
@@ -290,3 +291,373 @@ def test_string_panels_units_catalog_schema():
 def test_string_panels_units_no_panels_message_unchanged():
     for drawing in (None, {}):
         assert_refused(drawing, {}, "no closed polylines found on layer 'Panels'")
+
+
+def test_string_panels_continuity_inside_connected_bank():
+    # A full lower row connects both sides of the upper row's empty slot.
+    centres = [(80 * x, 0) for x in range(11)] + [(80 * x, 40) for x in (0, 1, 3, 4)]
+    drawing = {"polylines": [{"layer": "Panels", "closed": True,
+        "pts": [[x - 38.5, y - 19.25], [x + 38.5, y - 19.25],
+                [x + 38.5, y + 19.25], [x - 38.5, y + 19.25]]}
+        for x, y in centres]}
+    result, _ = run(drawing, {})
+    assert result["stats"]["bank_count"] == 1
+    points = [tuple(p) for string in result["strings"] for p in string["pts"]]
+    assert sorted(points) == sorted(centres)
+    assert len(points) == len(set(points)) == 15
+    assert all(1 <= string["modules"] <= 18 for string in result["strings"])
+    assert all(math.dist(a, b) <= 1.5 * 77 for string in result["strings"]
+               for a, b in zip(string["pts"], string["pts"][1:]))
+
+
+def test_string_panels_continuity_actual_demo_rooftop(intake):
+    panels = [p for p in intake["polylines"] if p.get("layer") == "Panels" and p.get("closed")]
+    centres = [tuple(round(sum(p["pts"][i][axis] for i in range(4)) / 4, 3)
+                     for axis in (0, 1)) for p in panels]
+    result, overlay = run(intake, {})
+    points = [tuple(p) for string in result["strings"] for p in string["pts"]]
+    assert len(points) == len(set(points)) == 2345
+    assert sorted(points) == sorted(centres)
+    assert result["stats"]["bank_count"] == 11
+    assert result["electrical"]["pass"] is True
+    assert all(1 <= string["modules"] <= result["electrical"]["max_modules_per_string"]
+               for string in result["strings"])
+    assert overlay["items"] == [{"id": s["id"], "pts": s["pts"]} for s in result["strings"]]
+    # Independent dimensional oracle from the repo demo's 77-inch module edge.
+    assert all(math.dist(a, b) <= 1.5 * 77 + 0.002 for string in result["strings"]
+               for a, b in zip(string["pts"], string["pts"][1:]))
+
+
+@pytest.mark.parametrize("gap,modules", [(115.5, [2]), (115.501, [1, 1])])
+def test_string_panels_continuity_adjacent_slot_boundary(gap, modules):
+    drawing = {"polylines": [rect(x, 77, 38.5) for x in (0.0, gap)]}
+    result, _ = run(drawing, {})
+    assert result["stats"]["bank_count"] == 1
+    assert [string["modules"] for string in result["strings"]] == modules
+
+
+@pytest.mark.parametrize("count", [18, 19, 20, 35, 36, 37])
+def test_string_panels_balances_contiguous_run_without_short_remainder(count):
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(count)]}
+    result, _ = run(intake, {})
+    sizes = [string["modules"] for string in result["strings"]]
+    maximum = result["electrical"]["max_modules_per_string"]
+    assert maximum == 18
+    assert len(sizes) == math.ceil(count / maximum)
+    assert max(sizes) - min(sizes) <= 1
+    assert sum(sizes) == count
+    assert max(sizes) <= maximum
+    assert result["electrical"]["pass"] is True
+    points = [tuple(point) for string in result["strings"] for point in string["pts"]]
+    assert len(points) == len(set(points)) == count
+    assert set(points) == {(index * 60.0, 0.0) for index in range(count)}
+    assert all(math.dist(left, right) <= 120.0 for string in result["strings"]
+               for left, right in zip(string["pts"], string["pts"][1:]))
+
+
+def test_string_panels_balancing_preserves_gap_and_order_boundaries():
+    positions = list(range(20)) + list(range(100, 119))
+    cents = [(float(x), 0.0) for x in positions]
+    ordered = list(range(len(cents)))
+    before = copy.deepcopy((ordered, cents))
+    chunks = list(string_panels._continuous_chunks(ordered, cents, 18, 1.5))
+    assert [len(chunk) for chunk in chunks] == [10, 10, 10, 9]
+    assert [index for chunk in chunks for index in chunk] == ordered
+    assert all(math.dist(cents[left], cents[right]) <= 1.5 for chunk in chunks
+               for left, right in zip(chunk, chunk[1:]))
+    assert (ordered, cents) == before
+
+
+@pytest.mark.parametrize("count,lower,upper,expected", [
+    (20, 9, 11, [10, 10]), (37, 12, 14, [13, 12, 12]),
+])
+def test_constrained_stringing_public_count_variants(count, lower, upper, expected):
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(count)]}
+    result, _ = run(intake, {"min_modules_per_string": lower, "max_modules_per_string": upper})
+    assert result["planning"]["status"] == "complete"
+    assert result["planning"]["minimum_modules"] == lower
+    assert result["planning"]["maximum_modules"] == upper
+    assert [string["modules"] for string in result["strings"]] == expected
+    assert result["stats"]["modules_stringed"] == count
+
+
+def test_constrained_stringing_public_island_refuses_false_success():
+    intake = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(11)]}
+    result, overlay = run(intake, {"min_modules_per_string": 12, "max_modules_per_string": 14})
+    assert result["planning"]["status"] == "infeasible"
+    assert result["planning"]["reason"] == "component_cardinality"
+    assert result["planning"]["witness"]["panel_count"] == 11
+    assert result["strings"] == [] and overlay["items"] == []
+    assert result["stats"]["modules_stringed"] == 0
+
+
+@pytest.mark.parametrize("scale,mpu", [(1.0, 0.0254), (0.0254, 1.0), (25.4, 0.001)])
+def test_constrained_stringing_equivalent_units(scale, mpu):
+    drawing = {"polylines": [rect(index * 60.0, 40.0, 80.0, scale) for index in range(20)]}
+    result, _ = run(drawing, {"min_modules_per_string": 9, "max_modules_per_string": 11,
+                              "meters_per_unit": mpu})
+    assert result["planning"]["status"] == "complete"
+    assert [item["modules"] for item in result["strings"]] == [10, 10]
+    points = [point for item in result["strings"] for point in item["pts"]]
+    assert sorted(round(point[0] / scale, 3) for point in points) == [i * 60.0 for i in range(20)]
+    assert [item["length_ft"] for item in result["strings"]] == [45.0, 45.0]
+
+
+def test_constrained_stringing_maximum_only_and_electrical_cap():
+    drawing = {"polylines": [rect(index * 60.0, 40.0, 80.0) for index in range(20)]}
+    result, _ = run(drawing, {"max_modules_per_string": 11})
+    assert result["planning"]["minimum_modules"] == 1
+    assert result["planning"]["maximum_modules"] == 11
+    assert [item["modules"] for item in result["strings"]] == [10, 10]
+    capped, _ = run(drawing, {"max_modules_per_string": 100})
+    assert capped["planning"]["maximum_modules"] == 18
+    assert capped["electrical"]["pass"] is True
+    assert max(item["modules"] for item in capped["strings"]) <= 18
+    refused, overlay = run(drawing, {"min_modules_per_string": 19})
+    assert refused["planning"]["reason"] == "electrical_capacity"
+    assert refused["planning"]["status"] == "infeasible"
+    assert refused["strings"] == [] and overlay["items"] == []
+    assert refused["electrical"]["pass"] is None
+
+
+@pytest.mark.parametrize("params", [
+    {"min_modules_per_string": True}, {"min_modules_per_string": 0},
+    {"max_modules_per_string": 2.5}, {"max_modules_per_string": None},
+    {"min_modules_per_string": 12, "max_modules_per_string": 11},
+])
+def test_constrained_stringing_bad_bounds_refused_at_builtin(params):
+    with pytest.raises(ValueError, match="bounds"):
+        run({"polylines": [rect(0, 40, 80)]}, params)
+
+
+def test_constrained_stringing_budget_returns_no_partial_plan(monkeypatch):
+    import solar_string_partition as partition
+    monkeypatch.setattr(partition, "DEFAULT_STATE_BUDGET", 0)
+    result, overlay = run({"polylines": [rect(i * 60, 40, 80) for i in range(20)]},
+                           {"min_modules_per_string": 9, "max_modules_per_string": 11})
+    assert result["planning"]["status"] == "unresolved"
+    assert result["planning"]["reason"] == "search_budget"
+    assert result["strings"] == [] and overlay["items"] == []
+    assert result["stats"]["modules_stringed"] == 0
+    assert result["electrical"]["pass"] is None
+
+
+def test_constrained_stringing_registered_aliases_declare_bounds():
+    for filename, name in ((REPO_DIR / "engine/registry.json", "string-panels"),
+                           (SERVER_DIR / "catalog_tools.json", "autofill-string-targets")):
+        record = next(item for item in json.loads(filename.read_text(encoding="utf-8"))["tools"]
+                      if item["name"] == name)
+        assert tool_validate.validate_params(record, {"min_modules_per_string": 9,
+                                                      "max_modules_per_string": 11}) == []
+        for params in ({"min_modules_per_string": True}, {"max_modules_per_string": 0}):
+            assert tool_validate.validate_params(record, params)
+        assert "planning" in record["returns"]["properties"]
+
+
+@pytest.mark.parametrize("name,filename", [
+    ("string-panels", REPO_DIR / "engine/registry.json"),
+    ("autofill-string-targets", SERVER_DIR / "catalog_tools.json"),
+])
+def test_constrained_stringing_dynamic_registered_entry(name, filename):
+    import tool_loader
+    record = next(item for item in json.loads(filename.read_text(encoding="utf-8"))["tools"]
+                  if item["name"] == name)
+    drawing = {"polylines": [rect(i * 60, 40, 80) for i in range(20)]}
+    before = copy.deepcopy(drawing)
+    envelope = tool_loader.run_tool_dynamic(record, drawing,
+        {"min_modules_per_string": 9, "max_modules_per_string": 11}, aps_live=False)
+    assert envelope["ok"], envelope.get("error")
+    assert envelope["result"]["planning"]["status"] == "complete"
+    assert [item["modules"] for item in envelope["result"]["strings"]] == [10, 10]
+    assert drawing == before
+
+
+def test_constrained_stringing_hole_and_reversed_input():
+    panels = []
+    for row in range(3):
+        for col in range(3):
+            if (row, col) != (1, 1):
+                panel = rect(col * 80, 40, 80)
+                panel["pts"] = [[x, y + row * 80] for x, y in panel["pts"]]
+                panels.append(panel)
+    results = [run({"polylines": order}, {"min_modules_per_string": 4,
+                                        "max_modules_per_string": 4})[0]
+               for order in (panels, list(reversed(panels)))]
+    for result in results:
+        assert result["planning"]["status"] == "complete"
+        assert [item["modules"] for item in result["strings"]] == [4, 4]
+        points = [tuple(point) for item in result["strings"] for point in item["pts"]]
+        assert len(points) == len(set(points)) == 8
+        assert (80.0, 80.0) not in points
+        assert all(math.dist(a, b) <= 120 for item in result["strings"]
+                   for a, b in zip(item["pts"], item["pts"][1:]))
+    assert results[0]["strings"] == results[1]["strings"]
+
+
+# Constrained planner oracles share the registered string-units CI suite.
+from solar_string_partition import plan_partition, validate_partition
+
+
+def exact_possible(points, minimum, maximum, step):
+    """Enumerate permutations and all cuts, independently of planner traversal."""
+    for order in itertools.permutations(range(len(points))):
+        for cuts in itertools.product((False, True), repeat=max(0, len(order) - 1)):
+            paths, current = [], [order[0]]
+            for index, cut in enumerate(cuts):
+                if cut:
+                    paths.append(current)
+                    current = []
+                current.append(order[index + 1])
+            paths.append(current)
+            if all(minimum <= len(path) <= maximum and all(
+                    math.dist(points[a], points[b]) <= step
+                    for a, b in zip(path, path[1:])) for path in paths):
+                return True
+    return False
+
+
+@pytest.mark.parametrize("points", [
+    [(0, 0), (1, 0), (2, 0), (3, 0)],
+    [(0, 0), (1, 0), (-0.5, 0.86), (-0.5, -0.86)],
+    [(0, 0), (1, 0), (0, 1), (1, 1), (2, 1)],
+    [(0, 0), (1, 0), (10, 0), (11, 0)],
+])
+@pytest.mark.parametrize("minimum,maximum", [(2, 2), (2, 3), (3, 4), (4, 4)])
+def test_partition_matches_independent_permutation_and_cut_oracle(points, minimum, maximum):
+    before = copy.deepcopy(points)
+    result = plan_partition(list(range(len(points))), points, minimum, maximum, 1.01)
+    possible = exact_possible(points, minimum, maximum, 1.01)
+    assert result["status"] == ("complete" if possible else "infeasible")
+    if possible:
+        validate_partition(list(range(len(points))), points, result["paths"], minimum, maximum, 1.01)
+    else:
+        assert result["paths"] == []
+    assert points == before
+
+
+def test_exhaustive_obstruction_differs_from_budget_exhaustion():
+    # A three-leaf star has four panels but no four-panel simple path.
+    points = [(0, 0), (1, 0), (-0.5, 0.86), (-0.5, -0.86)]
+    exhausted = plan_partition([0, 1, 2, 3], points, 4, 4, 1.01, state_budget=1)
+    assert exhausted["status"] == "unresolved"
+    assert exhausted["reason"] == "search_budget" and exhausted["paths"] == []
+    proved = plan_partition([0, 1, 2, 3], points, 4, 4, 1.01)
+    assert proved["status"] == "infeasible"
+    assert proved["reason"] == "exhaustive_path_search" and proved["paths"] == []
+
+
+@pytest.mark.parametrize("paths", [
+    [[0, 1], [1, 2]], [[0, 1]], [[0, 3], [1, 2]],
+    [[0], [1, 2, 3]], [[0, 1], [2, True]],
+])
+def test_complete_validator_rejects_wrong_coverage_sizes_or_edges(paths):
+    with pytest.raises(ValueError, match="invalid string partition"):
+        validate_partition([0, 1, 2, 3], [(0, 0), (1, 0), (2, 0), (3, 0)],
+                           paths, 2, 2, 1.01)
+
+
+def test_empty_and_reordered_inputs_are_immutable_and_deterministic():
+    assert plan_partition([], [], 2, 3, 1.0)["status"] == "complete"
+    points = [(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)]
+    order = [4, 3, 2, 1, 0]
+    before = copy.deepcopy((order, points))
+    first = plan_partition(order, points, 2, 3, 1.01)
+    assert first == plan_partition(order, points, 2, 3, 1.01)
+    assert (order, points) == before
+
+
+@pytest.mark.parametrize("minimum,maximum,budget", [(True, 3, 1), (0, 3, 1),
+    (4, 3, 1), (2, 3, -1), (2, 3, True)])
+def test_invalid_planner_contract_refused(minimum, maximum, budget):
+    with pytest.raises(ValueError, match="bounds or budget"):
+        plan_partition([0], [(0, 0)], minimum, maximum, 1.0, state_budget=budget)
+
+
+@pytest.mark.parametrize("paths,message", [
+    ([[0, 1], [1, 2]], "coverage"),
+    ([[0, 1]], "coverage"),
+    ([[0, 1], [2, 4]], "coverage"),
+    ([[0], [1, 2, 3]], "size"),
+    ([[0, 2], [1, 3]], "adjacency"),
+])
+def test_independent_validator_rejects_corrupt_complete_paths(paths, message):
+    points = [(0, 0), (1, 0), (2, 0), (3, 0)]
+    with pytest.raises(ValueError, match=message):
+        validate_partition([0, 1, 2, 3], points, paths, 2, 2, 1.01)
+
+
+def test_anchor_may_be_inside_a_string_and_empty_component_is_complete():
+    points = [(0, 0), (-1, 0), (1, 0)]
+    found = plan_partition([0, 1, 2], points, 3, 3, 1.01)
+    assert found["status"] == "complete"
+    assert found["paths"][0][1] == 0
+    empty = plan_partition([], [], 1, 2, 1.0)
+    assert empty["status"] == "complete" and empty["paths"] == []
+
+
+@pytest.mark.parametrize("scale,reverse", [(1.0, False), (25.4, False), (1.0, True)])
+def test_anchor_actual_roof_component_completes_within_existing_budget(intake, scale, reverse):
+    import statistics
+    from solar_string_partition import DEFAULT_STATE_BUDGET
+    # Bank discovery consumes normalized inches, as the public builtin does.
+    panels = [panel for panel in intake["polylines"]
+              if panel.get("layer") == "Panels" and panel.get("closed") and panel.get("pts")]
+    if reverse:
+        panels.reverse()
+    points = [string_panels._centroid(panel) for panel in panels]
+    banks = string_panels._cluster_banks(points, string_panels.DEFAULTS["cluster_radius_factor"])
+    bank = next(group for group in banks if len(group) == 123)
+    order = string_panels._bank_serpentine(panels, bank, points)
+    module_length = statistics.median(max(math.dist(a[:2], b[:2]) for a, b in zip(
+        panels[index]["pts"], panels[index]["pts"][1:] + panels[index]["pts"][:1]))
+        for index in bank)
+    max_step = string_panels.MAX_STEP_MODULE_LENGTHS * module_length * scale
+    points = [(x * scale, y * scale) for x, y in points]
+    before = copy.deepcopy((order, points))
+    result = plan_partition(order, points, 12, 14, max_step)
+    assert result["status"] == "complete"
+    assert result["searched_states"] <= DEFAULT_STATE_BUDGET == 50_000
+    validate_partition(order, points, result["paths"], 12, 14, max_step)
+    assert len({index for path in result["paths"] for index in path}) == 123
+    assert all(12 <= len(path) <= 14 for path in result["paths"])
+    assert (order, points) == before
+
+
+
+def _simple_suffix_oracle(neighbors, remaining, last, anchor, slots):
+    for length in range(min(slots, len(remaining)) + 1):
+        for suffix in itertools.permutations(sorted(remaining), length):
+            path = (last,) + suffix
+            if path[-1] == anchor and all(right in neighbors[left]
+                                         for left, right in zip(path, path[1:])):
+                return True
+    return False
+
+
+@pytest.mark.parametrize("edges", [
+    [(0, 1), (1, 2), (2, 3)],
+    [(0, 1), (1, 3), (0, 2), (2, 3)],
+    [(0, 1), (1, 2), (2, 0), (2, 3)],
+    [(0, 1), (2, 3)],
+])
+@pytest.mark.parametrize("remaining", [{1, 2, 3}, {2, 3}, {3}])
+@pytest.mark.parametrize("slots", [0, 1, 2, 3])
+def test_anchor_reachability_matches_independent_simple_suffix_oracle(edges, remaining, slots):
+    from solar_string_partition import _anchor_reachable
+    neighbors = {index: set() for index in range(4)}
+    for left, right in edges:
+        neighbors[left].add(right)
+        neighbors[right].add(left)
+    before = copy.deepcopy((neighbors, remaining))
+    assert _anchor_reachable(remaining, 0, 3, slots, neighbors) == _simple_suffix_oracle(
+        neighbors, remaining, 0, 3, slots)
+    assert (neighbors, remaining) == before
+
+
+def test_anchor_reachability_preserves_unused_alternative_and_zero_hop_anchor():
+    from solar_string_partition import _anchor_reachable
+    neighbors = {0: {1, 3}, 1: {0, 2}, 2: {1, 3}, 3: {0, 2}}
+    assert not _anchor_reachable({2}, 0, 2, 2, neighbors)
+    assert _anchor_reachable({2, 3}, 0, 2, 2, neighbors)
+    assert not _anchor_reachable({2, 3}, 0, 2, 1, neighbors)
+    assert _anchor_reachable({1, 2, 3}, 0, 0, 0, neighbors)

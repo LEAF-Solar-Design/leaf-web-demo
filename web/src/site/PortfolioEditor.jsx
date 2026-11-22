@@ -62,8 +62,10 @@ export function PortfolioPreview({ document, projectId, onSelectField, onInlineC
 
 function PortfolioView({ document, projectId, scope, onSelectField, onInlineChange, onSelectElement, selectedElement }) {
   const [view, setView] = useState('home')
-  const [selected, setSelected] = useState(null)
-  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null)
+  const [selectedId, setSelectedId] = useState(null)
+  const category = document.categories.find(item => item.slug === view)
+  const selected = category?.images.find(image => image.material_id === selectedId && !image.display?.hidden) || null
+  const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null), viewer = useRef(null), emptyStatus = useRef(null)
   const navigationSelection = useRef(null)
   useEffect(() => {
     const selection = (onInlineChange || onSelectField) ? selectedElement : null
@@ -75,7 +77,7 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
     const gallery = document.categories.find(item => selectionIdentity(item) === identity || item.images.some(image => selectionIdentity(image) === identity))
     const resume = document.resume.some(section => selectionIdentity(section) === identity || section.entries.some(entry => selectionIdentity(entry) === identity))
     setView(gallery ? gallery.slug : resume || path === 'textStyles.resumeHeading' ? 'resume' : ['about', 'aboutHeading', 'contactHeading', 'location', 'email'].some(key => path === `textStyles.${key}`) ? 'about' : 'home')
-    setSelected(null)
+    setSelectedId(null)
   }, [selectedElement, document, onInlineChange, onSelectField])
   useEffect(() => {
     if (!selectedElement) return
@@ -83,21 +85,58 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
     const target = nodes.find(node => node.dataset.element === selectedElement) || nodes.find(node => node.dataset.element.startsWith(`${selectedElement.split(':')[0]}:`))
     target?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
   }, [selectedElement, view, document])
-  const close = () => { setSelected(null); trigger.current?.focus() }
+  const closeDialog = dialog => {
+    if (!dialog?.open) return
+    if (typeof dialog.close === 'function') dialog.close()
+    else dialog.removeAttribute('open')
+  }
+  const close = () => { closeDialog(viewer.current); setSelectedId(null); trigger.current?.focus() }
   const visible = () => Boolean(surface.current && !surface.current.closest('[hidden], [inert], [aria-hidden="true"]'))
   useEscapeOwner('portfolio-image', Boolean(selected), close, { layer: 'sheet', scope: surface, when: visible })
   useEffect(() => {
     if (!selected) return
+    const dialog = viewer.current
+    const doc = dialog?.ownerDocument
+    const controls = doc?.querySelector('.environment-strip'), dock = doc?.querySelector('.bar-dock')
+    const fit = () => {
+      if (!dialog) return
+      const strip = controls?.getBoundingClientRect(), bar = dock?.getBoundingClientRect()
+      const top = Math.max(0, strip?.width > 0 && strip?.height > 0 ? strip.bottom : 0)
+      const bottom = Math.min(window.innerHeight, bar?.width > 0 && bar?.height > 0 ? bar.top : window.innerHeight)
+      dialog.style.top = `${top}px`
+      dialog.style.bottom = `${Math.max(0, window.innerHeight - bottom)}px`
+      dialog.style.height = `${Math.max(0, bottom - top)}px`
+    }
+    fit()
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(fit) : null
+    for (const node of [controls, dock, doc?.querySelector('header.top')]) if (node) observer?.observe(node)
+    window.addEventListener('resize', fit)
+    // The top layer keeps the photo and its close control above floating Studio
+    // panels, even when those panels leave no room in the narrow workspace.
+    if (dialog && !dialog.open) {
+      if (typeof dialog.showModal === 'function') dialog.showModal()
+      else dialog.setAttribute('open', '')
+    }
     closeButton.current?.focus()
     const key = event => {
       if (!visible()) return
       if (event.key === 'Tab') { event.preventDefault(); closeButton.current?.focus() }
     }
     window.addEventListener('keydown', key)
-    return () => window.removeEventListener('keydown', key)
-  }, [selected])
-  const category = document.categories.find(item => item.slug === view)
-  const navigate = next => { setSelected(null); setView(next) }
+    return () => {
+      window.removeEventListener('keydown', key); window.removeEventListener('resize', fit)
+      observer?.disconnect(); closeDialog(dialog)
+    }
+  }, [selectedId, Boolean(selected), selected?.preview_sha256])
+  useEffect(() => {
+    if (selectedId && !selected) {
+      closeDialog(viewer.current); setSelectedId(null)
+      if (trigger.current?.isConnected) trigger.current.focus()
+      else emptyStatus.current?.focus()
+      trigger.current = null
+    }
+  }, [category, selectedId, selected])
+  const navigate = next => { setSelectedId(null); setView(next) }
   const selectedIdentity = (onInlineChange || onSelectField) ? selectedElement?.split(':')[0] : null
   const reveals = node => selectionIdentity(node) === selectedIdentity || node.images?.some(reveals) || node.entries?.some(reveals)
   const layout = node => containerStyle(reveals(node) ? { ...node.layout, hidden: undefined } : node.layout)
@@ -128,15 +167,15 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
           return <Tag key={field}>{text(entry, [field], `Resume ${field}`, { title: 200, subtitle: 240, dates: 120, description: 2400 }[field], entry.textStyles?.[field])}{edit({ field: `resume.${field}`, section: selectionIdentity(section), entry: selectionIdentity(entry) }, `resume section ${index + 1} entry ${i + 1} ${field}`)}</Tag>
         })}
       </article>)}</section>)}</>
-        : category ? <section data-element={`${selectionIdentity(category)}:layout`} style={layout(category)}><h1>{text(category, ['title'], 'Gallery title', 120, category.textStyles?.title)}</h1><p>{text(category, ['description'], 'Gallery description', 1200, category.textStyles?.description)}</p>{galleryEdits(category)}<div className="portfolio-grid" style={grid(category)} data-gallery-layout={document.galleryLayout || 'grid'}>{category.images.filter(image => reveals(image) || !image.display?.hidden).map(image => <figure key={image.material_id} data-element={`${selectionIdentity(image)}:display`} style={photoSpanStyle(image.display, document, category)}><button onClick={event => { if (onInlineChange) { onSelectElement?.(`${selectionIdentity(image)}:display`, true); return } trigger.current = event.currentTarget; setSelected(image) }} aria-label={`View ${image.alt}`}>
+        : category ? <section data-element={`${selectionIdentity(category)}:layout`} style={layout(category)}><h1>{text(category, ['title'], 'Gallery title', 120, category.textStyles?.title)}</h1><p>{text(category, ['description'], 'Gallery description', 1200, category.textStyles?.description)}</p>{galleryEdits(category)}<div className="portfolio-grid" style={grid(category)} data-gallery-layout={document.galleryLayout || 'grid'}>{category.images.filter(image => reveals(image) || !image.display?.hidden).map(image => <figure key={image.material_id} data-element={`${selectionIdentity(image)}:display`} style={photoSpanStyle(image.display, document, category)}><button onClick={event => { if (onInlineChange) { onSelectElement?.(`${selectionIdentity(image)}:display`, true); return } trigger.current = event.currentTarget; setSelectedId(image.material_id) }} aria-label={`View ${image.alt}`}>
           {photo(image)}{!onInlineChange && <span style={textStyle(image.captionStyle)}>{image.title}</span>}
-        </button>{onInlineChange && text(image, ['title'], 'Photo caption', 200, image.captionStyle)}{edit({ field: 'caption', gallery: category.slug, material: image.material_id }, `${category.title} caption for ${image.alt}`)}</figure>)}</div></section>
+        </button>{onInlineChange && text(image, ['title'], 'Photo caption', 200, image.captionStyle)}{edit({ field: 'caption', gallery: category.slug, material: image.material_id }, `${category.title} caption for ${image.alt}`)}</figure>)}</div>{!category.images.length && <p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}</section>
           : <><h1>{rootText('headline', 240)}</h1>{edit({ field: 'headline' }, 'headline')}<p>{rootText('introduction', 2400)}</p>{edit({ field: 'introduction' }, 'introduction')}<div className="portfolio-grid" style={grid()}>{visibleCategories.map(item => <div key={selectionIdentity(item)} data-element={`${selectionIdentity(item)}:layout`} style={layout(item)}><button onClick={() => navigate(item.slug)}>
-            {item.images[item.hero] && !item.images[item.hero].display?.hidden ? photo(item.images[item.hero]) : <span>Add photos in the Project panel.</span>}{!onInlineChange && galleryText(item)}
+            {item.images[item.hero] && !item.images[item.hero].display?.hidden ? photo(item.images[item.hero]) : <span>{!item.images.length ? 'No photos in this gallery yet.' : 'Add photos in the Project panel.'}</span>}{!onInlineChange && galleryText(item)}
           </button>{onInlineChange && galleryText(item)}{galleryEdits(item)}</div>)}</div></>}
-    {selected && <div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}>
+    {selected && <dialog ref={viewer} className="portfolio-viewer" aria-modal="true" aria-label={selected.alt} onCancel={event => { event.preventDefault(); close() }}>
       <button ref={closeButton} onClick={close}>{labels.viewerClose || 'Close image'}</button>{photo(selected)}<p style={textStyle(selected.captionStyle)}>{selected.title}</p>
-    </div>}
+    </dialog>}
   </main>
 }
 
@@ -235,7 +274,7 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     <Field inputRef={target({ field: 'contact.email' })} label="Contact email" value={document.contact.email} limit={254} onChange={value => update(next => { next.contact.email = value })} />
     <Field inputRef={target({ field: 'contact.location' })} label="Location" value={document.contact.location} limit={160} onChange={value => update(next => { next.contact.location = value })} />
     </Disclosure>
-    <h3>Galleries</h3><p>Add photos from this project. At least one photo per gallery is required to save.</p>
+    <h3>Galleries</h3><p>Add photos from this project. Empty galleries can be saved; add their first photo whenever you are ready.</p>
     <label><span>Photo layout</span><select value={document.galleryLayout || 'grid'} onChange={event => update(next => {
       if (event.target.value === 'single') next.galleryLayout = 'single'
       else delete next.galleryLayout

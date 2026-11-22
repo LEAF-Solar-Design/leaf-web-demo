@@ -192,7 +192,9 @@ export function uploadProjectReference(projectId, file, { signal, expectedScope 
   if (!mediaType || !file?.size || file.size > maximum) {
     throw new Error('Choose an original MOV or gzip JSONL up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
   }
-  if (file.type && file.type !== 'application/octet-stream' && file.type.split(';')[0].toLowerCase() !== mediaType) {
+  const declaredType = file.type?.split(';')[0].toLowerCase()
+  const gzipAlias = extension === 'jsonl.gz' && declaredType === 'application/x-gzip'
+  if (file.type && file.type !== 'application/octet-stream' && declaredType !== mediaType && !gzipAlias) {
     throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT/JSON or gzip JSONL).')
   }
   return request(`/api/projects/${id}/reference-files?filename=${encodeURIComponent(file.name)}`, {
@@ -238,12 +240,44 @@ export function readProjectArloInput(projectId, inputId, { orgId, signal, expect
   return request(`/api/projects/${project}/arlo-inputs/${input}`, { orgId, signal, expectedScope, cache: 'no-store' })
 }
 
+export function activateProjectArloInput(projectId, originalId, inputId, { orgId, signal, expectedScope } = {}) {
+  const project = requireUuid(projectId, 'project')
+  const original = requireUuid(originalId, 'original ARLO input')
+  const input = requireUuid(inputId, 'ARLO input version')
+  const org = requireUuid(orgId, 'organization')
+  return request(`/api/projects/${project}/arlo-inputs/${original}/activate`, {
+    ...mutation('POST', { input_version_id: input }), orgId: org, signal, expectedScope,
+  })
+}
+
 export function reviseProjectArloInput(projectId, inputId, patch, { orgId, key, signal, expectedScope } = {}) {
   const project = requireUuid(projectId, 'project')
   const input = requireUuid(inputId, 'ARLO input version')
   const opts = mutation('POST', { patch })
   if (key) opts.headers['Idempotency-Key'] = key
-  return request(`/api/projects/${project}/arlo-inputs/${input}/revisions`, { ...opts, orgId, signal, expectedScope })
+  // Match only submitted fields and the rules in arlo_lab._patch_constraints.
+  // Capture the serialized patch so later caller edits cannot widen this allowlist.
+  const messages = new Set()
+  for (const [group, fields] of Object.entries(JSON.parse(opts.body).patch || {})) {
+    if (!['requirements', 'budget'].includes(group) || !fields || typeof fields !== 'object' || Array.isArray(fields)) continue
+    for (const name of Object.keys(fields)) {
+      if (!/^[a-z][a-z0-9_]*$/.test(name)) continue
+      const label = `${group}.${name}`
+      const positive = group === 'budget' || ['diameter_m', 'max_support_span_m'].includes(name)
+      for (const rule of ['is not an editable numeric constraint.', 'must be a finite number.',
+        positive ? 'must be greater than zero.' : 'must be nonnegative.',
+        ...(group === 'budget' && name !== 'timeout_seconds' ? ['must be a whole number.'] : [])]) {
+        const text = `${label} ${rule}`
+        if (text.length <= 160) messages.add(text)
+      }
+    }
+  }
+  return request(`/api/projects/${project}/arlo-inputs/${input}/revisions`, { ...opts, orgId, signal, expectedScope }).catch(error => {
+    const structured = error.body?.error
+    if (error.status === 422 && !detailOf(error.body) && structured?.error_code === 'BAD_PARAMS'
+        && messages.has(structured.message)) error.message = structured.message
+    throw error
+  })
 }
 
 export function restoreProjectArloInput(projectId, inputId, { orgId, key, signal, expectedScope } = {}) {
@@ -378,8 +412,24 @@ export async function resetProject(projectId) {
   return request(`/api/projects/${id}/reset`, mutation('POST'))
 }
 
-// DELETE /api/projects/{id} -> {..., receipt}. TERMINAL, same as reset.
-export async function deleteProject(projectId) {
+export async function archiveProject(projectId, key) {
   const id = requireUuid(projectId, 'project')
-  return request(`/api/projects/${id}`, mutation('DELETE'))
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/archive`, opts)
+}
+
+export async function restoreProject(projectId, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('POST')
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}/restore`, opts)
+}
+
+// DELETE is permanent and only accepted for an archived project.
+export async function deleteProject(projectId, { confirmName }, key) {
+  const id = requireUuid(projectId, 'project')
+  const opts = mutation('DELETE', { confirm_name: confirmName })
+  if (key) opts.headers['Idempotency-Key'] = key
+  return request(`/api/projects/${id}`, opts)
 }

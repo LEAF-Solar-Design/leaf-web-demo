@@ -1,6 +1,7 @@
 /**
  * T1 overlay hook and client. Each test names the failure it prevents.
  */
+import { scaleTimeout } from './testTimeScale.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 
@@ -377,7 +378,7 @@ describe('the lane owns its own events (round 7)', () => {
 
     await waitFor(
       () => expect(screen.getByTestId('v').textContent).toBe('v2'),
-      { timeout: 5000 })
+      { timeout: scaleTimeout(5000) })
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#999999')
   })
 })

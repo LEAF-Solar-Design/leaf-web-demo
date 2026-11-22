@@ -89,9 +89,9 @@ def validate_document(document):
         slugs.add(slug)
         text(category['title'], 1, 120)
         text(category['description'], 0, 1200)
-        items(category['images'], 1, 200)
+        items(category['images'], 0, 200)
         total += len(category['images'])
-        if total > 200 or type(category['hero']) is not int or not 0 <= category['hero'] < len(category['images']):
+        if total > 200 or type(category['hero']) is not int or not (0 <= category['hero'] < len(category['images']) if category['images'] else category['hero'] == 0):
             raise ValueError('Invalid hero or more than 200 images')
         seen = set()
         for image in category['images']:
@@ -199,7 +199,7 @@ export default function Layout({children}){const n=page.nav||{};return <html lan
 ''',
         'app/page.jsx': b'''import page from '../portfolio.json';
 import {textStyle,containerStyle,photoStyle,galleryStyle} from './design';
-export default function Home(){return <><h1 style={textStyle(page.textStyles?.headline)}>{page.headline}</h1><p style={textStyle(page.textStyles?.introduction)}>{page.introduction}</p><div className="portfolio-grid" style={galleryStyle(page)}>{page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={containerStyle(c.layout)}>{!c.images[c.hero].display?.hidden&&<img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt} style={photoStyle(c.images[c.hero].display,page.appearance)}/>}<h2 style={textStyle(c.textStyles?.title)}>{c.title}</h2><p style={textStyle(c.textStyles?.description)}>{c.description}</p></a>)}</div></>;}
+export default function Home(){return <><h1 style={textStyle(page.textStyles?.headline)}>{page.headline}</h1><p style={textStyle(page.textStyles?.introduction)}>{page.introduction}</p><div className="portfolio-grid" style={galleryStyle(page)}>{page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={containerStyle(c.layout)}>{c.images[c.hero]&&!c.images[c.hero].display?.hidden&&<img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt} style={photoStyle(c.images[c.hero].display,page.appearance)}/>}<h2 style={textStyle(c.textStyles?.title)}>{c.title}</h2><p style={textStyle(c.textStyles?.description)}>{c.description}</p>{!c.images.length&&<p>No photos in this gallery yet.</p>}</a>)}</div></>;}
 ''',
         'app/[slug]/page.jsx': b'''import page from '../../portfolio.json';
 import Gallery from '../Gallery';
@@ -219,11 +219,62 @@ export default function Resume(){return <><h1 style={textStyle(page.textStyles?.
         'app/Gallery.jsx': b'''"use client";
 import {useEffect,useRef,useState} from 'react';
 import {photoStyle,photoSpanStyle,textStyle,galleryStyle} from './design';
+function Photograph({image,page,onOpen,onRetryFocus}){
+ const [failed,setFailed]=useState(false),[loading,setLoading]=useState(true),[attempt,setAttempt]=useState(0);
+ const current=useRef(0),opener=useRef(null),element=useRef(null);
+ useEffect(()=>{const image=element.current;if(current.current===attempt&&image?.complete){setLoading(false);if(!image.naturalWidth)setFailed(true);}},[attempt]);
+ const retry=()=>{current.current+=1;setAttempt(current.current);setFailed(false);setLoading(true);if(onRetryFocus)onRetryFocus();else opener.current?.focus();};
+ const style=photoStyle(image.display,page.appearance);
+ const picture=failed
+  ? <span role="img" aria-label={'Photograph unavailable: '+image.alt} style={{...style,display:'grid',placeItems:'center',minHeight:'12rem',boxSizing:'border-box',border:'1px solid currentColor'}}>Photograph unavailable</span>
+  : <img ref={element} key={attempt} loading={onOpen?'lazy':undefined} src={'/images/'+image.material_id+'.jpg'+(attempt?'?retry='+attempt:'')} alt={image.alt} aria-busy={loading}
+     onLoad={()=>{if(current.current===attempt)setLoading(false);}}
+     onError={()=>{if(current.current===attempt){setLoading(false);setFailed(true);}}} style={style}/>;
+ return <>{onOpen?<button ref={opener} style={{width:'100%'}} aria-label={'View '+image.alt} onClick={e=>onOpen(image,e.currentTarget)}>{picture}<span style={textStyle(image.captionStyle)}>{image.title}</span></button>:picture}
+  {failed&&<div role="status"><p>The photo could not load. Check your connection and try again.</p><button style={{marginTop:'0.5rem',textDecoration:'underline'}} onClick={retry}>Retry photo</button></div>}</>;
+}
 export default function Gallery({page,category}){
- const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null);
- const close=()=>{setSelected(null);trigger.current?.focus();};
- useEffect(()=>{if(!selected)return;closeButton.current?.focus();const key=e=>{if(e.key==='Escape')close();if(e.key==='Tab'){e.preventDefault();closeButton.current?.focus();}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[selected]);
- return <><div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><button aria-label={'View '+image.alt} onClick={e=>{trigger.current=e.currentTarget;setSelected(image);}}><img loading="lazy" src={'/images/'+image.material_id+'.jpg'} alt={image.alt} style={photoStyle(image.display,page.appearance)}/><span style={textStyle(image.captionStyle)}>{image.title}</span></button></figure>)}</div>{selected&&<div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><img src={'/images/'+selected.material_id+'.jpg'} alt={selected.alt} style={photoStyle(selected.display,page.appearance)}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
+ const [selectedId,setSelectedId]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{}),emptyStatus=useRef(null);
+ const selected=category.images.find(image=>image.material_id===selectedId&&!image.display?.hidden)||null;
+ const currentImages=useRef(category.images);currentImages.current=category.images;
+ const close=()=>{restoreBackground.current();setSelectedId(null);trigger.current?.focus();};
+ useEffect(()=>{setSelectedId(null);trigger.current=null;},[category.slug]);
+ useEffect(()=>{
+  if(selectedId&&!selected){
+   restoreBackground.current();setSelectedId(null);
+   if(trigger.current?.isConnected)trigger.current.focus();else emptyStatus.current?.focus();
+   trigger.current=null;
+  }
+ },[category.images,selectedId,selected]);
+ useEffect(()=>{
+   if(!selected)return;
+   const background=[];let branch=dialog.current;
+   while(branch&&branch!==document.body){
+    for(const sibling of branch.parentElement.children)if(sibling!==branch){background.push([sibling,Boolean(sibling.inert)]);sibling.inert=true;}
+    branch=branch.parentElement;
+   }
+   const restore=()=>{for(const [node,wasInert]of background)node.inert=wasInert;};
+   restoreBackground.current=restore;
+  const key=e=>{
+   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&!e.altKey&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey){
+    e.preventDefault();
+    const images=currentImages.current.filter(image=>!image.display?.hidden);
+    setSelectedId(current=>{
+     const index=images.findIndex(image=>image.material_id===current);
+     return index<0?current:images[Math.max(0,Math.min(images.length-1,index+(e.key==='ArrowRight'?1:-1)))].material_id;
+    });
+   }
+   if(e.key==='Escape')close();
+   if(e.key==='Tab'){
+    const buttons=[...(dialog.current?.querySelectorAll('button:not([disabled])')||[])];
+    if(buttons.length){e.preventDefault();const index=buttons.indexOf(document.activeElement);buttons[index<0?0:(index+(e.shiftKey?-1:1)+buttons.length)%buttons.length].focus();}
+   }
+  };
+   window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
+ },[Boolean(selected)]);
+ useEffect(()=>{if(selectedId)closeButton.current?.focus();},[selectedId,selected?.preview_sha256]);
+ const open=(image,button)=>{trigger.current=button;setSelectedId(image.material_id);};
+ return <>{!category.images.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph key={image.material_id+':'+(image.preview_sha256||'')} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={selected.material_id+':'+(selected.preview_sha256||'')} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
 }
 ''',
     }

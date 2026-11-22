@@ -251,7 +251,7 @@ describe('Solar settings seed admission', () => {
 
   it('SF2 row35 a converted solver decision keeps its refusal', async () => {
     const { controller, services, adapters, load } = setup(A)
-    controller.setContext({ solarSettingsFormEnabled: true, entitlements: { entitlements: { run_write: true, solve: true } } })
+    controller.setContext({ agentDisabled: true, solarSettingsFormEnabled: true, entitlements: { entitlements: { run_write: true, solve: true } } })
     services.routePrompt.mockResolvedValue({ lane: 'solve', tool: 'solar-solve-proposal', params: P, confidence: 1 })
     await load()
     await controller.actions.dispatch('solve the Solar layout')
@@ -315,6 +315,51 @@ function setup(overrides = {}, extra = []) {
   return { controller, services, adapters, load, capabilities }
 }
 
+describe('standalone solar refusal handoff', () => {
+  const prompt = 'size the strings'
+  const reason = 'broker_adapter_unavailable'
+
+  it('starts a primary assistant turn with the refused tool and its reason', async () => {
+    const { controller, adapters, load } = setup()
+    controller.setContext({ agentDisabled: false })
+    await load()
+    controller.actions.setPrompt(prompt)
+    const decision = await controller.actions.dispatch(undefined, { allowSecretOnce: true })
+    expect(decision.tool).toBe('solar-size-strings')
+    expect(adapters.startAgentTurn).toHaveBeenCalledExactlyOnceWith(prompt, {
+      lane: 'run', tool: decision.tool, confidence: 0.9, rationale: `solar-size-strings is not ready here: ${reason}`,
+    }, { allowSecretOnce: true })
+    expect(controller.getState()).toMatchObject({ routeError: null, agentMode: 'primary', prompt: '' })
+    expect(adapters.commitDecision).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [true, reason],
+    [false, 'entitlement_required'],
+    [false, 'entitlement_policy_unavailable'],
+    [false, reason + '; entitlement_required'],
+  ])('keeps the raw refusal with agentDisabled=%s and reason %s', async (agentDisabled, refusal) => {
+    const { controller, adapters, load } = setup({ refusal_reasons: refusal.split('; ') })
+    controller.setContext({ agentDisabled })
+    await load()
+    await controller.actions.dispatch(prompt)
+    expect(controller.getState().routeError).toBe(refusal)
+    expect(adapters.startAgentTurn).not.toHaveBeenCalled()
+  })
+
+  it('keeps the raw refusal and shows the adapter banner when the assistant fails', async () => {
+    const { controller, adapters, load } = setup()
+    controller.setContext({ agentDisabled: false })
+    const error = new Error('assistant unavailable')
+    adapters.startAgentTurn.mockRejectedValueOnce(error)
+    adapters.agentBannerFor = vi.fn(() => 'Try again later.')
+    await load()
+    await controller.actions.dispatch(prompt)
+    expect(adapters.agentBannerFor).toHaveBeenCalledWith(error)
+    expect(controller.getState()).toMatchObject({ routeError: reason, agentBanner: 'Try again later.' })
+  })
+})
+
 describe('W1 catalog gates', () => {
   it('preserves all four states and reconciles visible counts', async () => {
     const { controller, load } = setup()
@@ -349,6 +394,7 @@ describe('W1 catalog gates', () => {
 
   it('blocks direct picks, slash picks, alternatives, and prompt routes with the same reason', async () => {
     const { controller, adapters, load } = setup()
+    controller.setContext({ agentDisabled: true })
     await load()
     controller.actions.commitDecision({ lane: 'run', tool: 'solar-size-strings' })
     await controller.actions.dispatchSlash('solar-size-strings')

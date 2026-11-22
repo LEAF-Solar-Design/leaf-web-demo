@@ -7,9 +7,12 @@ import { DatasetElementV1, DatasetQueryV1 } from '../../../vendor/assistant-cont
 import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createIntegrationsClient, UUID } from './client.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
+import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
+import { SavedDatasetViewExport } from './SavedDatasetViewExport.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
+import { ProjectLogRetentionPanel } from './ProjectLogRetentionPanel.jsx'
 import { ActionDefinitionPanel } from './ActionDefinitionPanel.jsx'
 import { WorkflowSchedulePreviewPanel } from './WorkflowSchedulePreviewPanel.jsx'
 import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
@@ -20,15 +23,20 @@ import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow
 import { STUDIO_DRAWING_OCCLUDERS } from '../site/drawingOccluders.js'
 import './ops-workspace.css'
 import { humanizeError } from '../errorHumanize.js'
+import { DuplicateOriginalMember, parseProjectOriginalJson } from './projectOriginalJson.js'
 
 const STUDIO_CHROME_OCCLUDERS = Object.freeze(STUDIO_DRAWING_OCCLUDERS.filter(([selector]) =>
   ['header.top', '#drafting-ribbon', '.bar.bar-command-line', 'footer.foot-bar'].includes(selector)))
 
-const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
-const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
+const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, readIdentity: null, previousRead: false, action: null, historical: false, pending: '', error: '', errorOperation: null, notice: '' })
+const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null, window: '', query: null, grouping: false, pairKey: '', providerField: '', firstProvider: '', secondProvider: '' })
 const xKinds = ['date', 'instant', 'number', 'count']
 const yKinds = ['number', 'count', 'money', 'ratio', 'duration']
+const recipeKey = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
 const referenceKey = (ref) => JSON.stringify([ref.id, ref.version, ref.digest])
+const namedWindows = (dataset) => dataset?.derivation?.plan.kind === 'group_count' &&
+  dataset.fields.some(field => field.id === 'window_id' && field.type.kind === 'identifier') ? dataset.derivation.plan.windows : []
 export function scopeCacheIdentity(scope, generation) {
   return JSON.stringify([scope.tenantId, scope.projectId, scope.platformUserId, scope.bindingId, scope.projectRole, scope.externalAuthority, scope.externalSubject, generation])
 }
@@ -65,7 +73,7 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     } catch (failure) {
       if (!alive(controller) || failure?.name === 'AbortError') return
       if (failure?.status === 403) onForbidden()
-      else setError(failure.message || 'The original is unavailable. Nothing was imported.')
+      else setError(failure.message || 'Original unavailable; no import.')
     } finally { if (alive(controller)) setPending(false) }
   }
   function loadReferences(after) {
@@ -77,7 +85,7 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
       const eligible = page.materials.filter((item) => item.project_id === projectId && item.media_type === 'application/json' &&
         UUID.test(item.material_id) && /^[0-9a-f]{64}(?![\s\S])/.test(item.sha256) && Number.isInteger(item.byte_size) && item.byte_size > 0 && item.byte_size <= 8388608)
       setReferences((old) => after ? [...old, ...eligible] : eligible); setCursor(page.next_cursor)
-      if (!eligible.length) setNotice('No eligible JSON originals on this page. JSON originals must be at most 8 MiB.')
+      if (!eligible.length) setNotice('No JSON originals (max 8 MiB).')
     })
   }
   function chooseOriginal(materialId) {
@@ -86,14 +94,14 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     if (!material) { request.current?.abort(); setPending(false); return }
     run(async (controller) => {
       const blob = await readProjectReferenceOriginal(projectId, materialId, { signal: controller.signal })
-      if (blob.size !== material.byte_size || blob.size > 8388608) throw new Error('The original byte size changed. Nothing was imported.')
-      if (!globalThis.crypto?.subtle) throw new Error('Original digest verification is unavailable in this browser.')
+      if (blob.size !== material.byte_size || blob.size > 8388608) throw new Error('File size changed. Nothing was imported.')
+      if (!globalThis.crypto?.subtle) throw new Error('This browser cannot verify original files.')
       const bytes = await blob.arrayBuffer()
       const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('')
-      if (digest !== material.sha256) throw new Error('The original digest changed. Nothing was imported.')
+      if (digest !== material.sha256) throw new Error('File digest changed. Nothing was imported.')
       let original
-      try { original = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
-      catch { throw new Error('The original must contain valid UTF-8 JSON.') }
+      try { original = parseProjectOriginalJson(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
+      catch (failure) { if (failure instanceof DuplicateOriginalMember) throw failure; throw new Error('Invalid UTF-8 JSON.') }
       const found = []
       const stack = [{ value: original, path: '', depth: 0 }]
       let arrayListBytes = 2
@@ -117,8 +125,8 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
       await guard(controller.signal)
       if (!alive(controller)) return
       setSource({ material, original }); setArrays(found)
-      if (limited) setNotice('Additional array paths are unavailable because the array list is too large. The original is retained; choose one of the listed arrays.')
-      if (!found.length) setError('No safe record arrays are available in this original.')
+      if (limited) setNotice('Too many arrays. Original retained; choose a listed array.')
+      if (!found.length) setError('No record arrays in this original.')
     })
   }
   function selectArray(value) {
@@ -137,12 +145,19 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
           sha256: source.material.sha256, byte_length: source.material.byte_size }, selection: { records_pointer: value }, row_count: rows.length, envelope }
         const size = new TextEncoder().encode(JSON.stringify(context)).byteLength
         setContextBytes(size)
-        if (size > 262144) { setPointer(null); setError('Complete material context is too large to display. The original and last valid dataset are retained.'); return }
-      } catch { setPointer(null); setError('Complete material context is unavailable. The original and last valid dataset are retained.'); return }
+        if (size > 262144) { setPointer(null); setError('Context too large. Original and last valid dataset retained.'); return }
+      } catch { setPointer(null); setError('Context unavailable. Original and last valid dataset retained.'); return }
     }
-    const first = rows.find((row) => row && typeof row === 'object' && !Array.isArray(row))
-    setFields(Object.keys(first || {}).filter((key) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) &&
-      !['__proto__', 'prototype', 'constructor'].includes(key)).slice(0, 100).map((key, index) => ({
+    const keys = new Set()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+      for (const key of Object.keys(row)) {
+        if (/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && !['__proto__', 'prototype', 'constructor'].includes(key)) keys.add(key)
+        if (keys.size === 100) break
+      }
+      if (keys.size === 100) break
+    }
+    setFields([...keys].map((key, index) => ({
       id: key, label: key, pointer: `/${key}`, kind: 'text', conversion: 'identity', key: index === 0, nullable: false,
     })))
   }
@@ -152,7 +167,9 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     run(async (controller) => {
       if (!source || pointer === null || !Array.isArray(recordsAtOriginal(source.original, pointer))) throw new Error('Choose an original and records array.')
       const definition = { schema_version: 1, id, version: Number(version), title, reporting_time_zone: 'UTC', retention_days: 365,
-        fields: fields.map((field) => ({ id: field.id, label: field.label, type: { kind: field.kind }, nullable: field.nullable, sensitivity: 'internal' })),
+        fields: fields.map((field) => ({ id: field.id, label: field.label,
+          type: field.kind === 'ratio' ? { kind: 'ratio', scale: field.ratioScale || 'percent' } : { kind: field.kind },
+          nullable: field.nullable, sensitivity: 'internal' })),
         key_fields: fields.filter((field) => field.key).map((field) => field.id),
         lineage: { kind: 'project_material', material_id: source.material.material_id, sha256: source.material.sha256, byte_length: source.material.byte_size } }
       const mapping = { schema_version: 1, fields: fields.map((field) => ({ field_id: field.id, pointer: field.pointer, conversion: field.conversion })) }
@@ -171,7 +188,7 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
     </select></label>
     {pending && <p role="status">Reading or importing original…</p>}{error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     {source && <><pre aria-label="Original provenance">{JSON.stringify(source.material, null, 2)}</pre>
-      {contextBytes !== null && <p>Complete material context: {contextBytes} UTF-8 bytes. Source capture and ingestion clocks remain unchanged.</p>}
+      {contextBytes !== null && <p>Complete material context: {contextBytes} UTF-8 bytes. Source clocks unchanged.</p>}
       <label>Records array<select value={pointer === null ? 'unselected' : pointer} disabled={pending} onChange={(event) => selectArray(event.target.value === 'unselected' ? null : event.target.value)}>
         <option value="unselected">Select records array</option>{arrays.map((item) => <option key={item.pointer} value={item.pointer}>{item.pointer || '(root)'} · {item.count} records</option>)}
       </select></label>
@@ -180,8 +197,11 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         <label>Import dataset title<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
         <label>Import dataset version<input required type="number" min="1" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
         {fields.map((field, index) => <fieldset key={index}><legend>Import field {index + 1}</legend>
-          {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
-          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required={key !== 'pointer'} placeholder={key === 'pointer' ? 'Blank maps the whole record' : undefined} value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
+          <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'ratio', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
+          {field.kind === 'ratio' && <label>{`Field ${index + 1} ratio scale`}<select value={field.ratioScale || 'percent'} onChange={(event) => updateField(index, 'ratioScale', event.target.value)}>
+            <option value="percent">Percent (80 means 80%)</option><option value="fraction">Fraction (0.8 means 80%)</option>
+          </select></label>}
           <label>{`Field ${index + 1} conversion`}<select value={field.conversion} onChange={(event) => updateField(index, 'conversion', event.target.value)}>{['identity', 'string_number', 'iso_instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
           <label><input type="checkbox" checked={field.key} onChange={(event) => updateField(index, 'key', event.target.checked)} />{`Field ${index + 1} key`}</label>
           <label><input type="checkbox" checked={field.nullable} onChange={(event) => updateField(index, 'nullable', event.target.checked)} />{`Field ${index + 1} nullable`}</label>
@@ -208,13 +228,20 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const [handoff, setHandoff] = useState(null)
   const boardRef = useRef(null)
   const resultRef = useRef(null)
+  const viewFeedback = useRef(null)
   const composeFeedback = useRef(null)
   const [composeError, setComposeError] = useState('')
   const [savedReadback, setSavedReadback] = useState(null)
   useLayoutEffect(() => { if (composeError || savedReadback) composeFeedback.current?.focus() }, [composeError, savedReadback])
+  useLayoutEffect(() => {
+    if (state.error && state.errorOperation?.owner === 'view' && document.activeElement === document.body) viewFeedback.current?.focus()
+  }, [state.error, state.errorOperation])
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
+  // Keep only dataset selection intent while a profile hides this Ground.
+  // Results and action authority are always discarded and read again.
+  const rememberedView = useRef(null)
   const busy = useRef(false)
   const snapshot = session?.controller?.getSnapshot?.() || session
   const sessionGeneration = snapshot?.generation
@@ -222,6 +249,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const eligible = active && signedIn && !mock && UUID.test(projectId || '') && status === 'active'
   // Comparing the render identity prevents a single frame of old-account content.
   const identityKey = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, active, epoch])
+  const resumeOwner = JSON.stringify([projectId, accountScope, signedIn, mock, sessionGeneration, status, epoch])
   const identity = useMemo(() => ({ key: identityKey }), [identityKey, session?.controller])
   const visible = state.identity === identity && eligible
   const leaving = leavingGround === 'integrations'
@@ -265,22 +293,25 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     return context.current === ctx && !ctx.controller.signal.aborted && generation.current === ctx.generation &&
       (!now || (now.status === 'active' && now.generation === ctx.sessionGeneration))
   }
-  function fail(error, ctx) {
+  function fail(error, ctx, errorOperation = null) {
     if (!current(ctx) || error?.name === 'AbortError') return
     if (error?.status === 403) {
+      rememberedView.current = null
       invalidate()
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
       setRevision('')
-    } else setState((old) => ({ ...old, pending: '', error: humanizeError(error), retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
+    } else setState((old) => ({ ...old, ...(error?.status === 401 ? { read: null, readIdentity: null, previousRead: false } : {}),
+      pending: '', error: humanizeError(error), errorOperation, retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
+    if (rememberedView.current?.owner !== resumeOwner) rememberedView.current = null
     invalidate()
     setState({ ...empty(), identity, pending: eligible ? 'Loading integrations…' : '' })
     setForm(blankForm())
     setRevision('')
     if (!eligible) return undefined
-    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration }
+    const ctx = { controller: new AbortController(), generation: generation.current, sessionGeneration, resumeOwner }
     context.current = ctx
     ;(async () => {
       try {
@@ -289,25 +320,37 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         ctx.cacheIdentity = scopeCacheIdentity(scope, sessionGeneration)
         const [datasets, elements] = await Promise.all([
           client.listDatasets(projectId, { signal: ctx.controller.signal }),
-          client.listElements(projectId, { signal: ctx.controller.signal }),
+          // Each saved view is validated against its source during discovery.
+          // Keep that work within one request; remaining views use the cursor below.
+          client.listElements(projectId, { signal: ctx.controller.signal, limit: 1 }),
         ])
         if (!current(ctx)) return
         setState({ ...empty(), identity, scope, datasets: datasets.records, elements: elements.records,
           datasetCursor: datasets.nextCursor, elementCursor: elements.nextCursor })
+        const resume = rememberedView.current
+        rememberedView.current = null
+        if (resume?.owner === ctx.resumeOwner && resume.scope === ctx.cacheIdentity) {
+          const saved = elements.records.find(record => record.element.id === resume.id && record.element.kind.startsWith('dataset.'))
+          if (saved) {
+            setState(old => ({ ...old, pending: 'Loading view…' }))
+            await readView(saved, false, ctx)
+            if (current(ctx)) setState(old => ({ ...old, pending: '' }))
+          }
+        }
       } catch (error) { fail(error, ctx) }
     })()
     return invalidate
   }, [identity, retry, client])
 
-  async function operation(label, action, composing = false) {
+  async function operation(label, action, composing = false, owner = 'integrations') {
     const ctx = context.current
     if (!ctx || !current(ctx) || busy.current) return
     busy.current = true
-    setState((old) => ({ ...old, pending: label, error: '', notice: '' }))
+    setState((old) => ({ ...old, pending: label, error: '', errorOperation: null, notice: '' }))
     if (composing) setComposeError('')
     try { await action(ctx) } catch (error) {
       if (composing && current(ctx) && error?.name !== 'AbortError' && ![401, 403].includes(error?.status)) setComposeError(humanizeError(error))
-      else fail(error, ctx)
+      else fail(error, ctx, { owner, retry: () => operation(label, action, composing, owner) })
     }
     finally {
       if (current(ctx)) {
@@ -339,7 +382,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   async function guardSchedulePreview(signal) {
     const ctx = context.current
     if (!ctx || !current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
-    const scope = await client.getScope(projectId, { signal })
+    let scope
+    try { scope = await client.getScope(projectId, { signal }) }
+    catch (error) {
+      // The client also uses status 0 for scope validation failures, not just transport errors.
+      if (error?.status === 0 && error?.message === 'The integration response or request was invalid.') {
+        fail({ status: 403 }, ctx)
+        throw new DOMException('Aborted', 'AbortError')
+      }
+      throw error
+    }
     if (!current(ctx) || signal.aborted) throw new DOMException('Aborted', 'AbortError')
     if (scope.projectId !== projectId || !['owner', 'editor', 'reviewer', 'read_only'].includes(scope.projectRole) ||
         scopeCacheIdentity(scope, ctx.sessionGeneration) !== ctx.cacheIdentity) {
@@ -354,15 +406,30 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       const dataset = await client.getDataset(projectId, reference, { signal })
       if (!current(ctx) || signal.aborted) return
       setState((old) => ({ ...old, datasets: [...old.datasets.filter((item) => referenceKey(item.reference) !== referenceKey(reference)), dataset],
-        notice: `Dataset ${dataset.title} is available in the native composer.` }))
+        notice: `Dataset ${dataset.title} is ready.` }))
       setForm({ ...blankForm(), dataset: referenceKey(reference), columns: dataset.fields.map((field) => field.id) })
     } catch (error) { fail(error, ctx); throw error }
   }
+  async function adoptDerivedDataset(reference, signal) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || signal.aborted) return
+    const dataset = await client.getDataset(projectId, reference, { signal })
+    await guardWorkflow(signal)
+    if (!current(ctx) || signal.aborted) return
+    setState(old => ({ ...old, datasets: [...old.datasets.filter(item => referenceKey(item.reference) !== referenceKey(reference)), dataset] }))
+    // A completed materialization never overwrites an in-progress view draft.
+    setForm(old => old.dataset || old.id || old.title || old.editing ? old
+      : { ...old, dataset: referenceKey(reference), columns: dataset.fields.map(field => field.id) })
+  }
   async function readView(record, historical, ctx, cursor) {
+    rememberedView.current = !historical && record.element.kind.startsWith('dataset.')
+      ? { owner: ctx.resumeOwner, scope: ctx.cacheIdentity, id: record.element.id } : null
     const request = ++viewGeneration.current
+    const readIdentity = JSON.stringify([ctx.cacheIdentity, record.revision, record.element])
+    const retain = state.readIdentity === readIdentity && state.read && ['ready', 'empty', 'partial', 'stale'].includes(state.read.status)
     ctx.action?.controller.abort()
     ctx.action = null
-    setState((old) => ({ ...old, selected: record, historical, read: null, action: null }))
+    setState((old) => ({ ...old, selected: record, historical, read: retain ? old.read : null, readIdentity, previousRead: Boolean(retain), action: null }))
     if (record.element.kind === 'integration.action') {
       if (historical || !['owner', 'editor'].includes(state.scope?.projectRole)) return
       const binding = { record, ctx, request, controller: new AbortController(), grantRevision: null, availability: 'unavailable' }
@@ -371,11 +438,32 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       await refreshAction(binding)
       return
     }
+    if (retain) {
+      await guardSchedulePreview(ctx.controller.signal)
+      if (!current(ctx) || request !== viewGeneration.current) return
+    }
     const read = await client.queryDataset(projectId, record.element.dataset_ref,
       DatasetQueryV1.parse({ ...record.element.query, ...(cursor ? { cursor } : {}) }), { signal: ctx.controller.signal })
     if (!current(ctx) || request !== viewGeneration.current) return
     if (read.status === 'forbidden') { fail({ status: 403 }, ctx); return }
-    setState((old) => ({ ...old, read }))
+    if (retain && ['failed', 'unavailable', 'invalid'].includes(read.status)) throw new Error('The dataset could not be loaded.')
+    setState((old) => ({ ...old, read, previousRead: false, error: '', errorOperation: null }))
+  }
+  function loadView(record, historical, cursor) {
+    operation(cursor ? 'Loading view data…' : 'Loading view…', (ctx) => readView(record, historical, ctx, cursor), false, 'view')
+  }
+  function retryView() {
+    if (state.errorOperation?.owner === 'view') state.errorOperation.retry()
+    else loadView(state.selected, state.historical)
+  }
+  function loadHistoricalRevision(selected, requestedRevision) {
+    operation('Loading historical recipe…', async (ctx) => {
+      setState((old) => ({ ...old, ...(requestedRevision !== selected.revision
+        ? { read: null, readIdentity: null, previousRead: false }
+        : { previousRead: Boolean(old.read && ['ready', 'empty', 'partial', 'stale'].includes(old.read.status)) }) }))
+      const record = await client.getElement(projectId, selected.element.id, { revision: requestedRevision, signal: ctx.controller.signal })
+      if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
+    }, false, 'view')
   }
   const currentAction = (binding) => current(binding.ctx) && binding.ctx.action === binding &&
     viewGeneration.current === binding.request && !binding.controller.signal.aborted
@@ -467,26 +555,45 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setRevision('')
       setForm(blankForm())
       await readView(record, false, ctx)
-    })
+    }, false, 'view')
   }
   function compose(event) {
     event.preventDefault()
-    if (savedReadback) return
+    if (savedReadback || !canEdit) return
     operation('Saving view…', async (ctx) => {
+      if (!/[\p{L}\p{N}\p{P}\p{S}]/u.test(form.title)) throw new Error('Enter a visible view title.')
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
       const fields = form.kind === 'table' ? form.columns : [...new Set([form.x, form.y])]
       if (fields.some((id) => !dataset.fields.some((field) => field.id === id))) throw new Error('Select authorized fields.')
       if (form.kind === 'line' && (!xKinds.includes(dataset.fields.find((field) => field.id === form.x)?.type.kind) ||
         !yKinds.includes(dataset.fields.find((field) => field.id === form.y)?.type.kind))) throw new Error('Choose compatible line axes.')
+      const grouping = form.kind === 'table' && form.grouping ? {
+        kind: 'provider_pairs', pair_key_field: form.pairKey, provider_field: form.providerField,
+        providers: [form.firstProvider, form.secondProvider],
+      } : undefined
+      if (grouping && [form.pairKey, form.providerField].some(id => !fields.includes(id) ||
+        !['text', 'identifier'].includes(dataset.fields.find(field => field.id === id)?.type.kind))) {
+        throw new Error('Pair and provider fields must be visible text or identifiers.')
+      }
+      const windows = namedWindows(dataset)
+      if (form.window && !windows.some(window => window.id === form.window)) throw new Error('Select a declared window.')
+      const query = dataset.derivation ? { ...(form.query || { limit: 100 }), fields } : { fields, limit: 100 }
+      if (windows.length) {
+        const retained = (query.filters || []).filter(filter => !(filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value)))
+        query.filters = [...retained, ...(form.window ? [{ field: 'window_id', op: 'eq', value: form.window }] : [])]
+        // Cursors are bound to the previous projection/filter, never a new selection.
+        delete query.cursor
+      }
       const parsed = DatasetElementV1.safeParse({ schema_version: 1, id: form.id, title: form.title.trim(),
-        dataset_ref: dataset.reference, query: { fields, limit: 100 }, kind: `dataset.${form.kind}`,
-        props: form.kind === 'table' ? { columns: fields, row_limit: 100 } : { x_field: form.x, y_field: form.y } })
-      if (!parsed.success) throw new Error('Enter a title, a stable lowercase slug ID, and valid fields.')
-      if (!form.editing && state.elements.some((record) => record.element.id === form.id)) throw new Error('Select that saved view and choose Edit current recipe to update it.')
+        dataset_ref: dataset.reference, query, kind: `dataset.${form.kind}`,
+        props: form.kind === 'table' ? { columns: fields, row_limit: 100, ...(grouping ? { row_grouping: grouping } : {}) } : { x_field: form.x, y_field: form.y } })
+      if (!parsed.success) throw new Error('Enter a title, lowercase ID and valid fields.')
+      if (!form.editing && state.elements.some((record) => record.element.id === form.id)) throw new Error('Open the saved view, then Edit current recipe.')
       const saved = await client.saveElement(projectId, parsed.data, { signal: ctx.controller.signal,
         ...(form.editing ? { expectedRevision: form.editing.revision } : {}) })
       if (!current(ctx)) return
+      if (recipeKey(saved.element) !== recipeKey(parsed.data)) throw new Error('The saved recipe did not match your draft. Reload saved views before retrying.')
       setState((old) => ({ ...old, notice: `Saved ${saved.element.title}, revision ${saved.revision}.`,
         elements: [...old.elements.filter((record) => record.element.id !== saved.element.id), saved] }))
       setForm((old) => ({ ...old, editing: saved }))
@@ -507,14 +614,19 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   function editSelected() {
     const saved = state.selected
     const element = saved.element
+    const dataset = state.datasets.find(item => referenceKey(item.reference) === referenceKey(element.dataset_ref))
+    const windows = namedWindows(dataset)
     setForm({ dataset: referenceKey(element.dataset_ref), id: element.id, title: element.title, kind: element.kind === 'dataset.table' ? 'table' : 'line',
-      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved })
+      columns: element.props.columns || [], x: element.props.x_field || '', y: element.props.y_field || '', editing: saved,
+      grouping: Boolean(element.props.row_grouping), pairKey: element.props.row_grouping?.pair_key_field || '',
+      providerField: element.props.row_grouping?.provider_field || '', firstProvider: element.props.row_grouping?.providers[0] || '',
+      secondProvider: element.props.row_grouping?.providers[1] || '', query: element.query, window: element.query.filters?.find(filter => filter.field === 'window_id' && filter.op === 'eq' && windows.some(window => window.id === filter.value))?.value || '' })
   }
   function loadMore(resource) {
     operation('Loading more…', async (ctx) => {
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
-        after: isDataset ? state.datasetCursor : state.elementCursor })
+        after: isDataset ? state.datasetCursor : state.elementCursor, ...(!isDataset ? { limit: 1 } : {}) })
       if (current(ctx)) setState((old) => {
         let records = [...old[resource], ...page.records]
         if (!isDataset) {
@@ -530,7 +642,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     })
   }
   const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
+  const onForbidden = () => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }
+  const canEdit = ['owner', 'editor'].includes(state.scope?.projectRole)
   const pending = Boolean(state.pending)
+  const viewError = state.error && state.read && state.previousRead && state.errorOperation?.owner === 'view'
   const message = mock ? 'Integrations are unavailable in demo mode.' : !signedIn ? 'Sign in to view integrations.' :
     !UUID.test(projectId || '') ? 'Open a project to view integrations.' : status !== 'active' ? 'An active session is required to view integrations.' : null
   return <section ref={boardRef} className="studio-ground-ops" data-ground="ops" hidden={!active && !leaving}
@@ -541,59 +656,68 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       {message ? <p role="status">{message}</p> : visible && <>
         <OpsHomePanel active={active} />
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
+        {state.error && !viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={() => state.errorOperation ? state.errorOperation.retry() : setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <details className="ops-advanced" open={!hasLinkedDevice}>
           <summary>Workflows and data</summary>
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
+          {canEdit && context.current && <WorkflowScheduleDraftBrowser
             key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
             contextKey={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} mode={mode === 'light' || mode === 'dark' ? mode : undefined}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WebhookReceiptPanel
+            onForbidden={onForbidden} />}
+          {canEdit && context.current && <WebhookReceiptPanel
             key={JSON.stringify(['webhook-receipt', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ActionDefinitionPanel
+            onForbidden={onForbidden} />}
+          {canEdit && context.current && <ActionDefinitionPanel
             key={JSON.stringify(['action-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onForbidden={onForbidden}
             onSaved={(record) => { const ctx = context.current; if (ctx && current(ctx)) setState((old) => ({ ...old,
               elements: [...old.elements.filter((item) => item.element.id !== record.element.id), record],
               notice: `Saved ${record.element.title}, revision ${record.revision}. No action was submitted.` })) }} />}
           {['owner', 'editor', 'reviewer', 'read_only'].includes(state.scope.projectRole) && context.current && <WorkflowSchedulePreviewPanel
             key={JSON.stringify(['schedule-preview', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardSchedulePreview}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowDefinitionPanel
+            onForbidden={onForbidden} />}
+          {canEdit && context.current && <ManualWorkflowDefinitionPanel
             key={JSON.stringify(['manual-workflow-definition', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowStartPanel
+            onForbidden={onForbidden} />}
+          {canEdit && context.current && <ManualWorkflowStartPanel
             key={JSON.stringify(['manual-workflow-start', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onForbidden={onForbidden}
             onAdmitted={(run) => { const ctx = context.current; if (ctx && current(ctx)) setHandoff({ run, generation: ctx.generation }) }} />}
-          {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <ManualWorkflowRunPanel
+          {canEdit && context.current && <ProjectLogRetentionPanel
+            key={JSON.stringify(['retention', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
+            signal={context.current.controller.signal} guard={guardWorkflow}
+            onForbidden={onForbidden} />}
+          {canEdit && context.current && <ManualWorkflowRunPanel
             key={JSON.stringify(['manual-workflow', identity.key, context.current.cacheIdentity])} client={client} projectId={projectId}
             signal={context.current.controller.signal} guard={guardWorkflow} displayPreferences={preferences}
             requestedRunId={handoff?.generation === context.current.generation ? handoff.run.run_id : undefined}
             admittedBinding={handoff?.generation === context.current.generation ? handoff.run : undefined}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }} />}
+            onForbidden={onForbidden} />}
           {state.scope.projectRole === 'owner' && context.current && <IntegrationSetupPanel
             key={JSON.stringify([identity.key, context.current.cacheIdentity])} client={client} projectId={projectId} scope={state.scope}
             signal={context.current.controller.signal} guard={guardSetup}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onForbidden={onForbidden}
             onDatasetReady={refreshSetupDataset} />}
           {state.scope.projectRole === 'owner' && context.current && <ProjectMaterialImport
             key={JSON.stringify(['material-import', identity.key, context.current.cacheIdentity])} projectId={projectId} client={client}
             signal={context.current.controller.signal} guard={guardSetup}
-            onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
+            onForbidden={onForbidden}
             onImported={async (_reference, signal) => {
               const ctx = context.current
               const page = await client.listDatasets(projectId, { signal })
               await guardSetup(signal)
               if (ctx && current(ctx) && !signal.aborted) setState((old) => ({ ...old, datasets: page.records, datasetCursor: page.nextCursor }))
             }} />}
+          {canEdit && context.current && state.datasets.some(isImportedMaterialDataset) && <DatasetDerivationPanel
+            key={JSON.stringify(['dataset-derivation', identity.key, context.current.cacheIdentity])}
+            contextKey={context.current.cacheIdentity} projectId={projectId} client={client} datasets={state.datasets}
+            signal={context.current.controller.signal} guard={guardWorkflow} onCreated={adoptDerivedDataset}
+            onForbidden={onForbidden} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
             {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
               ? 'No datasets are available yet. Use integration setup to connect your data.'
@@ -607,29 +731,44 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             <ul>{state.elements.map((record) => <li key={record.element.id}><button disabled={pending} onClick={() => chooseSaved(record)}>{record.element.title} · revision {record.revision}</button></li>)}</ul>
             {state.elementCursor && <button disabled={pending} onClick={() => loadMore('elements')}>Load more saved views</button>}
           </section>
-          <form onSubmit={compose} aria-label="Compose native view"><h2>Compose native view</h2>
+          <form onSubmit={compose} onKeyDown={event => {
+            if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault()
+          }} aria-label="Compose native view"><h2>Compose native view</h2>
             {composeError && <p ref={composeFeedback} tabIndex={-1} role="alert">{composeError} Your draft is retained. Review it and save again.</p>}
             {savedReadback && <div ref={composeFeedback} tabIndex={-1} role="alert">
               <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
               <button type="button" disabled={pending} onClick={() => operation('Loading saved view…', (ctx) => readSavedView(savedReadback.record, ctx))}>Reload view</button>
             </div>}
-            <fieldset disabled={pending || Boolean(savedReadback)}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
+            <fieldset disabled={pending || Boolean(savedReadback) || !canEdit}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
               <label>Dataset<select required value={form.dataset} onChange={(event) => setForm({ ...blankForm(), dataset: event.target.value })}>
                 <option value="">Select dataset</option>{state.datasets.map((item) => <option key={referenceKey(item.reference)} value={referenceKey(item.reference)}>{item.title} · version {item.reference.version}</option>)}
               </select></label>
               <label>Title<input required maxLength={120} value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} /></label>
               <label>Stable ID<input required maxLength={128} pattern="[a-z0-9]+((_|-)[a-z0-9]+)*" disabled={Boolean(form.editing)} value={form.id} onChange={(event) => setForm({ ...form, id: event.target.value })} /></label>
               <label>View type<select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value })}><option value="table">Table</option><option value="line">Line</option></select></label>
+              {namedWindows(dataset).length > 0 && <label>Named window<select value={form.window} onChange={event => setForm({ ...form, window: event.target.value })}>
+                <option value="">All windows</option>{namedWindows(dataset).map(window => <option key={window.id} value={window.id}>{window.id}{window.filters.length === 0 ? ' (all admitted history)' : ''}</option>)}
+              </select></label>}
               {form.kind === 'table' ? <fieldset><legend>Table columns</legend>{dataset?.fields.map((field) => <label key={field.id}><input type="checkbox" checked={form.columns.includes(field.id)} onChange={(event) => setForm({ ...form, columns: event.target.checked ? [...form.columns, field.id] : form.columns.filter((id) => id !== field.id) })} />{field.label}</label>)}</fieldset> : <>
                 {['x', 'y'].map((axis) => <label key={axis}>{axis.toUpperCase()} field<select required value={form[axis]} onChange={(event) => setForm({ ...form, [axis]: event.target.value })}>
                   <option value="">Select field</option>{dataset?.fields.filter((field) => (axis === 'x' ? xKinds : yKinds).includes(field.type.kind)).map((field) => <option key={field.id} value={field.id}>{field.label}</option>)}
                 </select></label>)}
               </>}
+              {form.kind === 'table' && <fieldset><legend>Provider pair presentation</legend>
+                <label><input type="checkbox" checked={Boolean(form.grouping)} onChange={event => setForm({ ...form, grouping: event.target.checked })} />Group verified provider pairs</label>
+                {form.grouping && <>
+                  <p>Pairs require complete results, matching nonempty keys and both providers. Other rows stay separate.</p>
+                  {[['pairKey', 'Pair key field'], ['providerField', 'Provider field']].map(([key, label]) => <label key={key}>{label}<select required value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })}>
+                    <option value="">Select a visible field</option>{dataset?.fields.filter(field => form.columns.includes(field.id) && ['text', 'identifier'].includes(field.type.kind)).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}
+                  </select></label>)}
+                  {[['firstProvider', 'First provider'], ['secondProvider', 'Second provider']].map(([key, label]) => <label key={key}>{label}<input required maxLength={120} value={form[key]} onChange={event => setForm({ ...form, [key]: event.target.value })} /></label>)}
+                </>}
+              </fieldset>}
               <button type="submit">{form.editing ? 'Update view' : 'Save view'}</button>
               {form.editing && <button type="button" onClick={() => setForm(blankForm())}>Create another view</button>}
             </fieldset>
           </form>
-          <fieldset><legend>Personal display preferences</legend><p>Local to this view. Dataset reporting timezone is unchanged; these preferences are not saved to your organization.</p>
+          <fieldset><legend>Personal display preferences</legend><p>Dataset reporting timezone is unchanged. Preferences stay in this view.</p>
             {['locale', 'timezone', 'hourFormat'].map((key) => <label key={key}>{({ locale: 'Display locale', timezone: 'Display timezone', hourFormat: 'Hour cycle' })[key]}
               <select value={preferences[key]} onChange={(event) => {
                 const parsed = DisplayPreferencesSchema.safeParse({ ...preferences, [key]: event.target.value })
@@ -638,16 +777,15 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             </label>)}{preferenceError && <p role="alert">{preferenceError}</p>}
           </fieldset>
           {state.selected && <section aria-label="Selected native view">
+            {state.selected.element.kind !== 'integration.action' && <DatasetDerivationEvidence
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} />}
             <p>Recipe revision {state.selected.revision}{state.historical ? ' · Historical recipe' : ''}. {state.selected.element.kind === 'integration.action'
               ? (state.historical ? 'Historical actions are read-only.' : 'Actions execute with current human authority.')
-              : 'Views query live data; this is not an immutable evidence snapshot.'}</p>
+              : 'Views query live data.'}</p>
             {state.selected.element.kind !== 'integration.action' && !state.historical && <button disabled={pending || !state.datasets.some((item) => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))} onClick={editSelected}>Edit current recipe</button>}
-            <form onSubmit={(event) => { event.preventDefault(); operation('Loading historical recipe…', async (ctx) => {
-              const record = await client.getElement(projectId, state.selected.element.id, { revision: Number(revision), signal: ctx.controller.signal })
-              if (current(ctx)) { setForm(blankForm()); await readView(record, true, ctx) }
-            }) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
+            <form onSubmit={(event) => { event.preventDefault(); loadHistoricalRevision(state.selected, Number(revision)) }}><label>Earlier recipe revision<input type="number" min="1" step="1" required value={revision} onChange={(event) => setRevision(event.target.value)} /></label><button disabled={pending}>Read revision</button></form>
             {state.selected.element.kind === 'integration.action' ? <>
-              {!state.historical && !['owner', 'editor'].includes(state.scope.projectRole) && <p role="status">You do not have permission to perform this action.</p>}
+              {!state.historical && !canEdit && <p role="status">You do not have permission to perform this action.</p>}
               {state.action && <>
                 {state.action.binding.grantRevision !== null ? <IntegrationActionForm
                   element={state.selected.element} contextKey={JSON.stringify([context.current?.cacheIdentity, sessionGeneration, state.selected.revision, state.action.binding.request])}
@@ -660,10 +798,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
                 {state.action.availability !== 'ready' && <button disabled={pending} onClick={() => refreshAction(state.action.binding)}>Retry action authority</button>}
               </>}
             </> : <>
+            {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            <SavedDatasetViewExport projectId={projectId} record={state.selected} read={state.read}
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))}
+              readIdentity={state.readIdentity} scopeKey={context.current?.cacheIdentity} preferences={preferences}
+              unavailable={pending || state.previousRead || Boolean(viewError)} guard={guardSchedulePreview} />
+            {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
-              onRetry={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}
-              onLoadMore={(cursor) => operation('Loading view data…', (ctx) => readView(state.selected, state.historical, ctx, cursor))} />}
-            {!state.read && !pending && <button onClick={() => operation('Loading view…', (ctx) => readView(state.selected, state.historical, ctx))}>Retry view</button>}
+              onRetry={retryView}
+              onLoadMore={(cursor) => loadView(state.selected, state.historical, cursor)} />}
+            {!state.read && !pending && !viewError && <button onClick={retryView}>Retry view</button>}
             </>}
           </section>}
         </details>}

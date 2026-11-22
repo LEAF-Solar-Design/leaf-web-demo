@@ -30,6 +30,9 @@ PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da
 # Current connected Native producer; hash derived after the frozen source change.
 REVIEWED_WORKER_SHA256 = frozenset({'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37', PRE_EXECUTION_WORKER_SHA256,
     '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'})
+# Native create/edit custody changes only package validation, not claim/settlement ordering.
+EDIT_CUSTODY_WORKER_SHA256 = '1d2844f0937c498ab7b5b743e40e6b2421c3571f8c722dd6abe027e5ebb13087'
+REVIEWED_WORKER_SHA256 = REVIEWED_WORKER_SHA256 | {EDIT_CUSTODY_WORKER_SHA256}
 PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
 PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
@@ -281,11 +284,53 @@ def settled_failure_status(raw, claim):
     return {'backend_status_sha256': sha(raw)}
 
 
+def completion_receipt(raw, claim, scope_digest, image):
+    """Validate the closed worker receipt against the recorded attempt and PNG."""
+    need(type(raw) is bytes and len(raw) <= MAX_LOCAL)
+    value = worker.parse(raw)
+    base = {'schema', 'job_id', 'lease_owner', 'attempt', 'archive_sha256',
+            'worker_binding', 'target'}
+    need(type(value) is dict and base <= set(value) and worker.encode(value) == raw)
+    need(type(value['attempt']) is int and value['attempt'] == claim['attempt']
+         and value['job_id'] == claim['job_id'])
+    worker.canonical_uuid(value['lease_owner'])
+    scope = worker.binding(value['worker_binding'])
+    need(sha(worker.encode(scope)) == scope_digest)
+    job = dict(job_id=claim['job_id'], attempt=claim['attempt'],
+               lease_owner=value['lease_owner'],
+               descriptor=dict(claim['source'], project_id=scope['project_id']))
+    facts = {k: v for k, v in value.items() if k not in base}
+    need(value == worker.make_receipt(job, scope, facts, image))
+    return value
+
+
+def completed_status(raw, claim, receipt_digest):
+    # The server verifies the stored receipt and screenshot before emitting
+    # this digest. It binds the saved scope, owner, attempt and native facts.
+    need(type(raw) is bytes and len(raw) <= MAX_LOCAL)
+    value = worker.parse(raw)
+    base = {'job_id', 'status'} | set(claim['source'])
+    need(type(value) is dict and value.get('job_id') == claim['job_id'])
+    need(source({k: value[k] for k in claim['source']}) == claim['source'])
+    if value.get('status') in ('queued', 'running'):
+        need(set(value) == base)
+        raise Unavailable()
+    need(set(value) == base | {'receipt', 'evidence_basis'} and value['status'] == 'complete')
+    receipt = value['receipt']
+    need(type(receipt) is dict and set(receipt) == {'kind', 'receipt_id', 'sha256'})
+    worker.canonical_uuid(receipt['receipt_id'])
+    need(receipt['kind'] == 'simulator' and receipt['sha256'] == receipt_digest
+         and value['evidence_basis'] == 'authenticated-worker-report')
+    return {'backend_status_sha256': sha(raw)}
+
+
 class LocalProof:
     def __init__(self, directory, checkpoint, scope_digest):
         self.directory, self.checkpoint = directory, checkpoint
         self.files = {}
+        self.limits = {}
         self.settled_producer = False
+        self.completion = False
         self.scope_digest = scope_digest
         old = self.capture(checkpoint)
         value = worker.parse(old)
@@ -326,8 +371,17 @@ class LocalProof:
         name = self.claim['job_id'] + '-' + str(self.claim['attempt']) + '-failure.json'
         self.failure_path = self.cycle / name
         self.names = sorted(p.name for p in self.cycle.iterdir())
-        need(self.names == sorted([name] + ([] if self.legacy else ['journal.json'])))
         failure = worker.parse(self.capture(self.failure_path))
+        need(type(failure) is dict)
+        self.completion = (not self.legacy and self.settled_producer and
+                           failure.get('stage') == 'completion' and failure.get('result') == 'unknown')
+        expected = [name] + ([] if self.legacy else ['journal.json'])
+        if self.completion:
+            prefix = self.claim['job_id'] + '-' + str(self.claim['attempt'])
+            self.intent_path = self.cycle / (prefix + '-completion.json')
+            self.image_path = self.cycle / (prefix + '.png')
+            expected += [self.intent_path.name, self.image_path.name]
+        need(self.names == sorted(expected))
         fields = {'stage', 'result', 'job_id', 'archive_sha256', 'execution_stage',
                   'error_code', 'authority_failure', 'failure_settlement', 'cleanup_complete',
                   'allocator_release_confirmed'}
@@ -337,11 +391,11 @@ class LocalProof:
             self.build_artifact = failure['build_artifact']
             need(type(self.build_artifact) is dict and self.build_artifact.get('source') == self.claim['source'])
         need(type(failure) is dict and set(failure) == fields)
-        need(failure['stage'] == 'execution' and failure['result'] == 'failed'
+        need((self.completion or (failure['stage'] == 'execution' and failure['result'] == 'failed'))
              and failure['job_id'] == self.claim['job_id'] and
              failure['archive_sha256'] == self.claim['source']['archive_sha256'])
         if self.settled_producer:
-            need(failure['execution_stage'] == 'mac-producer')
+            need(failure['execution_stage'] == ('completion' if self.completion else 'mac-producer'))
         else:
             need(failure['execution_stage'] == 'mac-permit-refresh' if self.legacy else
                  failure['execution_stage'] in ('mac-bootstrap', 'mac-permit-refresh'))
@@ -351,21 +405,37 @@ class LocalProof:
             need(failure['error_code'] != 'journal-failed')
         need(type(failure['authority_failure']) is str and failure['authority_failure'] in worker.AUTHORITY_FAILURES)
         if self.settled_producer:
-            need(failure['authority_failure'] == 'none' and failure['failure_settlement'] == 'accepted')
-            need(failure['error_code'] not in ('completion-unknown', 'authority-lost', 'journal-failed'))
+            if self.completion:
+                need(failure['failure_settlement'] in ('request-failed', 'response-unconfirmed')
+                     and failure['error_code'] != 'journal-failed')
+                intent = self.capture(self.intent_path)
+                image = self.capture(self.image_path, worker.MAX_PNG)
+                saved = completion_receipt(intent, self.claim, scope_digest, image)
+                need(saved['allocator_ticket'] == self.ticket)
+                if self.build_artifact is not None:
+                    need(saved.get('build_artifact') == self.build_artifact)
+                self.completion_digest = sha(intent)
+            else:
+                need(failure['authority_failure'] == 'none' and failure['failure_settlement'] == 'accepted')
+                need(failure['error_code'] not in ('completion-unknown', 'authority-lost', 'journal-failed'))
             need(not directory.is_symlink() and self.cycle_stat == cycle_stat)
             self.journal_source_sha256 = pre_execution_source(self.runtime)
             self.worker_sha256 = reviewed_worker_source(self.runtime)
             self.stats = {path: PreExecutionProof.file_stat(path) for path in self.files}
-            need(all(read(path) == raw for path, raw in self.files.items()))
+            need(all(self.captured_read(path) == raw for path, raw in self.files.items()))
         else:
             need(failure['failure_settlement'] == 'not-attempted-authority-lost')
         need(failure['cleanup_complete'] is True and failure['allocator_release_confirmed'] is True)
 
-    def capture(self, path):
-        raw = read(path)
+    def capture(self, path, limit=MAX_LOCAL):
+        raw = read(path) if limit == MAX_LOCAL else read(path, limit)
         self.files[path] = raw
+        self.limits[path] = limit
         return raw
+
+    def captured_read(self, path):
+        limit = self.limits[path]
+        return read(path) if limit == MAX_LOCAL else read(path, limit)
 
     def recheck(self, scope):
         need(sha(worker.encode(worker.binding(scope))) == self.scope_digest)
@@ -373,7 +443,7 @@ class LocalProof:
         need((self.cycle.stat().st_dev, self.cycle.stat().st_ino) == self.cycle_stat)
         need(sorted(p.name for p in self.cycle.iterdir()) == self.names)
         for path, raw in self.files.items():
-            need(read(path) == raw)
+            need(self.captured_read(path) == raw)
         if self.settled_producer:
             need(not self.directory.is_symlink())
             for path, expected in self.stats.items():
@@ -400,8 +470,11 @@ class LocalProof:
                 raw = http.status(self.claim['job_id'])
             except Exception:
                 raise Unavailable() from None
-            backend = (settled_failure_status(raw, self.claim) if self.settled_producer else
-                       disposition(raw, scope, self.claim))
+            if self.completion:
+                backend = completed_status(raw, self.claim, self.completion_digest)
+            else:
+                backend = (settled_failure_status(raw, self.claim) if self.settled_producer else
+                           disposition(raw, scope, self.claim))
             try:
                 observed = native.read_reconciliation_allocator(self.claim['job_id'], self.claim['attempt'])
             except worker.WorkerError as error:
@@ -431,11 +504,15 @@ class LocalProof:
                    'allocator_witness_sha256': allocator['witness_sha256'],
                    'outcome': 'failed-pre-producer-reconciled'}
         if self.settled_producer:
-            receipt.update(outcome='failed-producer-settled-reconciled',
+            receipt.update(outcome=('completed-producer-reconciled' if self.completion else
+                                    'failed-producer-settled-reconciled'),
                            backend_status_sha256=backend['backend_status_sha256'],
-                           attempt_binding='local-accepted-failure-settlement',
+                           attempt_binding=('authenticated-completion-receipt' if self.completion else
+                                            'local-accepted-failure-settlement'),
                            worker_sha256=self.worker_sha256,
                            journal_source_sha256=self.journal_source_sha256)
+            if self.completion:
+                receipt['completion_receipt_sha256'] = self.completion_digest
         else:
             receipt['disposition_sha256'] = backend['disposition_sha256']
         immutable(receipt_path(self.directory, self.claim['job_id']), worker.encode(receipt))
@@ -485,7 +562,9 @@ def pre_execution_source(revision):
         producer_sha = sha(producer)
         need(producer_sha in REVIEWED_WORKER_SHA256)
         journal_sha = journal_source_sha(journal)
-        if journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256:
+        if producer_sha == EDIT_CUSTODY_WORKER_SHA256:
+            need(journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256)
+        elif journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256:
             need(producer_sha == CONNECTED_WORKER_SHA256)
         else:
             need(journal_sha in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,

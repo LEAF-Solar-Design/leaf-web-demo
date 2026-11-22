@@ -7,7 +7,16 @@ import workerUnavailable from './__fixtures__/workerUnavailable.json'
 import { PROJECT_SOLAR_GRAPH_TOOLS, PROJECT_SOLAR_GRAPH_REASONS, projectSolarGraphReason,
   parseProjectSolarInsertionPoint, deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest,
   exactProjectSolarGraphPreview, projectSolarGraphFeedback, panelGroupAngleKey, proposePanelGroups,
-  validatePanelGroups, panelHandleValid } from './solarProjectGraphFormModel.js'
+  validatePanelGroups, validatePanelGroupDiscovery, panelHandleValid } from './solarProjectGraphFormModel.js'
+
+it('guides graphless panel grouping through setup and import before gap grouping', () => {
+  const guidance = projectSolarGraphReason('graphless', 'solar-panel-groups')
+  expect(guidance).toContain('Settings')
+  expect(guidance).toContain('Panel import')
+  expect(guidance).toContain('Use proposed memberships')
+  expect(guidance).toContain('Gap between groups')
+  expect(projectSolarGraphReason('graphless', 'solar-feeders')).toBe(PROJECT_SOLAR_GRAPH_REASONS.graphless)
+})
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
@@ -24,6 +33,16 @@ const build = (changes = {}) => {
   return buildProjectSolarGraphRequest({ tool: 'solar-homeruns', binding, state, currentState: state,
     catalogDigest: digest, idempotencyKey: 'graph-intent', ...changes })
 }
+it('requires an explicit typed geometry choice limited to panel grouping', () => {
+  const groups = [{ name: 'Imported', panel_refs: ['a', 'b'] }]
+  const input = { tool: 'solar-panel-groups', groups }
+  expect(build(input).request.params).not.toHaveProperty('geometry_only')
+  expect(build({ ...input, geometryOnly: true }).request.params.geometry_only).toBe(true)
+  for (const geometryOnly of [null, 0, 1, 'true', {}, []]) {
+    expect(build({ ...input, geometryOnly })).toEqual({ ok: false, reason: 'request_invalid' })
+  }
+  expect(build({ geometryOnly: true })).toEqual({ ok: false, reason: 'request_invalid' })
+})
 function row(changes = {}, flags = {}) {
   return { name: 'solar-homeruns', catalog_digest: digest, availability: {
     admission_checked: true, admission: { status_code: 200, error: null }, entitled: true, engine_ready: true,
@@ -94,6 +113,36 @@ const groupGraph = () => ({ panels: [panel('b'), panel('a'), panel('d', 90), pan
 const groupNames = [{ key: '0.0', name: ' Group 1 ' }, { key: '90.0', name: 'Group 2' }]
 const groupNumbers = { module_width_along_row: '2', module_height_across_row: '1', alignment_tolerance: '0.01' }
 
+it('S02 builds the explicit discovery contract without sending manual memberships', () => {
+  const checked = validatePanelGroupDiscovery({ project: { installation_design: 'Roof' } },
+    { BranchMaxOffset: '0.75', AlignmentTolerance: '0.05' })
+  expect(checked).toEqual({ ok: true, value: {
+    InstallationDesign: 'Roof', BranchMaxOffset: 0.75, AlignmentTolerance: 0.05 } })
+  const built = build({ tool: 'solar-panel-groups', discover: checked.value })
+  expect(built.ok).toBe(true)
+  expect(built.request.params).toEqual({ drawing_id: binding.drawing_id, expected_rev: 6,
+    discover: { BranchMaxOffset: 0.75, AlignmentTolerance: 0.05, InstallationDesign: 'Roof' } })
+  checked.value.BranchMaxOffset = 9
+  expect(built.request.params.discover.BranchMaxOffset).toBe(0.75)
+})
+
+it.each([0, -1, 1000001, Infinity, NaN, '', 'bad', '0x10', true])('S02 discovery refuses invalid numeric input %s', (value) => {
+  const graph = { project: { installation_design: 'Roof' } }
+  for (const key of ['BranchMaxOffset', 'AlignmentTolerance']) {
+    expect(validatePanelGroupDiscovery(graph, { BranchMaxOffset: 1, AlignmentTolerance: 0.1, [key]: value }))
+      .toEqual({ ok: false, reason: 'group_discovery_invalid' })
+  }
+})
+
+it('S02 discovery requires the pinned project design and cannot be mixed with groups or another tool', () => {
+  const discover = { BranchMaxOffset: 1, AlignmentTolerance: 0.1, InstallationDesign: 'Ground' }
+  expect(validatePanelGroupDiscovery({}, discover)).toEqual({ ok: false, reason: 'group_discovery_invalid' })
+  expect(build({ tool: 'solar-panel-groups', discover, groups: [] })).toEqual({ ok: false, reason: 'request_invalid' })
+  expect(build({ discover })).toEqual({ ok: false, reason: 'request_invalid' })
+  expect(build({ tool: 'solar-panel-groups', discover: { ...discover, panel_refs: ['a'] } }))
+    .toEqual({ ok: false, reason: 'request_invalid' })
+})
+
 it('W1C-26b accepts exactly the specified Python hexadecimal handle syntax', () => {
   for (const handle of ['1A', '1a', ' 1a ', '+1a', '-1a', '0x1A', '0X1a', '0x_1a', '1_a']) {
     expect(panelHandleValid(handle)).toBe(true)
@@ -146,6 +195,167 @@ it('W1C-26 proposes sorted angle buckets and reports singletons without mutating
     { key: '90.0', angle_key: '90.0', panel_refs: ['c', 'd'], count: 2 },
   ], singletons: 1, ungrouped: 5, invalid_handles: 1, refused: null })
   expect(graph.panels).toEqual(before)
+})
+const gapNumbers = (gap_distance) => ({ ...groupNumbers, gap_distance })
+it('keeps outline gaps by default and offers explicit center distances at the same value', () => {
+  const panels = [0, 5, 10, 18, 23].map((x, index) => ({ id: String(index), angle: 0,
+    frame_ref: null, centre: [x, 0], provenance: { source_handle: `A${index}` } }))
+  const graph = { panels, frames: [] }
+  const numbers = { gap_distance: '6', module_width_along_row: '4',
+    module_height_across_row: '2', alignment_tolerance: '0.01' }
+  expect(proposePanelGroups(graph, numbers).proposals.map(group => group.panel_refs))
+    .toEqual([['0', '1', '2', '3', '4']])
+  const centers = { ...numbers, gap_measurement: 'centers' }
+  expect(proposePanelGroups(graph, centers).proposals.map(group => group.panel_refs))
+    .toEqual([['0', '1', '2'], ['3', '4']])
+  expect(proposePanelGroups(graph, { ...centers, module_width_along_row: '40' }))
+    .toEqual(proposePanelGroups(graph, centers))
+  expect(proposePanelGroups(graph, { ...numbers, gap_measurement: 'unknown' }).refused)
+    .toBe('group_gap_measurement_invalid')
+})
+it('uses an inclusive center distance across rotated layouts and stable input ordering', () => {
+  const points = [[0, 0], [3, 4], [20, 0], [23, 4]]
+  const numbers = { gap_distance: '5', gap_measurement: 'centers',
+    module_width_along_row: '100', module_height_across_row: '100' }
+  for (const radians of [0, Math.PI / 7]) {
+    const panels = points.map(([x, y], index) => ({ id: String(index), frame_ref: null,
+      angle: radians * 180 / Math.PI, provenance: { source_handle: `B${index}` },
+      centre: [x * Math.cos(radians) - y * Math.sin(radians) + 100,
+        x * Math.sin(radians) + y * Math.cos(radians) - 50] }))
+    const graph = { panels: panels.slice().reverse(), frames: [] }
+    const before = structuredClone(graph)
+    expect(proposePanelGroups(graph, numbers).proposals.map(group => group.panel_refs))
+      .toEqual([['0', '1'], ['2', '3']])
+    expect(graph).toEqual(before)
+    expect(proposePanelGroups(graph, { ...numbers, gap_distance: '4.999' }).singletons).toBe(4)
+  }
+})
+const positionedPanel = (id, x, y, angle = 0) => panel(id, angle, { centre: [x, y] })
+const islandGraph = () => ({ panels: [positionedPanel('a', 0, 0), positionedPanel('b', 3, 0),
+  positionedPanel('c', 20, 0), positionedPanel('d', 23, 0)], frames: [] })
+
+it('partitions an angle bucket by edge gap and submits the named islands through normal validation', () => {
+  const graph = islandGraph()
+  const split = proposePanelGroups(graph, gapNumbers('1'))
+  expect(split).toEqual({ proposals: [
+    { key: '0.0:a', angle_key: '0.0', panel_refs: ['a', 'b'], count: 2 },
+    { key: '0.0:c', angle_key: '0.0', panel_refs: ['c', 'd'], count: 2 },
+  ], singletons: 0, ungrouped: 4, invalid_handles: 0, refused: null })
+  const names = split.proposals.map(({ key }, index) => ({ key, name: `Island ${index + 1}` }))
+  const validated = validatePanelGroups(graph, names, gapNumbers('1'))
+  expect(validated).toEqual({ ok: true, value: [
+    { name: 'Island 1', panel_refs: ['a', 'b'], module_width_along_row: 2,
+      module_height_across_row: 1, alignment_tolerance: 0.01 },
+    { name: 'Island 2', panel_refs: ['c', 'd'], module_width_along_row: 2,
+      module_height_across_row: 1, alignment_tolerance: 0.01 },
+  ] })
+  expect(build({ tool: 'solar-panel-groups', groups: validated.value }).request.params.groups).toEqual(validated.value)
+  expect(proposePanelGroups(graph, gapNumbers(15)).proposals).toEqual([
+    { key: '0.0:a', angle_key: '0.0', panel_refs: ['a', 'b', 'c', 'd'], count: 4 },
+  ])
+  expect(validatePanelGroups(graph, names, gapNumbers(15))).toEqual({ ok: false, reason: 'panel_groups_stale' })
+  expect(proposePanelGroups(graph, gapNumbers(0.99))).toMatchObject({ proposals: [], singletons: 4, refused: null })
+})
+it('keeps the no-gap default and ignores dimensions until gap partitioning is requested', () => {
+  for (const graph of [groupGraph(), islandGraph()]) {
+    for (const gap_distance of [undefined, null, '', '   ']) {
+      expect(proposePanelGroups(graph, { gap_distance })).toEqual(proposePanelGroups(graph))
+    }
+    expect(proposePanelGroups(graph).proposals[0]).toEqual({ key: '0.0', angle_key: '0.0',
+      panel_refs: graph.panels.filter(({ angle }) => angle === 0).map(({ id }) => id).sort(),
+      count: graph.panels.filter(({ angle }) => angle === 0).length })
+  }
+  expect(validatePanelGroups(groupGraph(), groupNames, { ...groupNumbers, gap_distance: '' }))
+    .toEqual(validatePanelGroups(groupGraph(), groupNames, groupNumbers))
+})
+it('orders gap islands and members deterministically, keeps angles apart and reports isolated panels', () => {
+  const graph = islandGraph()
+  graph.panels.push(positionedPanel('e', 0, 0, 90), positionedPanel('f', 0, 2, 90),
+    positionedPanel('1', 100, 0))
+  const before = structuredClone(graph)
+  const expected = proposePanelGroups(graph, gapNumbers(1))
+  expect(expected.proposals.map(({ panel_refs }) => panel_refs)).toEqual([['a', 'b'], ['c', 'd'], ['e', 'f']])
+  expect(expected.singletons).toBe(1)
+  expect(expected.ungrouped).toBe(7)
+  expect(graph).toEqual(before)
+  expect(proposePanelGroups({ ...graph, panels: graph.panels.slice().reverse() }, gapNumbers(1))).toEqual(expected)
+})
+it('uses transitive connectivity, rotation and Euclidean corner distance rather than centre distance or expanded boxes', () => {
+  const chain = { panels: [positionedPanel('a', 0, 0), positionedPanel('b', 3, 0), positionedPanel('c', 6, 0)] }
+  expect(proposePanelGroups(chain, gapNumbers(1)).proposals[0].panel_refs).toEqual(['a', 'b', 'c'])
+  const diagonal = { panels: [positionedPanel('a', 0, 0), positionedPanel('b', 3, 2)] }
+  expect(proposePanelGroups(diagonal, gapNumbers(1)).singletons).toBe(2)
+  expect(proposePanelGroups(diagonal, gapNumbers(1.42)).proposals[0].count).toBe(2)
+  const rotated = { panels: [positionedPanel('a', 0, 0, 90), positionedPanel('b', 0, 3, 90)] }
+  expect(proposePanelGroups(rotated, gapNumbers(1.01)).proposals[0].count).toBe(2)
+  expect(proposePanelGroups(rotated, gapNumbers(0.99)).singletons).toBe(2)
+  const oblique = { panels: [positionedPanel('a', 0, 0, 45),
+    positionedPanel('b', 3 / Math.sqrt(2), 3 / Math.sqrt(2), 45)] }
+  expect(proposePanelGroups(oblique, gapNumbers(1.01)).proposals[0].count).toBe(2)
+  expect(proposePanelGroups(oblique, gapNumbers(0.99)).singletons).toBe(2)
+  const overlap = { panels: [positionedPanel('a', 0, 0), positionedPanel('b', 1, 0)] }
+  expect(proposePanelGroups(overlap, gapNumbers(0.01)).proposals[0].count).toBe(2)
+})
+it('rejects invalid gap values, missing dimensions and unreadable geometry through proposal and form validation', () => {
+  const graph = islandGraph()
+  for (const gap of [0, -1, NaN, Infinity, -Infinity, '0', '-1', 'NaN', 'Infinity', 'no gap', false, {}, []]) {
+    const numbers = gapNumbers(gap)
+    expect(proposePanelGroups(graph, numbers).refused).toBe('group_gap_invalid')
+    expect(validatePanelGroups(graph, [], numbers)).toEqual({ ok: false, reason: 'group_gap_invalid' })
+  }
+  for (const key of ['module_width_along_row', 'module_height_across_row']) {
+    for (const value of [undefined, '', '0', '-1', 'Infinity', '1000001']) {
+      expect(proposePanelGroups(graph, { ...gapNumbers(1), [key]: value }).refused).toBe('group_numbers_invalid')
+    }
+  }
+  for (const centre of [undefined, [], [0], [NaN, 0], [0, Infinity], [0, 0, NaN], ['0', 0]]) {
+    const malformed = { panels: [positionedPanel('a', 0, 0), { ...positionedPanel('b', 3, 0), centre }] }
+    expect(proposePanelGroups(malformed, gapNumbers(1)).refused).toBe('group_geometry_invalid')
+    expect(validatePanelGroups(malformed, [], gapNumbers(1))).toEqual({ ok: false, reason: 'group_geometry_invalid' })
+  }
+})
+it('includes exact edge and corner gap thresholds at 60 degrees', () => {
+  const radians = Math.PI / 3
+  const cos = Math.cos(radians), sin = Math.sin(radians)
+  // Width 2, height 1: local offsets give an edge gap of 1 and a
+  // corner gap of hypot(0.6, 0.8) = 1, respectively.
+  for (const [x, y] of [[3, 0], [2.6, 1.8]]) {
+    const graph = { panels: [positionedPanel('a', 0, 0, 60),
+      positionedPanel('b', x * cos - y * sin, x * sin + y * cos, 60)] }
+    expect(proposePanelGroups(graph, gapNumbers(1))).toMatchObject({ refused: null, singletons: 0,
+      proposals: [{ panel_refs: ['a', 'b'], count: 2 }] })
+    expect(proposePanelGroups(graph, gapNumbers(0.9999))).toMatchObject({ proposals: [], singletons: 2 })
+  }
+})
+it('partitions 4096 panels into spatial islands in under 500 ms', () => {
+  const graph = { panels: Array.from({ length: 4096 }, (_, index) => {
+    const column = index % 64, row = Math.floor(index / 64)
+    return positionedPanel(index.toString(16).padStart(4, '0'),
+      column * 3 - 96 + (column >= 32 ? 20 : 0), row * 2 - 64)
+  }) }
+  const started = performance.now()
+  const result = proposePanelGroups(graph, gapNumbers(1))
+  const elapsed = performance.now() - started
+  expect(result.refused).toBe(null)
+  expect(result.singletons).toBe(0)
+  expect(result.proposals.map(({ count }) => count)).toEqual([2048, 2048])
+  expect(result.proposals[0].panel_refs).toEqual(graph.panels.filter((_, index) => index % 64 < 32).map(({ id }) => id))
+  expect(result.proposals[1].panel_refs).toEqual(graph.panels.filter((_, index) => index % 64 >= 32).map(({ id }) => id))
+  expect(elapsed).toBeLessThan(500)
+})
+it('retains group limits and ambiguous-handle refusals after gap partitioning', () => {
+  const many = { panels: Array.from({ length: 129 }, (_, index) =>
+    [positionedPanel(`${index}a`, index * 10, 0), positionedPanel(`${index}b`, index * 10 + 3, 0)]).flat() }
+  expect(proposePanelGroups(many, gapNumbers(1))).toMatchObject({ refused: 'too_many_groups' })
+  expect(proposePanelGroups(many, gapNumbers(1)).proposals).toHaveLength(129)
+  const large = { panels: Array.from({ length: 4097 }, (_, index) => panel(String(index))) }
+  // No centres are present: the existing angle-bucket cap refuses this input
+  // before allocating rectangles or entering the spatial connectivity pass.
+  expect(proposePanelGroups(large, gapNumbers(1))).toMatchObject({ refused: 'group_too_large' })
+  expect(proposePanelGroups(large, gapNumbers(1)).proposals[0].count).toBe(4097)
+  const duplicate = islandGraph()
+  duplicate.panels[2].provenance.source_handle = 'A'
+  expect(proposePanelGroups(duplicate, gapNumbers(1)).refused).toBe('ambiguous_panel_handle')
 })
 it('W1C-26 refuses limits without truncating', () => {
   const many = { panels: Array.from({ length: 129 }, (_, index) =>
@@ -310,6 +520,7 @@ it('R13C-14 freezes local and status sentences', () => {
     context_unreadable: 'This project drawing version could not be read. Reload it and try again.',
     graph_unreadable: 'The Solar design stored with this drawing could not be read.',
     graphless: 'Start a Solar design in settings before using this tool.',
+    panel_groups_setup_required: 'Start a Solar design in Settings, then run Panel import. Return here and choose Use proposed memberships to enter Gap between groups.',
     not_current_head: 'Open the newest drawing version before using this tool.',
     version_digest_unavailable: 'This drawing version has no recorded content digest. Reload it before continuing.',
     scope_stale: 'The drawing or session changed. Refresh before continuing.',
@@ -326,6 +537,10 @@ it('R13C-14 freezes local and status sentences', () => {
     group_name_invalid: 'Enter a group name of 1 to 255 characters without [.',
     group_name_collision: 'Group names must be unique, including existing panel groups.',
     group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
+    group_gap_invalid: 'Enter a gap distance as a finite number greater than 0, or leave it blank to group by angle.',
+    group_gap_measurement_invalid: 'Choose outline separation or panel center distance for the gap measurement.',
+    group_geometry_invalid: 'Panel positions could not be read. Re-import the panels before grouping by gap.',
+    group_discovery_invalid: 'Use a Roof or Ground project and enter an outline offset and alignment tolerance greater than 0 and at most 1000000.',
     tool_unsupported: 'This tool has no project form in this view.',
     submit_unavailable: 'Project Solar submission is unavailable in this view.',
     run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -355,8 +570,9 @@ it('R13C-14 freezes local and status sentences', () => {
   expect(Object.isFrozen(PROJECT_SOLAR_GRAPH_REASONS)).toBe(true)
   for (const [code, sentence] of Object.entries(expected)) {
     expect(sentence.length).toBeGreaterThanOrEqual(12)
-    if (['no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
-      'panel_groups_stale', 'group_name_invalid', 'group_name_collision', 'group_numbers_invalid'].includes(code)) {
+    if (['panel_groups_setup_required', 'no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
+      'panel_groups_stale', 'group_name_invalid', 'group_name_collision', 'group_numbers_invalid',
+      'group_gap_invalid', 'group_gap_measurement_invalid', 'group_geometry_invalid', 'group_discovery_invalid'].includes(code)) {
       expect(projectSolarGraphReason(code, 'solar-panel-groups')).toBe(sentence)
       expect(projectSolarGraphReason(code, 'solar-feeders')).toBe(expected.request_refused)
       expect(projectSolarGraphReason(code, 'solar-panels-from-drawing')).toBe(expected.request_refused)

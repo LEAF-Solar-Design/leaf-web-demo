@@ -1257,12 +1257,13 @@ def test_pre_execution_source_binding_requires_reviewed_git_history():
     assert r.journal_source_sha(current) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
 
 
-def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
+def test_worker_source_allowlist_contains_only_captured_producers():
     r = service.recovery
     assert r.REVIEWED_WORKER_SHA256 == {
         'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d',
         '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197',
         'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37',
+        '1d2844f0937c498ab7b5b743e40e6b2421c3571f8c722dd6abe027e5ebb13087',
     }
     assert r.sha(Path(service.worker.__file__).read_bytes()) in r.REVIEWED_WORKER_SHA256
     # Bind the new Journal dependency closure to its exact reviewed producer,
@@ -1272,7 +1273,7 @@ def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
     connected = r.runtime_commit('HEAD')
     worker = r.runtime_source(connected, 'scripts/native_preview_worker.py')
     journal = r.runtime_source(connected, 'scripts/native_preview_reconciliation.py')
-    assert r.sha(worker) == r.CONNECTED_WORKER_SHA256
+    assert r.sha(worker) == r.EDIT_CUSTODY_WORKER_SHA256
     assert r.journal_source_sha(journal) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
     assert r.pre_execution_source(connected) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
     load, read = r.runtime_source, r.read
@@ -1358,3 +1359,20 @@ def test_claim_journal_write_failure_cannot_reach_heartbeat_source_or_native(tmp
     result = service.worker.run_once(SCOPE, Http(), forbidden, cycle, journal=journal)
     assert result['result'] == 'failed' and calls == ['claim']
     assert journal.failed and journal.path.read_bytes() == old
+
+
+@pytest.mark.parametrize("journal_sha", [
+    service.recovery.PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
+    service.recovery.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256,
+])
+def test_edit_custody_worker_refuses_legacy_journal_pair(monkeypatch, journal_sha):
+    r = service.recovery
+    current_worker = Path(service.worker.__file__).read_bytes()
+    current_journal = Path(r.__file__).read_bytes()
+    assert r.sha(current_worker) == r.EDIT_CUSTODY_WORKER_SHA256
+    monkeypatch.setattr(r, "runtime_source", lambda revision, path:
+                        current_worker if path.endswith("native_preview_worker.py") else current_journal)
+    assert r.pre_execution_source("a" * 40) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
+    monkeypatch.setattr(r, "journal_source_sha", lambda raw: journal_sha)
+    with pytest.raises(service.worker.WorkerError):
+        r.pre_execution_source("a" * 40)

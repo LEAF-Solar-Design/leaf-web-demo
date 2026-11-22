@@ -35,6 +35,9 @@ from . import billing_statement, db, tenant_cost_store
 from . import org_invitations
 from .pricebook import load_pricebook
 
+# Archive checks belong to the mutation transaction, after the project lock.
+# A router dependency releases that lock before the writer and also intercepts
+# authorized lifecycle receipt replays.
 router = APIRouter(prefix="/api", tags=["platform"])
 from .binding_grant_issuance import router as binding_grant_router
 router.include_router(binding_grant_router)
@@ -140,6 +143,7 @@ class PutProjectFileBody(BaseModel):
     path: str = Field(min_length=1, max_length=512)
     media_type: str = Field(min_length=3, max_length=200)
     content: str = Field(max_length=1_048_576)
+    expected_revision: Optional[int] = Field(default=None, strict=True, ge=0, le=2147483646)
 
 
 class CloneProjectBody(BaseModel):
@@ -464,6 +468,10 @@ def _lifecycle_response(operation):
     except project_lifecycle.LifecycleForbidden:
         raise HTTPException(status_code=403, detail="project access denied") from None
     except project_lifecycle.LifecycleConflict as exc:
+        if str(exc) == "archive the project before deleting it":
+            return JSONResponse(status_code=409, content={
+                "detail": str(exc), "code": "project_not_archived",
+            })
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
@@ -928,11 +936,29 @@ def restore_arlo_input(project_id: uuid.UUID, input_version_id: uuid.UUID,
     return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
 
 
+class ActivateRetainedArloInputBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    input_version_id: uuid.UUID
+
+
+@router.post("/projects/{project_id}/arlo-inputs/{original_id}/activate")
+def activate_retained_arlo_input(project_id: uuid.UUID, original_id: uuid.UUID,
+                                 body: ActivateRetainedArloInputBody,
+                                 actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    result = _lifecycle_response(lambda: arlo_lab.activate_retained_input(
+        actor.org_id, project_id, actor.binding_id, original_id, body.input_version_id))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
 @router.get("/projects/{project_id}/arlo-jobs/{job_id}")
 def get_arlo_job(project_id: uuid.UUID, job_id: uuid.UUID,
+                 input_diagnostics: bool = False,
                  actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
-    return _lifecycle_response(lambda: arlo_lab.job_view(
-        actor.org_id, project_id, actor.binding_id, job_id))
+    result = _lifecycle_response(lambda: arlo_lab.job_view(
+        actor.org_id, project_id, actor.binding_id, job_id, input_diagnostics=input_diagnostics))
+    if input_diagnostics:
+        return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+    return result
 
 
 @router.post("/projects/{project_id}/arlo-jobs/{job_id}/cancel")
@@ -967,8 +993,9 @@ def create_blank_project(
 
 
 @router.get("/projects")
-def list_projects(org_id: uuid.UUID = Depends(get_org_id)):
-    return {"projects": [p.to_dict() for p in store.list_projects(org_id)]}
+def list_projects(org_id: uuid.UUID = Depends(get_org_id), archived: bool = False):
+    projects = store.list_projects(org_id, archived=True) if archived else store.list_projects(org_id)
+    return {"projects": [p if isinstance(p, dict) else p.to_dict() for p in projects]}
 
 
 @router.get("/projects/{project_id}")
@@ -1004,6 +1031,8 @@ def _project_repository_authority(
         raise HTTPException(status_code=404, detail="project resource not found") from None
     except project_lifecycle.LifecycleForbidden:
         raise HTTPException(status_code=403, detail="project access denied") from None
+    except project_lifecycle.LifecycleConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
     except Exception:
         raise HTTPException(status_code=503, detail="repository authority unavailable") from None
 
@@ -1074,6 +1103,18 @@ def revoke_project_member(
     ))
 
 
+@router.get("/projects/{project_id}/files/by-path")
+def get_project_file_by_path(
+    project_id: uuid.UUID,
+    path: str = Query(min_length=1, max_length=512),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    result = _lifecycle_response(lambda: project_lifecycle.get_project_file_by_path(
+        actor.org_id, project_id, actor.binding_id, path=path,
+    ))
+    return JSONResponse(result, headers={"Cache-Control": "private, no-store"})
+
+
 @router.put("/projects/{project_id}/files")
 def put_project_file(
     project_id: uuid.UUID,
@@ -1084,7 +1125,7 @@ def put_project_file(
     return _lifecycle_response(lambda: project_lifecycle.put_project_file(
         actor.org_id, project_id, actor.binding_id, path=body.path,
         media_type=body.media_type, content=body.content,
-        idempotency_key=idempotency_key,
+        idempotency_key=idempotency_key, expected_revision=body.expected_revision,
     ))
 
 
@@ -1165,15 +1206,57 @@ def reset_project(
     ))
 
 
+@router.post("/projects/{project_id}/archive")
+def archive_project(
+    project_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.archive_project(
+        actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+    ))
+
+
+@router.post("/projects/{project_id}/restore")
+def restore_project(
+    project_id: uuid.UUID,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    return _lifecycle_response(lambda: project_lifecycle.restore_project(
+        actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+    ))
+
+
+class DeleteProjectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_name: Optional[str] = Field(default=None, strict=True)
+
+
+def project_artifact_delete_object(key: str, version_or_sha256: str):
+    # Fail closed: key + SHA is inventory, not an atomic delete precondition.
+    # A future backend must use supported conditional deletion (version ID or
+    # ETag match), or producer-proven immutable unique keys. Otherwise leave the
+    # row queued; the current upload backend only exposes delete(key).
+    raise RuntimeError("exact-identity artifact deletion backend is not configured")
+
+
 @router.delete("/projects/{project_id}")
 def delete_project(
     project_id: uuid.UUID,
     idempotency_key: str = Header(alias="Idempotency-Key"),
     actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+    body: Optional[DeleteProjectBody] = None,
 ):
-    return _lifecycle_response(lambda: project_lifecycle.delete_project(
+    response = _lifecycle_response(lambda: project_lifecycle.delete_project(
         actor.org_id, project_id, actor.binding_id, idempotency_key=idempotency_key,
+        confirm_name=body.confirm_name if body is not None else None,
     ))
+    try:
+        project_lifecycle.sweep_project_artifacts(project_id, project_artifact_delete_object)
+    except Exception:
+        LOGGER.warning("project artifact sweep deferred project_id=%s", project_id)
+    return response
 
 
 @router.post("/projects/{project_id}/drawing-versions/import", status_code=201)
@@ -1241,9 +1324,9 @@ def create_job(project_id: uuid.UUID, body: CreateJobBody,
     denial = entitlements.stored_job_entitlement_denial(org_id, body.kind)
     if denial is not None:
         return denial
-    job = store.create_job(
+    job = _lifecycle_response(lambda: store.create_job(
         org_id, project_id, body.kind, tool_name=body.tool, params=body.params
-    )
+    ))
     return {"job": job.to_dict()}
 
 

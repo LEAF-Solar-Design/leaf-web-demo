@@ -13,6 +13,7 @@
  * the REAL guard seam, standing in for api.stageAuthorTool, and these rows
  * pin what the panel does with the typed refusal it gets back.
  */
+import { scaleTimeout } from '../testTimeScale.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
@@ -29,7 +30,7 @@ const FAKE_ANTHROPIC = `sk-ant-api03-${'A9_-'.repeat(12)}`
 const FAKE_GENERIC = `api_key: ${'x'.repeat(24)}`
 const BENIGN = 'count panels within 24in of the roof edge'
 
-const SETTLE = { timeout: 5000 }
+const SETTLE = { timeout: scaleTimeout(5000) }
 
 beforeEach(() => setCredentialMountAvailable(true))
 afterEach(() => {

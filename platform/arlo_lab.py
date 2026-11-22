@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal
 from pathlib import Path
 import uuid
 from typing import Any
@@ -211,6 +212,71 @@ def _active_input(cur, org_id, project_id, original_id):
         raise lifecycle.LifecycleConflict("ARLO active input reference is invalid.") from None
 
 
+def _select_input(cur, org_id, project_id, binding_id, original_id, target_id):
+    if _active_input(cur, org_id, project_id, original_id) == uuid.UUID(str(target_id)):
+        return
+    content = canonical_text({"input_version_id": str(target_id)})
+    cur.execute(
+        "INSERT INTO project_files (file_id,org_id,project_id,path,media_type,content,"
+        "content_sha256,created_by_binding_id) VALUES (%(file)s,%(org)s,%(project)s,"
+        "%(path)s,'application/json',%(content)s,%(sha)s,%(actor)s) "
+        "ON CONFLICT ON CONSTRAINT project_files_scope_path_unique DO UPDATE SET "
+        "content=EXCLUDED.content, content_sha256=EXCLUDED.content_sha256, "
+        "revision=project_files.revision+1, updated_at=NOW()",
+        {"file": uuid.uuid4(), "org": org_id, "project": project_id,
+         "path": f"arlo/inputs/{original_id}/active.json", "content": content,
+         "sha": hashlib.sha256(content.encode()).hexdigest(), "actor": binding_id})
+
+
+def activate_retained_input(org_id, project_id, binding_id, original_id, target_id):
+    """Select an existing reference input without appending inputs or job receipts."""
+    original_id, target_id = uuid.UUID(str(original_id)), uuid.UUID(str(target_id))
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            _scope(cur, org_id, project_id, binding_id, write=True)
+            original = _input_response(_registered_row(cur, org_id, project_id, original_id))
+            target = _input_response(_registered_row(cur, org_id, project_id, target_id))
+            if original["original_id"] != str(original_id) or original["parent_id"] is not None \
+                    or "material_id" not in original or "material_id" not in target \
+                    or target["original_id"] != str(original_id) \
+                    or target["material_id"] != original["material_id"] \
+                    or target["original_sha256"] != original["original_sha256"]:
+                raise lifecycle.LifecycleConflict("ARLO retained input lineage mismatch")
+            cur.execute(
+                "SELECT sha256 FROM project_reference_materials WHERE org_id = %(org)s "
+                "AND project_id = %(project)s AND material_id = %(material)s",
+                {"org": org_id, "project": project_id,
+                 "material": uuid.UUID(original["material_id"])})
+            material = cur.fetchone()
+            if material is None:
+                raise lifecycle.LifecycleUnavailable("ARLO reference material not found")
+            if material["sha256"] != original["original_sha256"]:
+                raise lifecycle.LifecycleConflict("ARLO reference material digest mismatch")
+            _select_input(cur, org_id, project_id, binding_id, original_id, target_id)
+            return target
+    return run_transaction(operation, isolation="serializable")
+
+
+def _retained_summaries(cur, org_id, project_id, original_id, material_id, active):
+    cur.execute(
+        "SELECT i.input_version_id, i.input_sha256, v.provenance FROM arlo_lab_inputs i "
+        "JOIN drawing_versions v ON v.version_id = i.input_version_id "
+        "AND v.org_id = i.org_id AND v.project_id = i.project_id "
+        "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
+        "AND v.deleted_at IS NULL AND i.example_id = %(source)s "
+        "AND i.example_version = %(material)s AND v.provenance->>'material_id' = %(material)s "
+        "AND COALESCE(v.provenance->>'original_id', i.input_version_id::text) = %(original)s "
+        "ORDER BY (i.input_version_id = %(original)s::uuid) DESC, i.input_version_id",
+        {"org": org_id, "project": project_id, "source": REFERENCE_SOURCE,
+         "material": material_id, "original": str(original_id)})
+    return [{"input_version_id": str(row["input_version_id"]),
+             "input_sha256": row["input_sha256"],
+             "parent_id": row["provenance"].get("parent_id"),
+             "original_id": str(original_id), "active": row["input_version_id"] == active}
+            for row in cur.fetchall()]
+
+
 def read_input(org_id, project_id, binding_id, input_version_id):
     def operation(conn):
         with conn.cursor() as cur:
@@ -221,6 +287,11 @@ def read_input(org_id, project_id, binding_id, input_version_id):
             result = _input_response(_registered_row(cur, org_id, project_id, active))
             if result["original_id"] != str(original_id):
                 raise lifecycle.LifecycleConflict("ARLO active input lineage mismatch")
+            if "material_id" in base:
+                if result.get("material_id") != base["material_id"]:
+                    raise lifecycle.LifecycleConflict("ARLO active input material mismatch")
+                result["retained_inputs"] = _retained_summaries(
+                    cur, org_id, project_id, original_id, base["material_id"], active)
             return result
     return run_transaction(operation, isolation="serializable")
 
@@ -289,21 +360,69 @@ def revise_input(org_id, project_id, binding_id, input_version_id, *, patch=None
                     result = _register_input(org_id, project_id, binding_id, key=key, request=request,
                         example_id=parent["example_id"], example_version=parent["example_version"],
                         source=source, source_kind=parent["provenance"]["source_kind"], conn=conn)
-            content = canonical_text({"input_version_id": result["input_version_id"]})
-            cur.execute(
-                "INSERT INTO project_files (file_id,org_id,project_id,path,media_type,content,"
-                "content_sha256,created_by_binding_id) VALUES (%(file)s,%(org)s,%(project)s,"
-                "%(path)s,'application/json',%(content)s,%(sha)s,%(actor)s) "
-                "ON CONFLICT ON CONSTRAINT project_files_scope_path_unique DO UPDATE SET "
-                "content=EXCLUDED.content, content_sha256=EXCLUDED.content_sha256, "
-                "revision=project_files.revision+1, updated_at=NOW()",
-                {"file": uuid.uuid4(), "org": org_id, "project": project_id,
-                 "path": f"arlo/inputs/{original_id}/active.json", "content": content,
-                 "sha": hashlib.sha256(content.encode()).hexdigest(), "actor": binding_id})
+            _select_input(cur, org_id, project_id, binding_id, original_id, result["input_version_id"])
             lifecycle._write_receipt(cur, org_id, project_id, binding_id, "file_put", key,
                                      fingerprint, {"input_version_id": result["input_version_id"]})
             return result
     return run_transaction(operation, isolation="serializable")
+
+
+def _same_json_value(left: Any, right: Any) -> bool:
+    """Compare JSON values without treating number spelling as request content."""
+    if type(left) in (int, float) and type(right) in (int, float):
+        # Browsers serialize 180.0 as 180. Use exact decimal values, without a
+        # tolerance, and exclude bool (a subclass of int in Python).
+        return Decimal(str(left)) == Decimal(str(right))
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _same_json_value(value, right[key]) for key, value in left.items())
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _same_json_value(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def _execution_input_row(cur, org_id, project_id, version_id):
+    cur.execute(
+        "SELECT i.*, v.provenance, v.intake_ref, v.oss_object, v.import_fingerprint "
+        "FROM arlo_lab_inputs i "
+        "JOIN drawing_versions v ON v.version_id = i.input_version_id "
+        "AND v.org_id = i.org_id AND v.project_id = i.project_id "
+        "JOIN live_projects p ON p.org_id = i.org_id AND p.project_id = i.project_id "
+        "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
+        "AND i.input_version_id = %(version)s AND v.deleted_at IS NULL",
+        {"org": org_id, "project": project_id, "version": version_id})
+    return cur.fetchone()
+
+
+def _input_provenance_checks(row, version_id):
+    provenance = row["provenance"]
+    is_object = isinstance(provenance, dict)
+    expected = REFERENCE_CONTRACT if row["example_id"] == REFERENCE_SOURCE else CONTRACT
+    return {"provenance_is_object": is_object,
+            "contract_matches": is_object and provenance.get("contract") == expected,
+            "input_sha256_matches": is_object and provenance.get("input_sha256") == row["input_sha256"],
+            "intake_ref_matches": row["intake_ref"] == f"arlo_lab_inputs:{version_id}",
+            "oss_object_is_null": row["oss_object"] is None}
+
+
+def _input_provenance_diagnostic(cur, org_id, project_id, version_id):
+    # This is an API reader's observation, never an attestation of the worker's
+    # imported module. No raw provenance, request, storage ref or path is exposed.
+    report = {"reader_context": "api_not_worker",
+              "reader_module_file_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    row = _execution_input_row(cur, org_id, project_id, version_id)
+    report["registered_input_found"] = row is not None
+    if row is not None:
+        report["predicates"] = _input_provenance_checks(row, version_id)
+        report["value_types"] = {key: type(row[key]).__name__ for key in
+                                 ("example_id", "input_sha256", "provenance", "intake_ref", "oss_object")}
+        provenance = row["provenance"]
+        report["provenance_value_types"] = {key: type(provenance.get(key)).__name__ for key in
+                                            ("contract", "input_sha256")} if isinstance(provenance, dict) else {}
+    return report
 
 
 def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
@@ -313,23 +432,12 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
     version_id = uuid.UUID(str(job_context["input_version_id"]))
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT i.*, v.provenance, v.intake_ref, v.oss_object, v.import_fingerprint "
-                "FROM arlo_lab_inputs i "
-                "JOIN drawing_versions v ON v.version_id = i.input_version_id "
-                "AND v.org_id = i.org_id AND v.project_id = i.project_id "
-                "JOIN live_projects p ON p.org_id = i.org_id AND p.project_id = i.project_id "
-                "WHERE i.org_id = %(org)s AND i.project_id = %(project)s "
-                "AND i.input_version_id = %(version)s AND v.deleted_at IS NULL",
-                {"org": org_id, "project": project_id, "version": version_id})
-            row = cur.fetchone()
+            row = _execution_input_row(cur, org_id, project_id, version_id)
     if row is None:
         raise ValueError("registered ARLO model input is unavailable")
     provenance = row["provenance"]
     expected_contract = REFERENCE_CONTRACT if row["example_id"] == REFERENCE_SOURCE else CONTRACT
-    if not isinstance(provenance, dict) or provenance.get("contract") != expected_contract \
-            or provenance.get("input_sha256") != row["input_sha256"] \
-            or row["intake_ref"] != f"arlo_lab_inputs:{version_id}" or row["oss_object"] is not None:
+    if not all(_input_provenance_checks(row, version_id).values()):
         raise ValueError("registered ARLO input provenance mismatch")
     if expected_contract == REFERENCE_CONTRACT:
         source = {"contract": REFERENCE_CONTRACT, "material_id": row["example_version"],
@@ -341,13 +449,18 @@ def load_registered_request(job_context: dict, submitted_params: dict) -> dict:
                 or digest({**source, "input_sha256": row["input_sha256"]}) != row["import_fingerprint"]:
             raise ValueError("registered ARLO reference provenance mismatch")
     response = _input_response(row)
-    if digest(submitted_params) != row["input_sha256"]:
+    canonical_text(submitted_params)  # Reject non-JSON or non-finite values.
+    if not _same_json_value(submitted_params, response["request"]):
         raise ValueError("ARLO request differs from its registered immutable input")
+    # The hash-verified stored bytes remain authoritative for execution, even
+    # when the browser used an equivalent spelling for a JSON number.
     return response["request"]
 
 
 def job_view(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID,
-             job_id: uuid.UUID, *, cancel: bool = False) -> dict:
+             job_id: uuid.UUID, *, cancel: bool = False, input_diagnostics: bool = False) -> dict:
+    if cancel and input_diagnostics:
+        raise ValueError("input diagnostics are read-only")
     def operation(conn):
         with conn.cursor() as cur:
             _scope(cur, org_id, project_id, binding_id, write=cancel)
@@ -386,5 +499,8 @@ def job_view(org_id: uuid.UUID, project_id: uuid.UUID, binding_id: uuid.UUID,
                 "solver_result": (canonical_text(result["solver_result"])
                                   if isinstance(result.get("solver_result"), dict) else None),
             }
+            if input_diagnostics:
+                view["input_diagnostics"] = _input_provenance_diagnostic(
+                    cur, org_id, project_id, row["input_version_id"])
             return {"job": view}
     return run_transaction(operation, isolation="serializable")

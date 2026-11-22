@@ -87,6 +87,36 @@ function LazyLabGround(props) {
   </LabLoadBoundary>
 }
 
+function EstimatorLoadState({ active, occluders, failed = false, retry }) {
+  const boardRef = useRef(null)
+  const win = useGroundWindow(active, true, boardRef, occluders)
+  return <section ref={boardRef} data-ground="estimator" hidden={!active} aria-label="Estimator workspace"
+    style={{ position: 'absolute', inset: 0 }}>
+    <div data-measured={Boolean(win)} style={{ position: 'absolute', ...(win ? windowStyle(win) : { inset: 0 }) }}>
+      {failed ? <GroundFailure label="Estimator" retry={retry} /> : <GroundSkeleton label="Estimator" />}
+    </div>
+  </section>
+}
+
+class EstimatorLoadBoundary extends Component {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    return this.state.failed ? <EstimatorLoadState {...this.props.groundProps} failed retry={this.props.retry} /> : this.props.children
+  }
+}
+
+function LazyEstimatorGround(props) {
+  const [generation, setGeneration] = useState(0)
+  const EstimatorGround = useMemo(() => lazy(() => import('../estimator/EstimatorGround.jsx')), [generation])
+  const [activated, setActivated] = useState(props.active)
+  if (props.active && !activated) setActivated(true)
+  if (!activated && !props.active) return null
+  return <EstimatorLoadBoundary key={generation} groundProps={props} retry={() => setGeneration(value => value + 1)}>
+    <Suspense fallback={<EstimatorLoadState {...props} />}><EstimatorGround {...props} /></Suspense>
+  </EstimatorLoadBoundary>
+}
+
 function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false, retry }) {
   const boardRef = useRef(null)
   const leaving = leavingGround === 'integrations'
@@ -219,6 +249,7 @@ export default function SurfaceGrounds({
         onLaunch={onLaunch}
       />
       <LazyLabGround active={(studioShell || !boardVisible) && surfaceGround(surface) === 'lab'}
+        projectId={projectId} accountScope={accountScope}
         mock={mock} studioShell={studioShell} occluders={groundOccluders} />
       <LazyOpsGround
         active={(studioShell || !boardVisible) && surfaceGround(surface) === 'integrations'}
@@ -232,6 +263,9 @@ export default function SurfaceGrounds({
         studioShell={studioShell}
         occluders={groundOccluders}
       />
+      <LazyEstimatorGround active={(studioShell || !boardVisible) && surfaceGround(surface) === 'embedded-app'}
+        projectId={projectId} accountScope={accountScope} signedIn={signedIn}
+        mock={mock} studioShell={studioShell} occluders={groundOccluders} />
     </>
   )
 }

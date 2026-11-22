@@ -1,4 +1,8 @@
 import { expect, test } from '@playwright/test'
+import { scaled } from './timeScale.mjs'
+
+test.use({ video: 'off', trace: 'off' })
+test.describe.configure({ mode: 'parallel' })
 
 async function openTour(page, viewport) {
   await page.setViewportSize(viewport)
@@ -10,6 +14,7 @@ async function openTour(page, viewport) {
 }
 
 test('the version toast ignores a captured drag-away before Undo activates normally', async ({ page }) => {
+  test.setTimeout(scaled(30_000))
   const tour = await openTour(page, { width: 1280, height: 800 })
   await tour.getByRole('button', { name: 'Skip', exact: true }).click()
 
@@ -40,6 +45,7 @@ test('the version toast ignores a captured drag-away before Undo activates norma
 })
 
 test('Back recovers phone tour focus to visible Skip before the next Tab', async ({ page }) => {
+  test.setTimeout(scaled(30_000))
   const tour = await openTour(page, { width: 390, height: 844 })
   await tour.getByRole('button', { name: 'More', exact: true }).click()
   await tour.getByRole('button', { name: 'Next', exact: true }).click()

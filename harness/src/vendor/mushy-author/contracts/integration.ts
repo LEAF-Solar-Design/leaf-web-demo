@@ -1,5 +1,5 @@
 // Generated from packages/assistant-contract/src/integration.ts; do not edit.
-// SHA256: 8da36355b422b1cfcdc1d891f2c0d171ed9280acf43d5cfa1d989faf75c5b76b
+// SHA256: 74bb0d9f6a16a5c50028bfd5be10daad87b43a7b5dd4722af908bdc5dcbe5747
 import { z } from "zod";
 
 // The final negative lookahead is an absolute end anchor; `$` alone permits a final newline.
@@ -502,11 +502,19 @@ export const DatasetDefinitionV1 = z.strictObject({
   key_fields: z.array(FieldId).min(1).max(8),
   time_field: FieldId.optional(),
   reporting_time_zone: TimeZone,
-  lineage: z.strictObject({
+  lineage: z.union([z.strictObject({
     connection_id: Slug,
     operation_ref: IntegrationRefV1,
     transform_ref: IntegrationRefV1.optional(),
-  }),
+  }), z.strictObject({
+    kind: z.literal("project_material"),
+    material_id: z.string().uuid(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    byte_length: z.number().int().min(1).max(8 * 1024 * 1024),
+    connection_id: z.never().optional(),
+    operation_ref: z.never().optional(),
+    transform_ref: z.never().optional(),
+  })]),
   retention_days: z.number().int().min(1).max(3650),
 }).superRefine((dataset, ctx) => {
   unique(dataset.key_fields, ctx, ["key_fields"]);
@@ -618,6 +626,12 @@ function matchesField(field: DatasetFieldV1, value: z.infer<typeof Scalar>): boo
   }
 }
 
+export const DatasetQueryCoverageV1 = z.strictObject({
+  kind: z.literal("complete_materialization"),
+  matching_rows: z.number().int().min(0).max(100000),
+  offset: z.number().int().min(0).max(100000),
+});
+
 export const DatasetReadV1 = z.strictObject({
   schema_version: z.literal(1),
   dataset_ref: IntegrationRefV1,
@@ -627,6 +641,7 @@ export const DatasetReadV1 = z.strictObject({
     values: z.record(FieldId, Scalar),
   })).max(1000),
   next_cursor: Cursor.nullable(),
+  query_coverage: DatasetQueryCoverageV1.optional(),
   status: z.enum(["ready", "empty", "partial", "stale", "unavailable", "forbidden", "invalid", "failed"]),
   freshness: z.strictObject({
     source_updated_at: Instant.nullable(),
@@ -635,6 +650,12 @@ export const DatasetReadV1 = z.strictObject({
   }),
 }).superRefine((read, ctx) => {
   unique(read.rows.map((row) => row.key), ctx, ["rows"]);
+  const coverage = read.query_coverage;
+  if (coverage && (coverage.offset > coverage.matching_rows ||
+      coverage.offset + read.rows.length > coverage.matching_rows ||
+      (read.next_cursor === null && coverage.offset + read.rows.length < coverage.matching_rows))) {
+    ctx.addIssue({ code: "custom", path: ["query_coverage"], message: "Coverage does not match the returned query page" });
+  }
   if (["empty", "unavailable", "forbidden", "invalid", "failed"].includes(read.status) && read.rows.length > 0) {
     ctx.addIssue({ code: "custom", path: ["rows"], message: "This status cannot carry rows" });
   }
@@ -660,11 +681,29 @@ const ElementShape = {
   dataset_ref: IntegrationRefV1,
   query: DatasetQueryV1,
 };
+const ProviderLabel = z.string().min(1).max(120).refine(value => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value));
+export const DatasetRowGroupingV1 = z.strictObject({
+  kind: z.literal("provider_pairs"), pair_key_field: FieldId, provider_field: FieldId,
+  providers: z.tuple([ProviderLabel, ProviderLabel]),
+}).superRefine((grouping, ctx) => {
+  if (grouping.pair_key_field === grouping.provider_field || grouping.providers[0] === grouping.providers[1]) {
+    ctx.addIssue({ code: "custom", message: "Pair grouping requires distinct fields and provider labels" });
+  }
+});
+export type DatasetRowGroupingV1 = z.infer<typeof DatasetRowGroupingV1>;
+
 export const DatasetElementV1 = z.union([
   z.strictObject({
     ...ElementShape,
     kind: z.literal("dataset.table"),
-    props: z.strictObject({ columns: FieldIds, row_limit: z.number().int().min(1).max(1000) }),
+    props: z.strictObject({ columns: FieldIds, row_limit: z.number().int().min(1).max(1000),
+      row_grouping: DatasetRowGroupingV1.optional() }),
+  }).superRefine((element, ctx) => {
+    const grouping = element.props.row_grouping;
+    if (grouping && [grouping.pair_key_field, grouping.provider_field].some(id =>
+      !element.query.fields.includes(id) || !element.props.columns.includes(id))) {
+      ctx.addIssue({ code: "custom", path: ["props", "row_grouping"], message: "Grouping fields must be visible requested fields" });
+    }
   }),
   z.strictObject({
     ...ElementShape,

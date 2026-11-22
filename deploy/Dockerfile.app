@@ -118,7 +118,7 @@ RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
       | sha256sum -c - \
  && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends git curl ca-certificates util-linux \
-      xz-utils gcc make libc6-dev libseccomp-dev \
+      xz-utils gcc make libc6-dev libseccomp-dev ffmpeg bubblewrap \
  && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \
       -o /tmp/libredwg.tar.xz \
  && echo "23330d9f887ebb93ff9512751c0f77a905a16b11ba659787074469c8f1581402  /tmp/libredwg.tar.xz" \
@@ -140,7 +140,11 @@ RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
  && apt-get purge -y curl xz-utils gcc make libc6-dev libseccomp-dev \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
- && dwg2dxf --version
+ && dwg2dxf --version \
+ && test -x /usr/bin/ffmpeg \
+ && test -x /usr/bin/ffprobe \
+ && test -x /usr/bin/bwrap \
+ && test -x /usr/bin/prlimit
 
 # --- Python deps: server + platform + da (the three the app imports). ---------
 # psycopg[binary] ships its own libpq wheel, so no apt libpq-dev is needed.

@@ -1,11 +1,13 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { config } from '../../api.js'
 import { humanizeError } from '../../errorHumanize.js'
 import HistoryView from './HistoryView.jsx'
 import LabSaveBar from './LabSaveBar.jsx'
 import LabDiffView from './LabDiffView.jsx'
-import { createLabArtifactsClient, SAVED_REVISION_EVENT } from './labArtifactsClient.js'
+import { createLabArtifactsClient, graphLayouts, SAVED_REVISION_EVENT, verifyLabBundle } from './labArtifactsClient.js'
+import { canonicalJSON } from '../contract.js'
 
 const graph = setting => ({ schema: 'leaf.lab-graph.v1', blocks: [
   { id: 'field-1', registry: { id: 'field', version: '1.0.0' }, settings: { field: setting } },
@@ -17,7 +19,41 @@ const changes = [
   { op: 'replace', path: '/pipes', before: [], after: second.pipes },
 ]
 const copy = value => JSON.parse(JSON.stringify(value))
-const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => copy(data) })
+const response = (data, status = 200) => ({ ok: status < 400, status,
+  json: async () => copy(data), text: async () => JSON.stringify(data) })
+const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex')
+function exportFixture() {
+  const identity = { tenant_id: 'test-tenant', doc_id: 'strategy', revision: 1, parent_revision: null,
+    kind: 'graph', author: 'tester', created_at: 1800000001, sha256: hash(first) }
+  const report = { candidates: [{ setting: 'price', score: 2 }, { setting: 'size', score: 3 }],
+    confirm_report: { parent_policy_digest: hash({ field: 'price' }), child_policy_digest: hash({ field: 'size' }),
+      calibration: { parent: { n: 20 }, child: { n: 20 } } }, reasons: ['complete report'] }
+  const run = { tenant_id: identity.tenant_id, doc_id: identity.doc_id, run_id: 'evaluation-1',
+    graph_revision: 1, graph_sha256: identity.sha256, state: 'finished' }
+  const parts = { identity, graph: copy(first),
+    layout: { schema: 'leaf.lab-layout.v1', positions: { 'field-1': { x: 12, y: -34 } } },
+    policy_reference: { graph_sha256: identity.sha256,
+      blocks: first.blocks.map(block => ({ id: block.id, registry: block.registry, settings_sha256: hash(block.settings) })),
+      compiled: [{ run_id: run.run_id, block_id: 'field-1', ...report.confirm_report }] },
+    evaluations: [{ run, events: Array.from({ length: 1001 }, (_, seq) => ({ tenant_id: identity.tenant_id,
+      run_id: run.run_id, seq, kind: seq === 1000 ? 'finished' : 'value', payload: { result: { data: seq } } })),
+    complete_results: { 'job-1': { result: report } } }] }
+  const bundle = { schema: 'leaf.lab-bundle.v1', parts,
+    manifest: { algorithm: 'sha256', parts: Object.fromEntries(Object.entries(parts).map(([key, value]) => [key, hash(value)])) } }
+  const fetchImpl = vi.fn(async url => {
+    if (url.endsWith('/revisions/1/export')) return response(bundle)
+    if (url.endsWith('/head')) return response({ ...identity, revision: 2, published_revision: 1 })
+    if (url.endsWith('/revisions')) return response({ revisions: [identity, { ...identity, revision: 2 }] })
+    throw new Error(`Unexpected request ${url}`)
+  })
+  return { bundle, fetchImpl, client: createLabArtifactsClient({ fetchImpl }) }
+}
+const blobText = blob => new Promise((resolve, reject) => {
+  const reader = new FileReader()
+  reader.onload = () => resolve(reader.result)
+  reader.onerror = reject
+  reader.readAsText(blob)
+})
 function deferred() {
   let resolve
   const promise = new Promise(done => { resolve = done })
@@ -53,9 +89,154 @@ function ledger() {
   return { rows, append, fetchImpl, client: createLabArtifactsClient({ fetchImpl, now: () => 1800000000000 }) }
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('Strategy revision ledger', () => {
+  it('downloads the selected editable revision, full evaluation and digest manifest as JSON', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    let downloaded, filename
+    const createObjectURL = vi.fn(blob => { downloaded = blob; return 'blob:lab-export' })
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = revokeObjectURL
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () { filename = this.download })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Export revision'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Exported r1.')
+    const exported = JSON.parse(await blobText(downloaded))
+    expect(exported).toEqual(bundle)
+    expect(downloaded.type).toBe('application/json')
+    expect(filename).toBe('lab-strategy-r1.json')
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:lab-export'), { timeout: 2000 })
+    for (const [part, value] of Object.entries(exported.parts)) expect(exported.manifest.parts[part]).toBe(hash(value))
+    expect(exported.parts.evaluations[0].events).toHaveLength(1001)
+    expect(exported.parts.evaluations[0].complete_results['job-1'].result.candidates).toHaveLength(2)
+    expect(fetchImpl.mock.calls.find(([url]) => url.endsWith('/revisions/1/export'))[1]).toMatchObject({
+      method: 'GET', credentials: 'same-origin', redirect: 'error', headers: { 'X-Tenant-Id': config.tenant },
+    })
+    expect(client.state.events).toEqual([])
+  })
+
+  it('reopens a downloaded bundle on a fresh client with identities, layout and evaluations intact', async () => {
+    const { bundle, client: exporter } = exportFixture()
+    const exported = await exporter.exportBundle('strategy', 1)
+    const { client, fetchImpl } = exportFixture()
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByLabelText('Reopen bundle')).toBeEnabled())
+    fetchImpl.mockClear()
+    const input = screen.getByLabelText('Reopen bundle')
+    fireEvent.change(input, { target: { files: [new File([JSON.stringify(exported.bundle)], 'saved.json', { type: 'application/json' })] } })
+    await waitFor(() => expect(client.state.restoredGraph).toEqual(first))
+    expect(client.currentDocId()).toBe(bundle.parts.identity.doc_id)
+    expect(client.state.openedBundle).toEqual(bundle)
+    expect(client.state.lastSaved).toMatchObject({ revision: 1, sha256: hash(first), graph: first })
+    expect(client.state.head).toBe(2)
+    expect(client.state.published).toBe(1)
+    expect(await graphLayouts.get(client.state.restoredGraph).load()).toEqual(bundle.parts.layout)
+    expect(fetchImpl.mock.calls.map(([url]) => url.split('/').at(-1))).toEqual(['export', 'head'])
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+    const edited = copy(client.state.restoredGraph)
+    edited.blocks[0].settings.field = 'edited after reopen'
+    act(() => client.takeGraph(edited))
+    expect(client.state.restoredGraph.blocks[0].settings.field).toBe('edited after reopen')
+    expect(client.state.openedBundle.parts.graph).toEqual(first)
+  })
+
+  it.each(['identity', 'graph', 'layout', 'policy_reference', 'evaluations'])('visibly refuses a tampered %s part before requests', async part => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    bundle.parts[part] = part === 'evaluations' ? [] : { ...bundle.parts[part], tampered: true }
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByLabelText('Reopen bundle')).toBeEnabled())
+    fetchImpl.mockClear()
+    fireEvent.change(screen.getByLabelText('Reopen bundle'), { target: { files: [new File([JSON.stringify(bundle)], 'tampered.json')] } })
+    expect(await screen.findByText('Reopen failed: Bundle integrity check failed. No graph was opened.')).toBeVisible()
+    expect(client.state.restoredGraph).toBeNull()
+    expect(client.state.openedBundle).toBeNull()
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing digest, a mismatched graph identity and malformed JSON', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const missing = copy(bundle)
+    delete missing.manifest.parts.layout
+    expect(() => verifyLabBundle(missing)).toThrow('integrity check failed')
+    const mismatched = copy(bundle)
+    mismatched.parts.identity.sha256 = hash({ other: true })
+    mismatched.manifest.parts.identity = hash(mismatched.parts.identity)
+    expect(() => verifyLabBundle(mismatched)).toThrow('integrity check failed')
+    expect(await client.reopenBundle('{')).toMatchObject({ ok: false, detail: expect.stringContaining('integrity check failed') })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('shows revoked export authorization without downloading or changing the graph', async () => {
+    const { client, fetchImpl } = exportFixture()
+    const download = vi.fn()
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = download })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fetchImpl.mockResolvedValueOnce(response({ detail: 'lab_export_forbidden' }, 403))
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    expect(await screen.findByText('Export failed: You no longer have access to this revision.')).toBeVisible()
+    expect(download).not.toHaveBeenCalled()
+    expect(client.state.restoredGraph).toBeNull()
+  })
+
+  it('reauthorizes reopen and rejects a different tenant identity even with valid digests', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    fetchImpl.mockResolvedValueOnce(response({ detail: 'lab_export_forbidden' }, 403))
+    expect(await client.reopenBundle(JSON.stringify(bundle))).toMatchObject({ ok: false, status: 403 })
+    expect(client.state.restoredGraph).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    const foreign = copy(bundle)
+    foreign.parts.identity.tenant_id = 'another-tenant'
+    foreign.parts.evaluations = []
+    foreign.manifest.parts.identity = hash(foreign.parts.identity)
+    foreign.manifest.parts.evaluations = hash(foreign.parts.evaluations)
+    expect(await client.reopenBundle(JSON.stringify(foreign))).toMatchObject({ ok: false, detail: expect.stringContaining('integrity check failed') })
+    expect(client.state.restoredGraph).toBeNull()
+  })
+
+  it('drops pending export and reopen when the document or graph operation changes', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const exporting = client.exportBundle('strategy', 1)
+    client.setDocId('other')
+    pending.resolve(response(bundle))
+    expect(await exporting).toMatchObject({ ok: false })
+    const reopening = deferred()
+    fetchImpl.mockImplementationOnce(() => reopening.promise)
+    const opening = client.reopenBundle(JSON.stringify(bundle))
+    client.takeGraph(second)
+    reopening.resolve(response(bundle))
+    expect(await opening).toMatchObject({ ok: false })
+    expect(client.state.restoredGraph).toEqual(second)
+    expect(client.state.openedBundle).toBeNull()
+  })
+
+  it('exports a revision without evaluations or layout and drops a response after an account change', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    bundle.parts.evaluations = []
+    bundle.parts.layout = null
+    bundle.parts.policy_reference.compiled = []
+    for (const key of ['evaluations', 'layout', 'policy_reference']) bundle.manifest.parts[key] = hash(bundle.parts[key])
+    expect(await client.exportBundle('strategy', 1)).toEqual({ ok: true, bundle })
+    const pending = deferred()
+    fetchImpl.mockImplementationOnce(() => pending.promise)
+    const exporting = client.exportBundle('strategy', 1)
+    const tenant = config.tenant
+    try {
+      config.tenant = 'another-tenant'
+      pending.resolve(response(bundle))
+      expect(await exporting).toMatchObject({ ok: false })
+    } finally { config.tenant = tenant }
+    expect(client.state.openedBundle).toBeNull()
+  })
+
   it('gets and puts layouts at the digest path using the shared tenant request helper', async () => {
     const sha256 = 'a'.repeat(64)
     const layout = { schema: 'leaf.lab-layout.v1', positions: { 'field-1': { x: 12, y: -34 } } }
@@ -641,6 +822,7 @@ describe('Strategy revision ledger', () => {
       await expect(client.head(id)).rejects.toThrow('Enter a valid Document ID.')
       await expect(client.revisions(id)).rejects.toThrow('Enter a valid Document ID.')
       await expect(client.revision(id, 1)).rejects.toThrow('Enter a valid Document ID.')
+      await expect(client.exportBundle(id, 1)).rejects.toThrow('Enter a valid Document ID.')
       await expect(client.diff(id, 1, 2)).rejects.toThrow('Enter a valid Document ID.')
       await expect(client.restore(id, 1, 2)).rejects.toThrow('Enter a valid Document ID.')
       await expect(client.publish(id, 1)).rejects.toThrow('Enter a valid Document ID.')
@@ -722,4 +904,139 @@ describe('Strategy revision ledger', () => {
     expect(screen.getByText('replace /unknown')).toBeVisible()
     expect(screen.queryByText(/DO-NOT-RENDER/)).not.toBeInTheDocument()
   })
+})
+
+
+describe('original export response text', () => {
+  it.each(['numeric tokens', 'larger multilingual report'])('preserves producer text for %s', async variant => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    producer.result.candidates[1].score = -0
+    if (variant === 'larger multilingual report') {
+      producer.result.reasons = ['策略 🌱, 15 分钟, 250 mV, توقيت UTC. '.repeat(2000)]
+    }
+    const producerText = canonicalJSON(producer.result)
+      .replace('"score":2', '"score":2e0')
+      .replace('"score":0', '"score":-0.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = '\n  ' + canonicalJSON(bundle)
+      .replace(canonicalJSON(producer.result), producerText) + '\n'
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: async () => serverText })
+
+    const exported = await client.exportBundle('strategy', 1, { preserveText: true })
+
+    expect(exported.ok).toBe(true)
+    expect(new TextEncoder().encode(exported.text)).toEqual(new TextEncoder().encode(serverText))
+    expect(verifyLabBundle(JSON.parse(exported.text))).toEqual(bundle)
+    expect(exported.text).toContain(producerText)
+    expect(createHash('sha256').update(producerText + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][1].method).toBe('GET')
+  })
+
+  it('retains the current export when the previous document response finishes last', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const older = deferred()
+    const newer = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => older.promise })
+    const oldExport = client.exportBundle('strategy', 1, { preserveText: true })
+    client.setDocId('other')
+    const otherBundle = copy(bundle)
+    otherBundle.parts.identity.doc_id = 'other'
+    otherBundle.parts.evaluations[0].run.doc_id = 'other'
+    otherBundle.manifest.parts.identity = hash(otherBundle.parts.identity)
+    otherBundle.manifest.parts.evaluations = hash(otherBundle.parts.evaluations)
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => newer.promise })
+    const newExport = client.exportBundle('other', 1, { preserveText: true })
+    const newerText = JSON.stringify(otherBundle)
+    newer.resolve(newerText)
+    const currentResult = await newExport
+    expect(currentResult).toMatchObject({ ok: true, text: newerText })
+
+    older.resolve(JSON.stringify(bundle))
+    const staleResult = await oldExport
+
+    expect(staleResult.ok).toBe(false)
+    expect(staleResult).not.toHaveProperty('text')
+    expect(currentResult.text).toBe(newerText)
+    expect(currentResult.bundle.parts.identity.doc_id).toBe('other')
+    expect(client.state.openedBundle).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  })
+
+  it('downloads the verified response bytes with the producer numeric spelling intact', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    const producerText = canonicalJSON(producer.result).replace('"score":2', '"score":2.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = canonicalJSON(bundle).replace('"score":2', '"score":2.0')
+    const parsedDecoy = vi.fn(async () => ({ schema: 'different-response' }))
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    let downloaded
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:raw-export' }
+      static revokeObjectURL() {}
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Export revision'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Exported r1.')
+    const downloadedText = await blobText(downloaded)
+    expect(downloadedText).toBe(serverText)
+    const jobOffset = downloadedText.indexOf('"job-1":')
+    const resultOffset = downloadedText.indexOf('"result":', jobOffset) + '"result":'.length
+    const digestOffset = downloadedText.indexOf(',"result_sha256":', resultOffset)
+    const downloadedResult = downloadedText.slice(resultOffset, digestOffset)
+    expect(createHash('sha256').update(downloadedResult + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(verifyLabBundle(JSON.parse(downloadedText))).toEqual(bundle)
+    expect(parsedDecoy).not.toHaveBeenCalled()
+  })
+
+  it('rejects tampered response text even when a separate JSON reader would return a valid bundle', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const serverText = canonicalJSON(bundle).replace('"field":"price"', '"field":"tampered"')
+    const parsedDecoy = vi.fn(async () => bundle)
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    const createObjectURL = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL() {}
+    })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Export failed: Bundle integrity check failed. No graph was opened.')
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(parsedDecoy).not.toHaveBeenCalled()
+    expect(client.state.restoredGraph).toBeNull()
+  })
+
+  it.each(['document', 'account'])('refuses retained response text after a %s change', async change => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const body = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => body.promise })
+    const exporting = client.exportBundle('strategy', 1, { preserveText: true })
+    const tenant = config.tenant
+    try {
+      if (change === 'document') client.setDocId('other')
+      else config.tenant = 'another-tenant'
+      body.resolve(JSON.stringify(bundle))
+      const result = await exporting
+      expect(result).toMatchObject({ ok: false })
+      expect(result).not.toHaveProperty('text')
+      expect(client.state.openedBundle).toBeNull()
+    } finally { config.tenant = tenant }
+  })
+
 })

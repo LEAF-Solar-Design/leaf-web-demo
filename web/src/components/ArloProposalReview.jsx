@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { getArloReviews, saveArloReview } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
+import { canonicalExportJson } from './arloCanonicalExport.js'
 import './ArloProposalReview.css'
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const number = (value, digits = 2) => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : 'Unavailable'
 const point = p => p && ['x', 'y', 'z'].every(axis => Number.isFinite(p[axis]))
+const productDisclaimer = 'Native boxes and supports, host attachment, family compatibility, engineering compliance, fitting offsets, and volumetric/access envelopes remain unverified. This JSON deliverable does not establish a native CAD round trip or engineering approval.'
 const reviewDate = value => {
   const date = value ? new Date(value) : null
   return date && !Number.isNaN(date.getTime()) ? date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Date unavailable'
@@ -33,9 +35,20 @@ function RoutePreview({ proposal }) {
   </figure>
 }
 
-export default function ArloProposalReview({ envelope, context }) {
+export default function ArloProposalReview({ envelope, canonicalJson, context, currentProject }) {
   const result = envelope?.solver_result
-  const proposals = Array.isArray(result?.proposals) ? result.proposals : []
+  const storedProposals = Array.isArray(result?.proposals) ? result.proposals : []
+  const malformedProposals = storedProposals.some(p => !p || typeof p !== 'object' || Array.isArray(p)
+    || typeof p.proposal_id !== 'string' || !p.proposal_id.trim())
+    || new Set(storedProposals.map(p => p?.proposal_id)).size !== storedProposals.length
+  const object = value => value && typeof value === 'object' && !Array.isArray(value)
+  const list = value => value == null || Array.isArray(value)
+  const malformedDetails = !malformedProposals && storedProposals.some(p =>
+    !list(p.routes) || (p.routes || []).some(route => !object(route) || !list(route.points))
+    || !list(p.quantities) || (p.quantities || []).some(row => !object(row)
+      || (row.kind != null && typeof row.kind !== 'string')
+      || (row.unit != null && typeof row.unit !== 'string')))
+  const proposals = malformedProposals || malformedDetails ? [] : storedProposals
   const [selectedId, setSelectedId] = useState(proposals[0]?.proposal_id || '')
   const proposal = proposals.find(p => p.proposal_id === selectedId) || proposals[0]
   const [reviews, setReviews] = useState([])
@@ -45,10 +58,77 @@ export default function ArloProposalReview({ envelope, context }) {
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
   const [historyRetry, setHistoryRetry] = useState(0)
+  const [exportError, setExportError] = useState('')
+  const [verifiedExport, setVerifiedExport] = useState(null)
   const alive = useRef(false)
   const attempts = useRef(new Map())
+  const pendingExports = useRef(new Map())
+  useEffect(() => {
+    const pending = pendingExports.current
+    return () => {
+      for (const [timer, url] of pending) {
+        clearTimeout(timer)
+        URL.revokeObjectURL(url)
+      }
+      pending.clear()
+    }
+  }, [])
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
     && ['organization_id','project_id','input_version_id'].every((k, i) => envelope?.solver_input?.[k] === context?.[['org_id','project_id','input_version_id'][i]])
+  // Retained job context cannot establish which project the caller currently has open.
+  const scopeReason = !result || envelope?.solver !== 'arlo-design' || !/^[a-f0-9]{64}$/i.test(envelope?.result_sha256 || '')
+    ? 'No stored result is available to export.'
+    : !['orgId','projectId'].every(k => uuid.test(currentProject?.[k] || ''))
+      ? "Open this result from the project's Jobs to export it"
+      : !bound || currentProject.orgId !== context.org_id || currentProject.projectId !== context.project_id
+        ? 'Export unavailable: this stored result does not match the current project job. Reopen it from its project.' : ''
+  const exportScope = JSON.stringify([context?.org_id, context?.project_id, context?.job_id, context?.input_version_id,
+    currentProject?.orgId, currentProject?.projectId])
+  const verified = verifiedExport?.envelope === envelope && verifiedExport?.canonicalJson === canonicalJson
+    && verifiedExport?.scope === exportScope ? verifiedExport : null
+  const exportReason = scopeReason || verified?.error || (!verified?.json ? 'Export unavailable: verifying producer JSON and hashes.' : '')
+  useEffect(() => {
+    let cancelled = false
+    if (!scopeReason) canonicalExportJson(envelope, canonicalJson, context, productDisclaimer).then(json => {
+      if (!cancelled) setVerifiedExport({ envelope, canonicalJson, scope: exportScope, json })
+    }).catch(cause => {
+      if (!cancelled) setVerifiedExport({ envelope, canonicalJson, scope: exportScope,
+        error: `Export unavailable: ${humanizeError(cause)}` })
+    })
+    return () => { cancelled = true }
+  }, [envelope, canonicalJson, exportScope, scopeReason])
+  // Inspection remains available even when producer verification refuses export.
+  const exportDocument = { job_context: context ?? null, envelope, product_disclaimer: productDisclaimer }
+  const exportJson = verified?.json || JSON.stringify(exportDocument, null, 2)
+  const exportResult = () => {
+    if (exportReason) return
+    let url, link
+    setExportError('')
+    try {
+      url = URL.createObjectURL(new Blob([exportJson], { type: 'application/json' }))
+      link = document.createElement('a')
+      link.href = url
+      link.download = `arlo-result-${context.job_id}.json`
+      document.body.appendChild(link)
+      link.click()
+    } catch (cause) {
+      setExportError(`Result export failed. ${humanizeError(cause)}`)
+    } finally {
+      link?.remove()
+      if (url) {
+        const timer = setTimeout(() => {
+          pendingExports.current.delete(timer)
+          URL.revokeObjectURL(url)
+        }, 0)
+        pendingExports.current.set(timer, url)
+      }
+    }
+  }
+  const exportControl = <>
+    <button type="button" className="btn ghost" disabled={Boolean(exportReason)} onClick={exportResult}>Export result</button>
+    {exportReason && <p role="status">{exportReason}</p>}
+    {exportError && <p role="alert">{exportError}</p>}
+  </>
   useEffect(() => {
     alive.current = true
     let cancelled = false
@@ -60,7 +140,7 @@ export default function ArloProposalReview({ envelope, context }) {
       setReviews(data.reviews); setLoading(false)
     }).catch(cause => { if (!cancelled) { setError(humanizeError(cause)); setLoading(false) } })
     return () => { cancelled = true; alive.current = false }
-  }, [bound, context?.job_id, envelope.result_sha256, historyRetry])
+  }, [bound, context?.job_id, envelope?.result_sha256, historyRetry])
   const decide = async decision => {
     // At most one pending attempt per proposal. Only a retry of the same decision reuses its key and original payload;
     // a different decision replaces it, so a superseded key is never replayed under a later decision.
@@ -87,12 +167,15 @@ export default function ArloProposalReview({ envelope, context }) {
     }
     finally { if (alive.current) setSaving(false) }
   }
-  if (!proposal) return <div className="arlo-review"><h4>Feeder design incomplete</h4><p>No complete proposal is available to review. Run the design again to try another proposal.</p></div>
-  const selectedReviews = reviews.filter(r => r.payload.proposalId === proposal.proposal_id)
-  const complete = result.status === 'complete' && proposal.production_valid === false && Array.isArray(proposal.violations) && proposal.violations.length === 0
-  const disabledReason = saving ? 'Saving your decision. Please wait.' : !bound ? 'Open this result from its project job to save a decision.' : loading ? 'Loading saved decisions. Please wait.' : !complete ? `This proposal is incomplete${proposal.violations?.length ? ` and has ${proposal.violations.length} design ${proposal.violations.length === 1 ? 'check' : 'checks'} to resolve` : ''}. Run the design again before accepting or rejecting it.` : ''
+  const selectedReviews = reviews.filter(r => r.payload.proposalId === proposal?.proposal_id)
+  const complete = proposal && result.status === 'complete' && proposal.production_valid === false && Array.isArray(proposal.violations) && proposal.violations.length === 0
+  const disabledReason = saving ? 'Saving your decision. Please wait.' : !bound ? 'Open this result from its project job to save a decision.' : loading ? 'Loading saved decisions. Please wait.' : !complete ? `This proposal is incomplete${proposal?.violations?.length ? ` and has ${proposal.violations.length} design ${proposal.violations.length === 1 ? 'check' : 'checks'} to resolve` : ''}. Run the design again before accepting or rejecting it.` : ''
+  const productionValid = proposal ? proposal.production_valid : result?.production_valid
   return <div className="arlo-review">
-    <p className="dim">Electrical design / Proposal review</p><h4>Review the complete feeder</h4>
+    <p className="dim">Electrical design / Proposal review</p>
+    {malformedProposals && <p role="alert">Stored proposals could not be reviewed because a proposal identity is missing or duplicated. The stored result is preserved in the export. Reopen the result or run the design again.</p>}
+    {malformedDetails && <p role="alert">Stored proposal routes or quantities could not be displayed. The stored result is preserved in the export. Reopen the result or run the design again.</p>}
+    {proposal ? <><h4>Review the complete feeder</h4>
     <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote('') }}>
       {proposals.map((p,i) => <option value={p.proposal_id} key={p.proposal_id}>Proposal {i+1}, {number(p.estimated_installed_cost)} cost units</option>)}
     </select></label>
@@ -100,6 +183,31 @@ export default function ArloProposalReview({ envelope, context }) {
     <table className="counts"><thead><tr><th>Part</th><th>Quantity</th><th>Installed cost</th></tr></thead><tbody>
       {(proposal.quantities || []).map((q,i) => <tr key={i}><td>{q.kind}</td><td>{number(q.quantity)} {q.unit}</td><td>{number(q.installed_cost)}</td></tr>)}
     </tbody></table><p>Total: <strong>{number(proposal.estimated_installed_cost)} catalog cost units</strong>. Currency was not supplied.</p>
+    </> : <><h4>Feeder design incomplete</h4><p>No complete proposal is available to review. Run the design again to try another proposal.</p></>}
+    {result && <p>Production valid: <strong>{productionValid === true ? 'true' : productionValid === false ? 'false' : 'Not supplied'}</strong></p>}
+    {result && (!proposal || productionValid === false) && <section aria-label="Limitations">
+      <h4>Limitations</h4><p>{productDisclaimer}</p>
+      <p>Any additional stored limitations are retained in the complete proposal and stored result below.</p>
+      {[['Envelope', envelope.limitations], ['Result', result.limitations], ['Solver diagnostics', result.diagnostics?.limitations], ['Proposal', proposal?.limitations]].filter(([, value]) => value !== undefined).map(([label, value]) => <div key={label}><h5>{label} limitations</h5><pre>{JSON.stringify(value, null, 2)}</pre></div>)}
+    </section>}
+    {proposal && <section aria-label="Complete proposal data">
+      <h4>Complete proposal data</h4>
+      <p>All stored fields, including route coordinates and segments, catalog parts, supports, placements and hosts, quantities, cost lines and total, constraints, violations, and source identities. Missing fields were not supplied by the solver.</p>
+      <pre aria-label="Proposal JSON">{JSON.stringify(proposal, null, 2)}</pre>
+    </section>}
+    {result && <section aria-label="Solver trace">
+      <h4>Solver trace</h4><p>Trace event count: {Array.isArray(result.trace) ? result.trace.length : 'Not supplied'}</p>
+      <pre aria-label="Trace events JSON">{JSON.stringify(result.trace ?? null, null, 2)}</pre>
+    </section>}
+    <section aria-label="Result export">
+      <h4>Stored result and export</h4>
+      <p>Export all proposals as editable JSON, with the original request semantics, identities, constraints, costs, trace, hashes and stored limitations.</p>
+      {exportControl}
+      <details><summary>Inspect full stored result and export JSON</summary>
+        <pre aria-label="Export JSON preview">{exportJson}</pre>
+      </details>
+    </section>
+    {proposal && <>
     <p>Accepting records your proposal choice. It does not apply CAD changes or grant engineering approval.</p>
     {disabledReason && <p role="status">{disabledReason}</p>}
     {!complete && Array.isArray(proposal.violations) && proposal.violations.length > 0 && <ul aria-label="Design checks to resolve">{proposal.violations.map((violation, index) => <li key={index}>Design check {index + 1}: {humanizeError(violation?.message || violation)}</li>)}</ul>}
@@ -111,5 +219,6 @@ export default function ArloProposalReview({ envelope, context }) {
     <div className="arlo-actions"><button type="button" className="btn" disabled={!bound || !complete || loading || saving} onClick={() => decide('accept')}>Accept proposal</button>
       <button type="button" className="btn ghost" disabled={!bound || !complete || loading || saving} onClick={() => decide('reject')}>Reject proposal</button></div>
     <h4>Saved decisions</h4>{selectedReviews.length ? <ol>{selectedReviews.map(row => <li key={row.operation_id}><strong>{row.payload.decision === 'accept' ? 'Accepted' : 'Rejected'}</strong>{row.payload.note && <>: {row.payload.note}</>}<br /><span className="dim">{reviewDate(row.created_at)}</span></li>)}</ol> : <p>No saved decision for this proposal.</p>}
+    </>}
   </div>
 }

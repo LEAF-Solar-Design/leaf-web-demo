@@ -12,6 +12,7 @@
  * through. A hand-rolled fake refusal would prove only that the panel can
  * render an object.
  */
+import { scaleTimeout } from '../testTimeScale.js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
@@ -75,7 +76,7 @@ const type = (text) => fireEvent.change(replyBox(), { target: { value: text } })
 // A generous ceiling, not a delay: these assertions settle in a few ms, and the
 // wait only ever costs that much on a loaded CI box (the default 1 s ceiling
 // flaked once under a parallel full-suite run).
-const SETTLE = { timeout: 5000 }
+const SETTLE = { timeout: scaleTimeout(5000) }
 
 describe('a named token shape is refused on the wire and shown here', () => {
   it('renders the refusal as its own notice, not as a failure banner', async () => {

@@ -248,6 +248,8 @@ def apply_recorded_sizing(graph, sizing_record, tenant):
 def solve_frames(graph, frames, *, maximum, dwgname, tenant, grant_ref, replay=None):
     """Solve and commit every frame in `frames` order, a split frame piece by piece through the plugin's
     retry loop. `replay` is the list of recorded responses (each used at most once), or None for live calls.
+    Recorded replay preserves Branch order through the internal parity option.
+    Live calls retain strict Studio continuity.
     Returns (graph, recorded bodies, response hashes, split frame records)."""
     responses = replay or []
     recorded_bodies, response_hashes, split_frames = [], [], []
@@ -289,7 +291,8 @@ def solve_frames(graph, frames, *, maximum, dwgname, tenant, grant_ref, replay=N
                                              frame_ref=frame["id"], tenant_id=tenant, job_id=job,
                                              split_state=out["split_state"])
                 candidate = complete_split_search(graph, binding, out["proposals"])
-                graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+                graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]},
+                                            candidate=candidate, plugin_parity=replay is not None)
                 split_frames.append({"frame": frame["name"], "pieces": len(out["pieces"]),
                                      "split_state": dict(out["split_state"])})
                 continue
@@ -303,7 +306,8 @@ def solve_frames(graph, frames, *, maximum, dwgname, tenant, grant_ref, replay=N
             else:
                 proposal = cloud.proposal(params, tenant, job)
             candidate = complete_search(graph, binding, proposal)
-            graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=candidate)
+            graph = commit.commit_solve(graph, {"expected_rev": graph["rev"]},
+                                            candidate=candidate, plugin_parity=replay is not None)
     return graph, recorded_bodies, response_hashes, split_frames
 
 def produce(args):

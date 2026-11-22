@@ -51,9 +51,8 @@ The names are fixed by the standard and match the Swift side.
 
 Import dataset rendering from the relative `src/datasets` entry, for example
 `import { DatasetElement, resolveDisplayPreferences } from "./vendor/assistant-react/src/datasets"`.
-It is intentionally absent from `src/index.ts`, so conversation consumers do
-not load Recharts. Dataset hosts supply the `recharts` peer (`^3.6.0`); the
-package also declares it for its own tests. Both React 18.3 and 19 are supported,
+It is intentionally absent from `src/index.ts`. The dataset entry is
+self-contained, including its SVG line chart. Both React 18.3 and 19 are supported,
 with no Next.js, Tailwind, host context, or host component requirement.
 
 `DatasetElement` accepts S7's `element`, `read`, `preferences`, optional
@@ -71,7 +70,16 @@ Preferences resolve per field from user, workspace, then en-US/UTC/24h.
 Date-only values keep their reporting day; instants use the viewer's timezone.
 Money respects declared scale and currency fraction digits without FX, and
 ratios respect their explicit scale, including negative and over-100% values.
+Unsafe integer ratios display `Invalid`. Percent-scale values retain their
+original numeric magnitude, including safe integer digits near the precision limit.
 For pure formatting without chart imports, use `src/datasets/formatting`.
+
+Table text and identifier cells show hidden bidirectional embedding, override and
+isolate controls as Unicode escapes with a separate "Hidden direction marks" label.
+This keeps an account identifier from silently reversing on screen and distinguishes
+it from a literal backslash-u string. Ordinary Arabic and Hebrew text remains unchanged.
+The supplied rows, keys, mappings and pure formatter output are not rewritten.
+This cell treatment does not claim to sanitize chart labels or other host text.
 
 Hosts may also wrap `LineChartCore` or `DataTableCore` in their own cards.
 The chart retains categorical X by default and supports axis, formatter,
@@ -86,7 +94,8 @@ strings in its source rows and formats them using the display preferences.
 Null X stays in the
 equivalent table and is omitted from the plot. `formatDatasetAxisValue` guards
 generated temporal ticks outside the canonical range. Count axes use integer
-ticks. Animations are disabled; the Recharts accessibility layer is enabled.
+ticks. Charts render without animation and support pointer tooltips, arrow-key
+navigation, Home/End, and polite announcements of the active observation.
 
 Tables use semantic headers and stable row keys in a keyboard-focusable
 overflow region. `maxRows` bounds the visible viewport (default 12); all
@@ -95,7 +104,10 @@ the displayed data without mutating the authoritative read or saved query.
 Line charts include a native “View data table” disclosure of those same rows.
 The cores accept `className`/`style` for layout, use `--leaf-*` tokens with
 host CSS-variable and package-token fallbacks, and fit their parent without
-global CSS. Provider strings render as text, never raw HTML.
+global CSS. Provider strings render as text, never raw HTML. Text cells containing
+an absolute HTTPS URL render as keyboard-accessible links in a new tab, retaining
+the supplied URL as the label. Links suppress referrer and opener access. Values
+with credentials, whitespace, backslashes, or other schemes remain inert text.
 
 ## Inert schedule draft form (separate actions entry)
 

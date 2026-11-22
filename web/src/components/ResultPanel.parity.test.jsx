@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { scaleTimeout } from '../testTimeScale.js'
 import React from 'react'
 import { cleanup, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -117,5 +118,5 @@ describe('ResultPanel table parity', () => {
       expect(row.style.visibility).not.toBe('hidden')
       expect(row.style.opacity === '' || Number(row.style.opacity) >= 1).toBe(true)
     })
-  }, 15_000)
+  }, scaleTimeout(15_000))
 })

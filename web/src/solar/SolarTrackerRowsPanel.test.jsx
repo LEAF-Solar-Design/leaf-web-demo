@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarTrackerRowsPanel, { TRACKER_ROWS_PANEL_REASONS as S } from './SolarTrackerRowsPanel.jsx'
@@ -220,7 +221,7 @@ describe('manual tracker rows panel', () => {
     builder.mockRestore()
     // Reaching the 256-row cap through the form re-renders every row on each click: about 20 s in
     // jsdom, measured, so this row carries its own budget instead of the 5 s default.
-  }, 120_000)
+  }, scaleTimeout(120_000))
   it('p11_power_validation_order', async () => {
     const { p } = await setup({}, false)
     change(screen.getByLabelText('Module power'), '0')
@@ -370,7 +371,7 @@ describe('manual tracker rows panel', () => {
       cleanup()
     }
     // One panel mount per refusal code, about fifty of them: about 5 s in jsdom, measured.
-  }, 60_000)
+  }, scaleTimeout(60_000))
   it('p23_stale_head_refresh', async () => {
     const { p } = await setup({ client: { createTrackerRows: vi.fn(async () => ({ ok: false, code: 'TRACKER_ROWS_STALE_HEAD' })) } })
     p.terrainClient.getTerrain.mockResolvedValue(stored(head(H2, 1, H)))

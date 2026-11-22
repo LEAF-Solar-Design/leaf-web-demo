@@ -1,0 +1,68 @@
+.inline-authoring {
+  box-sizing: border-box;
+  display: grid;
+  gap: .8rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: .9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--leaf-radius-key);
+  background: var(--card);
+  color: var(--ink);
+  font-size: var(--leaf-size-dense);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.inline-authoring > *, .inline-authoring fieldset, .inline-authoring legend,
+.inline-authoring dd, .inline-authoring details { min-width: 0; max-width: 100%; }
+.inline-authoring h4, .inline-authoring h5, .inline-authoring p,
+.inline-authoring dl, .inline-authoring dd, .inline-authoring ol, .inline-authoring ul { margin: 0; }
+.inline-authoring h4 { font-size: 1.1em; }
+.inline-authoring h5, .inline-authoring dt { color: var(--muted); font: inherit; font-weight: 600; }
+.inline-authoring ul, .inline-authoring ol { padding-inline-start: 1.4em; }
+.inline-authoring fieldset { padding: 0; margin: 0; border: 0; }
+.inline-authoring legend { padding: 0 0 .5rem; }
+.inline-question-header { padding: .15em .45em; border-radius: var(--leaf-radius-key); background: var(--accent-tint); }
+.inline-choices, .inline-actions { display: flex; flex-wrap: wrap; align-items: start; gap: .4rem; }
+.inline-choices button {
+  text-align: start;
+  padding: .45rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--leaf-radius-key);
+  background: var(--card);
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.inline-choices button[aria-pressed="true"] { border-color: var(--primary); background: var(--accent-tint); }
+.inline-authoring small { display: block; color: var(--muted); }
+.inline-authoring button { justify-self: start; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.inline-authoring label, .inline-authoring .inline-comment { display: grid; gap: .35rem; flex-basis: 100%; margin-top: .45rem; min-width: 0; }
+.inline-authoring input, .inline-authoring textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: .45rem;
+  background: var(--card);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: var(--leaf-radius-key);
+  font: inherit;
+}
+.inline-authoring textarea { resize: vertical; }
+.inline-authoring :focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.inline-authoring table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: start; }
+.inline-authoring td, .inline-authoring th { padding: .25rem; vertical-align: top; text-align: start; border-bottom: 1px solid var(--border); }
+.inline-build-rows, .inline-review-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: .55rem .9rem;
+}
+.inline-review-details { display: grid; gap: .5rem; margin-bottom: .6rem; }
+.inline-authoring pre { max-height: 18rem; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.inline-authoring summary { cursor: pointer; }
+@media (max-width: 520px) {
+  .inline-authoring { padding: .65rem; }
+  .inline-build-rows, .inline-review-details dl { grid-template-columns: minmax(0, 1fr); gap: .2rem; }
+  .inline-authoring dd + dt { margin-top: .4rem; }
+}

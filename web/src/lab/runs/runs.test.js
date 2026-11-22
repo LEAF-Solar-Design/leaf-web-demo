@@ -17,6 +17,139 @@ function stream(chunks, hold = false) {
   } }) }
 }
 const parked = () => stream([], true)
+
+it.each(['html', 'empty', 'mismatched', 'missing-type', 'empty-object', 'array'])('refuses invalid snapshot metadata %s before replacing verified values', async kind => {
+  const store = createValueStore()
+  store.apply('r', { ...event(0, 'corpus', { result: { data: 'verified bytes' } }), run_id: 'r' })
+  const row = { ok: true, status: 200,
+    headers: { get: () => kind === 'html' ? 'text/html' : kind === 'mismatched' ? 'image/png' : kind === 'missing-type' ? null : 'application/json' },
+    json: async () => {
+      if (['html', 'empty'].includes(kind)) throw new SyntaxError('inert non-JSON response')
+      return kind === 'empty-object' ? {} : kind === 'array' ? [] : { state: 'finished', graph_revision: 1 }
+    } }
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true, size: 100000 }), run_id: 'r' })])).mockResolvedValueOnce(row)
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result.data).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(2)
+  expect(fetchImpl.mock.calls.every(([, init]) => init.method === undefined || init.method === 'GET')).toBe(true)
+})
+
+it.each(['utf8', 'json', 'truncation-marker'])('retains verified evidence and records incomplete %s at EOF', async kind => {
+  const store = createValueStore()
+  store.apply('r', { ...event(0, 'corpus', { result: { data: 'verified bytes' } }), run_id: 'r' })
+  const encode = value => new TextEncoder().encode(value)
+  const bytes = kind === 'utf8' ? encode('event: run\ndata: {"label":"\u20ac').slice(0, -1)
+    : encode(kind === 'json' ? 'event: run\ndata: {"run_id":"r","seq":1,'
+      : 'id: r:1\nevent: run\ndata: {"run_id":"r","seq":1,"kind":"value","payload":{"truncated":true')
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  const fetchImpl = vi.fn().mockResolvedValue(stream([bytes]))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'incomplete_evidence', evidenceError: 'incomplete_stream_frame' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result.data).toBe('verified bytes')
+  expect(store.getRun('r').gaps.at(-1)).toMatchObject({ from: 1, recovered: false, reason: 'incomplete_stream_frame' })
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
+  expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:0')
+  expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
+})
+
+it.each(['9007199254740992', '9007199254740993', '18446744073709551615'])('refuses unsafe numeric event cursor %s without replacing evidence', async seq => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const raw = `event: run\nid: r:${seq}\ndata: {"run_id":"r","seq":${seq},"kind":"value","block_id":"corpus","payload":{"result":"unsafe"}}\n\n`
+  const fetchImpl = vi.fn().mockResolvedValue(stream([raw]))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'invalid_event_cursor' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(1)
+  expect(fetchImpl.mock.calls[0][1].method).toBeUndefined()
+  expect(store.apply('r', event(Number(seq)))).toBe(false)
+})
+it('resumes the largest safe cursor exactly', async () => {
+  const store = createValueStore()
+  store.apply('r', event(Number.MAX_SAFE_INTEGER))
+  const fetchImpl = vi.fn().mockResolvedValue(parked())
+  open({ runIds: ['r'], store, fetchImpl })
+  await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+  expect(fetchImpl.mock.calls[0][1].headers['Last-Event-ID']).toBe('r:9007199254740991')
+})
+
+
+it.each(['metadata', 'first-page', 'later-page'])('retains verified evidence on contradictory %s snapshot identity', async failure => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const metadata = { run_id: failure === 'metadata' ? 'other' : 'r', state: 'finished', graph_revision: 1 }
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })]))
+    .mockResolvedValueOnce(json(metadata))
+  if (failure === 'later-page') fetchImpl.mockResolvedValueOnce(json({ events: Array.from({ length: 500 }, (_, seq) => event(seq, 'corpus', { result: 'staged only' })) }))
+  fetchImpl.mockResolvedValueOnce(json({ events: [{ ...event(failure === 'later-page' ? 500 : 1), run_id: 'other' }] }))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+})
+it('commits values older than the retained snapshot log without losing their block bytes', () => {
+  const store = createValueStore({ maxEvents: 2 }), staged = store.createSnapshotStore()
+  staged.upsertRun('r', { state: 'finished', graph_revision: 1 })
+  staged.apply('r', event(0, 'early', { result: 'early full bytes' }))
+  staged.apply('r', event(1, 'later'))
+  staged.apply('r', event(2, 'later'))
+  expect(staged.getRun('r').events).toHaveLength(2)
+  store.commitSnapshot('r', staged.getRun('r'))
+  expect(store.getBlock('r', 'early').value.result).toBe('early full bytes')
+  expect(store.getRun('r').lastSeq).toBe(2)
+})
+
+
+it('pauses oversized aggregate snapshots before replacing verified evidence', async () => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  let page = 0
+  const payload = 'x'.repeat(65536)
+  const fetchImpl = vi.fn().mockImplementation(async url => {
+    if (url.includes('/stream/')) return stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })])
+    if (!url.includes('/events?')) return json({ run_id: 'r', state: 'finished', graph_revision: 1 })
+    const start = page++ * 500
+    return json({ events: Array.from({ length: 500 }, (_, i) => event(start + i, 'block' + (start + i), { result: payload })) })
+  })
+  const sleep = vi.fn()
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(store.getRun('r').transport.evidenceError).toBe('snapshot_budget_exceeded'), { timeout: 3000 })
+  expect(store.getRun('r').transport.status).toBe('invalid_evidence')
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(5)
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+  expect(sleep).not.toHaveBeenCalled()
+})
+
+it.each(['metadata', 'events'])('refuses partial snapshot %s responses without replacing verified bytes', async phase => {
+  const store = createValueStore()
+  store.apply('r', event(0, 'corpus', { result: 'verified bytes' }))
+  const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', { ...event(1, 'corpus', { truncated: true }), run_id: 'r' })]))
+    .mockResolvedValueOnce(json({ run_id: 'r', state: 'finished', graph_revision: 1 }, phase === 'metadata' ? 206 : 200))
+    .mockResolvedValueOnce(json({ events: [{ ...event(1, 'corpus', { result: 'partial bytes' }) }, { seq: 2, kind: 'finished', payload: {} }] }, 206))
+  const sleep = vi.fn(async (ms, signal) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })))
+  open({ runIds: ['r'], store, fetchImpl, sleep })
+  await waitFor(() => expect(sleep).toHaveBeenCalledTimes(1))
+  expect(store.getRun('r').transport).toMatchObject({ status: 'invalid_evidence', evidenceError: 'snapshot_response_invalid' })
+  expect(store.getRun('r').lastSeq).toBe(0)
+  expect(store.getBlock('r', 'corpus').value.result).toBe('verified bytes')
+  expect(fetchImpl).toHaveBeenCalledTimes(phase === 'metadata' ? 2 : 3)
+  expect(fetchImpl.mock.calls.every(([, init]) => !init.method || init.method === 'GET')).toBe(true)
+})
+
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
 
 it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {
@@ -446,6 +579,45 @@ describe('authenticated run requests and SSE', () => {
     const fetchImpl = vi.fn().mockResolvedValueOnce(stream(['data: ' + 'x'.repeat(256 * 1024) + '\n\n'])).mockResolvedValueOnce(parked())
     open({ runIds: ['r'], store: createValueStore(), fetchImpl, sleep: vi.fn().mockResolvedValue() })
     await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2))
+  })
+  it('recovers complete corpus evidence from a server-truncated value event', async () => {
+    const store = createValueStore()
+    const evidence = JSON.stringify({
+      context: { policy: { schema: 'leaf.lab-corpus-policy.v1' } },
+      policy: { schema: 'leaf.lab-corpus-policy.v1' },
+      evaluation: { schema: 'leafhft.block-suite-result.v1', verdict: 'insufficient',
+        candidates: [{ diagnostic: 'synthetic-evidence'.repeat(6000) }] },
+    })
+    const value = { ...event(0, 'corpus', { result: { data: evidence } }), run_id: 'r' }
+    const finished = { run_id: 'r', seq: 1, kind: 'finished', payload: {} }
+    const size = new TextEncoder().encode(JSON.stringify(value.payload)).length
+    expect(size).toBeGreaterThan(64 * 1024)
+    expect(size).toBeLessThan(1048576 + 65536)
+    const truncated = { ...value, payload: { truncated: true, size } }
+    const fetchImpl = vi.fn(async url => {
+      if (url.includes('/stream/')) return stream([frame('run', truncated), frame('run', finished)])
+      if (url.includes('/events?')) return json({ events: [value, finished] })
+      return json({ state: 'finished', graph_revision: 1 })
+    })
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getBlock('r', 'corpus')?.value.result?.data === evidence).toBe(true))
+    expect(store.getRun('r').state).toBe('finished')
+    expect(store.getRun('r').lastSeq).toBe(1)
+    expect(store.getRun('r').gaps.at(-1).recovered).toBe(true)
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === undefined || init.method === 'GET')).toBe(true)
+  })
+  it('pauses truncated-value recovery on authentication failure without replacing prior evidence', async () => {
+    const store = createValueStore()
+    store.apply('r', { ...event(0, 'corpus', { result: { data: 'previous' } }), run_id: 'r' })
+    const truncated = { ...event(1, 'corpus', { truncated: true, size: 100000 }), run_id: 'r' }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(stream([frame('run', truncated)], true))
+      .mockResolvedValueOnce(json({ detail: 'authentication required' }, 401))
+    open({ runIds: ['r'], store, fetchImpl })
+    await waitFor(() => expect(store.getRun('r')?.transport.status).toBe('auth_expired'))
+    expect(store.getBlock('r', 'corpus').value.result.data).toBe('previous')
+    expect(store.getRun('r').lastSeq).toBe(0)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
   it.each(['finished', 'failed', 'cancelled'])('removes %s runs and stops when none remain', async kind => {
     const store = createValueStore(), sleep = vi.fn(), fetchImpl = vi.fn().mockResolvedValue(stream([frame('run', { run_id: 'r', seq: 0, kind })]))

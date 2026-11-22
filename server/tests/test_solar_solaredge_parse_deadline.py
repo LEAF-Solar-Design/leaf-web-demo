@@ -75,6 +75,31 @@ def slot_free():
     return False
 
 
+def test_resource_refusal_preserves_known_cause_without_trusting_bad_envelopes(monkeypatch):
+    import solar_solaredge_pdf as primitives
+    from test_solar_solaredge_pdf import _pdf, HELVETICA
+    monkeypatch.setattr(primitives, 'MAX_LETTERS', 0)
+    value = worker.verdict_bytes(_pdf(b'BT /F1 4 Tf (1.1) Tj ET', resources=HELVETICA))
+    assert worker.decode_verdict(0, value) is None
+    assert worker.decode_refusal(0, value) == 'REPORT_RESOURCE_LIMIT'
+    assert worker.decode_refusal(1, value) is None
+    for altered in [value[:-1], value[:-1] + b',"extra":1}',
+                    value.replace(b'REPORT_RESOURCE_LIMIT', b'FOREIGN_REASON'),
+                    value[:-1] + b',"refusal":"REPORT_RESOURCE_LIMIT"}']:
+        assert worker.decode_refusal(0, altered) is None
+
+
+def test_resource_refusal_from_actual_child_is_named_and_reaped(monkeypatch, children):
+    from test_solar_solaredge_pdf import _pdf, HELVETICA
+    code = ('import sys;sys.path.insert(0,' + repr(str(SERVER)) + ');'
+            'import solar_solaredge_pdf as p;p.MAX_LETTERS=0;'
+            'import solar_solaredge_parse_worker as w;raise SystemExit(w.main())')
+    monkeypatch.setattr(report, '_worker_argv', lambda: [sys.executable, '-B', '-c', code])
+    with pytest.raises(report.SolarEdgeReportError, match='REPORT_RESOURCE_LIMIT'):
+        report.parse_source(_pdf(b'BT /F1 4 Tf (1.1) Tj ET', resources=HELVETICA))
+    assert children and all(child.poll() is not None for child in children)
+
+
 def use(monkeypatch, argv, deadline=None, slots=None):
     monkeypatch.setattr(report, "_worker_argv", lambda: list(argv))
     if deadline is not None:
@@ -180,7 +205,9 @@ def test_parse_deadline_decode_verdict_size(monkeypatch):
 def test_parse_deadline_c14_through_the_child(children):
     matrices = report.parse_source(PDF)
     assert len(matrices) == 14
-    assert canonical_sha(matrices) == C14_MATRICES_SHA
+    assert all(isinstance(matrix["Optimizers"], list) for matrix in matrices)
+    legacy = [{key: value for key, value in matrix.items() if key != "Optimizers"} for matrix in matrices]
+    assert canonical_sha(legacy) == C14_MATRICES_SHA
     assert len(children) == 1 and children[0].returncode == 0
     assert children[0].args == report._worker_argv()
 
@@ -189,6 +216,52 @@ def test_parse_deadline_small_through_the_child(children):
     assert report.parse_source(pdf(1)) == []
     refusal("REPORT_PDF_UNSUPPORTED", report.parse_source, b"%PDF-1.4\n\x00\x01garbage")
     assert [child.returncode for child in children] == [0, 0]
+
+
+def test_optimizer_numeric_label_is_independent_of_dotted_label_and_legacy_output():
+    import solar_solaredge_parse as parser
+    from test_solar_solaredge_parse import _page, _word
+    page = _page(with_second_grid=False)
+    # Same optimizer gets a numeric word before the dotted string word in the scan.
+    page.letters = _word("42", 112, 522) + page.letters
+    parsed, legacy = parser.parse_primitives(page)
+    assert parsed.optimizers[0].vendor_labels == ["42"]
+    assert parsed.optimizers[0].string_labels == ["1.1"]
+    assert "Optimizers" not in legacy[0]
+    modern = parsed.identity_matrices()
+    assert modern[0]["Optimizers"][0]["vendor_label"] == "42"
+    assert modern[0]["Optimizers"][0]["cells"] == [[0, 1]]
+    assert modern[0]["Sequences"] == [2]
+
+
+def test_equidistant_label_and_unproven_panel_do_not_supply_identity():
+    import solar_solaredge_parse as parser
+    from test_solar_solaredge_parse import _page, _word
+    page = _page(with_second_grid=False)
+    page.letters = _word("42", 135, 522) + page.letters
+    parsed, _ = parser.parse_primitives(page)
+    assert all("42" not in opt.vendor_labels for opt in parsed.optimizers)
+    parsed.optimizers[1].measured_panels.clear()
+    assert parsed.identity_matrices()[0]["Optimizers"][1]["cells"] == []
+
+
+@pytest.mark.parametrize("bad", ["dotted-vendor", "bool-cell", "outside", "extra", "huge-id"])
+def test_worker_rejects_malformed_optimizer_identity(bad):
+    matrix = {"Rows": [{"Panels": [{"Code": 1}]}], "Optimizers": [
+        {"id": "pdf-optimizer-1", "vendor_label": "12", "cells": [[0, 0]]}]}
+    opt = matrix["Optimizers"][0]
+    if bad == "dotted-vendor":
+        opt["vendor_label"] = "1.2"
+    elif bad == "bool-cell":
+        opt["cells"] = [[False, 0]]
+    elif bad == "outside":
+        opt["cells"] = [[0, 1]]
+    elif bad == "extra":
+        opt["unexpected"] = 1
+    else:
+        opt["id"] = "pdf-optimizer-" + "1" * 1000
+    out = json.dumps({"schema": worker.VERDICT_SCHEMA, "matrices": [matrix]}).encode()
+    assert worker.decode_verdict(0, out) is None
 
 
 def test_parse_deadline_hung_child_is_killed(monkeypatch, children):

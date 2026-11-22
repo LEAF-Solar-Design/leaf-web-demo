@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout } from '../auth.js'
-import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
+import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, activateProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
 import { humanizeError } from '../errorHumanize.js'
 
 const message = error => humanizeError(error?.message || 'Reference files could not be loaded. Try again.')
@@ -28,12 +28,44 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
   const [activeInputs, setActiveInputs] = useState({})
   const [editor, setEditor] = useState(null)
   const [constraintError, setConstraintError] = useState('')
+  const constraintErrorId = useId()
+  const constraintForm = useRef(null)
+  useEffect(() => {
+    const form = constraintForm.current
+    if (!form) return
+    // Native beforeinput runs before type=number can silently discard a comma.
+    const rejectComma = event => {
+      const path = event.target.dataset?.constraintPath
+      const text = event.type === 'paste' ? event.clipboardData?.getData('text') : event.data
+      if (path && typeof text === 'string' && text.includes(',')) {
+        event.preventDefault()
+        setConstraintError(`${path} uses a period for decimals. Commas are not accepted; enter the value again.`)
+      }
+    }
+    form.addEventListener('beforeinput', rejectComma)
+    form.addEventListener('paste', rejectComma)
+    return () => {
+      form.removeEventListener('beforeinput', rejectComma)
+      form.removeEventListener('paste', rejectComma)
+    }
+  }, [editor?.materialId, editor?.inputId])
+  const rejectedSaveFocus = useRef(null)
+  useLayoutEffect(() => {
+    if (arlo?.running) return
+    const pending = rejectedSaveFocus.current
+    rejectedSaveFocus.current = null
+    if (constraintError && pending && !pending.moved && pending.button.isConnected
+      && !pending.button.disabled && document.activeElement === document.body) {
+      pending.button.focus()
+    }
+  }, [constraintError, arlo?.running])
   const input = useRef(null)
   const live = useRef(false)
   const running = useRef(false)
   const downloadRunning = useRef(false)
   const arloRunning = useRef(false)
   const arloKeys = useRef(new Map())
+  const selections = useRef(new Map())
   const abort = useRef(null)
   const urls = useRef(new Map())
   const current = () => live.current && readActiveScope() === scope
@@ -61,6 +93,7 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       for (const [url, timer] of urls.current) { clearTimeout(timer); URL.revokeObjectURL(url) }
       urls.current.clear()
       arloKeys.current.clear()
+      selections.current.clear()
       setArlo(null)
       setActiveInputs({}); setEditor(null); setConstraintError('')
       setRows([]); setQueue([]); setBusy(false); setLoading(false); setError(''); setDownloading(null)
@@ -131,6 +164,23 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
     return input
   }
   const prepareArlo = async row => {
+    const selection = selections.current.get(row.material_id)
+    if (selection) {
+      if (!selection.confirmed) throw new Error('Select a retained ARLO revision again before editing or running.')
+      try {
+        const input = await readProjectArloInput(projectId, selection.originalId, { orgId, ...options() })
+        if (!current()) return null
+        validateSelection(input, row, selection, true)
+        setEditor(previous => previous?.materialId === row.material_id
+          && (previous.inputId !== input.input_version_id || previous.inputSha !== input.input_sha256) ? null : previous)
+        setActiveInputs(previous => ({ ...previous, [row.material_id]: input }))
+        return input
+      } catch (cause) {
+        selection.confirmed = false
+        if (current()) setEditor(null)
+        throw cause
+      }
+    }
     const registered = validateArlo(await registerProjectArloInput(projectId, row.material_id, {
       orgId, key: `arlo-reference-${row.material_id}`, ...options(),
     }), row)
@@ -139,8 +189,75 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       orgId, ...options(),
     }), row)
     if (!current()) return null
+    if ((input.original_id || input.input_version_id) !== (registered.original_id || registered.input_version_id)) {
+      throw new Error('The ARLO input did not match this original family.')
+    }
+    setEditor(previous => previous?.materialId === row.material_id
+      && (previous.inputId !== input.input_version_id || previous.inputSha !== input.input_sha256) ? null : previous)
     setActiveInputs(previous => ({ ...previous, [row.material_id]: input }))
     return input
+  }
+  const validateSelection = (input, row, selection, retained = false) => {
+    validateArlo(input, row)
+    if (input.input_version_id !== selection.input_version_id || input.input_sha256 !== selection.input_sha256
+        || (input.original_id || input.input_version_id) !== selection.originalId
+        || (input.parent_id || null) !== (selection.parent_id || null)
+        || !/^[a-f0-9]{64}$/i.test(input.input_sha256 || '')) {
+      throw new Error('The retained ARLO revision did not match the selected input.')
+    }
+    if (retained && !retainedCandidates(input, row).some(candidate => candidate.input_version_id === selection.input_version_id
+        && candidate.input_sha256 === selection.input_sha256 && (candidate.parent_id || null) === (selection.parent_id || null))) {
+      throw new Error('The selected ARLO revision is no longer retained. Select a revision again.')
+    }
+  }
+  const retainedCandidates = (input, row) => {
+    const originalId = input.original_id || input.input_version_id
+    if (!Array.isArray(input.retained_inputs)) return []
+    return input.retained_inputs.filter(candidate => candidate && typeof candidate.input_version_id === 'string'
+      && /^[a-f0-9]{64}$/i.test(candidate.input_sha256 || '')
+      && (candidate.input_version_id === originalId ? !candidate.parent_id : Boolean(candidate.parent_id))
+      && (!candidate.original_id || candidate.original_id === originalId)
+      && (candidate.organization_id === undefined || candidate.organization_id === orgId)
+      && (candidate.project_id === undefined || candidate.project_id === projectId)
+      && (candidate.material_id === undefined || candidate.material_id === row.material_id)
+      && (candidate.original_sha256 === undefined || candidate.original_sha256 === row.sha256))
+  }
+  const selectRevision = async (row, inputId) => {
+    if (!current() || arloRunning.current || !inputId) return
+    const active = activeInputs[row.material_id]
+    const candidate = retainedCandidates(active, row).find(item => item.input_version_id === inputId)
+    const selection = { ...candidate, input_version_id: inputId,
+      originalId: active.original_id || active.input_version_id, confirmed: false }
+    selections.current.set(row.material_id, selection)
+    setEditor(null)
+    setConstraintError('')
+    arloRunning.current = true
+    setArlo({ materialId: row.material_id, detail: 'Selecting retained ARLO revision…', running: true })
+    try {
+      if (!candidate) throw new Error('The selected ARLO revision is no longer retained.')
+      const activated = await activateProjectArloInput(projectId, selection.originalId, inputId, { orgId, ...options() })
+      if (!current()) return
+      validateSelection(activated, row, selection)
+      const canonical = await readProjectArloInput(projectId, selection.originalId, { orgId, ...options() })
+      if (!current()) return
+      validateSelection(canonical, row, selection, true)
+      selection.confirmed = true
+      setActiveInputs(previous => ({ ...previous, [row.material_id]: canonical }))
+      setArlo({ materialId: row.material_id, detail: 'Retained ARLO revision selected.', running: false })
+    } catch (cause) {
+      if (current() && cause?.name !== 'AbortError') setArlo({ materialId: row.material_id, error: message(cause) })
+    } finally { arloRunning.current = false }
+  }
+  const loadRevisions = async row => {
+    if (!current() || arloRunning.current) return
+    arloRunning.current = true
+    setArlo({ materialId: row.material_id, detail: 'Loading retained ARLO revisions…', running: true })
+    try {
+      await prepareArlo(row)
+      if (current()) setArlo({ materialId: row.material_id, detail: 'ARLO revisions loaded.', running: false })
+    } catch (cause) {
+      if (current() && cause?.name !== 'AbortError') setArlo({ materialId: row.material_id, error: message(cause) })
+    } finally { arloRunning.current = false }
   }
   const runArlo = async row => {
     if (!current() || arloRunning.current || !onRunArlo || !orgId) return
@@ -183,7 +300,7 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
           if (typeof value === 'number') fields[`${group}.${name}`] = String(value)
         }
       }
-      setEditor({ materialId: row.material_id, inputId: input.input_version_id, fields })
+      setEditor({ materialId: row.material_id, inputId: input.input_version_id, inputSha: input.input_sha256, fields })
       setArlo({ materialId: row.material_id, detail: 'Constraints ready to edit.', running: false })
     } catch (cause) {
       if (current() && cause?.name !== 'AbortError') setArlo({ materialId: row.material_id, error: message(cause) })
@@ -198,10 +315,28 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       setArlo({ materialId: row.material_id, running: false })
       return
     }
+    const button = document.activeElement
+    const focus = !restore && button?.matches('form[aria-label="ARLO constraints"] button[type="submit"]')
+      ? { button, moved: false } : null
+    rejectedSaveFocus.current = focus
+    const moved = event => {
+      if (focus && event.target !== button
+        && (event.type === 'pointerdown' || event.target !== document.body)) focus.moved = true
+    }
+    document.addEventListener('focusin', moved, { signal: abort.current.signal })
+    document.addEventListener('pointerdown', moved, { signal: abort.current.signal })
     arloRunning.current = true
     setConstraintError('')
     setArlo({ materialId: row.material_id, detail: restore ? 'Restoring original…' : 'Saving constraints…', running: true })
     try {
+      if (selections.current.has(row.material_id)) {
+        const canonical = await prepareArlo(row)
+        if (!canonical || !current()) return
+        if (canonical.input_version_id !== input.input_version_id || canonical.input_sha256 !== input.input_sha256) {
+          setEditor(null)
+          throw new Error('The active ARLO input changed. Reopen constraints and try again.')
+        }
+      }
       let revised
       if (restore) {
         revised = await restoreProjectArloInput(projectId, input.input_version_id, { orgId, ...options() })
@@ -218,6 +353,16 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       }
       if (!current()) return
       validateArlo(revised, row)
+      if (selections.current.has(row.material_id)) {
+        const selection = selections.current.get(row.material_id)
+        if ((revised.original_id || revised.input_version_id) !== selection.originalId
+            || (restore ? revised.input_version_id !== selection.originalId : revised.parent_id !== input.input_version_id)) {
+          selection.confirmed = false
+          setEditor(null)
+          throw new Error('The ARLO input did not match this original family.')
+        }
+        selections.current.set(row.material_id, { ...revised, originalId: selection.originalId, confirmed: true })
+      }
       setActiveInputs(previous => ({ ...previous, [row.material_id]: revised }))
       setEditor(null)
       setArlo({ materialId: row.material_id, detail: restore ? 'Original ARLO input restored.' : 'ARLO revision saved. Run ARLO to use these constraints.', running: false })
@@ -226,8 +371,11 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
       // messages such as budget.timeout_seconds instead of treating them as network timeouts.
       if (current() && cause?.name !== 'AbortError') setConstraintError(cause?.status === 422 ? cause.message : message(cause))
     } finally {
+      document.removeEventListener('focusin', moved)
+      document.removeEventListener('pointerdown', moved)
       arloRunning.current = false
-      if (current()) setArlo(previous => ({ ...previous, running: false }))
+      if (current()) setArlo(previous => ({ ...previous, running: false,
+        detail: previous?.running ? '' : previous?.detail }))
     }
   }
   const failed = queue.filter(item => item.state === 'failed').length
@@ -257,21 +405,34 @@ function ReferenceSession({ projectId, orgId, scope, onRunArlo }) {
           Run ARLO with {row.name}
         </button>
         <button type="button" disabled={Boolean(arlo?.running)} onClick={() => void editConstraints(row)}>Edit constraints</button>
+        <button type="button" disabled={Boolean(arlo?.running)} onClick={() => void loadRevisions(row)}>Load retained revisions for {row.name}</button>
         {activeInputs[row.material_id] && <>
           <p>Active input: {activeInputs[row.material_id].input_version_id} · SHA-256: {activeInputs[row.material_id].input_sha256}
             {' '}· Parent: {activeInputs[row.material_id].parent_id || 'Original'} · Original: {activeInputs[row.material_id].original_id || activeInputs[row.material_id].input_version_id}</p>
+          {Array.isArray(activeInputs[row.material_id].retained_inputs) && <label>Retained ARLO revision for {row.name}
+            <select aria-label={`Retained ARLO revision for ${row.name}`} disabled={Boolean(arlo?.running)} value=""
+              onChange={event => void selectRevision(row, event.target.value)}>
+              <option value="">Select a retained revision</option>
+              {retainedCandidates(activeInputs[row.material_id], row).map(candidate => <option key={candidate.input_version_id} value={candidate.input_version_id}>
+                {candidate.input_version_id} · SHA-256: {candidate.input_sha256} · Parent: {candidate.parent_id || 'Original'}
+              </option>)}
+            </select>
+          </label>}
           <button type="button" disabled={Boolean(arlo?.running) || !activeInputs[row.material_id].parent_id}
             onClick={() => void saveConstraints(row, true)}>Restore original</button>
         </>}
-        {editor?.materialId === row.material_id && <form aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
+        {editor?.materialId === row.material_id && <form ref={constraintForm} aria-label="ARLO constraints" onSubmit={event => { event.preventDefault(); void saveConstraints(row) }}>
           {Object.entries(editor.fields).map(([path, value]) => <label key={path}>{path}
-            <input type="number" step="any" value={value} disabled={Boolean(arlo?.running)}
-              onChange={event => setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } }))} />
+            <input type="number" step="any" data-constraint-path={path} value={value} disabled={Boolean(arlo?.running)}
+              aria-describedby={constraintError ? constraintErrorId : undefined}
+              aria-invalid={constraintError && (constraintError.startsWith(`${path} `)
+                || !value.trim() || !Number.isFinite(Number(value))) ? true : undefined}
+              onChange={event => { setConstraintError(''); setEditor(previous => ({ ...previous, fields: { ...previous.fields, [path]: event.target.value } })) }} />
           </label>)}
           <button type="submit" disabled={Boolean(arlo?.running)}>Save revision</button>
           <button type="button" disabled={Boolean(arlo?.running)} onClick={() => { setEditor(null); setConstraintError('') }}>Cancel editing</button>
         </form>}
-        {arlo?.materialId === row.material_id && constraintError && <p role="alert">{constraintError}</p>}
+        {arlo?.materialId === row.material_id && constraintError && <p id={constraintErrorId} role="alert">{constraintError}</p>}
         {arlo?.materialId === row.material_id && (arlo.error
           ? <p role="alert">{arlo.error}</p> : <p role="status">{arlo.detail}</p>)}
       </>}

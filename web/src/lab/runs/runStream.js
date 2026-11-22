@@ -3,7 +3,8 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { labValueStore, terminalState } from './valueStore.js'
 
 const headersFor = accept => ({ accept, 'X-Tenant-Id': config.tenant, ...authHeaders() })
-async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUnauthorized } = {}) {
+class SnapshotEvidenceError extends Error {}
+async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUnauthorized, snapshot = false } = {}) {
   const headers = { ...headersFor('application/json'), 'content-type': 'application/json' }
   try {
     const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/${path}`, {
@@ -12,20 +13,42 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUna
     })
     noteUnauthorized(response, 'lab-runs', headers.Authorization)
     if (response.status === 401) onUnauthorized?.(headers.Authorization)
-    const data = await response.json().catch(() => ({}))
+    let data
+    if (snapshot && response.ok) {
+      const invalid = () => ({ ok: false, status: response.status, invalidEvidence: true, detail: 'Invalid snapshot response' })
+      if (response.status !== 200) return invalid()
+      if (typeof response.headers?.get === 'function') {
+        const media = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+        if (!/^application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)$/.test(media)) return invalid()
+      }
+      try { data = await response.json() } catch { return invalid() }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) return invalid()
+    } else data = await response.json().catch(() => ({}))
     return response.ok ? { ...data, ok: true } : { ok: false, status: response.status, detail: data.detail }
   } catch { return { ok: false, status: 0, detail: 'Run service unavailable' } }
 }
 export function newSubmissionId() {
   return `v1.${Date.now()}.${crypto.randomUUID().replaceAll('-', '')}`
 }
-export async function submitRun({ docId, graphRevision, submissionId, reconcileOnly = false, fetchImpl }) {
+export async function submitRun({ docId, graphRevision, submissionId, reconcileOnly = false, projectId = '', fetchImpl }) {
   const result = await request('runs', { fetchImpl, body: { doc_id: docId, graph_revision: graphRevision,
+    ...(projectId ? { project_id: projectId } : {}),
     ...(submissionId === undefined ? {} : { submission_id: submissionId, reconcile_only: reconcileOnly }) } })
   if (result.ok && typeof result.run_id === 'string' && typeof result.state === 'string') {
     return { ok: true, runId: result.run_id, state: result.state }
   }
   return { ...result, ok: false, outcomeUnknown: result.ok || result.status === 0 || result.status >= 500 }
+}
+export async function discoverRuns({ docId, projectId = '', fetchImpl }) {
+  const query = new URLSearchParams({ doc_id: docId, project_id: projectId })
+  const result = await request(`runs?${query}`, { fetchImpl })
+  if (!result.ok || !Array.isArray(result.runs) || result.runs.length > 20) return { ...result, ok: false }
+  if (result.runs.some(row => !row || row.doc_id !== docId || row.project_id !== projectId
+    || !/^v1\.[0-9]{13}\.[0-9a-f]{32}$/.test(row.submission_id)
+    || !Number.isInteger(row.graph_revision) || row.graph_revision < 1
+    || typeof row.run_id !== 'string' || !row.run_id
+    || !['queued', 'running', 'finished', 'failed', 'cancelled'].includes(row.state))) return { ok: false }
+  return result
 }
 export const cancelRun = ({ runId, fetchImpl }) => request(`runs/${encodeURIComponent(runId)}/cancel`, { fetchImpl, body: {} })
 
@@ -47,26 +70,53 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
     return terminalState(run?.state) && run.state !== 'missing' && run.transport.status !== 'finished'
   }))
   const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state) || pendingSnapshots.has(id)))
-  // Keep terminal reconciliation resumable until its retained values are read.
-  pendingSnapshots.forEach(id => store.resetSnapshot(id, {}))
+  // Keep terminal reconciliation resumable without discarding verified values.
+  pendingSnapshots.forEach(id => store.beginSnapshot(id))
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
     pendingSnapshots.add(id)
-    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
+    const row = await request(`runs/${encodeURIComponent(id)}`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized, snapshot: true })
     if (stopped || connectionSignal.aborted) return
+    if (row.invalidEvidence || (row.ok && row.run_id !== undefined && row.run_id !== id) || (row.ok && !['queued', 'running', 'finished', 'failed', 'cancelled', 'missing'].includes(row.state))) {
+      transport({ evidenceError: 'snapshot_response_invalid' })
+      throw new SnapshotEvidenceError('Invalid snapshot response')
+    }
     if (!row.ok) { if (row.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot unavailable') }
-    store.resetSnapshot(id, { state: row.state, graph_revision: row.graph_revision })
-    let after = -1
+    const staged = store.createSnapshotStore()
+    staged.upsertRun(id, { state: row.state, graph_revision: row.graph_revision })
+    let after = -1, snapshotBytes = 0, snapshotPages = 0
+    const budgetExceeded = () => {
+      paused = true
+      transport({ status: 'invalid_evidence', evidenceError: 'snapshot_budget_exceeded' })
+      throw new SnapshotEvidenceError('Snapshot budget exceeded')
+    }
     for (;;) {
-      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized })
+      if (++snapshotPages > 128) budgetExceeded()
+      const page = await request(`runs/${encodeURIComponent(id)}/events?after_seq=${after}&limit=500`, { fetchImpl, signal: connectionSignal, onUnauthorized: rememberUnauthorized, snapshot: true })
       if (stopped || connectionSignal.aborted) return
+      if (page.invalidEvidence) {
+        transport({ evidenceError: 'snapshot_response_invalid' })
+        throw new SnapshotEvidenceError('Invalid snapshot event response')
+      }
       if (!page.ok) { if (page.status === 401) { paused = true; transport({ status: 'auth_expired' }) }; throw new Error('Snapshot events unavailable') }
-      for (const event of page.events || []) store.apply(id, event)
-      const next = store.getRun(id)?.lastSeq ?? -1
+      if (!Array.isArray(page.events) || page.events.some(event => !event || (event.run_id !== undefined && event.run_id !== id) || !Number.isSafeInteger(event.seq) || event.seq <= after)) {
+        transport({ evidenceError: 'snapshot_response_invalid' })
+        throw new SnapshotEvidenceError('Invalid snapshot events')
+      }
+      for (const event of page.events) {
+        snapshotBytes += new TextEncoder().encode(JSON.stringify(event)).byteLength
+        if (snapshotBytes > 64 * 1024 * 1024) budgetExceeded()
+        if (!staged.apply(id, event)) {
+          transport({ evidenceError: 'snapshot_response_invalid' })
+          throw new SnapshotEvidenceError('Invalid snapshot cursor order')
+        }
+      }
+      const next = staged.getRun(id)?.lastSeq ?? -1
       if ((page.events || []).length < 500) break
       if (next <= after) throw new Error('Snapshot cursor did not advance')
       after = next
     }
+    store.commitSnapshot(id, staged.getRun(id))
     store.addGap(id, { recovered: true })
     if (terminalState(store.getRun(id)?.state)) {
       store.setTransport(id, { status: 'finished' }); active.delete(id)
@@ -114,11 +164,21 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             const frame = async () => {
               if (!data.length) { type = 'message'; frameId = ''; frameBytes = 0; return }
               const value = JSON.parse(data.join('\n')), kind = type
+              if (kind === 'run' && active.has(value.run_id) && !Number.isSafeInteger(value.seq)) {
+                transport({ evidenceError: 'invalid_event_cursor' })
+                throw new SnapshotEvidenceError('Invalid event cursor')
+              }
               // The data envelope is authoritative; an id must agree with it.
               if (kind === 'run' && frameId && frameId !== `${value.run_id}:${value.seq}`) throw new Error('Invalid event cursor')
               type = 'message'; data = []; frameId = ''; frameBytes = 0; failures = 0
               if (kind === 'run' && active.has(value.run_id)) {
-                store.apply(value.run_id, value)
+                if (value.kind === 'value' && value.payload?.truncated === true) {
+                  // The bounded SSE producer keeps large values in durable
+                  // events. Recover those bytes before advancing this cursor.
+                  store.addGap(value.run_id, { from: value.seq, to: value.seq, recovered: false })
+                  await snapshot(value.run_id, controller.signal)
+                  immediate = true
+                } else store.apply(value.run_id, value)
                 if (terminalState(store.getRun(value.run_id)?.state) || (!value.block_id && terminalState(value.kind))) {
                   if (store.getRun(value.run_id)) store.setTransport(value.run_id, { status: 'finished' })
                   active.delete(value.run_id)
@@ -156,7 +216,18 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
             while (!stopped && !paused && active.size && !immediate) {
               const chunk = await reader.read()
               if (stopped || controller.signal.aborted) break
-              if (chunk.done) { if (pendingCR) await consumeLine(); break }
+              if (chunk.done) {
+                if (pendingCR) await consumeLine()
+                if (lineBytes.length || data.length || frameId || type !== 'message') {
+                  for (const id of active) store.addGap(id, {
+                    from: (store.getRun(id)?.lastSeq ?? -1) + 1,
+                    recovered: false, reason: 'incomplete_stream_frame',
+                  })
+                  transport({ evidenceError: 'incomplete_stream_frame' })
+                  throw new Error('Incomplete stream frame')
+                }
+                break
+              }
               // Delay CR line splitting so a following LF is counted in the
               // same frame, even when the pair straddles chunks.
               for (const byte of chunk.value) {
@@ -171,8 +242,8 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
               }
             }
           }
-        } catch {
-          if (!stopped && !paused) transport({ status: 'reconnecting' })
+        } catch (error) {
+          if (!stopped && !paused) transport({ status: error instanceof SnapshotEvidenceError ? 'invalid_evidence' : error.message === 'Incomplete stream frame' ? 'incomplete_evidence' : 'reconnecting' })
         } finally {
           controller.abort()
           if (reader) { try { await reader.cancel() } catch { /* disconnected */ } reader.releaseLock() }

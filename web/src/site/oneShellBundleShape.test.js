@@ -59,5 +59,7 @@ describe('one studio shell bundle shape', () => {
       .map((p) => relative(WEB_ROOT, p))
     expect(hits).toEqual([])
     expect(js).not.toContain('VITE_ONE_SHELL')
-  })
+  // This reads the full source tree on shared CI disks; keep the scan bounded
+  // without applying the default five-second UI-test budget to filesystem I/O.
+  }, 30_000)
 })

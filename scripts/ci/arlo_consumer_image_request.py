@@ -7,7 +7,9 @@ CONNECTION = "arn:aws:codestar-connections:us-east-1:807034087062:connection/f4b
 PINS = {
     "arlo_recipe": ("arlo-3dml", "acd89a0a413774147c3aa12607372d0d9e5b209e"),
     "arlo_source": ("arlo-3dml", "f35a10e864879ac0723fe595fc8dbbe02e09b5f2"),
-    "platform_pinned": ("leaf-web-demo", "f20fa02b8c2038eb69a6607792b5cbd5287053c4"),
+    # Match the published API source that supports project-reference provenance
+    # and preserves stored request bytes across browser number serialization.
+    "platform_pinned": ("leaf-web-demo", "91c8bf8ad32fb3f6e6308d56987a0599bd85b819"),
 }
 
 

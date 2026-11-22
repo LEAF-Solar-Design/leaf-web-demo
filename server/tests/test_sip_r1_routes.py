@@ -76,6 +76,25 @@ def test_sip_r1_context_http_shape(http, memory):
     assert "holder_binding_id" not in response.text
 
 
+def test_context_solve_preparation_is_opt_in_and_scope_checked(http, memory, monkeypatch):
+    import solar_project_solve_preparation as preparation
+    calls = []
+    def prepare(intake, frame_ref, *, is_head):
+        calls.append((intake, frame_ref, is_head))
+        return {"available": True, "frame_ref": frame_ref}
+    monkeypatch.setattr(preparation, "prepare_solve", prepare)
+    assert "solve_preparation" not in http.get(CONTEXT).json()
+    assert calls == []
+    response = http.get(CONTEXT, params={"solve_frame": "frame-1"})
+    assert response.status_code == 200
+    assert response.json()["solve_preparation"] == {"available": True, "frame_ref": "frame-1"}
+    assert calls == [({}, "frame-1", True)]
+    calls.clear()
+    reason(http.get(CONTEXT, params={"prepare_solve": True}, headers={"X-Org-Id": str(O2)}), 404, "CONTEXT_NOT_FOUND")
+    reason(http.get(CONTEXT, params={"solve_frame": "frame-1", "drawing_id": str(D2)}), 404, "CONTEXT_NOT_FOUND")
+    assert calls == [] and memory.mutations == []
+
+
 def test_sip_r1_status_without_checkout(http, memory):
     response = http.get(CHECKOUT)
     assert response.status_code == 200 and response.json()["checkout"] is None
@@ -253,3 +272,15 @@ def test_sip_r1_renew_wrong_ascii_proof(http, memory):
 
 def test_sip_r1_release_wrong_ascii_proof(http, memory):
     _reject_checkout_proof(http, memory, method="DELETE", nonascii=False)
+
+
+def test_context_preserves_existing_positional_scope_arguments(memory):
+    import json
+    response = project_drawings.context_route(P1, V2, D1, memory.tenant, O1, P1)
+    assert response.status_code == 200, response.body
+    body = json.loads(response.body)
+    assert body["context"]["organization_id"] == str(O1)
+    assert body["context"]["project_id"] == str(P1)
+    assert body["context"]["drawing_id"] == str(D1)
+    assert "solve_preparation" not in body
+    assert memory.mutations == []

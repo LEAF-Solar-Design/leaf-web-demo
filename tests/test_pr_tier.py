@@ -14,6 +14,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CONTRACT_MANIFEST = ROOT / "scripts/ci/contract-keep.json"
 
 
 def load_module(name, path):
@@ -43,6 +44,10 @@ def row(sid, target=None, cwd="server", kind="pytest", **extra):
                 command=["<PYTHON>", "-m", "pytest", target or ("tests/test_" + sid + ".py")], **extra)
 
 
+def committed_contracts():
+    return json.loads(CONTRACT_MANIFEST.read_text(encoding="utf-8"))["suites"]
+
+
 def inputs():
     proposal = dict(schema="leaf.ci.pr-tier.v1", catchers=["catcher", "removed"],
                     hard_harm_sentinels=[], prerequisites=[], suite_ids=["catcher", "removed"])
@@ -58,12 +63,31 @@ def inputs():
     return proposal, history, ["sentinel"], catalog
 
 
+def contract_record(sid="catcher", **changes):
+    return {"id": sid, "reason": "main-broke", "added": "2026-11-18", "evidence": {"pr": 3332}, **changes}
+
+
+def manifest_text(*records):
+    return json.dumps({"schema": "leaf.ci.contract-keep.v1", "suites": records})
+
+
+@pytest.fixture
+def generation_inputs(generator, tmp_path, monkeypatch):
+    path = tmp_path / "contract-keep.json"
+    legacy = contract_record("server-w1c-solve-proposal", reason="contract-keep", evidence=None)
+    path.write_text(manifest_text(contract_record(), legacy), encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", path)
+    documents = inputs()
+    documents[3]["suites"].append(row(legacy["id"]))
+    return documents
+
+
 def build(generator, documents):
     return generator.build_document(*documents, {name: "b" * 64 for name in ("proposal", "fail30", "sentinels")})
 
 
-def test_generator_is_deterministic_and_keeps_failure_owners(generator):
-    documents = inputs()
+def test_generator_is_deterministic_and_keeps_failure_owners(generator, generation_inputs):
+    documents = generation_inputs
     first = build(generator, documents)
     proposal, history, sentinels, catalog = documents
     catalog["suites"].reverse()
@@ -76,7 +100,8 @@ def test_generator_is_deterministic_and_keeps_failure_owners(generator):
     assert first["suite_ids"] == sorted(first["suite_ids"])
     assert set(first["suite_ids"]) == {
         "catcher", "sentinel", "web-owner", "harness-owner", "unknown",
-        "web-version-restore-proof", "web-build", "harness-tsc-build", "ci-full-run-manifest-certificates"}
+        "web-version-restore-proof", "web-build", "harness-tsc-build", "ci-full-run-manifest-certificates",
+        "server-w1c-solve-proposal"}
     assert first["reasons"]["web-owner"] == ["fail30:web/src/widget.test"]
     assert first["reasons"]["unknown"] == ["unknown-ownership"]
     assert first["generated_from"]["catalog_sha256"] == "a" * 64
@@ -92,8 +117,51 @@ def test_web_path_normalization(runner, path):
     assert not runner.pr_tier_owns(row("server-owner", "tests/widget.test.js"), path)
 
 
-def test_generator_retains_unknown_new_and_transitive_prerequisites(generator):
-    documents = inputs()
+def test_generator_keeps_cross_cutting_contract_suite_and_proposal_reason(generator, generation_inputs):
+    result = build(generator, generation_inputs)
+    assert result["reasons"]["catcher"] == ["main-broke", "proposal"]
+    assert result["reasons"]["server-w1c-solve-proposal"] == ["contract-keep"]
+
+
+def assert_contract_memberships(policy, records):
+    for record in records:
+        sid = record["id"]
+        assert sid in policy["suite_ids"], sid
+        assert record["reason"] in policy["reasons"][sid], sid
+
+
+def test_committed_pr_tier_keeps_cross_cutting_contract_suites(generator):
+    policy = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    records = committed_contracts()
+    assert generator.CONTRACT_KEEP == tuple(record["id"] for record in records)
+    assert_contract_memberships(policy, records)
+    by_id = {record["id"]: record for record in records}
+    for sid in (
+        "scripts-proof-string-sizer", "server-capabilities-project-read", "server-engine-registry-scripts",
+        "server-lab-capability-coverage", "server-solar-design-survives-saves",
+        "server-solar-tool-solar-string-reports", "server-surface-entitlements", "server-w1-catalog-gates",
+        "server-w1-cloud-solve-probe", "server-w1-solve-parity", "server-w1c-solve-proposal",
+    ):
+        assert by_id[sid] == dict(id=sid, reason="contract-keep", added="2026-11-18", evidence=None)
+    sid = "scripts-solar-w1-studio-autofill-solve"
+    assert by_id[sid] == dict(id=sid, reason="main-broke", added="2026-11-17", evidence={
+        "pr": 3332, "failure": "DISCONTIGUOUS_SOLVE_STRING", "date": "2026-11-17",
+        "note": "added by hand on the CI owner's instruction; no second main failure required for this first entry",
+    })
+    migration = by_id["migration-expand-contract"]
+    assert migration["reason"] == "main-broke"
+    assert (migration["evidence"]["pr"], migration["evidence"]["job"]) == (3309, 10540)
+
+
+@pytest.mark.parametrize("sid", ["healthy", "catcher"])
+def test_manifest_only_change_fails_membership_invariant(sid):
+    policy = dict(suite_ids=["catcher"], reasons={"catcher": ["proposal"]})
+    with pytest.raises(AssertionError, match=sid):
+        assert_contract_memberships(policy, [dict(id=sid, reason="main-broke")])
+
+
+def test_generator_retains_unknown_new_and_transitive_prerequisites(generator, generation_inputs):
+    documents = generation_inputs
     proposal, _, _, catalog = documents
     proposal["catalog_suite_ids"] = [r["id"] for r in catalog["suites"]] + ["dep-one", "dep-two"]
     catalog["suites"].extend([row("new-suite"), row("dep-one", prerequisites=["dep-two"]), row("dep-two")])
@@ -105,9 +173,47 @@ def test_generator_retains_unknown_new_and_transitive_prerequisites(generator):
     assert result["prerequisites"]["dep-one"] == ["dep-two"]
 
 
+def async_author_row(runner):
+    return next(row for row in runner.selection_catalog(ROOT)["suites"]
+                if row["id"] == "web-async-author-stage")
+
+
+@pytest.mark.parametrize("reason", [None, "proposal", "hard-harm-sentinel", "fail30",
+                                  "prerequisite", "new-catalog-suite"])
+def test_generator_knows_async_browser_owner_and_preserves_other_reasons(generator, runner, reason, generation_inputs):
+    documents = generation_inputs
+    proposal, history, sentinels, catalog = documents
+    owner = async_author_row(runner)
+    sid = owner["id"]
+    catalog["suites"].append(owner)
+    assert runner.pr_tier_owned_paths(owner) == ["web/e2e/async-author-stage.spec.mjs"]
+    if reason == "proposal":
+        proposal["catchers"].append(sid)
+        proposal["suite_ids"].append(sid)
+    elif reason == "hard-harm-sentinel":
+        sentinels.append(sid)
+    elif reason == "fail30":
+        history[generator.REPO_SLUG]["fail_files"]["web/e2e/async-author-stage.spec.mjs"] = 1
+    elif reason == "prerequisite":
+        catalog["suites"][0]["prerequisites"] = [sid]
+    elif reason == "new-catalog-suite":
+        proposal["catalog_suite_ids"] = [r["id"] for r in catalog["suites"] if r["id"] != sid]
+    result = build(generator, documents)
+    if reason is None:
+        assert sid not in result["suite_ids"]
+        assert sid not in result["reasons"]
+    else:
+        expected = "fail30:web/e2e/async-author-stage.spec.mjs" if reason == "fail30" else reason
+        assert result["reasons"][sid] == [expected]
+        assert sid in result["suite_ids"]
+    assert result["reasons"]["unknown"] == ["unknown-ownership"]
+    assert result["reasons"]["web-version-restore-proof"] == ["studio-keep"]
+    assert result["reasons"]["sentinel"] == ["hard-harm-sentinel"]
+
+
 @pytest.mark.parametrize("bad", ["proposal", "fail30", "sentinels", "catalog", "dependency"])
-def test_generator_refuses_malformed_inputs(generator, bad):
-    documents = list(inputs())
+def test_generator_refuses_malformed_inputs(generator, generation_inputs, bad):
+    documents = list(generation_inputs)
     if bad == "proposal":
         documents[0]["suite_ids"] = ["catcher", 123]
     elif bad == "fail30":
@@ -123,8 +229,8 @@ def test_generator_refuses_malformed_inputs(generator, bad):
 
 
 @pytest.mark.parametrize("malformed", ["{", '{"suite_ids":[],"suite_ids":[]}', "[]"])
-def test_generator_refusal_leaves_existing_output_untouched(generator, tmp_path, monkeypatch, malformed):
-    proposal, history, sentinels, catalog = inputs()
+def test_generator_refusal_leaves_existing_output_untouched(generator, generation_inputs, tmp_path, monkeypatch, malformed):
+    proposal, history, sentinels, catalog = generation_inputs
     paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
     for path, document in zip(paths, (proposal, history, sentinels)):
         path.write_text(json.dumps(document), encoding="utf-8")
@@ -139,8 +245,8 @@ def test_generator_refusal_leaves_existing_output_untouched(generator, tmp_path,
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_generator_cli_requires_explicit_activation(generator, tmp_path, monkeypatch, capsys, enabled):
-    proposal, history, sentinels, catalog = inputs()
+def test_generator_cli_requires_explicit_activation(generator, generation_inputs, tmp_path, monkeypatch, capsys, enabled):
+    proposal, history, sentinels, catalog = generation_inputs
     paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
     for path, document in zip(paths, (proposal, history, sentinels)):
         path.write_text(json.dumps(document), encoding="utf-8")
@@ -158,8 +264,113 @@ def test_generator_cli_requires_explicit_activation(generator, tmp_path, monkeyp
     assert document == generator.generate(*paths, catalog=catalog)
 
 
+@pytest.mark.parametrize(("contents", "cause"), [
+    (None, "contract-keep.json"),
+    ("{", "Expecting"),
+    ('{"schema":"wrong","suites":[]}', "schema"),
+    ('{"schema":"a","schema":"b"}', "duplicate JSON key: schema"),
+    (manifest_text(), "suites"),
+    (manifest_text({"id": "catcher"}), "added"),
+    (manifest_text(contract_record(extra=True)), "extra"),
+    (manifest_text(contract_record(), contract_record()), "duplicate suites.id: catcher"),
+    (manifest_text(contract_record("catcher/extra")), "catcher/extra"),
+    (manifest_text(contract_record(added="2026-02-29")), "catcher added"),
+    (manifest_text(contract_record(added="20261118")), "catcher added"),
+    (manifest_text(contract_record(reason="keep")), "catcher invalid reason"),
+    (manifest_text(contract_record(reason="contract-keep")), "catcher evidence"),
+    (manifest_text(contract_record(evidence=None)), "catcher evidence"),
+    (manifest_text(contract_record(evidence=[])), "catcher evidence"),
+    (manifest_text(contract_record(evidence={})), "catcher evidence"),
+    (manifest_text(contract_record(evidence={"date": "2026-13-01"})), "catcher evidence.date"),
+    (manifest_text(contract_record("retired")), "live catalog: retired"),
+])
+def test_invalid_manifest_refuses_generation_and_sync(generator, tmp_path, monkeypatch, capsys, contents, cause):
+    proposal, history, sentinels, catalog = inputs()
+    paths = [tmp_path / name for name in ("proposal.json", "fail30.json", "sentinels.json")]
+    for path, document in zip(paths, (proposal, history, sentinels)):
+        path.write_text(json.dumps(document), encoding="utf-8")
+    manifest = tmp_path / "contract-keep.json"
+    if contents is not None:
+        manifest.write_text(contents, encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", manifest)
+    monkeypatch.setattr(generator, "live_catalog", lambda: catalog)
+    output = tmp_path / "tier.json"
+    previous = (ROOT / "scripts/ci/pr-tier.json").read_bytes()
+    output.write_bytes(previous)
+    for args in (["--proposal", str(paths[0]), "--fail30", str(paths[1]), "--sentinels", str(paths[2])],
+                 ["--sync-contract-keep"]):
+        assert generator.main([*args, "--output", str(output)]) == 2
+        error = capsys.readouterr().err
+        assert "contract-keep.json" in error and cause in error
+        assert output.read_bytes() == previous
+
+
+@pytest.fixture
+def sync_inputs(generator, tmp_path, monkeypatch):
+    manifest = tmp_path / "contract-keep.json"
+    manifest.write_text(manifest_text(contract_record("catcher"), contract_record("healthy")), encoding="utf-8")
+    monkeypatch.setattr(generator, "CONTRACT_KEEP_PATH", manifest)
+    monkeypatch.setattr(generator, "ROOT", tmp_path)  # No proposal, fail30 or sentinels on disk.
+    catalog = inputs()[3]
+    monkeypatch.setattr(generator, "live_catalog", lambda: catalog)
+    tier = dict(schema=generator.SCHEMA, enabled=False,
+                catalog_suite_ids=["unknown", "healthy", "catcher"], suite_ids=["unknown", "catcher"],
+                reasons={"unknown": ["z", "a"], "catcher": ["proposal"]},
+                generated_from={"catalog_sha256": "d" * 64}, prerequisites={"unknown": ["catcher"]},
+                extra={"preserved": [3, 2, 1]})
+    path = tmp_path / "tier.json"
+    path.write_text(json.dumps(tier), encoding="utf-8")
+    return path, tier
+
+
+def test_sync_unions_members_and_reasons_offline(generator, sync_inputs, monkeypatch):
+    path, tier = sync_inputs
+    argv = ["--sync-contract-keep", "--output", str(path)]
+    assert generator.main(argv) == 0
+    expected = dict(tier, suite_ids=["catcher", "healthy", "unknown"], reasons={
+        "catcher": ["main-broke", "proposal"], "healthy": ["main-broke"], "unknown": ["a", "z"],
+    })
+    canonical = (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert path.read_bytes() == canonical
+    monkeypatch.setattr(generator.os, "replace", lambda *_: pytest.fail("unchanged file replaced"))
+    assert generator.main(argv) == 0
+    assert path.read_bytes() == canonical
+
+
+@pytest.mark.parametrize(("changes", "cause"), [
+    ({"catalog_suite_ids": ["catcher", "unknown"]}, "catalog_suite_ids: healthy"),
+    ({"schema": "wrong"}, "schema"),
+    ({"enabled": 1}, "enabled"),
+    ({"suite_ids": "catcher"}, "suite_ids"),
+    ({"suite_ids": ["catcher", "catcher"]}, "suite_ids"),
+    ({"suite_ids": ["outside"]}, "catalog_suite_ids"),
+    ({"catalog_suite_ids": ["catcher", "unknown", "unknown"]}, "catalog_suite_ids"),
+    ({"reasons": {"catcher": ["proposal"]}}, "reasons"),
+    ({"reasons": {"unknown": [], "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": "x", "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": ["x", "x"], "catcher": ["proposal"]}}, "unknown"),
+    ({"reasons": {"unknown": [3], "catcher": ["proposal"]}}, "unknown"),
+    ({"prerequisites": {"catcher": ["outside"]}}, "prerequisites"),
+])
+def test_sync_refusal_preserves_tier(generator, sync_inputs, capsys, changes, cause):
+    path, tier = sync_inputs
+    previous = json.dumps(dict(tier, **changes)).encode("utf-8")
+    path.write_bytes(previous)
+    assert generator.main(["--sync-contract-keep", "--output", str(path)]) == 2
+    assert cause in capsys.readouterr().err
+    assert path.read_bytes() == previous
+
+
+def test_sync_committed_tier_is_byte_identical(generator, tmp_path):
+    committed = (ROOT / "scripts/ci/pr-tier.json").read_bytes()
+    path = tmp_path / "tier.json"
+    path.write_bytes(committed)
+    assert generator.main(["--sync-contract-keep", "--output", str(path)]) == 0
+    assert path.read_bytes() == committed
+
+
 def stub_suites(runner):
-    return [runner.Suite(sid, sid, "pytest", ROOT / "server",
+    return [runner.Suite(sid, sid, "pytest", runner.REPO / "server",
                          [sys.executable, "-m", "pytest", "tests/test_" + sid + ".py"], 1)
             for sid in ("tier-member", "changed", "healthy", "new-suite", "web-build",
                         "harness-tsc-build", "ci-full-run-manifest-certificates", "dependency", "priority")]
@@ -214,7 +425,114 @@ def test_active_check_honors_only_explicit_full(generator, runner, tmp_path, mon
     assert captured.err == ""
 
 
-def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=None):
+@pytest.fixture
+def main_history(runner, monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    git("init")
+    git("config", "user.name", "Tier fixture")
+    git("config", "user.email", "tier@example.test")
+    (repo / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "judged baseline")
+    base = git("rev-parse", "HEAD")
+    target = repo / "server/tests/test_changed.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# changed\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "main change")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "--detach", base)
+    (repo / "sibling.txt").write_text("sibling\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "unjudged sibling")
+    sibling = git("rev-parse", "HEAD")
+    blob = git("rev-parse", "HEAD:sibling.txt")
+    git("checkout", "--detach", head)
+    monkeypatch.setattr(runner, "REPO", repo)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PUSH")
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_HEAD_REF", "refs/heads/main")
+    monkeypatch.setenv("CODEBUILD_RESOLVED_SOURCE_VERSION", head)
+    monkeypatch.setenv("HEAD_SHA", head)
+    monkeypatch.setenv("TRUSTED_SHA", head)
+    monkeypatch.setenv("LEAF_CI_LAST_JUDGED_SHA", base)
+    monkeypatch.delenv("LEAF_CI_FULL", raising=False)
+    monkeypatch.delenv("LEAF_CHANGED_PATHS", raising=False)
+    return dict(base=base, head=head, sibling=sibling, blob=blob)
+
+
+@pytest.mark.parametrize("baseline", ["valid", "missing", "malformed", "unavailable",
+                                      "notancestor", "self", "blob"])
+def test_main_activation_and_changed_paths_share_judged_baseline(
+        generator, runner, main_history, monkeypatch, tmp_path, capsys, baseline):
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy_for(stub_suites(runner))), encoding="utf-8")
+    monkeypatch.setattr(generator, "load_runner", lambda: runner)
+    values = dict(valid=main_history["base"], malformed="main", unavailable="f" * 40,
+                  notancestor=main_history["sibling"], self=main_history["head"],
+                  blob=main_history["blob"])
+    if baseline == "missing":
+        monkeypatch.delenv("LEAF_CI_LAST_JUDGED_SHA")
+    else:
+        monkeypatch.setenv("LEAF_CI_LAST_JUDGED_SHA", values[baseline])
+    assert generator.main(["--active", str(path)]) == 0
+    assert capsys.readouterr().out == ("1\n" if baseline == "valid" else "0\n")
+    if baseline == "valid":
+        # Main's trusted policy SHA normally equals HEAD. It is not the diff base.
+        assert runner.pr_tier_base() == main_history["base"]
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", '["unrelated.txt"]')
+        assert runner.pr_tier_changed_paths() == ["server/tests/test_changed.py"]
+        rc, ran, data = invoke(runner, monkeypatch, tmp_path, policy_for(stub_suites(runner)))
+        assert rc == 0
+        assert "changed" in ran and "healthy" not in ran
+        assert data["mode"] == data["execution_mode"] == data["selection_mode"] == "tier"
+    else:
+        with pytest.raises(ValueError):
+            runner.pr_tier_changed_paths()
+        suites = stub_suites(runner)
+        assert runner.select_pr_tier(suites, policy_for(suites)) == suites
+
+
+@pytest.mark.parametrize("bad_head", ["", "main", "a" * 40])
+def test_main_requires_exact_resolved_head(
+        generator, runner, main_history, monkeypatch, tmp_path, capsys, bad_head):
+    monkeypatch.setenv("CODEBUILD_RESOLVED_SOURCE_VERSION", bad_head)
+    monkeypatch.setattr(generator, "load_runner", lambda: runner)
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy_for(stub_suites(runner))), encoding="utf-8")
+    assert generator.main(["--active", str(path)]) == 0
+    assert capsys.readouterr().out == "0\n"
+    with pytest.raises(ValueError):
+        runner.pr_tier_changed_paths()
+
+
+def test_main_full_promotion_skips_tier(generator, main_history, monkeypatch, capsys):
+    monkeypatch.setenv("LEAF_CI_FULL", "1")
+    monkeypatch.setattr(generator, "load_runner", lambda: pytest.fail("full run checked tier"))
+    assert generator.main(["--active", "unused-policy.json"]) == 0
+    assert capsys.readouterr().out == "0\n"
+
+
+@pytest.mark.parametrize("failure", [OSError("git unavailable"), subprocess.TimeoutExpired("git", 30)])
+def test_main_git_failure_disables_activation_and_runs_all_suites(
+        generator, runner, main_history, monkeypatch, tmp_path, capsys, failure):
+    def unavailable(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(generator, "load_runner", lambda: runner)
+    monkeypatch.setattr(runner.subprocess, "run", unavailable)
+    assert generator.main(["--active", str(tmp_path / "policy.json")]) == 0
+    assert capsys.readouterr().out == "0\n"
+    suites = stub_suites(runner)
+    assert runner.select_pr_tier(suites, policy_for(suites)) == suites
+
+
+def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=None, observed=None):
     suites = stub_suites(runner) if suites is None else suites
     monkeypatch.setattr(runner, "build_suites", lambda: suites)
     monkeypatch.setattr(runner, "migrate_gate_database", lambda suites: None)
@@ -223,6 +541,8 @@ def invoke(runner, monkeypatch, tmp_path, policy=None, flags=(), jobs=1, suites=
 
     def fake_run(suite, log_dir, attempt):
         ran.append(suite.id)
+        if observed is not None:
+            observed.append(suite)
         return runner.Result(suite, "PASS", "1", 0.1, counts={"got": 1, "passed": 1})
 
     monkeypatch.setattr(runner, "run_suite_guarded", fake_run)
@@ -292,8 +612,374 @@ def test_unknown_changed_paths_conservatively_runs_everything_in_tier_mode(runne
     assert data["mode"] == "tier"
 
 
+@pytest.fixture
+def async_author_case(runner, monkeypatch):
+    owner = async_author_row(runner)
+    suite = runner.Suite(owner["id"], owner["label"], owner["kind"], ROOT / owner["cwd"],
+                         owner["command"], None)
+    unknown = runner.Suite("unknown", "unknown npm script", "script", runner.WEB,
+                           ["npm", "run", "unknown"], None)
+    suites = [suite, unknown]
+    document = dict(suite_ids=[unknown.id], catalog_suite_ids=[s.id for s in suites],
+                    reasons={unknown.id: ["unknown-ownership"]})
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document
+
+
+@pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
+                                    ["docs/ci.md"], ["README.md"],
+                                    ["server/site.py", "docs/ci.md", "CHANGELOG.md"]])
+def test_scoped_non_web_changes_omit_only_async_unknown_inclusion(
+        runner, monkeypatch, async_author_case, changed):
+    suites, document = async_author_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(changed))
+    assert runner.select_pr_tier(suites, document) == suites[1:]
+
+
+@pytest.mark.parametrize("changed", [
+    ["web/src/app.js"], ["web/README.md"], ["web/package.json"],
+    ["web/e2e/async-author-stage.spec.mjs"], ["scripts/ci.md"], ["dispatch/worker.py"],
+    [".github/workflows/ci.yml"], [".codebuild/ci.sh"], ["package.json"],
+    ["package-lock.json"], ["pyproject.toml"], ["tsconfig.json"], ["main.py"],
+    ["tests/test_gate.py"], ["unknown/path.md"], ["server/site.py", "web/src/app.js"],
+    ["server/../web/src/app.js"], ["/server/site.py"], ["./server/site.py"],
+    ["server//site.py"], ["server/"], [r"server\site.py"], ["server/.config"],
+    [], [None], [123], "not-json", None,
+])
+def test_async_proof_keeps_web_ci_config_and_uncertain_changes(
+        runner, monkeypatch, async_author_case, changed):
+    suites, document = async_author_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    assert runner.select_pr_tier(suites, document) == suites
+
+
+@pytest.mark.parametrize("reason", [None, "proposal", "hard-harm-sentinel", "fail30:web/e2e/async-author-stage.spec.mjs"])
+def test_async_tier_membership_is_never_removed_by_non_web_scope(
+        runner, monkeypatch, async_author_case, reason):
+    suites, document = async_author_case
+    document["suite_ids"].append(suites[0].id)
+    if reason is not None:
+        document["reasons"][suites[0].id] = [reason]
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md"]')
+    assert runner.select_pr_tier(suites, document) == suites
+
+
+def test_full_mode_keeps_async_proof(runner, monkeypatch, tmp_path, async_author_case):
+    suites, _ = async_author_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md"]')
+    monkeypatch.setattr(runner, "select_pr_tier", lambda *a: pytest.fail("full mode used tier selection"))
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, suites=suites)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert "mode" not in data
+
+
+DEFERRED_SUITES = {
+    "web-studio-panels-proof", "web-version-restore-proof", "studio-walk-regressions",
+    "harness-vitest", "server-lab-runs",
+}
+
+
+@pytest.fixture
+def deferred_case(runner, monkeypatch):
+    suites = runner.build_suites()
+    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PULL_REQUEST_UPDATED")
+    monkeypatch.delenv("TRUSTED_SHA", raising=False)
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document
+
+
+@pytest.mark.parametrize("event", [
+    "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED",
+])
+def test_unrelated_pr_defers_only_five_suites(runner, monkeypatch, deferred_case, event):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md", "tools/xbench/README.md"]')
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_EVENT")
+    baseline = runner.select_pr_tier(suites, document)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", event)
+    selected = runner.select_pr_tier(suites, document)
+    assert DEFERRED_SUITES <= {s.id for s in baseline}
+    assert not DEFERRED_SUITES & {s.id for s in selected}
+    assert selected == [s for s in baseline if s.id not in DEFERRED_SUITES]
+    assert set(runner.PR_TIER_PREREQUISITES) <= {s.id for s in selected}
+
+
+@pytest.mark.parametrize("sid,path", [
+    ("web-studio-panels-proof", "web/e2e/campaign-panel.spec.mjs"),
+    ("web-studio-panels-proof", "web/src/campaigns/CampaignPanel.jsx"),
+    ("web-studio-panels-proof", "web/next.config.js"),
+    ("web-version-restore-proof", "web/e2e/local/version-restore.spec.mjs"),
+    ("web-version-restore-proof", "web/fixtures/version.json"),
+    ("web-version-restore-proof", "platform/migrations/0084_lab_runs.sql"),
+    ("studio-walk-regressions", "web/e2e/regressions/runGate.mjs"),
+    ("studio-walk-regressions", "dispatch/worker.py"),
+    ("harness-vitest", "harness/test/operatorLoop.test.ts"),
+    ("harness-vitest", "platform/migrations/0084_lab_runs.sql"),
+    ("server-lab-runs", "server/tests/test_lab_runs.py"),
+    ("server-lab-runs", "platform/migrations/0084_lab_runs.sql"),
+])
+def test_related_pr_keeps_deferred_suite(runner, monkeypatch, deferred_case, sid, path):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(["docs/ci.md", path]))
+    selected = runner.select_pr_tier(suites, document)
+    assert sid in {s.id for s in selected}
+    original = next(s for s in suites if s.id == sid)
+    assert next(s for s in selected if s.id == sid) is original
+
+
+def test_mixed_pr_paths_retain_only_affected_deferred_suites(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/ci.md", "platform/migrations/0084_lab_runs.sql"]')
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert selected & DEFERRED_SUITES == DEFERRED_SUITES - {"web-studio-panels-proof"}
+
+
+@pytest.mark.parametrize("changed", [
+    [], None, "not-json", [None], [123], [""],
+    ["scripts/ci/build_pr_tier.py"], [".codebuild/ci.sh"], [".github/workflows/ci.yml"],
+    ["README.md"], ["unknown/file.py"], ["docs/.config/file"],
+    ["docs/../ci.md"], ["docs/./ci.md"], ["docs//ci.md"], ["docs/"],
+    ["/docs/ci.md"], [r"docs\ci.md"], ["docs/C:ci.md"],
+    ["docs/ci.md\n"], ["docs/ci\x00.md"], ["docs/ci\x7f.md"],
+    ["docs/ ci.md"], ["docs/ci file.md"], ["docs/ci.md", "scripts/shared.py"],
+])
+def test_uncertain_or_shared_pr_keeps_all_deferred_suites(
+        runner, monkeypatch, deferred_case, changed):
+    suites, document = deferred_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    assert DEFERRED_SUITES <= {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+def test_mixed_pr_paths_keep_only_related_deferred_suites(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps([
+        "docs/ci.md", "platform/migrations/0084_lab_runs.sql", "tools/xbench/README.md",
+    ]))
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert selected & DEFERRED_SUITES == DEFERRED_SUITES - {"web-studio-panels-proof"}
+
+
+@pytest.mark.parametrize("event", ["PULL_REQUEST_MERGED", "PULL_REQUEST_CLOSED", "BUILD", ""])
+def test_other_contexts_preserve_existing_family_selection(runner, monkeypatch, deferred_case, event):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    monkeypatch.delenv("CODEBUILD_WEBHOOK_EVENT")
+    baseline = runner.select_pr_tier(suites, document)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", event)
+    assert runner.select_pr_tier(suites, document) == baseline
+
+
+def test_main_push_keeps_five_even_on_safe_web_family_path(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PUSH")
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_HEAD_REF", "refs/heads/main")
+    monkeypatch.setattr(runner, "pr_tier_changed_paths", lambda: ["docs/adn-purchase-walkthrough.md"])
+    assert DEFERRED_SUITES <= {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+@pytest.mark.parametrize("sid", sorted(DEFERRED_SUITES))
+def test_pr_priority_keeps_deferred_suite_on_safe_web_family_path(
+        runner, monkeypatch, deferred_case, sid):
+    suites, document = deferred_case
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES", json.dumps([sid]))
+    assert {s.id for s in runner.select_pr_tier(suites, document)} & DEFERRED_SUITES == {sid}
+
+
+def test_pr_dependency_readds_deferred_suite_before_family_pruning(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    document["prerequisites"] = {"harness-tsc-build": ["web-version-restore-proof"],
+                                 "web-version-restore-proof": ["web-studio-panels-proof"]}
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    selected = {s.id for s in runner.select_pr_tier(suites, document)}
+    assert {"harness-tsc-build", "web-version-restore-proof", "web-studio-panels-proof"} <= selected
+
+
+def test_new_deferred_suite_is_preserved_on_pr(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    document["catalog_suite_ids"].remove("web-studio-panels-proof")
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["docs/adn-purchase-walkthrough.md"]')
+    assert "web-studio-panels-proof" in {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+def test_deferred_scope_adds_real_direct_ownership(runner, monkeypatch, deferred_case):
+    suites, document = deferred_case
+    scopes = dict(runner.PR_TIER_DEFERRED_SCOPES)
+    scopes["web-studio-panels-proof"] = ((), ())
+    monkeypatch.setattr(runner, "PR_TIER_DEFERRED_SCOPES", scopes)
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["web/e2e/campaign-panel.spec.mjs"]')
+    assert "web-studio-panels-proof" in {s.id for s in runner.select_pr_tier(suites, document)}
+
+
+@pytest.mark.parametrize("changed", [["server/site.py"], ["platform/auth.py"],
+                                    ["docs/ci.md", "README.md"]])
+def test_non_web_pr_bounds_all_real_web_shards_without_changing_catalog(
+        runner, monkeypatch, changed):
+    suites = runner.build_suites()
+    fingerprint = runner.catalog_fingerprint(suites)
+    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", json.dumps(changed))
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    observed = runner.select_pr_tier(suites, document)
+    ran = [s.id for s in observed]
+    assert set(document["suite_ids"]) <= set(ran)
+    assert set(runner.PR_TIER_PREREQUISITES) <= set(ran)
+    originals = {s.id: s for s in suites}
+    bounded = []
+    for suite in observed:
+        original = originals[suite.id]
+        if suite.id in {"web-vitest-1", "web-vitest-2", "web-vitest-3"}:
+            identities = [reason.removeprefix("fail30:") for reason in document["reasons"][suite.id]
+                          if reason.startswith("fail30:")]
+            paths = suite.argv[len(original.argv):]
+            assert len(paths) == len(identities) == 22
+            assert {runner.pr_tier_path("web/" + path) for path in paths} == set(identities)
+            assert all((ROOT / "web" / path).is_file() for path in paths)
+            assert suite.argv[:len(original.argv)] == original.argv
+            assert suite == runner.replace(original, argv=suite.argv)
+            assert suite is not original
+            bounded.append(suite.id)
+        else:
+            assert suite is original
+    assert len(bounded) == 3
+    assert fingerprint == runner.catalog_fingerprint(suites)
+
+
+@pytest.fixture
+def web_catcher_case(runner, monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, "REPO", tmp_path)
+    monkeypatch.setattr(runner, "WEB", tmp_path / "web")
+    source = tmp_path / "web/src"
+    source.mkdir(parents=True)
+    (source / "catcher.test.js").write_text("", encoding="utf-8")
+    suites = [runner.Suite(f"web-vitest-{shard}", "web tests", "vitest", runner.WEB,
+                           ["npm", "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1)
+              for shard in range(1, 4)]
+    suites += [runner.Suite("harness-vitest", "harness tests", "vitest", tmp_path / "harness",
+                            ["npm", "test"], 1)]
+    document = dict(schema=runner.PR_TIER_SCHEMA, enabled=True,
+                    suite_ids=[s.id for s in suites], catalog_suite_ids=[s.id for s in suites],
+                    reasons={s.id: ["fail30:web/src/catcher.test", "proposal"] for s in suites})
+    monkeypatch.setenv("LEAF_CHANGED_PATHS", '["server/site.py"]')
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES", raising=False)
+    return suites, document, source
+
+
+@pytest.mark.parametrize("changed", [
+    ["web/src/app.js"], ["web/README.md"], ["scripts/ci.md"], [".github/workflows/ci.yml"],
+    [".codebuild/ci.sh"], ["package.json"], ["package-lock.json"], ["pyproject.toml"],
+    ["vitest.config.js"], ["tsconfig.json", "server/site.py"], ["main.py"],
+    ["tests/test_gate.py"], ["unknown/path.md"], ["server/../web/src/app.js"],
+    ["/server/site.py"], ["./server/site.py"], ["server//site.py"], ["server/"],
+    [r"server\site.py"], ["server/site.py\n"], ["server/.config"], [], [None], [123],
+    "not-json", None,
+])
+def test_web_catchers_keep_full_commands_for_closure_or_unknown_paths(
+        runner, monkeypatch, web_catcher_case, changed):
+    suites, document, _ = web_catcher_case
+    if changed is None:
+        def unavailable():
+            raise ValueError("PR changed paths unavailable")
+        monkeypatch.setattr(runner, "pr_tier_changed_paths", unavailable)
+    else:
+        monkeypatch.setenv("LEAF_CHANGED_PATHS", changed if isinstance(changed, str) else json.dumps(changed))
+    selected = runner.select_pr_tier(suites, document)
+    assert selected == suites
+    assert all(actual is original for actual, original in zip(selected, suites))
+
+
+@pytest.mark.parametrize("bad", ["missing", "mapping", "no-suite", "empty", "string", "number",
+                                 "no-catchers", "empty-catcher", "escape", "absolute", "non-test",
+                                 "extension", "absent", "ambiguous", "mixed", "symlink"])
+def test_invalid_catcher_metadata_keeps_original_web_command(runner, web_catcher_case, bad):
+    suites, document, source = web_catcher_case
+    if bad == "missing":
+        document.pop("reasons")
+    elif bad == "mapping":
+        document["reasons"] = []
+    elif bad == "no-suite":
+        document["reasons"] = {}
+    else:
+        reasons = {
+            "empty": [], "string": "fail30:web/src/catcher.test", "number": [123],
+            "no-catchers": ["proposal"], "empty-catcher": ["fail30:"],
+            "escape": ["fail30:web/src/../catcher.test"],
+            "absolute": ["fail30:/web/src/catcher.test"],
+            "non-test": ["fail30:web/src/catcher"],
+            "extension": ["fail30:web/src/catcher.test.js"],
+            "absent": ["fail30:web/src/missing.test"],
+            "mixed": ["fail30:web/src/catcher.test", "fail30:web/src/missing.test"],
+        }.get(bad, ["fail30:web/src/catcher.test"])
+        for suite in suites:
+            document["reasons"][suite.id] = reasons
+    if bad == "ambiguous":
+        (source / "catcher.test.jsx").write_text("", encoding="utf-8")
+    elif bad == "symlink":
+        outside = source.parents[1] / "outside.test.js"
+        outside.write_text("", encoding="utf-8")
+        (source / "catcher.test.js").unlink()
+        try:
+            (source / "catcher.test.js").symlink_to(outside)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    selected = runner.select_pr_tier(suites, document)
+    assert selected == suites
+    assert all(actual is original for actual, original in zip(selected, suites))
+
+
+def test_web_catcher_selection_keeps_new_priority_and_prerequisite_suites(
+        runner, monkeypatch, web_catcher_case):
+    suites, document, _ = web_catcher_case
+    extras = [runner.Suite(sid, sid, "pytest", runner.REPO / "server",
+                           [sys.executable, "-m", "pytest", f"tests/test_{sid}.py"], 1)
+              for sid in ("new-suite", "priority", "dependency")]
+    document["catalog_suite_ids"].extend(["priority", "dependency"])
+    document["prerequisites"] = {"web-vitest-1": ["dependency"]}
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES", '["priority"]')
+    selected = runner.select_pr_tier(suites + extras, document)
+    assert [s.id for s in selected] == [s.id for s in suites + extras]
+    assert all(s.argv[-1] == "src/catcher.test.js" for s in selected[:3])
+    assert all(s is original for s, original in zip(selected[3:], (suites + extras)[3:]))
+
+
+def test_full_mode_never_resolves_or_bounds_catchers(runner, monkeypatch, tmp_path, web_catcher_case):
+    suites, _, _ = web_catcher_case
+    monkeypatch.setattr(runner, "pr_tier_web_catchers", lambda *a: pytest.fail("full mode bounded catchers"))
+    observed = []
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, suites=suites, observed=observed)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert all(s is original for s, original in zip(observed, suites))
+    assert "mode" not in data
+
+
+def test_bounded_catchers_keep_actual_counts_and_original_catalog_fingerprint(
+        runner, monkeypatch, tmp_path, web_catcher_case):
+    suites, document, _ = web_catcher_case
+    fingerprint = runner.catalog_fingerprint(suites)
+    observed = []
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, document, suites=suites, observed=observed)
+    assert rc == 0 and ran == [s.id for s in suites]
+    assert all(s.argv[-1] == "src/catcher.test.js" for s in observed[:3])
+    assert data["catalog_fingerprint"] == fingerprint == runner.catalog_fingerprint(suites)
+    assert data["executed_total"] == len(ran)
+    assert all(entry["got"] == "1" and entry["executed"] == 1 for entry in data["results"])
+
+
 def test_pr_diff_uses_base_and_both_rename_paths(runner, monkeypatch):
     monkeypatch.delenv("LEAF_CHANGED_PATHS", raising=False)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", "PULL_REQUEST_UPDATED")
+    monkeypatch.setenv("LEAF_CI_LAST_JUDGED_SHA", "invalid-main-baseline")
     monkeypatch.setenv("TRUSTED_SHA", "c" * 40)
     calls = []
 
@@ -348,13 +1034,15 @@ def test_ci_final_receipt_uses_actual_tier_result(tmp_path):
         if mode:
             payload["mode"] = mode
         result_path.write_text(json.dumps(payload), encoding="utf-8")
-        detail = dict(execution_mode="full", selection_mode="shadow", executed_suite_ids=["all"])
+        detail = dict(execution_mode="full", selection_mode="shadow", executed_suite_ids=["all"],
+                      head_sha="a" * 40)
         namespace = dict(json=json, Path=redirected_path, detail=detail)
         exec(compile(block, "ci-tier-result", "exec"), namespace)
         namespace.update(sys=SimpleNamespace(argv=["finalize", str(tmp_path), "0", "1"]),
                          out=tmp_path, subprocess=SimpleNamespace(
                              run=lambda *a, **kw: pytest.fail("tier invoked full-run manifest")))
         if mode == "tier":
+            assert detail["head_sha"] == "a" * 40
             assert detail["execution_mode"] == detail["selection_mode"] == "selected"
             assert detail["selection_source"] == "pr-tier"
             assert detail["executed_suite_ids"] == payload["suite_ids"]
@@ -363,7 +1051,8 @@ def test_ci_final_receipt_uses_actual_tier_result(tmp_path):
             exec(compile(manifest, "ci-tier-manifest", "exec"), namespace)
             assert not (tmp_path / "full-run.json").exists()
         else:
-            assert detail == dict(execution_mode="full", selection_mode="shadow", executed_suite_ids=["all"])
+            assert detail == dict(execution_mode="full", selection_mode="shadow", executed_suite_ids=["all"],
+                                  head_sha="a" * 40)
             # A traced ordinary run still enters manifest production and requires its helper.
             with pytest.raises(ValueError, match="manifest_helper_unavailable"):
                 exec(compile(manifest, "ci-full-manifest", "exec"), namespace)
@@ -390,6 +1079,8 @@ def test_ci_tier_activation_precedes_startup_and_preserves_selection_mode():
     ("PULL_REQUEST_UPDATED", "enabled", "full", "selected"),
     ("PULL_REQUEST_REOPENED", "enabled", "full", "selected"),
     ("PUSH", "enabled", "full", "full"),
+    ("MAIN_PUSH", "enabled", "full", "selected"),
+    ("MAIN_PUSH_NO_BASELINE", "enabled", "full", "full"),
     ("", "enabled", "full", "full"),
     ("PULL_REQUEST_MERGED", "enabled", "full", "full"),
     ("PULL_REQUEST_UPDATED", "disabled", "full", "full"),
@@ -399,6 +1090,7 @@ def test_ci_tier_activation_precedes_startup_and_preserves_selection_mode():
     ("PUSH", "enabled", "selected", "selected"),
     ("PULL_REQUEST_UPDATED", "disabled", "shadow", "shadow"),
 ])
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, policy, selection_mode, expected):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
     activation = source.split("# LEAF_PR_TIER_ACTIVATION_BEGIN\n", 1)[1].split(
@@ -415,8 +1107,19 @@ def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, polic
     script = tmp_path / "startup.sh"
     script.write_text('set -euo pipefail\nselection_mode=' + selection_mode + "\n" + activation + startup
                       + '\nprintf "selection_mode=%s\\n" "$selection_mode"\n', encoding="utf-8")
-    env = {key: value for key, value in os.environ.items() if key not in ("BASH_ENV", "LEAF_CI_FULL")}
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("BASH_ENV", "LEAF_CI_FULL", "CODEBUILD_WEBHOOK_HEAD_REF",
+                          "CODEBUILD_RESOLVED_SOURCE_VERSION", "LEAF_CI_LAST_JUDGED_SHA")}
     env["CODEBUILD_WEBHOOK_EVENT"] = event
+    if event.startswith("MAIN_PUSH"):
+        env["CODEBUILD_WEBHOOK_EVENT"] = "PUSH"
+        env["CODEBUILD_WEBHOOK_HEAD_REF"] = "refs/heads/main"
+        for name, ref in (("CODEBUILD_RESOLVED_SOURCE_VERSION", "HEAD"),
+                          ("LEAF_CI_LAST_JUDGED_SHA", "HEAD^")):
+            env[name] = subprocess.run(["git", "rev-parse", ref], cwd=ROOT, check=True,
+                                       capture_output=True, text=True).stdout.strip()
+        if event == "MAIN_PUSH_NO_BASELINE":
+            env.pop("LEAF_CI_LAST_JUDGED_SHA")
     result = subprocess.run([shutil.which("bash"), script.as_posix()], env=env, cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -430,41 +1133,55 @@ def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, polic
 @pytest.mark.skipif(not shutil.which("bash"), reason="CI gate argument execution requires bash")
 @pytest.mark.parametrize("event", ["PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED",
                                    "PUSH", "pin", "PULL_REQUEST_MERGED"])
-def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
+def test_ci_committed_policy_runs_pr_and_valid_main_tier_but_keeps_pin_full(
         runner, monkeypatch, tmp_path, capsys, event):
     source = (ROOT / ".codebuild/ci.sh").read_text(encoding="utf-8")
     activation = source.split("# LEAF_PR_TIER_ACTIVATION_BEGIN\n", 1)[1].split(
         "# LEAF_PR_TIER_ACTIVATION_END", 1)[0]
     block = source.split("gate_tier_args=()\n", 1)[1].split('\necho "LEAF_EVENT gate ', 1)[0]
     env = {key: value for key, value in os.environ.items()
-           if key not in ("BASH_ENV", "CODEBUILD_WEBHOOK_EVENT", "LEAF_PROOF_TRUSTED_SHA", "LEAF_CI_FULL")}
+           if key not in ("BASH_ENV", "CODEBUILD_WEBHOOK_EVENT", "LEAF_PROOF_TRUSTED_SHA", "LEAF_CI_FULL",
+                          "CODEBUILD_WEBHOOK_HEAD_REF", "CODEBUILD_RESOLVED_SOURCE_VERSION",
+                          "LEAF_CI_LAST_JUDGED_SHA")}
     if event == "pin":
         env["LEAF_PROOF_TRUSTED_SHA"] = "c" * 40
     else:
         env["CODEBUILD_WEBHOOK_EVENT"] = event
+    if event == "PUSH":
+        def revision(ref):
+            return subprocess.run(["git", "rev-parse", ref], cwd=ROOT, check=True,
+                                  capture_output=True, text=True).stdout.strip()
+
+        env.update(CODEBUILD_WEBHOOK_HEAD_REF="refs/heads/main",
+                   CODEBUILD_RESOLVED_SOURCE_VERSION=revision("HEAD"),
+                   TRUSTED_SHA=revision("HEAD"), LEAF_CI_LAST_JUDGED_SHA=revision("HEAD^"))
     command = ('set -euo pipefail\nselection_mode=full\n' + activation + '\ngate_tier_args=()\n'
                + block + '\nprintf "%s\\n" "${gate_tier_args[@]}"')
     result = subprocess.run([shutil.which("bash"), "-c", command], env=env, cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
-    is_pr = event.startswith("PULL_REQUEST_") and event != "PULL_REQUEST_MERGED"
-    assert result.stdout.split() == (["--tier-file", "scripts/ci/pr-tier.json"] if is_pr else [])
+    is_tier = event in {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED", "PUSH"}
+    assert result.stdout.split() == (["--tier-file", "scripts/ci/pr-tier.json"] if is_tier else [])
 
     catalog = runner.selection_catalog(ROOT)
     # Keep real catalog ownership while replacing suite execution with inert results.
     suites = [runner.Suite(r["id"], r["label"], r["kind"], ROOT / r["cwd"], r["command"], 1)
               for r in catalog["suites"]]
+    current_ids = {r["id"] for r in catalog["suites"]}
     document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
     assert document["enabled"] is True
     monkeypatch.setenv("LEAF_CHANGED_PATHS", '["server/tests/test_autofill_adapter.py"]')
     monkeypatch.setenv("LEAF_PRIORITY_SUITES", '["server-auth"]')
     monkeypatch.setattr(runner, "emit_gate_proof", lambda *a, **kw: pytest.fail("tier minted proof"))
-    rc, ran, data = invoke(runner, monkeypatch, tmp_path, "committed" if is_pr else None, suites=suites)
+    rc, ran, data = invoke(runner, monkeypatch, tmp_path, "committed" if is_tier else None, suites=suites)
     assert rc == 0
-    if is_pr:
+    if is_tier:
         assert {"server-adapter-autofill", "server-auth"}.isdisjoint(document["suite_ids"])
-        expected = set(document["suite_ids"]) | {"server-adapter-autofill", "server-auth"}
-        assert set(ran) == expected < set(document["catalog_suite_ids"])
+        expected = ((set(document["suite_ids"]) & current_ids)
+                    | (current_ids - set(document["catalog_suite_ids"]))
+                    | {"server-adapter-autofill", "server-auth"})
+        assert set(ran) == expected < current_ids
         assert set(runner.PR_TIER_PREREQUISITES) <= set(ran)
         assert data["mode"] == data["execution_mode"] == data["selection_mode"] == "tier"
         assert all(entry["mode"] == "tier" for entry in data["results"])
@@ -475,24 +1192,27 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         assert "mode=tier cannot prove a full gate" in capsys.readouterr().out
         assert not proof.exists()
     else:
-        assert set(ran) == set(document["catalog_suite_ids"])
+        assert set(ran) == current_ids
         assert "mode" not in data
         assert "tier" not in data["selection"]
 
 
-def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, runner):
-    document = json.loads((ROOT / "scripts/ci/pr-tier.json").read_text(encoding="utf-8"))
+def test_committed_historical_policy_is_enabled_and_compatible(generator, runner):
+    path = ROOT / "scripts/ci/pr-tier.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
     catalog = runner.selection_catalog(ROOT)
     assert document["enabled"] is True
-    assert document["generated_from"]["catalog_sha256"] == catalog["catalog_sha256"]
-    assert document["catalog_suite_ids"] == sorted(row["id"] for row in catalog["suites"])
+    assert runner.load_pr_tier(path) == document
     assert "web-version-restore-proof" in document["suite_ids"]
+    assert "web-async-author-stage" not in document["suite_ids"]
+    assert "web-async-author-stage" not in document["reasons"]
     # Evidence inputs are copied into the task worktree, not shipped with CI.
     paths = [ROOT / name for name in ("pr-tier-proposal.json", "fail30.json", "sentinels-strict.json")]
     if all(path.is_file() for path in paths):
         assert generator.generate(*paths, catalog=catalog, enabled=True) == document
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="CI shell assertions require the Linux producer environment")
 def test_owned_ci_tests_pass_with_ambient_explicit_full():
     if os.environ.get("LEAF_CI_FULL") == "1":
         pytest.skip("Already running with ambient explicit full")

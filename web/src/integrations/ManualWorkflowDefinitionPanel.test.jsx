@@ -385,3 +385,97 @@ it('bounds a hung save, aborts I/O and ignores a late response during identical 
   await screen.findByRole('region', { name: 'Saved immutable definition' })
   expect(posts(fetchImpl)[1][1].body).toBe(original.body)
 })
+
+const savedDefinition = () => ({ schema_version: 1, id: reference.id, version: reference.version, title: 'Saved workflow',
+  trigger: 'manual', authority_mode: 'caller_bound', steps: [{ id: 'saved-step', kind: 'action', connection_id: entry.connection_id,
+    connector_ref: entry.connector_ref, operation_ref: entry.operation_ref,
+    arguments: { note: '', count: 0, enabled: false, nullable: null, choice: 'one' } }] })
+const reopen = { projectId, reference }
+
+it('hydrates the exact saved reference after remount and saves edited arguments as a new immutable version', async () => {
+  const { props, fetchImpl } = setup()
+  const original = savedDefinition()
+  const get = vi.spyOn(props.client, 'getManualWorkflowDefinition').mockResolvedValue(original)
+  const first = render(<ManualWorkflowDefinitionPanel {...props} />)
+  first.unmount()
+  render(<ManualWorkflowDefinitionPanel {...props} reopen={reopen} />)
+  await waitFor(() => expect(screen.getByLabelText('Definition version')).toHaveValue(2))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled())
+  expect(get).toHaveBeenCalledExactlyOnceWith(projectId, reference, { signal: expect.any(AbortSignal) })
+  expect(screen.getByLabelText('Step 1 stable ID')).toHaveValue('saved-step')
+  expect(screen.getByLabelText('Step 1 action')).toHaveValue(key(entry))
+  expect(screen.getByLabelText('Step 1 Note (required)')).toHaveValue('')
+  expect(screen.getByLabelText('Step 1 Count (required)')).toHaveValue(0)
+  expect(screen.getByLabelText('Step 1 Enabled (required)')).toHaveValue('false')
+  expect(screen.getByLabelText('Step 1 Optional presence')).toHaveValue('omit')
+  expect(screen.getByLabelText('Step 1 Nullable presence')).toHaveValue('null')
+  expect(posts(fetchImpl)).toHaveLength(0)
+  change('Definition version', '1'); save()
+  expect(await screen.findByRole('alert')).toHaveTextContent('Choose a version greater than the saved version')
+  expect(posts(fetchImpl)).toHaveLength(0)
+  change('Definition version', '2'); change('Step 1 Note (required)', 'edit')
+  fetchImpl.mockResolvedValueOnce(response({ ...reference, version: 2, digest: 'b'.repeat(64) }))
+  save(); await screen.findByRole('region', { name: 'Saved immutable definition' })
+  expect(JSON.parse(posts(fetchImpl)[0][1].body)).toEqual({ ...original, version: 2,
+    steps: [{ ...original.steps[0], arguments: { ...original.steps[0].arguments, note: 'edit' } }] })
+  expect(original).toEqual(savedDefinition())
+  expect(fetchImpl.mock.calls.every(([url]) => /action-catalog\?|\/manual-workflows$/.test(url))).toBe(true)
+})
+
+it('finds exact saved actions across catalog pages and retains true, nonzero and empty optional values', async () => {
+  const { props, fetchImpl } = setup({ actions: [other], next_cursor: 'next' })
+  const definition = savedDefinition()
+  definition.steps[0].arguments = { ...definition.steps[0].arguments, count: 4, enabled: true, optional: '' }
+  vi.spyOn(props.client, 'getManualWorkflowDefinition').mockResolvedValue(definition)
+  fetchImpl.mockResolvedValueOnce(response({ actions: [other], next_cursor: 'next' }))
+  fetchImpl.mockResolvedValueOnce(response(catalog))
+  render(<ManualWorkflowDefinitionPanel {...props} reopen={reopen} />)
+  await waitFor(() => expect(screen.getByLabelText('Definition version')).toHaveValue(2))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeEnabled())
+  expect(fetchImpl.mock.calls[1][0]).toContain('after=next')
+  expect(screen.getByLabelText('Step 1 Count (required)')).toHaveValue(4)
+  expect(screen.getByLabelText('Step 1 Enabled (required)')).toHaveValue('true')
+  expect(screen.getByLabelText('Step 1 Optional presence')).toHaveValue('value')
+  expect(screen.getByLabelText('Step 1 Optional')).toHaveValue('')
+  expect(posts(fetchImpl)).toHaveLength(0)
+})
+
+it.each(['project', 'reference', 'unknown-field', 'wrong-type', 'unavailable-action'])('refuses reopening with %s mismatch without losing data into a save', async (kind) => {
+  const { props, fetchImpl } = setup()
+  const definition = savedDefinition()
+  if (kind === 'reference') definition.version = 2
+  if (kind === 'unknown-field') definition.steps[0].arguments.extra = 'preserve'
+  if (kind === 'wrong-type') definition.steps[0].arguments.enabled = 'false'
+  if (kind === 'unavailable-action') definition.steps[0].operation_ref = { ...entry.operation_ref, digest: 'b'.repeat(64) }
+  const get = vi.spyOn(props.client, 'getManualWorkflowDefinition').mockResolvedValue(definition)
+  render(<ManualWorkflowDefinitionPanel {...props} reopen={kind === 'project' ? { ...reopen, projectId: '22222222-2222-4222-8222-222222222222' } : reopen} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('saved workflow could not be reopened')
+  expect(screen.getByLabelText('Definition title')).toHaveValue('')
+  expect(screen.getByRole('button', { name: 'Save workflow definition' })).toBeDisabled()
+  if (kind === 'project') expect(get).not.toHaveBeenCalled()
+  expect(posts(fetchImpl)).toHaveLength(0)
+})
+
+it.each([401, 403])('visibly refuses an unauthorized saved definition read (%s)', async (status) => {
+  const { props, fetchImpl } = setup()
+  vi.spyOn(props.client, 'getManualWorkflowDefinition').mockRejectedValue(Object.assign(new Error('private token'), { status }))
+  render(<ManualWorkflowDefinitionPanel {...props} reopen={reopen} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('not authorized')
+  expect(props.onForbidden).toHaveBeenCalledOnce()
+  expect(document.body.textContent).not.toContain('private token')
+  expect(fetchImpl).not.toHaveBeenCalled()
+})
+
+it('aborts a reopened definition read on project change and ignores its late reply', async () => {
+  const { props, fetchImpl } = setup()
+  let finish
+  const get = vi.spyOn(props.client, 'getManualWorkflowDefinition').mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const view = render(<ManualWorkflowDefinitionPanel {...props} reopen={reopen} />)
+  await waitFor(() => expect(get).toHaveBeenCalledOnce())
+  const readSignal = get.mock.calls[0][2].signal
+  view.rerender(<ManualWorkflowDefinitionPanel {...props} projectId="22222222-2222-4222-8222-222222222222" reopen={reopen} />)
+  expect(readSignal.aborted).toBe(true)
+  await act(async () => finish(savedDefinition()))
+  expect(screen.getByLabelText('Definition title')).toHaveValue('')
+  expect(fetchImpl).not.toHaveBeenCalled()
+})

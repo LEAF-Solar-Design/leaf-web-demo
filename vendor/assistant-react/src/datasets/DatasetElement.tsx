@@ -3,6 +3,7 @@
 import { DatasetElementV1, DatasetReadV1, type DatasetFieldV1 } from "../../../assistant-contract/src/integration";
 import { LEAF_TOKENS, target } from "../tokens";
 import { DataTableCore, type DataTableColumn } from "./DataTableCore";
+import { ProviderPairTable } from "./ProviderPairTable";
 import { LineChartCore, projectDatasetLine, formatDatasetAxisValue } from "./LineChartCore";
 import { formatDatasetValue, resolveDisplayPreferences, type DisplayPreferences } from "./formatting";
 
@@ -40,6 +41,26 @@ const rootStyle = {
   color: `var(--leaf-foreground, var(--foreground, ${colors.foreground}))`,
   fontFamily: `var(--leaf-font-sans, ${LEAF_TOKENS.font.sans})`,
 };
+
+function sourceHref(field: DatasetFieldV1, value: unknown): string | null {
+  if (field.type.kind !== "text" || typeof value !== "string" ||
+      !/^https:\/\//i.test(value) || /[\s\\\u0000-\u001f\u007f]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password ? value : null;
+  } catch { return null; }
+}
+
+function datasetCell(field: DatasetFieldV1, value: string | number | boolean | null, preferences: DisplayPreferences) {
+  const text = formatDatasetValue(field, value, preferences);
+  if ((field.type.kind !== "text" && field.type.kind !== "identifier") || !/[\u202a-\u202e\u2066-\u2069]/.test(text)) return text;
+  const escaped = text.replace(/[\u202a-\u202e\u2066-\u2069]/g, mark => `\\u${mark.charCodeAt(0).toString(16).toUpperCase()}`);
+  return <span>
+    <small title="Direction controls are shown explicitly so text cannot change reading order."
+      style={{ border: "1px solid currentColor", borderRadius: 3, padding: "1px 3px", marginInlineEnd: 4 }}>Hidden direction marks</small>
+    {" "}<bdi dir="auto">{escaped}</bdi>
+  </span>;
+}
 
 function Freshness({ freshness, preferences }: {
   freshness: DatasetReadV1["freshness"];
@@ -117,11 +138,26 @@ export function DatasetElement({
     const field = fields.get(id)!;
     return {
       key: id, header: field.label, numeric: numericKinds.has(field.type.kind),
-      cell: (row) => formatDatasetValue(field, row.values[id] ?? null, prefs),
+      cell: (row) => {
+        const value = row.values[id] ?? null;
+        const text = datasetCell(field, value, prefs);
+        const href = sourceHref(field, value);
+        return href ? <a href={href} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer"
+          style={{ color: "inherit", textDecoration: "underline", overflowWrap: "anywhere" }}>{text}</a> : text;
+      },
     };
   });
-  const table = <DataTableCore columns={columns} rows={rows} getRowKey={(row) => row.key}
-    maxRows={12} label={`${element.title} data`} />;
+  const grouping = element.kind === "dataset.table" ? element.props.row_grouping : undefined;
+  if (grouping && [grouping.pair_key_field, grouping.provider_field].some(id =>
+      !["text", "identifier"].includes(fields.get(id)!.type.kind))) return state("invalid");
+  const coverage = read.query_coverage;
+  const complete = Boolean((read.status === "ready" || read.status === "empty") && coverage &&
+    coverage.offset === 0 && coverage.matching_rows === read.rows.length &&
+    read.next_cursor === null && read.rows.length <= limit);
+  const table = grouping ? <ProviderPairTable columns={columns} rows={rows} grouping={grouping}
+    complete={complete} label={`${element.title} data`} />
+    : <DataTableCore columns={columns} rows={rows} getRowKey={(row) => row.key}
+      maxRows={12} label={`${element.title} data`} />;
   const xField = element.kind === "dataset.line" ? fields.get(element.props.x_field)! : null;
   const yField = element.kind === "dataset.line" ? fields.get(element.props.y_field)! : null;
   const chartRows = xField && yField ? projectDatasetLine(rows, xField, yField) : [];

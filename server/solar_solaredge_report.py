@@ -5,8 +5,8 @@ JSON binding includes tenant, project, drawing, head version, graph digest and
 a request digest over source id, source content digest, tolerance and selection
 order. Repeated requests reuse that JSON without parsing. Requests are bounded
 to 4096 bytes, tolerance to 1e-6 through 1e6, frames to 10,000, panels to 200,000
-and displayed match candidates to 16. Parsing runs behind a per-process limit
-of MAX_CONCURRENT_PARSES, in a child process (solar_solaredge_parse_worker.py)
+and match candidates to the importer's bounded grid list. Parsing runs behind a
+per-process limit of MAX_CONCURRENT_PARSES, in a child process (solar_solaredge_parse_worker.py)
 under a fixed wall-time deadline of PARSE_DEADLINE_S: at the deadline the child
 is killed and reaped before the parse slot is released, and the request is
 refused as REPORT_PARSE_TIMEOUT with nothing stored. The report creates no
@@ -28,6 +28,7 @@ import solar_solaredge_parse_worker as parse_worker
 import solar_artifacts
 import solar_import_sources
 import solar_solaredge_import as si
+import solar_panel_group_kernel as panel_kernel
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
@@ -35,6 +36,9 @@ from solar_sizing_client import digest, units_resolved
 
 REPORT_TOOL = "solar-solaredge-report"
 REPORT_SCHEMA = "leaf.solar-solaredge-report.v1"
+ATOMIC_POLICY = "atomic-v1"
+WHOLE_MATRIX_POLICY = "whole-matrix-v1"
+MATCHING_POLICIES = frozenset({ATOMIC_POLICY, WHOLE_MATRIX_POLICY})
 REQUEST_SCHEMA = "leaf.solar-solaredge-report-request.v1"
 RESULT_SCHEMA = "leaf.solar-solaredge-report-result.v1"
 REPORT_KIND = "solaredge-report"
@@ -93,9 +97,49 @@ def validate_request(request):
             "selection_order": order, "project_id": project}
 
 
-def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order):
+def _report_candidates(match):
+    candidates = list(match["candidates"])
+    if "status" in match:
+        return candidates
+    listed = candidates[:MAX_REPORT_CANDIDATES]
+    if match["grid_index"] not in listed:
+        listed[-1] = match["grid_index"]
+    return listed
+
+
+def _recorded_import_angle(frames, panels):
+    """Only the imported-geometry producer path supplies an independent rotation."""
+    if any(frame.get("extra", {}).get("grouping_basis") != "geometry-only"
+           or frame.get("provenance", {}).get("created_by") != "solar-panel-groups"
+           for frame in frames):
+        return None
+    angles = []
+    for panel in panels:
+        angle = panel.get("angle")
+        if (panel.get("provenance", {}).get("created_by") != "solar-panels-from-drawing"
+                or type(angle) not in (int, float) or not math.isfinite(angle)):
+            return None
+        angle = math.radians(angle)
+        if angles:
+            delta = (angle - angles[0] + math.pi / 4) % (math.pi / 2) - math.pi / 4
+            if abs(delta) > 1e-6:
+                return None
+            angle = angles[0] + delta
+        angles.append(angle)
+    return sorted(angles)[len(angles) // 2] if angles else None
+
+
+def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_order, associations=None,
+                         matching_policy=ATOMIC_POLICY):
+    """Review every frame; unresolved rows retain all candidates and null PDF indexes.
+
+    Unique matches keep the existing matched-row format. Unresolved rows also carry
+    an explicit status and cannot pass the acceptance path's strict match validation.
+    """
     if not units_resolved(graph):
         raise SolarEdgeReportError("REPORT_UNITS_UNRESOLVED")
+    if type(matching_policy) is not str or matching_policy not in MATCHING_POLICIES:
+        raise SolarEdgeReportError("REPORT_REQUEST_INVALID")
     frames = graph["frames"]
     if not frames:
         raise SolarEdgeReportError("REPORT_FRAMES_REQUIRED")
@@ -124,9 +168,20 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
                                   "y": float(panel["centre"][1])})
         groups.append({"block": frame["id"], "panels": handles})
     try:
-        row_angle = si.lattice_row_angle([(p["x"], p["y"]) for p in kernel_panels])
+        parse_worker._validate_identities(matrices)
+        centres = [(p["x"], p["y"]) for p in kernel_panels]
+        try:
+            row_angle = si.lattice_row_angle(centres)
+        except si.SolarEdgeImportError as exc:
+            angle = _recorded_import_angle(frames, [panels[ref_of[p["handle"]]] for p in kernel_panels])
+            if exc.code != "lattice-angle-ambiguous" or angle is None:
+                raise
+            row_angle = si.lattice_row_angle(centres, recorded_angle=angle,
+                coordinate_tolerance=panel_kernel.INTAKE_COORD_QUANTUM)
+        whole = {"allow_whole_matrices": True} if matching_policy == WHOLE_MATRIX_POLICY else {}
         result = si.run_import(matrices, groups, kernel_panels, row_angle=row_angle,
-                               alignment_tolerance=alignment_tolerance, selection_order=selection_order)
+                               alignment_tolerance=alignment_tolerance, selection_order=selection_order,
+                               review=True, associations=associations, **whole)
     except si.SolarEdgeImportError as exc:
         code = {
             "ambiguous-structural-match": "REPORT_AMBIGUOUS_MATCH",
@@ -137,6 +192,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
             "lattice-angle-unavailable": "REPORT_ROW_ANGLE_UNRESOLVED",
             "lattice-angle-ambiguous": "REPORT_ROW_ANGLE_UNRESOLVED",
             "bound-exceeded": "REPORT_LIMIT_EXCEEDED",
+            "invalid-associations": "REPORT_ASSOCIATIONS_INVALID",
             "duplicate-panel": "REPORT_PANEL_HANDLE_DUPLICATE",
         }.get(exc.code, "REPORT_PDF_UNSUPPORTED")
         raise SolarEdgeReportError(code) from None
@@ -144,8 +200,9 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED") from None
     matches = [{"frame_ref": m["block"], "pdf_grid": m["grid_index"],
                 "pdf_matrix": m["original_index"], "pdf_sub_grid": m["sub_grid_id"],
-                "candidates": list(m["candidates"][:MAX_REPORT_CANDIDATES]),
-                "candidate_count": len(m["candidates"])} for m in result["matches"]]
+                "candidates": _report_candidates(m),
+                "candidate_count": len(m["candidates"]),
+                **({"status": m["status"]} if "status" in m else {})} for m in result["matches"]]
     strings = []
     for s in result["strings"] + result["bridge_strings"]:
         source = s["source"]
@@ -162,12 +219,18 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
               "pdf_panels": sum(cell["Code"] == 1 for matrix in matrices
                                 for row in matrix["Rows"] for cell in row["Panels"]),
               "matchable_grids": result["matchable_count"], "bridge_grids": result["bridge_grid_count"],
-              "frames": len(frames), "matched_frames": len(matches),
+              "frames": len(frames), "matched_frames": sum(m["pdf_grid"] is not None for m in matches),
               "group_strings": len(result["strings"]), "bridge_strings": len(result["bridge_strings"]),
               "strings": len(strings), "assigned_panels": sum(len(s["panel_refs"]) for s in strings),
               "unassigned_panels": len(unassigned), "partial_strings": sum(s["partial"] for s in strings)}
-    return {"row_angle": row_angle, "counts": counts, "matches": matches,
+    output = {"row_angle": row_angle, "counts": counts, "matches": matches,
             "strings": strings, "unassigned_panel_refs": unassigned}
+    if "optimizer_measurement" in result:
+        measured = result["optimizer_measurement"]
+        output["optimizer_measurement"] = {"complete": measured["complete"], "optimizers": [
+            {**opt, "panel_refs": [ref_of.get(handle) for handle in opt["panel_handles"]]}
+            for opt in measured["optimizers"]]}
+    return output
 
 
 def _worker_argv():
@@ -175,7 +238,7 @@ def _worker_argv():
     return [sys.executable, "-B", os.path.abspath(parse_worker.__file__)]
 
 
-def parse_source(content):
+def parse_source(content, *, legacy=False):
     """The PDF's matrices, parsed in a child process under a hard wall-time deadline.
 
     Returns only after the child has exited and been reaped, on every path, so a caller holding a
@@ -191,7 +254,8 @@ def parse_source(content):
         source.write(content)
         source.seek(0)
         try:
-            child = subprocess.Popen(_worker_argv(), stdin=source, stdout=subprocess.PIPE,
+            argv = _worker_argv() + (["--legacy-matrices"] if legacy else [])
+            child = subprocess.Popen(argv, stdin=source, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
         except (OSError, ValueError):
             raise SolarEdgeReportError("REPORT_PARSE_UNAVAILABLE") from None
@@ -209,6 +273,8 @@ def parse_source(content):
         source.close()
     if timed_out:
         raise SolarEdgeReportError("REPORT_PARSE_TIMEOUT")
+    if parse_worker.decode_refusal(child.returncode, out) == parse_worker.RESOURCE_REFUSAL:
+        raise SolarEdgeReportError(parse_worker.RESOURCE_REFUSAL)
     matrices = parse_worker.decode_verdict(child.returncode, out)
     if matrices is None:
         raise SolarEdgeReportError("REPORT_PDF_UNSUPPORTED")
@@ -275,7 +341,7 @@ def build_solaredge_report(backend, tenant_id, drawing_id, request):
     if not _PARSE_SLOTS.acquire(blocking=False):
         raise SolarEdgeReportError("REPORT_BUSY")
     try:
-        matrices = parse_source(content)
+        matrices = parse_source(content, legacy=True)
     finally:
         _PARSE_SLOTS.release()
     core = report_from_matrices(context["graph"], matrices,

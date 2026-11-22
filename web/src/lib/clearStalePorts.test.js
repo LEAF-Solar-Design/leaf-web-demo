@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { scaleTimeout } from '../testTimeScale.js'
 import { afterEach, expect, it } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
@@ -81,7 +82,7 @@ it('clears a detached listener and writes the exact receipt', async () => {
   expect(receipt.signalled).toContainEqual({ port, pid: child.pid, signal: expect.stringMatching(/^SIG(TERM|KILL)$/) })
   await refusedConnection(port)
   expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toEqual(receipt)
-}, 20_000)
+}, scaleTimeout(20_000))
 
 it('writes an empty receipt when there is no listener', async () => {
   const server = createServer()
@@ -95,17 +96,20 @@ it('writes an empty receipt when there is no listener', async () => {
   const receipt = await clearStalePorts({ ports: [port], receiptPath })
   expect(receipt).toEqual({ ok: true, remaining: [], signalled: [], error: null })
   expect(JSON.parse(readFileSync(receiptPath, 'utf8'))).toEqual(receipt)
-}, 15_000)
+}, scaleTimeout(15_000))
 
 it('slow discovery within the deadline succeeds', async () => {
   const receiptPath = receiptFile()
+  let slowDone = false
   const exec = async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200))
+    slowDone = true
     return { stdout: '', stderr: '' }
   }
   const started = Date.now()
   const receipt = await clearStalePorts({ ports: [5275], receiptPath, timeoutMs: 5000, exec })
-  expect(Date.now() - started).toBeGreaterThanOrEqual(1200)
+  expect(slowDone).toBe(true)
+  expect(Date.now() - started).toBeGreaterThanOrEqual(1150)
   expect(receipt.ok).toBe(true)
   expect(receipt.remaining).toEqual([])
   expect(receipt.signalled).toEqual([])
@@ -149,7 +153,7 @@ it.each([
   const receiptPath = receiptFile()
   const result = spawnSync(process.execPath, [script, ...args,
     ...(name === 'missing receipt' ? [] : ['--receipt', receiptPath]),
-  ], { encoding: 'utf8', timeout: 5000, windowsHide: true })
+  ], { encoding: 'utf8', timeout: scaleTimeout(5000), windowsHide: true })
   expect(result.error).toBeUndefined()
   expect(result.status).toBe(2)
   expect(existsSync(receiptPath)).toBe(false)

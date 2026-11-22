@@ -2,6 +2,7 @@
 
 import builtins
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -28,11 +29,15 @@ def fixture(tmp_path, monkeypatch):
     (repo / "web/package-lock.json").write_text(json.dumps({"packages": {
         "node_modules/playwright-core": {"version": "1.60.0", "integrity": "sha512-fixture"}}}))
     (repo / "server/requirements.txt").write_text("playwright==1.60.0\npytest\n")
+    (repo / "web/next.config.mjs").write_text("export default {};\n")
+    for tree in ("web", "harness"):
+        (repo / tree / "package.json").write_text('{"private":true}\n')
     release = tmp_path / "os-release"
     release.write_text('ID=ubuntu\nVERSION_ID="24.04"\n')
     argv = ["--repo", str(repo), "--cache-dir", str(tmp_path / "cache"),
             "--run", "device:fixture", "--writable", "1", "--day", "20261111",
-            "--node-version", "v22.1.0", "--os-release", str(release),
+            "--node-version", "v22.1.0", "--npm-version", "10.9.0", "--tree", "web",
+            "--os-release", str(release),
             "--pip-cache", str(tmp_path / "pip"), "--npm-cache", str(tmp_path / "npm"),
             "--revision", "a" * 40, "--src", str(tmp_path / "snapshot"),
             "--dest", str(tmp_path / "dest")]
@@ -118,6 +123,197 @@ def test_dl_key_stable_and_sensitive(fixture):
     assert cache.key_inputs(arguments(fixture, day="20261112")) != original
     assert cache.key_inputs(arguments(fixture, node_version="v20.0.0")) != original
     assert cache.key_inputs(arguments(fixture, node_version="v22.9.9")) == original
+
+
+def test_nm_key_stable_and_sensitive(fixture):
+    args = arguments(fixture, kind="nm")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert set(original) == {"schema", "tree", "lock", "package", "node", "npm", "platform", "arch", "os"}
+    for name in ("package-lock.json", "package.json"):
+        path = Path(args.repo) / "web" / name
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.write_bytes(content)
+        path.unlink()
+        with pytest.raises(ValueError):
+            cache.key_inputs(args)
+        path.write_bytes(content)
+        # Identical files still belong to separate tree keys.
+        write(Path(args.repo) / "harness" / name, content)
+    for changes in ({"node_version": "v22.1.1"}, {"npm_version": "10.9.1"}, {"tree": "harness"}):
+        assert cache.key_inputs(arguments(fixture, kind="nm", **changes)) != original
+    args.tree = None
+    with pytest.raises(ValueError):
+        cache.key_inputs(args)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("node_version", "22.1.0"), ("node_version", "v22"), ("node_version", "v22.1.0-extra"),
+    ("npm_version", "v10.9.0"), ("npm_version", "10.9"), ("npm_version", "10.9.0\n"),
+])
+def test_nm_bad_versions_fail_open(fixture, capsys, field, value):
+    assert invoke(fixture, capsys, kind="nm", **{field: value})["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+def test_nm_installed_tree_round_trip(fixture, capsys):
+    root = fixture[0] / "repo/web/node_modules"
+    write(root / "tool/bin/run", b"#!/bin/sh\n", executable=True)
+    write(root / "tool/index.js", b"module.exports = 1;")
+    (root / ".bin").mkdir()
+    (root / ".bin/tool").symlink_to("../tool/bin/run")
+    for name in (".cache", ".vite", ".vitest"):
+        write(root / name / "transient")
+    assert invoke(fixture, capsys, "publish", "nm")["result"] == "published"
+    cache.shutil.rmtree(root)
+    result = invoke(fixture, capsys, kind="nm", writable="0")
+    assert result["result"] == "exact" and result["node_modules"] == "seeded"
+    assert (root / "tool/bin/run").read_bytes() == b"#!/bin/sh\n"
+    assert (root / "tool/bin/run").stat().st_mode & 0o111
+    assert (root / "tool/index.js").read_bytes() == b"module.exports = 1;"
+    assert not (root / "tool/index.js").stat().st_mode & 0o111
+    assert os.readlink(root / ".bin/tool") == "../tool/bin/run"
+    for name in (".cache", ".vite", ".vitest"):
+        assert not (root / name).exists()
+    assert invoke(fixture, capsys, kind="nm", writable="0", npm_version="10.9.1")["result"] == "miss"
+
+
+def test_nx_key_stable_and_sensitive(fixture, monkeypatch):
+    args = arguments(fixture, kind="nx")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert original == {
+        "schema": "leaf.dep-cache.nx.v1",
+        "lock": hashlib.sha256((Path(args.repo) / "web/package-lock.json").read_bytes()).hexdigest(),
+        "config": hashlib.sha256((Path(args.repo) / "web/next.config.mjs").read_bytes()).hexdigest(),
+        "node": "v22.1.0", "platform": cache.sysconfig.get_platform(),
+        "arch": cache.platform.machine(), "day": "20261111",
+    }
+    for rel in ("web/package-lock.json", "web/next.config.mjs"):
+        path = Path(args.repo) / rel
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.write_bytes(content)
+    for changes in ({"node_version": "v22.1.1"}, {"day": "20261112"}):
+        assert cache.key_inputs(arguments(fixture, kind="nx", **changes)) != original
+    for module, name in ((cache.sysconfig, "get_platform"), (cache.platform, "machine")):
+        with monkeypatch.context() as context:
+            context.setattr(module, name, lambda: "fixture-other")
+            assert cache.key_inputs(args) != original
+    write(Path(args.repo) / "web/app/page.tsx", b"changed source")
+    Path(args.os_release).unlink()
+    assert cache.key_inputs(args) == original
+
+
+@pytest.mark.parametrize("field,value", [
+    ("day", ""), ("day", "2026-11-11"), ("day", "2026111"), ("day", "20261111\n"),
+    ("node_version", "22.1.0"), ("node_version", "v22"),
+    ("node_version", "v22.1.0-extra"), ("node_version", "v22.1.0\n"),
+])
+def test_nx_invalid_inputs_fail_open(fixture, capsys, field, value):
+    with pytest.raises(ValueError):
+        cache.key_inputs(arguments(fixture, kind="nx", **{field: value}))
+    assert invoke(fixture, capsys, kind="nx", **{field: value})["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+@pytest.mark.parametrize("rel", ["web/package-lock.json", "web/next.config.mjs"])
+def test_nx_missing_inputs_fail_open(fixture, capsys, rel):
+    (fixture[0] / "repo" / rel).unlink()
+    with pytest.raises(ValueError):
+        cache.key_inputs(arguments(fixture, kind="nx"))
+    assert invoke(fixture, capsys, kind="nx")["result"] == "error"
+    assert not (fixture[0] / "cache").exists()
+
+
+def test_nx_round_trip_excludes_other_cache_data(fixture, capsys):
+    root = fixture[0] / "repo/web/.next/cache"
+    payloads = {"webpack/client/0.pack": b"webpack client", "webpack/server/index.pack": b"webpack server",
+                "swc/plugins/tool.wasm": b"swc"}
+    for rel, payload in payloads.items():
+        write(root / rel, payload)
+    for rel in ("images/image", "fetch-cache/response", "config.json", "webpack-other/partial"):
+        write(root / rel)
+    assert invoke(fixture, capsys, "publish", "nx")["result"] == "published"
+    entry = entry_for(fixture, "nx")
+    assert cache.ENTRY_RE.fullmatch(entry.name)
+    meta = cache.load_meta(entry, "nx")
+    assert {row[0] for row in meta["files"]} == {"next-cache/" + rel for rel in payloads}
+    cache.shutil.rmtree(root)
+    before = snapshot(entry.parent)
+    result = invoke(fixture, capsys, kind="nx", writable="0")
+    assert result["result"] == "exact" and result["next-cache"] == "seeded"
+    assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()} == payloads
+    assert snapshot(entry.parent) == before
+    assert invoke(fixture, capsys, kind="nx", writable="0", day="20261112")["result"] == "miss"
+
+
+def test_py_key_stable_and_sensitive(fixture, monkeypatch):
+    base = fixture[0] / "base"
+    base.mkdir()
+    (base / "z.dist-info").mkdir()
+    (base / "a.egg-info").write_text("metadata")
+    (base / "unrelated").mkdir()
+    monkeypatch.setattr(cache.sysconfig, "get_paths", lambda: {"purelib": str(base), "platlib": str(base)})
+    args = arguments(fixture, kind="py")
+    original = cache.key_inputs(args)
+    assert cache.key_inputs(args) == original
+    assert original["base"] == ["a.egg-info", "z.dist-info"]
+    assert set(original["files"]) == set(cache.DEPENDENCY_FILES[2:])
+    assert original["executable"] == os.path.realpath(cache.sys.executable)
+    for rel in cache.DEPENDENCY_FILES[2:]:
+        path = Path(args.repo) / rel
+        content = path.read_bytes()
+        path.write_bytes(content + b"x")
+        assert cache.key_inputs(args) != original
+        path.unlink()
+        assert cache.key_inputs(args)["files"][rel] == "absent"
+        path.write_bytes(content)
+    for changes in ({"day": "20261112"}, {"dest": fixture[0] / "other-venv"}):
+        assert cache.key_inputs(arguments(fixture, kind="py", **changes)) != original
+    assert cache.key_inputs(arguments(fixture, "publish", "py", src=args.dest)) == original
+    (base / "new.dist-info").mkdir()
+    assert cache.key_inputs(args) != original
+
+
+@pytest.mark.parametrize("changes", [
+    {"day": ""}, {"day": "2026-11-11"}, {"day": "20261111\n"},
+    {"dest": ""}, {"dest": "relative/venv"},
+])
+def test_py_invalid_inputs_fail_open(fixture, capsys, changes):
+    assert invoke(fixture, capsys, kind="py", **changes)["result"] == "error"
+
+
+def test_py_installed_tree_round_trip(fixture, capsys):
+    root = fixture[0] / "venv"
+    write(root / "pyvenv.cfg")
+    write(root / "lib/python/site-packages/tool.py", b"tool = 1\n")
+    write(root / "lib/python/site-packages/__pycache__/tool.pyc")
+    write(root / "__pycache__/root.pyc")
+    write(root / "bin/pytest", b"#!/venv/bin/python\n", executable=True)
+    for name in ("python", "python3", "python3.12"):
+        (root / "bin" / name).symlink_to("/usr/bin/python3")
+    assert invoke(fixture, capsys, "publish", "py", src=root)["result"] == "published"
+    cache.shutil.rmtree(root)
+    result = invoke(fixture, capsys, kind="py", dest=root, writable="0")
+    assert result["result"] == "exact" and result["venv"] == "seeded"
+    assert (root / "lib/python/site-packages/tool.py").read_bytes() == b"tool = 1\n"
+    assert (root / "bin/pytest").stat().st_mode & 0o111
+    assert {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} == {
+        "lib/python/site-packages/tool.py", "bin/pytest"}
+    assert not any(p.is_symlink() or p.name == "__pycache__" for p in root.rglob("*"))
+    assert invoke(fixture, capsys, kind="py", dest=root, day="20261112", writable="0")["result"] == "miss"
+
+
+@pytest.mark.parametrize("kind", ["dl", "pw", "as", "nm", "py", "nx"])
+def test_per_kind_off_is_scoped(fixture, capsys, kind):
+    write(fixture[0] / "cache" / (".leaf-dep-cache-off-" + kind), b"")
+    assert invoke(fixture, capsys, kind=kind)["result"] == "off"
+    other = "nm" if kind != "nm" else "py"
+    assert invoke(fixture, capsys, kind=other)["result"] == "miss"
 
 
 def test_pw_key_depends_only_on_versions_os_arch(fixture, monkeypatch):
@@ -320,6 +516,232 @@ def test_destination_failure_is_error_without_quarantine(fixture, capsys, monkey
     assert entry.is_dir()
     assert not list(entry.parent.glob("*.tmp-corrupt-*"))
     assert not list((fixture[0] / "out").iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("version", [(3, 11), (3, 12)])
+def test_remove_tree_permission_callback(tmp_path, monkeypatch, version):
+    root = tmp_path / "tree"
+    path = root / "file"
+    write(path)
+    path.chmod(0o444)
+    root.chmod(0o555)
+    calls = []
+
+    def unlink(name):
+        calls.append(name)
+        assert path.stat().st_mode & 0o200
+        assert root.stat().st_mode & 0o200
+        Path(name).unlink()
+
+    def rmtree(name, **kwargs):
+        error = PermissionError("fixture read-only entry")
+        if version >= (3, 12):
+            kwargs["onexc"](unlink, str(path), error)
+        else:
+            kwargs["onerror"](unlink, str(path), (PermissionError, error, None))
+        Path(name).rmdir()
+
+    monkeypatch.setattr(cache.sys, "version_info", version)
+    monkeypatch.setattr(cache.shutil, "rmtree", rmtree)
+    cache._remove_tree(root)
+    assert calls == [path]
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("version", [(3, 11), (3, 12)])
+@pytest.mark.parametrize("permission_error", [False, True])
+def test_remove_tree_propagates_callback_failure(tmp_path, monkeypatch, version, permission_error):
+    root = tmp_path / "tree"
+    write(root / "file")
+    original = PermissionError("fixture still denied") if permission_error else OSError("fixture I/O error")
+    calls = []
+
+    def fail_remove(name):
+        calls.append(name)
+        raise original
+
+    def rmtree(name, **kwargs):
+        if version >= (3, 12):
+            kwargs["onexc"](fail_remove, str(root), original)
+        else:
+            kwargs["onerror"](fail_remove, str(root), (type(original), original, None))
+
+    monkeypatch.setattr(cache.sys, "version_info", version)
+    monkeypatch.setattr(cache.shutil, "rmtree", rmtree)
+    with pytest.raises(OSError) as error:
+        cache._remove_tree(root)
+
+    assert error.value is original
+    assert calls == ([root] if permission_error else [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("directory_mode", [0o555, 0o500, 0])
+def test_remove_tree_removes_readonly_entries(tmp_path, directory_mode):
+    root = tmp_path / "tree"
+    directory = root / "readonly"
+    write(directory / "file")
+    (directory / "file").chmod(0o444)
+    directory.chmod(directory_mode)
+    root.chmod(0o555)
+
+    cache._remove_tree(root)
+
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+def test_remove_tree_retries_unreadable_directory_with_readonly_children(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    directory = root / "unreadable"
+    write(directory / "nested/file")
+    (directory / "nested/file").chmod(0o444)
+    (directory / "nested").chmod(0o555)
+    directory.chmod(0)
+    rmtree = cache.shutil.rmtree
+    attempts = []
+
+    def denied_open(name, **kwargs):
+        if not attempts:
+            attempts.append(Path(name))
+            error = PermissionError("fixture unreadable directory")
+            if "onexc" in kwargs:
+                kwargs["onexc"](os.open, str(directory), error)
+            else:
+                kwargs["onerror"](os.open, str(directory), (PermissionError, error, None))
+            Path(name).rmdir()
+        else:
+            # The retried traversal must retain the permission callback.
+            assert "onexc" in kwargs or "onerror" in kwargs
+            rmtree(name, **kwargs)
+
+    monkeypatch.setattr(cache.shutil, "rmtree", denied_open)
+    cache._remove_tree(root)
+
+    assert attempts == [root]
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+def test_remove_tree_retries_failed_scandir(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    write(root / "nested/file")
+    (root / "nested/file").chmod(0o444)
+    (root / "nested").chmod(0o555)
+    root.chmod(0o555)
+    scandir = os.scandir
+    attempts = []
+
+    def denied_scan(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise PermissionError("fixture unreadable directory")
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", denied_scan)
+    cache._remove_tree(root)
+
+    assert len(attempts) > 1
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and directory permissions are required")
+def test_remove_tree_does_not_follow_symlinks(tmp_path):
+    target = tmp_path / "target"
+    write(target / "file", b"keep")
+    (target / "file").chmod(0o444)
+    target.chmod(0o555)
+    before = snapshot(target)
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "link").symlink_to(target, target_is_directory=True)
+    (root / "file-link").symlink_to(target / "file")
+    root.chmod(0o555)
+
+    cache._remove_tree(root)
+
+    assert not root.exists()
+    assert snapshot(target) == before
+    # A tree path that is itself a symlink must also leave its target intact.
+    root.symlink_to(target, target_is_directory=True)
+    cache._remove_tree(root)
+    assert not root.is_symlink()
+    assert snapshot(target) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions are not supported on Windows")
+@pytest.mark.parametrize("error_type", [OSError, cache.Corrupt])
+def test_failed_seed_removes_readonly_temporary(fixture, capsys, monkeypatch, error_type):
+    root = fixture[0] / "repo/web/node_modules"
+    write(root / "package/file")
+    invoke(fixture, capsys, "publish", "nm")
+    cache.shutil.rmtree(root)
+    original = error_type("fixture copy failed")
+
+    def fail_copy(source_root, rel, destination, row, verify):
+        write(destination)
+        destination.chmod(0o444)
+        destination.parent.chmod(0o555)
+        raise original
+
+    monkeypatch.setattr(cache, "copy_file", fail_copy)
+    args = arguments(fixture, kind="nm")
+    with pytest.raises(error_type) as error:
+        cache.seed(args, Path(args.cache_dir), entry_for(fixture, "nm"), cache.key_inputs(args), {})
+
+    assert error.value is original
+    assert not root.exists()
+    assert not list(root.parent.glob("*.leaf-seed-*"))
+
+
+@pytest.mark.parametrize("failure", ["copy", "commit", "none", "handled"])
+def test_seed_cleanup_failure_preserves_active_error(fixture, capsys, monkeypatch, failure):
+    sources(fixture)
+    invoke(fixture, capsys, "publish")
+    args = arguments(fixture, pip_cache=fixture[0] / "out/pip", npm_cache=fixture[0] / "out/npm")
+    original = OSError("fixture seed failed")
+    cleanup = OSError("fixture cleanup failed")
+    rename = os.rename
+
+    def fail_copy(*unused):
+        raise original
+
+    def commit(source, destination):
+        if failure in ("none", "handled"):
+            # Leave staged trees behind after an otherwise successful seed.
+            return
+        if Path(destination).name == "npm":
+            raise original
+        rename(source, destination)
+
+    def fail_cleanup(path):
+        raise cleanup
+
+    if failure == "copy":
+        monkeypatch.setattr(cache, "copy_file", fail_copy)
+    else:
+        monkeypatch.setattr(os, "rename", commit)
+    monkeypatch.setattr(cache, "_remove_tree", fail_cleanup)
+
+    with pytest.raises(OSError) as error:
+        if failure == "handled":
+            try:
+                raise original
+            except OSError:
+                cache.seed(args, Path(args.cache_dir), entry_for(fixture), cache.key_inputs(args), {})
+        else:
+            cache.seed(args, Path(args.cache_dir), entry_for(fixture), cache.key_inputs(args), {})
+
+    assert error.value is (cleanup if failure in ("none", "handled") else original)
+    stderr = capsys.readouterr().err
+    if failure in ("none", "handled"):
+        assert stderr == ""
+    else:
+        assert stderr.splitlines() == [
+            f"dep-cache: cleanup failed for {path}: {cleanup}"
+            for path in ([fixture[0] / "out/pip"] if failure == "commit" else [])
+            + sorted((fixture[0] / "out").glob("*.leaf-seed-*"))]
 
 
 def test_missing_payload_is_corrupt(fixture, capsys):

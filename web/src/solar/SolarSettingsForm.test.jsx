@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import React, { StrictMode } from 'react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -566,7 +567,7 @@ describe('Canonical Solar settings form through the merged project client', () =
         }
       }
     }
-  }, 20000);
+  }, scaleTimeout(20000));
   it('R8-21 uses the R7 captured predicate after result production and before continuation', async () => {
     for (const stage of ['context', 'preview']) {
       const h = projectHarness();

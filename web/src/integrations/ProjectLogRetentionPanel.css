@@ -1,0 +1,20 @@
+.retention-panel { font: inherit; color: inherit; display: grid; gap: 1rem; min-width: 0; }
+.retention-panel header p { max-width: 76ch; margin-block: .4rem; line-height: 1.55; }
+.retention-panel fieldset { border: 1px solid var(--border-color, #8886); border-radius: .4rem; padding: .8rem; min-width: 0; }
+.retention-panel legend { font-weight: 650; padding-inline: .3rem; }
+.retention-panel label { display: grid; gap: .25rem; font-size: .9rem; min-width: 0; }
+.retention-panel input, .retention-panel select, .retention-panel button { font: inherit; color: inherit; background: var(--panel-bg, transparent); border: 1px solid var(--border-color, #8888); border-radius: .3rem; padding: .45rem .65rem; min-width: 0; }
+.retention-panel button { cursor: pointer; min-height: 2.5rem; }
+.retention-panel button:hover:enabled, .retention-panel button[aria-pressed="true"] { background: var(--hover-bg, #8882); }
+.retention-panel button:disabled { opacity: .55; cursor: default; }
+.retention-panel :is(input, select, button, summary):focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.retention-panel .retention-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: .7rem; margin-bottom: .7rem; }
+.retention-panel .retention-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-block: .5rem; }
+.retention-panel p { overflow-wrap: anywhere; line-height: 1.5; }
+.retention-panel [role="alert"] { border-inline-start: .25rem solid currentColor; padding-inline-start: .7rem; }
+.retention-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; max-width: 100%; }
+.retention-panel .retention-table-frame { overflow-x: auto; max-width: 100%; border: 1px solid var(--border-color, #8886); }
+.retention-panel table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+.retention-panel th, .retention-panel td { text-align: start; vertical-align: top; border-bottom: 1px solid var(--border-color, #8886); padding: .45rem; }
+.retention-panel td span { display: block; max-width: 32rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (max-width: 480px) { .retention-panel fieldset { padding: .6rem; } .retention-panel .retention-actions button { flex: 1 1 11rem; } }

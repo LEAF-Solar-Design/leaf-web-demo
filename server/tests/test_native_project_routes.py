@@ -122,6 +122,105 @@ def create(lane):
         return client.post(PREFIX, json=lane.body, headers=lane.headers)
 
 
+def test_known_local_pre_generation_refusal_survives_private_middleware_without_generation(connected, monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise flow.VideoUnavailableBeforeGeneration()
+    monkeypatch.setattr(native, '_require_video_prerequisites', unavailable)
+    result = create(connected)
+    expected = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=PROJECT,
+        source_request_id=EDIT, source_profile=native.SOURCE_PROFILE, action='create',
+        authority_session_id=SID, authority_turn_id=TID, stage='before_generation')
+    assert result.status_code == 503
+    assert result.json() == dict(error=dict(code='video_unavailable', message=flow.VIDEO_REFUSAL_MESSAGE), refusal=expected)
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations and not connected.candidates
+    assert connected.active is None
+    assert len([e for e in connected.events if e['type'] == 'browser_source_dispatch']) == 1
+    assert [e['data']['refusal'] for e in connected.events if e['type'] == 'browser_source_error'] == [expected]
+    # A known refusal records disposition; it does not erase the original claim.
+    connected.headers = connected.begin()
+    assert create(connected).status_code == 409
+    assert not connected.posts and not connected.initializations
+
+
+@pytest.mark.parametrize('change', ['plain503', 'downstream-code', 'wrong-request', 'extra', 'revoked', 'no-disposition'])
+def test_only_current_bound_local_refusal_is_public(connected, monkeypatch, change):
+    if change == 'downstream-code':
+        def downstream(*args, **kwargs):
+            error = authoring.AuthoringError('author_unavailable')
+            error.code = 'video_unavailable'
+            raise error
+        monkeypatch.setattr(authoring, 'author', downstream)
+    elif change == 'plain503':
+        monkeypatch.setattr(native, 'author', lambda *a, **kw: (_ for _ in ()).throw(flow.FlowError(503)))
+    else:
+        def foreign(*args, **kwargs):
+            witness = dict(schema='leaf.native-source-pre-generation-refusal.v1', project_id=PROJECT,
+                source_request_id=EDIT, source_profile=native.SOURCE_PROFILE, action='create',
+                authority_session_id=SID, authority_turn_id=TID, stage='before_generation')
+            if change == 'wrong-request':
+                witness['source_request_id'] = str(uuid.uuid4())
+            elif change == 'extra':
+                witness['diagnostic'] = 'private provider detail'
+            else:
+                connected.revoked = True
+            raise flow.PreGenerationRefusal(witness, provenance=None if change == 'no-disposition' else flow._RECORDED_REFUSAL)
+        monkeypatch.setattr(native, 'author', foreign)
+    result = create(connected)
+    assert result.status_code in (403, 503)
+    assert 'refusal' not in result.json()
+    assert 'private provider detail' not in result.text
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations
+
+
+def test_refusal_is_not_returned_when_membership_changes_after_turn_settlement(connected, monkeypatch):
+    monkeypatch.setattr(native, '_require_video_prerequisites', lambda *a, **kw:
+        (_ for _ in ()).throw(flow.VideoUnavailableBeforeGeneration()))
+    def finish(*args, **kwargs):
+        connected.active = None
+        connected.revoked = True
+    monkeypatch.setattr(flow.turn_runner, 'finish_stage_authority', finish)
+    response = create(connected)
+    assert response.status_code == 403
+    assert 'refusal' not in response.json()
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert not connected.posts and not connected.initializations
+
+
+def test_untrusted_error_body_is_scrubbed_even_if_it_looks_like_a_refusal(connected):
+    async def downstream_response(request):
+        return routes.JSONResponse({'refusal': {'stage': 'before_generation'},
+            'error': {'code': 'video_unavailable', 'message': 'private provider detail'}}, status_code=503)
+    request = Request({'type': 'http', 'method': 'POST', 'path': PREFIX, 'headers': []})
+    import asyncio
+    result = asyncio.run(routes.no_store_responses(request, downstream_response))
+    assert 'refusal' not in json.loads(result.body)
+    assert b'private provider detail' not in result.body
+    assert result.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.parametrize('available', [False, True])
+def test_actual_native_prerequisite_check_precedes_author(connected, monkeypatch, available):
+    material = connected.body['material_refs'][0]['material_id']
+    connected.rows[material]['media_type'] = 'video/quicktime'
+    actual_import = native.importlib.import_module
+    monkeypatch.setattr(native.importlib, 'import_module', lambda name, *a, **kw:
+        SimpleNamespace(_available=lambda: available) if name == 'project_video_materials' else actual_import(name, *a, **kw))
+    calls = []
+    monkeypatch.setattr(authoring, 'author', lambda *a, **kw: calls.append('author'))
+    request = dict(connected.body, edit_id=EDIT, idempotency_key='synthetic')
+    request.pop('source_request_id')
+    if available:
+        native.author(connected.tenant, PROJECT, request)
+        assert calls == ['author']
+    else:
+        with pytest.raises(flow.VideoUnavailableBeforeGeneration):
+            native.author(connected.tenant, PROJECT, request)
+        assert not calls
+    assert not connected.posts and not connected.initializations
+
+
 def prepare_native_edit_consumer(lane):
     lane.body.update(source_operation='edit', expected_base_commit=BASE, material_refs=[])
     lane.headers = lane.begin('edit')
@@ -477,3 +576,161 @@ def test_native_confirmation_is_not_issued_twice(connected):
         # A fresh held intent observes durable publication and cannot mint a second approval.
         assert client.post(PREFIX+'/'+EDIT+'/confirm', json=body, headers=connected.begin('confirm', body)).status_code == 200
     assert len(connected.confirmations) == 1 and len(connected.posts) == 1
+
+
+@pytest.fixture
+def native_export(connected, monkeypatch):
+    assert create(connected).status_code == 200
+    row = connected.candidates[EDIT]
+    body = dict(receipt_digest=row['receipt_digest'], expected_version=row['version'],
+                confirmation_id=str(uuid.uuid4()))
+    with TestClient(connected.app) as client:
+        published = client.post(PREFIX+'/'+EDIT+'/confirm', json=body,
+                                headers=connected.begin('confirm', body))
+    assert published.status_code == 200 and published.json()['state'] == 'published'
+    connected.export_query = {key: str(published.json()[key]) for key in routes.source_export._WITNESSES}
+    connected.bundle = b'# v3 git bundle\n@object-format=sha1\n' + HEAD.encode() + b' refs/heads/main\n\nPACK'
+    connected.export_result = dict(bundle=connected.bundle, size_bytes=len(connected.bundle),
+        bundle_sha256=hashlib.sha256(connected.bundle).hexdigest(), source_commit=HEAD, source_tree=TREE,
+        lease_id=ACTOR, lease_generation='1')
+    connected.exports = []
+    def producer(*args, **kwargs):
+        connected.exports.append((args, kwargs))
+        return connected.export_result
+    monkeypatch.setattr(routes.source, 'export_project_source_bundle', producer)
+    # A customer download does not depend on a live conversation or worker lease.
+    connected.allowed, connected.active = False, None
+    return connected
+
+
+def download_native(lane, query=None, project=PROJECT, request_id=EDIT):
+    path = '/api/projects/'+project+'/native/source/requests/'+request_id+'/export'
+    with TestClient(lane.app) as client:
+        return client.get(path, params=lane.export_query if query is None else query)
+
+
+def test_native_export_exact_private_bytes_and_identity_for_read_only_member(native_export, monkeypatch):
+    accesses = []
+    def member(tenant, project, *, write, binding):
+        assert tenant is native_export.tenant and project == PROJECT and write is False
+        accesses.append(project)
+        return ORG
+    monkeypatch.setattr(authoring.platform_link, 'require_project_access', member)
+    response = download_native(native_export)
+    assert response.status_code == 200, response.text
+    assert response.content == native_export.bundle
+    assert accesses
+    assert native_export.exports == [((ORG, ORG, PROJECT, HEAD, TREE), {'max_bytes': 67108864})]
+    assert response.headers['content-type'] == 'application/octet-stream'
+    assert response.headers['content-disposition'] == f'attachment; filename="project-source-{HEAD}.bundle"'
+    assert response.headers['content-length'] == str(len(native_export.bundle))
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert response.headers['x-leaf-bundle-sha256'] == hashlib.sha256(response.content).hexdigest()
+    for key, value in native_export.export_query.items():
+        assert response.headers['x-leaf-source-'+key.removeprefix('source_').replace('_', '-')] == value
+    assert not any('lease' in key or 'repo' in key for key in response.headers)
+
+
+@pytest.mark.parametrize('field', ['source_commit', 'source_tree', 'receipt_digest', 'version'])
+def test_native_export_refuses_stale_review_witness_before_production(native_export, field):
+    query = dict(native_export.export_query)
+    query[field] = str(int(query[field])+1) if field == 'version' else 'f'*len(query[field])
+    response = download_native(native_export, query)
+    assert response.status_code == 409 and not native_export.exports
+    assert response.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.parametrize('kind', ['duplicate', 'missing', 'unknown', 'oversize', 'bad-version', 'bad-id'])
+def test_native_export_closed_bounded_query_and_request_identity(native_export, kind):
+    query = list(native_export.export_query.items())
+    request_id = EDIT
+    if kind == 'duplicate':
+        query.append(query[0])
+    elif kind == 'missing':
+        query.pop()
+    elif kind == 'unknown':
+        query.append(('repo_key', ACTOR))
+    elif kind == 'oversize':
+        query.append(('unknown', 'x'*2049))
+    elif kind == 'bad-version':
+        query = [(key, '01' if key == 'version' else value) for key, value in query]
+    else:
+        request_id = 'invalid'
+    response = download_native(native_export, query, request_id=request_id)
+    assert response.status_code == 422 and not native_export.exports
+
+
+@pytest.mark.parametrize('kind', ['revoked', 'foreign-project', 'unauthenticated', 'worker-only', 'unresolved'])
+def test_native_export_denies_without_customer_membership(native_export, kind):
+    project = PROJECT
+    if kind == 'revoked':
+        native_export.revoked = True
+    elif kind == 'foreign-project':
+        project = str(uuid.uuid4())
+    elif kind == 'unresolved':
+        native_export.tenant.authority_resolved = False
+    else:
+        def deny():
+            raise HTTPException(401 if kind == 'unauthenticated' else 403, 'private identity detail')
+        native_export.app.dependency_overrides[deps.require_active_tenant] = deny
+    # Authorization wins over malformed query data; no bundle is produced.
+    response = download_native(native_export, [('unknown', 'bad')], project=project)
+    assert response.status_code == 403 and not native_export.exports
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert 'private identity detail' not in response.text
+
+
+@pytest.mark.parametrize('kind', ['unpublished', 'missing', 'browser-profile', 'receipt-tamper'])
+def test_native_export_requires_durable_native_publication(native_export, kind):
+    if kind == 'missing':
+        native_export.candidates.clear()
+    elif kind == 'browser-profile':
+        from test_browser_project_flow import candidate
+        native_export.candidates[EDIT] = candidate()
+    elif kind == 'receipt-tamper':
+        native_export.candidates[EDIT]['receipt_json']['changed_paths'] = ['Sources/Other.swift']
+    else:
+        native_export.candidates[EDIT]['state'] = 'awaiting_confirmation'
+    response = download_native(native_export)
+    assert response.status_code == 409 and not native_export.exports
+
+
+@pytest.mark.parametrize('kind,status', [('revoked', 403), ('mapping', 403), ('principal', 403),
+                                        ('candidate', 409), ('missing', 409)])
+def test_native_export_rechecks_authorization_and_candidate_after_production(native_export, monkeypatch, kind, status):
+    def producer(*args, **kwargs):
+        if kind == 'revoked':
+            native_export.revoked = True
+        elif kind == 'mapping':
+            native_export.authority['repo_key'] = str(uuid.uuid4())
+        elif kind == 'principal':
+            native_export.tenant.subject = 'another-person'
+        elif kind == 'missing':
+            native_export.candidates.clear()
+        else:
+            native_export.candidates[EDIT]['version'] += 1
+        return native_export.export_result
+    monkeypatch.setattr(routes.source, 'export_project_source_bundle', producer)
+    response = download_native(native_export)
+    assert response.status_code == status
+    assert native_export.bundle not in response.content
+    assert response.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.parametrize('field,value', [('bundle', b'not a Git bundle'), ('size_bytes', True),
+    ('size_bytes', 1), ('bundle_sha256', '0'*64), ('source_commit', 'e'*40), ('source_tree', 'f'*40)])
+def test_native_export_verifies_producer_bytes_and_witnesses(native_export, field, value):
+    native_export.export_result[field] = value
+    response = download_native(native_export)
+    assert response.status_code == 503
+    assert response.headers['cache-control'] == 'private, no-store'
+
+
+@pytest.mark.parametrize('error,status', [(routes.source.SourceConflict, 409), (routes.source.SourceUnavailable, 503)])
+def test_native_export_bounds_producer_errors(native_export, monkeypatch, error, status):
+    def producer(*args, **kwargs):
+        raise error('private producer detail')
+    monkeypatch.setattr(routes.source, 'export_project_source_bundle', producer)
+    response = download_native(native_export)
+    assert response.status_code == status and 'private producer detail' not in response.text

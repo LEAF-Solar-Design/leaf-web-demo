@@ -51,9 +51,10 @@ def test_exact_create_and_cas_wire(save, kind, revision):
     value = {"recipe": recipe(kind), "confirmation_id": "a" * 16}
     if revision is not None:
         value["expectedRevision"] = revision
-    save.response["element"] = recipe(kind)
+    successor = 1 if revision is None else revision + 1
+    save.response.update(element=recipe(kind), revision=successor)
     result = save.save(value)
-    assert result["result"] == {"element": recipe(kind), "revision": 1}
+    assert result["result"] == {"element": recipe(kind), "revision": successor}
     assert len(save.requests) == len(save.gates) == 1
     args, _ = save.gates[0]
     assert args[:3] == (save.auth.tenant_id, save.auth.session_id, save.auth.turn_id)
@@ -141,6 +142,18 @@ def test_action_response_must_match_complete_submission(save, change):
     else:
         save.response["element"][change]["version"] = 2
     assert save.save({"recipe": submitted})["error"]["code"] == "outcome_unknown"
+    assert len(save.requests) == 1
+
+
+@pytest.mark.parametrize("expected,returned", [(None, 2), (7, 1), (7, 7), (7, 9)])
+def test_non_successor_receipt_is_unknown_without_retry(save, expected, returned):
+    value = {"recipe": recipe()}
+    if expected is not None:
+        value["expectedRevision"] = expected
+    save.response["revision"] = returned
+    result = save.save(value)
+    assert "result" not in result
+    assert result["error"]["code"] == "outcome_unknown"
     assert len(save.requests) == 1
 
 
@@ -299,7 +312,7 @@ def test_real_plan_first_approval_exact_recipe_revision_and_one_use(save, tmp_pa
     monkeypatch.setattr(session_policy, "get_policy", lambda session, tenant: "plan_first")
     save.svc.gate = agent_gate.gate
     value = {"recipe": recipe(kind), "expectedRevision": 7}
-    save.response["element"] = recipe(kind)
+    save.response.update(element=recipe(kind), revision=8)
     pending = save.save(value)["gate"]
     assert pending["decision"] == "awaiting_approval" and not save.requests
     confirmation = pending["confirmation_id"]

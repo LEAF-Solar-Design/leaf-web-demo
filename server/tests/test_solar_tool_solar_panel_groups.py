@@ -30,6 +30,8 @@ import write_loop
 from solar_design_graph import GraphValidationError, validate_graph
 from solar_graph_context import resolve_graph_context
 from solar_graph_seed import new_empty_graph
+from solar_project import project_validity
+from solar_solve_request import build_stringer_request
 from solar_sizing_client import require_sizing
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_graph_versions import drawing, commit, request_for, TENANT as BUNDLE_TENANT, DRAWING  # noqa: F401
@@ -129,13 +131,13 @@ def test_declaration_is_local_graph_commit():
         "invalid_request_code": INVALID, "readiness": {"kind": "w1-chain"},
         "engine": "server-builtin", "interaction": {"mode": "form"},
         "record_store": "write_seed", "record": None, "ledger": ["panel-group-create"],
-        "trusted_inputs": [], "maturity": "production", "wave": 1, "order": 30,
+        "trusted_inputs": ["source_intake"], "maturity": "production", "wave": 1, "order": 30,
         "scenario": "w1-rooftop",
     }
     assert json.loads((SERVER / "solar_tools/solar_panel_groups.json").read_text()) == expected
     assert solar_tools.get(TOOL) == expected
     assert deps.catalog_tool_digest(tool_row()) == (
-        "sha256:098e6563d15837eccc55d63f81b45011fa6efc679130b27c8241fef77e47425a")
+        "sha256:47819a8a1afc3d2ac512a309825de985ad9ddeadf4ba8335c7c249b6eabb9e54")
 
 
 @pytest.mark.parametrize("name,order,ledger", [
@@ -440,6 +442,79 @@ def test_run_is_deterministic(u):
     assert first == second
     assert first["frames"][0]["id"] == frame_id(source, [P3, P2, P1])
     assert first["frames"][0]["provenance"]["created_at"] == source["panels"][0]["provenance"]["created_at"]
+
+
+def discovery_source(value):
+    outlines = []
+    for panel in value["panels"]:
+        x, y = panel["centre"]
+        outlines.append({"handle": panel["provenance"]["source_handle"],
+            "layer": value["settings"]["panel_layer_contains"] or "Panels", "closed": True,
+            "pts": [[x-1, y-.5], [x+1, y-.5], [x+1, y+.5], [x-1, y+.5]]})
+    return {"polylines": outlines}
+
+
+def discovery_params(value):
+    return {"expected_rev": value["rev"], "discover": {
+        "BranchMaxOffset": .1, "AlignmentTolerance": .1, "InstallationDesign": "Roof"}}
+
+
+def test_discovery_partitions_islands_and_keeps_singletons(u):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source = discovery_source(value)
+    before = copy.deepcopy((value, source))
+    result = builtin().run(value, discovery_params(value), source_intake=source)
+    assert [set(frame["panel_refs"]) for frame in result["frames"]] == [{P1, P2}, {P3}]
+    assert sorted(ref for frame in result["frames"] for ref in frame["panel_refs"]) == sorted([P1, P2, P3])
+    assert all(panel["frame_ref"] for panel in result["panels"])
+    assert (value, source) == before
+    validate_graph(result)
+    assert result == builtin().run(value, discovery_params(value), source_intake=source)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("missing-source", "SOURCE_INTAKE_REQUIRED"),
+    ("missing-handle", "AMBIGUOUS_PANEL_HANDLE"),
+    ("moved-source", "GROUP_GEOMETRY_MISMATCH"),
+    ("caller-membership", INVALID),
+    ("wrong-installation", INVALID),
+    ("invalid-offset", INVALID),
+    ("extra-source-panel", "INVALID_GROUP_COVERAGE"),
+])
+def test_discovery_refuses_unbound_or_ambiguous_input(u, fault, code):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source, request = discovery_source(value), discovery_params(value)
+    if fault == "missing-source":
+        source = None
+    elif fault == "missing-handle":
+        source["polylines"].pop()
+    elif fault == "moved-source":
+        for point in source["polylines"][0]["pts"]:
+            point[0] -= .1
+    elif fault == "caller-membership":
+        request["groups"] = params()["groups"]
+    elif fault == "wrong-installation":
+        request["discover"]["InstallationDesign"] = "Ground"
+    elif fault == "extra-source-panel":
+        extra = copy.deepcopy(source["polylines"][-1])
+        extra["handle"] = "FF"
+        source["polylines"].append(extra)
+    else:
+        request["discover"]["BranchMaxOffset"] = True
+    before = copy.deepcopy(value)
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(value, request, source_intake=source)
+    assert error.value.code == code
+    assert value == before
+
+
+def test_discovery_offset_controls_islands_without_changing_geometry(u):
+    value = u(centres=((0, 0), (2.05, 0), (30, 0)))
+    source, request = discovery_source(value), discovery_params(value)
+    request["discover"]["BranchMaxOffset"] = .01
+    result = builtin().run(value, request, source_intake=source)
+    assert [frame["panel_refs"] for frame in result["frames"]] == [[P1], [P2], [P3]]
+    assert [panel["centre"] for panel in result["panels"]] == [panel["centre"] for panel in value["panels"]]
 
 
 def test_adapter_commit_and_terminal_proof(u, tmp_path, monkeypatch):
@@ -886,3 +961,87 @@ def test_group_creation_cancel(u):
         assert result == validate_graph(source)
         assert result["frames"] == []
     assert source == before
+
+
+# Manual Roof admission regression from the actual S03 readiness refusal.
+@pytest.fixture(params=["named", "seed-defaults"])
+def manual_roof(graph, request):
+    value = copy.deepcopy(graph)
+    for key in ("frames", "strings", "inverters", "routes", "schedules", "electrical_zones"):
+        value[key] = []
+    value["project"]["zip_code"] = ""
+    value["project"]["validity"] = project_validity(value["project"])
+    value["settings"]["panels_in_sequence"] = 14
+    outlines = []
+    for index, panel in enumerate(value["panels"]):
+        x = index * 3.0
+        panel.update(frame_ref=None, matrix_cell=None, centre=[x, 0.0], angle=0.0,
+                     assignment={"string_ref": None, "seq": None})
+        panel["provenance"]["source_handle"] = f"{160 + index:X}"
+        outlines.append({"handle": panel["provenance"]["source_handle"],
+                         "layer": "Panels", "closed": True,
+                         "pts": [[x-1, -.5], [x+1, -.5], [x+1, .5], [x-1, .5]]})
+    if request.param == "seed-defaults":
+        units = {key: graph["project"]["units"][key] for key in (
+            "drawing_units", "wcs_to_ucs", "elevation_datum", "crs")}
+        value = new_empty_graph(tenant_id="fixture", drawing_id="manual-roof",
+            source_hash=graph["source_hash"], units=units, created_at="2026-11-15T00:00:00Z")
+        value = local._load_builtin("solar-settings").run(value,
+            {"expected_rev": value["rev"], "changes": {
+                "panel_layer_contains": "Panels", "panels_in_sequence": 14}})
+        value = local._load_builtin("solar-panels-from-drawing").run(value,
+            {"expected_rev": value["rev"]}, source_intake={"polylines": outlines})
+    confirmed = local._load_builtin("solar-size-strings").run_bound(value,
+        {"expected_rev": value["rev"], "mode": "manual-global", "confirm": True},
+        tenant_id="fixture", job_id="manual-confirm")
+    grouped = local._load_builtin("solar-panel-groups").run(confirmed,
+        {"expected_rev": confirmed["rev"], "discover": {
+            "BranchMaxOffset": 1.0, "AlignmentTolerance": .1, "InstallationDesign": "Roof"}},
+        source_intake={"polylines": outlines})
+    return grouped
+
+
+def test_confirmed_manual_discovery_admits_solve_without_zip(manual_roof):
+    before = copy.deepcopy(manual_roof)
+    assert require_sizing(manual_roof)["mode"] == "manual-global"
+    assert manual_roof["project"]["validity"] in (
+        {"state": "unknown", "reasons": ["project_zip_required"]},
+        {"state": "unknown", "reasons": ["seed_defaults"]})
+    assert all(frame["module_power_watts"] == 0 for frame in manual_roof["frames"])
+    for frame in manual_roof["frames"]:
+        assert build_stringer_request(manual_roof, frame["id"], max_string_length=14,
+                                      dwgname="Synthetic", full_frame=True)
+    readiness = availability.w1_graph_readiness(manual_roof)
+    for tool in ("solar-solve-proposal", "solar-commit-solve"):
+        assert readiness[tool] == {"input_ready": True, "input_reason": None}
+    # Manual geometry does not grant electrical equipment or weather-based sizing readiness.
+    assert readiness["solar-size-strings"]["input_ready"] is False
+    assert readiness["solar-assign-equipment"]["input_ready"] is False
+    assert manual_roof == before
+
+
+@pytest.mark.parametrize("fault", ["confirmation", "evidence", "length", "panel-moved",
+                                    "frame-stale", "panel-stale", "settings-stale",
+                                    "project-name", "project-zip", "project-stale"])
+def test_manual_roof_exception_keeps_real_prerequisites(manual_roof, fault):
+    value = copy.deepcopy(manual_roof)
+    if fault == "confirmation":
+        value["settings"]["global_string_sizing_confirmed"] = False
+    elif fault == "evidence":
+        value["settings"]["extra"].pop("string_sizing")
+    elif fault == "length":
+        value["settings"]["panels_in_sequence"] = 13
+    elif fault == "panel-moved":
+        value["panels"][0]["centre"][0] += .1
+    elif fault in ("frame-stale", "panel-stale", "settings-stale"):
+        item = {"frame-stale": value["frames"][0], "panel-stale": value["panels"][0],
+                "settings-stale": value["settings"]}[fault]
+        item["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
+    elif fault == "project-stale":
+        value["project"]["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
+    else:
+        value["project"]["name" if fault == "project-name" else "zip_code"] = (
+            "" if fault == "project-name" else "invalid")
+        value["project"]["validity"] = project_validity(value["project"])
+    for tool in ("solar-solve-proposal", "solar-commit-solve"):
+        assert availability.w1_graph_readiness(value)[tool]["input_ready"] is False

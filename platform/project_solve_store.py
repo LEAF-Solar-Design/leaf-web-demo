@@ -21,7 +21,7 @@ _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _GRANT_RE = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _REFUSALS = frozenset({
     "cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
-    "cloud_upstream_failure", "cloud_response_invalid",
+    "cloud_upstream_failure", "cloud_response_invalid", "CLOUD_REQUEST_REJECTED",
 })
 _TERMINAL = frozenset({"completed", "refused", "outcome_unknown"})
 
@@ -32,6 +32,15 @@ class ExchangeScope:
     project_id: UUID
     drawing_id: UUID
     job_id: UUID
+
+
+@dataclass(frozen=True)
+class PieceExchangeScope(ExchangeScope):
+    """A server-derived piece in one immutable graph/source revision."""
+    piece_index: int
+    graph_revision: int
+    graph_sha256: str
+    source_hash: str
 
 
 @dataclass(frozen=True)
@@ -173,11 +182,34 @@ UNKNOWN_SQL = (
 )
 
 
+def _sql(sql, args):
+    """Select additive piece custody without changing legacy SQL or callers."""
+    if "piece_index" not in args:
+        return sql
+    scoped = SCOPE_SQL + (
+        " AND e.piece_index=%(piece_index)s AND e.graph_revision=%(graph_revision)s"
+        " AND e.graph_sha256=%(graph_sha256)s AND e.source_hash=%(source_hash)s")
+    if sql == PREPARE_SQL:
+        fields = (*_PREPARE_FIELDS, "piece_index", "source_hash")
+        return ("INSERT INTO project_solve_piece_exchanges (" + ",".join(fields) + ") "
+            "SELECT " + ",".join("%(" + name + ")s" for name in fields) +
+            " FROM jobs j WHERE " + LIVE_SQL +
+            " ON CONFLICT (job_id,piece_index) DO NOTHING RETURNING *")
+    return sql.replace("project_solve_exchanges", "project_solve_piece_exchanges").replace(
+        SCOPE_SQL, scoped)
+
+
 def _parameters(scope, lease):
     if not isinstance(scope, ExchangeScope) or not isinstance(lease, JobAttempt):
         raise ExchangeInputError()
     if any(not isinstance(getattr(scope, name), UUID) for name in (
             "org_id", "project_id", "drawing_id", "job_id")):
+        raise ExchangeInputError()
+    if isinstance(scope, PieceExchangeScope) and (
+            type(scope.piece_index) is not int or not 0 <= scope.piece_index < 64
+            or type(scope.graph_revision) is not int or not 0 <= scope.graph_revision <= 2147483647
+            or any(type(value) is not str or _HASH_RE.fullmatch(value) is None
+                   for value in (scope.graph_sha256, scope.source_hash))):
         raise ExchangeInputError()
     if (type(lease.worker_id) is not str
             or lease.worker_id != lease.worker_id.strip()
@@ -232,7 +264,7 @@ def _lock(conn, args, *, live=True, required=True):
             canonical_jobs._graph_scope(job, conn)
         except ProjectContextError as exc:
             raise ExchangeLeaseLost() from exc
-        cur.execute(LOCK_EXCHANGE_SQL, args)
+        cur.execute(_sql(LOCK_EXCHANGE_SQL, args), args)
         exchange = _exchange(cur.fetchone())
         if live:
             _live(job, args, cur)
@@ -243,7 +275,7 @@ def _lock(conn, args, *, live=True, required=True):
 
 def _write(conn, sql, args):
     with conn.cursor() as cur:
-        cur.execute(sql, args)
+        cur.execute(_sql(sql, args), args)
         if cur.rowcount != 1:
             raise ExchangeLeaseLost()
         return _exchange(cur.fetchone())
@@ -261,7 +293,7 @@ def get_exchange(scope: ExchangeScope, lease: JobAttempt, *, conn=None) -> dict:
         with db.connection() as connection:
             return get_exchange(scope, lease, conn=connection)
     with conn.cursor() as cur:
-        cur.execute(READ_SQL, args)
+        cur.execute(_sql(READ_SQL, args), args)
         exchange = _exchange(cur.fetchone())
         if exchange is None:
             raise ExchangeNotFound()
@@ -278,6 +310,9 @@ def prepare_exchange(
 ) -> dict:
     args = _parameters(scope, lease)
     _validate_bytes(request_bytes, request_sha256, MAX_REQUEST_BYTES)
+    if isinstance(scope, PieceExchangeScope) and (
+            scope.graph_revision != graph_revision or scope.graph_sha256 != graph_sha256):
+        raise ExchangeConflict()
     if (not isinstance(grant_ref, str) or _GRANT_RE.fullmatch(grant_ref) is None
             or not isinstance(classification, str) or classification not in {"live", "synthetic"}):
         raise ExchangeInputError()
@@ -300,11 +335,11 @@ def prepare_exchange(
                 or job["execution_context"]["parent_intake_sha256"] != parent_intake_sha256):
             raise ExchangeConflict()
         with conn.cursor() as cur:
-            cur.execute(PREPARE_SQL, args)
+            cur.execute(_sql(PREPARE_SQL, args), args)
             inserted = _exchange(cur.fetchone())
             if inserted is not None:
                 return inserted
-            cur.execute(LOCK_EXCHANGE_SQL, args)
+            cur.execute(_sql(LOCK_EXCHANGE_SQL, args), args)
             existing = _exchange(cur.fetchone())
             _live(job, args, cur)
             if existing is None:
@@ -333,7 +368,7 @@ def begin_send(scope: ExchangeScope, lease: JobAttempt, *,
         except (ExchangeLeaseLost, ExchangeNotFound):
             return False
         with conn.cursor() as cur:
-            cur.execute(BEGIN_SEND_SQL, args)
+            cur.execute(_sql(BEGIN_SEND_SQL, args), args)
             return cur.rowcount == 1
 
     # run_transaction returns only after its context managers commit. Callers
@@ -522,3 +557,114 @@ def read_completed_exchange(org_id, project_id, drawing_id, job_id, *, conn) -> 
         if not isinstance(exchange[name], str) or _HASH_RE.fullmatch(exchange[name]) is None:
             raise ExchangeInputError()
     return exchange
+
+
+def read_completed_piece_exchange(scope: PieceExchangeScope, *, conn) -> dict:
+    """Lease-free, fully scoped piece reader used for offline reconstruction."""
+    if not isinstance(scope, PieceExchangeScope):
+        raise ExchangeInputError()
+    args = _parameters(scope, JobAttempt("offline-reader", 1))
+    with conn.cursor() as cur:
+        cur.execute(_sql("SELECT e.* FROM project_solve_exchanges e WHERE " + SCOPE_SQL, args), args)
+        exchange = _exchange(cur.fetchone())
+    if exchange is None:
+        raise ExchangeNotFound()
+    if exchange["state"] != "completed":
+        raise ExchangeStateError()
+    for name, bound in (("request", MAX_REQUEST_BYTES), ("response", MAX_RESPONSE_BYTES),
+                        ("candidate", MAX_CANDIDATE_BYTES), ("proof", MAX_PROOF_BYTES)):
+        _validate_bytes(exchange[name + "_bytes"], exchange[name + "_sha256"], bound)
+    return exchange
+
+
+def read_assembly_inputs(scope: ExchangeScope, input_version_id: UUID, piece_count: int, *, conn):
+    """Bounded lease-free evidence read for failed-parent attribution only."""
+    if (type(scope) is not ExchangeScope or not isinstance(input_version_id, UUID)
+            or type(piece_count) is not int or not 1 <= piece_count <= 64):
+        raise ExchangeInputError()
+    args = _parameters(scope, JobAttempt("offline-reader", 1))
+    sizes = "+".join("COALESCE(octet_length(" + name + "_bytes),0)"
+                     for name in ("request", "response", "candidate", "proof"))
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS count, COALESCE(sum(byte_count),0) AS bytes FROM ("
+                    "SELECT " + sizes + " AS byte_count FROM project_solve_exchanges e WHERE " + SCOPE_SQL +
+                    " UNION ALL SELECT " + sizes + " FROM project_solve_piece_exchanges e WHERE " +
+                    SCOPE_SQL + ") bounded", args)
+        bounds = cur.fetchone()
+        # Reuse the graph service's 16 MiB input envelope, before loading blobs.
+        if bounds["count"] < piece_count + 1:
+            raise ExchangeNotFound()
+        if bounds["count"] != piece_count + 1 or bounds["bytes"] > 16 * MAX_RESPONSE_BYTES:
+            raise ExchangeInputError()
+        cur.execute("SELECT e.* FROM project_solve_exchanges e WHERE " + SCOPE_SQL, args)
+        parent = _exchange(cur.fetchone())
+        cur.execute("SELECT e.* FROM project_solve_piece_exchanges e WHERE " + SCOPE_SQL +
+                    " ORDER BY e.piece_index LIMIT 65", args)
+        children = [_exchange(row) for row in cur.fetchall()]
+    if (parent is None or parent["state"] not in {"prepared", "completed"}
+            or any(type(row["piece_index"]) is not int for row in children)
+            or [row["piece_index"] for row in children] != list(range(piece_count))):
+        raise ExchangeStateError()
+    for row in [parent, *children]:
+        if (any(row[name] != getattr(scope, name) for name in ("org_id", "project_id", "drawing_id", "job_id"))
+                or row["input_version_id"] != input_version_id
+                or row is not parent and row["state"] != "completed"):
+            raise ExchangeInputError()
+        for name, bound in (("request", MAX_REQUEST_BYTES), ("response", MAX_RESPONSE_BYTES),
+                            ("candidate", MAX_CANDIDATE_BYTES), ("proof", MAX_PROOF_BYTES)):
+            raw, stamp = row[name + "_bytes"], row[name + "_sha256"]
+            if row is parent and parent["state"] == "prepared" and name != "request":
+                if raw is not None or stamp is not None:
+                    raise ExchangeInputError()
+            else:
+                _validate_bytes(raw, stamp, bound)
+    return parent, children
+
+
+def complete_split_manifest(scope: ExchangeScope, lease: JobAttempt, *,
+        response_bytes, response_sha256, solver_endpoint, solver_version,
+        candidate_bytes, candidate_sha256, proof_bytes, proof_sha256) -> dict:
+    """Atomically settle a local parent manifest after durable child completion.
+
+    This is not a send permission: all transitions commit together, and no
+    network operation may occur inside this transaction. Legacy sends retain
+    their separate committed intent and unknown-outcome rules.
+    """
+    if type(scope) is not ExchangeScope:
+        raise ExchangeInputError()
+    args = _parameters(scope, lease)
+    for raw, stamp, bound in ((response_bytes, response_sha256, MAX_RESPONSE_BYTES),
+            (candidate_bytes, candidate_sha256, MAX_CANDIDATE_BYTES),
+            (proof_bytes, proof_sha256, MAX_PROOF_BYTES)):
+        _validate_bytes(raw, stamp, bound)
+    if not _bounded_text(solver_endpoint, 2048) or not _bounded_text(solver_version, 200):
+        raise ExchangeInputError()
+    values = dict(response_bytes=response_bytes, response_sha256=response_sha256,
+        solver_endpoint=solver_endpoint, solver_version=solver_version,
+        candidate_bytes=candidate_bytes, candidate_sha256=candidate_sha256,
+        proof_bytes=proof_bytes, proof_sha256=proof_sha256)
+    args.update(values, send_protocol=None, send_principal_sha256=None)
+
+    def operation(conn):
+        _, exchange = _lock(conn, args)
+        basis = ("input_version_id", "parent_intake_sha256", "graph_revision", "graph_sha256",
+                 "frame_id", "phase", "grant_ref", "classification")
+        with conn.cursor() as cur:
+            cur.execute("SELECT state," + ",".join(basis) +
+                " FROM project_solve_piece_exchanges e WHERE " + SCOPE_SQL, args)
+            children = cur.fetchall()
+        if not children or any(row["state"] != "completed" for row in children):
+            raise ExchangeStateError()
+        if any(row[name] != exchange[name] for row in children for name in basis):
+            raise ExchangeConflict()
+        if exchange["state"] == "completed":
+            if any(exchange[name] != value for name, value in values.items()):
+                raise ExchangeConflict()
+            return exchange
+        if exchange["state"] != "prepared":
+            raise ExchangeStateError()
+        _write(conn, BEGIN_SEND_SQL, args)
+        _write(conn, CAPTURE_SQL, args)
+        return _write(conn, COMPLETE_SQL, args)
+
+    return db.run_transaction(operation)

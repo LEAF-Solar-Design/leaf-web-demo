@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarReadResult from './SolarReadResult.jsx'
+import SolarEdgeTrackingReferences from './SolarEdgeTrackingReferences.jsx'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
@@ -10,6 +11,7 @@ export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
   catalog_unavailable: 'Refresh the Solar tools before reading this output.',
   catalog_refreshing: 'Refreshing the Solar tools. Your inputs are kept.',
   tool_not_admitted: 'This Solar tool is no longer available for this project. Close it to continue.',
+  write_access_required: 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.',
   params_schema_changed: 'This Solar tool changed. Close and reopen it to use the new inputs.',
   unsupported: 'This tool is not available in the project Solar workspace.',
   host_unavailable: 'This editor is not available in the project Solar workspace.',
@@ -23,6 +25,7 @@ export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
   proposal_ready: 'Proposal ready for review.',
   run_outcome_unknown: 'The run outcome is unknown. Check its job before submitting again.',
   run_refused: 'The server refused this Solar request.',
+  solve_preparation_refused: 'This saved drawing could not be prepared for Solve. Refresh it and try again.',
   proposal_unreadable: 'This Solar proposal could not be read.',
   proposal_required: 'Run a solve and review its proposal before committing.',
   proposal_unpublished: 'This proposal has not published a drawing version.',
@@ -58,6 +61,7 @@ export function projectSolarWorkspaceReason(code) {
     case 'catalog_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_unavailable
     case 'catalog_refreshing': return PROJECT_SOLAR_WORKSPACE_REASONS.catalog_refreshing
     case 'tool_not_admitted': return PROJECT_SOLAR_WORKSPACE_REASONS.tool_not_admitted
+    case 'write_access_required': return PROJECT_SOLAR_WORKSPACE_REASONS.write_access_required
     case 'params_schema_changed': return PROJECT_SOLAR_WORKSPACE_REASONS.params_schema_changed
     case 'unsupported': return PROJECT_SOLAR_WORKSPACE_REASONS.unsupported
     case 'host_unavailable': return PROJECT_SOLAR_WORKSPACE_REASONS.host_unavailable
@@ -71,6 +75,7 @@ export function projectSolarWorkspaceReason(code) {
     case 'proposal_ready': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_ready
     case 'run_outcome_unknown': return PROJECT_SOLAR_WORKSPACE_REASONS.run_outcome_unknown
     case 'run_refused': return PROJECT_SOLAR_WORKSPACE_REASONS.run_refused
+    case 'solve_preparation_refused': return PROJECT_SOLAR_WORKSPACE_REASONS.solve_preparation_refused
     case 'proposal_unreadable': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_unreadable
     case 'proposal_required': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_required
     case 'proposal_unpublished': return PROJECT_SOLAR_WORKSPACE_REASONS.proposal_unpublished
@@ -79,7 +84,7 @@ export function projectSolarWorkspaceReason(code) {
   }
 }
 
-const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read']
+const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-solaredge-tracking-read', 'solar-assignment-report']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
 const REASON_CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
@@ -182,6 +187,8 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
   const mounted = useRef(false)
   const formEpoch = useRef(0)
   const parameterRevision = useRef(0)
+  const readButton = useRef(null)
+  const focusAfterRead = useRef(null)
   // SchemaForm's latest validity report, written in the handler itself: the report can arrive (from its effect) after
   // the render a submit closes over, and a stale valid form must never send the previous values.
   const reportedValid = useRef(true)
@@ -192,6 +199,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     operation.current?.controller.abort()
     operation.current = null
     presentedScope.current = null
+    focusAfterRead.current = null
   }
   const previous = latest.current
   if (!sameOwner(previous, owner)) {
@@ -230,9 +238,12 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     }
   }, [projectClient])
 
-  const edit = () => {
+  const retireParameters = () => {
     parameterRevision.current += 1
     invalidate()
+  }
+  const edit = () => {
+    retireParameters()
     setState({ phase: 'idle', generation: generation.current })
   }
   const read = async (event) => {
@@ -274,6 +285,7 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
     try {
       capturedScope = admitted.projectClient.captureCatalogScope()
       if (!check()) return
+      focusAfterRead.current = document.activeElement === readButton.current ? token : null
       setState({ phase: 'reading', generation: token })
       const outcome = await admitted.projectClient.readSolar({ tool: admitted.name, params,
         catalogDigest: admitted.digest, current: admitted.name !== 'solar-solaredge-tracking-read', signal: controller.signal })
@@ -299,23 +311,33 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
   const reason = owner.reason || (visible.phase === 'reading' ? 'reading' : busy ? 'busy' :
     !activeForm.valid ? 'parameters_invalid' : visible.phase === 'refused' ? 'read_refused' :
       visible.phase === 'stale' ? 'scope_stale' : visible.phase === 'presented' ? null : 'idle')
+  useLayoutEffect(() => {
+    if (!['presented', 'refused'].includes(visible.phase)) return
+    const restore = focusAfterRead.current === visible.generation
+    focusAfterRead.current = null
+    if (restore && !owner.reason && document.activeElement === document.body) readButton.current?.focus()
+  }, [visible.phase, visible.generation, owner.reason])
   return <section className="project-solar-read-panel">
-    <form onSubmit={read} onInputCapture={edit} onChangeCapture={edit}>
+    <form onSubmit={read} onInputCapture={retireParameters} onChangeCapture={retireParameters}>
       <SchemaForm key={formEpoch.current} schema={owner.editableSchema} values={activeForm.values}
         onChange={(values) => { edit(); setForm((value) => ({ ...value, values })) }}
         onValidityChange={(valid) => {
           reportedValid.current = valid
           setForm((value) => value.valid === valid ? value : { ...value, valid })
         }} />
-      <p role="status" aria-live="polite">{projectSolarWorkspaceReason(reason)}
+      <p role="status" aria-live="polite">{reason === 'read_refused' && visible.code === 'REPORT_RESOURCE_LIMIT'
+        ? 'This PDF exceeds the inspection limit. Try a smaller report. Your saved tracking is kept.'
+        : projectSolarWorkspaceReason(reason)}
         {reason === 'read_refused' && <> <code>{visible.code}</code></>}
       </p>
-      <button type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>
+      <button ref={readButton} type="submit" disabled={!!owner.reason || visible.phase === 'reading' || busy || !activeForm.valid}>
         {PROJECT_SOLAR_WORKSPACE_LABELS.read_action}
       </button>
     </form>
-    {!owner.reason && visible.phase === 'presented' && <SolarReadResult data={visible.data}
+    {!owner.reason && visible.phase === 'presented' && <><SolarReadResult data={visible.data}
       solarBinding={solarBinding} authorityKey={authorityKey} projectClient={projectClient}
-      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />}
+      catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />
+      {owner.name === 'solar-solaredge-tracking-read' && <SolarEdgeTrackingReferences
+        data={visible.data} binding={solarBinding} catalogDigest={owner.digest} />}</>}
   </section>
 }

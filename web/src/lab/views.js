@@ -10,7 +10,7 @@ const label = (id) => glossary.terms.find((term) => term.id === id).plain
 
 export const LAB_VIEWS = Object.freeze([
   { id: 'graph', label: label('strategy'), component: GraphView, path: '/app/lab' },
-  { id: 'widgets', label: label('market'), component: WidgetsView, path: '/app/lab/widgets' },
+  { id: 'widgets', label: 'Widgets', component: WidgetsView, path: '/app/lab/widgets' },
   { id: 'history', label: label('test'), component: HistoryView, path: '/app/lab/history' },
   { id: 'runs', label: label('keeper'), component: RunsView, path: '/app/lab/runs' },
   { id: 'deploys', label: label('lane'), component: DeploysView, path: '/app/lab/deploys' },

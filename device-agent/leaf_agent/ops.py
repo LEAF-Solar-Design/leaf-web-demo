@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from http.client import HTTPException
+import os
 import re
 import socket
 from urllib.error import HTTPError, URLError
@@ -14,6 +15,7 @@ from .config import Config
 from .packages import Registry
 
 MAX_BODY = 1048576
+OFF_LIMITS_TOKENS = ("444f8e80ff06", "80ff06", "10.0.0.175")
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
 ARGS = {
     "pkg.install": ({"package", "version"}, set()),
@@ -25,6 +27,29 @@ ARGS = {
     "ha.flow.start": ({"handler"}, {"data"}), "ha.flow.step": ({"flow_id", "data"}, set()),
     "agent.pause": (set(), set()), "agent.update": ({"version", "sha256"}, set()),
 }
+
+
+def names_off_limits(value) -> bool:
+    tokens = OFF_LIMITS_TOKENS + tuple(
+        token.strip().lower() for token in os.environ.get("LEAF_AGENT_OFF_LIMITS", "").split(",")
+        if token.strip()
+    )
+    pending = [value]
+    nodes = 0
+    while pending:
+        item = pending.pop()
+        nodes += 1
+        if nodes > 2000:
+            return True
+        if isinstance(item, str):
+            if any(token in item.lower() for token in tokens):
+                return True
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return False
 
 
 def failure(code: str, *, status="refused") -> dict:
@@ -109,6 +134,8 @@ class Dispatcher:
             return failure("invalid_args")
         if op == "ha.flow.step" and (not isinstance(args["flow_id"], str) or not 1 <= len(args["flow_id"]) <= 128):
             return failure("invalid_args")
+        if op in {"http.proxy", "ha.flow.start", "ha.flow.step"} and names_off_limits(args):
+            return failure("off_limits")
         try:
             if op == "http.proxy":
                 auth = handler.auth_headers()

@@ -1,31 +1,14 @@
 import React from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readdirSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import type { DatasetElementV1, DatasetReadV1 } from "../../assistant-contract/src/integration";
 import {
   DatasetElement, DataTableCore, LineChartCore, projectDatasetLine,
   formatDatasetAxisValue, resolveDisplayPreferences,
 } from "../src/datasets";
-
-const chart = vi.hoisted(() => ({
-  data: [] as unknown[], line: {} as Record<string, unknown>, axis: {} as Record<string, unknown>,
-  yAxis: {} as Record<string, unknown>, root: {} as Record<string, unknown>,
-  tooltip: {} as Record<string, unknown>, reference: {} as Record<string, unknown>,
-}));
-// Replace only the chart layout boundary; projection and formatting remain real.
-vi.mock("recharts", () => ({
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  LineChart: ({ children, data, ...props }: { children: React.ReactNode; data: unknown[] }) => {
-    chart.data = data; chart.root = props;
-    return <div data-testid="native-line">{children}</div>;
-  },
-  Line: (props: Record<string, unknown>) => { chart.line = props; return null; },
-  XAxis: (props: Record<string, unknown>) => { chart.axis = props; return null; },
-  YAxis: (props: Record<string, unknown>) => { chart.yAxis = props; return null; },
-  Tooltip: (props: Record<string, unknown>) => { chart.tooltip = props; return null; },
-  ReferenceLine: (props: Record<string, unknown>) => { chart.reference = props; return null; },
-  CartesianGrid: () => null,
-}));
 
 afterEach(cleanup);
 const ref = { id: "sales", version: 1, digest: "a".repeat(64) };
@@ -36,6 +19,27 @@ const element: DatasetElementV1 = {
   props: { columns: ["day", "revenue"], row_limit: 10 },
 };
 const lineElement = { ...element, kind: "dataset.line", props: { x_field: "day", y_field: "revenue" } };
+it.each(["text", "identifier"] as const)("shows hidden direction controls explicitly in %s cells without changing input identity", kind => {
+  const raw = "حساب \u202eABC123\u202c";
+  const literal = "حساب \\u202EABC123\\u202C";
+  const input = { ...read(), fields: [
+    { id: "account", label: "Account", type: { kind }, nullable: false, sensitivity: "public" as const },
+  ], rows: [
+    { key: "raw", values: { account: raw } },
+    { key: "literal", values: { account: literal } },
+    { key: "ordinary", values: { account: "חשבון XYZ456" } },
+  ] };
+  const before = JSON.stringify(input);
+  const view = { ...element, query: { fields: ["account"], limit: 10 }, props: { columns: ["account"], row_limit: 10 } };
+  render(<DatasetElement element={view} read={input} preferences={preferences} />);
+  const marked = screen.getByRole("cell", { name: /Hidden direction marks/ });
+  expect(within(marked).getByText(literal)).toBeInTheDocument();
+  expect(marked.textContent).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+  const plain = screen.getByRole("cell", { name: literal, exact: true });
+  expect(within(plain).queryByText("Hidden direction marks")).toBeNull();
+  expect(screen.getByRole("cell", { name: "חשבון XYZ456", exact: true })).toBeInTheDocument();
+  expect(JSON.stringify(input)).toBe(before);
+});
 function read(status: DatasetReadV1["status"] = "ready"): DatasetReadV1 {
   return {
     schema_version: 1, dataset_ref: ref, status,
@@ -54,6 +58,39 @@ function read(status: DatasetReadV1["status"] = "ready"): DatasetReadV1 {
 }
 
 describe("native dataset elements", () => {
+  function renderSource(value: string) {
+    return render(<DatasetElement element={{ ...element, query: { fields: ["source"], limit: 10 },
+      props: { columns: ["source"], row_limit: 10 } }} read={{ ...read(), fields: [
+        { id: "source", label: "Original source", type: { kind: "text" }, nullable: false, sensitivity: "public" },
+      ], rows: [{ key: "source", values: { source: value } }] }} preferences={preferences} />);
+  }
+
+  it.each([
+    "https://github.com/example/project/pull/12",
+    "https://forge.example.test/team/project/pulls/12",
+  ])("renders a supplied HTTPS source as an accessible external link: %s", (url) => {
+    renderSource(url);
+    const link = screen.getByRole("link", { name: url });
+    expect(link.getAttribute("href")).toBe(url);
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+  });
+
+  it.each([
+    "javascript:alert(1)", "data:text/html,<script>alert(1)</script>",
+    "//example.test/pull/12", "http://example.test/pull/12",
+    "https://user:password@example.test/pull/12", "https://example.test/has a space",
+    "https://example.test/\npath", "https://example.test\\@other.test/path",
+    '<a href="https://example.test">source</a>', "https://",
+  ])("keeps unsafe or ambiguous source text inert: %s", (value) => {
+    const result = renderSource(value);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(within(screen.getByRole("table")).getByText(value, { exact: true,
+      normalizer: (text) => text })).toBeTruthy();
+    expect(result.container.querySelector("script")).toBeNull();
+  });
+
   it("renders semantic headers, formatting and separate freshness labels", () => {
     const result = render(<DatasetElement element={element} read={read()} preferences={preferences} />);
     const table = screen.getByRole("table");
@@ -107,7 +144,7 @@ describe("native dataset elements", () => {
     result.rerender(<DatasetElement element={{ ...element, query: { fields: ["day"], limit: 10 } }} read={read()} preferences={preferences} />);
     expect(screen.queryByRole("table")).toBeNull();
     result.rerender(<DatasetElement element={{ ...lineElement, props: { x_field: "missing", y_field: "revenue" } }} read={read()} preferences={preferences} />);
-    expect(screen.queryByTestId("native-line")).toBeNull();
+    expect(screen.queryByRole("application")).toBeNull();
     result.rerender(<DatasetElement element={element} read={read()} preferences={{ ...preferences, timezone: "invalid" }} />);
     expect(screen.getByText("Invalid dataset or binding.")).toBeTruthy();
     expect(screen.queryByRole("table")).toBeNull();
@@ -161,12 +198,12 @@ describe("native dataset elements", () => {
     const original = read();
     const snapshot = JSON.stringify(original);
     const result = render(<DatasetElement element={lineElement} read={original} preferences={preferences} />);
-    expect(chart.data).toEqual([
-      { x: Date.parse("2026-01-01"), y: 0 }, { x: Date.parse("2026-01-02"), y: null }, { x: Date.parse("2026-01-03"), y: 1234 },
-    ]);
-    expect(chart.line.connectNulls).toBe(false);
-    expect(chart.line.isAnimationActive).toBe(false);
-    expect(chart.root.accessibilityLayer).toBe(true);
+    const dots = result.container.querySelectorAll("circle.leaf-line-dot");
+    expect(dots).toHaveLength(2);
+    expect(Number(dots[0].getAttribute("cx"))).toBeLessThan(Number(dots[1].getAttribute("cx")));
+    expect(Number(dots[0].getAttribute("cy"))).toBeGreaterThan(Number(dots[1].getAttribute("cy")));
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+    expect(screen.getByRole("application").getAttribute("tabindex")).toBe("0");
     const summary = screen.getByText("View data table");
     expect(summary.tagName).toBe("SUMMARY");
     expect(summary.parentElement?.tagName).toBe("DETAILS");
@@ -177,7 +214,7 @@ describe("native dataset elements", () => {
     expect(JSON.stringify(original)).toBe(snapshot);
     result.rerender(<DatasetElement element={{ ...lineElement, props: { x_field: "revenue", y_field: "day" } }} read={original} preferences={preferences} />);
     expect(screen.getByText("Invalid dataset or binding.")).toBeTruthy();
-    expect(screen.queryByTestId("native-line")).toBeNull();
+    expect(screen.queryByRole("application")).toBeNull();
   });
 
   it("escapes provider text without creating controls or displaying raw errors", () => {
@@ -202,17 +239,21 @@ describe("native dataset elements", () => {
       input.rows.push({ key: "missing", values: { day: null, revenue: 3 } });
       const before = JSON.stringify(input);
       const projected = projectDatasetLine(input.rows, input.fields[0], input.fields[1]);
-      render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
+      const result = render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
       const positions = xs.map((x) => typeof x === "number" ? x : Date.parse(x)).sort((a, b) => a - b);
-      expect(chart.data).toEqual([
+      expect(projected).toEqual([
         { x: positions[0], y: 1 }, { x: positions[1], y: null }, { x: positions[2], y: 0 },
       ]);
-      expect(projected).toEqual(chart.data);
       expect(positions[2] - positions[1]).toBeGreaterThan(positions[1] - positions[0]);
-      expect(chart.axis.type).toBe("number");
-      expect(chart.axis.domain).toEqual(["dataMin", "dataMax"]);
-      expect(chart.axis.allowDecimals).toBe(kind !== "count");
-      expect((chart.axis.tickFormatter as (v: number) => string)(positions[0])).not.toBe("Invalid");
+      const dots = result.container.querySelectorAll("circle.leaf-line-dot");
+      expect(dots).toHaveLength(2);
+      expect(Number(dots[0].getAttribute("cx"))).toBeLessThan(Number(dots[1].getAttribute("cx")));
+      expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+      const ticks = [...result.container.querySelectorAll("text.leaf-x-tick")].map(tick => tick.textContent);
+      expect(ticks).not.toContain("Invalid");
+      if (kind === "count") expect(ticks.every(tick => !tick?.includes("."))).toBe(true);
+      fireEvent.focus(screen.getByRole("application"));
+      expect(screen.getByRole("tooltip").textContent).toContain(formatDatasetAxisValue(input.fields[0], positions[0], preferences));
       screen.getByText("View data table").parentElement?.setAttribute("open", "");
       const tableRows = within(screen.getByRole("table")).getAllByRole("row");
       expect(tableRows).toHaveLength(5);
@@ -245,9 +286,11 @@ describe("native dataset elements", () => {
       expect(projected[2].x).toBeGreaterThan(projected[0].x);
       const tolerance = Number.EPSILON * Math.max(1, Math.abs(epoch));
       expect(Math.abs(projected[2].x - projected[0].x - 0.8)).toBeLessThanOrEqual(tolerance);
-      render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
-      expect(chart.data).toEqual(projected);
-      expect(chart.line.connectNulls).toBe(false);
+      const result = render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
+      const dots = result.container.querySelectorAll("circle.leaf-line-dot");
+      expect(dots).toHaveLength(2);
+      expect(Number(dots[0].getAttribute("cx"))).toBeLessThan(Number(dots[1].getAttribute("cx")));
+      expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
       screen.getByText("View data table").parentElement?.setAttribute("open", "");
       expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(5);
       expect(JSON.stringify(input)).toBe(before);
@@ -261,10 +304,16 @@ describe("native dataset elements", () => {
       kind === "money" ? { kind, currency: "USD", scale: "minor" } :
       kind === "duration" ? { kind, unit: "s" } : { kind };
     input.rows = [{ key: "zero", values: { day: 0, revenue: 0 } }];
-    render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
-    expect(screen.getByTestId("native-line")).toBeTruthy();
-    expect(chart.data).toEqual([{ x: 0, y: 0 }]);
-    expect(chart.yAxis.allowDecimals).toBe(kind !== "count" && kind !== "money");
+    const result = render(<DatasetElement element={lineElement} read={input} preferences={preferences} />);
+    expect(screen.getByRole("application")).toBeTruthy();
+    expect(result.container.querySelectorAll("circle.leaf-line-dot")).toHaveLength(1);
+    fireEvent.focus(screen.getByRole("application"));
+    expect(screen.getByRole("tooltip").textContent).toContain(formatDatasetAxisValue(input.fields[1], 0, preferences));
+    if (kind === "count" || kind === "money") {
+      const ticks = [...result.container.querySelectorAll("text.leaf-y-tick")].map(tick => tick.textContent);
+      expect(ticks).toEqual(expect.arrayContaining([formatDatasetAxisValue(input.fields[1], 0, preferences)]));
+      if (kind === "count") expect(ticks.every(tick => !tick?.includes("."))).toBe(true);
+    }
   });
 
   it.each(["date", "instant"] as const)("guards generated %s ticks outside the canonical range", (kind) => {
@@ -276,18 +325,115 @@ describe("native dataset elements", () => {
   });
 
   it("retains categorical defaults, chart options, formatter callbacks and accessible description", () => {
-    render(<LineChartCore data={[{ day: "A", value: 2 }]} xKey="day" yKey="value" title="Standalone"
+    const result = render(<LineChartCore data={[{ day: "A", value: 2 }]} xKey="day" yKey="value" title="Standalone"
       referenceLine={{ y: 3, label: "Target" }} yAxisDomain={[0, 5]}
       xFormatter={(value) => `X ${value}`} yFormatter={(value) => `Y ${value}`}
       accessibilityDescription="Values are also in the report." />);
-    expect(chart.axis.type).toBe("category");
-    expect(chart.yAxis.domain).toEqual([0, 5]);
-    expect(chart.reference.y).toBe(3);
-    expect(chart.line.connectNulls).toBe(false);
-    expect((chart.tooltip.labelFormatter as (value: unknown) => string)("A")).toBe("X A");
-    expect((chart.tooltip.formatter as (value: unknown) => unknown)(2)).toEqual(["Y 2", "value"]);
+    expect(result.container.querySelector("text.leaf-x-tick")?.textContent).toBe("X A");
+    expect(result.container.querySelector("text.leaf-y-tick")?.textContent).toBe("Y 0");
+    expect(result.container.querySelector(".leaf-reference-line")?.getAttribute("stroke-dasharray")).toBe("3 3");
+    expect(screen.getByText("Target")).toBeTruthy();
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+    fireEvent.focus(screen.getByRole("application"));
+    expect(screen.getByRole("tooltip").textContent).toBe("X A value: Y 2");
     const group = screen.getByRole("group", { name: "Standalone" });
     expect(group.getAttribute("aria-describedby")).toBe(screen.getByText("Values are also in the report.").id);
+  });
+
+  it("joins across gaps only when connectNulls is true and renders explicit x ticks exactly", () => {
+    const props = { data: [{ x: 0, y: 1 }, { x: 1, y: null }, { x: 4, y: 3 }], xKey: "x", yKey: "y" };
+    const result = render(<LineChartCore {...props} xAxisType="number" xAxisTicks={[0, 2, 4]} connectNulls />);
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(1);
+    expect(result.container.querySelector("path.leaf-line-curve")?.getAttribute("d")).toMatch(/C/);
+    expect([...result.container.querySelectorAll("text.leaf-x-tick")].map(tick => tick.textContent)).toEqual(["0", "2", "4"]);
+    result.rerender(<LineChartCore {...props} />);
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+  });
+
+  it("announces keyboard navigation with the value label and hides the tooltip on blur", () => {
+    const result = render(<LineChartCore data={[{ x: "A", y: 1 }, { x: "B", y: 2 }, { x: "C", y: 3 }]}
+      xKey="x" yKey="y" valueLabel="Revenue" />);
+    const plot = screen.getByRole("application");
+    fireEvent.focus(plot);
+    fireEvent.keyDown(plot, { key: "ArrowRight" });
+    expect(screen.getByRole("tooltip").textContent).toBe("B Revenue: 2.0");
+    expect(result.container.querySelector('[aria-live="polite"]')?.textContent).toBe("B Revenue: 2.0");
+    expect(result.container.querySelectorAll('circle[r="4"]')).toHaveLength(1);
+    fireEvent.keyDown(plot, { key: "End" });
+    expect(screen.getByRole("tooltip").textContent).toBe("C Revenue: 3.0");
+    fireEvent.keyDown(plot, { key: "ArrowLeft" });
+    expect(screen.getByRole("tooltip").textContent).toBe("B Revenue: 2.0");
+    fireEvent.keyDown(plot, { key: "Home" });
+    expect(screen.getByRole("tooltip").textContent).toBe("A Revenue: 1.0");
+    fireEvent.blur(plot);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("uses linear numeric spacing and evenly spaced categories", () => {
+    const props = { data: [{ x: 1, y: 1 }, { x: 2, y: 2 }, { x: 100, y: 3 }], xKey: "x", yKey: "y" };
+    const result = render(<LineChartCore {...props} xAxisType="number" xAxisDomain={["dataMin", "dataMax"]} />);
+    const positions = () => [...result.container.querySelectorAll("circle.leaf-line-dot")].map(dot => Number(dot.getAttribute("cx")));
+    const numeric = positions();
+    expect((numeric[2] - numeric[1]) / (numeric[1] - numeric[0])).toBeCloseTo(98);
+    result.rerender(<LineChartCore {...props} />);
+    const category = positions();
+    expect(category[2] - category[1]).toBeCloseTo(category[1] - category[0]);
+  });
+
+  it("activates the nearest observation by pointer x and clears it on pointer leave", () => {
+    const result = render(<LineChartCore data={[{ x: "2026-10-20", y: 1 }, { x: "2026-10-22", y: 3 }]}
+      xKey="x" yKey="y" />);
+    expect([...result.container.querySelectorAll(".leaf-x-tick")].map(tick => tick.textContent)).toEqual(["10/20", "10/22"]);
+    const plot = screen.getByRole("application");
+    const dots = result.container.querySelectorAll("circle.leaf-line-dot");
+    const x = Number(dots[1].getAttribute("cx")) - 1;
+    fireEvent(plot, new MouseEvent("pointermove", { bubbles: true, clientX: x, clientY: 100 }));
+    expect(screen.getByRole("tooltip").textContent).toBe("2026-10-22 y: 3.0");
+    fireEvent.pointerLeave(plot);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("treats non-finite observations as gaps and deduplicates generated formatted ticks", () => {
+    const result = render(<LineChartCore data={[{ x: 0, y: 0 }, { x: 0.5, y: NaN }, { x: 1, y: 1 }, { x: 2, y: Infinity }]}
+      xKey="x" yKey="y" xAxisType="number" xAxisAllowDecimals={false} yAxisAllowDecimals={false} />);
+    expect(result.container.querySelectorAll("circle.leaf-line-dot")).toHaveLength(2);
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+    const labels = (selector: string) => [...result.container.querySelectorAll(selector)].map(tick => tick.textContent);
+    expect(labels(".leaf-x-tick")).toEqual(["0", "1", "2"]);
+    expect(labels(".leaf-y-tick")).toEqual(["0", "1"]);
+    result.rerender(<LineChartCore data={[{ x: 0, y: 0 }, { x: 1, y: 1 }]} xKey="x" yKey="y"
+      xAxisType="number" xFormatter={() => "same x"} yFormatter={() => "same y"} />);
+    expect(labels(".leaf-x-tick")).toEqual(["same x"]);
+    expect(labels(".leaf-y-tick")).toEqual(["same y"]);
+  });
+
+  it("uses zero-based default y bounds, evenly spaced ticks and an empty category slot", () => {
+    const result = render(<LineChartCore
+      data={[{ x: "A", y: 1200 }, { x: "B", y: null }, { x: "C", y: 3400 }]}
+      xKey="x" yKey="y" xLabel="Date" yFormatter={value => `$${(Number(value) / 100).toFixed(2)}`} />);
+    const labels = () => [...result.container.querySelectorAll(".leaf-y-tick")].map(tick => tick.textContent);
+    expect(labels()).toEqual(["$0.00", "$8.50", "$17.00", "$25.50", "$34.00"]);
+    expect(screen.getByText("Date")).toBeTruthy();
+    const ticks = [...result.container.querySelectorAll(".leaf-x-tick")];
+    expect(ticks.map(tick => tick.textContent)).toEqual(["A", "B", "C"]);
+    const dots = result.container.querySelectorAll("circle.leaf-line-dot");
+    expect(dots).toHaveLength(2);
+    expect(Number(ticks[1].getAttribute("x"))).toBeCloseTo(
+      (Number(dots[0].getAttribute("cx")) + Number(dots[1].getAttribute("cx"))) / 2);
+    expect(result.container.querySelectorAll("path.leaf-line-curve")).toHaveLength(0);
+    result.rerender(<LineChartCore data={[{ x: "A", y: -10 }, { x: "B", y: 30 }]} xKey="x" yKey="y" />);
+    expect(labels()).toEqual(["-10", "0", "10", "20", "30"]);
+  });
+
+  it("keeps all source modules free of recharts imports", () => {
+    const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    function sources(directory: string): string[] {
+      return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
+        ? sources(join(directory, entry.name)) : /\.[cm]?[jt]sx?$/.test(entry.name) ? [join(directory, entry.name)] : []);
+    }
+    for (const file of sources(join(packageRoot, "src"))) {
+      expect(readFileSync(file, "utf8")).not.toMatch(/(?:from\s*|import\s*(?:\(\s*)?|require\s*\()\s*["']recharts(?:\/[^"']*)?["']/);
+    }
   });
 
   it("bounds table viewport without losing the equivalent rows and supplies a meaningful empty state", () => {

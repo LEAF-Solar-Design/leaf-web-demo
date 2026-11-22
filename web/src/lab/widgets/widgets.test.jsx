@@ -4,7 +4,6 @@ import WidgetsView from './WidgetsView.jsx'
 import WidgetPreview from './WidgetPreview.jsx'
 import { createTextElement, validateElement, validateElements, validateWidgetDoc } from './widgetDoc.js'
 import { createWidgetDoc } from './useWidgetEditor.js'
-import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const add = () => fireEvent.click(screen.getByRole('button', { name: 'Add text' }))
@@ -54,7 +53,12 @@ describe('widget definition download', () => {
     const blob = captured.createObjectURL.mock.calls[0][0]
     expect(blob).toBeInstanceOf(Blob)
     expect(blob.type).toBe('application/json')
-    expect(await readBlob(blob)).toEqual(validateWidgetDoc(createWidgetDoc(DESIGNER_DEFAULT_DOC)))
+    const exported = await readBlob(blob)
+    expect(exported).toEqual(validateWidgetDoc(createWidgetDoc()))
+    expect(exported.schema).toBe('widget-doc.v1')
+    expect(exported.active).toBe('la')
+    expect(exported.formats.la.h).toBe(160)
+    expect(Object.values(exported.formats).every(({ els }) => els.length === 0)).toBe(true)
     expect(captured.anchor().download).toBe('widget-CON.json')
     expect(captured.anchor().getAttribute('href')).toBe('blob:widget-definition')
     expect(captured.anchor().isConnected).toBe(false)

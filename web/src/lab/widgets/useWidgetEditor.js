@@ -1,6 +1,5 @@
 import { useReducer } from 'react'
 import { FORMATS, PRESETS, RENDERER_VERSION, shapeFor } from './widgetCatalog.js'
-import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 
 export const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 export const HEIGHT_BOUNDS = { la: [60, 220], diExp: [84, 200] }
@@ -181,7 +180,7 @@ export function widgetEditorReducer(state, action) {
       if (f.h !== surface.h) f.els = f.els.map((e) => clampElement(e, W, f.h))
       return commit(state, withSurface(f))
     }
-    case 'reset': return commit(state, withSurface(createWidgetDoc(DESIGNER_DEFAULT_DOC).formats[id]), { selectedId: null })
+    case 'reset': return commit(state, withSurface(defaultSurface(id)), { selectedId: null })
     default: return state
   }
 }

@@ -720,7 +720,7 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
                     if line.startswith("python scripts/run-all-gates.py "))
         start = script.index("gate_fail_fast_args=(--fail-fast)")
         gate = script[start:script.index(call, start) + len(call)]
-        self.assertEqual(script.count("LEAF_EVENT"), 3)
+        self.assertEqual(script.count("LEAF_EVENT"), 4)
         events = ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED", "PUSH")
         cases = [(event, full, "", 1) for event in events for full in (None, "1", "0", "true", "")]
         cases.extend([("PULL_REQUEST_UPDATED", "1", "runner_changed", 1),
@@ -896,11 +896,12 @@ printf '%s\\n' "$gate_status"
                       gate_runs[0])
         shard_start = script.index(
             'if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then\n')
-        shard_end = script.index('\nfi\n', shard_start)
+        shard_end = script.index('\nelif [[ "$selected_partition_ready" == 1 ]]; then', shard_start)
+        shard_block = script[shard_start:shard_end]
         for flag in ("--shard-count", "--shard-index"):
-            self.assertEqual(script.count(flag), 1)
-            self.assertLess(shard_start, script.index(flag))
-            self.assertLess(script.index(flag), shard_end)
+            self.assertEqual(shard_block.count(flag), 1)
+            self.assertLess(0, shard_block.index(flag))
+            self.assertLess(shard_block.index(flag), len(shard_block))
         proof = script.split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
             "# LEAF_GATE_PROOF_END", 1)[0]
         self.assertEqual(script.count("--verify-shard-results"), 1)
@@ -1017,6 +1018,93 @@ printf '%s\\n' "$gate_status"
         self.assertIn("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1", fallback)
         self.assertNotIn("AUTOFILL_SOLVER_ROOT", fallback)
         self.assertEqual(script.count("export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1"), 1)
+
+    def test_autofill_solver_device_failure_guard(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block, after = script.split("# LEAF_AUTOFILL_SOLVER_BEGIN\n", 1)[1].split(
+            "# LEAF_AUTOFILL_SOLVER_END\n", 1)
+        fatal = ("FATAL: autofill-solver unavailable on this worker "
+                 "(dep-cache seed and S3 fetch both failed); seed the leaf-web-demo "
+                 "dep cache or run on a credentialed worker")
+        self.assertEqual(block.count(fatal), 1)
+        self.assertIn(f'echo "{fatal}" >&2', block)
+        self.assertIn('"${CODEBUILD_BUILD_ID:-}" == device:*', block)
+        self.assertIn('"${LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED:-}" != 1', block)
+        self.assertIn('autofill_solver_fatal=0\nif fetch_autofill_solver; then', block)
+        fatal_branch = block.split(f'echo "{fatal}" >&2', 1)[1].split('\n  else\n', 1)[0]
+        self.assertIn('autofill_solver_fatal=1', fatal_branch)
+        self.assertNotIn('export LEAF_AUTOFILL_SOLVER_ABSENT_OK', fatal_branch)
+        self.assertIn('autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED', block)
+        self.assertIn('export LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', block)
+        guard = 'if [[ "${autofill_solver_fatal:-0}" == 1 ]]; then exit 1; fi\n'
+        self.assertTrue(after.startswith(guard))
+        self.assertLess(script.index(guard), script.index('python scripts/run-all-gates.py'))
+
+    def _run_autofill_solver_outcome(self, build_id, allowed=None, fetch_status=1):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('autofill_solver_fatal=0\nif fetch_autofill_solver; then')
+        end = script.index('\n', script.index('# LEAF_AUTOFILL_SOLVER_END\n', start)
+                           + len('# LEAF_AUTOFILL_SOLVER_END\n'))
+        env = {key: value for key, value in os.environ.items()
+               if key not in ('BASH_ENV', 'CODEBUILD_BUILD_ID',
+                              'LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED',
+                              'LEAF_AUTOFILL_SOLVER_ABSENT_OK')}
+        if build_id is not None:
+            env['CODEBUILD_BUILD_ID'] = build_id
+        if allowed is not None:
+            env['LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED'] = allowed
+        command = ('set -euo pipefail\n'
+                   'autofill_solver_fatal=1\n'
+                   'fetch_autofill_solver() {\n'
+                   '  autofill_solver_revision=inert-revision\n'
+                   '  autofill_solver_key=inert-seed\n'
+                   f'  return {fetch_status}\n'
+                   '}\n')
+        command += script[start:end] + '\nenv\n'
+        return subprocess.run([BASH, '-c', command], env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_device_without_seed_fails(self):
+        for allowed in (None, '0', 'true'):
+            with self.subTest(allowed=allowed):
+                result = self._run_autofill_solver_outcome('device:worker', allowed)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(result.stderr, 'FATAL: autofill-solver unavailable on this worker '
+                                 '(dep-cache seed and S3 fetch both failed); seed the leaf-web-demo '
+                                 'dep cache or run on a credentialed worker\n')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_device_escape_hatch_exports_absent_ok(self):
+        result = self._run_autofill_solver_outcome('device:worker', '1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', result.stdout.splitlines())
+        self.assertIn('autofill-solver: absent allowed by LEAF_AUTOFILL_SOLVER_ABSENT_ALLOWED',
+                      result.stdout.splitlines())
+        self.assertEqual(result.stderr, '')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_non_device_exports_absent_ok(self):
+        for build_id in (None, '', 'leaf-ci:build', 'github-actions', 'device-worker'):
+            for allowed in (None, '1'):
+                with self.subTest(build_id=build_id, allowed=allowed):
+                    result = self._run_autofill_solver_outcome(build_id, allowed)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=1', result.stdout.splitlines())
+                    self.assertNotIn('autofill-solver:', result.stdout)
+                    self.assertEqual(result.stderr, '')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; solver outcome requires bash")
+    def test_autofill_solver_success_does_not_acknowledge_absence(self):
+        for build_id in ('device:worker', 'leaf-ci:build'):
+            with self.subTest(build_id=build_id):
+                result = self._run_autofill_solver_outcome(build_id, fetch_status=0)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn('AUTOFILL_SOLVER_ROOT=/tmp/autofill-solver', result.stdout.splitlines())
+                self.assertIn('AUTOFILL_SOLVER_REVISION=inert-revision', result.stdout.splitlines())
+                self.assertNotIn('LEAF_AUTOFILL_SOLVER_ABSENT_OK=', result.stdout)
+                self.assertEqual(result.stderr, '')
 
     def test_gate_proof_receipt_guard(self):
         script = CI_PATH.read_text(encoding="utf-8")
@@ -1228,6 +1316,182 @@ printf '%s\\n' "$gate_status"
                 self.assertEqual(result.stdout.splitlines(), [expected_sha, expected_flag, expected_loader])
                 self.assertEqual(result.stderr, f"WARNING: LEAF_PROOF_TRUSTED_SHA ignored ({reason})\n"
                                  if reason else "")
+
+
+class TestNarrativeOnlyDeviceCi(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.repo = Path(self.temporary.name)
+        self.git("init", "-q")
+        self.git("config", "user.email", "offline@example.invalid")
+        self.git("config", "user.name", "Offline fixture")
+        self.git("config", "core.autocrlf", "false")
+        for name in ("README.md", "docs/guide.md", "src/app.py"):
+            self.write(name, "original narrative\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        script = CI_PATH.read_text(encoding="utf-8")
+        self.classifier = script.split("<<'LEAF_DOCS_ONLY'\n", 1)[1].split(
+            "\nLEAF_DOCS_ONLY\n", 1)[0]
+
+    def git(self, *args):
+        result = subprocess.run(["git", *args], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def write(self, name, content):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def commit(self):
+        self.git("add", "-A")
+        self.git("commit", "-qm", "candidate")
+
+    def classify(self, overrides=None, trusted=None, shell=False):
+        head = self.git("rev-parse", "HEAD")
+        # Pin both device and non-device cases independently of the runner env.
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("CODEBUILD_", "LEAF_", "FORGE_", "GIT_"))}
+        env.update(CODEBUILD_BUILD_ID="device:dv-" + "a" * 16,
+                   CODEBUILD_WEBHOOK_EVENT="PULL_REQUEST_UPDATED",
+                   CODEBUILD_WEBHOOK_HEAD_REF="refs/pull/12/head",
+                   CODEBUILD_WEBHOOK_BASE_REF="refs/heads/main",
+                   CODEBUILD_RESOLVED_SOURCE_VERSION=head)
+        env.update(overrides or {})
+        if shell:
+            script = CI_PATH.read_text(encoding="utf-8")
+            branch = script.split("  # LEAF_DOCS_ONLY_BEGIN\n", 1)[1].split(
+                "  # LEAF_DOCS_ONLY_END", 1)[0]
+            env.update(HEAD_SHA=head, TRUSTED_SHA=self.base, loader_check="checked",
+                       TEST_PYTHON=sys.executable.replace("\\", "/"),
+                       MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*")
+            command = '''set -euo pipefail
+python() { command "$TEST_PYTHON" "$@"; }
+pip() { echo UNEXPECTED_DEPENDENCY; return 97; }
+npm() { echo UNEXPECTED_DEPENDENCY; return 97; }
+aws() { echo UNEXPECTED_RECEIPT; return 97; }
+''' + branch + '''
+echo NORMAL_CI
+pip install candidate
+npm ci
+python scripts/run-all-gates.py
+'''
+            return subprocess.run([BASH, "-c", command], cwd=self.repo, env=env,
+                                  capture_output=True, text=True)
+        return subprocess.run([sys.executable, "-I", "-B", "-", head,
+                               self.base if trusted is None else trusted, "checked"],
+                              input=self.classifier, cwd=self.repo, env=env,
+                              capture_output=True, text=True)
+
+    def assert_normal(self, **kwargs):
+        result = self.classify(**kwargs)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_narrative_changes_emit_consistent_receipts(self):
+        self.write("README.md", "updated\n")
+        self.write("docs/nested/readme.rst", "new\n")
+        self.write("docs/notes.txt", "notes\n")
+        (self.repo / "docs/guide.md").unlink()
+        self.commit()
+        for event in ("CREATED", "UPDATED", "REOPENED"):
+            with self.subTest(event=event):
+                result = self.classify({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_" + event})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                lines = result.stdout.splitlines()
+                self.assertEqual(len(lines), 4)
+                self.assertIn("mode=selected", lines[0])
+                detail = json.loads(lines[1].removeprefix("LEAF_SELECTION "))
+                final = json.loads(lines[2].removeprefix("LEAF_SELECTION_FINAL "))
+                self.assertEqual(detail, final)
+                self.assertEqual((detail["mode"], detail["source"], detail["reasons"],
+                                  detail["executed"], detail["of"], detail["unit"]),
+                                 ("selected", "docs_only", ["docs_only"], 0, 0, "suites"))
+                self.assertEqual(lines[3], "LEAF_DOCS_ONLY result=skip files=4")
+
+    def test_unknown_paths_and_mixed_source_run(self):
+        for name in ("src/app.py", "src/readme.md", "config/readme.md", "docs/map.json",
+                     "docs/image.png", "docs/helper.py", "claims/example.md"):
+            with self.subTest(name=name):
+                self.git("reset", "--hard", self.base)
+                self.git("clean", "-fdq")
+                self.write("README.md", "updated\n")
+                self.write(name, "unknown\n")
+                self.commit()
+                self.assert_normal()
+
+    def test_rename_checks_both_sides(self):
+        for old, new, expected in (("docs/guide.md", "src/guide.md", 1),
+                                   ("src/app.py", "docs/app.md", 1),
+                                   ("docs/guide.md", "docs/renamed.txt", 0)):
+            with self.subTest(old=old, new=new):
+                self.git("reset", "--hard", self.base)
+                (self.repo / old).rename(self.repo / new)
+                self.commit()
+                result = self.classify()
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+    def test_metadata_identity_and_full_fallbacks(self):
+        self.write("README.md", "updated\n")
+        self.commit()
+        cases = [{"CODEBUILD_WEBHOOK_EVENT": value} for value in ("", "PUSH", "PULL_REQUEST_CLOSED")]
+        cases += [{"CODEBUILD_WEBHOOK_HEAD_REF": value} for value in ("", "refs/heads/main", "refs/pull/0/head")]
+        cases += [{"CODEBUILD_WEBHOOK_BASE_REF": value} for value in ("", "main", "refs/heads/../main")]
+        cases += [{"CODEBUILD_RESOLVED_SOURCE_VERSION": value} for value in ("", "bad", "f" * 40)]
+        cases += [{"LEAF_CI_FULL": "1"}, {"LEAF_LOADER_TRUSTED_SHA": "f" * 40},
+                  {"CODEBUILD_BUILD_ID": "codebuild:normal"}, {"CODEBUILD_BUILD_ID": ""}]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                self.assert_normal(overrides=overrides)
+        self.assert_normal(trusted="f" * 40)
+        self.assert_normal(trusted="bad")
+        head = self.git("rev-parse", "HEAD")
+        result = self.classify({"CODEBUILD_RESOLVED_SOURCE_VERSION": "",
+                                "FORGE_CI_OPERATION": "ci-" + head})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_empty_diff_runs(self):
+        self.assert_normal()
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; early exit requires bash")
+    def test_early_exit_avoids_dependency_and_test_commands(self):
+        self.write("README.md", "updated\n")
+        self.commit()
+        result = self.classify(shell=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("LEAF_DOCS_ONLY result=skip files=1", result.stdout)
+        self.assertNotIn("NORMAL_CI", result.stdout)
+        self.assertNotIn("UNEXPECTED", result.stdout)
+        # The exact same shell branch retains setup in non-device jobs.
+        result = self.classify({"CODEBUILD_BUILD_ID": "codebuild:ordinary"}, shell=True)
+        self.assertEqual(result.returncode, 97, result.stdout + result.stderr)
+        self.assertIn("NORMAL_CI", result.stdout)
+        self.assertNotIn("LEAF_SELECTION", result.stdout)
+
+    def test_nonregular_doc_modes_run(self):
+        for mode in ("100755", "120000"):
+            with self.subTest(mode=mode):
+                self.git("reset", "--hard", self.base)
+                blob = self.git("rev-parse", self.base + ":README.md")
+                self.git("update-index", "--cacheinfo", mode + "," + blob + ",README.md")
+                self.git("commit", "-qm", "unsafe mode")
+                self.assert_normal()
+
+    def test_skip_precedes_candidate_code_and_setup(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index("# LEAF_DOCS_ONLY_BEGIN")
+        end = script.index("# LEAF_DOCS_ONLY_END", start)
+        self.assertIn("then\n    exit 0\n", script[start:end])
+        for command in ('show "$TRUSTED_SHA:scripts/ci/select_tests.py"',
+                        "python3 -I -B scripts/ci/build_pr_tier.py", "aws s3api put-object",
+                        'echo "LEAF_T start setup', "pip install", "npm ci",
+                        "python scripts/run-all-gates.py --jobs"):
+            self.assertLess(end, script.index(command))
+        self.assertLess(script.index('if [[ "${1:-}" == --heavy-prerequisites ]]'), start)
 
 
 class TestPrCodebuildProject(unittest.TestCase):

@@ -208,6 +208,15 @@ def acquire_checkout(org_id, project_id, drawing_id, *, actor_binding_id, holder
         _scope(cur, org_id, project_id, drawing_id, actor_binding_id=actor_binding_id)
         args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id}
         cur.execute(
+            "SELECT status FROM live_projects WHERE org_id = %(org_id)s "
+            "AND project_id = %(project_id)s FOR SHARE", args,
+        )
+        project = cur.fetchone()
+        if project is None:
+            refuse("CONTEXT_NOT_FOUND")
+        if project["status"] == "archived":
+            refuse("PROJECT_ARCHIVED")
+        cur.execute(
             "INSERT INTO project_drawing_checkouts (org_id, project_id, drawing_id) "
             "VALUES (%(org_id)s, %(project_id)s, %(drawing_id)s) ON CONFLICT DO NOTHING", args,
         )

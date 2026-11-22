@@ -217,7 +217,7 @@ class Http:
     def request(self, method, suffix, body=None, limit=16384):
         data = None if body is None else encode(body)
         require(data is None or len(data) <= MAX_BODY, 'request-bounds')
-        require(0 < limit <= producer().MAX_ARCHIVE_BYTES, 'response-bounds')
+        require(0 < limit and (limit <= NATIVE_LIMIT or limit <= producer().MAX_ARCHIVE_BYTES), 'response-bounds')
         request = urllib.request.Request(self.prefix + suffix, data=data, method=method,
             headers={'Authorization': 'Bearer ' + self._token, 'Content-Type': 'application/json',
                      'User-Agent': USER_AGENT})
@@ -394,7 +394,7 @@ def run_once(scope, http, native, output, *, clock=time.time, journal=None):
                       'deadline': job['deadline']})
         guard.start()
         raw = http.request('GET', job['job_id'] + '/source?' + urllib.parse.urlencode(guard.identity),
-                           limit=producer().MAX_ARCHIVE_BYTES)
+                           limit=NATIVE_LIMIT if job['descriptor']['schema'] == NATIVE_SCHEMA else producer().MAX_ARCHIVE_BYTES)
         guard.check()
         verify_source(raw, job['descriptor'])
         guard.check()
@@ -518,7 +518,7 @@ def native_descriptor(value, org, project):
     _native_need(type(value) is dict and set(value) == NATIVE_FIELDS)
     d = dict(value)
     _native_need(d['schema'] == NATIVE_SCHEMA and d['target'] == 'ios-simulator'
-        and d['source_profile'] == NATIVE_PROFILE and d['source_operation'] == 'create'
+        and d['source_profile'] == NATIVE_PROFILE and d['source_operation'] in ('create', 'edit')
         and d['org_id'] == org and d['project_id'] == project)
     for key in ('org_id', 'project_id', 'actor_binding_id', 'repo_key', 'source_request_id'):
         _native_need(type(d[key]) is str and str(UUID(d[key])) == d[key] and UUID(d[key]).int != 0)
@@ -598,6 +598,9 @@ def native_files_policy(files, descriptor):
             _native_need(mode == '100644' and len(raw) <= 1048576)
             total += len(raw)
     _native_need(total <= 4194304)
+    if descriptor['source_operation'] == 'edit':
+        _native_need({p for p in files if p.startswith('Resources/Input/')} ==
+                     {ref['path'] for ref in descriptor['material_refs']})
     for ref in descriptor['material_refs']:
         mode, raw = files.get(ref['path'], (None, None))
         _native_need(mode == '100644' and type(raw) is bytes and len(raw) == ref['byte_size']

@@ -1,3 +1,4 @@
+import { WidgetText } from './WidgetText.jsx'
 import { useEffect, useMemo, useState } from 'react'
 import { resolveValues } from './widgetsClient.js'
 import { renderWidget } from './widgetRender.js'
@@ -28,12 +29,15 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
   const period = Math.max(5000, Number(intervalMs) || 5000), surface = doc.formats[format]
   const bindingKey = JSON.stringify(surface.els.filter((element) => element.binding?.source === 'graph.output').map((element) => element.binding))
   const graphBindings = useMemo(() => JSON.parse(bindingKey), [bindingKey])
+  const hasHostBindings = surface.els.some((element) => element.binding?.source === 'kashbot.board')
   const [poll, setPoll] = useState({ values: [], failed: false })
   const [clock, setClock] = useState(() => now())
   useEffect(() => {
     let disposed = false, inFlight = false, controller = null, timer = null, lastStarted = -Infinity
     let wasVisible = document.visibilityState === 'visible', resumePending = false
     setPoll({ values: [], failed: false })
+    // Literal-only previews have no freshness clock or values to refresh.
+    if (!graphBindings.length && !hasHostBindings) return
     function schedule() {
       clearTimeout(timer)
       const delay = docId && graphBindings.length ? Math.max(0, lastStarted + period - now()) : period
@@ -86,7 +90,7 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
     document.addEventListener('visibilitychange', visibility)
     tick(true)
     return () => { disposed = true; clearTimeout(timer); controller?.abort(); document.removeEventListener('visibilitychange', visibility) }
-  }, [docId, format, graphBindings, client, now, period])
+  }, [docId, format, graphBindings, hasHostBindings, client, now, period])
   let graphIndex = 0
   const elements = surface.els.map((element) => {
     const graph = element.binding?.source === 'graph.output', entry = graph ? poll.values[graphIndex++] : null
@@ -122,7 +126,7 @@ export function WidgetPreview({ docId, doc, format = doc.active, host = null, cl
       {elements.map(({ element, nodes, freshness, truncated, tainted }) => <g key={element.id} data-element-id={element.id} data-freshness={freshness} data-truncated={String(truncated)} data-host-tainted={String(tainted)}>
         <title>{`${element.id}: ${freshness}${truncated ? ' (truncated)' : ''}`}</title>
         {nodes.map((node) => <svg key={node.id} x={node.x} y={node.y} width={node.w} height={node.h} viewBox={node.viewBox ?? `0 0 ${node.w} ${node.h}`} overflow="hidden" opacity={node.opacity}>
-          {node.kind === 'text' ? <text x={node.align === 'right' ? node.w : node.align === 'center' ? node.w / 2 : 0} y={node.h / 2} dominantBaseline="central" textAnchor={node.align === 'right' ? 'end' : node.align === 'center' ? 'middle' : 'start'} fill={`var(${node.color}, #ffffff)`} fontSize={node.fontSize} fontWeight={node.weight}>{node.text}</text>
+          {node.kind === 'text' ? <WidgetText node={node} fill={`var(${node.color}, #ffffff)`} />
             : node.kind === 'box' ? <rect width={node.w} height={node.h} fill={`var(${node.color}, #86efac)`} />
               : <path d={node.path} fill={node.stroke ? 'none' : `var(${node.color}, #86efac)`} stroke={node.stroke ? `var(${node.color}, #86efac)` : undefined} strokeWidth={2 * node.scale} />}
         </svg>)}

@@ -218,7 +218,7 @@ class PortfolioTemplateTests(unittest.TestCase):
     def test_item_and_document_bounds(self):
         for mutate in [lambda d: d.update(categories=[]), lambda d: d.update(resume=d['resume'] * 9),
                        lambda d: d['resume'][0].update(entries=d['resume'][0]['entries'] * 21),
-                       lambda d: d['categories'][0].update(images=[])]:
+                       lambda d: d['categories'][0].update(images=[], hero=1)]:
             value = portfolio_document(); mutate(value)
             with self.assertRaises(ValueError):
                 template.validate_document(value)
@@ -300,6 +300,78 @@ class PortfolioLayoutTests(unittest.TestCase):
     def setUpClass(cls):
         cls.web = portfolio_producer('portfolio_page_template')
         cls.native = portfolio_producer('portfolio_ios_template')
+
+    def test_empty_gallery_lifecycle_round_trips_both_exports(self):
+        value = portfolio_document()
+        image = value['categories'][0]['images'].pop()
+        fresh = json.loads(json.dumps(value))
+        mixed = portfolio_document()
+        mixed['categories'].append(dict(slug='seasonal', title='Seasonal', description='Coming later', hero=0, images=[]))
+        # Removing the final photo, saving/reopening, then adding its first photo.
+        reopened = template.validate_document(json.loads(json.dumps(value)))
+        restored = json.loads(json.dumps(reopened))
+        restored['categories'][0]['images'].append(image)
+        for name, document in [('new', fresh), ('mixed', mixed), ('removed', reopened), ('restored', restored)]:
+            previews = {photo['material_id']: b'optimized preview fixture'
+                        for category in document['categories'] for photo in category['images']}
+            for native, producer in [(False, self.web), (True, self.native)]:
+                with self.subTest(variant=name, native=native):
+                    self.assertEqual(producer.validate_document(document), document)
+                    args = (document, 1, previews) if native else (document, 1, previews, template.PACKAGE_VERSIONS)
+                    with zipfile.ZipFile(io.BytesIO(producer.source_archive(*args))) as archive:
+                        data_path = 'Portfolio/PortfolioContent/portfolio.json' if native else 'portfolio.json'
+                        self.assertEqual(json.loads(archive.read(data_path)), document)
+                        manifest = json.loads(archive.read('source-manifest.json'))
+                        assets = manifest['assets'] if native else json.loads(archive.read('asset-manifest.json'))
+                        self.assertEqual(set(assets), set(previews))
+                        self.assertEqual(manifest['document_sha256'], template.document_digest(document))
+                        if native:
+                            source = archive.read('Portfolio/PortfolioApp.swift').decode()
+                            self.assertIn('guard category.images.isEmpty ? category.hero == 0 : category.images.indices.contains(category.hero)', source)
+                            self.assertIn('if category.images.indices.contains(category.hero) {', source)
+                            self.assertIn('if category.images.isEmpty {', source)
+                            self.assertEqual(source.count('No photos in this gallery yet.'), 2)
+                        else:
+                            home = archive.read('app/page.jsx').decode()
+                            self.assertIn('c.images[c.hero]&&!c.images[c.hero].display?.hidden', home)
+                            self.assertIn('No photos in this gallery yet.', home)
+                            self.assertIn('role="status"', archive.read('app/Gallery.jsx').decode())
+
+    def test_empty_support_preserves_both_validator_boundaries(self):
+        for producer in [self.web, self.native]:
+            for count in [0, 1, 94, 200]:
+                value = portfolio_document()
+                image = value['categories'][0]['images'][0]
+                value['categories'][0]['images'] = [dict(image, material_id=f'00000000-0000-0000-0000-{i:012x}') for i in range(count)]
+                self.assertEqual(producer.validate_document(value), value)
+                previews = {photo['material_id']: b'optimized preview fixture' for photo in value['categories'][0]['images']}
+                args = (value, 1, previews) if producer is self.native else (value, 1, previews, template.PACKAGE_VERSIONS)
+                with zipfile.ZipFile(io.BytesIO(producer.source_archive(*args))) as archive:
+                    data_path = 'Portfolio/PortfolioContent/portfolio.json' if producer is self.native else 'portfolio.json'
+                    self.assertEqual(json.loads(archive.read(data_path)), value)
+                if count:
+                    value['categories'][0]['hero'] = count - 1
+                    self.assertEqual(producer.validate_document(value), value)
+                for hero in [True, False, -1, 0.5, '0', None, max(1, count)]:
+                    value['categories'][0]['hero'] = hero
+                    with self.subTest(producer=producer.__name__, count=count, hero=hero), self.assertRaises(ValueError):
+                        producer.validate_document(value)
+            for mutation in [
+                lambda d: d.update(categories=[]),
+                lambda d: d.update(categories=[dict(d['categories'][0], slug=f'gallery-{i}', images=[]) for i in range(13)]),
+                lambda d: d['categories'][0]['images'].append(dict(d['categories'][0]['images'][0])),
+                lambda d: d['categories'][0]['images'][0].update(sha256='A' * 64),
+                lambda d: d['categories'][0]['images'][0].update(preview_sha256='b' * 63),
+                lambda d: d['categories'].append(dict(d['categories'][0], slug='other', images=[dict(d['categories'][0]['images'][0], sha256='b' * 64)])),
+                lambda d: d['categories'][0].update(images=[dict(d['categories'][0]['images'][0], material_id=f'00000000-0000-0000-0000-{i:012x}') for i in range(201)]),
+                lambda d: d.update(resume=[dict(heading='Experience', entries=[dict(title='', subtitle='', dates='', description='🍰' * 2400) for _ in range(20)]) for _ in range(8)]),
+            ]:
+                value = portfolio_document(); mutation(value)
+                with self.subTest(producer=producer.__name__, mutation=mutation), self.assertRaises(ValueError):
+                    producer.validate_document(value)
+            value = portfolio_document()
+            value['categories'] = [dict(value['categories'][0], slug=f'gallery-{i}', images=[]) for i in range(12)]
+            self.assertEqual(producer.validate_document(value), value)
 
     def test_legacy_canonical_bytes_and_digest_remain_unchanged(self):
         value = portfolio_document()

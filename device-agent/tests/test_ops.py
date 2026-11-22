@@ -124,3 +124,77 @@ def test_ha_operations_implicitly_select_registered_homeassistant(config, regist
     assert dispatcher.dispatch("ha.flow.start", {"handler": "arbitrary"})["error"]["code"] == "invalid_args"
     assert dispatcher.dispatch("ha.flow.step", {"flow_id": "", "data": {}})["error"]["code"] == "invalid_args"
     assert dispatcher.dispatch("ha.onboard", {"host": "evil"})["error"]["code"] == "invalid_args"
+
+
+@pytest.mark.parametrize("entity_id", ["light.wiz_rgbw_tunable_80ff06", "light.Living_80FF06"])
+def test_off_limits_proxy_refused_before_network(config, registry, local_package, monkeypatch, entity_id):
+    calls = []
+    monkeypatch.setattr(registry.get("echo"), "auth_headers", lambda: calls.append(True) or {})
+    result = proxy(config, registry, method="POST", path="/api/services/light/turn_on",
+                   body_json={"entity_id": entity_id})
+    assert result["status"] == "refused"
+    assert result["error"]["code"] == "off_limits"
+    assert not calls
+    assert not local_package.requests
+
+
+@pytest.mark.parametrize("op,args", [
+    ("ha.flow.step", {"flow_id": "local-flow", "data": {"host": "10.0.0.175"}}),
+    ("ha.flow.start", {"handler": "wiz", "data": {"mac": "444F8E80FF06"}}),
+])
+def test_off_limits_flow_refused_before_handler(config, registry, local_package, monkeypatch, op, args):
+    from leaf_agent.config import write_json
+    catalog = list(config.catalog().values())
+    catalog[0]["package"] = "homeassistant"
+    write_json(config.home / "catalog.json", catalog)
+    handler = registry.get("echo")
+    calls = []
+    monkeypatch.setattr(handler, "handle", lambda *values: calls.append(values))
+    registry.register("homeassistant", handler)
+    result = Dispatcher(config, registry).dispatch(op, args)
+    assert result["status"] == "refused"
+    assert result["error"]["code"] == "off_limits"
+    assert not calls
+    assert not local_package.requests
+
+
+def test_off_limits_environment_read_at_call_time(config, registry, local_package, monkeypatch):
+    dispatcher = Dispatcher(config, registry)
+    monkeypatch.setenv("LEAF_AGENT_OFF_LIMITS", " , LIGHT.DESK_LAMP, , ")
+    args = {"package": "echo", "method": "POST", "path": "/api/services/light/turn_on",
+            "body_json": {"entity_id": "light.desk_lamp"}}
+    assert dispatcher.dispatch("http.proxy", args)["error"]["code"] == "off_limits"
+    assert not local_package.requests
+    args["body_json"]["entity_id"] = "light.desk"
+    assert dispatcher.dispatch("http.proxy", args)["status"] == "ok"
+    assert len(local_package.requests) == 1
+    monkeypatch.delenv("LEAF_AGENT_OFF_LIMITS")
+    args["body_json"]["entity_id"] = "light.desk_lamp"
+    assert dispatcher.dispatch("http.proxy", args)["status"] == "ok"
+    assert len(local_package.requests) == 2
+
+
+def test_other_wiz_light_allowed(config, registry, local_package):
+    result = proxy(config, registry, method="POST", path="/api/services/light/turn_on",
+                   body_json={"entity_id": "light.wiz_rgbw_tunable_daea0a"})
+    assert result["status"] == "ok"
+    assert len(local_package.requests) == 1
+
+
+def test_names_off_limits_walks_keys_values_and_sequences(monkeypatch):
+    from leaf_agent.ops import names_off_limits
+    monkeypatch.delenv("LEAF_AGENT_OFF_LIMITS", raising=False)
+    assert names_off_limits({"nested": [{"LIGHT.80FF06": None}]})
+    assert names_off_limits({"nested": (None, {"host": "10.0.0.175"})})
+    assert not names_off_limits({"nested": [None, (False, 175, "light.desk")]})
+
+
+def test_names_off_limits_node_limit_fails_closed(monkeypatch):
+    from leaf_agent.ops import names_off_limits
+    monkeypatch.delenv("LEAF_AGENT_OFF_LIMITS", raising=False)
+    assert not names_off_limits([None] * 1999)
+    assert names_off_limits([None] * 2000)
+    nested = None
+    for _ in range(2000):
+        nested = [nested]
+    assert names_off_limits(nested)

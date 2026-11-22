@@ -37,6 +37,8 @@ def _call(function, *args, _document_errors=False, **kwargs):
         return _layout_error(error)
     except ledger.NotFound:
         raise HTTPException(404, detail="lab_document_not_found") from None
+    except ledger.ExportForbidden:
+        raise HTTPException(403, detail="lab_export_forbidden") from None
     except ledger.KindFixed:
         raise HTTPException(409, detail="lab_document_kind_fixed") from None
     except ledger.GitConflict:
@@ -113,6 +115,54 @@ def revisions(doc_id: str, limit: int = 100, before: int | None = None,
 def revision(doc_id: str, revision: int, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
     return _call(ledger.get, str(tenant), doc_id, revision)
+
+
+def _authorize_export(tenant, graph, run):
+    # Use the same live identity binding and project role boundary as run
+    # admission, even when the revision has never been run.
+    from routers.lab_runs import _authorize_corpus_run, _corpus_actor
+    from lab_evaluate import GraphRefused
+
+    try:
+        if run is not None:
+            _authorize_corpus_run(tenant, run)
+        for block in graph["blocks"]:
+            settings = block["settings"]
+            drawing = settings.get("drawing")
+            project = settings.get("project_id") or (drawing.get("project_id") if isinstance(drawing, dict) else None)
+            if project is None:
+                continue
+            actor = _corpus_actor(tenant)
+            from leaf_platform import project_lifecycle, project_reference_materials
+            project_lifecycle.require_project_role(str(tenant), project, actor, write=False)
+            if block["registry"]["id"] == "corpus-evaluator":
+                for key in ("corpus", "suite"):
+                    descriptor = settings[key]
+                    material = project_reference_materials.get_material(
+                        str(tenant), project, actor, descriptor["material_id"])
+                    if (material["org_id"] != str(tenant) or material["project_id"] != project
+                            or any(material[field] != descriptor[field]
+                                   for field in ("material_id", "sha256", "byte_size"))):
+                        raise ledger.ExportForbidden()
+    except GraphRefused:
+        raise ledger.ExportForbidden() from None
+    except Exception as error:
+        # Project metadata uses a fail-closed boundary, just as run admission.
+        if isinstance(error, ledger.ExportForbidden):
+            raise
+        raise ledger.ExportForbidden() from None
+
+
+@router.get("/{doc_id}/revisions/{revision}/export")
+def export_revision(doc_id: str, revision: int, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    bundle = _call(ledger.export_bundle, str(tenant), doc_id, revision,
+                   authorize=lambda graph, run: _authorize_export(tenant, graph, run))
+    _admit(tenant, "build")
+    return JSONResponse(bundle, headers={
+        "Content-Disposition": f'attachment; filename="lab-{doc_id}-r{revision}.json"',
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })
 
 
 @router.get("/{doc_id}/diff")

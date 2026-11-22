@@ -1,6 +1,8 @@
+import { notYetAvailable } from '../site/studioAvailability.js'
 import { useEffect, useRef, useState } from 'react'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { authorTool } from '../api'
+import StagedSourceDownload from './StagedSourceDownload.jsx'
 import { authorStartFailureOf } from '../controllers/useAuthorStageController.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 import { finiteOrNull, orDash, usageCostLabel } from '../usage.js'
@@ -226,8 +228,15 @@ function lifecycleMessage(error) {
   return 'Publish did not complete. The staged tool is not runnable.'
 }
 
-export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled = true }) {
+export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStageSettled, seed, seedSignal, seedAutoSubmit = false, targetToolName = null, onCancelRevision, stageActivity = null, onResumeAuthor, notLinked, onLinkClaude, buildEntitled: buildEntitledByPolicy = true }) {
+  // Availability manifest (site/studioAvailability.js): where the staging walk
+  // proved authoring fails, the panel says so and takes Generate away, on the
+  // same rung the entitlement gate already uses. Recovery of an existing
+  // request stays disabled with it, exactly as it is for an unentitled account.
+  const authorNotYet = notYetAvailable('shared.author-tool')
+  const buildEntitled = buildEntitledByPolicy && !authorNotYet
   const [desc, setDesc] = useState('')
+  const [recoveryId, setRecoveryId] = useState('')
   const [busy, setBusy] = useState(false)
   const [elapsedMs, setElapsedMs] = useState(0)
   const [err, setErr] = useState(null)
@@ -459,7 +468,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   // current error and lasts only as long as the gate it stands in for.
   const hiddenGrantFailure = !err && grantGate && !linkGateShown ? authorStartFailureOf(stageActivity?.error) : null
   const gatedGrantFailure = hiddenGrantFailure?.kind === 'grant' ? hiddenGrantFailure : null
-  const authorError = err ? errorPresentation(err, 'Tool authoring failed.') : null
+  const authorError = err ? errorPresentation(err, 'Tool authoring failed.', err?.body?.reason_code) : null
   const publicationError = publishErr ? errorPresentation(publishErr, lifecycleMessage(publishErr)) : null
   const provLine = authored ? authoredProvLine(authored) : null
   const publicationStatus = authored?.publication_status || null
@@ -490,6 +499,28 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
   return (
     <div className="author-panel author-inner">
       <p className="panel-sub">Describe a CAD tool in plain English. Leaf stages it for review before publication.</p>
+      {stageActivity?.lookupRequest && !stageActivity.pointer && !authored && (
+        <div className="customization-state author-request-recovery">
+          <label>Existing authoring request ID
+            <input value={recoveryId} onChange={(event) => setRecoveryId(event.target.value)} />
+          </label>
+          <button type="button" disabled={!recoveryId.trim() || authorLocked || !buildEntitled
+            || stageActivity.enabled === false || stageActivity.recoveredRequest?.busy}
+            onClick={() => stageActivity.lookupRequest(recoveryId.trim())}>Check existing request</button>
+          {stageActivity.recoveredRequest?.busy && <p role="status">Checking request...</p>}
+          {stageActivity.recoveredRequest?.message && <p role="status">{stageActivity.recoveredRequest.message}</p>}
+          {stageActivity.recoveredRequest?.job && <p role="status">
+            Request <code>{stageActivity.recoveredRequest.job.change_set_id}</code>: {stageActivity.recoveredRequest.job.status}.
+            {' '}Attempt {stageActivity.recoveredRequest.job.attempt ?? 'unknown'}. No new request was started.
+          </p>}
+          {stageActivity.recoveredRequest?.job?.status === 'failed'
+            && stageActivity.recoveredRequest.job.error?.retryable === true && (
+              <button type="button" disabled={authorLocked || !buildEntitled
+                || stageActivity.enabled === false || stageActivity.recoveredRequest.busy}
+                onClick={() => stageActivity.retryRequest?.()}>Retry this request</button>
+            )}
+        </div>
+      )}
       {draftMessage && <div role="status">{draftMessage}</div>}
       {stageActivity?.previousStagedReceipt && (
         <div className="customization-state" role="status">
@@ -510,7 +541,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             title={stageActivity?.pointer ? 'Finish or discard the current request before cancelling the revision.' : undefined}>Cancel revision</button>
         </div>
       )}
-      {!buildEntitled && !buildGate && <div className="author-gate" role="status">Tool authoring is unavailable for this account or site. Contact your administrator for access.</div>}
+      {!buildEntitled && !buildGate && <div className="author-gate" role="status" data-availability={authorNotYet ? 'unavailable' : undefined}>{authorNotYet || 'Tool authoring is unavailable for this account or site. Contact your administrator for access.'}</div>}
       {buildGate
         ? <BuildGate />
         : quotaGate
@@ -651,6 +682,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             <div className="customization-detail"><span>Server diff</span><pre>{typeof (authored.diff_summary || authored.diff) === 'string' ? (authored.diff_summary || authored.diff) : JSON.stringify(authored.diff_summary || authored.diff, null, 2)}</pre></div>
           )}
           <pre className="code"><code>{authored.code}</code></pre>
+          <StagedSourceDownload staged={authored} disabled={publishing || busyNow || stageActivity?.enabled === false} />
           {!authored.published ? canRecover ? (
             <>
               <button type="button" className="chip-act" onClick={reviseDraft} disabled={publishing || busyNow}>Revise</button>

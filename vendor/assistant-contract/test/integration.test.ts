@@ -34,6 +34,42 @@ const read = {
 const element = { schema_version: 1, id: "sales-view", title: "Sales", dataset_ref: ref, query };
 
 describe("integration contracts", () => {
+  const material = { kind: "project_material" as const,
+    material_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", sha256: "ab".repeat(32), byte_length: 6915737 };
+
+  it("project-material lineage round trips complete original identity without a provider connection", () => {
+    const original = { ...dataset, lineage: material };
+    expect(DatasetDefinitionV1.parse(JSON.parse(JSON.stringify(original)))).toEqual(original);
+    for (const byte_length of [1, 8 * 1024 * 1024]) {
+      expect(DatasetDefinitionV1.parse({ ...original, lineage: { ...material, byte_length } }).lineage).toEqual({ ...material, byte_length });
+    }
+    // Adding the material branch does not change the existing HTTP lineage contract.
+    expect(DatasetDefinitionV1.parse(dataset)).toEqual(dataset);
+  });
+
+  it("project-material lineage rejects malformed identities, digests and byte bounds", () => {
+    for (const invalid of [
+      { material_id: "not-a-project-material" }, { material_id: "../foreign" },
+      { sha256: "ab".repeat(31) }, { sha256: "ab".repeat(33) }, { sha256: "AB".repeat(32) }, { sha256: "g".repeat(64) },
+      { byte_length: 0 }, { byte_length: -1 }, { byte_length: 1.5 }, { byte_length: 8 * 1024 * 1024 + 1 }, { byte_length: "6915737" },
+    ]) expect(DatasetDefinitionV1.safeParse({ ...dataset, lineage: { ...material, ...invalid } }).success).toBe(false);
+    const incomplete = { ...material } as Record<string, unknown>;
+    for (const key of Object.keys(material)) {
+      const missing = { ...incomplete }; delete missing[key];
+      expect(DatasetDefinitionV1.safeParse({ ...dataset, lineage: missing }).success).toBe(false);
+    }
+  });
+
+  it("project-material lineage refuses mixed provider lineage and caller authority or destination fields", () => {
+    for (const extra of [
+      { connection_id: "sales-account" }, { operation_ref: ref }, { transform_ref: ref },
+      { url: "https://caller.example/original" }, { token: "fixture-not-authority" },
+      { tenantId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" }, { authority: true },
+    ]) expect(DatasetDefinitionV1.safeParse({ ...dataset, lineage: { ...material, ...extra } }).success).toBe(false);
+    expect(DatasetDefinitionV1.safeParse({ ...dataset, lineage: { ...dataset.lineage, ...material } }).success).toBe(false);
+    expect(DatasetDefinitionV1.safeParse({ ...dataset, lineage: { ...material, kind: "http" } }).success).toBe(false);
+  });
+
   it("round trips a read connector, dataset, query, read and both recipes", () => {
     const samples = [
       [IntegrationRefV1, ref], [OperationV1, operation], [ConnectorDefinitionV1, connector],

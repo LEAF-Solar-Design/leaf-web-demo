@@ -87,7 +87,7 @@ const D = 'sha256:' + 'c'.repeat(64)
 const STEP = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
 const GRAPH = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
-const READ = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
+const READ = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export', 'solar-assignment-report']
 const JOB = '55555555-5555-4555-8555-555555555555'
 const accepted = () => ({ ok: true, status: 202, data: { job_id: JOB, status: 'submitted' } })
 function Row(name, code = null) {
@@ -334,12 +334,27 @@ it('W1C-26 panel groups opens the project graph form from the enabled ribbon con
   expect(last(h.graphs).projectClient).toBe(h.client)
   noLegacy(h)
 })
-it('R13G2B-10 read tools render canonical output without writing', async () => {
-  const h = await setup({ names: ['solar-string-data'] }); await h.open('solar-string-data')
+it.each(['solar-solaredge-accept', 'solar-solaredge-tracking-read'])('S02 opens the existing %s project editor without submitting a run', async (name) => {
+  const h = await setup({ names: [name] })
+  expect(tool(h, name).disabled).toBe(false)
+  await h.open(name)
+  expect(h.runtime.openTool).toBe(h.rows[0])
+  expect(h.adapter.projectSolarRefusal).toBeNull()
+  if (name === 'solar-solaredge-accept') {
+    expect(screen.getByRole('region', { name: 'Project SolarEdge import' })).toBeTruthy()
+  } else {
+    expect(screen.getByRole('button', { name: 'Read project output' })).toBeTruthy()
+  }
+  expect(h.client.submitRun).not.toHaveBeenCalled()
+  expect(h.client.readSolar).not.toHaveBeenCalled()
+  noLegacy(h)
+})
+it.each(['solar-string-data', 'solar-assignment-report'])('R13G2B-10 %s renders canonical output without writing', async (name) => {
+  const h = await setup({ names: [name] }); await h.open(name)
   fireEvent.click(screen.getByRole('button', { name: 'Read project output' }))
   await waitFor(() => expect(h.view.container.textContent).toContain('57.4'))
   expect(h.client.readSolar).toHaveBeenCalledOnce()
-  expect(h.client.readSolar.mock.calls[0][0].tool).toBe('solar-string-data')
+  expect(h.client.readSolar.mock.calls[0][0].tool).toBe(name)
   expect(h.client.submitRun).not.toHaveBeenCalled(); noLegacy(h)
 })
 it('R13G2B-11 rendered ribbon submit leaves all legacy seams untouched', async () => {

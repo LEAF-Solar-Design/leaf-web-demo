@@ -55,7 +55,7 @@ beforeEach(() => {
   })
 })
 
-const setup = async () => {
+const setup = async ({ scrollAway = true } = {}) => {
   const view = render(panel(initialTurns))
   await push(event('turn_started', 'original'))
   const log = screen.getByRole('log', { name: 'Assistant conversation' })
@@ -67,9 +67,12 @@ const setup = async () => {
     act(() => observers[0].report())
   }
   resize(height)
-  log.scrollTop = 0
-  fireEvent.scroll(log)
-  expect(jumpChip()).not.toBeNull()
+  if (scrollAway) {
+    fireEvent.wheel(log)
+    log.scrollTop = 0
+    fireEvent.scroll(log)
+    expect(jumpChip()).not.toBeNull()
+  }
   return { view, log, resize }
 }
 
@@ -81,6 +84,40 @@ afterEach(() => {
 })
 
 describe('following the latest conversation message', () => {
+  it('re-pins a layout scroll without a reader gesture', async () => {
+    const { log } = await setup({ scrollAway: false })
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 43100 })
+    log.scrollTop = 651
+    fireEvent.scroll(log)
+    expect(jumpChip()).toBeNull()
+    expect(log.scrollTop).toBe(log.scrollHeight)
+  })
+
+  it('follows content appended after the last event', async () => {
+    const { log } = await setup({ scrollAway: false })
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 30000 })
+    await act(async () => { log.appendChild(document.createElement('div')) })
+    expect(log.scrollTop).toBe(log.scrollHeight)
+    expect(jumpChip()).toBeNull()
+  })
+
+  it('keeps the reader’s position when content is appended after scrolling away', async () => {
+    const { log } = await setup()
+    Object.defineProperty(log, 'scrollHeight', { configurable: true, value: 30000 })
+    await act(async () => { log.appendChild(document.createElement('div')) })
+    expect(log.scrollTop).toBe(0)
+    expect(jumpChip()).not.toBeNull()
+  })
+
+  it('releases the pin after a scroll key inside the log', async () => {
+    const { log } = await setup({ scrollAway: false })
+    fireEvent.keyDown(log, { key: 'PageUp' })
+    log.scrollTop = 0
+    fireEvent.scroll(log)
+    expect(log.scrollTop).toBe(0)
+    expect(jumpChip()).not.toBeNull()
+  })
+
   it('opens at the newest message with a current user turn and a long transcript', async () => {
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(30000)
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(394)

@@ -30,6 +30,8 @@ cannot be found) this port refuses with a named :class:`SolarEdgeImportError`, a
 match (a group whose shape fits more than one unused grid) refuses unless the caller states the
 group order is the plugin's own selection order (``selection_order="recorded"``), because the
 plugin's first-fit answer then depends on an order the caller may not know.
+The report-only review mode retains unmatched and ambiguous groups instead; it never uses
+recorded order to resolve a tie and draws strings only for unique matches.
 
 The group row angle. For block panels the plugin's angle is the block rotation plus the block
 definition's rectangle rotation; :func:`lattice_row_angle` recovers it from the centroids when
@@ -260,7 +262,8 @@ def shape_signature(matrix):
     return tuple(tuple(cell["Code"] for cell in row["Panels"]) for row in matrix["Rows"])
 
 
-def lattice_row_angle(centres, *, spread_tolerance=1e-6):
+def lattice_row_angle(centres, *, spread_tolerance=1e-6, recorded_angle=None,
+                      coordinate_tolerance=0.0):
     """The shared panel angle, reconstructed from the centroid lattice; fails closed.
 
     The plugin's group row angle is the panel's angle (PanelGroup ctor, PanelGroup.cs:25), and
@@ -272,7 +275,16 @@ def lattice_row_angle(centres, *, spread_tolerance=1e-6):
     runs along it or across it; this returns the angle in [-pi/4, pi/4) and the caller picks
     the axis family from the definition's extents. Any spread above the tolerance refuses:
     the panels do not share one orientation and no single angle may be guessed.
+    A separately recorded module angle may instead be verified against every
+    nearest-neighbour vector with the stated coordinate rounding uncertainty.
     """
+    # A caller with independently recorded module rotation can check rounded
+    # centroids against it. This does not relax the default inferred-angle path.
+    if recorded_angle is not None and (
+            type(recorded_angle) not in (int, float) or not math.isfinite(recorded_angle)
+            or type(coordinate_tolerance) not in (int, float)
+            or not math.isfinite(coordinate_tolerance) or not 0 < coordinate_tolerance <= 0.0005):
+        raise SolarEdgeImportError("lattice-angle-unavailable", "invalid recorded angle")
     points = [(float(x), float(y)) for x, y in centres]
     if len(points) < 2 or len(points) > MAX_PANELS:
         raise SolarEdgeImportError("lattice-angle-unavailable", f"{len(points)} panels")
@@ -314,7 +326,16 @@ def lattice_row_angle(centres, *, spread_tolerance=1e-6):
             raise SolarEdgeImportError("lattice-angle-unavailable", "coincident or isolated panels")
         j = best[1]
         angle = math.atan2(points[j][1] - y, points[j][0] - x)
+        if recorded_angle is not None:
+            # Each coordinate can move by one half-quantum; the difference of
+            # two points can move by at most 2*sqrt(2)*tolerance in norm.
+            uncertainty = 2 * math.sqrt(2) * coordinate_tolerance / math.sqrt(best[0])
+            residual = abs((angle - recorded_angle + math.pi / 4) % (math.pi / 2) - math.pi / 4)
+            if uncertainty >= math.sqrt(0.5) or residual > math.asin(uncertainty) + spread_tolerance:
+                raise SolarEdgeImportError("lattice-angle-ambiguous", "centroids disagree with recorded rotation")
         folded.append((angle + math.pi / 4) % (math.pi / 2) - math.pi / 4)
+    if recorded_angle is not None:
+        return (recorded_angle + math.pi / 4) % (math.pi / 2) - math.pi / 4
     folded.sort()
     if folded[-1] - folded[0] > spread_tolerance:
         raise SolarEdgeImportError(
@@ -398,8 +419,44 @@ def _group_bridge_panels(sequences, bridge_seqs, bridge_panels):
     return result
 
 
+def _whole_matrix_grids(matrices, grids, drawing_shapes):
+    """Prefer a complete original only when no other group can claim its parts."""
+    groups_by_shape = {}
+    for index, signature in enumerate(drawing_shapes):
+        groups_by_shape.setdefault(signature, []).append(index)
+    atomic_by_original = {}
+    for grid in grids:
+        atomic_by_original.setdefault(grid["original_index"], []).append(shape_signature(grid["json"]))
+    replacements = {}
+    for index, source in enumerate(matrices):
+        if len(source.get("SubGrids") or []) <= 1:
+            continue
+        signature = shape_signature(source)
+        candidates = groups_by_shape.get(signature, ())
+        if len(candidates) != 1:
+            continue
+        atomics = atomic_by_original[index]
+        if signature in atomics:
+            continue  # The existing candidate already covers this shape.
+        owner = candidates[0]
+        competing = False
+        for atomic in atomics:
+            claimants = groups_by_shape.get(atomic, ())
+            if claimants and (len(claimants) != 1 or claimants[0] != owner):
+                competing = True
+                break
+        if not competing:
+            replacements[index] = {"json": copy.deepcopy(source), "original_index": index,
+                                   "sub_grid_id": -1}
+    if not replacements:
+        return grids, set()
+    return ([grid for grid in grids if grid["original_index"] not in replacements]
+            + [replacements[index] for index in sorted(replacements)]), set(replacements)
+
+
 def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
-               selection_order="unknown"):
+               selection_order="unknown", review=False, associations=None,
+               allow_whole_matrices=False):
     """S3 and S4 end to end.
 
     ``groups``: the drawing's panel groups in the plugin's selection order, each
@@ -407,11 +464,26 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     ``panels``: ``[{"handle", "x", "y"}]``, the drawing's panel centroids.
     Returns ``{"matches", "strings", "bridge_strings", "unassigned"}``; every string is
     ``{"panels", "inverter_id", "string_input_number", "partial", "source"}``.
+    With ``review=True``, every group gets a match row. Unmatched and ambiguous rows
+    have a status, all candidates and null grid indexes; they produce no strings.
+    Review never resolves a tie by recorded order, including competing drawing groups.
+    Explicit review associations may choose a structural candidate once; clearing
+    those choices restores automatic review without modifying any input.
+    The default remains the strict plugin-parity path.
     """
+    if type(allow_whole_matrices) is not bool or (allow_whole_matrices and not review):
+        raise SolarEdgeImportError("invalid-matching-policy", "whole matrices require explicit review")
     if selection_order not in SELECTION_ORDERS:
         raise SolarEdgeImportError("invalid-selection-order", repr(selection_order))
     if not isinstance(groups, (list, tuple)) or not groups or len(groups) > MAX_GROUPS:
         raise SolarEdgeImportError("malformed-groups", "groups must be a nonempty bounded list")
+    choices = {} if associations is None else associations
+    if (type(choices) is not dict or len(choices) > MAX_GROUPS
+            or any(type(ref) is not str or not 1 <= len(ref) <= 100
+                   or type(index) is not int or index < 0 for ref, index in choices.items())
+            or len(set(choices.values())) != len(choices)
+            or (choices and not review)):
+        raise SolarEdgeImportError("invalid-associations", "explicit choices require a valid review map")
     if not isinstance(panels, (list, tuple)) or len(panels) > MAX_PANELS:
         raise SolarEdgeImportError("malformed-panels", "panels must be a bounded list")
     centre = {}
@@ -438,6 +510,8 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
     by_original = {}
     strings = []
     grouped = []
+    drawings = []
+    shape_counts = {}
     for gi, group in enumerate(groups):
         members = group.get("panels") if isinstance(group, Mapping) else None
         if not isinstance(members, list) or not members:
@@ -449,18 +523,47 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
         drawing = drawing_group_matrix(
             [{"handle": h.upper(), "centre": centre[h.upper()]} for h in members],
             row_angle, alignment_tolerance)
-        candidates = [i for i in by_shape.get(shape_signature(drawing), ()) if i not in used]
+        signature = shape_signature(drawing)
+        drawings.append((drawing, signature))
+        shape_counts[signature] = shape_counts.get(signature, 0) + 1
+    whole_originals = set()
+    if allow_whole_matrices:
+        grids, whole_originals = _whole_matrix_grids(
+            matrices, grids, [signature for _, signature in drawings])
+        by_shape = {}
+        for index, grid in enumerate(grids):
+            by_shape.setdefault(shape_signature(grid["json"]), []).append(index)
+    if choices:
+        signatures = {}
+        for group, (_, signature) in zip(groups, drawings):
+            ref = group.get("block")
+            if type(ref) is str and ref in choices:
+                if ref in signatures:
+                    raise SolarEdgeImportError("invalid-associations", "choice names duplicate groups")
+                signatures[ref] = signature
+        for ref, index in choices.items():
+            if ref not in signatures or index not in by_shape.get(signatures[ref], ()):
+                raise SolarEdgeImportError("invalid-associations", "choice is not a structural candidate")
+    for gi, (group, (drawing, signature)) in enumerate(zip(groups, drawings)):
+        candidates = [i for i in by_shape.get(signature, ()) if review or i not in used]
+        explicit = choices.get(group.get("block"))
+        if review and explicit is None and (len(candidates) != 1 or shape_counts[signature] > 1):
+            matches.append({"group_index": gi, "block": group.get("block"),
+                            "status": "ambiguous" if candidates else "unmatched",
+                            "grid_index": None, "original_index": None, "sub_grid_id": None,
+                            "candidates": candidates})
+            continue
         if not candidates:
             raise SolarEdgeImportError(
                 "no-structural-match",
-                f"group {gi} ({group.get('block')}, {len(members)} panels) fits no unused PDF grid")
-        if len(candidates) > 1 and selection_order != "recorded":
+                f"group {gi} ({group.get('block')}, {len(group['panels'])} panels) fits no unused PDF grid")
+        if explicit is None and len(candidates) > 1 and selection_order != "recorded":
             raise SolarEdgeImportError(
                 "ambiguous-structural-match",
                 f"group {gi} ({group.get('block')}) fits PDF grids {candidates}; the plugin takes "
                 "the first in its selection order, so this is reproducible only with "
                 "selection_order='recorded' and the plugin's own order")
-        index = candidates[0]
+        index = candidates[0] if explicit is None else explicit
         merged = merge(drawing, grids[index]["json"])
         drawn = draw_sequences(merged, entity_handles)
         used.add(index)
@@ -475,10 +578,16 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
             strings.append(s)
 
     bridge_strings = []
+    unresolved = review and any(m["grid_index"] is None for m in matches)
     for data in bridge_data:
         original = data["original"]
         found = by_original.get(data["original_index"])
+        if (data["original_index"] in whole_originals and found
+                and any(match["sub_grid_id"] == -1 for match in found)):
+            continue  # These original sequences were emitted by the complete match.
         if not found:
+            if unresolved:
+                continue
             raise SolarEdgeImportError(
                 "bridge-grid-unmatched",
                 f"PDF grid {data['original_index'] + 1} has bridge strings but no matched sub-grid")
@@ -510,10 +619,14 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
             for seq, r, c in members:
                 handle = lookup.get((r, c), "")
                 if not handle:
+                    if unresolved:
+                        break
                     raise SolarEdgeImportError(
                         "bridge-handle-missing",
                         f"PDF grid {data['original_index'] + 1} bridge panel Seq {seq} at ({r}, {c})")
                 handles.append(handle)
+            if len(handles) != len(members):
+                continue
             bridge = {"Sequences": [len(handles)],
                       "Rows": [{"Panels": [{"Code": 1, "Id": h, "Seq": i + 1,
                                             "InverterId": inverter_id,
@@ -525,6 +638,38 @@ def run_import(matrices, groups, panels, *, row_angle=0.0, alignment_tolerance,
 
     assigned = {h for s in strings + bridge_strings for h in s["panels"]}
     unassigned = sorted(set(grouped) - assigned, key=lambda h: int(h, 16))
-    return {"matches": matches, "strings": strings, "bridge_strings": bridge_strings,
+    result = {"matches": matches, "strings": strings, "bridge_strings": bridge_strings,
             "unassigned": unassigned, "matchable_count": len(grids),
             "bridge_grid_count": len(bridge_data)}
+    if any("Optimizers" in matrix for matrix in matrices):
+        # Coordinates, never parser-local hex panel IDs, establish the correspondence.
+        positions = {}
+        for match in matches:
+            if match["grid_index"] is None:
+                continue
+            original_index = match["original_index"]
+            original = matrices[original_index]
+            row_offset = col_offset = 0
+            allowed = None
+            if match["sub_grid_id"] != -1:
+                sub = next(sg for sg in original["SubGrids"] if sg["Id"] == match["sub_grid_id"])
+                allowed = _json_cells(sub, len(original["Rows"]), len(original["Rows"][0]["Panels"]))
+                row_offset = min(r for r, _ in allowed)
+                col_offset = min(c for _, c in allowed)
+            for r, row in enumerate(match["merged"]["Rows"]):
+                for c, cell in enumerate(row["Panels"]):
+                    pos = (r + row_offset, c + col_offset)
+                    if cell["Code"] == 1 and cell["Id"] and (allowed is None or pos in allowed):
+                        positions.setdefault((original_index, *pos), set()).add(cell["Id"])
+        optimizers = []
+        complete = all("Optimizers" in matrix for matrix in matrices)
+        for index, matrix in enumerate(matrices):
+            for opt in matrix.get("Optimizers", []):
+                handles = []
+                for r, c in opt["cells"]:
+                    found = positions.get((index, r, c), set())
+                    handles.append(next(iter(found)) if len(found) == 1 else None)
+                optimizers.append({"id": opt["id"], "vendor_label": opt["vendor_label"],
+                                   "pdf_matrix": index, "panel_handles": handles})
+        result["optimizer_measurement"] = {"complete": complete, "optimizers": optimizers}
+    return result

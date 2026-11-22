@@ -6,6 +6,7 @@ an absence of failures. Activation requires the explicit --enabled flag.
 """
 
 import argparse
+from datetime import date
 import hashlib
 import importlib.util
 import json
@@ -14,11 +15,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
 REPO_SLUG = "LEAF-Solar-Design/leaf-web-demo"
 SCHEMA = "leaf.ci.pr-tier.v1"
+CONTRACT_KEEP_PATH = Path(__file__).with_name("contract-keep.json")
 
 
 def unique_object(pairs):
@@ -36,11 +39,70 @@ def load_input(path):
 
 
 def suite_ids(value, name):
-    if (not isinstance(value, list)
-            or any(not isinstance(v, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", v) for v in value)
-            or len(value) != len(set(value))):
+    if not isinstance(value, list):
         raise ValueError("invalid " + name)
-    return set(value)
+    ids = set()
+    for sid in value:
+        if not isinstance(sid, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", sid):
+            raise ValueError(f"invalid {name}: {sid!r}")
+        if sid in ids:
+            raise ValueError(f"duplicate {name}: {sid}")
+        ids.add(sid)
+    return ids
+
+
+def validate_date(value, field):
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            date.fromisoformat(value)
+            return
+        except ValueError:
+            pass
+    raise ValueError(f"invalid {field}: {value!r}")
+
+
+def load_contract_keep():
+    try:
+        document, _ = load_input(CONTRACT_KEEP_PATH)
+        if not isinstance(document, dict) or document.get("schema") != "leaf.ci.contract-keep.v1":
+            raise ValueError("invalid schema")
+        records = document.get("suites")
+        if not isinstance(records, list) or not records:
+            raise ValueError("suites must be a nonempty array")
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(f"suites[{index}] must be an object")
+            fields = {"id", "reason", "added", "evidence"} ^ record.keys()
+            if fields:
+                raise ValueError(f"suites[{index}] invalid fields: {sorted(fields)}")
+        ids = [record["id"] for record in records]
+        suite_ids(ids, "suites.id")
+        if ids != sorted(ids):
+            raise ValueError("suites must be ordered by id")
+        reasons = {}
+        for record in records:
+            sid, reason, evidence = record["id"], record["reason"], record["evidence"]
+            validate_date(record["added"], f"{sid} added")
+            if reason == "contract-keep":
+                if evidence is not None:
+                    raise ValueError(f"{sid} evidence must be null for contract-keep")
+            elif reason == "main-broke":
+                if not isinstance(evidence, dict) or not evidence:
+                    raise ValueError(f"{sid} evidence must be a nonempty object for main-broke")
+                if "date" in evidence:
+                    validate_date(evidence["date"], f"{sid} evidence.date")
+            else:
+                raise ValueError(f"{sid} invalid reason: {reason!r}")
+            reasons[sid] = reason
+        return reasons
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{CONTRACT_KEEP_PATH}: {exc}") from exc
+
+
+def require_contract_ids(reasons, ids, source):
+    missing = reasons.keys() - ids
+    if missing:
+        raise ValueError(f"{CONTRACT_KEEP_PATH}: IDs absent from {source}: {', '.join(sorted(missing))}")
 
 
 def load_runner():
@@ -75,8 +137,8 @@ def validate_catalog(catalog):
     return suite_ids(ids, "catalog suite IDs")
 
 
-def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner=None):
-    """Pure policy construction; validate every input before any output write."""
+def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner=None, *, contract_reasons=None):
+    """Construct the tier from validated inputs without modifying the catalog or proposal."""
     if not isinstance(proposal, dict) or proposal.get("schema") != SCHEMA:
         raise ValueError("invalid proposal schema")
     proposed = suite_ids(proposal.get("suite_ids"), "proposal suite_ids")
@@ -96,6 +158,9 @@ def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner
                        for path, count in history["fail_files"].items())):
             raise ValueError("invalid failure history: " + str(repo))
     ids = validate_catalog(catalog)
+    if contract_reasons is None:
+        contract_reasons = load_contract_keep()
+    require_contract_ids(contract_reasons, ids, "live catalog")
     dependencies = {}
     for row in catalog["suites"]:
         deps = suite_ids(row.get("prerequisites", []), "catalog prerequisites")
@@ -115,6 +180,8 @@ def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner
     for sid in sentinels:
         include(sid, "hard-harm-sentinel")
     include("web-version-restore-proof", "studio-keep")
+    for sid, reason in contract_reasons.items():
+        include(sid, reason)
     # An optional baseline makes a future regeneration retain every new suite,
     # even when that suite has an otherwise perfectly understood owner.
     baseline = (suite_ids(proposal["catalog_suite_ids"], "proposal catalog_suite_ids")
@@ -144,19 +211,70 @@ def build_document(proposal, failures, sentinels, catalog, input_sha256s, runner
     }
 
 
+def live_catalog():
+    proc = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/run-all-gates.py"), "--list"],
+                          cwd=ROOT, capture_output=True, text=True, check=True, timeout=60)
+    return json.loads(proc.stdout, object_pairs_hook=unique_object)
+
+
 def generate(proposal_path, failures_path, sentinels_path, catalog=None, *, enabled=False):
+    contract_reasons = load_contract_keep()
     documents, digests = [], {}
     for name, path in (("proposal", proposal_path), ("fail30", failures_path), ("sentinels", sentinels_path)):
         doc, digest = load_input(path)
         documents.append(doc)
         digests[name] = digest
     if catalog is None:
-        proc = subprocess.run([sys.executable, "-B", str(ROOT / "scripts/run-all-gates.py"), "--list"],
-                              cwd=ROOT, capture_output=True, text=True, check=True, timeout=60)
-        catalog = json.loads(proc.stdout, object_pairs_hook=unique_object)
-    document = build_document(*documents, catalog, digests)
+        catalog = live_catalog()
+    document = build_document(*documents, catalog, digests, contract_reasons=contract_reasons)
     document["enabled"] = enabled
     return document
+
+
+def merge_contract_keep(tier):
+    contract_reasons = load_contract_keep()
+    if not isinstance(tier, dict) or tier.get("schema") != SCHEMA or type(tier.get("enabled")) is not bool:
+        raise ValueError("invalid tier schema or enabled flag")
+    snapshot = suite_ids(tier.get("catalog_suite_ids"), "catalog_suite_ids")
+    members = suite_ids(tier.get("suite_ids"), "suite_ids")
+    if not members or not members <= snapshot:
+        raise ValueError("suite_ids must be a nonempty subset of catalog_suite_ids")
+    reasons = tier.get("reasons")
+    if not isinstance(reasons, dict) or reasons.keys() != members:
+        raise ValueError("reasons keys must match suite_ids")
+    for sid, values in reasons.items():
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(value, str) or not value.strip() for value in values)
+                or len(set(values)) != len(values)):
+            raise ValueError(f"invalid reasons for {sid}")
+    dependencies = tier.get("prerequisites", {})
+    if not isinstance(dependencies, dict) or not dependencies.keys() <= snapshot:
+        raise ValueError("invalid prerequisites")
+    for sid, deps in dependencies.items():
+        if not suite_ids(deps, f"{sid} prerequisites") <= snapshot:
+            raise ValueError(f"{sid} prerequisites outside catalog_suite_ids")
+    require_contract_ids(contract_reasons, validate_catalog(live_catalog()), "live catalog")
+    require_contract_ids(contract_reasons, snapshot, "catalog_suite_ids")
+
+    tier["suite_ids"] = sorted(members.union(contract_reasons))
+    for sid, reason in contract_reasons.items():
+        values = reasons.setdefault(sid, [])
+        if reason not in values:
+            values.append(reason)
+    for values in reasons.values():
+        values.sort()
+
+
+def replace_tier(path, content):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(content)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def main(argv=None):
@@ -165,10 +283,12 @@ def main(argv=None):
     parser.add_argument("--fail30", type=Path, default=ROOT / "fail30.json")
     parser.add_argument("--sentinels", type=Path, default=ROOT / "sentinels-strict.json")
     parser.add_argument("--output", type=Path, default=ROOT / "scripts/ci/pr-tier.json")
+    parser.add_argument("--sync-contract-keep", action="store_true",
+                        help="merge contract memberships and reasons into the existing output tier")
     parser.add_argument("--enabled", action="store_true", help="explicitly activate the generated PR tier")
     parser.add_argument("--stdout", action="store_true", help="print the document without writing files")
     parser.add_argument("--active", type=Path, metavar="POLICY",
-                        help="print 1 only for a PR event with a usable, enabled tier policy; otherwise 0")
+                        help="print 1 for a PR or baselined main push with an enabled tier; otherwise 0")
     args = parser.parse_args(argv)
     if args.active is not None:
         # The device worker sets this for a server-issued full run, which must
@@ -178,20 +298,43 @@ def main(argv=None):
             return 0
         is_pr = os.environ.get("CODEBUILD_WEBHOOK_EVENT") in (
             "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED")
-        print(int(is_pr and load_runner().load_pr_tier(args.active, quiet=True) is not None))
+        is_main = (os.environ.get("CODEBUILD_WEBHOOK_EVENT") == "PUSH"
+                   and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        active = False
+        if is_pr or is_main:
+            runner = load_runner()
+            try:
+                if is_main:
+                    runner.pr_tier_base()
+                active = runner.load_pr_tier(args.active, quiet=True) is not None
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        print(int(active))
         return 0
     try:
-        document = generate(args.proposal, args.fail30, args.sentinels, enabled=args.enabled)
+        original_digest = None
+        if args.sync_contract_keep:
+            document, original_digest = load_input(args.output)
+            merge_contract_keep(document)
+        else:
+            document = generate(args.proposal, args.fail30, args.sentinels, enabled=args.enabled)
         serialized = json.dumps(document, indent=2, sort_keys=True) + "\n"
+        if args.stdout:
+            print(serialized, end="")
+        elif args.sync_contract_keep:
+            content = serialized.encode("utf-8")
+            if hashlib.sha256(content).hexdigest() != original_digest:
+                replace_tier(args.output, content)
+        else:
+            args.output.write_text(serialized, encoding="utf-8")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print("PR tier generation refused: " + str(exc), file=sys.stderr)
         return 2
-    if args.stdout:
-        print(serialized, end="")
-    else:
-        args.output.write_text(serialized, encoding="utf-8")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# Compatibility for importers. The activation probe only needs the tier file.
+CONTRACT_KEEP = tuple(load_contract_keep())

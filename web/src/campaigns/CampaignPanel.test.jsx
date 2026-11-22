@@ -1,3 +1,4 @@
+import { scaleTimeout } from '../testTimeScale.js'
 import { act, cleanup, fireEvent, render as renderCollapsed, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
@@ -745,7 +746,7 @@ describe('release evidence panel', () => {
         reader.readAsArrayBuffer(urlApi.createObjectURL.mock.calls[0][0])
       })
       expect([...new Uint8Array(saved)]).toEqual([1, 2, 3, 4])
-      await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:source'), { timeout: 2000 })
+      await waitFor(() => expect(urlApi.revokeObjectURL).toHaveBeenCalledWith('blob:source'), { timeout: scaleTimeout(2000) })
       expect(screen.queryByTitle('Release tool: source.dxf')).toBeNull()
     } finally { clicked.mockRestore() }
   })

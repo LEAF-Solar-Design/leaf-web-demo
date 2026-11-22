@@ -297,10 +297,19 @@ def get_version_plan(drawing_id: str, version: str,
         plan_text = data.decode("utf-8")
     except UnicodeError:
         return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    plan_lines = plan_text.splitlines()
+    if not plan_lines or plan_lines[0] not in {
+            "LEAF_MUTATION_PLAN|1", "LEAF_MUTATION_PLAN|2", "LEAF_MUTATION_PLAN|3"}:
+        return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    plan_grammar = int(plan_lines[0].rsplit("|", 1)[1])
+    plan_kind = ("checkpoint" if len(plan_lines) > 2
+                 and plan_lines[1].startswith("BASE_SHA256|")
+                 and plan_lines[2] == "CLEARMODEL" else "ops")
     return with_envelope_fields({
         "drawing_id": drawing_id, "version": v,
         "parent_version": entry["parent_version"],
         "plan_sha256": entry["plan_sha256"], "plan_text": plan_text,
+        "plan_grammar": plan_grammar, "plan_kind": plan_kind,
         "result_sha256": write_loop.version_content_sha256(
             backend, str(tenant_id), drawing_id, v),
     })
@@ -774,6 +783,7 @@ async def solaredge_pdf_report(drawing_id: str, request: Request,
             "REPORT_BRIDGE_UNRESOLVED": (422, ErrorCode.BAD_PARAMS, False),
             "REPORT_ROW_ANGLE_UNRESOLVED": (422, ErrorCode.BAD_PARAMS, False),
             "REPORT_PDF_UNSUPPORTED": (422, ErrorCode.BAD_PARAMS, False),
+            "REPORT_RESOURCE_LIMIT": (422, ErrorCode.BAD_PARAMS, False),
             "REPORT_LIMIT_EXCEEDED": (422, ErrorCode.BAD_PARAMS, False),
             "REPORT_BUSY": (503, ErrorCode.INTERNAL, True),
             "REPORT_PARSE_TIMEOUT": (503, ErrorCode.INTERNAL, True),
@@ -1499,8 +1509,8 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
     """(payload intake, None) or (None, refusal) for a DXF save over `parent_version`.
 
     Each SOLAR_CARRIED_KEYS key the parent's stored intake holds is copied onto the parsed edit, its value
-    unchanged; a key the parent lacks stays absent, and a parent with none of them leaves the parsed intake
-    exactly as it was. A parent version the manifest does not name carries nothing: it cannot be the head,
+    unchanged. A generic edited.dxf upload also inherits the parent's drawing name when available.
+    A parent version the manifest does not name carries nothing: it cannot be the head,
     so the store's compare-and-set refuses the save as before. Every named parent's bytes are checked
     against its manifest digest before parsing, whether or not it carries solar keys. Parent bytes that
     match the digest but are not a JSON object (a DWG source) carry nothing. Fails closed: a named parent
@@ -1534,6 +1544,9 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
         return intake, None
     if type(parent) is not dict:
         return intake, None
+    parent_name = parent.get("dwg")
+    if intake["dwg"].lower() == "edited.dxf" and isinstance(parent_name, str) and parent_name:
+        intake["dwg"] = parent_name
     carried = {name: parent[name] for name in SOLAR_CARRIED_KEYS if name in parent}
     if not carried:
         return intake, None
@@ -1595,7 +1608,8 @@ def save_edited_version(drawing_id: str,
                         parent_version: int = Form(...),
                         source_digest: str = Form(...),
                         tenant_id: str = Depends(deps.require_active_tenant),
-                        x_checkout_capability: Optional[str] = Header(default=None)) -> Any:
+                        x_checkout_capability: Optional[str] = Header(default=None),
+                        origin: Optional[str] = Form(default=None)) -> Any:
     """Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION
     of this drawing — the editing surface's write-back into the same
     versioned-control chain every other write uses.
@@ -1662,6 +1676,7 @@ def save_edited_version(drawing_id: str,
         return refused
     intake_payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
     intake_digest = hashlib.sha256(intake_payload).hexdigest()
+    autocad = origin == "autocad"
     try:
         with write_loop.drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
@@ -1670,10 +1685,12 @@ def save_edited_version(drawing_id: str,
             new_v = write_loop._put_bytes_version(
                 backend, str(tenant_id), drawing_id, intake_payload,
                 parent_version=int(parent_version),
-                meta={"tool": "cad-edit-surface", "source": "cad_edit",
+                meta={"tool": "autocad-palette" if autocad else "cad-edit-surface",
+                      "source": "autocad_publish" if autocad else "cad_edit",
                       "source_sha256": actual_digest,
                       "intake_sha256": intake_digest,
-                      "note": "browser edit via the isolated engine worker"},
+                      "note": ("published from AutoCAD through the Leaf palette" if autocad else
+                               "browser edit via the isolated engine worker")},
                 holder=holder, fence=fence,
                 require_parent_is_head=True)
     except store.CheckoutDenied as exc:
@@ -1924,7 +1941,8 @@ def save_plan_version(drawing_id: str,
             # DXF from, so a mismatch is a client defect. Never commit a plan the
             # bytes beside it contradict.
             def text_entities(entities):
-                entries = Counter()
+                # Keyed by everything but the words; the words are compared by texts_agree.
+                entries = {}
                 for entity in entities:
                     point = entity.get("pt") or []
                     xy = [point[index] if index < len(point) else None for index in range(2)]
@@ -1932,20 +1950,53 @@ def save_plan_version(drawing_id: str,
                         write_loop._extractor_round(value, 3)
                         if isinstance(value, (int, float)) and not isinstance(value, bool) else value
                         for value in xy)
-                    entries[(entity.get("kind"),
-                             str(entity["handle"]) if entity.get("handle") is not None else None,
-                             str(entity["layer"]) if entity.get("layer") is not None else None,
-                             *xy, entity.get("text"))] += 1
+                    key = (entity.get("kind"),
+                           str(entity["handle"]) if entity.get("handle") is not None else None,
+                           str(entity["layer"]) if entity.get("layer") is not None else None,
+                           *xy)
+                    entries.setdefault(key, []).append(entity.get("text"))
                 return entries
+
+            def normalized_text(text):
+                # Studio's DXF writer spells MTEXT tab codes (^I) as spaces; the intake already
+                # collapses whitespace runs.
+                return " ".join(text.replace("^I", " ").split()) if isinstance(text, str) else text
+
+            def texts_agree(left, right):
+                # The intake caps a text at dxf_intake._TEXT_MAX_CHARS raw characters, so a capped
+                # note whose tabs were respelled ends at a different word: there a prefix agrees.
+                a, b = normalized_text(left), normalized_text(right)
+                if a == b:
+                    return True
+                if not (isinstance(a, str) and isinstance(b, str)):
+                    return False
+                import dxf_intake
+                capped = max(len(left), len(right)) >= dxf_intake._TEXT_MAX_CHARS
+                return capped and min(len(a), len(b)) > 0 and (a.startswith(b) or b.startswith(a))
+
+            def text_entities_agree(upload_rows, base_rows):
+                up, base = text_entities(upload_rows), text_entities(base_rows)
+                if up.keys() != base.keys():
+                    return False
+                for key, base_texts in base.items():
+                    up_texts = up[key]
+                    if len(up_texts) != len(base_texts):
+                        return False
+                    pending = list(up_texts)
+                    for text in base_texts:
+                        match = next((i for i, cand in enumerate(pending) if texts_agree(cand, text)), None)
+                        if match is None:
+                            return False
+                        pending.pop(match)
+                return True
 
             try:
                 expected_base = copy.deepcopy(base_intake)
                 expected_base["dwg"] = drawing_id
                 uploaded = copy.deepcopy(intake)
                 uploaded["dwg"] = drawing_id
-                if "texts" in base_intake and (
-                    text_entities(uploaded.get("texts") or [])
-                    != text_entities(base_intake.get("texts") or [])
+                if "texts" in base_intake and not text_entities_agree(
+                    uploaded.get("texts") or [], base_intake.get("texts") or []
                 ):
                     raise ValueError("text entities differ from the head")
                 quantized_upload = write_loop.quantize_intake_like_extractor(uploaded)

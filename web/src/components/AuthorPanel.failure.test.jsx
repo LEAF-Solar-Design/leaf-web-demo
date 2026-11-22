@@ -2,11 +2,78 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import AuthorPanel from './AuthorPanel.jsx'
 import useAuthorStageController from '../controllers/useAuthorStageController.js'
+import { errorPresentation } from '../errorPresentation.js'
 
 afterEach(cleanup)
 
 const changeSetId = '24b18e9d-3aaa-4e75-b443-6cab404ffd4c'
 const description = 'Validate campaign host enrollment evidence.'
+const protectedFailureMessage = 'Protected tool authoring could not complete. The approved request was not executed.'
+
+function protectedFailure(reasonCode) {
+  return Object.assign(new Error('Internal exception text'), {
+    status: 400,
+    body: {
+      error: { error_code: 'BAD_PARAMS', message: protectedFailureMessage, retryable: false },
+      ...(reasonCode === undefined ? {} : { reason_code: reasonCode }),
+      diagnostic: 'Private server diagnostic',
+      exception: 'Private exception details',
+      description: 'Private request description',
+      credentials: 'Private credential value',
+    },
+  })
+}
+
+describe('protected authoring failure reasons', () => {
+  it.each(['customization_policy_rejected', 'customization_revision_unavailable'])(
+    'shows %s beside the safe message after submission', async (reasonCode) => {
+      const error = protectedFailure(reasonCode)
+      const onAuthor = vi.fn(async () => { throw error })
+      const { container } = render(<AuthorPanel onAuthor={onAuthor} />)
+      fireEvent.change(screen.getByLabelText('What should the tool do?'), { target: { value: description } })
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate tool' })) })
+
+      const code = screen.getByText(reasonCode, { selector: 'code' })
+      expect(code.parentElement).toHaveTextContent(`Couldn’t author the tool: ${protectedFailureMessage} ${reasonCode}`)
+      expect(code.childElementCount).toBe(0)
+      expect(screen.queryByText('BAD_PARAMS')).not.toBeInTheDocument()
+      for (const privateText of [error.message, error.body.diagnostic, error.body.exception, error.body.description, error.body.credentials]) {
+        expect(container).not.toHaveTextContent(privateText)
+      }
+    },
+  )
+
+  it.each([undefined, '', null, { message: 'Private reason details' }, 'Internal exception: private details', '<img src=x onerror=alert(1)>'])(
+    'keeps the generic code for a missing or invalid reason %j', (reasonCode) => {
+      const { container } = render(<AuthorPanel onAuthor={vi.fn()} stageActivity={{ error: protectedFailure(reasonCode) }} />)
+      const code = screen.getByText('BAD_PARAMS', { selector: 'code' })
+      expect(code.parentElement).toHaveTextContent(`Couldn’t author the tool: ${protectedFailureMessage} BAD_PARAMS`)
+      expect(container.querySelector('img')).toBeNull()
+      expect(container).not.toHaveTextContent('Private reason details')
+      expect(container).not.toHaveTextContent('Internal exception: private details')
+    },
+  )
+
+  it('updates the displayed reason when the same safe message accompanies a new failure', () => {
+    const props = { onAuthor: vi.fn() }
+    const view = render(<AuthorPanel {...props} stageActivity={{ error: protectedFailure('customization_policy_rejected') }} />)
+    view.rerender(<AuthorPanel {...props} stageActivity={{ error: protectedFailure('customization_revision_unavailable') }} />)
+    expect(screen.getByText('customization_revision_unavailable', { selector: 'code' })).toBeInTheDocument()
+    expect(screen.queryByText('customization_policy_rejected')).not.toBeInTheDocument()
+    expect(screen.getByText(`Couldn’t author the tool: ${protectedFailureMessage}`)).toBeInTheDocument()
+  })
+
+  it('preserves shared formatter behavior when a caller does not supply the reason code', () => {
+    expect(errorPresentation(protectedFailure('customization_policy_rejected'))).toEqual({
+      message: protectedFailureMessage,
+      code: 'BAD_PARAMS',
+      nextAction: '',
+      actor: '',
+      retryable: false,
+    })
+    expect(errorPresentation(new Error('Connection lost'))).toMatchObject({ message: 'Connection lost', code: '' })
+  })
+})
 
 function renderFailure({ pollUrl = `/api/author/stages/${changeSetId}` } = {}) {
   const onAuthor = vi.fn(async () => null)

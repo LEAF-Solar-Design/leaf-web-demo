@@ -2,6 +2,29 @@
   "_note": "Tracked, server-lane seed registry for drawing.write tools (M2). deps.all_tools() folds these in additively so /api/run resolves them by name. Read tools stay in engine/registry.json; authored tools stay in the gitignored authored_tools.json.",
   "tools": [
     {
+      "name": "solar-string-tags",
+      "version": "1.0.0",
+      "description": "Publish visible circuit TEXT tags on a source drawing.",
+      "kind": "script",
+      "family_id": "stringing",
+      "engine_op": "solar_string_tags",
+      "entry": "builtins/solar_string_tags.py",
+      "params": {
+        "type": "object",
+        "properties": {
+          "expected_rev": {"type": "integer", "minimum": 0},
+          "paper_mm_per_drawing_unit": {"type": "number", "exclusiveMinimum": 0},
+          "paper_height_mm": {"type": "number", "minimum": 1.8},
+          "tag_layer": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "required": ["expected_rev", "paper_mm_per_drawing_unit"],
+        "additionalProperties": false
+      },
+      "returns": {"type": "object"},
+      "capabilities": ["drawing.write"],
+      "allow_local_fallback": false
+    },
+    {
       "name": "solar-settings",
       "version": "1.0.0",
       "description": "Edit drawing-owned solar settings.",
@@ -136,7 +159,7 @@
     {
       "name": "solar-panel-groups",
       "version": "1.0.0",
-      "description": "Build panel groups with the licensed drawing engine.",
+      "description": "Build selected panel groups or discover whole-drawing groups from source geometry and recorded drawing properties.",
       "kind": "script",
       "family_id": "stringing",
       "engine_op": "solar_panel_groups",
@@ -152,6 +175,9 @@
             "type": "integer",
             "minimum": 0
           },
+          "geometry_only": {
+            "type": "boolean"
+          },
           "cancel": {
             "type": "boolean"
           },
@@ -161,6 +187,16 @@
             "items": {
               "type": "object"
             }
+          },
+          "discover": {
+            "type": "object",
+            "properties": {
+              "BranchMaxOffset": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "AlignmentTolerance": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000000},
+              "InstallationDesign": {"type": "string", "enum": ["Roof", "Ground"]}
+            },
+            "required": ["BranchMaxOffset", "AlignmentTolerance", "InstallationDesign"],
+            "additionalProperties": false
           }
         },
         "required": [

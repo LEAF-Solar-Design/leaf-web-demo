@@ -139,6 +139,7 @@ export class FakeAppRunClient implements AppRunClient {
     description: string;
     mode: "build" | "one_off";
     idempotencyKey: string;
+    target?: "branch";
   }> = [];
   readonly publicationCalls: Array<{ tenantId: string; changeSetId: string }> = [];
   /** Ordered method-name log: proof of which surfaces were touched, and when. */
@@ -197,9 +198,12 @@ export class FakeAppRunClient implements AppRunClient {
     description: string,
     mode: "build" | "one_off",
     idempotencyKey: string,
+    _authority?: { sessionId?: string; turnId?: string },
+    _targetToolName?: string,
+    target?: "branch",
   ): Promise<Record<string, unknown>> {
     this.methodLog.push("authorTool");
-    this.authorCalls.push({ tenantId, description, mode, idempotencyKey });
+    this.authorCalls.push({ tenantId, description, mode, idempotencyKey, ...(target !== undefined ? { target } : {}) });
     return {
       tool: { name: "panel-gap-checker", capabilities: ["drawing.read"] },
       preview: "Created panel-gap-checker.",

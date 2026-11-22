@@ -10,6 +10,7 @@ import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { cloneDocument, selectionIdentity, singleFieldChange } from './portfolioEdits.js'
 import { appearanceStyle, textStyle } from './pageDesign.js'
+import { nativePreviewSubmissionKey } from '../lib/nativePreviewSubmission.js'
 import ElementInspector, { InlineText } from './ElementInspector.jsx'
 import './projectPageEditor.css'
 
@@ -31,8 +32,10 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
-      {isValidPageAction(document.action) && <p className="project-page__action">
-        <a href={document.action.href} onClick={event => event.preventDefault()} onAuxClick={event => event.preventDefault()}>{document.action.label}</a>
+      {typeof document.action?.label === 'string' && document.action.label && <p className="project-page__action">
+        {isValidPageAction(document.action)
+          ? <a href={document.action.href} target={document.action.href.startsWith('https:') ? '_blank' : undefined} rel={document.action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{document.action.label}</a>
+          : document.action.label}
       </p>}
     </div>
   </main>
@@ -65,6 +68,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const actionRow = useRef(null)
   const editor = useRef(null)
   const nativeSession = useRef(null)
+  const nativePreparation = useRef(false)
+  const priorJobInput = useRef(null)
   const live = useRef(false)
   const operation = useRef(null)
   const preview = useRef(onPreview)
@@ -91,6 +96,16 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       clearTimeout(session.deadlineTimer)
       if (session.url) URL.revokeObjectURL(session.url)
     }
+  }
+  const acceptSaved = page => {
+    const previous = sourceSnapshot.current.saved
+    if (previous?.revision !== page?.revision || previous?.digest !== page?.digest) {
+      // Retire the old observer before publishing the new saved source.
+      clearNative()
+      setNative(null)
+    }
+    sourceSnapshot.current = { ...sourceSnapshot.current, saved: page }
+    setSaved(page)
   }
   useEffect(() => {
     clearNative()
@@ -192,7 +207,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     const page = await loadProjectPage(projectId, { signal })
     if (!current()) return
     if (!page) { setNotice('No saved page yet. Choose Create a page to begin.'); return }
-    setSaved(page); replaceDraft(page.document, page)
+    acceptSaved(page); replaceDraft(page.document, page)
     show(page.document)
   })
   const importContent = event => {
@@ -216,8 +231,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     if (!current()) return
     // Retain the exact draft object and its ephemeral selection identities on save.
     const accepted = equalDocument(page.document, snapshot.draft) ? { ...page, document: snapshot.draft } : page
+    acceptSaved(accepted)
     sourceSnapshot.current = { saved: accepted, draft: snapshot.draft }
-    setSaved(accepted); setDraft(snapshot.draft)
+    setDraft(snapshot.draft)
     show(snapshot.draft)
   })
   const download = (target = 'web') => perform('exporting', async (signal, current) => {
@@ -291,7 +307,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         || !incomingProposal.isCurrent()) { finish(false); return }
       // A load started by this request must settle before reviewing its snapshot.
       if (pending.opened && busy === 'loading') return
-      if (busy || operation.current || dirty || validation || error?.conflict || nativeSession.current?.active || native?.active) {
+      if (busy || operation.current || dirty || validation || error?.conflict || (nativeSession.current?.active || nativePreparation.current) || native?.active) {
         finish(false); return
       }
       if (!draft && !saved && !pending.opened) {
@@ -313,7 +329,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           && typeof provenance.turnId === 'string' && Boolean(provenance.turnId.trim()) && provenance.turnId.length <= 200
           && Number.isSafeInteger(provenance.seq) && provenance.seq > 0
           && sourceSnapshot.current.saved === snapshot.saved && sourceSnapshot.current.draft === snapshot.draft
-          && sourceSnapshot.current.enabled && !sourceSnapshot.current.busy && !operation.current && !nativeSession.current?.active
+          && sourceSnapshot.current.enabled && !sourceSnapshot.current.busy && !operation.current && !(nativeSession.current?.active || nativePreparation.current)
         if (!current()) { finish(false); return }
         let cancelled = false
         void validateProjectPhotoAssignmentProposal(projectId, saved, incomingProposal.result).then(value => {
@@ -351,7 +367,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     setBusy(null); setProposal(null); setNotice('Proposal generation cancelled.')
   }
   const useProposal = () => {
-    if (!live.current || !proposal || proposalBlocked || operation.current || nativeSession.current?.active || sourceSnapshot.current.saved !== proposal.snapshot.saved
+    if (!live.current || !proposal || proposalBlocked || operation.current || (nativeSession.current?.active || nativePreparation.current) || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
     if (!proposal.photo) portfolioTextChanges(saved.document, document)
@@ -377,6 +393,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     const controller = new AbortController()
     session.controller = controller
     const current = () => live.current && nativeSession.current === session && !controller.signal.aborted
+      && sourceSnapshot.current.saved?.revision === session.revision
+      && sourceSnapshot.current.saved?.digest === session.digest
     const publish = extra => setNative({ revision: session.revision, job: session.job, url: session.url, active: session.active, ...extra })
     const stop = () => {
       clearTimeout(session.timer)
@@ -393,12 +411,20 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     publish({})
     const step = async first => {
       try {
+        if (first && submit && session.priorJobId) {
+          const previous = await loadProjectNativePreview(projectId, session.priorJobId, { signal: controller.signal, expectedScope: session.expectedScope })
+          if (!current()) return
+          validateNativePreview(previous, { job_id: session.priorJobId, revision: session.revision, document_sha256: session.digest })
+          if (previous.status !== 'failed') throw new Error('Not a failed preview')
+          session.archive = previous.archive_sha256
+          session.submissionAttempted = true
+        }
         const value = first && submit
-          ? await submitProjectNativePreview(projectId, session.revision, session.key, { signal: controller.signal })
+          ? await submitProjectNativePreview(projectId, session.revision, session.key, { signal: controller.signal, priorJobId: session.priorJobId, expectedScope: session.expectedScope })
           : await loadProjectNativePreview(projectId, session.job.job_id, { signal: controller.signal })
         if (!current()) return
         // prepare_source copies page.digest into source.document_sha256.
-        const job = validateNativePreview(value, session.job || { revision: session.revision, document_sha256: session.digest })
+        const job = validateNativePreview(value, session.job || { revision: session.revision, document_sha256: session.digest, archive_sha256: session.archive })
         session.job = job
         if (job.status !== 'complete' && session.url) {
           URL.revokeObjectURL(session.url)
@@ -419,6 +445,12 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         } else session.timer = setTimeout(() => { if (current()) void step(false) }, 2000)
       } catch {
         if (!current()) return
+        if (session.priorJobId && !session.submissionAttempted) {
+          stop()
+          nativeSession.current = null
+          setNative({ revision: session.revision, active: false, message: 'Could not verify a failed preview for this saved page. No build was submitted.' })
+          return
+        }
         if (session.url) { URL.revokeObjectURL(session.url); session.url = null }
         stop()
         publish({ message: session.job
@@ -428,14 +460,33 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     }
     await step(true)
   }
-  const buildNative = () => {
+  const buildNative = async (priorJobId = undefined) => {
     if (!enabled || operation.current || busy || dirty || validation || !saved
-      || draft?.schema !== 'leaf.portfolio.v1' || nativeSession.current?.active) return
+      || draft?.schema !== 'leaf.portfolio.v1' || (nativeSession.current?.active || nativePreparation.current)) return
     let session = nativeSession.current
     if (session?.job && !['failed', 'cancelled'].includes(session.job.status)) return
+    if (priorJobId && session && !session.job && session.priorJobId !== priorJobId) {
+      setNative(previous => ({ ...previous, message: 'A different submission is unconfirmed. Check that submission first.' }))
+      return
+    }
     if (!session || session.job) {
+      let key
+      nativePreparation.current = true
+      try {
+        // Live authentication derives the actor server-side; the dev binding is optional.
+        key = priorJobId ? 'recover-page:' + priorJobId : await nativePreviewSubmissionKey(localStorage,
+          [accountScope, getStoredOrgId(), getStoredActorBindingId() || accountScope, projectId, saved.revision, saved.digest], session?.job ? session.key : null)
+        if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
+      } catch {
+        if (!live.current || sourceSnapshot.current.saved !== saved || !sourceSnapshot.current.enabled) return
+        setNative({ revision: saved.revision, active: false,
+          message: 'The preview submission identity could not be restored or saved. No build was submitted.' })
+        return
+      } finally {
+        nativePreparation.current = false
+      }
       clearNative()
-      session = { revision: saved.revision, digest: saved.digest, key: crypto.randomUUID(), job: null, url: null, active: false }
+      session = { revision: saved.revision, digest: saved.digest, key, priorJobId, expectedScope: priorJobId ? readActiveScope() : undefined, job: null, url: null, active: false }
       nativeSession.current = session
     }
     void observeNative(session, true)
@@ -532,10 +583,17 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         <h3>iOS preview</h3>
         <p className="project-page-editor__note">Build a private simulator preview of your saved portfolio. It is not an installed or published app.</p>
         <div className="project-page-editor__actions">
-          <button type="button" onClick={buildNative} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
+          <button type="button" onClick={() => buildNative()} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
             || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}>Build iOS preview</button>
           {native?.job && <button type="button" onClick={checkNative} disabled={!enabled || Boolean(busy) || Boolean(native.active)}>Check preview again</button>}
         </div>
+        <label>Failed preview job ID<input ref={priorJobInput} maxLength={36} /></label>
+        <button type="button" disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
+          || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}
+          onClick={() => {
+            const prior = priorJobInput.current.value.trim()
+            if (prior) void buildNative(prior)
+          }}>Recover original iOS preview</button>
         {dirty && <p className="project-page-editor__note">Save changes before building a new preview.</p>}
         {native && <p role="status" aria-live="polite">{nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision {native.revision}</p>}
         {native?.message && <p className="project-page-editor__note" role="status">{native.message}</p>}

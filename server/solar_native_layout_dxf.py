@@ -20,6 +20,7 @@ MAX_PILES = kernels.MAX_PILES
 MAX_DXF_BYTES = 16 * 1024 * 1024
 NAMESPACE = "LEAF_STUDIO_LAYOUT"
 SCHEMA = "leaf.studio-native-layout.v1"
+_INSERTION_UNITS = {"m": 6, "ft": 2}
 _HEX = re.compile(r"[0-9A-Fa-f]{1,16}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
@@ -283,6 +284,13 @@ class _Drawing:
                 or p[versions[0]].value not in ("AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032")):
             _fail("SOURCE_UNSAFE")
         self.seed_index = seeds[0]
+        units = [j + 1 for j in range(start, end)
+                 if p[j].code == 9 and p[j].value.casefold() == "$insunits"]
+        if (len(units) > 1 or (units and (units[0] >= end or p[units[0]].code != 70
+                or not re.fullmatch(r"[0-9]+", p[units[0]].value.strip())))):
+            _fail("UNITS_INVALID")
+        self.units_index = units[0] if units else None
+        self.insertion_units = int(p[units[0]].value.strip()) if units else None
         self.entity_starts = {r.start for r in self.records["ENTITIES"]}
         self.object_starts = {r.start for r in self.records["OBJECTS"]}
         self.next_handle = max(int(p[seeds[0]].value, 16),
@@ -467,6 +475,8 @@ def _namespace(drawing):
             _fail("NAMESPACE_INVALID")
         document = ps.decode_document(payload["document"].encode("utf-8"))
         _document(document, payload["parameters"])
+        if drawing.insertion_units not in (None, 0, _INSERTION_UNITS[document["units"]["drawing_units"]]):
+            _fail("UNITS_MISMATCH")
         if (_sha(payload["document"].encode("utf-8")) != payload["document_sha256"]
                 or _sha(_json(payload["parameters"]).encode("utf-8")) != payload["parameters_sha256"]):
             _fail("NAMESPACE_INVALID")
@@ -553,6 +563,9 @@ def materialize_native_layout(context, head, document, source, *, parameters):
         _fail("SOURCE_REQUIRED")
     raw = intake_dxf.intake_to_dxf({"layers": ["0", "Defpoints"]}) if source is None else source
     drawing = _Drawing(raw)
+    insertion_units = _INSERTION_UNITS[document["units"]["drawing_units"]]
+    if drawing.insertion_units not in (None, 0, insertion_units):
+        _fail("UNITS_MISMATCH")
     old_record, old = _namespace(drawing)
     if old is not None and old["scope"] != scope:
         _fail("SCOPE_MISMATCH")
@@ -580,6 +593,11 @@ def materialize_native_layout(context, head, document, source, *, parameters):
 
     def append(index, pairs):
         additions[index] = additions.get(index, b"") + _pack(pairs)
+
+    if drawing.units_index is None:
+        append(drawing.sections["HEADER"][1], [(9, "$INSUNITS"), (70, str(insertion_units))])
+    else:
+        replacements[drawing.units_index] = (drawing.units_index + 1, _pack([(70, str(insertion_units))]))
 
     for handle in owned:
         record = drawing.handles[handle]

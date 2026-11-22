@@ -48,7 +48,17 @@ def main():
             preview.paste(rgba, mask=rgba.getchannel('A'))
         else:
             preview.paste(oriented.convert('RGB'))
-        preview.save('preview.jpg', format='JPEG', quality=85)
+        # Bound the derivative for model inspection without changing originals.
+        while True:
+            encoded = io.BytesIO()
+            preview.save(encoded, format='JPEG', quality=85)
+            if encoded.tell() <= 1024 * 1024:
+                Path('preview.jpg').write_bytes(encoded.getvalue())
+                break
+            if preview.size == (1, 1):
+                raise ValueError('preview budget')
+            preview.thumbnail((max(1, preview.width * 3 // 4),
+                               max(1, preview.height * 3 // 4)), Image.Resampling.LANCZOS)
     print(json.dumps({'media_type': media_type, 'width': width, 'height': height}))
 
 

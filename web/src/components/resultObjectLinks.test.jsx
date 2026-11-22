@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { scaleTimeout } from '../testTimeScale.js'
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -119,7 +120,7 @@ describe('report object links', () => {
     expect(view.container.querySelectorAll('.result-object-links li')).toHaveLength(100)
     view.rerender(<ResultPanel result={envelope()} navigation={{ jump }} />)
     expect(screen.getByRole('button', { name: /Panel 161 Site/ })).toBeInTheDocument()
-  }, 15000)
+  }, scaleTimeout(15000))
 
   it('reports the current provider key through the bridge, including loading', () => {
     const onChange = vi.fn()

@@ -15,6 +15,7 @@ from uuid import UUID
 
 VIDEO_MAX_BYTES = 64 * 1024 * 1024
 TEXT_MAX_BYTES = 8 * 1024 * 1024
+MATERIAL_JSON_MAX_DEPTH = 128
 CORPUS_MAX_BYTES = 64 * 1024 * 1024
 CORPUS_EXPANDED_MAX_BYTES = 2 * 1024 ** 3
 CORPUS_LINE_MAX_BYTES = 1024 * 1024
@@ -28,6 +29,19 @@ class InvalidReference(ValueError):
 
 class ReferenceStoreUnavailable(RuntimeError):
     pass
+
+
+def unique_json_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
+    return result
+
+
+def check_json_depth(raw):
+    from json_resource_limits import within_depth_budget
+    if not within_depth_budget(raw, MATERIAL_JSON_MAX_DEPTH):
+        raise InvalidReference('Material JSON exceeds its nesting depth limit.')
 
 
 def upload_policy(name, content_type):
@@ -47,12 +61,15 @@ def upload_policy(name, content_type):
     return name, media_type, CORPUS_MAX_BYTES if corpus else VIDEO_MAX_BYTES if extension == '.mov' else TEXT_MAX_BYTES
 
 
-def validate_corpus(raw):
-    """Validate one gzip member incrementally, retaining no expanded corpus.
+def validate_corpus(raw, *, allow_members=False):
+    """Validate gzip JSONL incrementally, retaining no expanded corpus.
+
+    Direct validation keeps its one-member default. Original imports opt into
+    standard concatenated members while sharing all logical-stream limits.
 
     Output chunks and unfinished lines have separate bounds. zlib checks the
-    gzip CRC/trailer; eof and unused_data reject truncation, extra members and
-    trailing bytes. The uploaded compressed bytes remain the stored original.
+    gzip CRC/trailer; eof and unused_data detect truncation and trailing bytes
+    for each member. The uploaded compressed bytes remain the stored original.
     """
     expanded = rows = 0
     line = bytearray()
@@ -83,6 +100,20 @@ def validate_corpus(raw):
                            parse_float=finite_float, object_pairs_hook=unique_object)
         if not isinstance(value, dict):
             raise ValueError('row object required')
+        # Escaped lone surrogates parse as Python strings but have no UTF-8
+        # representation. Literal UTF-8 was checked by decoding above.
+        if br'\u' in data:
+            pending = [value]
+            while pending:
+                item = pending.pop()
+                if isinstance(item, str):
+                    item.encode('utf-8')
+                elif isinstance(item, dict):
+                    pending.extend(item.keys())
+                    pending.extend(item.values())
+                elif isinstance(item, list):
+                    pending.extend(item)
+
         rows += 1
         if rows > CORPUS_MAX_ROWS:
             raise ValueError('row count')
@@ -103,12 +134,16 @@ def validate_corpus(raw):
                     line.extend(fragment)
                     if len(line) > CORPUS_LINE_MAX_BYTES:
                         raise ValueError('line size')
-                if decoder.unused_data:
-                    raise ValueError('trailing data or gzip members')
                 if decoder.eof:
-                    if offset + 65536 < len(raw) or pending:
-                        raise ValueError('trailing data')
-                    break
+                    pending = decoder.unused_data
+                    if pending or offset + 65536 < len(raw):
+                        if not allow_members:
+                            raise ValueError('trailing data or gzip members')
+                        # Each member must finish (including its CRC/trailer).
+                        # Rows, partial lines and expanded bytes span members.
+                        decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                    else:
+                        break
         if not decoder.eof:
             raise ValueError('incomplete gzip')
         if line:
@@ -205,15 +240,17 @@ def validate_mov(raw):
         raise InvalidReference('MOV must contain a video track.')
 
 
-def validate(name, content_type, raw):
+def validate(name, content_type, raw, *, allow_corpus_members=False):
     name, media_type, limit = upload_policy(name, content_type)
     if not 0 < len(raw) <= limit:
         raise InvalidReference('Reference file is empty or exceeds its size limit.')
     if media_type == 'application/gzip':
-        validate_corpus(raw)
+        validate_corpus(raw, allow_members=allow_corpus_members)
     elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
+        if media_type == 'application/json':
+            check_json_depth(raw)
         try:
             text = raw.decode('utf-8-sig')
             if any(unicodedata.category(c) == 'Cc' and c not in '\t\r\n' for c in text):
@@ -221,14 +258,9 @@ def validate(name, content_type, raw):
             if media_type == 'application/json':
                 def invalid_constant(value):
                     raise ValueError('non-finite JSON')
-                def unique_object(pairs):
-                    result = {}
-                    for key, value in pairs:
-                        if key in result:
-                            raise ValueError('duplicate JSON key')
-                        result[key] = value
-                    return result
-                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_object)
+                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+        except InvalidReference:
+            raise
         except (UnicodeError, ValueError, RecursionError):
             raise InvalidReference('Reference must contain valid UTF-8 text or strict JSON.') from None
     return {'name': name, 'media_type': media_type, 'byte_size': len(raw),
@@ -242,7 +274,9 @@ def object_key(org_id, project_id, digest):
 
 
 def prepare_and_store(org_id, project_id, name, content_type, raw):
-    prepared = validate(name, content_type, raw)
+    # Original gzip files may contain concatenated producer members. Preserve
+    # every compressed byte; validate the full logical stream before storage.
+    prepared = validate(name, content_type, raw, allow_corpus_members=True)
     import write_loop
     try:
         write_loop.upload_backend_for_tenant(str(org_id)).put_if_absent_or_verify(

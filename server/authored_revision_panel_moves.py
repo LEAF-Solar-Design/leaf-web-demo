@@ -1,0 +1,188 @@
+"""Author a floor comparison for two explicitly bound DXF artifact revisions."""
+import re
+
+from authored_block_transform import TRANSFORM_SOURCE
+
+
+PARAMS = {
+    "type": "object",
+    "properties": {
+        "floors": {
+            "type": "array", "minItems": 1,
+            "description": "Floor names and inclusive base elevations in the drawing's world Z units.",
+            "items": {
+                "type": "object", "required": ["name", "elevation"],
+                "properties": {"name": {"type": "string"}, "elevation": {"type": "number"}},
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["floors"],
+    "additionalProperties": False,
+}
+
+
+def matches(description):
+    prompt = description.casefold()
+    return all(re.search(pattern, prompt) for pattern in (
+        r"\b(?:panels?|modules?)\b", r"\b(?:revisions?|versions?|parent drawing)\b",
+        r"\b(?:floors?|levels?|storeys?|story|stories)\b", r"\b(?:mov\w*|chang\w*|relocat\w*)\b",
+    ))
+
+
+def bind_linked_dxfs(store, tenant_id, project_id, artifact_id, prior_version,
+                     current_version, prior_bytes, current_bytes):
+    """Bind bytes already obtained by an authorized host to its scoped ledger.
+
+    This adapter performs no storage discovery. Callers supply the two files and
+    their scope. The generated tool only compares snapshots available to it.
+    """
+    if any(type(v) is not int or v < 1 for v in (prior_version, current_version)):
+        raise ValueError("Expected positive integer drawing versions.")
+    scope = (tenant_id, project_id, artifact_id)
+    store.verify_read(*scope, prior_version, prior_bytes)
+    current = store.verify_read(*scope, current_version, current_bytes)
+    if current.parent_version != prior_version:
+        raise ValueError("Selected revisions must share a direct parent link.")
+    return _bind_snapshots(artifact_id, prior_version, current_version, prior_bytes, current_bytes)
+
+
+def bind_project_parent(tenant, context):
+    """Resolve the selected publication's recorded parent inside its exact drawing."""
+    from uuid import UUID
+
+    import project_drawing_editor as editor
+    import solar_project_context as project
+
+    binding = context.binding
+    proof = binding.version.provenance or {}
+    if proof.get("schema") != "leaf.project-drawing-publication.v1":
+        raise ValueError("The selected drawing version has no recorded parent publication.")
+    try:
+        parent_id = UUID(proof["parent_version_id"])
+    except (KeyError, TypeError, AttributeError, ValueError):
+        raise ValueError("The selected drawing version has no valid parent reference.") from None
+    parent = project.graph_store().resolve_version_binding(
+        binding.organization_id, binding.project_id, parent_id, drawing_id=binding.drawing_id)
+    if not 0 < parent.version.seq < binding.version.seq:
+        raise ValueError("The recorded parent must precede the selected drawing version.")
+    scope = tenant, binding.project_id, binding.drawing_id
+    prior_bytes, _ = editor.read_dxf(*scope, parent_id)
+    current_bytes, _ = editor.read_dxf(*scope, binding.input_version_id)
+    return _bind_snapshots(str(binding.drawing_id), parent.version.seq, binding.version.seq,
+                           prior_bytes, current_bytes)
+
+
+def _bind_snapshots(artifact_id, prior_version, current_version, prior_bytes, current_bytes):
+    from dxf_intake import parse_dxf_bytes
+
+    intake = parse_dxf_bytes(current_bytes)
+    previous = parse_dxf_bytes(prior_bytes)
+    if previous.get("insunits") != intake.get("insunits"):
+        raise ValueError("Linked drawing versions must share insertion units for the floor schedule.")
+    intake["linked_panel_revision"] = {
+        "drawing_id": artifact_id, "prior_version": prior_version, "current_version": current_version,
+        "parent_version": prior_version, "prior_intake": previous,
+    }
+    return intake
+
+
+def build_body(description):
+    return "import math\nimport re\n" + TRANSFORM_SOURCE + _BODY
+
+
+_BODY = r"""
+def floor_schedule(params):
+    floors = params.get("floors")
+    if not isinstance(floors, list) or not floors:
+        raise ValueError("Supply the floor names and their world Z base elevations.")
+    schedule = []
+    names = set()
+    elevations = set()
+    for floor in floors:
+        name, z = floor.get("name"), floor.get("elevation")
+        if (not isinstance(name, str) or not name.strip() or name in names
+                or type(z) not in (int, float) or not math.isfinite(z) or z in elevations):
+            raise ValueError("Floor names and finite floor elevations must each be unique.")
+        names.add(name)
+        elevations.add(z)
+        schedule.append((z, name))
+    return sorted(schedule, reverse=True)
+
+
+def panel_name(name):
+    words = " ".join(re.findall(r"[a-z0-9]+", name.casefold()))
+    return re.fullmatch(r"(?:(?:pv|solar|photovoltaic) )?(?:panels?|modules?)", words) is not None
+
+
+def collect(drawing, drawing_id, version, floors):
+    if any("unresolved block reference" in msg for msg in drawing.get("parseErrors", [])):
+        raise ValueError("Incomplete block references for panel comparison.")
+    if any(p.get("space") != "paper" and p.get("closed") and panel_name(p.get("layer", ""))
+           for p in drawing.get("polylines", [])):
+        raise ValueError("Panel outlines require block placement identities for this comparison.")
+    blocks = {name.casefold(): block for name, block in drawing.get("blocks", {}).items()}
+    records = {}
+    seen = set()
+    remaining = 100000
+    stack = [(i, identity_frame(), "", ()) for i in drawing.get("inserts", []) if i.get("space") != "paper"]
+    while stack:
+        insert, parent, prefix, ancestors = stack.pop()
+        name = insert.get("name", "").casefold()
+        handle = insert.get("handle", "").upper()
+        if not re.fullmatch(r"[A-F0-9]+", handle) or (prefix, handle) in seen:
+            raise ValueError("Missing or ambiguous INSERT handle in the revision placement path.")
+        seen.add((prefix, handle))
+        block = blocks.get(name)
+        if block is None or name in ancestors or block.get("nested_inserts_incomplete"):
+            raise ValueError("Incomplete or cyclic panel block reference.")
+        children = block.get("nested_inserts", [])
+        if "nested_inserts" not in block and (block.get("count", 0) > len(block.get("children", []))
+                or any(child.get("type") == "INSERT" for child in block.get("children", []))):
+            raise ValueError("Incomplete nested panel reference identities.")
+        base = block["base"]
+        rows, cols = insert.get("rows", 1), insert.get("columns", 1)
+        if type(rows) is not int or type(cols) is not int or min(rows, cols) < 1:
+            raise ValueError("Invalid panel array size.")
+        remaining -= rows * cols
+        if remaining < 0:
+            raise ValueError("Panel comparison exceeds the placement limit.")
+        is_panel = panel_name(name)
+        for row in range(rows):
+            for col in range(cols):
+                path = f"{prefix}{handle}[{row},{col}]"
+                frame = insert_frame(parent, insert, base, row, col)
+                if is_panel:
+                    point = transform_point(frame, base)
+                    if not all(math.isfinite(v) for v in point):
+                        raise ValueError("Panel position must be finite.")
+                    floor = next((name for z, name in floors if point[2] >= z), None)
+                    if floor is None:
+                        raise ValueError("Panel falls below the lowest supplied floor.")
+                    records[path] = {"drawing_id": drawing_id, "version": version, "path": path,
+                                     "floor": floor, "position": list(point)}
+                else:
+                    if len(stack) + len(children) > remaining:
+                        raise ValueError("Panel comparison exceeds the placement limit.")
+                    stack.extend((child, frame, path + "/", ancestors + (name,)) for child in children)
+    return records
+
+
+def run(intake, params):
+    binding = intake.get("linked_panel_revision") or {}
+    prior = binding.get("prior_intake")
+    previous, current = binding.get("prior_version"), binding.get("current_version")
+    drawing_id = binding.get("drawing_id")
+    if (not drawing_id or not isinstance(prior, dict) or type(previous) is not int
+            or type(current) is not int or not 0 < previous < current
+            or binding.get("parent_version") != previous):
+        raise ValueError("Two linked drawing revisions must be supplied by the version host.")
+    floors = floor_schedule(params)
+    old = collect(prior, drawing_id, previous, floors)
+    new = collect(intake, drawing_id, current, floors)
+    moved = [{"prior": old[path], "current": new[path]} for path in sorted(old.keys() & new.keys())
+             if old[path]["floor"] != new[path]["floor"]]
+    return {"counts": {"prior": len(old), "current": len(new)}, "moved": moved,
+            "added": [new[p] for p in sorted(new.keys() - old.keys())],
+            "removed": [old[p] for p in sorted(old.keys() - new.keys())]}, None
+"""

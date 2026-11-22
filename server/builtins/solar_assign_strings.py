@@ -175,7 +175,8 @@ def _invalidate(before, after):
     return edited
 
 
-def assign_strings(graph, request):
+def _assignment_plan(graph, request):
+    """Run the common kernel on a private graph; retain remainders before atomic refusal."""
     _bounded_json(request)
     if (type(request) is not dict or set(request) != REQUEST_KEYS
             or type(request["expected_rev"]) is not int
@@ -211,13 +212,20 @@ def assign_strings(graph, request):
     rows = {row["string"]: row for row in after_state["rows"]["string-assignment"]}
     assigned = [handle for handle, item in binding["strings"].items()
                 if item["circuit"] == bridge.UNASSIGNED and rows[handle]["_detail"]["circuit"] != bridge.UNASSIGNED]
+    remaining = [handle for handle, item in binding["strings"].items()
+                 if item["circuit"] == bridge.UNASSIGNED and
+                 rows[handle]["_detail"]["circuit"] == bridge.UNASSIGNED]
+    reason = None
     if not assigned:
-        _refuse("EXCESS_CAPACITY_DECLINED" if lines == [CANCELLED] else
-                "STRING_CAPACITY_INSUFFICIENT" if lines == [] else "STRING_ASSIGNMENT_MAPPING_FAILED")
-    if any(item["circuit"] == bridge.UNASSIGNED and
-           rows[handle]["_detail"]["circuit"] == bridge.UNASSIGNED
-           for handle, item in binding["strings"].items()):
-        _refuse("STRING_ASSIGNMENT_INCOMPLETE")
+        reason = ("EXCESS_CAPACITY_DECLINED" if lines == [CANCELLED] else
+                  "STRING_CAPACITY_INSUFFICIENT" if lines == [] else "STRING_ASSIGNMENT_MAPPING_FAILED")
+    elif remaining:
+        reason = "STRING_ASSIGNMENT_INCOMPLETE"
+    return before, binding, after_state, rows, assigned, remaining, reason, lines
+
+
+def _assignment_candidate(before, binding, after_state, rows, assigned):
+    """Validate private write-back without advancing a revision or publishing it."""
     try:
         result, _ = bridge.graph_from_state(before, after_state, binding)
     except bridge.ElectricalBridgeError as error:
@@ -229,6 +237,14 @@ def assign_strings(graph, request):
             if field in previous and inverter.get(field) == previous[field]:
                 inverter[field] = previous[field]
     _check_assignment_result(before, result, binding, rows, assigned)
+    return result
+
+
+def assign_strings(graph, request):
+    before, binding, after_state, rows, assigned, remaining, reason, lines = _assignment_plan(graph, request)
+    if reason is not None:
+        _refuse(reason)
+    result = _assignment_candidate(before, binding, after_state, rows, assigned)
     _invalidate(before, result)
     result = finish_mutation(before, result, TOOL)
     strings = {string["id"]: string for string in result["strings"]}

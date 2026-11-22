@@ -96,6 +96,7 @@ import {
 } from './productSurfaces.js'
 import { useSurfaceContract } from './useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
+import { isAccountUploadDrawingId } from '../workspace/createProjectFromDrawing.js'
 import {
   iosShipLaunchAffordance,
 } from './iosShipReadiness.js'
@@ -910,6 +911,7 @@ export default function ToolCast({
     orgId: workspace.orgId,
     projectsUnavailable: workspace.projectsError,
     mock: transportMock,
+    drawingAttachable: activeDrawingId ? isAccountUploadDrawingId(activeDrawingId) : true,
   }), [workspace.openProjectId, workspace.orgId, workspace.projectsError, currentProjectName, activeDrawingId, transportMock])
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId,

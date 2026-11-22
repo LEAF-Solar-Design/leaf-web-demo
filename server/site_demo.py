@@ -62,6 +62,17 @@ SITE_TOOL: Dict[str, Any] = {
     "params": {
         "type": "object",
         "properties": {
+            "min_modules_per_string": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional minimum modules per string. Enables bounded adjacency planning.",
+            },
+            "max_modules_per_string": {
+                "type": "integer",
+                "minimum": 1,
+                "description": ("Optional maximum modules per string, capped by the cold Voc limit. "
+                                "Enables bounded adjacency planning with minimum 1 when supplied alone."),
+            },
             "module_model": {
                 "type": "string",
                 "default": "Q.Peak DUO XL-G11.7 / 425",
@@ -106,6 +117,12 @@ SITE_TOOL: Dict[str, Any] = {
     "returns": {
         "type": "object",
         "properties": {
+            "planning": {
+                "type": "object",
+                "description": ("Present for explicit module bounds. Status is complete, infeasible with a proof "
+                                "witness, or unresolved when the deterministic search budget is exhausted. "
+                                "Unsuccessful plans contain no strings."),
+            },
             "module": {"type": "object"},
             "electrical": {"type": "object"},
             "strings": {"type": "array"},
