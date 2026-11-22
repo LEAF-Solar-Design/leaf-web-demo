@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import RoutePanel from './RoutePanel.jsx'
 import { alternativeDecision } from '../controllers/catalog/catalogRouting.js'
@@ -40,94 +40,7 @@ function mount(editor, onConfirmIntent = vi.fn()) {
 
 afterEach(() => {
   cleanup()
-  vi.useRealTimers()
   vi.restoreAllMocks()
-})
-
-describe('proposal and run cards', () => {
-  const proposalTool = { name: 'solar-string', title: 'String the roof', capabilities: ['drawing.read'], params: { properties: {} } }
-  const proposal = { lane: 'run', confidence: .99, tool: proposalTool.name, summary: 'Assign all roof panels to strings.',
-    runIntent: { tool: proposalTool.name, params: { design_min_temp: -20, max_system_v: 1000, custom_value: 12 } } }
-  const callbacks = () => ({ onConfirmIntent: vi.fn(), onPickAlternative: vi.fn(), onDismiss: vi.fn() })
-
-  it('shows a human title, sentence-case labels, units and the proposed change', () => {
-    const { container } = render(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...callbacks()} />)
-    expect(screen.getByText('String the roof')).toBeTruthy()
-    expect(screen.getByText(proposal.summary)).toBeTruthy()
-    const rows = container.querySelector('.proposal-fields').textContent
-    expect(rows).toContain('Design min temp-20 °C')
-    expect(rows).toContain('Max system V1000 V')
-    expect(rows).toContain('Custom value12')
-    expect(screen.queryByRole('button', { name: 'Check' })).toBeNull()
-    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Proposal')
-  })
-
-  it('offers Check only with a real validation callback', () => {
-    const validate = vi.fn()
-    render(<RoutePanel route={proposal} tools={[proposalTool]} running={false} onValidate={validate} {...callbacks()} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Check' }))
-    expect(validate).toHaveBeenCalledWith(proposal.runIntent, proposalTool, proposal.runIntent.params)
-  })
-
-  it('omits absent and default-only metrics and preserves a proposed zero', () => {
-    const tool = { ...proposalTool, params: { properties: { module: { default: 'Schema default' } } } }
-    const nextRoute = { ...proposal, runIntent: { ...proposal.runIntent, params: { panels_in_scope: 0 } },
-      metrics: { module: null, design_min_temp_c: -18, max_system_voltage_v: 1000 } }
-    const { container } = render(<RoutePanel route={nextRoute} tools={[tool]} running={false} {...callbacks()} />)
-    const metrics = container.querySelector('.proposal-metrics')
-    expect(metrics.textContent).toBe('Panels in scope0Design min temp-18 °CMax system V1000 V')
-    expect(Array.from(metrics.querySelectorAll('dt')).map((node) => node.textContent)).not.toContain('Module')
-  })
-
-  it('turns a low-confidence confirmed choice into the run card immediately', () => {
-    const handlers = callbacks()
-    handlers.onConfirmIntent.mockReturnValue(new Promise(() => {}))
-    const { container } = render(<RoutePanel route={{ ...proposal, confidence: .6 }} tools={[proposalTool]} running={false} {...handlers} />)
-    fireEvent.click(screen.getByRole('option'))
-    expect(screen.getByText('Planning · 0 s')).toBeTruthy()
-    expect(container.querySelector('.proposal-card.is-running')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Run solar-string' }).disabled).toBe(true)
-    expect(handlers.onConfirmIntent).toHaveBeenCalledOnce()
-  })
-
-  it('keeps the proposal in place while the caller consumes the route to start work', () => {
-    const handlers = callbacks()
-    const { container, rerender } = render(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...handlers} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Run solar-string' }))
-    rerender(<RoutePanel route={null} tools={[proposalTool]} running {...handlers} />)
-    expect(screen.getByText('Planning · 0 s')).toBeTruthy()
-    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Run')
-  })
-
-  it('shows Planning on the Run render, advances the trail and ticks elapsed seconds', () => {
-    vi.useFakeTimers()
-    const handlers = callbacks()
-    handlers.onConfirmIntent.mockReturnValue(new Promise(() => {}))
-    const { container, rerender } = render(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...handlers} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Run solar-string' }))
-    expect(screen.getByText('Planning · 0 s')).toBeTruthy()
-    expect(container.querySelector('.proposal-card.is-running')).toBeTruthy()
-    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Run')
-    expect(Array.from(container.querySelectorAll('.proposal-metrics dd')).every((node) => node.textContent === '…')).toBe(true)
-    expect(handlers.onConfirmIntent).toHaveBeenCalledOnce()
-    act(() => vi.advanceTimersByTime(2000))
-    expect(screen.getByText('Planning · 2 s')).toBeTruthy()
-    rerender(<RoutePanel route={proposal} tools={[proposalTool]} running {...handlers} />)
-    rerender(<RoutePanel route={proposal} tools={[proposalTool]} running={false} {...handlers} />)
-    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Result')
-  })
-
-  it.each([true, false])('clears Planning when a synchronous callback never starts running (intent %s)', (hasIntent) => {
-    const handlers = callbacks()
-    const nextRoute = hasIntent ? proposal : { ...proposal, runIntent: undefined }
-    const { container } = render(<RoutePanel route={nextRoute} tools={[proposalTool]} running={false} {...handlers} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Run solar-string' }))
-    expect(hasIntent ? handlers.onConfirmIntent : handlers.onPickAlternative).toHaveBeenCalledOnce()
-    expect(screen.queryByText(/Planning/)).toBeNull()
-    expect(container.querySelector('.proposal-card.is-running')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Run solar-string' }).disabled).toBe(false)
-    expect(container.querySelector('[aria-current="step"]').textContent).toBe('Proposal')
-  })
 })
 
 describe('RoutePanel demo refusals and outages', () => {
@@ -363,17 +276,15 @@ describe('RoutePanel solve lane', () => {
     expect(options[1].textContent).toContain('solar-solve-proposal')
     expect(options[1].textContent).toContain('39%')
 
-    // Alternatives are available during review; confirming replaces the
-    // resolver with its run card, so choose the alternative before Run.
-    fireEvent.click(options[1])
-    expect(onPickAlternative).toHaveBeenCalledWith('solar-solve-proposal')
-    onPickAlternative.mockClear()
-
     fireEvent.click(options[0])
 
     expect(onConfirmIntent).toHaveBeenCalledOnce()
     expect(onConfirmIntent).toHaveBeenCalledWith(boundRoute.runIntent, solverTools[0], { panelsPerString: 12 })
     expect(onPickAlternative).not.toHaveBeenCalled()
+
+    fireEvent.click(options[1])
+
+    expect(onPickAlternative).toHaveBeenCalledWith('solar-solve-proposal')
   })
 
   it('shows the bound solver parameters inside the confirm row', () => {

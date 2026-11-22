@@ -1,26 +1,5 @@
 /* One-shell shared chrome. These bands use the existing cockpit skin.
    Drafting instruments remain in cockpit.css. */
-.strip-decision.proposal-card {
-  box-sizing: border-box; width: 320px; max-width: 100%; padding: 12px;
-  display: flex; flex-wrap: wrap; gap: 8px; border: 1px solid var(--border);
-  border-radius: calc(var(--leaf-radius-field) + 1px); background: var(--card); font-size: var(--leaf-size-dense);
-}
-.proposal-card .strip-sentence { flex-basis: 100%; }
-.proposal-card .proposal-title { font-size: calc(var(--leaf-size-caption) + 2px); font-weight: 600; }
-.proposal-summary { width: 100%; margin: 0; }
-.proposal-fields, .proposal-metrics { width: 100%; margin: 0; font-variant-numeric: tabular-nums; }
-.proposal-fields > div, .proposal-metrics > div { display: grid; grid-template-columns: 1fr 1fr; align-items: center; min-height: 28px; gap: 8px; }
-.proposal-fields dt, .proposal-metrics dt { color: var(--muted); font-size: var(--leaf-size-caption); }
-.proposal-fields dd, .proposal-metrics dd { margin: 0; font-size: var(--leaf-size-dense); overflow-wrap: anywhere; }
-.proposal-trail { display: flex; width: 100%; justify-content: space-between; list-style: none; margin: 0; padding: 0; color: var(--muted); font-size: var(--leaf-size-caption); }
-.proposal-trail li::before { content: ''; display: inline-block; width: 4px; height: 4px; margin-right: 4px; border-radius: 50%; background: currentColor; }
-.proposal-trail [aria-current="step"] { color: var(--primary); }
-.strip-decision.proposal-card.is-running { border-color: var(--primary); }
-.proposal-card .proposal-run { background: var(--primary); color: var(--on-accent); border-color: var(--primary); }
-.proposal-planning { width: 100%; display: flex; align-items: center; gap: 8px; }
-.proposal-spinner { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: proposal-spin 1s linear infinite; }
-@keyframes proposal-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .proposal-spinner { animation: none; } }
 .studio-shell .studio-drawer-tabs { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"] .result-block:has(.result-panel > p.panel-sub) { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {

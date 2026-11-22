@@ -12,7 +12,6 @@ import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanKey } from '../labels.js'
-import { proposalField } from '../lib/toolRecord.js'
 import { humanizeError } from '../errorHumanize.js'
 import { catalogToolDisclaimer } from '../site/studioAvailability.js'
 import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
@@ -69,32 +68,11 @@ export default function RoutePanel({
   // Why the write is paused, supplied by the surface that owns the lock. /app
   // passes nothing and keeps the original checkout-only sentence below.
   writeLockNote = null,
-  onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss, onValidate,
+  onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss,
 }) {
   // M1 exit: on dismissal (Esc / typing / a run consuming the decision) the
   // last route is held for the 180 ms .exit fade (display-only) before unmount.
-  const [requested, setRequested] = useState(false)
-  const lastProposal = useRef(null)
-  if (liveRoute) lastProposal.current = liveRoute
-  const { shown: route, exiting } = useExit(liveRoute || (running || requested ? lastProposal.current : null))
-  const [elapsed, setElapsed] = useState(0)
-  const [finished, setFinished] = useState(false)
-  const wasRunning = useRef(false)
-  const planning = !!running || requested
-  useEffect(() => {
-    if (liveRoute) { setRequested(false); setFinished(false) }
-  }, [liveRoute])
-  useEffect(() => {
-    if (running) { wasRunning.current = true; setRequested(false) }
-    else if (wasRunning.current) { setRequested(false); setFinished(true); wasRunning.current = false }
-  }, [running])
-  useEffect(() => {
-    if (!planning) return undefined
-    const start = Date.now()
-    setElapsed(0)
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 250)
-    return () => clearInterval(timer)
-  }, [planning])
+  const { shown: route, exiting } = useExit(liveRoute)
   const [activeIdx, setActiveIdx] = useState(0)
   const surfaceRef = useRef(null)
   const resolverRef = useRef(null)
@@ -134,13 +112,9 @@ export default function RoutePanel({
   const notYet = catalogToolDisclaimer(route?.tool)
   const requestRun = () => {
     if (notYet) return
-    if (outage || belowConfirmFloor(route) || planning || locked || entBlocked) return
-    setRequested(true)
-    try {
-      const action = route.runIntent ? onConfirmIntent(route.runIntent, toolObj, params) : toolObj && onPickAlternative(toolObj.name)
-      if (action?.then) Promise.resolve(action).finally(() => { setRequested(false); setFinished(true) }).catch(() => {})
-      else setRequested(false)
-    } catch (error) { setRequested(false); throw error }
+    if (outage || belowConfirmFloor(route)) return
+    if (route.runIntent) onConfirmIntent(route.runIntent, toolObj, params)
+    else if (toolObj) onPickAlternative(toolObj.name)
   }
 
   // Resolver rows (low-confidence best guess, or a tool missing from this
@@ -225,7 +199,7 @@ export default function RoutePanel({
       window.removeEventListener('keydown', onCommandKey, true)
       window.removeEventListener('keydown', onKey)
     }
-  }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, planning, locked, entBlocked, outage,
+  }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked, outage,
       onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
 
   if (!route) return null
@@ -275,55 +249,39 @@ export default function RoutePanel({
   }
 
   // ---- RUN lane, confident: decision strip (Run · Enter · Esc) --------------
-  if ((confident || planning || finished) && toolObj) {
-    const summary = route.summary || route.runIntent?.summary
-    // Metrics describe this proposal, never schema defaults for missing input.
-    const fields = { ...(route.params || {}), ...(route.runIntent?.params || {}), ...(route.metrics || {}), ...(route.runIntent?.metrics || {}) }
-    const metrics = ['Panels in scope', 'Module', 'Design min temp', 'Max system V']
-      .map((label) => Object.entries(fields).find(([key, value]) => value !== null && value !== undefined && value !== '' && proposalField(key).label === label))
-      .filter(Boolean)
+  if (confident && toolObj) {
+    const summary = paramsSummary(params)
     return (
-      <div ref={surfaceRef} className={`strip-decision proposal-card ${planning ? 'is-running' : ''} ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
-        <ol className="proposal-trail" aria-label="Request progress">
-          {['Request', 'Proposal', 'Run', 'Result'].map((step, index) => <li key={step} aria-current={index === (finished ? 3 : planning ? 2 : 1) ? 'step' : undefined}>{step}</li>)}
-        </ol>
+      <div ref={surfaceRef} className={`strip-decision ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
+        <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
-          {route.routedLane === 'solve' ? 'Solve with ' : ''}<span className="route-tool proposal-title">{toolObj.title || toolObj.label || toolObj.display_name || route.tool}</span>
+          {route.routedLane === 'solve' ? 'Solve with ' : 'Run '}<span className="route-tool">{route.tool}</span>
           {isWrite && <> <span className="cap write">Edits drawing</span></>}
+          {summary && <span className="dim"> · {summary}</span>}
           <span className="dim">
+            {': '}
             {notYet
               ? notYet
               : locked
               ? (writeLockNote || 'editing is locked by another session; this write tool is paused.')
               : entBlocked
                 ? 'your plan doesn’t include editing tools.'
-                : ''}
+                : isWrite
+                  ? 'creates a new version; you confirm before it runs.'
+                  : 'you confirm before it runs.'}
           </span>
         </span>
-        {summary && <p className="proposal-summary">{summary}</p>}
-        <dl className="proposal-fields">
-          {Object.entries(params).map(([key, value]) => {
-            const field = proposalField(key, toolObj.params?.properties?.[key])
-            return <div key={key}><dt>{field.label}</dt><dd>{planning ? '…' : `${typeof value === 'object' ? JSON.stringify(value) : typeof value === 'boolean' ? value ? 'Yes' : 'No' : value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
-          })}
-        </dl>
-        {metrics.length > 0 && <dl className="proposal-metrics">{metrics.map(([key, value]) => {
-          const field = proposalField(key)
-          return <div key={key}><dt>{field.label}</dt><dd>{planning ? '…' : `${value}${field.unit ? ` ${field.unit}` : ''}`}</dd></div>
-        })}</dl>}
-        {planning && <div className="proposal-planning" role="status"><span className="proposal-spinner" aria-hidden="true" />Planning · {elapsed} s</div>}
         {route.stubKind === 'demo' && <span className="dim">This demo matches requests against a limited tool catalog.</span>}
-        {typeof onValidate === 'function' && <button type="button" className="chip-neutral" disabled={planning || locked || entBlocked} onClick={() => onValidate(route.runIntent, toolObj, params)}>Check</button>}
         <button
           type="button"
-          className="chip-act proposal-run"
+          className="chip-act"
           aria-label={`Run ${route.tool}`}
-          disabled={planning || locked || entBlocked || !!notYet}
+          disabled={running || locked || entBlocked || !!notYet}
           title={notYet || undefined}
           data-availability={notYet ? 'unavailable' : undefined}
           onClick={requestRun}
         >
-          {planning ? 'Running…' : 'Run'}
+          {running ? 'Running…' : 'Run'}
         </button>
         <span className="key hot">Enter</span>
         <span className="key">Esc</span>

@@ -240,7 +240,7 @@ describe('quiet Studio shell', () => {
   })
   it('shows coordinates and selection while withholding scale and render diagnostics', () => {
     const viewerRef = { current: null }
-    const { container, rerender } = render(<CockpitStatus ground={null} viewerRef={viewerRef} shown={{}} />)
+    const { container, rerender } = render(<CockpitStatus customerMode ground={null} viewerRef={viewerRef} shown={{}} />)
     expect(screen.getByText('X')).toBeTruthy()
     expect(screen.getByText('Y')).toBeTruthy()
     expect(screen.getByText('no selection')).toBeTruthy()

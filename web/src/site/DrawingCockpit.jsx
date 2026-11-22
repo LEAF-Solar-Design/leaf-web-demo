@@ -662,7 +662,7 @@ export function StatusToggles() {
   )
 }
 
-export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null, customerMode = true }) {
+export function CockpitStatus({ ground, viewerRef, shown = null, canvasIntake = undefined, selectedHandle = null, canvasSelector = null, customerMode = false }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs, canvasSelector)
   // App repaints when the lazy Viewer reports scene readiness. Read that
