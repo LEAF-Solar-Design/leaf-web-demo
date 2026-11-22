@@ -24,6 +24,7 @@ extracts through APS.
 """
 from __future__ import annotations
 
+from decimal import Decimal, DecimalException
 import math
 import re
 from pathlib import Path
@@ -42,6 +43,11 @@ class DxfParseError(ValueError):
     """The file is not something this minimal parser can honestly read."""
 
 
+def _layout_block_name(name: str) -> bool:
+    """Layout records are containers, unlike renderable anonymous definitions."""
+    return re.fullmatch(r"\*(?:Model_Space|Paper_Space[0-9]*)", name, re.IGNORECASE) is not None
+
+
 def _mleader_number(value, integer=False):
     try:
         number = float(value)
@@ -57,17 +63,20 @@ def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
     return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
 
 
-def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str, Any]:
+def parse_dxf_bytes(
+    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True
+) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
             "binary DXF is not supported; re-save this drawing as ASCII DXF "
             "or upload the DWG instead")
     try:
-        text = raw.decode("utf-8", errors="replace")
+        text = raw.decode("utf-8-sig", errors="replace")
     except Exception as exc:  # pragma: no cover - decode with replace cannot raise
         raise DxfParseError(f"undecodable DXF: {exc}") from exc
 
-    pairs = _group_pairs(text)
+    literal_text = {}
+    pairs = _group_pairs(text, literal_text=literal_text)
     layers: List[str] = []
     # Membership set beside the ordered list. `layers` stays a list because
     # first-seen ORDER is part of the intake shape; the set only answers
@@ -78,8 +87,14 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     # upload. Cheap to write, and it was the live-traffic blocker for routing
     # DXF here (see guest_uploads.run_extraction).
     seen_layers: set[str] = set()
+    # GAPS 51 (film take 4): layers the drawing itself hides (frozen, 70 bit
+    # 1, or off, a negative 62 colour), in table order, so a viewer starts
+    # with AutoCAD's own visibility instead of drawing frozen rails and tags.
+    hidden_layers: List[str] = []
+    hidden_seen: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
+    splines: List[Dict[str, Any]] = []
     circles: List[Dict[str, Any]] = []
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
@@ -104,12 +119,16 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
     objects = {}
+    elevation_evidence = []
     model_records = {}
     textstyles = {}
     mleader_records = []
 
     i = 0
     n = len(pairs)
+    active_layer = None
+    insunits = None
+    declared_units = set()
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -123,6 +142,18 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             section = None
             i += 1
             continue
+        if section == "HEADER" and code == 9 and value == "$CLAYER":
+            if i + 1 < n and pairs[i + 1][0] == 8 and pairs[i + 1][1]:
+                active_layer = pairs[i + 1][1]
+        if section == "HEADER" and (code, value) == (9, "$INSUNITS"):
+            if i + 1 < n and pairs[i + 1][0] == 70:
+                try:
+                    insunits = int(pairs[i + 1][1])
+                except ValueError:
+                    insunits = None
+                declared_units.add(insunits)
+            else:
+                declared_units.add(None)
         if section == "OBJECTS" and code == 0:
             j = i + 1
             while j < n and pairs[j][0] != 0:
@@ -141,11 +172,28 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
             j = i + 1
+            name, hidden = None, False
             while j < n and pairs[j][0] != 0:
-                if pairs[j][0] == 2 and pairs[j][1] not in seen_layers:
-                    seen_layers.add(pairs[j][1])
-                    layers.append(pairs[j][1])
+                code_j, value_j = pairs[j]
+                if code_j == 2 and name is None:
+                    name = value_j
+                    if value_j not in seen_layers:
+                        seen_layers.add(value_j)
+                        layers.append(value_j)
+                elif code_j == 70:
+                    try:
+                        hidden = hidden or bool(int(value_j.strip()) & 1)
+                    except ValueError:
+                        pass
+                elif code_j == 62:
+                    try:
+                        hidden = hidden or int(value_j.strip()) < 0
+                    except ValueError:
+                        pass
                 j += 1
+            if hidden and name is not None and name not in hidden_seen:
+                hidden_seen.add(name)
+                hidden_layers.append(name)
             i = j
             continue
         if section == "TABLES" and code == 0 and value == "DIMSTYLE":
@@ -159,8 +207,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
-            name, block, i = _parse_block(pairs, i + 1, parse_errors)
-            if name and not name.startswith("*"):
+            name, block, i = _parse_block(pairs, i + 1, parse_errors, include_measurement_evidence)
+            if name and not _layout_block_name(name):
                 block_count += 1
                 if block_count <= 200:
                     blocks[name] = block
@@ -176,6 +224,9 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 j += 1
             record = pairs[i + 1:j]
             handle = next((v for c, v in record if c == 5), None)
+            if include_measurement_evidence and handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
+                if _explicit_elevation(pairs, j, value, dict(record)):
+                    elevation_evidence.append(handle)
             if handle:
                 if value == "POLYLINE":
                     vertex_end = j
@@ -205,9 +256,20 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             if props is not None and entity.get("handle"):
                 insert_properties[entity["handle"]] = props
             continue
+        if include_measurement_evidence and section == "ENTITIES" and (code, value) == (0, "SPLINE"):
+            entity = _spline_measurement_path(record)
+            entity.update(space_info)
+            splines.append(entity)
+            if entity["layer"] not in seen_layers:
+                seen_layers.add(entity["layer"])
+                layers.append(entity["layer"])
+            i = j
+            continue
         if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
             if entity is not None:
+                if include_measurement_evidence:
+                    _retain_short_segment_vectors(entity, record, "LWPOLYLINE")
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
@@ -224,6 +286,8 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             # intake field, the frozen §1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1, dropped_count)
             if entity is not None:
+                if include_measurement_evidence:
+                    _retain_short_segment_vectors(entity, record, "LINE")
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
@@ -279,16 +343,31 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
             continue
         i += 1
 
+    block_names = {name.casefold(): name for name in blocks}
     resolved_inserts = []
     for entity in inserts:
-        if entity["name"] not in blocks:
+        block_name = block_names.get(entity["name"].casefold())
+        if block_name is None:
             parse_errors.append(
                 f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
         else:
+            entity["name"] = block_name
             resolved_inserts.append(entity)
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if splines:
+        out["splines"] = splines
+    if elevation_evidence:
+        out["elevation_evidence"] = elevation_evidence
+    if len(declared_units) > 1:
+        out["insunits_error"] = "Conflicting drawing insertion units."
+    elif insunits is not None:
+        out["insunits"] = insunits
+    if active_layer is not None:
+        out["active_layer"] = active_layer
+    if hidden_layers:
+        out["hidden_layers"] = hidden_layers
     mlstyles = {}
     for handle, (kind, record) in objects.items():
         if kind == "MLEADERSTYLE":
@@ -456,6 +535,17 @@ def parse_dxf_bytes(raw: bytes, *, source_name: str = "upload.dxf") -> Dict[str,
                 entity["dimensionRef"] = True
     if parse_errors:
         out["parseErrors"] = parse_errors
+    from drawing_dependency_report import from_pairs
+    out["dependency_report"] = from_pairs(pairs, literal_text=literal_text)
+    if include_measurement_evidence:
+        from dxf_spatial_clips import attach_clips
+        from authored_dynamic_visibility import attach_visibility
+        from authored_panel_regions import attach_footprints
+        from authored_viewport_panels import attach_viewports
+        attach_viewports(pairs, out)
+        attach_clips(pairs, out)
+        attach_footprints(pairs, out)
+        attach_visibility(pairs, out)
     return out
 
 
@@ -590,10 +680,24 @@ def _group_point(groups, code=10, default=(0.0, 0.0, 0.0)):
     return [_float(groups.get(code + j * 10, str(v))) for j, v in enumerate(default)]
 
 
+
+def _insert_array_count(raw):
+    try:
+        count = int(raw)
+    except (ValueError, TypeError):
+        return 0  # Preserve invalid input for the count tool's multiplicity refusal.
+    return count or 1  # Native individual INSERT records use zero default counts.
+
+
 def _parse_insert(pairs, i, dropped=None):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
+    array = {}
+    if any(code in groups for code in (70, 71, 44, 45)):
+        array = {"columns": _insert_array_count(groups.get(70, "1")), "rows": _insert_array_count(groups.get(71, "1")),
+                 "column_spacing": _float(groups.get(44, "0")),
+                 "row_spacing": _float(groups.get(45, "0"))}
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
     return {"name": groups.get(2, ""), "layer": groups.get(8, "0") or "0",
             "x": round(point[0], 3), "y": round(point[1], 3), "z": round(point[2], 3),
@@ -601,6 +705,7 @@ def _parse_insert(pairs, i, dropped=None):
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
+            **array,
             "_properties": _entity_properties(
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 
@@ -611,14 +716,18 @@ def _parse_block_child(pairs, i, kind):
     properties = _entity_properties(groups.get(62), groups.get(6), groups.get(370), groups.get(420))
     if properties is not None:
         child["properties"] = properties
-    if kind in ("LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
+    if kind in ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
         # These children must not inherit the legacy top-level parsers'
         # substitution of zero for unreadable coordinates.
         for code, value in pairs[i:end]:
             if code in (10, 20, 30, 11, 21, 31, 38, 40, 50, 51, 210, 220, 230):
                 if not math.isfinite(float(value)):
                     raise ValueError("malformed block geometry")
-    if kind == "LINE":
+    if kind == "POINT":
+        if not all(code in groups for code in (10, 20)):
+            raise ValueError("POINT needs a complete position")
+        child["pt"] = [round(v, 3) for v in _group_point(groups)]
+    elif kind == "LINE":
         if not all(code in groups for code in (10, 20, 11, 21)):
             raise ValueError("LINE needs two points")
         entity, end = _parse_line(pairs, i)
@@ -660,17 +769,169 @@ def _parse_block_child(pairs, i, kind):
     return child, end
 
 
-def _parse_block(pairs, i, parse_errors):
+def _explicit_elevation(pairs, end, kind, groups):
+    def finite(raw):
+        try:
+            return math.isfinite(float(raw))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    if kind == "LINE":
+        return finite(groups.get(30)) and finite(groups.get(31))
+    if kind == "LWPOLYLINE":
+        return finite(groups.get(38))
+    flags = _int(groups.get(70, 0))
+    if flags & (16 | 64):
+        return False
+    if not flags & 8:
+        return finite(groups.get(30))
+    count = 0
+    while end < len(pairs) and pairs[end] == (0, "VERTEX"):
+        vertex, end = _entity_groups(pairs, end + 1)
+        if not finite(vertex.get(30)):
+            return False
+        count += 1
+    return count >= 2
+
+
+def _spline_measurement_path(record):
+    groups = dict(record)
+    path = {"kind": "SPLINE", "layer": groups.get(8) or "0", "handle": groups.get(5)}
+    # Preserve bad evidence on its own path so unrelated layers and unused
+    # block definitions do not prevent a valid beam takeoff.
+    try:
+        flags = int(groups.get(70, 0))
+        path["closed"] = bool(flags & 3)
+        if flags & 2:
+            path["periodic"] = True
+        # SPLINE control points are Cartesian. The optional planar normal is
+        # metadata, unlike an INSERT extrusion that changes the placement basis.
+        if any(code in groups for code in (210, 220, 230)):
+            normal = [float(groups.get(code, 0)) for code in (210, 220, 230)]
+            if not all(map(math.isfinite, normal)) or not any(normal):
+                raise ValueError("Degenerate spline plane normal.")
+        for code, field in ((71, "degree"), (72, "knot count"), (73, "control point count")):
+            if len({int(v) for c,v in record if c == code}) > 1:
+                raise ValueError("Conflicting spline " + field + " declarations.")
+        degree = int(groups.get(71, 0))
+        knots = [float(v) for c, v in record if c == 40]
+        weights = [float(v) for c, v in record if c == 41]
+        points = []
+        for code, value in record:
+            if code == 10:
+                points.append([float(value)])
+            elif code in (20, 30):
+                if not points or len(points[-1]) != code // 10 - 1:
+                    raise ValueError("Invalid spline control point coordinates.")
+                points[-1].append(float(value))
+        if (not points and not knots and not weights and 11 in groups
+                and int(groups.get(73, 0)) == 0 and int(groups.get(72, 0)) == 0):
+            path["spline_error"] = "Fit-point-only SPLINE length is unsupported without a control net."
+            return path
+        if (len(points) <= degree or degree < 1 or int(groups.get(73, -1)) != len(points)
+                or any(len(p) < 2 or not all(math.isfinite(x) for x in p) for p in points)):
+            raise ValueError("Invalid spline degree or control points.")
+        if (len(knots) != len(points) + degree + 1 or int(groups.get(72, -1)) != len(knots)
+                or not all(math.isfinite(x) for x in knots)
+                or any(b < a for a, b in zip(knots, knots[1:]))
+                or knots[degree] >= knots[len(points)]
+                or any(a == b for a, b in zip(knots, knots[degree+1:]))):
+            raise ValueError("Invalid spline knot vector.")
+        if weights and (len(weights) != len(points) or not all(map(math.isfinite, weights))):
+            raise ValueError("Spline weights must be finite and match the control count.")
+        if any(w <= 0 for w in weights):
+            path["spline_error"] = "Spline length with nonpositive rational weights is unsupported."
+            return path
+        if path.get("periodic"):
+            # A periodic control net repeats its first degree poles and weights.
+            # Its knot sequence must repeat after one active parameter period.
+            unique = len(points) - degree
+            period = knots[len(points)] - knots[degree]
+            if (unique < degree + 1 or points[-degree:] != points[:degree]
+                    or (weights and weights[-degree:] != weights[:degree])
+                    or any(knots[k-degree] == knots[k] < knots[k+1] and points[k-degree-1] != points[k-degree]
+                           for k in range(degree+1, len(points)))
+                    or not all(math.isclose(b - a, period, rel_tol=1e-12)
+                               for a, b in zip(knots, knots[unique:]))):
+                raise ValueError("Inconsistent periodic spline control points, weights or knots.")
+        path.update(degree=degree, control_points=[p if len(p) == 3 else [*p, 0.] for p in points],
+                    knots=knots, weights=weights or [1.] * len(points))
+    except (ValueError, OverflowError) as exc:
+        path["spline_error"] = "Invalid SPLINE: " + str(exc)
+    return path
+
+
+def _retain_short_segment_vectors(path, record, kind):
+    """Preserve decimal DXF differences when absolute binary coordinates lose resolution."""
+    points = path["pts"]
+    if not any(max(map(abs, (*a, *b))) > 1e7 * math.dist(a, b)
+               for a, b in zip(points, points[1:])):
+        return
+    groups = dict(record)
+    if kind == "LINE":
+        vertices = [tuple(groups.get(code + offset, "0") for code in (10, 20, 30))
+                    for offset in (0, 1)]
+    else:
+        xs = [v for c, v in record if c == 10]
+        ys = [v for c, v in record if c == 20]
+        if len(xs) != len(ys):
+            path["measurement_error"] = "Incomplete survey coordinates."
+            return
+        vertices = [(x, y, "0") for x, y in zip(xs, ys)]
+    normal = _group_point(groups, 210, (0, 0, 1))
+    deltas = []
+    try:
+        for a, b in zip(vertices, vertices[1:]):
+            vector = [float(Decimal(y) - Decimal(x)) for x, y in zip(a, b)]
+            if kind == "LWPOLYLINE" and any(abs(x-y) > 1e-6 for x,y in zip(normal, (0,0,1))):
+                vector = _ocs_to_wcs(vector, normal)
+            if not all(map(math.isfinite, vector)):
+                raise ValueError("Non-finite survey vector.")
+            deltas.append(vector)
+    except (DecimalException, ValueError, OverflowError):
+        path["measurement_error"] = "Invalid survey coordinates."
+        return
+    path["measurement_vectors"] = deltas
+
+
+def _block_measurement_path(pairs, start, end, kind):
+    if kind == "SPLINE":
+        return _spline_measurement_path(pairs[start:end])
+    parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
+    path, _ = parse(pairs, start)
+    if path and kind in ("LINE", "LWPOLYLINE"):
+        _retain_short_segment_vectors(path, pairs[start:end], kind)
+    path.pop("_properties", None)
+    path.pop("xdata", None)
+    groups, _ = _entity_groups(pairs, start)
+    if kind == "POLYLINE" and int(groups.get(70, 0)) & (16 | 64):
+        return None
+    bulges = []
+    for code, value in pairs[start:end]:
+        if (kind == "LWPOLYLINE" and code == 10) or (kind == "POLYLINE" and (code, value) == (0, "VERTEX")):
+            bulges.append(0.0)
+        elif code == 42 and bulges:
+            bulges[-1] = float(value)
+    if any(bulges):
+        path["bulges"] = bulges
+        path["nrm"] = list(_group_point(groups, 210, (0, 0, 1)))
+    return path
+
+
+def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
-    flags = _int(groups.get(70, "0"))
     block = {"base": [round(v, 3) for v in _group_point(groups)],
              "count": 0, "complete": True, "children": []}
     while i < len(pairs):
         code, kind = pairs[i]
         if code == 0 and kind == "ENDBLK":
             _, i = _entity_groups(pairs, i + 1)
-            return ("" if flags & 1 else name), block, i
+            if block["count"] > len(block["children"]):
+                block.setdefault("nested_inserts", [])
+                if include_measurement_evidence:
+                    block.setdefault("beam_paths", [])
+            return name, block, i
         if code == 0 and kind in ("ENDSEC", "BLOCK", "EOF"):
             break
         if code != 0:
@@ -679,8 +940,30 @@ def _parse_block(pairs, i, parse_errors):
         block["count"] += 1
         try:
             child, end = _parse_block_child(pairs, i + 1, kind)
+            # The inverse writer still treats nested INSERTs as unsupported.
+            # Preserve their identities separately for read-only instance traversal.
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+                paths = block.setdefault("beam_paths", [])
+                if len(paths) < 10000:
+                    path = _block_measurement_path(pairs, i + 1, end, kind)
+                    if path is not None and (not path.get("closed") or path.get("periodic")):
+                        paths.append(path)
+                else:
+                    block["beam_paths_incomplete"] = True
+            if kind == "INSERT":
+                insert, _ = _parse_insert(pairs, i + 1)
+                insert.pop("_properties", None)
+                refs = block.setdefault("nested_inserts", [])
+                if len(refs) < 10000:
+                    refs.append(insert)
+                else:
+                    block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+                block["beam_paths_incomplete"] = True
+            if kind == "INSERT":
+                block["nested_inserts_incomplete"] = True
             parse_errors.append(f"BKE {name} ({kind}): {exc}")
             _, i = _entity_groups(pairs, i + 1)
             continue
@@ -689,8 +972,11 @@ def _parse_block(pairs, i, parse_errors):
             block["complete"] = False
         if block["count"] <= 60:
             block["children"].append(child)
+    if include_measurement_evidence:
+        block["beam_paths_incomplete"] = True
+    block["nested_inserts_incomplete"] = True
     block["complete"] = False  # unterminated definition
-    return ("" if flags & 1 else name), block, i
+    return name, block, i
 
 
 def _ocs_to_wcs(point: List[float], normal: List[float]) -> List[float]:
@@ -877,10 +1163,11 @@ def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
         properties[entity["handle"]] = props
 
 
-def _group_pairs(text: str) -> List[Tuple[int, str]]:
+def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
     """DXF is (code line, value line) pairs. Tolerates \r\n and blank tail."""
     lines = text.splitlines()
     pairs: List[Tuple[int, str]] = []
+    inline_record = False
     for k in range(0, len(lines) - 1, 2):
         code_raw = lines[k].strip()
         try:
@@ -891,7 +1178,15 @@ def _group_pairs(text: str) -> List[Tuple[int, str]]:
             # with a stray blank line — real writers do not produce these, but
             # a hand-edited demo file might.)
             continue
-        pairs.append((code, lines[k + 1].strip()))
+        value = lines[k + 1].strip()
+        if literal_text is not None:
+            if code == 0:
+                inline_record = value.upper() in {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
+            elif inline_record and code in (1, 3, 304) and lines[k + 1] != value:
+                # Dependency identity needs the exact text at chunk edges.
+                # Retain only differing inline values, indexed by pair position.
+                literal_text[len(pairs)] = lines[k + 1]
+        pairs.append((code, value))
     if not pairs:
         raise DxfParseError("no DXF group-code pairs found")
     return pairs
@@ -1003,9 +1298,12 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     raw_pts: List[List[float]] = []
     aci = linetype = lineweight = truecolor = None
     n = len(pairs)
+    header_z = None
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
-        if code == 8:
+        if code == 30:
+            header_z = _float(value)
+        elif code == 8:
             layer = value or "0"
         elif code == 5:
             handle = value
@@ -1042,7 +1340,7 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
                 elif c == 30:
                     z = _float(v)
                 i += 1
-            raw_pts.append([x, y, z])
+            raw_pts.append([x, y, header_z if header_z is not None and not wcs_vertices else z])
             continue
         if code == 0 and value == "SEQEND":
             i += 1

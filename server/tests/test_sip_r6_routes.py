@@ -20,6 +20,7 @@ from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
 from routers import project_drawings as routes, drawings, jobs, capabilities
 from route_flatten import iter_leaf_routes
+from solar_drawing_roles import discover_roles
 import test_sip_r6_read as reads
 import test_sip_r6_artifacts as files
 import test_sip_r5_routes as admission_cases
@@ -351,9 +352,17 @@ def _r1_specimens(http, monkeypatch):
             monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
         else:
             monkeypatch.delenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", raising=False)
-        specimens.append([specimen(http.client.request(method, path)) for method, path in (
+        responses = [http.client.request(method, path) for method, path in (
             ("GET", context), ("GET", checkout), ("POST", checkout), ("DELETE", checkout),
-            ("GET", standalone_path))])
+            ("GET", standalone_path))]
+        # X07 explicitly extends the context contract. Validate that extension
+        # against fixture intake, then keep the frozen digest over every legacy
+        # field and header rather than replacing it with a new opaque digest.
+        payload = responses[0].json()
+        assert payload.pop('role_discovery') == discover_roles(s.ctx.intake)
+        responses[0]._content = JSONResponse(payload).body
+        responses[0].headers['content-length'] = str(len(responses[0].content))
+        specimens.append([specimen(response) for response in responses])
     return specimens
 
 

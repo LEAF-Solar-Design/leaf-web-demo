@@ -281,6 +281,9 @@ class PieceStringerResponse(StringerResponse):
     def original_visited_path(self, request: StringerRequest) -> list[list[int]]:
         """Full answers keep every single-frame check; a partial beam has no path, lengths or
         grid_id, so it keeps the final_grid echo and yields no path."""
+        if any(panel.Code == 1 and panel.Seq <= 0
+               for row in self.data.final_grid.Rows for panel in row.Panels):
+            raise ValueError("required piece panel has no sequence")
         if self.partial_beam:
             self.check_grid_echo(request)
             return []
@@ -402,11 +405,12 @@ def _known_prewrite_failure(exc):
     return False
 
 
-def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncertainty=False) -> bytes:
+def post_stringer(request: StringerRequest, grant: CloudGrant, *, preserve_uncertainty=False,
+                  _transport=None) -> bytes:
     """Broker and custodied worker transport; no redirects or response logging."""
     try:
         deadline = time.monotonic() + 50
-        with requests.post(
+        with (_transport or requests).post(
             SOLVER_URL, data=canonical_bytes(request.wire_payload()),
             headers={"Authorization": "Bearer " + grant.access_token,
                      "Content-Type": "application/json"},

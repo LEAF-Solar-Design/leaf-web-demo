@@ -1,4 +1,5 @@
 import { serviceState, authorityKey, authorityStorage } from '../../lib/serviceAuthSession.js'
+import { isInvestorSession } from '../../investorDemo.js'
 
 const initialState = Object.freeze({
   status: 'checking',
@@ -144,10 +145,13 @@ export function createSessionController({
   }
 
   const signOut = async () => {
-    try { (serviceState(storage).mode ? authorityStorage() : storage)?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
+    const serviceMode = serviceState(storage).mode
+    const investor = !serviceMode && isInvestorSession(storage)
+    try { (serviceMode ? authorityStorage() : storage)?.removeItem('leaf.inflightAuthor.v1') } catch { /* storage unavailable */ }
     // An explicit sign-out is the second channel that may delete the token.
     requireAuth('signout', { tokenInvalidated: true })
-    await endSession?.()
+    if (investor) await endSession?.({ investor: true })
+    else await endSession?.()
   }
 
   const start = () => {

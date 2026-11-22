@@ -1,3 +1,4 @@
+import { catalogToolDisclaimer } from '../site/studioAvailability.js'
 import { useId, useState } from 'react'
 import ToolHistory from './ToolHistory.jsx'
 import ToolExplanation from './ToolExplanation.jsx'
@@ -98,12 +99,14 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                       never a second haloed primary in the pane */}
                   <button
                     className="chip-act tool-run"
-                    disabled={running || locked || entBlocked || runDisabled || validByTool[t.name] === false}
-                    title={runDisabled ? runDisabledNote || undefined : undefined}
-                    onClick={() => { if (!running && !locked && !entBlocked && !runDisabled && validByTool[t.name] !== false) onRequestRun(t, params) }}
+                    disabled={running || locked || entBlocked || runDisabled || validByTool[t.name] === false || !!catalogToolDisclaimer(t.name)}
+                    title={catalogToolDisclaimer(t.name) || (runDisabled ? runDisabledNote || undefined : undefined)}
+                    data-availability={catalogToolDisclaimer(t.name) ? 'unavailable' : undefined}
+                    onClick={() => { if (!running && !locked && !entBlocked && !runDisabled && validByTool[t.name] !== false && !catalogToolDisclaimer(t.name)) onRequestRun(t, params) }}
                   >
                     {isRunningThis ? 'Running on Leaf…' : 'Review & run'}
                   </button>
+                  {catalogToolDisclaimer(t.name) && <span className="dim" role="note">{catalogToolDisclaimer(t.name)}</span>}
                   {onReviseTool && (
                     <button
                       type="button"

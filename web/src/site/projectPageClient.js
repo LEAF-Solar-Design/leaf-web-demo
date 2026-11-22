@@ -438,12 +438,13 @@ export async function submitProjectSourceNativePreview(projectId, source, idempo
   }, async response => validateNativePreview(await response.json(), expected))
 }
 
-export async function submitProjectNativePreview(projectId, revision, idempotencyKey, { signal } = {}) {
+export async function submitProjectNativePreview(projectId, revision, idempotencyKey, { signal, priorJobId, expectedScope } = {}) {
   if (!Number.isSafeInteger(revision) || revision < 1 || typeof idempotencyKey !== 'string'
     || idempotencyKey.length < 1 || idempotencyKey.length > 200 || /[^\x21-\x7e]/.test(idempotencyKey)) nativeInvalid()
-  return request(nativePath(projectId), { native: true, signal, method: 'POST',
+  if (priorJobId !== undefined && (!validUuid(priorJobId) || idempotencyKey !== 'recover-page:' + priorJobId)) nativeInvalid()
+  return request(nativePath(projectId), { native: true, signal, expectedScope, method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-    body: JSON.stringify({ revision }),
+    body: JSON.stringify(priorJobId === undefined ? { revision } : { prior_job_id: priorJobId }),
   }, async response => validateNativePreview(await response.json(), { revision }))
 }
 

@@ -1,0 +1,401 @@
+"""Reconcile requests and retries to independently recorded receiver effects."""
+import hashlib
+
+
+def dead_letter_quality(exhausted, quarantine, replays, terminal):
+    """Reconcile exhausted delivery IDs to quarantine receipts and recorded replay effects."""
+    if not isinstance(exhausted,list) or not exhausted or not isinstance(quarantine,dict) or not isinstance(replays,list) or not isinstance(terminal,dict):
+        return "INCOMPLETE"
+    if not all(isinstance(job,str) and job for job in exhausted):
+        return "INCOMPLETE"
+    jobs = set(exhausted)
+    if len(jobs) != len(exhausted) or quarantine.keys() != jobs:
+        return "FAIL"
+    if terminal.keys() != jobs or not all(isinstance(r,str) and r for r in quarantine.values()):
+        return "INCOMPLETE"
+    if len(set(quarantine.values())) != len(jobs):
+        return "FAIL"
+    effects = dict.fromkeys(jobs, 0)
+    for replay in replays:
+        if not isinstance(replay,dict) or any(replay.get(k) is None for k in ("delivery","parent_receipt","new_effects")):
+            return "INCOMPLETE"
+        job, parent, count = replay["delivery"], replay["parent_receipt"], replay["new_effects"]
+        if not isinstance(job,str) or job not in jobs or parent != quarantine[job] or type(count) is not int or count not in (0,1):
+            return "FAIL"
+        effects[job] += count
+    for job, count in effects.items():
+        if terminal[job] is None:
+            return "INCOMPLETE"
+        if (terminal[job],count) not in (("quarantined",0),("recovered",1)):
+            return "FAIL"
+    return "PASS"
+
+
+def delivery_quality(attempts, effects, *, revision_order=None, final_state=None):
+    wanted, received = {}, {}
+    for rows, index, unique in ((attempts, wanted, False), (effects, received, True)):
+        if not isinstance(rows, list) or not rows:
+            return "INCOMPLETE"
+        for row in rows:
+            fields = ("drawing", "revision", "payload_digest", "destination")
+            if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
+                return "INCOMPLETE"
+            key = row["destination"], row["drawing"], row["revision"]
+            digest = row["payload_digest"]
+            payload = row.get("payload_bytes")
+            if not isinstance(payload, bytes):
+                return "INCOMPLETE"
+            if hashlib.sha256(payload).hexdigest() != digest:
+                return "FAIL"
+            if unique:
+                # Legacy effects are committed receiver records. Explicit lifecycle
+                # events count only once the receiver attests application.
+                if "http_status" in row and "state" not in row:
+                    return "INCOMPLETE"
+                state = row.get("state", "applied")
+                if state in ("accepted", "pending"):
+                    continue
+                if state != "applied":
+                    return "INCOMPLETE"
+            if key in index and (unique or index[key] != digest):
+                return "FAIL"
+            index[key] = digest
+    if wanted != received:
+        return "FAIL"
+    if revision_order is None and final_state is None:
+        return "PASS"
+    if not isinstance(revision_order, list) or not isinstance(final_state, list):
+        return "INCOMPLETE"
+    if not all(isinstance(r, str) for r in revision_order) or len(set(revision_order)) != len(revision_order):
+        return "INCOMPLETE"
+    rank = {r: i for i, r in enumerate(revision_order)}
+    latest = {}
+    for (dest, drawing, rev), digest in wanted.items():
+        if rev not in rank:
+            return "INCOMPLETE"
+        key = dest, drawing
+        if key not in latest or rank[rev] > rank[latest[key][0]]:
+            latest[key] = rev, digest
+    actual = {}
+    for row in final_state:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k),str) and row[k]
+                for k in ("destination","drawing","revision","payload_digest")):
+            return "INCOMPLETE"
+        key = row["destination"], row["drawing"]
+        if key in actual:
+            return "FAIL"
+        actual[key] = row["revision"], row["payload_digest"]
+    return "PASS" if actual == latest else "FAIL"
+
+
+def tombstone_replay_quality(events, recreation_grants, receiver_states):
+    """Compare each receiver existence snapshot to monotonic, per-drawing revision replay.
+
+    The initial inventory is empty. Grants identify exact (drawing, revision)
+    recreation events independently of the deliveries.
+    """
+    if not isinstance(events, list) or not events or not isinstance(receiver_states, list) or recreation_grants is None:
+        return "INCOMPLETE"
+    if len(events) != len(receiver_states):
+        return "INCOMPLETE"
+    if not isinstance(recreation_grants, (set, frozenset)):
+        return "INCOMPLETE"
+    latest, history, live, deleted = {}, {}, set(), set()
+    for event, snapshot in zip(events, receiver_states):
+        if not isinstance(event, dict) or any(event.get(k) is None for k in ("drawing", "revision", "action")):
+            return "INCOMPLETE"
+        drawing, rev, action = event["drawing"], event["revision"], event["action"]
+        if (not isinstance(drawing, str) or not drawing or type(rev) is not int or rev < 0
+                or action not in ("upsert", "delete", "recreate")):
+            return "FAIL"
+        if history.setdefault((drawing, rev), action) != action:
+            return "FAIL"
+        if rev > latest.get(drawing, -1):
+            if action == "delete":
+                live.discard(drawing)
+                deleted.add(drawing)
+            elif drawing not in deleted or (action == "recreate" and (drawing, rev) in recreation_grants):
+                live.add(drawing)
+                deleted.discard(drawing)
+            latest[drawing] = rev
+        if not isinstance(snapshot, list) or not all(isinstance(k, str) for k in snapshot):
+            return "INCOMPLETE"
+        if len(snapshot) != len(live) or set(snapshot) != live:
+            return "FAIL"
+    return "PASS"
+
+
+def batch_ack_quality(expected, acknowledgements, effects):
+    """Match accepted item revisions to independent, unique committed effects across retries."""
+    if not all(isinstance(rows, list) for rows in (expected, acknowledgements, effects)) or not expected:
+        return "INCOMPLETE"
+    wanted, accepted, committed = set(), set(), set()
+    for rows, target in ((expected, wanted), (acknowledgements, accepted), (effects, committed)):
+        for row in rows:
+            if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in ("item", "revision")):
+                return "INCOMPLETE"
+            key = row["item"], row["revision"]
+            if target is not wanted and key not in wanted:
+                return "FAIL"
+            if target is accepted:
+                if row.get("state") in ("pending", "rejected"):
+                    continue
+                if row.get("state") != "accepted":
+                    return "INCOMPLETE"
+            else:
+                if key in target:
+                    return "FAIL"
+                if target is committed and row.get("state") != "committed":
+                    return "INCOMPLETE"
+            target.add(key)
+    return "PASS" if accepted == committed == wanted else "INCOMPLETE"
+
+
+def predecessor_quality(events, final_revision):
+    """A complete delivery has one explicit root and a single unbroken successor chain."""
+    if not isinstance(events, list) or not events or not isinstance(final_revision, str):
+        return "INCOMPLETE"
+    parents = {}
+    for row in events:
+        if not isinstance(row, dict) or "predecessor" not in row or not isinstance(row.get("revision"), str):
+            return "INCOMPLETE"
+        revision, parent = row["revision"], row["predecessor"]
+        if not revision or (parent is not None and (not isinstance(parent, str) or not parent)):
+            return "FAIL"
+        if revision in parents and parents[revision] != parent:
+            return "FAIL"
+        parents[revision] = parent
+    children = {}
+    for node, parent in parents.items():
+        if parent is not None and parent not in parents:
+            return "INCOMPLETE"
+        if parent in children:
+            return "FAIL"
+        children[parent] = node
+    visited = set()
+    node = None
+    while node in children:
+        node = children[node]
+        if node in visited:
+            return "FAIL"
+        visited.add(node)
+    return "PASS" if visited == parents.keys() and node == final_revision else "FAIL"
+
+
+def atomic_batch_quality(manifests, previous, target, events):
+    """Read a recorded stream of commit markers and consumer-visible snapshots."""
+    import re
+    if not isinstance(manifests, dict) or not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    for revision in (previous, target):
+        members = manifests.get(revision)
+        if not isinstance(members, dict) or not members:
+            return "INCOMPLETE"
+        if not all(isinstance(v, str) and re.fullmatch("[0-9a-f]{64}", v) for v in members.values()):
+            return "FAIL"
+    visible = previous
+    committed = observed = False
+    for event in events:
+        if not isinstance(event, dict) or not event.get("kind"):
+            return "INCOMPLETE"
+        if event["kind"] == "commit":
+            if event.get("revision") is None:
+                return "INCOMPLETE"
+            if event["revision"] != target:
+                return "FAIL"
+            visible, committed = target, True
+        elif event["kind"] == "snapshot":
+            if not isinstance(event.get("members"), dict) or event.get("revision") is None:
+                return "INCOMPLETE"
+            if event["revision"] != visible or event["members"] != manifests[visible]:
+                return "FAIL"
+            observed |= committed
+        else:
+            return "FAIL"
+    return "PASS" if observed else "INCOMPLETE"
+
+
+def generation_receipt_quality(events):
+    """Check receipt credit against the active generation of each drawing at delivery time."""
+    if not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    active, seen, credited = {}, set(), set()
+    receipts = 0
+    for row in events:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in ("drawing", "generation", "kind")):
+            return "INCOMPLETE"
+        drawing, generation = row["drawing"], row["generation"]
+        identity = drawing, generation
+        if row["kind"] == "create":
+            if drawing in active or identity in seen:
+                return "FAIL"
+            active[drawing] = generation
+            seen.add(identity)
+        elif row["kind"] == "delete":
+            if active.get(drawing) != generation:
+                return "FAIL"
+            del active[drawing]
+        elif row["kind"] == "receipt":
+            if type(row.get("credited")) is not bool or not isinstance(row.get("effect"), str) or not row["effect"]:
+                return "INCOMPLETE"
+            if identity not in seen:
+                return "INCOMPLETE"
+            key = drawing, generation, row["effect"]
+            eligible = active.get(drawing) == generation and key not in credited
+            if row["credited"] != eligible:
+                return "FAIL"
+            if eligible:
+                credited.add(key)
+            receipts += 1
+        else:
+            return "INCOMPLETE"
+    return "PASS" if receipts else "INCOMPLETE"
+
+
+def retry_schedule_quality(attempts, retry_budget):
+    """Use a single request's ordered attempts, with Retry-After seconds measured from response."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if retry_budget is None or not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    if type(retry_budget) is not int or retry_budget < 0 or len(attempts) - 1 > retry_budget:
+        return "FAIL"
+    earliest = None
+    for index, row in enumerate(attempts):
+        if not isinstance(row, dict) or any(row.get(k) is None for k in ("sent", "received", "status")):
+            return "INCOMPLETE"
+        sent, received = row["sent"], row["received"]
+        if not all(map(finite_measure, (sent, received))) or received < sent or type(row["status"]) is not int:
+            return "FAIL"
+        if earliest is not None and Fraction(str(sent)) < earliest:
+            return "FAIL"
+        if index < len(attempts) - 1:
+            if row["status"] not in (429, 503):
+                return "FAIL"
+            delay = row.get("retry_after_seconds")
+            if delay is None:
+                return "INCOMPLETE"
+            if not finite_measure(delay) or delay < 0:
+                return "FAIL"
+            earliest = Fraction(str(received)) + Fraction(str(delay))
+    return "PASS"
+
+
+def idempotency_collision_quality(attempts):
+    """In one key namespace, bind the first successful request and receipt to its complete identity."""
+    if not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    bindings, issued = {}, set()
+    for row in attempts:
+        fields = ("key", "payload_digest", "destination", "revision", "outcome")
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) and row[k] for k in fields):
+            return "INCOMPLETE"
+        if "receipt" not in row or type(row.get("new_effects")) is not int:
+            return "INCOMPLETE"
+        key = row["key"]
+        identity = (row["payload_digest"], row["destination"], row["revision"])
+        receipt = row["receipt"]
+        if key not in bindings:
+            if row["outcome"] != "committed" or row["new_effects"] != 1:
+                return "FAIL"
+            if not isinstance(receipt,str) or not receipt or receipt in issued:
+                return "FAIL"
+            bindings[key] = identity, receipt
+            issued.add(receipt)
+        else:
+            original, original_receipt = bindings[key]
+            expected = ("replayed", original_receipt) if identity == original else ("conflict", None)
+            if (row["outcome"], receipt) != expected or row["new_effects"] != 0:
+                return "FAIL"
+    return "PASS"
+
+
+def revocation_quality(receipt, issued_at, as_of, supersessions):
+    """Adjudicate the original acknowledgement against a complete recorded revocation history."""
+    from benches.x03_quality import finite_measure
+    if not receipt or not all(map(finite_measure, (issued_at, as_of))) or not isinstance(supersessions, dict):
+        return "INCOMPLETE"
+    covered = supersessions.get("complete_through")
+    events = supersessions.get("events")
+    if not finite_measure(covered) or covered < as_of or not isinstance(events, list):
+        return "INCOMPLETE"
+    if issued_at > as_of:
+        return "FAIL"
+    for event in events:
+        if not isinstance(event, dict) or not event.get("receipt"):
+            return "INCOMPLETE"
+        if event["receipt"] != receipt:
+            continue
+        when = event.get("effective_at")
+        if not finite_measure(when) or event.get("action") not in ("revoke", "supersede"):
+            return "INCOMPLETE"
+        if event["action"] == "supersede" and not event.get("replacement"):
+            return "INCOMPLETE"
+        if when < issued_at:
+            return "INCOMPLETE"
+        if when <= as_of:
+            return "FAIL"
+    return "PASS"
+
+
+def retention_retry_quality(attempts, ttl):
+    """A logical delivery can commit once. Expired retries must reconcile or be refused."""
+    from fractions import Fraction
+    from benches.x03_quality import finite_measure
+    if not finite_measure(ttl) or ttl <= 0 or not isinstance(attempts, list) or not attempts:
+        return "INCOMPLETE"
+    bindings = {}
+    previous = None
+    for row in attempts:
+        if not isinstance(row, dict):
+            return "INCOMPLETE"
+        key, delivery, time, expiry, effects, status = (row.get(k) for k in
+            ("key", "delivery", "time", "expires", "new_effects", "status"))
+        if not all(isinstance(k, str) and k for k in (key, delivery, status)) or not all(map(finite_measure, (time, expiry))) or type(effects) is not int:
+            return "INCOMPLETE"
+        if previous is not None and time < previous:
+            return "INCOMPLETE"
+        previous = time
+        if delivery not in bindings:
+            if status != "committed" or effects != 1 or Fraction(str(expiry)) != Fraction(str(time)) + Fraction(str(ttl)):
+                return "FAIL"
+            bindings[delivery] = (key, expiry)
+        else:
+            if bindings[delivery] != (key, expiry) or effects != 0:
+                return "FAIL"
+            allowed = ("replayed",) if time < expiry else ("reconciled", "refused")
+            if status not in allowed:
+                return "FAIL"
+    return "PASS"
+
+
+def fencing_quality(events):
+    """Replay ordered lease grants and receiver decisions for each independently fenced resource."""
+    if not isinstance(events, list) or not events:
+        return "INCOMPLETE"
+    active = {}
+    previous = None
+    saw_decision = False
+    for event in events:
+        if not isinstance(event, dict):
+            return "INCOMPLETE"
+        seq, resource, worker, epoch = (event.get(k) for k in ("seq", "resource", "worker", "epoch"))
+        if type(seq) is not int or type(epoch) is not int or epoch < 0 or not all(isinstance(k,str) and k for k in (resource,worker)):
+            return "INCOMPLETE"
+        if previous is not None and seq <= previous:
+            return "INCOMPLETE"
+        previous = seq
+        if event.get("kind") == "grant":
+            if resource in active and epoch <= active[resource][0]:
+                return "FAIL"
+            active[resource] = (epoch,worker)
+        elif event.get("kind") == "receive":
+            committed = event.get("committed")
+            if resource not in active or type(committed) is not bool:
+                return "INCOMPLETE"
+            if committed and active[resource] != (epoch,worker):
+                return "FAIL"
+            saw_decision = True
+        else:
+            return "INCOMPLETE"
+    return "PASS" if saw_decision else "INCOMPLETE"

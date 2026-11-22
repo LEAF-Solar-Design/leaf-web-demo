@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Worker as Thread } from 'node:worker_threads'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -19,6 +20,44 @@ function fakeWorker() {
     emit: (data) => listeners.message.forEach((cb) => cb({ data })),
   }
 }
+
+describe('native worker transport refusal', () => {
+  it.each(['uncloneable payload', 'detached buffer'])('settles %s without exposing payloads and accepts the next message', async (mode) => {
+    const thread = new Thread(`
+      const { parentPort } = require('node:worker_threads')
+      let received = 0
+      parentPort.on('message', message => parentPort.postMessage({
+        type: 'documentLoaded', documentId: message.documentId, received: ++received,
+      }))
+    `, { eval: true })
+    const worker = {
+      addEventListener(type, listener) { thread.on(type, data => listener({ data })) },
+      postMessage(message) { thread.postMessage(message) },
+      terminate() { return thread.terminate() },
+    }
+    const boundary = new EngineBoundary({ flags: { cad_edit: true }, createWorker: () => worker })
+    try {
+      boundary.start()
+      const bad = { type: 'loadDocument', documentId: 'synthetic.dxf', bytes: new Uint8Array([1]) }
+      if (mode === 'uncloneable payload') bad.privatePayload = () => 'must never appear in a receipt'
+      else structuredClone(bad.bytes, { transfer: [bad.bytes.buffer] })
+      expect(boundary.post(bad)).toBe(false)
+      expect(boundary.droppedCount).toBe(1)
+      expect(boundary.droppedReceipts).toHaveLength(1)
+      expect(boundary.droppedReceipts[0]).toEqual({
+        direction: 'toWorker', reason: 'transport_post_failed', at: expect.any(Number),
+      })
+      const reply = new Promise((resolve, reject) => {
+        thread.once('message', resolve)
+        thread.once('error', reject)
+      })
+      expect(boundary.post({ type: 'loadDocument', documentId: 'valid.dxf', bytes: new Uint8Array([2]) })).toBe(true)
+      await expect(reply).resolves.toEqual({ type: 'documentLoaded', documentId: 'valid.dxf', received: 1 })
+    } finally {
+      await thread.terminate()
+    }
+  })
+})
 
 describe('engine worker boundary flag gating', () => {
   afterEach(() => {

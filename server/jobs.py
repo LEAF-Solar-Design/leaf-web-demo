@@ -1789,6 +1789,7 @@ def _ack_corpus_reap(job_id, worker_id, attempt):
 def _run_lab_corpus(job_id: str, *, _worker_id=None, _attempt=None) -> None:
     """Own the actual child lifecycle inside the existing fenced job lease."""
     import lab_corpus_executor as corpus_adapter
+    import lab_corpus_failures
     worker_id = _worker_id or str(uuid.uuid4())
     attempt = _attempt if _attempt is not None else claim_lease(job_id, worker_id)
     if attempt is None:
@@ -1820,8 +1821,10 @@ def _run_lab_corpus(job_id: str, *, _worker_id=None, _attempt=None) -> None:
         if isinstance(exc, corpus_adapter.CorpusStopped):
             _ack_corpus_reap(job_id, worker_id, attempt)
         if not cancelled():
+            error = error_obj(ErrorCode.INTERNAL, 'corpus execution could not be verified', False)
+            error['corpus_failure'] = lab_corpus_failures.failure_reason(exc)
             complete_callback(job_id, 'failed', worker_id=worker_id, provenance=provenance,
-                error=error_obj(ErrorCode.INTERNAL, 'corpus execution could not be verified', False))
+                error=error)
 
 
 def _run_native_preview(job_id: str, *, _worker_id=None, _attempt=None) -> None:

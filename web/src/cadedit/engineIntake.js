@@ -602,6 +602,7 @@ export function projectServerBlocks(intake) {
   if (intake?.source === 'engine' || intake?.source === 'bridge') {
     return { polylines: [], inserts: originals, truncated: 0, incompleteInserts: 0 }
   }
+  const modelInserts = originals.filter((insert) => insert?.space !== 'paper')
   const definitions = blockDefinitions(intake)
   const cache = new Map()
   const polylines = [], inserts = []
@@ -625,8 +626,8 @@ export function projectServerBlocks(intake) {
     cache.set(name, result)
     return result
   }
-  for (let i = 0; i < Math.min(originals.length, MAX_POINTS); i++) {
-    const source = originals[i]
+  for (let i = 0; i < Math.min(modelInserts.length, MAX_POINTS); i++) {
+    const source = modelInserts[i]
     if (!source || typeof source !== 'object') continue
     const positioned = Array.isArray(source.pt)
     const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
@@ -649,7 +650,7 @@ export function projectServerBlocks(intake) {
       rot: finite(row.rotationDeg) ? row.rotationDeg : 0,
       scale: markerScale, incomplete: source.incomplete === true || !expanded.complete })
   }
-  truncated += Math.max(0, originals.length - MAX_POINTS)
+  truncated += Math.max(0, modelInserts.length - MAX_POINTS)
   return { polylines, inserts, truncated,
     incompleteInserts: inserts.filter((insert) => insert.incomplete).length }
 }
@@ -679,6 +680,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
       countsByType.set(type, (countsByType.get(type) || 0) + 1)
       countsByLayer.set(layer, (countsByLayer.get(layer) || 0) + 1)
     }
+    if (entity?.modelSpace === false) continue
     const verts = Array.isArray(entity?.vertices) ? entity.vertices : []
     const r = (entity?.type === 'CIRCLE' || entity?.type === 'ARC') && finite(entity.radius) && entity.radius > 0 ? entity.radius : 0
     for (const v of verts) {
@@ -692,6 +694,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
   }
   const markSize = pointMarkSize(minX <= maxX ? { w: maxX - minX, h: maxY - minY } : null)
   for (const entity of list) {
+    if (entity?.modelSpace === false) continue
     if (entity?.type === 'INSERT') {
       const definition = definitions.get(String(entity.name).toUpperCase())
       const expanded = definition ? expandBlockReference(entity, definition) : { polylines: [], complete: false }
@@ -775,6 +778,14 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     countsByLayer: Object.fromEntries(countsByLayer),
   }
   return { source: 'engine', documentId: String(documentId || ''), sourceSummary, polylines, inserts, blocks, groups, faces3d: [], points, truncated, diagnostics }
+}
+
+export function projectionSummary(diagnostics) {
+  if (diagnostics?.truncated || Object.values(diagnostics?.omittedDimensions || {}).some(Boolean)) {
+    return 'Partial drawing view'
+  }
+  const count = diagnostics?.incompleteInserts
+  return count ? `${count} block${count === 1 ? '' : 's'} shown in part` : ''
 }
 
 export function projectionWarning(diagnostics) {

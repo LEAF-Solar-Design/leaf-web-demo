@@ -751,8 +751,19 @@ def _print_build_logs(work: Path, services, *, retry=False) -> None:
         print(tail, flush=True)
 
 
+APP_SYNTAX_FRONTEND = "docker-image://docker.io/docker/dockerfile:1"
+APP_FRONTEND_RETRY_BACKOFF_SECONDS = 20
+
+
 def _app_frontend_closed_before_build(path: Path) -> bool:
-    """Recognize only a complete, bounded app syntax-frontend failure log."""
+    """Recognize only a complete, bounded app syntax-frontend failure log.
+
+    Three shapes qualify, all ending before any build step: a warm frontend
+    (#2 resolves the image config, #3 is the cached frontend, all DONE) and a
+    cold pull (#2 pulls the frontend and is cut off at '#2 ...', #3 resolves
+    the image config; 11-20 publisher f3e0d733), or a completed frontend pull
+    at #1, build definition at #2 and config at #3. Fails closed on anything else.
+    """
     try:
         with path.open("rb") as stream:
             raw = stream.read(BUILD_LOG_TAIL_BYTES + 1)
@@ -764,9 +775,12 @@ def _app_frontend_closed_before_build(path: Path) -> bool:
     lines = text.rstrip("\r\n").splitlines()
     if not lines or not lines[0].startswith('#0 building with '):
         return False
-    required = ("#1 [internal] load build definition from Dockerfile.app",
-                "#2 resolve image config for docker-image://docker.io/docker/dockerfile:1",
-                "Dockerfile.app:1", "   1 | >>> # syntax=docker/dockerfile:1",
+    definitions = ("#1 [internal] load build definition from Dockerfile.app",
+                   "#2 [internal] load build definition from Dockerfile.app")
+    if sum(lines.count(line) for line in definitions) != 1:
+        return False
+    definition = next(line for line in definitions if line in lines)
+    required = (definition, "Dockerfile.app:1", "   1 | >>> # syntax=docker/dockerfile:1",
                 "ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly")
     if any(lines.count(line) != 1 for line in required) or lines[-1] != required[-1]:
         return False
@@ -779,11 +793,33 @@ def _app_frontend_closed_before_build(path: Path) -> bool:
     if any(line and not line.startswith('#') and line not in ("Dockerfile.app:1", required[-1])
            and re.fullmatch(r"-+|\s+\d+ \|.*", line) is None for line in lines):
         return False
-    frontend = r"#3 docker-image://docker.io/docker/dockerfile:1@sha256:[0-9a-f]{64}"
-    return (sum(re.fullmatch(frontend, line) is not None for line in lines) == 1
-            and any(re.fullmatch(r"#1 DONE [0-9.]+s", line) for line in lines)
-            and any(re.fullmatch(r"#2 DONE [0-9.]+s", line) for line in lines)
-            and any(re.fullmatch(r"#3 DONE [0-9.]+s", line) for line in lines))
+    config = f"resolve image config for {APP_SYNTAX_FRONTEND}"
+    frontend = re.escape(APP_SYNTAX_FRONTEND) + r"@sha256:[0-9a-f]{64}"
+    if (sum(match[2] == config for match in progress) != 1
+            or sum(re.fullmatch(frontend, match[2]) is not None for match in progress) != 1):
+        return False
+    heads: dict[int, str] = {}
+    for match in progress:
+        heads.setdefault(int(match[1]), match[2])
+    if set(heads) != {0, 1, 2, 3}:
+        return False
+    build_vertex = 1
+    if definition == definitions[0] and heads[2] == config and re.fullmatch(frontend, heads[3]):
+        config_vertex, frontend_vertex = 2, 3  # warm: frontend already cached
+    elif definition == definitions[0] and re.fullmatch(frontend, heads[2]) and heads[3] == config:
+        config_vertex, frontend_vertex = 3, 2  # cold: frontend pulled first
+    elif (definition == definitions[1] and re.fullmatch(frontend, heads[1])
+          and heads[2] == definition.split(' ', 1)[1] and heads[3] == config):
+        build_vertex, config_vertex, frontend_vertex = 2, 3, 1
+    else:
+        return False
+
+    def done(vertex: int) -> bool:
+        return any(re.fullmatch(rf"#{vertex} DONE [0-9.]+s", line) for line in lines)
+
+    return (done(build_vertex) and done(config_vertex)
+            and (done(frontend_vertex)
+                 or (build_vertex == 1 and f"#{frontend_vertex} ..." in lines)))
 
 
 def _build_images(root: Path, services, source: str, build_number: int,
@@ -817,6 +853,7 @@ def _build_images(root: Path, services, source: str, build_number: int,
                 continue
             moved = "pins refreshed" if fresh != freshness[service] else "pins unchanged"
             print(f"image app: syntax frontend transport closed before build; rebuilding once with identical source ({moved})", flush=True)
+            time.sleep(APP_FRONTEND_RETRY_BACKOFF_SECONDS)
         else:
             if service == "web":
                 continue
@@ -876,7 +913,8 @@ def produce_release(root: Path, output: Path, request: dict, env: dict, codebuil
     work = Path(tempfile.mkdtemp(prefix="leaf-native-release-"))
     proof_path = work / "gate-proof.json"
     proof_path.write_bytes(proof)
-    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree],
+    subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof", str(proof_path), "--expect-tree", tree]
+                   + (["--allow-device-verdict"] if env.get("LEAF_GATE_ALLOW_DEVICE_VERDICT") == "staging" else []),
                    cwd=root, check=True, timeout=120)
     if "selection" in request:
         contract.fixed_native_lane(gate_request, "gate")
@@ -1116,7 +1154,9 @@ def produce_forge(env: dict, codebuild, s3, *, admit_only=False):
             proof_path = work / "gate-proof.json"
             proof_path.write_bytes(proof)
             subprocess.run([sys.executable, "scripts/run-all-gates.py", "--verify-gate-proof",
-                            str(proof_path), "--expect-tree", tree], cwd=root, check=True, timeout=120)
+                            str(proof_path), "--expect-tree", tree]
+                           + (["--allow-device-verdict"] if env.get("LEAF_GATE_ALLOW_DEVICE_VERDICT") == "staging" else []),
+                           cwd=root, check=True, timeout=120)
             revision = request["solver_snapshot"]["commit"]
             pins = json.loads((root / "deploy/autofill-solver-sources.json").read_text())
             if not isinstance(pins, dict) or set(pins) != {revision}:

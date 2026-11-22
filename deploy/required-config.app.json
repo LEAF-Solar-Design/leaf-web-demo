@@ -1,6 +1,18 @@
 {
   "schemaVersion": 1,
   "container": "leaf-platform-app",
+  "optional": {
+    "environment": [
+      "LEAF_ESTIMATOR_SURFACE_ENABLED",
+      "LEAF_ESTIMATOR_HANDOFF_KMS_KEY_ID",
+      "LEAF_ESTIMATOR_BINDINGS"
+    ]
+  },
+  "defaults": {
+    "LEAF_ESTIMATOR_SURFACE_ENABLED": "false",
+    "LEAF_ESTIMATOR_HANDOFF_KMS_KEY_ID": "",
+    "LEAF_ESTIMATOR_BINDINGS": "[]"
+  },
   "required": {
     "environment": [
       "APS_LIVE",

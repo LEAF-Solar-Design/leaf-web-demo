@@ -105,12 +105,15 @@ _AUTHORING_NOUNS: Set[str] = {
 # strong, unambiguous authoring phrasing (verb-independent).
 _AUTHORING_PHRASE = re.compile(r"\btools?\s+(that|to|which|for)\b", re.IGNORECASE)
 
-# EXPLICIT build phrasing (Contract 4b BUILD-INTENT BOOST): "make/build/create/author
-# (me )?a tool (that|to) ...". When this is present the request is a NEW tool even if a
-# registered tool partially matches — UNLESS the text essentially names an existing tool
-# exactly (see _names_tool_exactly).
+# Explicit requests for a new tool can contain the name of a registered tool.
 _EXPLICIT_BUILD_RE = re.compile(
-    r"\b(make|build|create|author)(\s+me)?\s+an?\s+tools?\s+(that|to)\b", re.IGNORECASE
+    r"\b(?:make|build|create|author|write|add|need|want|develop|code)"
+    r"(?:\s+(?:me|us))?(?:\s+(?:a|an|the|new|one))?"
+    r"(?:\s+(?:new|brand-new|branch|autocad|c#|csharp|custom|small|simple|quick|studio|cad|plugin)){0,3}"
+    r"\s+(?:tools?|commands?|script|plugin|macro)\b"
+    r"|^\s*new\s+(?:(?:branch|autocad|studio)\s+)?(?:tool|command)\s*:"
+    r"|\b(?:brand-new\s+tool|new\s+branch\s+tool|new\s+autocad\s+command)\b",
+    re.IGNORECASE,
 )
 # Scaffolding tokens stripped before checking whether the text just NAMES an existing
 # tool (normalised vocabulary — matches _norm_tokens output).
@@ -282,18 +285,19 @@ def _alternatives(ranked: List[_Score], exclude_first: bool) -> List[Dict[str, A
 
 
 def _explicit_build(text: str) -> bool:
-    """Explicit authoring phrasing: 'make/build/create/author (me )?a tool (that|to)'."""
+    """Whether the request explicitly frames its description as a new tool."""
     return _EXPLICIT_BUILD_RE.search(text or "") is not None
 
 
-def _names_tool_exactly(best: "_Score", q_seq: List[str]) -> bool:
+def _names_tool_exactly(best: "_Score", text: str) -> bool:
     """True iff, after stripping authoring scaffolding, the remaining CONTENT tokens are
     all within the matched tool's name tokens — i.e. the text essentially NAMES that
     existing tool exactly (e.g. 'make a tool: count panels'), so the RUN match is honoured
     even under explicit build phrasing. A longer novel description (extra content tokens
     beyond the name, e.g. '... smaller than 10 sqft') is NOT an exact name -> Build."""
     name = set(best.doc.name)
-    residual = [t for t in q_seq if t not in _BUILD_SCAFFOLD]
+    description = _EXPLICIT_BUILD_RE.sub(" ", text, count=1)
+    residual = [t for t in _norm_tokens(description) if t not in _BUILD_SCAFFOLD]
     if not residual:
         return False
     return set(residual) <= name
@@ -419,6 +423,115 @@ def classify(
     return result.to_dict()
 
 
+# Only a complete grouped panel request can preselect a role. Extra constraints
+# must remain on the ordinary confirmation path.
+_GROUPED_PANELS = re.compile(
+    r"(?:please\s+)?(?:count|tally|how many|give me the number of)\s+"
+    r"(?:(?P<only>only|just)\s+)?(?:the\s+)?(?:solar\s+|pv\s+|photovoltaic\s+)?"
+    r"(?:panels?|modules?)\s+(?:are\s+)?(?:on each|in each|for each|per|by)\s+"
+    r"(?P<roof>roof(?:top)?\s+)?layers?"
+    r"(?P<exclude>\s*(?:,|and)?\s*(?:excluding|without|leaving out|leave out|ignoring)"
+    r"\s+(?:the\s+)?(?:roof\s+)?outlines?)?[.!?]?", re.I,
+)
+
+
+_COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
+_SHARE_WINDOW = re.compile(
+    rf"\b(?:within|inside|in|between)\s+(?:(?:the\s+)?(?:window|region|box)\s+)?"
+    rf"(?:from\s+)?{_PAIR}\s+(?:to|and)\s+{_PAIR}", re.I)
+_SHARE_SELECTION = re.compile(
+    r"(?:^|(?<=[,.?]))\s*(?:select\s+(?:only\s+)?|only\s+|for\s+)(?:the\s+)?"
+    r"(?P<names>[^.?!]+?)\s+(?:(?:panel|module)\s+sets?|layers?)\b", re.I)
+_SHARE_QUERY = re.compile(
+    r"(?:(?:what(?:'s| is)?|show(?: me)?|give me)\s+(?:the\s+)?"
+    r"(?:percentage|fraction|share|%)\s+of\s+(?:(?:all|the selected)\s+)?"
+    r"(?:panels?|modules?|that selection)\s+(?:is\s+)?(?:on each|in each|per|by)\s+layer"
+    r"|how are (?:panels|modules) distributed (?:across|among) layers"
+    r"|(?:show(?: me)?\s+)?(?:the\s+)?(?:per-layer (?:panel |module )?(?:percentage|share)"
+    r"|(?:panel |module )?layer share breakdown))", re.I)
+
+
+_CUMULATIVE_SHARE_QUERY = re.compile(
+    r"(?:(?:rank|sort|order) layers by (?:panel|module) count(?: then name)? and "
+    r"(?:give|show|report) (?:the )?(?:running|cumulative) (?:share|percentage|fraction)"
+    r"(?: after each layer)?|(?:show|give|report|list) (?:the )?(?:running|cumulative) "
+    r"(?:panel|module) (?:share|percentage|fraction) (?:by|per) layer"
+    r"(?:, largest first)?(?:\. break ties by layer name)?)", re.I,
+)
+
+
+def _share_change_params(text):
+    if not (re.search(r"\bpercentage[ -]points?\b", text, re.I)
+            and re.search(r"\blayers?\b", text, re.I)):
+        return None
+    match = re.search(r"\b(?:compare\s+|between\s+|from\s+)(.+?)\s+"
+                      r"(?:against|with|versus|and|to)\s+(.+)", text, re.I)
+    if not match:
+        return None
+    sides = []
+    for side in match.groups():
+        name_list = re.split(r"[,;.!?]|\s+(?:(?:in|as)\s+percentage[ -]points?"
+                             r"|(?:by|per)\s+layer)\b", side, maxsplit=1, flags=re.I)[0]
+        names = []
+        for name in re.split(r"\s+plus\s+", name_list, flags=re.I):
+            cleaned = re.sub(r"^the\s+(.+?)\s+blocks?$", r"\1", name.strip(), flags=re.I)
+            if not cleaned:
+                return None
+            names.append(cleaned)
+        sides.append(names)
+    return {"by": "block", "before": sides[0], "after": sides[1]}
+
+
+def _share_params(text):
+    remaining = text.strip()
+    params = {"layer_shares": True, "group_by": "layer", "panel_scope": "all_layers"}
+    window = _SHARE_WINDOW.search(remaining)
+    if window:
+        params["region"] = [float(value) for value in window.groups()]
+        remaining = remaining[:window.start()] + " " + remaining[window.end():]
+    selection = _SHARE_SELECTION.search(remaining)
+    if selection:
+        params["layer_names"] = re.split(r",\s*(?:and\s+)?|\s+and\s+", selection["names"], flags=re.I)
+        remaining = remaining[:selection.start()] + " " + remaining[selection.end():]
+    query = remaining.strip(" ,.?!")
+    if _CUMULATIVE_SHARE_QUERY.fullmatch(query):
+        params["cumulative_shares"] = True
+    elif not _SHARE_QUERY.fullmatch(query):
+        return None
+    if re.search(r"\b(?:selected|that selection)\b", query, re.I) and not (window or selection):
+        return None
+    return params
+
+
+_LAYER_LEADERS = re.compile(
+    r"(?:which|what)\s+(?P<roof>roof(?:top)?\s+)?layers?\s+"
+    r"(?:(?:has|have|holds?|contains?)\s+(?:the\s+)?most\s+(?:solar\s+)?(?:modules?|panels?)"
+    r"|(?:is|are)\s+(?:tied\s+for\s+)?(?:the\s+)?(?:largest|highest|greatest)\s+"
+    r"(?:solar\s+)?(?:module|panel)\s+count)[?.!]?", re.I,
+)
+_TOP_LAYER_COUNT = re.compile(
+    r"(?:rank|show|list|give me)\s+(?:the\s+)?top\s+(?P<n>\d{1,9}|one|two|three|four|five|six|seven|eight|nine|ten)"
+    r"\s+(?P<roof>roof(?:top)?\s+)?layers?\s+by\s+(?:solar\s+)?(?:module|panel)\s+count"
+    r"(?:,?\s+(?:highest first|descending))?[?.!]?", re.I,
+)
+
+
+def _layer_ranking_params(text):
+    query = text.strip()
+    match = _LAYER_LEADERS.fullmatch(query)
+    limit = 1
+    if match is None:
+        match = _TOP_LAYER_COUNT.fullmatch(query)
+        if match is None:
+            return None
+        number = match["n"].lower()
+        words = "one two three four five six seven eight nine ten".split()
+        limit = int(number) if number.isdecimal() else words.index(number) + 1
+    scope = "roof_layers" if match["roof"] else "all_layers"
+    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit}
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -429,15 +542,12 @@ def _decide(
 ) -> Classification:
     # 1. AUTHORING intent -> Build lane (unless the user named an EXISTING tool
     #    almost exactly, in which case honour the run match).
-    if _is_authoring(text, raw_toks):
+    explicit_build = _explicit_build(text)
+    if explicit_build or _is_authoring(text, raw_toks):
         honor_run = False
         if best is not None and best.exact:
-            # A contiguous tool-name match. Under EXPLICIT build phrasing ("make/build/
-            # create/author (me )?a tool that|to ..."), honour it as a RUN ONLY when the
-            # text essentially NAMES that tool exactly; otherwise the explicit build
-            # intent wins even though a tool partially matched (Contract 4b BUILD-INTENT
-            # BOOST — fixes "make a tool that counts panels smaller than 10 sqft" -> build).
-            if not _explicit_build(text) or _names_tool_exactly(best, q_seq):
+            # An explicit build can still just name a registered tool.
+            if not explicit_build or _names_tool_exactly(best, text):
                 honor_run = True
         if not honor_run:
             strong = _AUTHORING_PHRASE.search(text or "") is not None
@@ -486,6 +596,53 @@ def _decide(
                 for doc in sorted(solvers, key=lambda doc: str(doc.tool.get("name")))[:3]
             ],
         )
+
+    minimum_layers = re.search(
+        r"\b(?:fewest layers|smallest set of layers|minimum number of layers)\b", text, re.I
+    )
+    if minimum_layers:
+        target = re.search(r"\b(?:cover(?:ing)?|reach(?:ing)?)\s+(?:at least\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent\b)", text, re.I)
+        if target and any(doc.tool.get("name") == "count-modules" for doc in docs):
+            options = {"group_by": "layer", "panel_scope": "all_layers", "coverage_percent": float(target[1])}
+            return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                                  rationale="Find the minimum-size layer sets that reach the module coverage target.")
+
+    if (re.search(r"\brank(?:s|ing)?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
+            and re.search(r"\b(?:module|panel)s?\b", text, re.I)
+            and re.search(r"\b(?:windows?|regions?)\b", text, re.I)):
+        windows = re.findall(rf"{_PAIR}\s+to\s+{_PAIR}", text, re.I)
+        if len(windows) == 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
+            options = {"group_by": "layer", "panel_scope": "all_layers",
+                       "rank_windows": [[float(value) for value in bounds] for bounds in windows]}
+            return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                                  rationale="Compare physical module counts by layer in two drawing windows.")
+
+    comparison = _share_change_params(text)
+    if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        options = {"compare_selections": comparison}
+        return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
+                              rationale="Analyze selected physical modules by layer.")
+
+    shares = _share_params(text)
+    if shares and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
+                              confidence=0.95, rationale="Compute each selected layer's share of the physical panel count.")
+
+
+    ranking_params = _layer_ranking_params(text)
+    if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=ranking_params,
+                              confidence=0.95, rationale="Rank selected physical module counts by layer.")
+
+    grouped = _GROUPED_PANELS.fullmatch(text.strip())
+    if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):
+        if any(doc.tool.get("name") == "count-modules" for doc in docs):
+            scope = "roof_layers" if grouped["roof"] else "all_layers"
+            return Classification(
+                lane=LANE_RUN, tool="count-modules",
+                params={"group_by": "layer", "panel_scope": scope}, confidence=0.95,
+                rationale="Count identified panel sets by layer; unclear sets require a selection.",
+            )
 
     # 3. RUN lane — a catalog match (possibly low confidence).
     if best is not None and _confidence(best) >= MIN_RUN_MATCH_CONF:

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { readFileSync } from 'node:fs'
 import {
   DEFAULT_PRODUCT_SURFACE,
@@ -13,10 +15,52 @@ import {
   surfaceContract,
   surfaceGround,
   surfaceRailState,
+  setEstimatorSurfaceStatus,
+  SURFACE_RAIL_PROBES,
 } from './productSurfaces.js'
 import { groundShowsDrawing } from './SurfaceGrounds.jsx'
+import ProductSurfaceTabs from '../components/ProductSurfaceTabs.jsx'
+import * as surfaceOverlay from './useSurfaceContract.js'
 
 describe('product surface contract', () => {
+  it('S1-A11 ignores Estimator overlays in both directions and never grants rail authority', () => {
+    const overlay = vi.spyOn(surfaceOverlay, 'useSurfaceConfigOverlay')
+    const originalUrl = window.location.href
+    window.history.replaceState({}, '', '/app')
+    try {
+      for (const tab of [true, false]) {
+        overlay.mockReturnValue({ estimator: { chrome: { tab, rail: null } } })
+        for (const on of [false, true]) {
+          setEstimatorSurfaceStatus(on ? { state: 'on', bindings: [{ project_id: 'bound' }] } : null)
+          const html = renderToStaticMarkup(createElement(ProductSurfaceTabs, {
+            activeSurface: 'cad', states: productSurfaceStates(), onSelect: () => {}, mock: true,
+          }))
+          expect(html.includes('id="product-surface-tab-estimator"')).toBe(on)
+          expect(surfaceRailState('estimator', { state: 'on' }, 'app')).toBe(on)
+        }
+      }
+    } finally {
+      overlay.mockRestore()
+      setEstimatorSurfaceStatus(null)
+      window.history.replaceState({}, '', originalUrl)
+    }
+  })
+  it('Estimator has separate frozen rail authority and only opens in app with a binding', () => {
+    expect(Object.isFrozen(SURFACE_RAIL_PROBES)).toBe(true)
+    expect(Object.keys(SURFACE_RAIL_PROBES)).toEqual(['lab', 'estimator'])
+    try {
+      for (const status of [null, { state: 'off' }, { state: 'on', bindings: [] }, { state: 'on' }]) {
+        setEstimatorSurfaceStatus(status)
+        expect(surfaceRailState('estimator', { state: 'on' }, 'app')).toBe(false)
+      }
+      setEstimatorSurfaceStatus({ state: 'on', bindings: [{ project_id: 'bound' }] })
+      expect(surfaceRailState('estimator', null, 'app')).toBe(true)
+      expect(surfaceRailState('estimator', { state: 'on' }, 'tool')).toBe(false)
+      expect(surfaceContract('estimator').chrome.rail).toBe('estimator')
+      expect(surfaceGround('estimator')).toBe('embedded-app')
+      expect(groundShowsDrawing('estimator')).toBe(false)
+    } finally { setEstimatorSurfaceStatus(null) }
+  })
   it('C-04C row1 signed out still reads sign-in / Sign in', () => {
     expect(productSurfaceStates({ sessionActive: false, solarReady: true }).solar)
       .toEqual({ state: 'sign-in', label: 'Sign in' })
@@ -41,9 +85,9 @@ describe('product surface contract', () => {
     }
   })
 
-  it('defines the seven profiles once over one shared capability substrate', () => {
-    expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'sheets'])
-    expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(7)
+  it('defines the eight profiles once over one shared capability substrate', () => {
+    expect(PRODUCT_SURFACES.map(({ id }) => id)).toEqual(['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'estimator', 'sheets'])
+    expect(new Set(PRODUCT_SURFACES.map(({ id }) => id)).size).toBe(8)
     expect(SHARED_WORKSPACE_CAPABILITIES).toEqual(expect.arrayContaining([
       'conversation', 'annotations', 'approvals', 'marathons', 'one-shot execution',
     ]))
@@ -177,6 +221,17 @@ describe('product surface contract', () => {
 //   remaining slots undeclared today (null)
 // ---------------------------------------------------------------------------
 const CONTRACT_FIXTURE = {
+  estimator: {
+    ground: 'embedded-app', scene: 'app',
+    chrome: { shell: 'cockpit', productFrame: false, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true, rail: 'estimator' },
+    toolbar: { profile: 'project', ribbon: false, home: null, quick: null },
+    rails: { left: 'none', right: 'none', dock: null },
+    groundMaterial: { layerAccent: null, solarStrings: false },
+    commandLine: false, authoring: false, versions: 'none', conversations: { scope: null },
+    integrations: null, builds: { routes: [], card: null },
+    contextMenu: [], shortcuts: null, entitlements: [], resetOn: null, a11y: null,
+    tourAnchors: { console: { welcome: 'shell', viewer: 'viewer', count: 'command-bar', edge: 'command-bar', measure: 'command-bar' }, stage: null },
+  },
   lab: {
     ground: 'lab', scene: 'app',
     chrome: { shell: 'cockpit', productFrame: false, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true, rail: 'lab' },
@@ -326,7 +381,7 @@ const CONTRACT_FIXTURE = {
   },
 }
 
-const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'sheets']
+const SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'estimator', 'sheets']
 
 it('D2 ios declares the ship-lane route and it is the only surface that does', () => {
   expect(surfaceContract('ios').builds.routes).toEqual(['one-shot', 'ship-lane'])
@@ -338,7 +393,7 @@ it('D2 ios declares the ship-lane route and it is the only surface that does', (
 // The four the STUDIO hosts (`scene: 'app'`). Kept separate from SURFACE_IDS
 // so a row about the console cannot silently start asserting about a surface
 // the console never renders.
-const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab']
+const STUDIO_SURFACE_IDS = ['browser', 'cad', 'solar', 'ios', 'ops', 'lab', 'estimator']
 
 const CONTRACT_KEYS = [
   'ground', 'scene', 'chrome', 'toolbar', 'rails', 'groundMaterial', 'commandLine', 'authoring',
@@ -350,7 +405,7 @@ const ENUMS = {
   // 'sheet' is slice 5b's addition: a chrome-free public page is none of the
   // three studio grounds, and SurfaceGrounds derives its drawing set from this
   // value, so a fourth kind excludes sheets there by construction.
-  ground: ['drawing', 'board', 'device-stage', 'integrations', 'lab', 'sheet'],
+  ground: ['drawing', 'board', 'device-stage', 'integrations', 'lab', 'embedded-app', 'sheet'],
   scene: ['app', 'sheets'],
   // null joins the stage arms: a surface the stage never casts declares no arm
   // rather than being forced into the frame fallthrough. Loosening this enum
@@ -381,7 +436,7 @@ describe('Surface Contract — schema', () => {
       const contract = surfaceContract(id)
       expect(Object.keys(contract).sort()).toEqual([...CONTRACT_KEYS].sort())
       expect(Object.keys(contract.chrome).sort())
-        .toEqual(['cockpit', 'productFrame', 'projectSlot', ...(id === 'lab' ? ['rail'] : []), ...(contract.scene === 'app' ? ['shell'] : []), 'stageBranch', 'tab', 'workspaceCard'])
+        .toEqual(['cockpit', 'productFrame', 'projectSlot', ...(['lab', 'estimator'].includes(id) ? ['rail'] : []), ...(contract.scene === 'app' ? ['shell'] : []), 'stageBranch', 'tab', 'workspaceCard'])
       expect(Object.keys(contract.toolbar).sort()).toEqual(['home', ...(contract.scene === 'app' ? ['profile'] : []), 'quick', 'ribbon'])
       expect(Object.keys(contract.rails).sort()).toEqual(['dock', 'left', 'right'])
       expect(Object.keys(contract.groundMaterial).sort()).toEqual(['layerAccent', 'solarStrings'])

@@ -11,6 +11,8 @@ measured by running this contract with python -B from server/.
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from jsonschema import Draft7Validator
@@ -161,7 +163,7 @@ def test_solaredge_tracking_read_constants():
     assert (module.OUTPUT_SCHEMA, module.INVALID, module.RECORD_INVALID) == (
         "leaf.solar-solaredge-tracking-read.v1", "INVALID_SOLAREDGE_TRACKING_READ_REQUEST",
         "SOLAREDGE_IMPORT_RECORD_INVALID")
-    assert module.SECTIONS == ("strings", "frames", "unassigned")
+    assert module.SECTIONS == ("strings", "frames", "unassigned", "reference_changes")
     assert (module.PAGE_ITEMS, module.PAGE_BYTES, module.MAX_REF, module.MAX_VERSION) == (
         1_000, 262_144, 100, 99_999_999)
     assert (tracking.STORE_KEY, tracking.STORE_SCHEMA) == ("solaredge_import", "leaf.solar-solaredge-import.v1")
@@ -187,9 +189,13 @@ def test_solaredge_tracking_read_declaration():
             "engine_op": "solar_solaredge_tracking_read", "entry": "builtins/solar_solaredge_tracking_read.py",
             "params": {"type": "object", "properties": {
                 "drawing_id": {"type": "string", "maxLength": 128},
-                "section": {"type": "string", "enum": ["strings", "frames", "unassigned"],
+                "section": {"type": "string", "enum": ["strings", "frames", "unassigned", "reference_changes"],
+                            "description": "reference_changes lists missing frames, missing panels, moved panels with saved and current frame references, and new framed panels.",
                             "default": "strings"},
-                "offset": {"type": "integer", "minimum": 0, "maximum": 200000, "default": 0}},
+                "offset": {"type": "integer", "minimum": 0, "maximum": 410000, "default": 0}},
+                "allOf": [{"if": {"required": ["section"], "properties": {
+                    "section": {"const": "reference_changes"}}},
+                    "else": {"properties": {"offset": {"maximum": 200000}}}}],
                 "required": [], "additionalProperties": False},
             "returns": {"type": "object"}, "capabilities": ["drawing.read"],
             "allow_local_fallback": False},
@@ -207,6 +213,10 @@ def test_solaredge_tracking_read_declaration():
     ({"section": "strings"}, True),
     ({"section": "frames", "offset": 0}, True),
     ({"section": "unassigned", "offset": 200000}, True),
+    ({"section": "reference_changes"}, True),
+    ({"section": "reference_changes", "offset": 410000}, True),
+    ({"section": "reference_changes", "offset": 410001}, False),
+    ({"section": "frames", "offset": 200001}, False),
     ({"section": "panels"}, False),
     ({"section": "Strings"}, False),
     ({"section": 1}, False),
@@ -426,6 +436,156 @@ def test_solaredge_tracking_read_reference_check(case, references):
     output = builtin().run(_drift(case), {})
     assert output["references"] == references
     assert output["items"] == SMALL_RECORD["strings"] and output["counts"] == SMALL_COUNTS
+
+
+def _tracking_reader(graph, path, monkeypatch):
+    if path == "legacy":
+        return lambda request: builtin().run(graph, request)
+    import solar_project_solaredge as adapter
+
+    # Isolate the projection after the project's existing provenance checks. Its record has
+    # UUID provenance, unlike the legacy integer-version record; neither is rewritten by a read.
+    record = graph["extra"].get(tracking.STORE_KEY)
+    if record is not None:
+        record["schema"] = adapter.STORE_SCHEMA
+        record["report"].pop("source_version")
+        record["report"]["source_version_id"] = "00000000-0000-0000-0000-000000000001"
+    context = SimpleNamespace(graph=graph, organization_id="org", project_id="project",
+                              drawing_id="drawing")
+
+    def resolve(tenant, project_id, source_id, *, drawing_id, write):
+        assert (tenant, project_id, source_id, drawing_id, write) == (
+            TENANT, context.project_id, UUID(record["report"]["source_version_id"]),
+            context.drawing_id, False)
+        return context
+
+    monkeypatch.setattr(adapter.project, "resolve_context", resolve)
+    monkeypatch.setattr(adapter.graphs, "resolve_project_graph_context", lambda value: value)
+    monkeypatch.setattr(adapter, "_load_tracking_report", lambda source, value: ({}, {}, False))
+    monkeypatch.setattr(adapter, "_accepted_record", lambda *args: record)
+    return lambda request: adapter.read_tracking(TENANT, context, request)
+
+
+@pytest.mark.parametrize("path", ["legacy", "project"])
+@pytest.mark.parametrize("case,items", [
+    ("unchanged", []),
+    ("panel-deleted", [{"kind": "missing_panel", "panel_ref": PANEL[2], "frame_ref": FRAME1}]),
+    ("frame-deleted", [{"kind": "missing_frame", "frame_ref": FRAME1}] + [
+        {"kind": "moved_panel", "panel_ref": PANEL[i], "frame_ref": FRAME1,
+         "current_frame_ref": None} for i in (3, 2, 1)]),
+    ("panel-moved", [{"kind": "moved_panel", "panel_ref": PANEL[3], "frame_ref": FRAME1,
+                      "current_frame_ref": FRAME2}]),
+    ("panel-added", [{"kind": "unrecorded_panel", "panel_ref": app_id("panel", 7),
+                      "current_frame_ref": FRAME2}]),
+])
+def test_reference_changes_detail(path, case, items, monkeypatch):
+    graph = _drift(case)
+    reader = _tracking_reader(graph, path, monkeypatch)
+    before = copy.deepcopy(graph)
+    legacy = reader({})
+    detail = reader({"section": "reference_changes"})
+    assert detail["items"] == items
+    assert detail["page"] == {"offset": 0, "returned": len(items), "total": len(items),
+                              "next_offset": None}
+    for key in ("references", "counts", "provenance"):
+        assert detail[key] == legacy[key]
+    tail = reader({"section": "reference_changes", "offset": len(items)})
+    assert tail["items"] == [] and tail["page"]["next_offset"] is None
+    with pytest.raises(GraphValidationError) as exc:
+        reader({"section": "reference_changes", "offset": len(items) + 1})
+    assert exc.value.code == builtin().INVALID
+    if items:
+        detail["items"][0]["kind"] = "changed"
+    detail["provenance"]["request"]["selection_order"] = "changed"
+    assert graph == before
+
+
+@pytest.mark.parametrize("path", ["legacy", "project"])
+def test_reference_changes_bounded_stable_pages(path, monkeypatch):
+    graph = synthetic([1] * 2500)
+    graph["panels"] = []
+    graph["frames"][0]["panel_refs"] = []
+    # New framed panels must be sorted by identity, regardless of current array order.
+    new_refs = [app_id("panel", n) for n in range(2501, 3701)]
+    graph["frames"][0]["panel_refs"] = list(reversed(new_refs))
+    graph["panels"] = [{"id": ref} for ref in reversed(new_refs)]
+    reader = _tracking_reader(graph, path, monkeypatch)
+    expected = [
+        {"kind": "missing_panel", "panel_ref": row["panel_refs"][0],
+         "frame_ref": row["frame_ref"]}
+        for row in graph["extra"][tracking.STORE_KEY]["strings"]
+    ] + [{"kind": "unrecorded_panel", "panel_ref": ref,
+          "current_frame_ref": graph["frames"][0]["id"]} for ref in sorted(new_refs)]
+    offset, collected = 0, []
+    while offset is not None:
+        request = {"section": "reference_changes", "offset": offset}
+        output = reader(request)
+        assert output == reader(request)
+        assert output["page"]["total"] == 3700
+        assert 0 < output["page"]["returned"] <= 1000
+        assert sum(len(canonical_bytes(item)) + 1 for item in output["items"]) <= 262144
+        collected.extend(output["items"])
+        graph["panels"].reverse()
+        graph["frames"][0]["panel_refs"].reverse()
+        assert reader(request) == output
+        offset = output["page"]["next_offset"]
+    assert collected == expected
+    assert builtin()._request({"section": "reference_changes", "offset": 410000}) == (
+        "reference_changes", 410000)
+
+
+@pytest.mark.parametrize("path", ["legacy", "project"])
+def test_reference_changes_absent(path, monkeypatch):
+    graph = small_graph()
+    reader = _tracking_reader(graph, path, monkeypatch)
+    output = reader({"section": "reference_changes"})
+    assert output == dict(reader({}), section="reference_changes")
+    assert output["accepted"] is False and output["items"] == []
+
+
+@pytest.mark.parametrize("path", ["legacy", "project"])
+def test_reference_changes_byte_bound(path, monkeypatch):
+    graph = synthetic([1] * 1200)
+    record = graph["extra"][tracking.STORE_KEY]
+    old_frame, new_frame = "old-" + "f" * 96, "new-" + "f" * 96
+    record["frames"][0]["frame_ref"] = old_frame
+    refs = [str(n).zfill(100) for n in range(1200)]
+    for row, ref in zip(record["strings"], refs):
+        row.update(frame_ref=old_frame, panel_refs=[ref])
+    graph["frames"] = [{"id": old_frame, "panel_refs": []},
+                       {"id": new_frame, "panel_refs": refs}]
+    graph["panels"] = [{"id": ref} for ref in refs]
+    reader = _tracking_reader(graph, path, monkeypatch)
+    first = reader({"section": "reference_changes"})
+    count = first["page"]["returned"]
+    assert 0 < count < 1000
+    assert first["page"]["next_offset"] == count
+    size = sum(len(canonical_bytes(item)) + 1 for item in first["items"])
+    next_item = {"kind": "moved_panel", "panel_ref": refs[count],
+                 "frame_ref": old_frame, "current_frame_ref": new_frame}
+    assert size <= 262144 < size + len(canonical_bytes(next_item)) + 1
+    second = reader({"section": "reference_changes", "offset": count})
+    assert second["items"][0] == next_item
+    assert second["page"]["next_offset"] is None
+    assert len(first["items"] + second["items"]) == 1200
+
+
+@pytest.mark.parametrize("path", ["legacy", "project"])
+def test_reference_changes_bridge_and_unassigned_membership(path, monkeypatch):
+    graph = synthetic([1, 1], unassigned=1)
+    record = graph["extra"][tracking.STORE_KEY]
+    record["strings"][1].update(source="bridge", frame_ref=None)
+    # Without stored membership these panels may join another frame without being stale.
+    bridge = record["strings"][1]["panel_refs"][0]
+    unassigned = record["unassigned_panel_refs"][0]
+    graph["frames"][0]["panel_refs"] = record["strings"][0]["panel_refs"][:]
+    graph["frames"].append({"id": app_id("frame", 2), "panel_refs": [bridge, unassigned]})
+    reader = _tracking_reader(graph, path, monkeypatch)
+    assert reader({"section": "reference_changes"})["items"] == []
+    graph["frames"][1]["panel_refs"] = []
+    assert reader({"section": "reference_changes"})["items"] == [
+        {"kind": "moved_panel", "panel_ref": ref, "frame_ref": None,
+         "current_frame_ref": None} for ref in (bridge, unassigned)]
 
 
 @pytest.mark.parametrize("sizes,unassigned,body,page", [

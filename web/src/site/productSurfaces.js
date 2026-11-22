@@ -564,6 +564,35 @@ export const PRODUCT_SURFACES = Object.freeze([
       tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
     }),
   }),
+  Object.freeze({
+    id: 'estimator',
+    label: 'Estimator',
+    eyebrow: 'Project estimate',
+    title: 'Work in the linked estimator',
+    description: 'Open the estimator linked to this project.',
+    familyIds: Object.freeze([]),
+    contract: deepFreeze({
+      ground: 'embedded-app',
+      scene: 'app',
+      chrome: { shell: 'cockpit', productFrame: false, workspaceCard: false, cockpit: false, stageBranch: 'frame', projectSlot: null, tab: true, rail: 'estimator' },
+      toolbar: { profile: 'project', ribbon: false, home: null, quick: null },
+      rails: { left: 'none', right: 'none', dock: null },
+      groundMaterial: { layerAccent: null, solarStrings: false },
+      commandLine: false,
+      authoring: false,
+      versions: 'none',
+      conversations: { scope: null },
+      integrations: null,
+      builds: { routes: [], card: null },
+      contextMenu: [],
+      shortcuts: null,
+      entitlements: [],
+      resetOn: null,
+      a11y: null,
+      // The console tour mounts on every studio surface; the stage has no estimator walk.
+      tourAnchors: { console: CONSOLE_TOUR_ANCHORS, stage: null },
+    }),
+  }),
   // -------------------------------------------------------------------------
   // SHEETS (standardization slice 5b). The fifth surface, and the first one
   // the studio does NOT host: /sheets is its own SiteRoot arm
@@ -700,6 +729,20 @@ const SELECTABLE_SURFACE_IDS = new Set(
 )
 
 let labSurfaceStatus = null
+let estimatorSurfaceStatus = null
+
+export function setEstimatorSurfaceStatus(status) {
+  estimatorSurfaceStatus = status
+}
+
+export const SURFACE_RAIL_PROBES = Object.freeze({
+  lab: (status) => {
+    const labDeepLink = typeof window !== 'undefined' && /^\/app\/lab(?:\/(?:graph|widgets|history|runs|deploys))?\/?$/.test(window.location.pathname)
+    return status?.state === 'on' || labDeepLink
+  },
+  estimator: () => estimatorSurfaceStatus?.state === 'on'
+    && Array.isArray(estimatorSurfaceStatus.bindings) && estimatorSurfaceStatus.bindings.length > 0,
+})
 
 export function setLabSurfaceStatus(status) {
   labSurfaceStatus = status
@@ -712,8 +755,8 @@ export function surfaceRailState(id, status = labSurfaceStatus,
   scene = typeof window === 'undefined' ? 'app' : sceneForPath(window.location.pathname)) {
   const contract = productSurface(id).contract
   const rail = contract.chrome.rail
-  const labDeepLink = typeof window !== 'undefined' && /^\/app\/lab(?:\/(?:graph|widgets|history|runs|deploys))?\/?$/.test(window.location.pathname)
-  return rail ? contract.scene === scene && rail === 'lab' && (status?.state === 'on' || labDeepLink) : true
+  return rail ? contract.scene === scene && Object.hasOwn(SURFACE_RAIL_PROBES, rail)
+    && SURFACE_RAIL_PROBES[rail](status) : true
 }
 
 export function normalizeProductSurface(value, status = labSurfaceStatus) {
@@ -737,6 +780,9 @@ export function searchForProductSurface(search, surfaceId) {
 
 export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false, labStatus = labSurfaceStatus } = {}) {
   return {
+    estimator: surfaceRailState('estimator')
+      ? { state: 'available', label: 'Ready' }
+      : { state: 'hidden', label: 'Estimator is unavailable right now.' },
     lab: surfaceRailState('lab', labStatus)
       ? labStatus?.state === 'on' ? { state: 'available', label: 'Ready' } : { state: 'unavailable', label: 'Lab is unavailable right now.' }
       : { state: 'hidden', label: 'Lab is unavailable right now.' },

@@ -759,3 +759,240 @@ def test_lab_emf_is_best_effort(monkeypatch):
     emf_metrics.emit_lab_run_terminal("finished")
     emf_metrics.emit_lab_lease_takeover()
     emf_metrics.emit_lab_queue_age_max(1)
+
+
+@pytest.mark.parametrize('older_queued', [False, True])
+def test_idle_worker_recovers_expired_interactive_run(rig, monkeypatch, older_queued):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    if older_queued:
+        store.create(rig.tenant, 'doc', 'older-queued', 1, 'a' * 64, worker.OPS_REVISION,
+                     'b' * 64, 'lab-worker.v1', 'previous-build')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    block_id = rig.graph['blocks'][0]['id']
+    assert store.append_events(rig.tenant, 'run', 'previous-worker', lease['fence'], [
+        {'kind': 'value', 'block_id': block_id, 'payload': {'result': {'data': 7}}}])
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    instance = rig.make(slots=1)
+    instance.tick()
+    recovered = store.get(rig.tenant, 'run')
+    assert recovered['lease_fence'] == lease['fence'] + 1
+    terminal(rig)
+    rows = events(rig)
+    assert sum(row['kind'] == 'lease_takeover' for row in rows) == 1
+    assert sum(row['kind'] == 'value' and row['block_id'] == block_id for row in rows) == 1
+    assert store.get(rig.tenant, 'run')['claimed_color'] == 'idle'
+    if older_queued:
+        assert store.get(rig.tenant, 'older-queued')['state'] == 'queued'
+
+
+@pytest.mark.parametrize('gate', ['paused', 'disabled', 'rail-off', 'activation'])
+def test_idle_expired_recovery_preserves_operational_gates(rig, monkeypatch, gate):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    adapter = 'lab-activation.v1' if gate == 'activation' else 'lab-worker.v1'
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, adapter, 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    if gate == 'paused':
+        store.set_paused(True, 'test', 'test')
+    elif gate == 'disabled':
+        rig.env['LEAF_LAB_WORKER_DISABLED'] = '1'
+    elif gate == 'rail-off':
+        monkeypatch.setattr(worker, 'lab_surface_enabled', lambda: False)
+    rig.make().tick()
+    row = store.get(rig.tenant, 'run')
+    assert row['lease_fence'] == lease['fence']
+    assert row['state'] == 'running'
+    assert not any(event['kind'] == 'lease_takeover' for event in events(rig))
+
+
+@pytest.mark.parametrize('refusal', ['graph_pin_mismatch', 'registry_changed'])
+def test_idle_recovery_checks_execution_pins_before_evaluating(rig, monkeypatch, refusal):
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    assert store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                       build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    if refusal == 'graph_pin_mismatch':
+        rig.artifact['sha256'] = 'c' * 64
+    else:
+        monkeypatch.setattr(store, 'registry_digest', lambda: 'changed')
+    evaluated = []
+    monkeypatch.setattr(worker, 'evaluate_graph', lambda *args, **kwargs: evaluated.append(True))
+    rig.make().tick()
+    terminal(rig, 'failed')
+    assert not evaluated
+    assert any(event['kind'] == 'failed' and event['payload']['reason'] == refusal
+               for event in events(rig))
+
+
+def test_two_idle_workers_recover_one_expired_run_once(rig, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    rig.env.pop('LEAF_LAB_WORKER_IDLE_CLAIMS')
+    store.create(rig.tenant, 'doc', 'run', 1, 'a' * 64, worker.OPS_REVISION,
+                 'b' * 64, 'lab-worker.v1', 'previous-build')
+    lease = store.claim(rig.tenant, 'run', 'previous-worker', 1,
+                        build_revision='previous-build', color='active')
+    later = store._now() + timedelta(seconds=2)
+    monkeypatch.setattr(store, '_now', lambda: later)
+    ready = threading.Barrier(2)
+    claimable = store.claimable
+    def same_candidate(*args, **kwargs):
+        rows = claimable(*args, **kwargs)
+        assert [row['run_id'] for row in rows] == ['run']
+        ready.wait(timeout=10)
+        return rows
+    monkeypatch.setattr(store, 'claimable', same_candidate)
+    evaluated = []
+    evaluate = worker.evaluate_graph
+    def observed(*args, **kwargs):
+        evaluated.append(True)
+        return evaluate(*args, **kwargs)
+    monkeypatch.setattr(worker, 'evaluate_graph', observed)
+    instances = [rig.make(slots=1), rig.make(slots=1)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda instance: instance.tick(), instances))
+    terminal(rig)
+    assert len(evaluated) == 1
+    assert store.get(rig.tenant, 'run')['lease_fence'] == lease['fence'] + 1
+    assert sum(event['kind'] == 'lease_takeover' for event in events(rig)) == 1
+
+
+@pytest.mark.parametrize('stop,confirmed', [
+    ('cancel', True), ('cap', True), ('failure', True),
+    ('cancel', False), ('cap', False), ('failure', False), ('lease', True)])
+@pytest.mark.parametrize('failed_native', [False, True])
+def test_worker_fences_all_primed_intents_and_retains_terminal_cause(monkeypatch, stop, confirmed, failed_native):
+    """Inert worker lifecycle proof, independent of database integration fixtures."""
+    from test_lab_tool_nodes import independent_corpus_rig, TENANT
+    from lab_evaluate import RunBudgetExceeded
+    import jobs
+
+    rig = independent_corpus_rig(monkeypatch, ('a', 'b', 'c'))
+    rig.durations.update(a=0, b=1000, c=1000)
+    adapter_class = worker.lab_tool_nodes.ToolNodeAdapter
+    monkeypatch.setattr(worker.lab_tool_nodes, 'ToolNodeAdapter',
+        lambda *args, **kwargs: adapter_class(*args, sleep=rig.options['sleep'], **kwargs))
+    recorded = []
+    finished = []
+    monkeypatch.setattr(worker, 'lab_surface_enabled', lambda: True)
+    monkeypatch.setattr(worker.lab_tool_manifests, 'registry_for', lambda tenant: rig.registry)
+    if not confirmed:
+        monkeypatch.setattr(jobs, 'corpus_cleanup', lambda *args: None)
+    row = {'tenant_id': TENANT, 'run_id': 'run', 'doc_id': 'doc', 'graph_revision': 2,
+           'graph_sha256': 'a' * 64, 'registry_digest': 'registry',
+           'adapter_revision': 'lab-worker.v1', 'corpus_authority_json': 'inert-authority'}
+    run = worker._Run(row, {'fence': 1})
+
+    def append(*args):
+        if not rig.owned:
+            return False
+        recorded.extend(args[-1])
+        return True
+
+    fake_store = SimpleNamespace(paused=lambda: False, registry_digest=lambda: 'registry',
+        corpus_authority=lambda row: rig.authority, owns_corpus_run=lambda *args: rig.owned,
+        cancel_requested=lambda *args: rig.requested, append_events=append,
+        cancel_corpus_job=lambda *args, deadline: rig.options['corpus_cancel'](args[-2], args[-1], deadline),
+        finish=lambda *args: finished.append(args[-1]) or True)
+    instance = worker.LabWorker(store=fake_store,
+        artifacts=SimpleNamespace(get=lambda *args: {'graph': rig.graph, 'sha256': 'a' * 64}),
+        clock=lambda: rig.now, lease_s=10000, env={},
+        emit=SimpleNamespace(emit_lab_run_terminal=lambda *args: None))
+    real_evaluate = worker.evaluate_graph
+
+    def evaluate(graph, registry, *, tool_adapter, on_block, **kwargs):
+        assert len(rig.creates) == 3  # Worker admission precedes evaluator observation.
+        if failed_native:
+            # This intent is never observed, but its cancellation still needs
+            # the matching factual receipt even after a native failure.
+            rig.durable['lab:run:b:corpus:v1'].update(status='failed', ready_at=0)
+        def first(block, values):
+            on_block(block, values)
+            if stop == 'cancel':
+                run.cancel = rig.requested = True
+                raise RunCancelled()
+            if stop == 'cap':
+                rig.now = 600
+                raise RunBudgetExceeded()
+            if stop == 'lease':
+                rig.owned = False
+                # A stale worker cannot publish another value or cancel a native job.
+                on_block('stale', {'result': runtime_value('stale')})
+                raise AssertionError('stale write was accepted')
+            raise RuntimeError('inert parent failure')
+        return real_evaluate(graph, registry, tool_adapter=tool_adapter, on_block=first, **kwargs)
+
+    monkeypatch.setattr(worker, 'evaluate_graph', evaluate)
+    try:
+        instance._execute(run)
+    finally:
+        instance.stop()
+    values = [event for event in recorded if event['kind'] == 'value']
+    assert [event['block_id'] for event in values] == ['a']
+    assert values[0]['payload']['result']['error'] is None
+    if stop == 'lease':
+        assert not finished and not rig.cancels
+        assert run.lost
+    else:
+        state = 'cancelled' if stop == 'cancel' else 'failed'
+        reason = {'cap': 'run_wall_cap', 'failure': 'worker_error'}.get(stop)
+        payload = {'reason': reason} if reason else {}
+        if not confirmed:
+            payload['cleanup_confirmed'] = False
+        assert finished == [state]
+        assert recorded[-1] == {'kind': state, 'payload': payload}
+        assert rig.cancels == [('b', 'job-b', stop != 'cancel'), ('c', 'job-c', stop != 'cancel')]
+        assert rig.now == ((600 if stop == 'cap' else 0) + (0 if confirmed else 10))
+    assert run.done.is_set()
+
+
+@pytest.mark.parametrize('cancel_after_first', [False, True])
+def test_worker_priming_preserves_shared_budget_and_fresh_cancellation(monkeypatch, cancel_after_first):
+    from test_lab_tool_nodes import independent_corpus_rig, TENANT
+    import lab_corpus_executor as corpus
+
+    rig = independent_corpus_rig(monkeypatch)
+    monkeypatch.setattr(worker, 'lab_surface_enabled', lambda: True)
+    monkeypatch.setattr(worker.lab_tool_manifests, 'registry_for', lambda tenant: rig.registry)
+    submit = corpus.submit_policy
+    def slow_admission(*args, **kwargs):
+        job = submit(*args, **kwargs)
+        rig.now += 5
+        if cancel_after_first:
+            rig.requested = True
+        return job
+    monkeypatch.setattr(corpus, 'submit_policy', slow_admission)
+    row = {'tenant_id': TENANT, 'run_id': 'run', 'doc_id': 'doc', 'graph_revision': 2,
+           'graph_sha256': 'a' * 64, 'registry_digest': 'registry',
+           'adapter_revision': 'lab-worker.v1', 'corpus_authority_json': 'inert-authority'}
+    finished = []
+    fake_store = SimpleNamespace(paused=lambda: False, registry_digest=lambda: 'registry',
+        corpus_authority=lambda row: rig.authority, owns_corpus_run=lambda *args: True,
+        cancel_requested=lambda *args: rig.requested, append_events=lambda *args: True,
+        finish=lambda *args: finished.append(args[-1]) or True)
+    observed = []
+    evaluate = worker.evaluate_graph
+    def check_budget(*args, budget, tool_adapter, **kwargs):
+        observed.append((budget.run_wall_s, tool_adapter._corpus_deadline))
+        return evaluate(*args, budget=budget, tool_adapter=tool_adapter, **kwargs)
+    monkeypatch.setattr(worker, 'evaluate_graph', check_budget)
+    instance = worker.LabWorker(store=fake_store,
+        artifacts=SimpleNamespace(get=lambda *args: {'graph': rig.graph, 'sha256': 'a' * 64}),
+        clock=lambda: rig.now, lease_s=10000, env={},
+        emit=SimpleNamespace(emit_lab_run_terminal=lambda *args: None))
+    try:
+        instance._execute(worker._Run(row, {'fence': 1}))
+    finally:
+        instance.stop()
+    assert observed == ([] if cancel_after_first else [(590, 600)])
+    assert finished == (['cancelled'] if cancel_after_first else ['finished'])
+    assert not rig.cancels and len(rig.creates) == (1 if cancel_after_first else 2)

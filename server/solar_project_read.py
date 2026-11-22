@@ -3,6 +3,7 @@ from copy import deepcopy
 from hashlib import sha256
 from uuid import UUID
 
+from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 import deps
 import entitlements
@@ -12,6 +13,8 @@ import solar_project_artifacts as artifacts
 import solar_project_context as project
 import solar_project_graph as graph_adapter
 import solar_tools
+import project_drawing_editor as drawing_editor
+import project_solar_materialization as native
 from envelopes import with_envelope_fields
 from leaf_cloud_client import canonical_bytes
 from leaf_platform import entitlements as stored
@@ -27,7 +30,7 @@ SUPPORTED_READ_TOOLS = frozenset((
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
-    "solar-solaredge-tracking-read",
+    "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report",
 ))
 
 
@@ -76,10 +79,38 @@ def _trusted(tenant, name, catalog_digest):
     module = local._load_builtin(name)
     if (type(declaration) is not dict or declaration["adapter"] != "local-graph-read" or declaration["trusted_inputs"]
             or entitlements.tool_required_capability(trusted) != "run_read"
-            or local._reads_physical_head(module)
+            or (local._reads_physical_head(module) and name != "solar-takeoff")
             or (local._reads_version_history(module) and name != "solar-solaredge-tracking-read")):
         _fail("SIP_R6_TOOL_UNSUPPORTED")
     return trusted
+
+
+def assignment_report_catalog_availability(tool, tenant, *, project_id, drawing_id, input_version_id):
+    """Use read authority and the existing hook on the exact verified project graph."""
+    name = "solar-assignment-report"
+    trusted = False
+    try:
+        _trusted(tenant, name, deps.catalog_tool_digest(tool))
+        trusted = True
+    except (GraphValidationError, ValueError, TypeError, UnicodeError, RecursionError):
+        pass
+    state = policy.project_drawing_tool_availability(
+        tool, tenant, read_tool=trusted, exact_version=bool(input_version_id))
+    if not state["runnable"]:
+        return state
+    try:
+        verified = project.resolve_context(tenant, UUID(str(project_id)), UUID(str(input_version_id)),
+                                           drawing_id=UUID(str(drawing_id)), write=False)
+        context = graph_adapter.resolve_project_graph_context(verified)
+        if context.graph is None:
+            _fail("GRAPH_NOT_EMBEDDED")
+        readiness = local._load_builtin(name).input_readiness(context.graph)
+        reason = None if readiness["input_ready"] else readiness["input_reason"]
+    except (HTTPException, project.ProjectContextError, GraphValidationError, ValueError, TypeError, AttributeError):
+        reason = "invalid_drawing_context"
+    if reason:
+        state.update(input_ready=False, input_reason=reason, refusal_reasons=[reason], runnable=False)
+    return state
 
 
 def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
@@ -125,6 +156,22 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
         data = canonical_bytes(output)
         if len(data) > MAX_OUTPUT_BYTES:
             _fail("READ_OUTPUT_LIMIT_EXCEEDED")
+    elif tool_name == "solar-takeoff":
+        physical = None
+        if native.KEY in verified.intake:
+            try:
+                head, document, _ = native._canonical_state(verified)
+            except drawing_editor.EditorError:
+                _fail("SIP_R6_ARTIFACT_SOURCE_MISMATCH")
+            head = deepcopy(head)
+            head["state"] = {"schema": "leaf.solar-canonical-native-state-ref.v1",
+                "version_id": str(input_version_id), "intake_sha256": verified.intake_sha256,
+                "state_sha256": head["state"]["content_sha256"]}
+            physical = {"head": head, "document": document}
+        output, data = local._read_output(tool_name, context.graph, normalized, sink,
+            physical_head=physical, source_binding={"drawing_id": str(drawing_id),
+                "drawing_version": verified.binding.version.seq,
+                "graph_sha256": context.graph_sha256, "project_id": str(project_id)})
     else:
         output, data = local._read_output(tool_name, context.graph, normalized, sink)
     result = {"schema": RESULT_SCHEMA, "adapter": "project-local-graph-read",

@@ -491,6 +491,10 @@
   .lp-tab:hover { color: var(--leaf-ink-muted); }
 }
 .lp-tab.active { color: var(--leaf-ink); background: var(--leaf-line); }
+/* Availability manifest: a sheet tab that is not yet available stays visible
+   and focusable, reads as off, and its sentence sits beside the tabs. */
+.lp-tab[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+.lp-index-note { font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); white-space: nowrap; }
 .lp-index-meta { margin-left: auto; font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); }
 .lp-mono { font: 400 var(--leaf-size-caption) ui-monospace, monospace; }
 
@@ -2010,6 +2014,9 @@
   .lp-sheetno, .lp-index-meta, .lp-brandsub { display: none; }
   .lp-index { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
   .lp-index .lp-tab { white-space: nowrap; }
+  /* The phone row scrolls sideways, so the sentence leads it instead of trailing off screen,
+     and it takes exactly the first screen of the row and wraps, so no word is cut at the edge. */
+  .lp-index .lp-index-note { order: -1; flex: 0 0 calc(100vw - 40px); box-sizing: border-box; white-space: normal; line-height: 1.3; }
   .lp-stats { flex-wrap: wrap; gap: 16px; }
   .stage-loading { left: 16px; bottom: 96px; }
   .lp-stmt .lp-cta-row button { min-height: 44px; box-sizing: border-box; }

@@ -303,6 +303,7 @@ describe('project Solar read ownership', () => {
       catalog_unavailable: 'Refresh the Solar tools before reading this output.',
       catalog_refreshing: 'Refreshing the Solar tools. Your inputs are kept.',
       tool_not_admitted: 'This Solar tool is no longer available for this project. Close it to continue.',
+      write_access_required: 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.',
       params_schema_changed: 'This Solar tool changed. Close and reopen it to use the new inputs.',
       unsupported: 'This tool is not available in the project Solar workspace.',
       host_unavailable: 'This editor is not available in the project Solar workspace.',
@@ -655,4 +656,29 @@ describe('project Solar read ownership', () => {
       expect(source).not.toContain(forbidden)
     }
   })
+})
+
+
+it('assignment report uses registered fields and displays tentative identities without writing', async () => {
+  const name = 'solar-assignment-report'
+  const record = JSON.parse(readFileSync('../server/solar_tools/solar_assignment_report.json', 'utf8')).record
+  const report = { schema: 'leaf.solar-assignment-report.v1', expected_rev: 5, status: 'partial',
+    committed: false, commit_refusal_code: 'STRING_ASSIGNMENT_INCOMPLETE',
+    eligible_string_refs: ['candidate-string', 'remaining-string'],
+    candidate_assignments: [{ string_ref: 'candidate-string', inverter_ref: 'collector-one',
+      circuit_tag: '+1/1a', mppt_letter: 'A', input_number: 0 }],
+    remaining_string_refs: ['remaining-string'], counts: { eligible: 2, candidate_assigned: 1, remaining: 1 } }
+  const result = { ...resultFor(name), output: report, output_bytes: Buffer.byteLength(JSON.stringify(report)) }
+  const h = harness({ name, schema: record.params, read: async () => ({ ok: true, status: 200, data: { result } }) })
+  const view = render(<ProjectSolarReadPanel {...h.props} />)
+  fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '5' } })
+  fireEvent.change(screen.getByRole('combobox', { name: 'Accept excess capacity' }), { target: { value: '1' } })
+  clickRead()
+  await waitFor(() => expect(view.container.textContent).toContain('remaining-string'))
+  expect(view.container.textContent).toContain('candidate-string')
+  expect(h.projectClient.readSolar).toHaveBeenCalledOnce()
+  expect(h.projectClient.readSolar.mock.calls[0][0]).toMatchObject({ tool: name,
+    params: { drawing_id: B.drawing_id, expected_rev: 5, accept_excess_capacity: true } })
+  expect(h.projectClient.prepareRun).not.toHaveBeenCalled()
+  expect(h.projectClient.submitRun).not.toHaveBeenCalled()
 })

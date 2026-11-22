@@ -87,6 +87,25 @@ def _block_dxf(children, name="Fixture", flags=0):
     )
 
 
+def _parse_inspection_view(data):
+    """Compare the block fields emitted by both the DXF and inspection readers."""
+    parsed = dxf_intake.parse_dxf_bytes(data, include_measurement_evidence=False)
+    for block in parsed.get("blocks", {}).values():
+        # The inspection BKE record represents a nested INSERT as OTHER.
+        # DXF additionally carries its reference for read-only instance traversal.
+        block.pop("nested_inserts", None)
+    return parsed
+
+
+def _geometry(intake):
+    # Dependency reporting describes the encoded input; the emitter adds a
+    # default font, so that metadata is not a geometry round-trip invariant.
+    report = intake['dependency_report']
+    assert report['schema'] == 'leaf.drawing-dependencies.v1'
+    assert report['external_files_opened'] is False
+    return {key: value for key, value in intake.items() if key != 'dependency_report'}
+
+
 def _records(data):
     rows = []
     for code, value in dxf_intake._group_pairs(data.decode()):
@@ -103,7 +122,7 @@ def test_case_table_round_trip_preserves_block_base_and_insert_transform(sx):
     before = copy.deepcopy(intake)
     data = intake_dxf.intake_to_dxf(intake)
     # DXF reads the whole file, so member evidence coverage is unconditional.
-    assert dxf_intake.parse_dxf_bytes(data) == {**intake, "memberEvidenceCovered": True}
+    assert _geometry(_parse_inspection_view(data)) == {**intake, "memberEvidenceCovered": True}
     assert intake == before
     block = next(row for kind, row in _records(data) if kind == "BLOCK" and row[2] == "Fixture")
     assert block[10] == "1.0" and block[20] == "2.0" and block[30] == "0.0"
@@ -115,10 +134,10 @@ def test_case_table_round_trip_preserves_block_base_and_insert_transform(sx):
 def test_hand_written_dxf_and_inspection_fixture_pair_match_field_for_field():
     fixture = _fixture()
     data = intake_dxf.intake_to_dxf(fixture)
-    actual = dxf_intake.parse_dxf_bytes(data)
+    actual = _parse_inspection_view(data)
     inspected = intake_parse.parse_text(_inspection_text(fixture), "upload.dxf")
     # DXF coverage is unconditional; inspection needs an MEC|1 record.
-    assert actual == {**fixture, "memberEvidenceCovered": True}
+    assert _geometry(actual) == {**fixture, "memberEvidenceCovered": True}
     assert actual["blocks"] == inspected["blocks"]
     assert actual["inserts"] == inspected["inserts"]
     assert len(actual["inserts"]) == 1
@@ -146,7 +165,7 @@ def test_encoded_block_names_keep_distinct_definitions_and_child_layers():
     intake["blocks"]["A B"] = {"base": [7.0, 8.0, 0.0], "count": 0,
                                 "complete": True, "children": []}
     inspected = intake_parse.parse_text(_inspection_text(intake), "upload.dxf")
-    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake))
+    parsed = _parse_inspection_view(intake_dxf.intake_to_dxf(intake))
     assert inspected["blocks"] == parsed["blocks"] == intake["blocks"]
     assert inspected["blocks"]["A|B"]["base"] == [1.0, 2.0, 0.0]
     assert inspected["blocks"]["A B"]["base"] == [7.0, 8.0, 0.0]
@@ -178,7 +197,7 @@ def test_block_record_owners_and_all_new_handles_are_distinct():
 
 def test_sixty_one_children_keep_the_total_and_only_the_first_sixty():
     child = [(0, "LINE"), (10, 1), (20, 2), (11, 4), (21, 2)]
-    parsed = dxf_intake.parse_dxf_bytes(_block_dxf(child * 61))
+    parsed = _parse_inspection_view(_block_dxf(child * 61))
     block = parsed["blocks"]["Fixture"]
     assert block["count"] == 61 and block["complete"] is False
     assert len(block["children"]) == 60
@@ -189,7 +208,7 @@ def test_sixty_one_children_keep_the_total_and_only_the_first_sixty():
 
 @pytest.mark.parametrize("kind", ["INSERT", "ATTDEF", "HATCH"])
 def test_unsupported_child_is_listed_and_marks_the_definition_incomplete(kind):
-    parsed = dxf_intake.parse_dxf_bytes(_block_dxf([(0, kind), (2, "Nested")]))
+    parsed = _parse_inspection_view(_block_dxf([(0, kind), (2, "Nested")]))
     assert parsed["blocks"]["Fixture"] == {
         "base": [1.0, 2.0, 0.0], "count": 1, "complete": False,
         "children": [{"kind": "OTHER", "type": kind, "layer": ""}],
@@ -203,8 +222,13 @@ def test_unsupported_child_is_listed_and_marks_the_definition_incomplete(kind):
     ("*Model_Space", 0), ("*Paper_Space", 0), ("*Paper_Space0", 0),
     ("*D1", 1), ("*U2", 1), ("Anonymous", 1),
 ])
-def test_space_and_anonymous_definitions_are_skipped(name, flags):
-    assert dxf_intake.parse_dxf_bytes(_block_dxf([], name, flags))["blocks"] == {}
+def test_layout_definitions_are_skipped_but_anonymous_definitions_are_kept(name, flags):
+    blocks = dxf_intake.parse_dxf_bytes(_block_dxf([], name, flags))["blocks"]
+    if name.lower().startswith(("*model_space", "*paper_space")):
+        assert blocks == {}
+    else:
+        assert list(blocks) == [name]
+        assert blocks[name]["complete"] is True and blocks[name]["children"] == []
 
 
 def test_catalogue_is_capped_at_two_hundred_with_the_true_total():
@@ -228,7 +252,7 @@ def test_all_supported_block_child_geometries_use_the_inspection_precision():
     blocks = intake_parse.parse_text(text, "upload.dxf")["blocks"]
     intake = {"dwg": "upload.dxf", "layers": ["0"], "polylines": [], "blocks": blocks}
     # DXF reads the whole file, so member evidence coverage is unconditional.
-    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake)) == {**intake, "memberEvidenceCovered": True}
+    assert _geometry(_parse_inspection_view(intake_dxf.intake_to_dxf(intake))) == {**intake, "memberEvidenceCovered": True}
     lw, arc, label = blocks["Shapes"]["children"]
     assert lw["pts"] == [[1.123, 2.235], [4.0, 5.0]]
     assert lw["elev"] == 3.123 and lw["nrm"] == [0.0, 1.0, 0.0]
@@ -246,7 +270,7 @@ def test_insert_defaults_and_tilted_position_match_the_in_parser():
         (0, "ENDSEC"), (0, "EOF")))
     inspected = intake_parse.parse_text("IN|Fixture|0|1,2,3|0|0,1,0|1,1,1|a1", "upload.dxf")
     assert parsed["inserts"] == inspected["inserts"]
-    assert dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(parsed)) == parsed
+    assert _geometry(dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(parsed))) == _geometry(parsed)
 
 
 @pytest.mark.parametrize("name,blocks", [
@@ -266,7 +290,7 @@ def test_emitter_refuses_an_unresolved_insert_block_reference(name, blocks):
     assert str(error.value).endswith(name)
 
 
-@pytest.mark.parametrize("name,flags", [("*U1", 1), ("Anonymous", 1), ("*Model_Space", 0)])
+@pytest.mark.parametrize("name,flags", [("*Model_Space", 0), ("*Paper_Space", 0), ("*Paper_Space0", 0)])
 def test_dxf_drops_inserts_whose_definition_was_skipped(name, flags):
     parsed = dxf_intake.parse_dxf_bytes(_dxf(
         (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, name), (70, flags),
@@ -330,7 +354,7 @@ def test_no_blocks_dxf_has_the_legacy_intake_bytes():
     parsed = dxf_intake.parse_dxf_bytes(data)
     # DXF coverage is unconditional; the remaining legacy bytes stay pinned.
     assert parsed.pop("memberEvidenceCovered") is True
-    assert json.dumps(parsed).encode() == expected
+    assert json.dumps(_geometry(parsed)).encode() == expected
 
 
 def test_intake_without_blocks_or_inserts_keeps_entity_bytes_with_model_owner():
@@ -405,6 +429,6 @@ def test_incomplete_catalogue_emits_only_the_supported_children_it_carries():
     block["complete"] = False
     block["count"] = 3
     block["children"].append({"kind": "OTHER", "type": "HATCH", "layer": ""})
-    parsed = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf(intake))
+    parsed = _parse_inspection_view(intake_dxf.intake_to_dxf(intake))
     # DXF reads the whole file, so member evidence coverage is unconditional.
-    assert parsed == {**_fixture(), "memberEvidenceCovered": True}
+    assert _geometry(parsed) == {**_fixture(), "memberEvidenceCovered": True}

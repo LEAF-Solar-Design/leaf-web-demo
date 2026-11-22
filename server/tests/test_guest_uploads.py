@@ -1128,6 +1128,7 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
     RUNNING when the retry replaces the marker must fence itself out — the
     locked tail re-checks the attempt token, not mere marker existence."""
     import dxf_intake
+    from concurrent.futures import ThreadPoolExecutor
     real_parse = dxf_intake.parse_dxf_file
     state = {"old_worker_ran": False}
 
@@ -1142,8 +1143,8 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
             marker = guest_uploads.read_marker(backend, tenant, did)
             guest_uploads._mark_failed(backend, tenant, did, marker,
                                        "TIMEOUT", "budget exceeded", retryable=True)
-            # ...and the user's retry replaces the attempt and completes
-            # fully (inline extraction) before the old worker resumes.
+            # ...and the user's retry replaces the attempt and queues its
+            # worker. The old worker must retire before the retry extracts.
             retry = _upload(client, headers={"X-Tenant-Id": tenant})
             assert retry.status_code == 202
             assert retry.json()["drawing_id"] == did
@@ -1158,12 +1159,16 @@ def test_stale_worker_cannot_overwrite_replaced_attempt(client, monkeypatch):
     first = _upload(client)
     tenant, did = first.json()["tenant_id"], first.json()["drawing_id"]
     state["tenant"], state["did"] = tenant, did
-    # Re-enable inline extraction for the RETRY inside the wrapper.
-    monkeypatch.setattr(
-        guest_uploads, "start_extraction_thread",
-        lambda t, d, e: guest_uploads.run_extraction(t, d, e))
-
-    guest_uploads.run_extraction(tenant, did, ".dxf")  # the OLD worker
+    retry_workers = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def start_retry(t, d, e):
+            worker = pool.submit(guest_uploads.run_extraction, t, d, e)
+            retry_workers.append(worker)
+            return worker
+        monkeypatch.setattr(guest_uploads, "start_extraction_thread", start_retry)
+        guest_uploads.run_extraction(tenant, did, ".dxf")  # the OLD worker
+        assert len(retry_workers) == 1
+        retry_workers[0].result(timeout=10)
 
     backend = write_loop.backend_for_tenant(tenant, aps_live=False, da=None)
     final = guest_uploads.read_marker(backend, tenant, did)

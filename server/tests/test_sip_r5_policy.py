@@ -134,7 +134,7 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 54
+    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 56
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})
@@ -380,6 +380,7 @@ def test_sip_r5_failure_projection(monkeypatch):
         "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
         "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
         "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+        "SIP_R1_PROJECT_ARCHIVED": (409, False),
         "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
         "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
         "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
@@ -600,7 +601,7 @@ def test_sip_r5_legacy_projection_unchanged(monkeypatch):
     assert snapshot() == before
     assert shared_tables() == shared_before
     assert legacy == original and tools == tools_before
-    assert solar_tools.manifest() == manifest and len(manifest) == 54
+    assert solar_tools.manifest() == manifest and len(manifest) == 56
     assert {name: deps.catalog_tool_digest(tool) for name, tool in solar_tools.trusted_snapshot().items()} == digests
 
 
@@ -817,6 +818,57 @@ def test_admission_messages_name_cause_and_action(monkeypatch, exception, messag
     assert error["message"] == message
     assert error["next_action"] == action and len(action) < 200
     assert error["retryable"] is False
+
+
+@pytest.mark.parametrize("preview", [True, False])
+@pytest.mark.parametrize("code,candidates,action", [
+    ("SOLAREDGE_GRID_UNMATCHED", [], "redraw_frame"),
+    ("SOLAREDGE_GRID_AMBIGUOUS", [0, 1], "pick_candidate"),
+])
+def test_typed_grid_refusal_crosses_admission_with_named_fields(monkeypatch, preview, code, candidates, action):
+    from solar_project_solaredge import SolarEdgeGridRefusal
+    a = setup(monkeypatch)
+    refusal = SolarEdgeGridRefusal(code, "leaf:frame:group-1", candidates, action)
+    target, name = (service, "submit_project_graph_job") if preview else (platform_link, "submit_canonical_graph")
+    def fail(*args, **kwargs):
+        raise refusal
+    monkeypatch.setattr(target, name, fail)
+    response = request(a, {}, preview=preview)
+    assert response["status_code"] == 409
+    assert response["content"]["ok"] is False
+    error = response["content"]["error"]
+    assert error["reason_code"] == code
+    assert error["frame_ref"] == "leaf:frame:group-1"
+    assert error["candidate_ids"] == candidates
+    assert error["action"] == action and error["next_action"]
+
+
+def test_untyped_grid_exception_cannot_smuggle_diagnostic_fields(monkeypatch):
+    a = setup(monkeypatch)
+    refusal = GraphValidationError("SOLAREDGE_GRID_AMBIGUOUS")
+    refusal.frame_ref, refusal.candidate_ids, refusal.action = "private-marker", [99], "pick_candidate"
+    def fail(*args, **kwargs):
+        raise refusal
+    monkeypatch.setattr(platform_link, "submit_canonical_graph", fail)
+    error = request(a, {}, preview=False)["content"]["error"]
+    assert error["reason_code"] == "SOLAREDGE_GRID_AMBIGUOUS"
+    assert not {"frame_ref", "candidate_ids", "action"}.intersection(error)
+    assert "private-marker" not in str(error)
+
+
+def test_typed_grid_refusal_invalid_mutation_returns_report_invalid(monkeypatch):
+    from solar_project_solaredge import SolarEdgeGridRefusal
+    a = setup(monkeypatch)
+    refusal = SolarEdgeGridRefusal("SOLAREDGE_GRID_AMBIGUOUS", "leaf:frame:group-1", [0, 1], "pick_candidate")
+    refusal.candidate_ids = [True]
+    def fail(*args, **kwargs):
+        raise refusal
+    monkeypatch.setattr(platform_link, "submit_canonical_graph", fail)
+    response = request(a, {}, preview=False)
+    error = response["content"]["error"]
+    assert response["content"]["ok"] is False
+    assert error["reason_code"] == "REPORT_INVALID"
+    assert not {"frame_ref", "candidate_ids", "action"}.intersection(error)
 
 
 @pytest.mark.parametrize("value,display", [("Roof-PV", "Roof-PV"),

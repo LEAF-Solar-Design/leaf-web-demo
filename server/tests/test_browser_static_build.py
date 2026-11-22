@@ -159,3 +159,96 @@ def test_upstream_size_cap_and_close(fixture,monkeypatch):
     monkeypatch.setattr(build.requests,'post',lambda *a,**kw:Response())
     with pytest.raises(flow.FlowError) as error:f.exchange()
     assert error.value.status==503 and f.calls==['closed']
+
+
+@pytest.fixture
+def chart_fixture(fixture,monkeypatch):
+    import browser_chart_state as chart
+    f=fixture;p=ready(f);real=chart._store()
+    fields=dict(f.witnesses,artifact_id=p['artifactId'],manifest_sha256=p['manifestSha256'])
+    d=chart.descriptor(f.request,f.job,[(k,str(v)) for k,v in fields.items()])
+    state=dict(version=1,range='all',scale='Log',reference='2023-01-01',averaging=56,timeAxis='expanded2026',series=['a'],groups=[])
+    graph_calls=[];saved={'value':None}
+    def read(*args):graph_calls.append(('read',args));return deepcopy(saved['value'])
+    def save(*args,**kw):
+        graph_calls.append(('save',args,kw));saved['value']=dict(revision=1,digest='e'*64,descriptor=deepcopy(args[3]),state=deepcopy(args[4]));return deepcopy(saved['value'])
+    backend=SimpleNamespace(read=read,save=save,lifecycle=real.lifecycle,state_copy=real.state_copy)
+    monkeypatch.setattr(chart,'_store',lambda:backend)
+    body=dict(descriptor=fields,state=state,expected_revision=0,save_id=uid(100))
+    return SimpleNamespace(**locals())
+
+
+def test_chart_state_save_reload_uses_scoped_graph_and_read_only_preview(chart_fixture):
+    q=chart_fixture;f=q.f
+    with TestClient(f.app) as client:
+        path=f.path+'/chart-state'
+        assert client.get(path,params=q.fields).json()=={'chart':None}
+        response=client.put(path,json=q.body)
+        assert response.status_code==200 and response.headers['cache-control']=='private, no-store'
+        assert response.json()['chart']['state']==q.state
+        assert client.get(path,params=q.fields).json()==response.json()
+    args=next(v[1] for v in q.graph_calls if v[0]=='save')
+    assert args[:3]==tuple(uuid.UUID(v) for v in f.scope)
+    assert args[3]==q.d and all(v[0].endswith('/status') for v in f.calls if isinstance(v,tuple))
+
+
+def test_chart_state_foreign_artifact_refused_before_graph(chart_fixture):
+    q=chart_fixture
+    with TestClient(q.f.app) as client:r=client.get(q.f.path+'/chart-state',params=dict(q.fields,artifact_id=uid(99)))
+    assert r.status_code==409 and not q.graph_calls
+
+
+def test_chart_state_revocation_during_graph_read_hides_state(chart_fixture,monkeypatch):
+    q=chart_fixture
+    def read(*args):
+        monkeypatch.setattr(flow,'scope',lambda *a,**kw:(_ for _ in ()).throw(flow.FlowError(403)))
+        return dict(revision=1,digest='e'*64,descriptor=q.d,state=q.state)
+    q.backend.read=read
+    with TestClient(q.f.app) as client:r=client.get(q.f.path+'/chart-state',params=q.fields)
+    assert r.status_code==403 and 'series' not in r.text
+
+
+def test_chart_state_conflict_preserves_request_and_never_builds(chart_fixture):
+    q=chart_fixture
+    def conflict(*a,**kw):raise q.backend.lifecycle.LifecycleConflict('private detail')
+    q.backend.save=conflict
+    with TestClient(q.f.app) as client:r=client.put(q.f.path+'/chart-state',json=q.body)
+    assert r.status_code==409 and 'private detail' not in r.text
+    assert all(v[0].endswith('/status') for v in q.f.calls if isinstance(v,tuple))
+
+
+@pytest.mark.parametrize('mutation',['boolean_version','extra_descriptor','invalid_state','boolean_revision'])
+def test_chart_state_invalid_body_never_reaches_graph(chart_fixture,mutation):
+    q=chart_fixture;body=deepcopy(q.body)
+    if mutation=='boolean_version':body['descriptor']['version']=True
+    elif mutation=='extra_descriptor':body['descriptor']['org_id']=uid(99)
+    elif mutation=='invalid_state':body['state']['series']=['a','a']
+    else:body['expected_revision']=True
+    with TestClient(q.f.app) as client:r=client.put(q.f.path+'/chart-state',json=body)
+    assert r.status_code==422 and not q.graph_calls and not q.f.calls
+
+
+def test_chart_state_unauthorized_requests_never_dispatch(monkeypatch):
+    import browser_chart_state as chart
+    monkeypatch.setenv('LEAF_AUTH_LIVE','1')
+    monkeypatch.setattr(chart,'exchange',lambda *a,**kw:pytest.fail('unauthenticated chart dispatch'))
+    app=FastAPI();app.include_router(browser_project.router)
+    path=f'/api/projects/{uid(3)}/browser/source/requests/{uid(4)}/preview/{uid(5)}/chart-state'
+    with TestClient(app) as client:
+        for method in ('GET','PUT'):
+            for headers in ({},{'Authorization':'Bearer invalid'}):
+                assert client.request(method,path,headers=headers,json={} if method=='PUT' else None).status_code in (401,403)
+    from route_flatten import iter_leaf_routes
+    routes=[r for path,r in iter_leaf_routes(app.routes) if path.endswith('/chart-state')]
+    assert len(routes)==2 and all(deps.require_active_tenant in [d.call for d in r.dependant.dependencies] for r in routes)
+
+
+
+def test_chart_state_denied_write_precedes_body_read(chart_fixture,monkeypatch):
+    q=chart_fixture
+    def scope(*a,**kw):
+        if kw.get('write'):raise flow.FlowError(403)
+        return q.f.scope
+    monkeypatch.setattr(flow,'scope',scope)
+    with TestClient(q.f.app) as client:r=client.put(q.f.path+'/chart-state',content=b'not JSON',headers={'Content-Type':'application/json'})
+    assert r.status_code==403 and not q.graph_calls and not q.f.calls

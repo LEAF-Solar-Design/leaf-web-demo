@@ -325,6 +325,13 @@ def _prepare(context, tool, params, *, checkout, job_id, attempt, tool_manifest_
         "after_rev": after["rev"], "seed_base_rev": 0 if initialized else None,
         "seed_base_graph_sha256": local.digest(base) if initialized else None,
         "drawing_changed": True}
+    if tool == "solar-add-all-inverters":
+        placement = after["extra"]["inverter_placement"]
+        receipt["engine"] = placement["engine"]
+        receipt["engine_label"] = placement["label"]
+        receipt["engine_backend"] = placement["backend"]
+        receipt["placement_strategy"] = placement["placement_strategy"]
+        receipt["producing_attempt"] = {"job_id": str(job_id), "attempt": attempt}
     return PreparedProjectGraphCommit(raw, output, local.canonical_bytes(receipt))
 
 

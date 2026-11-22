@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ReferenceMaterialIntake from './ReferenceMaterialIntake.jsx'
-import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
+import { listProjectReferences, readProjectReferenceOriginal, registerProjectArloInput, readProjectArloInput, activateProjectArloInput, reviseProjectArloInput, restoreProjectArloInput, uploadProjectReference } from '../projects/api.js'
 
 const authority = vi.hoisted(() => ({ scope: 'account-a', listeners: new Set(), logouts: new Set() }))
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: fn => { authority.logouts.add(fn); return () => authority.logouts.delete(fn) } }))
@@ -13,6 +13,7 @@ vi.mock('../projects/api.js', () => ({
   listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn(),
   registerProjectArloInput: vi.fn(), uploadProjectReference: vi.fn(),
   readProjectArloInput: vi.fn(), reviseProjectArloInput: vi.fn(), restoreProjectArloInput: vi.fn(),
+  activateProjectArloInput: vi.fn(),
 }))
 
 const project = '11111111-2222-4333-8444-555555555555'
@@ -65,6 +66,177 @@ afterEach(() => {
 })
 
 describe('shared project original reference intake', () => {
+  const secondChild = { ...revisedInput, input_version_id: '66666666-7777-4888-8999-aaaaaaaaaaaa',
+    input_sha256: 'd'.repeat(64), parent_id: revisedInput.input_version_id,
+    request: { ...arloInput.request, budget: { timeout_seconds: 90, beam_width: 4 } } }
+  const retained = [arloInput, revisedInput, secondChild].map(({ input_version_id, input_sha256, parent_id }) =>
+    ({ input_version_id, input_sha256, parent_id }))
+  const withRetained = input => ({ ...input, retained_inputs: retained })
+  const revisionPicker = () => screen.getByRole('combobox', { name: 'Retained ARLO revision for feeder.json' })
+  const openRevisions = async onRunArlo => {
+    listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
+    registerProjectArloInput.mockResolvedValue(arloInput)
+    readProjectArloInput.mockResolvedValue(withRetained(arloInput))
+    const view = render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={onRunArlo} />)
+    await ready()
+    fireEvent.click(screen.getByRole('button', { name: 'Load retained revisions for feeder.json' }))
+    await screen.findByText('ARLO revisions loaded.')
+    return view
+  }
+
+  it.each([arloInput, revisedInput, secondChild])('selects and re-reads retained input $input_version_id before edit and run', async chosen => {
+    const onRunArlo = vi.fn().mockResolvedValue({ ok: true })
+    await openRevisions(onRunArlo)
+    expect(within(revisionPicker()).getAllByRole('option')).toHaveLength(4)
+    const pending = deferred()
+    activateProjectArloInput.mockResolvedValue(chosen)
+    readProjectArloInput.mockReturnValueOnce(pending.promise).mockResolvedValue(withRetained(chosen))
+    fireEvent.change(revisionPicker(), { target: { value: chosen.input_version_id } })
+    await waitFor(() => expect(activateProjectArloInput).toHaveBeenCalledOnce())
+    expect(activateProjectArloInput).toHaveBeenCalledWith(project, arloInput.original_id, chosen.input_version_id,
+      expect.objectContaining({ orgId, expectedScope: 'account-a', signal: expect.any(AbortSignal) }))
+    expect(screen.queryByText('Retained ARLO revision selected.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Edit constraints' }).disabled).toBe(true)
+    await act(async () => pending.resolve(withRetained(chosen)))
+    await screen.findByText('Retained ARLO revision selected.')
+    expect(onRunArlo).not.toHaveBeenCalled()
+    expect(reviseProjectArloInput).not.toHaveBeenCalled()
+    expect(registerProjectArloInput).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    expect((await screen.findByLabelText('budget.timeout_seconds')).value).toBe(String(chosen.request.budget.timeout_seconds))
+    runArlo()
+    await screen.findByText('ARLO result saved to this project.')
+    expect(onRunArlo).toHaveBeenCalledExactlyOnceWith(withRetained(chosen), expect.any(Object))
+    expect(readProjectArloInput.mock.lastCall).toEqual([project, arloInput.original_id,
+      expect.objectContaining({ orgId, expectedScope: 'account-a' })])
+  })
+
+  it.each(['target', 'digest', 'family', 'parent', 'material', 'project', 'organization', 'original digest', 'stale', 'failure'])('fails closed on a selection %s mismatch', async mismatch => {
+    const onRunArlo = vi.fn()
+    await openRevisions(onRunArlo)
+    const bad = { ...secondChild }
+    if (mismatch === 'target') bad.input_version_id = revisedInput.input_version_id
+    if (mismatch === 'digest') bad.input_sha256 = arloInput.input_sha256
+    if (mismatch === 'family') bad.original_id = secondChild.input_version_id
+    if (mismatch === 'parent') bad.parent_id = null
+    if (mismatch === 'material') bad.material_id = 'other-material'
+    if (mismatch === 'project') bad.project_id = otherProject
+    if (mismatch === 'organization') bad.organization_id = otherProject
+    if (mismatch === 'original digest') bad.original_sha256 = 'f'.repeat(64)
+    if (mismatch === 'failure') activateProjectArloInput.mockRejectedValue(new Error('Selection failed.'))
+    else activateProjectArloInput.mockResolvedValue(bad)
+    readProjectArloInput.mockResolvedValue({ ...secondChild, retained_inputs: mismatch === 'stale' ? [] : retained })
+    fireEvent.change(revisionPicker(), { target: { value: secondChild.input_version_id } })
+    await screen.findByRole('alert')
+    runArlo()
+    await screen.findByText('Select a retained ARLO revision again before editing or running.')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    await screen.findByText('Select a retained ARLO revision again before editing or running.')
+    expect(screen.queryByRole('form', { name: 'ARLO constraints' })).toBeNull()
+    expect(onRunArlo).not.toHaveBeenCalled()
+    expect(registerProjectArloInput).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['target', 'digest', 'retention'])('blocks edit and run when the selected revision changes on canonical re-read: %s', async mismatch => {
+    const onRunArlo = vi.fn()
+    await openRevisions(onRunArlo)
+    activateProjectArloInput.mockResolvedValue(secondChild)
+    readProjectArloInput.mockResolvedValue(withRetained(secondChild))
+    fireEvent.change(revisionPicker(), { target: { value: secondChild.input_version_id } })
+    await screen.findByText('Retained ARLO revision selected.')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    await screen.findByRole('form', { name: 'ARLO constraints' })
+    readProjectArloInput.mockResolvedValue(mismatch === 'target' ? withRetained(arloInput)
+      : mismatch === 'digest' ? { ...withRetained(secondChild), input_sha256: arloInput.input_sha256 }
+        : { ...secondChild, retained_inputs: [] })
+    runArlo()
+    await screen.findByRole('alert')
+    expect(screen.queryByRole('form', { name: 'ARLO constraints' })).toBeNull()
+    runArlo()
+    await screen.findByText('Select a retained ARLO revision again before editing or running.')
+    expect(onRunArlo).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'project', 'organization', 'logout'])('discards a pending selection after %s changes', async transition => {
+    const onRunArlo = vi.fn()
+    const view = await openRevisions(onRunArlo)
+    const pending = deferred()
+    activateProjectArloInput.mockReturnValue(pending.promise)
+    fireEvent.change(revisionPicker(), { target: { value: secondChild.input_version_id } })
+    const signal = activateProjectArloInput.mock.calls[0][3].signal
+    if (transition === 'scope') changeScope('account-b')
+    else if (transition === 'logout') logout()
+    else view.rerender(<ReferenceMaterialIntake projectId={transition === 'project' ? otherProject : project}
+      orgId={transition === 'organization' ? otherProject : orgId} onRunArlo={onRunArlo} />)
+    await act(async () => pending.resolve(secondChild))
+    expect(signal.aborted).toBe(true)
+    expect(screen.queryByText('Retained ARLO revision selected.')).toBeNull()
+    expect(onRunArlo).not.toHaveBeenCalled()
+    expect(readProjectArloInput).toHaveBeenCalledTimes(1)
+  })
+
+  it('invalidates a draft on selection and follows explicit save and restore transitions', async () => {
+    const onRunArlo = vi.fn().mockResolvedValue({ ok: true })
+    await openRevisions(onRunArlo)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    fireEvent.change(await screen.findByLabelText('requirements.clearance_m'), { target: { value: '123' } })
+    // Loading history and opening the original editor each register the material.
+    expect(registerProjectArloInput).toHaveBeenCalledTimes(2)
+    activateProjectArloInput.mockResolvedValue(revisedInput)
+    readProjectArloInput.mockResolvedValue(withRetained(revisedInput))
+    fireEvent.change(revisionPicker(), { target: { value: revisedInput.input_version_id } })
+    expect(screen.queryByRole('form', { name: 'ARLO constraints' })).toBeNull()
+    await screen.findByText('Retained ARLO revision selected.')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit constraints' }))
+    const budget = await screen.findByLabelText('budget.timeout_seconds')
+    expect(screen.getByLabelText('requirements.clearance_m').value).toBe(String(revisedInput.request.requirements.clearance_m))
+    const savedChild = { ...secondChild, request: { ...revisedInput.request,
+      budget: { ...revisedInput.request.budget, timeout_seconds: 90 } } }
+    reviseProjectArloInput.mockResolvedValue(savedChild)
+    fireEvent.change(budget, { target: { value: '90' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save revision' }))
+    await screen.findByText('ARLO revision saved. Run ARLO to use these constraints.')
+    expect(reviseProjectArloInput).toHaveBeenCalledExactlyOnceWith(project, revisedInput.input_version_id,
+      { budget: { timeout_seconds: 90 } }, expect.objectContaining({ orgId, expectedScope: 'account-a' }))
+    readProjectArloInput.mockResolvedValue(withRetained(savedChild))
+    runArlo()
+    await screen.findByText('ARLO result saved to this project.')
+    expect(onRunArlo.mock.calls[0][0].input_version_id).toBe(savedChild.input_version_id)
+    restoreProjectArloInput.mockResolvedValue(arloInput)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore original' }))
+    await screen.findByText('Original ARLO input restored.')
+    readProjectArloInput.mockResolvedValue(withRetained(arloInput))
+    runArlo()
+    await screen.findByText('ARLO result saved to this project.')
+    expect(onRunArlo.mock.calls[1][0].input_version_id).toBe(arloInput.input_version_id)
+    expect(registerProjectArloInput).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a wrong canonical target after a valid activation response', async () => {
+    const onRunArlo = vi.fn()
+    await openRevisions(onRunArlo)
+    activateProjectArloInput.mockResolvedValue(secondChild)
+    readProjectArloInput.mockResolvedValue(withRetained(arloInput))
+    fireEvent.change(revisionPicker(), { target: { value: secondChild.input_version_id } })
+    await screen.findByRole('alert')
+    expect(screen.queryByText('Retained ARLO revision selected.')).toBeNull()
+    runArlo()
+    await screen.findByText('Select a retained ARLO revision again before editing or running.')
+    expect(onRunArlo).not.toHaveBeenCalled()
+  })
+
+  it('keeps old responses usable without offering an unsupported retained selector', async () => {
+    listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
+    registerProjectArloInput.mockResolvedValue(arloInput)
+    const onRunArlo = vi.fn().mockResolvedValue({ ok: true })
+    render(<ReferenceMaterialIntake projectId={project} orgId={orgId} onRunArlo={onRunArlo} />)
+    await ready()
+    runArlo()
+    await screen.findByText('ARLO result saved to this project.')
+    expect(screen.queryByRole('combobox')).toBeNull()
+    expect(onRunArlo).toHaveBeenCalledOnce()
+  })
+
   it.each(['beforeinput', 'paste'])('refuses raw comma input through %s before numeric sanitization', async kind => {
     listProjectReferences.mockResolvedValue({ materials: [arloMaterial] })
     registerProjectArloInput.mockResolvedValue(arloInput)

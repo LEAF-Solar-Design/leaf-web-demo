@@ -857,3 +857,42 @@ def test_exemption_absent_keeps_prior_behavior(monkeypatch, allow_memory):
     assert author_quota.enforce("t-exempt", "hosted_starter") is None
     with pytest.raises(author_quota.AuthorQuotaExceeded):
         author_quota.enforce("t-exempt", "hosted_starter")
+
+
+@pytest.mark.parametrize("plan_mode", [True, False])
+def test_plan_bound_author_request_needs_no_description(monkeypatch, plan_mode):
+    """The harness posts a plan-bound build as {plan_confirmation_id, mode}
+    only; the description comes from the approved plan (staging walk
+    2026-11-21). Without plan mode a description is still required."""
+    staged = []
+
+    def fake_enqueue(**kwargs):
+        staged.append(kwargs)
+        return {"status": "staged"}
+
+    monkeypatch.setattr(author_router.deps, "auth_live", lambda: True)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router.customization_flags, "plan_mode_enabled",
+                        lambda _tenant: plan_mode)
+    monkeypatch.setattr(author_router.deps, "stage_author_identity",
+                        lambda tenant, *_: tenant)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    monkeypatch.setattr(
+        author_router.CustomizationService, "configured",
+        classmethod(lambda cls: SimpleNamespace(enqueue_stage=fake_enqueue, stage=fake_enqueue)),
+    )
+
+    req = author_router.AuthorRequest.model_validate(
+        {"plan_confirmation_id": "plan-1", "mode": "build"})
+    result = author_router.author(
+        req, tenant="tenant-a", idempotency_key="author:k",
+        authority_session_id="app-session", authority_turn_id="app-turn",
+    )
+    if plan_mode:
+        assert result == {"status": "staged"}
+        assert staged[0]["plan_confirmation_id"] == "plan-1"
+        assert staged[0]["description"] == ""
+    else:
+        assert result.status_code == 422
+        assert b"description_required" in result.body
+        assert staged == []

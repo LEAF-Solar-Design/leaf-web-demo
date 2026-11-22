@@ -1,7 +1,9 @@
 import './structural.css'
 import InviteAccept from './invites/InviteAccept.jsx'
+import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
+import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
 import { createPortal, flushSync } from 'react-dom'
@@ -19,6 +21,7 @@ import EngineObjectBridge from './cadedit/EngineObjectBridge.jsx'
 import { useLeavingGround, useStudioTransition } from './site/useStudioTransition.js'
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
+import { useEstimatorSurfaceStatus } from './estimator/useEstimatorSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
 import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
@@ -40,7 +43,7 @@ import { byId, ladderListener, slashCommandHandlers } from './lib/actionRegistry
 import useEscapeOwner from './lib/useEscapeOwner.js'
 import usePhoneDrawerEscape from './lib/usePhoneDrawerEscape.js'
 import useDockRise from './lib/useDockRise.js'
-import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
+import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, routeErrorText, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
 import { pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
@@ -81,6 +84,8 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 ])
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
+import { requiresReconciliation } from './errorPresentation.js'
+import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
@@ -153,6 +158,8 @@ import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // session (useSessionController defaults endSession to auth.js logout).
 import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { readActiveScope } from './auth/activeScope.js'
+import { consumeInvestorNotice, isInvestorSession } from './investorDemo.js'
+import { serviceState } from './lib/serviceAuthSession.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -169,7 +176,7 @@ import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
-  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
+  getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake, fetchInlineAuthoringFlags,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
   createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
@@ -193,7 +200,7 @@ import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.js
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
-  THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
+  PLAN_MODE_CONTEXT_KEY, THRESHOLDS, classifyAgentError, fetchRegistry, fetchSkills, listPendingApprovals,
 } from './converse.js'
 import { useWorkspaceControllers } from './controllers/WorkspaceControllerProvider.jsx'
 import { entitlementAllowed } from './controllers/platform/index.js'
@@ -212,7 +219,7 @@ import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
-import { mountedDrawingSource, createProjectFromDrawing } from './workspace/createProjectFromDrawing.js'
+import { mountedDrawingSource, createProjectFromDrawing, isAccountUploadDrawingId } from './workspace/createProjectFromDrawing.js'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
 import useSessionController from './controllers/session/useSessionController.js'
 import { consoleAuthRequired, consoleSignedOut, consoleKnownGuest } from './controllers/session/consoleGate.js'
@@ -323,9 +330,11 @@ const devControls = (() => {
 function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}` }
 
 function SignedOutGate({ onDemo, onSignIn }) {
+  const [investorNotice] = useState(() => consumeInvestorNotice())
   return (
     <div className="card enter" style={{ margin: '0 0 16px' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {investorNotice && <p className="panel-sub" style={{ margin: 0 }}>This demo link has expired or is no longer valid. Sign in to continue.</p>}
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--foreground)' }}>You’re not signed in</div>
         <p className="panel-sub" style={{ margin: 0 }}>
           {onSignIn
@@ -746,7 +755,7 @@ const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-  'solar-electrical-schedules', 'solar-cable-export',
+  'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff', 'solar-assignment-report',
   'solar-solaredge-accept', 'solar-solaredge-tracking-read',
 ])
 
@@ -778,6 +787,96 @@ function LocalCadEngineHold({ active }) {
 function appSurfaceFromLocation(location, labStatus) {
   return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
     ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
+export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runElapsedMs, onStop }) {
+  return (
+    <div className="strip-running enter" data-job-id={jobId || undefined}>
+      <span className="dot live pulse" aria-hidden="true" />
+      <span className="verb">
+        {(runProgress || runStatus || 'running')}
+        {toolName ? `: ${toolName}` : ''}
+        {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
+      </span>
+      <span className="key hot">Esc</span>
+      <button type="button" className="chip-act" onClick={onStop}>Stop</button>
+    </div>
+  )
+}
+
+export function headerChromeFor({ studioGround, surface, grant, signedOut, grantLoading, grantErr }) {
+  // The drafting toolbar marks the CAD drawing surface (surface contract, never a surface-id literal).
+  const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
+  const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
+  return { cost: !drawing, accounts: !drawing || !linked }
+}
+
+function storedPlanMode(sessionId) {
+  if (!sessionId) return null
+  try {
+    const stored = localStorage.getItem(`leaf.planMode.${sessionId}`)
+    return stored === null ? null : stored === '1'
+  } catch { return null }
+}
+
+export function useComposerPlanMode(sessionId, live, catalogController, startAgentTurn) {
+  const [available, setAvailable] = useState(false)
+  useEffect(() => {
+    if (!live) {
+      setAvailable(false)
+      return
+    }
+    let active = true
+    // Defer the read so a StrictMode mount replay makes one tenant request.
+    Promise.resolve().then(async () => {
+      if (!active) return
+      try {
+        const flags = await fetchInlineAuthoringFlags()
+        if (active) setAvailable(flags?.plan_mode === true)
+      } catch {
+        if (active) setAvailable(false)
+      }
+    })
+    return () => { active = false }
+  }, [live])
+
+  const [choice, setChoice] = useState(() => ({ sessionId, on: storedPlanMode(sessionId) }))
+  if (choice.sessionId !== sessionId) {
+    setChoice({ sessionId, on: storedPlanMode(sessionId) })
+  }
+  const visible = live && available
+  const planMode = visible && choice.on === true
+  useEffect(() => {
+    if (!visible || !choice.sessionId || choice.on === null) return
+    try {
+      localStorage.setItem(`leaf.planMode.${choice.sessionId}`, choice.on ? '1' : '0')
+    } catch { /* Keep the choice for this conversation while mounted. */ }
+  }, [choice, visible])
+
+  useLayoutEffect(() => {
+    if (!planMode) return
+    catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: true })
+    // setContext merges patches. Clear the previous value when leaving Plan.
+    return () => catalogController.setContext({ [PLAN_MODE_CONTEXT_KEY]: undefined })
+  }, [catalogController, planMode])
+  return {
+    planMode,
+    onTogglePlanMode: visible ? () => setChoice({ sessionId, on: !planMode }) : undefined,
+    startComposerTurn: !sessionId && planMode ? async (...args) => {
+      const turn = await startAgentTurn(...args)
+      const sentSessionId = turn?.session_id
+      if (sentSessionId) {
+        // An attachment alone never inherits the draft. Match the actual turn's
+        // receipt and preserve a choice made while the send was in flight.
+        setChoice(current => {
+          const attachedWithoutChoice = current.sessionId === sentSessionId && current.on === null
+          if (current !== choice && !attachedWithoutChoice) return current
+          return { sessionId: sentSessionId, on: storedPlanMode(sentSessionId) ?? true }
+        })
+      }
+      return turn
+    } : startAgentTurn,
+  }
 }
 
 export default function App() {
@@ -868,6 +967,7 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  useEstimatorSurfaceStatus(mock)
   const { path: surfacePath } = useRoute()
   useEffect(() => {
     const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
@@ -1012,6 +1112,7 @@ export default function App() {
   // the session. The controller publishes no token-presence signal, so folding
   // these into `status` would change three truth tables; they stay here.
   const [signedIn, setSignedIn] = useState(() => isSignedIn())
+  const investorDemo = signedIn && !serviceState().mode && isInvestorSession()
   // Pause authenticated reads for guests before the session response arrives.
   const knownGuest = consoleKnownGuest({ mock, authConfigured, isSignedIn, authCallback: isAuthRedirectCallback() })
   const is401 = (e) => e?.status === 401 || / -> 401$/.test(String(e?.message || ''))
@@ -1648,6 +1749,9 @@ export default function App() {
       } : {}),
     },
   })
+  const { planMode, onTogglePlanMode, startComposerTurn } = useComposerPlanMode(
+    agentSessionId, !mock && !knownGuest, catalogController, startAgentTurn,
+  )
   const {
     tools,
     toolsError: toolsErr,
@@ -1810,7 +1914,9 @@ export default function App() {
     orgId,
     projectsUnavailable: projectsErr,
     mock,
-  }), [openProjectId, workspace, wsLoading, wsError, currentProjectName, drawingName, orgId, projectsErr, mock])
+    // Only a known non-upload id (the sample drawing) takes the action away.
+    drawingAttachable: drawingState?.drawing_id ? isAccountUploadDrawingId(drawingState.drawing_id) : true,
+  }), [openProjectId, workspace, wsLoading, wsError, currentProjectName, drawingName, orgId, projectsErr, mock, drawingState?.drawing_id])
 
   // color-by-layer, stable across renders (keyed to base intake identity)
   const colorForLayer = useMemo(() => {
@@ -2483,9 +2589,20 @@ export default function App() {
     } : null,
   })
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
+  const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
+    projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
+    engineIntake: projectEngineIntake, engineDocument, engineDirty, canonicalVersionId,
+    drawingKey: projectDrawing.drawingKey,
+  }), [projectMode, projectEditorEngine?.scopeKey, projectEditorKey, projectEngineIntake,
+    engineDocument, engineDirty, canonicalVersionId, projectDrawing.drawingKey])
   const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
+  const projectHiddenLayers = projectMode ? projectDrawing.intake?.hidden_layers : undefined
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
+  // GAPS 51: what the canvas and the layer list show; the drawing's own frozen
+  // or off layers start hidden until the user toggles them (identity-stable,
+  // memoised inside the helper).
+  const shownLayers = withHiddenLayerDefaults(visibleLayers, projectHiddenLayers)
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
   // Context reads can briefly hide the drawing during checkout refresh. Retire
   // selection for a canonical identity change, not that read's pending state.
@@ -2529,7 +2646,7 @@ export default function App() {
   const viewNavigation = useViewNavigation({
     viewerRef, history: viewHistoryRef.current, setHistorySize: setViewHistorySize,
     selectedHandle, selectedLayer: selection?.layer ?? null, setSelectedHandle,
-    visibleLayers, setVisibleLayers, intake: drawingIntake,
+    visibleLayers: shownLayers, setVisibleLayers, intake: drawingIntake,
     navigationSource: navigationSourceRef,
   })
   const {
@@ -3000,7 +3117,7 @@ export default function App() {
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
   const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
     sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
-  catalogUiRef.current = { armDecision, startAgentTurn, running,
+  catalogUiRef.current = { armDecision, startAgentTurn: startComposerTurn, running,
     openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
@@ -3341,10 +3458,11 @@ export default function App() {
 
   // Retry the last run (plain affordance for retryable failures / transport hiccups).
   const onRetry = useCallback(() => {
+    if (requiresReconciliation(runErr) || requiresReconciliation(result?.error)) return
     const last = lastRunRef.current
     if (refuseProjectSolar(last?.tool?.name)) return
     if (last) onRequestCatalogRun(last.tool, last.params, null, 'catalog', { complete: true })
-  }, [onRequestCatalogRun, refuseProjectSolar])
+  }, [onRequestCatalogRun, refuseProjectSolar, runErr, result])
 
   // S20: a failed job row's Retry in the rail re-dispatches that job's tool
   // through the same confirm path as onRetry (never a silent run). The row
@@ -3802,8 +3920,16 @@ export default function App() {
     // in-flight beat rather than interleave two typing loops.
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
+    // The version beat lands when a NEWER head is seated. The demo opens the
+    // sample drawing with no version head (drawingState.head stays null until
+    // the first write seats one), and a null baseline used to keep Next locked
+    // forever after the delete committed. In mock the in-memory chain is the
+    // version authority, and an unseeded chain starts at v1.
+    const versionBaseHead = drawingState?.head ?? (mock
+      ? (mockVersions.isSeeded() ? mockVersions.view('head').head : 1)
+      : null)
     tourVersionStartRef.current = step?.action === 'version'
-      ? { seq, drawingId: drawingState?.drawing_id, head: drawingState?.head }
+      ? { seq, drawingId: drawingState?.drawing_id ?? (mock ? mockVersions.DRAWING_ID : null), head: versionBaseHead }
       : null
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -3841,7 +3967,7 @@ export default function App() {
       // AuthorPanel reports staging only after its card or failure is rendered.
       if (cannedSeq.current === seq && step?.action !== 'version' && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState, mock])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
@@ -4032,7 +4158,7 @@ export default function App() {
     [catalog, openFamilies],
   )
   // Mirrors ResultPanel's own canRetryKey condition (its listener is authoritative).
-  const resultOwnsR = !running && (!!runErr ||
+  const resultOwnsR = !running && !requiresReconciliation(runErr) && !requiresReconciliation(result?.error) && (!!runErr ||
     !!(result && result.error && !result.entitlement_required && result.error.retryable))
   const rTarget = useMemo(() => {
     if (running) return null
@@ -4064,8 +4190,8 @@ export default function App() {
   }, [])
 
   const toggleLayer = useCallback((layer) => {
-    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? v[layer] === false : !v[layer] }))
-  }, [projectMode, setVisibleLayers])
+    setVisibleLayers((v) => ({ ...v, [layer]: projectMode ? withHiddenLayerDefaults(v, projectHiddenLayers)?.[layer] === false : !v[layer] }))
+  }, [projectMode, setVisibleLayers, projectHiddenLayers])
 
   const applyVersion = useCallback(() => {
     seatDrawingVersion({ intake: editFixtureV2 }, { source: 'fixture' })
@@ -4147,6 +4273,8 @@ export default function App() {
   const signedOut = consoleSignedOut({ mock, authRequired, authConfigured, isSignedIn })
   // A signed-out visitor's catalog read can only 401; SignedOutGate already tells them to sign in.
   const visibleCatalogErr = signedOut ? null : catalogErr
+  // Take-3 film cleanup: which account chips the CAD drawing header keeps (see headerChromeFor).
+  const headerChrome = headerChromeFor({ studioGround, surface: activeSurface, grant, signedOut, grantLoading, grantErr })
 
   // Product-surface navigation (Browser / CAD / Solar CAD / iOS). 'cad' is the
   // module default, so the drawing workspace renders exactly as before unless
@@ -4925,7 +5053,7 @@ export default function App() {
       onToggleHistory: onToggleHistoryTracked,
     })
     const layers = layersCluster({
-      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers, onToggle: toggleLayer, colorFor: colorForLayer,
+      layers: projectMode ? drawingIntake?.layers : shown?.layers, counts: layerCounts, visibleLayers: shownLayers, onToggle: toggleLayer, colorFor: colorForLayer,
     })
     // Seating (Slice D): the tool rail hides behind the band on drafting
     // surfaces, so the band carries the rail's two affordances: `expand`
@@ -5072,7 +5200,7 @@ export default function App() {
     }
   }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, hasVersions, canUndo, canRedo, versionBusy, running, previewing,
-    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
+    drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, shownLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
     pushViewSnapshot, lastAuthoredTool, onUseAuthored, setFamilyOpen, engineDirty])
   const ribbonClusters = (() => {
@@ -5180,12 +5308,12 @@ export default function App() {
       inserts,
       faces,
       layers: layers.length,
-      layersShown: layers.filter((l) => visibleLayers[l] !== false).length,
+      layersShown: layers.filter((l) => shownLayers[l] !== false).length,
       extents: drawingExtents(drawingIntake.polylines),
       source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, visibleLayers, mock])
+  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shownLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -5387,6 +5515,8 @@ export default function App() {
           skills={catalogSkills}
           commandActions={slashCommandActions}
           sessionId={agentSessionId}
+          planMode={planMode}
+          onTogglePlanMode={onTogglePlanMode}
           // Slice 10b/10c: the act-scope palette's action rows (the ribbon's
           // own live tools, a second time) and the drawing the versions
           // artifact index and the find-scope search are scoped to.
@@ -5515,6 +5645,7 @@ export default function App() {
           </span>
           {mock && <span className="tag amber">Demo</span>}
         </div>
+        {investorDemo && <span className="tag amber">View-only demo</span>}
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">
@@ -5561,8 +5692,8 @@ export default function App() {
           )}
           {/* Live-only chrome (Claude-account terminal panel) is hidden in the
               demo — it can't work signed-out. Guarded on !mock. */}
-          <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />
-          {!mock && (
+          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+          {!mock && headerChrome.accounts && (
             <ClaudeAccountPanel
               mock={mock}
               signedOut={signedOut}
@@ -5957,6 +6088,8 @@ export default function App() {
                   GraphForm={ProjectSolarGraphForm}
                   newProjectIntentKey={mintCorrelationId}
                   onProjectSubmit={projectSolarRuntime.onProjectSubmit}
+                  onEstimatePublished={(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,
+                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)}
                   submissionSignal={projectSolarRuntime.submissionSignal}
                   openTool={projectSolarRuntime.openTool}
                   onOpenTool={onOpenProjectSolarTool}
@@ -6482,13 +6615,14 @@ export default function App() {
                   ref={projectMode ? viewerRef : intake ? viewerRef : solarStarterViewerRef}
                   intake={projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   drawingKey={projectMode ? projectDrawing.drawingKey : consoleDrawingKey}
+                  engineObservationBinding={engineObservationBinding}
                   solarOverlay={projectMode ? projectDrawing.overlay : solarOverlay}
                   onIntakeOverride={onViewerIntakeOverride}
                   onSceneReady={onDrawingSceneReady}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
                   paletteRevision={studioGround ? (surfaceSlots.groundMaterial.layerAccent === 'solar' ? 'solar' : 'base') : undefined}
                   stringRoutes={projectMode ? undefined : solarStringRoutes}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   highlightHandles={projectMode ? undefined : overlay?.highlight_handles}
                   markers={projectMode ? undefined : overlay?.markers}
                   overlayPolylines={projectMode ? undefined : overlay?.polylines}
@@ -6499,11 +6633,23 @@ export default function App() {
                   onSelectEntity={(handle, gesture) => {
                     if (!projectMode && workspaceCardRef.current?.dataset.cockpitPicking === '1') return
                     if (!projectMode && canvasPickRef.current?.(handle, { additive: !!gesture?.additive })) return
+                    if (projectMode && !gesture?.additive) viewerRef.current?.setHighlight?.([], { nativeHandles: true })
                     setSelectedHandle(handle)
                   }}
-                  marqueeGate={() => !projectMode && typeof canvasMarqueeRef.current === 'function' && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
+                  marqueeGate={() => (projectMode || typeof canvasMarqueeRef.current === 'function') && workspaceCardRef.current?.dataset.cockpitPicking !== '1'}
                   onMarqueeSelect={(handles, gesture) => {
-                    if (projectMode || workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (workspaceCardRef.current?.dataset.cockpitPicking === '1') return
+                    if (projectMode) {
+                      if (gesture?.subtract) {
+                        if (!handles.length) return
+                        setSelectedHandle(current => handles.includes(current) ? null : current)
+                        viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, subtract: true })
+                        return
+                      }
+                      if (!gesture?.additive) setSelectedHandle(null)
+                      viewerRef.current?.setHighlight?.(handles, { nativeHandles: true, additive: !!gesture?.additive })
+                      return
+                    }
                     canvasMarqueeRef.current?.(handles, { additive: !!gesture?.additive })
                   }}
                   pendingEdit={projectMode ? null : pendingEdit || writeGhost}
@@ -6535,7 +6681,7 @@ export default function App() {
                   layers={drawingIntake.layers}
                   counts={layerCounts}
                   colorForLayer={surfaceColorForLayer}
-                  visibleLayers={visibleLayers}
+                  visibleLayers={shownLayers}
                   onToggle={toggleLayer}
                 />
               ) : null
@@ -6606,6 +6752,8 @@ export default function App() {
         <div className="environment-activity-fallback" ref={setActivityFallback} />
         <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
+          <DrawingDependencyReport key={resultDrawingKey}
+            report={(projectMode ? projectDrawing.intake : intake)?.dependency_report} />
           <ResultPanel
             navigation={viewNavigation}
             running={running}
@@ -6615,6 +6763,13 @@ export default function App() {
             error={runErr}
             result={shownResult}
             tool={selectedTool}
+            onSelectModuleSet={selectedTool?.name === 'count-modules' &&
+              result?.origin?.drawingKey && result.origin.drawingKey === resultDrawingKey
+              ? (setIds, region) => onRequestCatalogRun(selectedTool, {
+                set_ids: setIds,
+                ...(region ? { region: region } : {}),
+              }, null, 'catalog', { complete: true })
+              : undefined}
             onRetry={onRetry}
             notices={
               /* NR banners dock UNDER the header of the affected pane (the
@@ -6769,34 +6924,28 @@ export default function App() {
           {/* SB3 state strips ride above the well: running / failed. Decisions
               (the route) attach as resolver rows / decision strips below. */}
           {running && (
-            <div className="strip-running enter">
-              <span className="dot live pulse" aria-hidden="true" />
-              <span className="verb">
-                {(runProgress || runStatus || 'running')}
-                {selectedTool?.name ? `: ${selectedTool.name}` : ''}
-                {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
-              </span>
-              <span className="key hot">Esc</span>
-              <button type="button" className="chip-act" onClick={onStopRun}>Stop</button>
-            </div>
+            <RunningJobStrip jobId={currentJobId} runProgress={runProgress} runStatus={runStatus}
+              toolName={selectedTool?.name} runElapsedMs={runElapsedMs} onStop={onStopRun} />
           )}
           {(runErr || routeErr) && (
             <div className="strip-failed enter" role="alert">
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
-                  ? `Couldn’t route the prompt: ${routeErr}`
+                  ? routeErrorText(routeErr)
                   : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
-              <button
-                type="button"
-                className="chip-act"
-                onClick={routeErr ? onDispatch : onRetry}
-              >
-                Retry
-              </button>
-              <span className="key">R</span>
+              {(routeErr || !requiresReconciliation(runErr)) && <>
+                <button
+                  type="button"
+                  className="chip-act"
+                  onClick={routeErr ? onDispatch : onRetry}
+                >
+                  Retry
+                </button>
+                <span className="key">R</span>
+              </>}
             </div>
           )}
           {/* Calm agent-tier advisory (degraded fallback / quota / grant):
@@ -6969,7 +7118,9 @@ export default function App() {
         {/* W4b cockpit: live cursor coordinates, scale, counts, selection
             (studio only; DOM-written at rAF rate, never React state). */}
         {studioGround && groundShowsDrawing(activeSurface) && (
-          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake} selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
+          <CockpitStatus ground={studioGround} viewerRef={viewerRef} shown={drawingIntake}
+            canvasIntake={solarOverlayCanvasIntake(viewerOverride, projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE)}
+            selectedHandle={selectedHandle} canvasSelector=".viewer-canvas" />
         )}
         {/* W4e: ORTHO and OSNAP real through StatusModesBridge; the rest honestly off, plus fullscreen. */}
         <SurfaceFrame.Cockpit />
@@ -6998,6 +7149,7 @@ export default function App() {
           onExit={onTourExit}
           landed={tourLanded && !running && !routing}
           busy={running || routing}
+          result={result}
         />
       )}
       {/* Lane E operator console entry: renders nothing unless a single

@@ -3,7 +3,9 @@
 import argparse
 import importlib.util
 from pathlib import Path
+import re
 import sys
+import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import xbench_core
@@ -23,8 +25,21 @@ def main(argv=None, *, opener=None):
     parser.add_argument("--readiness-dir", default="D:/agents/production-lanes-2026-11-10/XBENCH/driver/readiness")
     parser.add_argument("--no-readiness", action="store_true")
     parser.add_argument("--benches-dir", default=str(Path(__file__).resolve().parent / "benches"))
+    parser.add_argument("--opt", action="append", default=[], metavar="KEY=VALUE")
     try:
         args = parser.parse_args(argv)
+        if len(args.opt) > 16:
+            raise ValueError("at most 16 options are allowed")
+        options = {}
+        for option in args.opt:
+            key, separator, value = option.partition("=")
+            if not separator or re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key) is None:
+                raise ValueError("--opt requires KEY=VALUE with a valid key")
+            if len(value) > 256 or any(unicodedata.category(char) == "Cc" for char in value):
+                raise ValueError("--opt value must be at most 256 characters without control characters")
+            if key in options:
+                raise ValueError("duplicate --opt key: " + key)
+            options[key] = value
         if args.bench not in xbench_core.BENCH_IDS:
             raise ValueError("invalid bench: " + args.bench)
         base = xbench_core.validate_base(args.base)
@@ -47,6 +62,7 @@ def main(argv=None, *, opener=None):
             args.out, bench=args.bench, verdict=verdict, source_sha=source_sha,
             manifest_sha256=manifest["manifest_sha256"], started_at=started_at,
             finished_at=xbench_core.utc_now(), steps=steps, fixtures=fixtures, limits=limits,
+            options=options,
         )
 
     failed = [row["id"] for row in fixtures if not row["ok"]]
@@ -69,7 +85,8 @@ def main(argv=None, *, opener=None):
         limits = getattr(module, "LIMITS", "")
         if not isinstance(limits, str):
             raise TypeError("LIMITS must be a string")
-        ctx = xbench_core.BenchContext(args.bench, manifest, base, Path(args.out), source_sha, fixtures)
+        ctx = xbench_core.BenchContext(args.bench, manifest, base, Path(args.out), source_sha, fixtures,
+                                       options=options)
         steps = module.run(ctx)
         if not isinstance(steps, list) or not all(isinstance(step, xbench_core.Step) for step in steps):
             raise TypeError("run(ctx) must return a list of Step")

@@ -276,6 +276,32 @@ describe('Viewer local XY origin', () => {
     expect(api.snapshot().selections[1]).toMatchObject({ requested_handles: [], selected_handles: [], highlight_geometry_count: 0 })
   })
 
+  it('commits project marquee handles without interpreting decimal-looking hex as entity IDs', () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const intake = drawing()
+    intake.polylines[0].handle = '10'
+    const view = mount(intake, {
+      marqueeGate: () => true,
+      onMarqueeSelect: (handles, gesture) => view.ref.current.setHighlight(handles, {
+        nativeHandles: true, additive: gesture.additive,
+      }),
+    })
+    const mountEl = view.container.firstChild, api = mountEl.__leafViewerObservation
+    frame()
+    marquee(view, api.project(O - 0.002, -O + 0.012), api.project(O + 0.012, -O - 0.002))
+    frame(); act(() => vi.runOnlyPendingTimers())
+    expect(api.snapshot().selections[0]).toMatchObject({
+      kind: 'marquee', requested_handles: ['10'], selected_handles: ['10'], highlight_geometry_count: 6,
+    })
+    act(() => view.ref.current.setHighlight(['B', '10'], { nativeHandles: true, additive: true }))
+    expect(mountEl.dataset.groupHighlight).toBe('10 B')
+    act(() => view.ref.current.setHighlight(['10'], { nativeHandles: true }))
+    expect(mountEl.dataset.groupHighlight).toBe('10')
+    // Existing engine callers still pass decimal entity IDs.
+    act(() => view.ref.current.setHighlight(['10']))
+    expect(mountEl.dataset.groupHighlight).toBe('A')
+  })
+
   it('keeps 0.01-unit detail in actual buffers and rendered pixels through pan, zoom and resize', () => {
     const intake = freeze(drawing()), before = JSON.stringify(intake)
     const view = mount(intake)
@@ -414,6 +440,22 @@ describe('Viewer local XY origin', () => {
     expect(Math.abs(head.position.x)).toBeLessThan(1)
   })
 
+  it('observes verified project engine lineage without changing the engine scene key', () => {
+    const engine = freeze({ ...drawing(), source: 'engine', documentId: 'project.dxf' })
+    const view = mount(editFixture, { drawingKey: 'project:verified' })
+    act(() => view.ref.current.applyVersion(engine))
+    frame()
+    let api = view.container.firstChild.__leafViewerObservation
+    expect(api.snapshot().drawingKey).toBe('engine:project.dxf')
+    view.update({ engineObservationBinding: { documentId: 'project.dxf', drawingKey: 'project:verified' } })
+    frame()
+    api = view.container.firstChild.__leafViewerObservation
+    expect(api.snapshot().drawingKey).toBe('project:verified')
+    expect(view.ref.current.getDrawingScene().drawingKey).toBe('engine:project.dxf')
+    view.update({ engineObservationBinding: null })
+    expect(api.snapshot().drawingKey).toBe('engine:project.dxf')
+  })
+
   it('resets the frame on applyVersion and drawing switches without translating persisted bridge data', () => {
     const bridge = freeze(bridgeToIntake({ drawing: 'large.dwg', bounds: { minX: O, maxX: O + 0.01 },
       lines: [{ handle: 'A', layer: 'Panels', pts: [pt(0, 0), pt(0.01, 0)] }] }))
@@ -447,7 +489,9 @@ describe('Viewer local XY origin', () => {
     const insert = objects(object => object.userData.handle === 'INS2')[0]
     sameXY(insert.getWorldPosition(new THREE.Vector3()), intake.inserts[1].pt)
     expect(insert.rotation.z).toBeCloseTo(Math.PI / 6)
-    expect(insert.scale.toArray()).toEqual([1.7, 1.7, 1])
+    // The placeholder glyph is sized by the view (2% of the drawing span), so only the mirror
+    // sign of the insert's drawing scale applies to it (roof-site.dwg: scale 180 blanked the canvas).
+    expect(insert.scale.toArray()).toEqual([1, 1, 1])
     view.update({ visibleLayers: { Panels: false, Blocks: false, Surfaces: false } })
     expect(polyLines().parent.visible).toBe(false)
     expect(insert.parent.visible).toBe(false)

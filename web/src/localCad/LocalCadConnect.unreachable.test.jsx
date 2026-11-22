@@ -9,7 +9,10 @@ afterEach(cleanup)
 
 describe('LocalCadConnect unreachable', () => {
   it('an unreachable bridge shows only the not-found line, not the transport error', () => {
-    render(<LocalCadConnect status="unreachable" error="Failed to fetch" />)
+    const view = render(<LocalCadConnect />)
+    expect(screen.getByRole('button', { name: 'AutoCAD live view' })).toBeTruthy()
+    expect(screen.getByTestId('local-cad-status').textContent).toBe('')
+    view.rerender(<LocalCadConnect status="unreachable" error="Failed to fetch" />)
 
     expect(screen.getByTestId('local-cad-status').textContent).toBe('AutoCAD: not found on this computer')
     const statusText = screen.getByTestId('local-cad-status').closest('[aria-live]').textContent

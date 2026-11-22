@@ -13,12 +13,17 @@ import json
 import os
 import stat
 from collections.abc import Mapping
-from decimal import Decimal, InvalidOperation, localcontext
+from contextlib import contextmanager
+from copy import deepcopy
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
 import shutil
 import struct
 import tempfile
+import time
+import math
+import ctypes
 from uuid import UUID, uuid4
 from urllib.parse import parse_qs, urlsplit
 import zlib
@@ -34,6 +39,8 @@ MAX_JSON_BYTES = 1048576
 MAX_JSON_DEPTH = 64
 MAX_RATE_ITEMS = 10000
 MAX_SCREENSHOT_BYTES = 16 * 1024 * 1024
+MAX_PNG_CHUNKS = 4096
+MAX_IDENTITY_REQUESTS = 256
 IMPORT_REFUSALS = ("Choose the drawing again to retry the upload.",
                    "Retry to attach this drawing to the project.")
 DOWNSTREAM = (
@@ -98,7 +105,32 @@ def _strict_json_bytes(data):
     def constant(value):
         raise ValueError("nonfinite JSON constant")
 
-    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=Decimal)
+    def number(token, integer=False):
+        if len(token) > 128:
+            raise ValueError("JSON numeric token budget exceeded")
+        exponent = re.search(r"[eE]([+-]?[0-9]+)$", token)
+        if exponent and (len(exponent.group(1).lstrip("+-")) > 4 or abs(int(exponent.group(1))) > 1000):
+            raise ValueError("JSON exponent budget exceeded")
+        value = Decimal(token)
+        if not value.is_finite() or (value.is_zero() and value.is_signed()):
+            raise ValueError("nonfinite or negative-zero JSON number")
+        return int(token) if integer else value
+
+    value = json.loads(text, object_pairs_hook=pairs, parse_constant=constant,
+                       parse_float=number, parse_int=lambda token: number(token, True))
+    def unicode_strings(item):
+        if isinstance(item, str):
+            if any(0xd800 <= ord(char) <= 0xdfff for char in item):
+                raise ValueError("unpaired JSON surrogate")
+        elif isinstance(item, dict):
+            for key, child in item.items():
+                unicode_strings(key)
+                unicode_strings(child)
+        elif isinstance(item, list):
+            for child in item:
+                unicode_strings(child)
+    unicode_strings(value)
+    return value
 
 
 def rate_total(rates):
@@ -114,12 +146,13 @@ def rate_total(rates):
         pair = []
         for key in ("quantity", "unit_rate"):
             value = item.get(key)
-            if not isinstance(value, str) or not re.fullmatch(r"\d{1,30}(?:\.\d{1,30})?", value):
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,30}(?:\.[0-9]{1,30})?", value):
                 raise ValueError("rates require nonnegative decimal strings")
             pair.append(Decimal(value))
         values.append(pair)
-    with localcontext() as context:
-        context.prec = 128 + len(str(len(values)))
+    context = Context(prec=128 + len(str(len(values))), rounding=ROUND_HALF_EVEN,
+                      Emin=-999999, Emax=999999, capitals=1, clamp=0, flags=[], traps=[])
+    with localcontext(context):
         return sum((quantity * rate for quantity, rate in values), Decimal(0))
 
 
@@ -160,6 +193,9 @@ def bindings(ctx):
 
     fixtures = unique_rows(ctx.manifest.get("fixtures"), manifest=True)
     verified = unique_rows(ctx.fixtures)
+    for role in ROLES:
+        if sum(row["role"] == role for row in fixtures.values()) != 1:
+            raise ValueError("missing or ambiguous fixture role: " + role)
     bound, json_bytes, fingerprints = {}, {}, {}
     for role, identity in mapping.items():
         row = fixtures.get(identity)
@@ -175,9 +211,7 @@ def bindings(ctx):
         data = bytearray() if role in ("oracle", "rates") else None
         if not stat.S_ISREG(bound[role].lstat().st_mode):
             raise ValueError("fixture is not a regular file: " + role)
-        descriptor = os.open(bound[role], os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
-                             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
-        with os.fdopen(descriptor, "rb") as source:
+        with _binary_input(bound[role]) as source:
             opened = os.fstat(source.fileno())
             if not stat.S_ISREG(opened.st_mode):
                 raise ValueError("opened fixture is not a regular file: " + role)
@@ -214,6 +248,15 @@ def bindings(ctx):
     for role, path in bound.items():
         if _file_fingerprint(path.lstat()) != fingerprints[role]:
             raise ValueError("fixture identity changed: " + role)
+        if role in json_bytes:
+            # Some filesystems retain the same timestamp for a same-size write.
+            # Compare bounded current content, but never use it as parsing input.
+            with _binary_input(path) as source:
+                current = os.fstat(source.fileno())
+                if (not stat.S_ISREG(current.st_mode)
+                        or _file_fingerprint(current) != fingerprints[role]
+                        or source.read(MAX_JSON_BYTES + 1) != json_bytes[role]):
+                    raise ValueError("JSON fixture content changed after parsing: " + role)
     return config, bound, oracle["expected"], total
 
 
@@ -223,13 +266,57 @@ def _file_fingerprint(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
 
 
+@contextmanager
+def _binary_input(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            yield source
+    finally:
+        os.close(descriptor)
+
+
+def _verify_primary_receipt(ctx, config, bound):
+    identity = config["fixtures"]["drawing"]
+    rows = [row for row in ctx.manifest["fixtures"] if row.get("id") == identity]
+    proofs = [row for row in ctx.fixtures if row.get("id") == identity]
+    if len(rows) != 1 or len(proofs) != 1:
+        raise ValueError("missing primary drawing receipt")
+    row, proof = rows[0], proofs[0]
+    path = bound["drawing"]
+    if (row.get("role") != "drawing" or Path(row["path"]) != path or proof.get("ok") is not True
+            or any(row.get(key) != proof.get(key) for key in ("path", "bytes", "sha256"))
+            or type(row.get("bytes")) is not int or row["bytes"] < 0):
+        raise ValueError("invalid primary drawing receipt")
+    initial = _file_fingerprint(path.lstat())
+    digest, size = hashlib.sha256(), 0
+    with _binary_input(path) as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != initial:
+            raise ValueError("primary drawing changed before upload")
+        while True:
+            block = source.read(min(1024 * 1024, row["bytes"] - size + 1))
+            if not block:
+                break
+            size += len(block)
+            if size > row["bytes"]:
+                raise ValueError("primary drawing grew before upload")
+            digest.update(block)
+        if _file_fingerprint(os.fstat(source.fileno())) != initial:
+            raise ValueError("primary drawing changed during upload check")
+    if (size != row["bytes"] or digest.hexdigest() != row["sha256"]
+            or _file_fingerprint(path.lstat()) != initial):
+        raise ValueError("primary drawing receipt changed before upload")
+
+
 def classify(observation, expected=None):
     """Only an explicit rendered blocker in a confirmed new project can FAIL."""
     text_fields = ("ui_text", "ground_option", "issue", "evidence_path", "import_rejection",
                    "attachment_status", "import_status", "version_selection_status", "project_id",
                    "route_project_id", "active_project_id", "imported_version_id", "source",
                    "web_build", "stage", "exception_type", "fixture_rate_total", "screenshot_sha256")
-    bool_fields = ("fresh_project", "imported_version_selected", "evidence_saved", "diagnostic_saved")
+    bool_fields = ("fresh_project", "imported_version_selected", "evidence_saved", "diagnostic_saved",
+                   "event_callback_failed")
     invalid = not isinstance(observation, Mapping)
     if not invalid:
         invalid = (any(key in observation and not isinstance(observation[key], str) for key in text_fields)
@@ -250,7 +337,24 @@ def classify(observation, expected=None):
                    and re.search(r"\bGround (?:Mount )?Physical\b", label, re.I)
                    and re.search(r"\bunavailable\b", label, re.I))
     pending = "Checking Solar steps" in observation.get("ui_text", "")
-    proven = fresh and observation.get("evidence_saved") is True and not pending
+    try:
+        projects = {_uuid(observation.get(key)) for key in
+                    ("project_id", "route_project_id", "active_project_id", "project_binding")}
+        canonical = len(projects) == 1
+    except ValueError:
+        canonical = False
+    provenance = (isinstance(observation.get("source"), str)
+                  and re.fullmatch(r"[0-9a-f]{40}", observation["source"]) is not None
+                  and observation.get("web_build") == observation["source"])
+    evidence_pin = (isinstance(observation.get("evidence_path"), str)
+                    and re.fullmatch(r"(x10-evidence-[0-9a-f]{32})/x10-ui.json / \1/x10-ground.png",
+                                     observation["evidence_path"]) is not None
+                    and type(observation.get("screenshot_bytes")) is int
+                    and 0 < observation["screenshot_bytes"] <= MAX_SCREENSHOT_BYTES
+                    and isinstance(observation.get("screenshot_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", observation["screenshot_sha256"]) is not None)
+    proven = (fresh and canonical and provenance and evidence_pin and observation.get("evidence_saved") is True and not pending
+              and observation.get("event_callback_failed") is not True)
     contradictory = (bool(observation.get("import_rejection"))
                      and observation.get("imported_version_selected") is True)
     if contradictory:
@@ -272,7 +376,7 @@ def classify(observation, expected=None):
                   + safe_text(observation.get("issue", "Available option alone is insufficient.")))
     evidence = observation.get("evidence_path", "x10-ui.json / x10-ground.png when saved.")
     rows = [Step(1, verdict, reason + " Evidence: " + evidence,
-                 observed=observation, expected=expected)]
+                 observed=deepcopy(observation), expected=deepcopy(expected))]
     rows.extend(Step(n, "UNREADABLE", "Prerequisite: completed step 1 and " + subject
                      + "; downstream product observation unimplemented in this slice.")
                 for n, subject in enumerate(DOWNSTREAM, 2))
@@ -332,9 +436,12 @@ def _create_project(page, ctx, config, observation):
 
 
 def _valid_png(path):
-    if not 57 <= path.stat().st_size <= MAX_SCREENSHOT_BYTES:
+    initial = path.lstat()
+    if not stat.S_ISREG(initial.st_mode) or not 57 <= initial.st_size <= MAX_SCREENSHOT_BYTES:
         raise ValueError("invalid screenshot size")
-    with path.open("rb") as source:
+    with _binary_input(path) as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("screenshot changed before read")
         data = source.read(MAX_SCREENSHOT_BYTES + 1)
     if len(data) > MAX_SCREENSHOT_BYTES:
         raise ValueError("screenshot byte budget exceeded")
@@ -344,8 +451,14 @@ def _valid_png(path):
     compressed = bytearray()
     rows = []
     palette = False
+    palette_entries = 0
+    transparency = False
     image_ended = False
+    chunks = 0
     while offset + 12 <= len(data):
+        chunks += 1
+        if chunks > MAX_PNG_CHUNKS:
+            raise ValueError("screenshot chunk budget exceeded")
         length = struct.unpack(">I", data[offset:offset + 4])[0]
         kind = data[offset + 4:offset + 8]
         end = offset + 12 + length
@@ -373,8 +486,8 @@ def _valid_png(path):
                 columns = max(0, (width - x + dx - 1) // dx)
                 count = max(0, (height - y + dy - 1) // dy)
                 if columns and count:
-                    rows.append((1 + (columns * channels * depth + 7) // 8, count))
-            expected = sum(length * count for length, count in rows)
+                    rows.append((1 + (columns * channels * depth + 7) // 8, count, columns))
+            expected = sum(length * count for length, count, _ in rows)
             if expected > 64 * 1024 * 1024:
                 raise ValueError("screenshot decoded size exceeds limit")
         elif kind == b"IHDR":
@@ -386,6 +499,19 @@ def _valid_png(path):
             if color == 3 and length // 3 > 2 ** depth:
                 break
             palette = True
+            palette_entries = length // 3
+        elif kind == b"tRNS":
+            if transparency or image or color not in (0, 2, 3):
+                break
+            if color == 3:
+                if not palette or not 1 <= length <= palette_entries:
+                    break
+            elif length != (2 if color == 0 else 6):
+                break
+            elif any(sample > (1 << depth) - 1 for sample in struct.unpack(
+                    ">" + "H" * (length // 2), payload)):
+                break
+            transparency = True
         elif kind == b"IDAT":
             if image_ended or (color == 3 and not palette):
                 break
@@ -404,10 +530,38 @@ def _valid_png(path):
                         or decoder.unused_data or decoder.unconsumed_tail):
                     raise ValueError("invalid screenshot decoded size or stream")
                 position = 0
-                for stride, count in rows:
+                for stride, count, columns in rows:
+                    previous = bytearray(stride - 1) if color == 3 else None
                     for _ in range(count):
-                        if decoded[position] > 4:
+                        filtering = decoded[position]
+                        if filtering > 4:
                             raise ValueError("invalid screenshot row filter")
+                        if color == 3:
+                            current = bytearray(decoded[position + 1:position + stride])
+                            for index in range(len(current)):
+                                left = current[index - 1] if index else 0
+                                above = previous[index]
+                                upper_left = previous[index - 1] if index else 0
+                                if filtering == 1:
+                                    prediction = left
+                                elif filtering == 2:
+                                    prediction = above
+                                elif filtering == 3:
+                                    prediction = (left + above) // 2
+                                elif filtering == 4:
+                                    estimate = left + above - upper_left
+                                    distances = [abs(estimate - value) for value in (left, above, upper_left)]
+                                    prediction = (left, above, upper_left)[distances.index(min(distances))]
+                                else:
+                                    prediction = 0
+                                current[index] = (current[index] + prediction) & 255
+                            mask = (1 << depth) - 1
+                            for column in range(columns):
+                                bit = column * depth
+                                pixel = (current[bit // 8] >> (8 - depth - bit % 8)) & mask
+                                if pixel >= palette_entries:
+                                    raise ValueError("screenshot pixel references absent palette entry")
+                            previous = current
                         position += stride
                 return data
             break
@@ -417,28 +571,109 @@ def _valid_png(path):
     raise ValueError("invalid screenshot structure")
 
 
+def _write_evidence_json(path, value):
+    with path.open("w", encoding="utf-8", newline="\n") as target:
+        target.write(json.dumps(value, indent=2) + "\n")
+        target.flush()
+
+
+def _read_evidence_json(path):
+    initial = path.lstat()
+    if not stat.S_ISREG(initial.st_mode) or initial.st_size > MAX_JSON_BYTES:
+        raise ValueError("invalid evidence record type or size")
+    with _binary_input(path) as source:
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record replaced before read")
+        data = source.read(MAX_JSON_BYTES + 1)
+        if _file_fingerprint(os.fstat(source.fileno())) != _file_fingerprint(initial):
+            raise ValueError("evidence record changed during read")
+    if len(data) > MAX_JSON_BYTES or _file_fingerprint(path.lstat()) != _file_fingerprint(initial):
+        raise ValueError("evidence record changed or exceeded budget")
+    return _strict_json_bytes(data), hashlib.sha256(data).hexdigest()
+
+
+def _commit_generation(staging, destination):
+    """Atomic directory publication that never replaces an existing owner."""
+    if os.name == "nt":
+        return staging.rename(destination)  # Windows directory rename refuses existing targets.
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(library, "renameat2", None)
+    if rename is None:
+        raise OSError("atomic no-replace rename is unavailable")
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(destination), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    return destination
+
+
+def _directory_stamp(directory):
+    """Refuse links/reparse points and pin each existing ancestor identity."""
+    directory = directory.absolute()
+    result = []
+    for path in list(reversed(directory.parents)) + [directory]:
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)):
+            raise ValueError("evidence directory contains a link or reparse point")
+        result.append([info.st_dev, info.st_ino])
+    return result
+
+
 def _save(page, ctx, observation, surface=None, validate=None):
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
-    ctx.out_dir.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".x10-staging-", dir=ctx.out_dir))
+    observation.pop("evidence_record_sha256", None)
+    fixtures = [Path(row["path"]).resolve() for row in ctx.manifest.get("fixtures", [])]
+    root = ctx.out_dir.resolve()
+    if root in fixtures:
+        raise ValueError("evidence directory collides with a fixture")
     generation = "x10-evidence-" + uuid4().hex
+    destination = ctx.out_dir / generation
+    final = destination.resolve()
+    if destination.exists() or any(path == final or final in path.parents for path in fixtures):
+        raise ValueError("evidence generation collides with existing material")
+    ctx.out_dir.mkdir(parents=True, exist_ok=True)
+    root_stamp = _directory_stamp(ctx.out_dir)
+    staging = Path(tempfile.mkdtemp(prefix=".x10-staging-", dir=ctx.out_dir))
+    staging_stamp = _directory_stamp(staging)
+    stage = staging.resolve()
+    targets = [staging / "x10-ground.png", staging / "x10-ui.json",
+               destination / "x10-ground.png", destination / "x10-ui.json"]
+    resolved = [path.resolve() for path in targets]
+    if (staging.is_symlink() or stage.parent != root or not staging.name.startswith(".x10-staging-")
+            or any(path == stage or stage in path.parents for path in fixtures)
+            or len(set(resolved)) != len(resolved) or any(path in fixtures for path in resolved)
+            or any(path.exists() or path.is_symlink() for path in targets)):
+        # No writes and no ownership claim on a supplied/aliased directory.
+        raise ValueError("evidence destinations are not fresh and distinct")
     evidence = generation + "/x10-ui.json / " + generation + "/x10-ground.png"
     committed = None
+    failure = None
+
+    def fence(directory, stamp):
+        if _directory_stamp(ctx.out_dir) != root_stamp or _directory_stamp(directory) != stamp:
+            raise ValueError("evidence directory ancestor changed")
+
     try:
         if surface is None:
             surface = page.get_by_role("navigation", name="Solar design steps")
         if validate is not None:
             validate()
+        fence(staging, staging_stamp)
         surface.screenshot(path=str(staging / "x10-ground.png"), timeout=15_000)
+        fence(staging, staging_stamp)
         if validate is not None:
             validate()
         data = _valid_png(staging / "x10-ground.png")
         pin = {"screenshot_bytes": len(data), "screenshot_sha256": hashlib.sha256(data).hexdigest()}
-        saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence)
+        saved = dict(observation, **pin, evidence_saved=True, evidence_path=evidence,
+                     evidence_directory_stamp=staging_stamp)
         record = staging / "x10-ui.json"
-        record.write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8")
-        if json.loads(record.read_text(encoding="utf-8")) != saved:
+        fence(staging, staging_stamp)
+        _write_evidence_json(record, saved)
+        fence(staging, staging_stamp)
+        record_value, record_hash = _read_evidence_json(record)
+        if record_value != saved:
             raise ValueError("invalid evidence JSON")
         def check_pin(directory):
             actual = _valid_png(directory / "x10-ground.png")
@@ -449,19 +684,51 @@ def _save(page, ctx, observation, surface=None, validate=None):
         check_pin(staging)
         if validate is not None:
             validate()
-        staging.rename(ctx.out_dir / generation)
+        fence(staging, staging_stamp)
+        try:
+            _commit_generation(staging, destination)
+        except BaseException:
+            # A reported failure may follow the atomic move. Claim cleanup only
+            # when the moved set still matches this attempt's exact record/pin.
+            if not staging.exists():
+                try:
+                    fence(destination, staging_stamp)
+                    check_pin(destination)
+                    if _read_evidence_json(destination / "x10-ui.json") == (saved, record_hash):
+                        committed = destination
+                except (OSError, ValueError):
+                    pass
+            raise
         committed = ctx.out_dir / generation
+        fence(committed, staging_stamp)
         check_pin(committed)
-        if json.loads((committed / "x10-ui.json").read_text(encoding="utf-8")) != saved:
+        if _read_evidence_json(committed / "x10-ui.json") != (saved, record_hash):
             raise ValueError("invalid committed evidence JSON")
         if validate is not None:
             validate()
-        observation.update(pin, evidence_saved=True, evidence_path=evidence)
+        observation.update(pin, evidence_saved=True, evidence_path=evidence, evidence_record_sha256=record_hash,
+                           evidence_directory_stamp=staging_stamp)
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-        if committed is not None and observation["evidence_saved"] is not True:
-            shutil.rmtree(committed)
+        cleanup = []
+        for directory in (staging, committed if observation["evidence_saved"] is not True else None):
+            if directory is not None and directory.exists():
+                # A failed set must not retain a scorable JSON record even if
+                # removing its remaining directory fails.
+                try:
+                    fence(directory, staging_stamp)
+                    (directory / "x10-ui.json").unlink(missing_ok=True)
+                    shutil.rmtree(directory)
+                except (OSError, ValueError) as exc:
+                    cleanup.append(type(exc).__name__)
+        if cleanup:
+            observation.update(evidence_saved=False, evidence_cleanup_errors=cleanup)
+            observation.pop("evidence_path", None)
+            observation.pop("evidence_record_sha256", None)
+            if failure is None:
+                raise OSError("evidence cleanup failed")
 
 
 def _invalidate_evidence(ctx, observation):
@@ -472,14 +739,28 @@ def _invalidate_evidence(ctx, observation):
         directory = ctx.out_dir / match.group(1)
         record = directory / "x10-ui.json"
         try:
+            expected_stamp = observation.get("evidence_directory_stamp")
+            if _directory_stamp(directory) != expected_stamp:
+                raise ValueError("evidence directory ancestor changed before cleanup")
+            value, digest = _read_evidence_json(record)
+            screenshot = _valid_png(directory / "x10-ground.png")
             if (not directory.is_symlink() and not record.is_symlink()
-                    and json.loads(record.read_text(encoding="utf-8")).get("evidence_path") == pointer):
+                    and digest == observation.get("evidence_record_sha256")
+                    and value.get("evidence_path") == pointer
+                    and value.get("screenshot_bytes") == len(screenshot) == observation.get("screenshot_bytes")
+                    and value.get("screenshot_sha256") == hashlib.sha256(screenshot).hexdigest()
+                    == observation.get("screenshot_sha256")):
+                if _directory_stamp(directory) != expected_stamp:
+                    raise ValueError("evidence directory changed during cleanup")
                 record.unlink()
+                if _directory_stamp(directory) != expected_stamp:
+                    raise ValueError("evidence directory changed before removal")
                 shutil.rmtree(directory)
         except Exception:
             pass
     observation["evidence_saved"] = False
     observation.pop("evidence_path", None)
+    observation.pop("evidence_record_sha256", None)
 
 
 def _diagnostic(ctx, observation, stage, exc):
@@ -488,12 +769,26 @@ def _diagnostic(ctx, observation, stage, exc):
     observation.update(stage=stage, exception_type=safe_text(type(exc).__name__),
                        issue="UI/infrastructure unreadable at " + stage + ": " + safe_text(type(exc).__name__),
                        evidence_saved=False)
+    temporary = None
     try:
+        diagnostic = ctx.out_dir / "x10-ui.json"
+        if any(Path(row["path"]).resolve() == diagnostic.resolve()
+               for row in ctx.manifest.get("fixtures", [])):
+            observation["diagnostic_saved"] = False
+            return
         ctx.out_dir.mkdir(parents=True, exist_ok=True)
-        (ctx.out_dir / "x10-ui.json").write_text(
-            json.dumps(observation, indent=2) + "\n", encoding="utf-8")
-    except OSError:
+        descriptor, name = tempfile.mkstemp(prefix=".x10-diagnostic-", suffix=".json", dir=ctx.out_dir)
+        os.close(descriptor)
+        temporary = Path(name)
+        _write_evidence_json(temporary, observation)
+        if _read_evidence_json(temporary)[0] != observation:
+            raise ValueError("invalid diagnostic readback")
+        temporary.replace(diagnostic)
+    except (OSError, ValueError, TypeError):
         observation["diagnostic_saved"] = False
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _continue_workspace(page):
@@ -511,6 +806,17 @@ def _prepare_workspace(page):
 def _import_primary(page, ctx, config, bound, observation):
     observation["imported_version_selected"] = False
     observation.pop("import_rejection", None)
+    _current_project(page, observation)
+    scope_epoch = observation.get("project_scope_epoch")
+    if type(scope_epoch) is not int:
+        raise ValueError("missing project continuity epoch")
+
+    def project_unchanged():
+        current = _current_project(page, observation)
+        if observation.get("project_scope_epoch") != scope_epoch:
+            raise ValueError("project switched during primary import")
+        return current
+
     project = page.get_by_role("button", name="Project", exact=True)
     if project.get_attribute("aria-expanded") != "true":
         project.click(timeout=15_000)
@@ -525,8 +831,11 @@ def _import_primary(page, ctx, config, bound, observation):
         r"^(?:Choose the drawing again to retry the upload\.|Retry to attach this drawing to the project\.)$"))
     if status.is_visible() or failure.is_visible():
         raise ValueError("stale attachment terminal before upload")
+    _verify_primary_receipt(ctx, config, bound)
+    project_unchanged()
     upload.set_input_files(str(bound["drawing"]), timeout=15_000)
     status.or_(failure).first.wait_for(state="visible", timeout=180_000)
+    project_unchanged()
     if failure.is_visible():
         hint = failure.inner_text(timeout=15_000)
         if hint not in ("Choose the drawing again to retry the upload.",
@@ -534,10 +843,10 @@ def _import_primary(page, ctx, config, bound, observation):
             raise ValueError("unrecognized rendered import refusal")
         observation["import_rejection"] = hint
         observation["attachment_status"] = "Primary drawing attachment rejected; retry required."
-        epoch = _current_project(page, observation)
+        epoch = project_unchanged()
 
         def validate():
-            if (_current_project(page, observation) != epoch or not failure.is_visible()
+            if (project_unchanged() != epoch or not failure.is_visible()
                     or failure.inner_text(timeout=15_000) != hint):
                 raise ValueError("project or refusal changed during capture")
 
@@ -569,7 +878,7 @@ def _import_primary(page, ctx, config, bound, observation):
     if not isinstance(element, str) or not element.startswith("version:"):
         raise ValueError("missing preview version identity")
     identity = _uuid(element[len("version:"):])
-    _current_project(page, observation)
+    project_unchanged()
     rows = observation.get("project_versions", [])
     matches = [row for row in rows if row["version_id"] == identity and row["seq"] == sequence]
     if len(matches) != 1:
@@ -583,6 +892,7 @@ def _import_primary(page, ctx, config, bound, observation):
     viewer.wait_for(state="visible", timeout=30_000)
     if viewer.inner_text(timeout=15_000) != identity:
         raise ValueError("selected viewer version mismatch")
+    project_unchanged()
     observation["version_selection_status"] = safe_text(marker.inner_text())
     observation["imported_version_id"] = identity
     observation["imported_drawing_id"] = drawing
@@ -611,33 +921,75 @@ def _uuid(value):
     return str(UUID(value))
 
 
-def _catalog_observer(base, observation):
+def _aliased_uuid(row, primary, alias):
+    if not isinstance(row, dict):
+        raise ValueError("invalid identity row")
+    values = [_uuid(row[key]) for key in (primary, alias) if key in row]
+    if not values or len(set(values)) != 1:
+        raise ValueError("missing or conflicting identity aliases")
+    return values[0]
+
+
+def _main_request(request, main_frame=None):
+    frame = request.frame
+    return frame is main_frame if main_frame is not None else frame.parent_frame is None
+
+
+def _catalog_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
     observation["catalog_epoch"] = 0
     observation["catalog_binding"] = None
     latest = None
     pending_binding = None
     failed = False
+    request_count = 0
 
     def exact_url(value):
         url = urlsplit(value)
-        return (url.scheme, url.netloc, url.path) == (origin.scheme, origin.netloc, "/api/capabilities")
+        return (not url.username and not url.password and not url.fragment
+                and (url.scheme, url.netloc, url.path) == (origin.scheme, origin.netloc, "/api/capabilities"))
+
+    def url_binding(value):
+        if not exact_url(value):
+            raise ValueError("catalog response changed endpoint")
+        url = urlsplit(value)
+        if url.fragment:
+            raise ValueError("invalid catalog identity URL")
+        query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
+        binding = {}
+        for key in ("drawing_id", "project_id", "input_version_id"):
+            values = query.get(key, [])
+            if len(values) != 1:
+                raise ValueError("missing or ambiguous catalog identity")
+            binding[key] = _uuid(values[0])
+        return binding
 
     def request_seen(request):
-        nonlocal latest, pending_binding, failed
-        if not exact_url(request.url):
+        nonlocal latest, pending_binding, failed, request_count
+        captured, epoch = latest, observation["catalog_epoch"]
+        main = _main_request(request, main_frame)
+        if not main:
             return
+        url = request.url
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        if not exact_url(url):
+            return
+        method = request.method
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        if request_count >= max_requests:
+            latest, pending_binding, failed = None, None, True
+            observation.update(event_callback_failed=True, catalog_binding=None)
+            observation["catalog_epoch"] += 1
+            return
+        request_count += 1
         try:
-            if request.method != "GET":
+            if method != "GET":
                 raise ValueError("catalog requires normal GET")
-            url = urlsplit(request.url)
-            query = parse_qs(url.query, keep_blank_values=True, max_num_fields=20)
-            binding = {}
-            for key in ("drawing_id", "project_id", "input_version_id"):
-                values = query.get(key, [])
-                if len(values) != 1:
-                    raise ValueError("missing or ambiguous catalog identity")
-                binding[key] = _uuid(values[0])
+            binding = url_binding(url)
         except ValueError:
             # An invalid same-origin catalog binding cannot leave old proof current.
             binding = None
@@ -648,15 +1000,24 @@ def _catalog_observer(base, observation):
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest or not exact_url(response.url):
+        captured, epoch = latest, observation["catalog_epoch"]
+        request = response.request
+        if request is not captured or not _main_request(request, main_frame):
             return
-        failed = failed or type(response.status) is not int or not 200 <= response.status < 300
+        try:
+            invalid = url_binding(response.url) != pending_binding
+        except ValueError:
+            invalid = True
+        status = response.status
+        if latest is not captured or observation["catalog_epoch"] != epoch:
+            return
+        failed = failed or invalid or type(status) is not int or status != 200
         observation["catalog_epoch"] += 1
         observation["catalog_binding"] = None if failed else pending_binding
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and exact_url(request.url):
+        if request is latest and _main_request(request, main_frame) and exact_url(request.url):
             failed = True
             observation["catalog_epoch"] += 1
             observation["catalog_binding"] = None
@@ -666,10 +1027,14 @@ def _catalog_observer(base, observation):
     return request_seen
 
 
-def _project_observer(base, observation):
+def _project_observer(base, observation, main_frame=None, *, max_requests=MAX_IDENTITY_REQUESTS):
+    if type(max_requests) is not int or max_requests <= 0:
+        raise ValueError("invalid identity request budget")
     origin = urlsplit(base)
-    observation.update(project_epoch=0, project_binding=None, project_versions=[])
+    observation.update(project_epoch=0, project_scope_epoch=0, project_binding=None, project_versions=[])
     latest, route, failed = None, None, False
+    scope_route = None
+    request_count = 0
 
     def route_id(value):
         url = urlsplit(value)
@@ -689,25 +1054,62 @@ def _project_observer(base, observation):
         observation.update(project_binding=None, project_versions=[])
 
     def request_seen(request):
-        nonlocal latest, route, failed
-        identity = route_id(request.url)
+        nonlocal latest, route, failed, scope_route, request_count
+        captured, epoch = latest, observation["project_epoch"]
+        main = _main_request(request, main_frame)
+        if not main:
+            return
+        url = request.url
+        if latest is not captured or observation["project_epoch"] != epoch:
+            return
+        identity = route_id(url)
         if identity is None:
             return
-        latest, route, failed = request, identity, request.method != "GET"
+        method = request.method
+        if latest is not captured or observation["project_epoch"] != epoch:
+            return
+        if request_count >= max_requests:
+            latest, route, failed = None, None, True
+            clear()
+            observation["project_scope_epoch"] += 1
+            observation["event_callback_failed"] = True
+            return
+        request_count += 1
+        if identity != scope_route or method != "GET":
+            observation["project_scope_epoch"] += 1
+        scope_route = identity
+        latest, route, failed = request, identity, method != "GET"
         clear()
 
     def response_seen(response):
         nonlocal failed
-        if response.request is not latest or route_id(response.url) != route:
+        captured_request, captured_route, start_epoch = latest, route, observation["project_epoch"]
+        request = response.request
+        if request is not captured_request or not _main_request(request, main_frame):
+            return
+        url, status = response.url, response.status
+        if latest is not captured_request or route != captured_route or observation["project_epoch"] != start_epoch:
             return
         clear()
-        failed = failed or type(response.status) is not int or response.status != 200
+        failed = (failed or route_id(url) != route or type(status) is not int or status != 200)
         if failed:
+            observation["project_scope_epoch"] += 1
+            return
+        captured_request, captured_route, epoch = latest, route, observation["project_epoch"]
+
+        def current():
+            return (latest is captured_request and route == captured_route
+                    and observation["project_epoch"] == epoch and not failed)
+
+        data = response.body()
+        if not current():
             return
         try:
-            body = response.json()
+            if not isinstance(data, bytes):
+                raise ValueError("invalid project metadata bytes")
+            body = _strict_json_bytes(data)
             project = body["project"]
-            identity = _uuid(project.get("project_id") or project.get("id"))
+            identity = _aliased_uuid(project, "project_id", "id")
             if identity != route:
                 raise ValueError("project identity mismatch")
             versions = body.get("drawing_versions", [])
@@ -715,23 +1117,30 @@ def _project_observer(base, observation):
                 raise ValueError("invalid project versions")
             rows = []
             seen = set()
+            sequences = set()
             for version in versions:
-                version_id = _uuid(version.get("version_id") or version.get("id"))
+                version_id = _aliased_uuid(version, "version_id", "id")
                 drawing_id = _uuid(version.get("drawing_id"))
                 seq = version.get("seq")
-                if type(seq) is not int or not 1 <= seq <= 999999999 or version_id in seen:
+                if (type(seq) is not int or not 1 <= seq <= 999999999 or version_id in seen
+                        or (drawing_id, seq) in sequences):
                     raise ValueError("invalid project version identity")
                 seen.add(version_id)
+                sequences.add((drawing_id, seq))
                 rows.append(dict(project_id=route, version_id=version_id, drawing_id=drawing_id, seq=seq))
-        except Exception:
-            failed = True
+        except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
+            if current():
+                failed = True
+                observation["project_scope_epoch"] += 1
             return
-        observation.update(project_binding=identity, project_versions=rows)
+        if current():
+            observation.update(project_binding=identity, project_versions=rows)
 
     def request_failed(request):
         nonlocal failed
-        if request is latest and route_id(request.url) == route:
+        if request is latest and _main_request(request, main_frame) and route_id(request.url) == route:
             failed = True
+            observation["project_scope_epoch"] += 1
             clear()
 
     request_seen.response = response_seen
@@ -741,7 +1150,8 @@ def _project_observer(base, observation):
 
 def _current_project(page, observation):
     project = _uuid(observation.get("project_id"))
-    if observation.get("project_binding") != project or observation.get("fresh_project") is not True:
+    if (observation.get("event_callback_failed") is True or observation.get("project_binding") != project
+            or observation.get("fresh_project") is not True):
         raise ValueError("current project differs from fresh project")
     chip = page.get_by_role("button", name=re.compile(r"^Projects: change project\. Project .+"))
     if not chip.is_visible():
@@ -754,9 +1164,15 @@ def _current_identity(page, observation):
     project = _uuid(observation.get("project_id"))
     version = _uuid(observation.get("imported_version_id"))
     drawing = _uuid(observation.get("imported_drawing_id"))
+    sequence = observation.get("selected_sequence")
     if (not isinstance(binding, dict) or binding.get("project_id") != project
             or binding.get("input_version_id") != version or binding.get("drawing_id") != drawing):
         raise ValueError("current catalog identity differs from imported project/version")
+    rows = observation.get("project_versions", [])
+    if (type(sequence) is not int or len([row for row in rows if row.get("project_id") == project
+            and row.get("version_id") == version and row.get("drawing_id") == drawing
+            and row.get("seq") == sequence]) != 1):
+        raise ValueError("imported drawing/version/sequence is absent from current project metadata")
     viewer = page.locator(".viewer-title code")
     if not viewer.is_visible() or viewer.inner_text(timeout=15_000) != version:
         raise ValueError("current viewer version differs from imported version")
@@ -812,19 +1228,80 @@ def _ground(page, ctx, observation):
     _save(page, ctx, observation, validate=validate)
 
 
-def observe(page, ctx, config, bound, session_info=None):
+class _ObservationBudget:
+    """Share one deadline across nested locator calls and successive UI waits."""
+    def __init__(self, seconds, clock):
+        if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("invalid observation budget")
+        self.clock, self.last = clock, None
+        self.end = self.sample() + seconds
+        if not math.isfinite(self.end):
+            raise ValueError("invalid observation deadline")
+
+    def sample(self):
+        value = self.clock()
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or (self.last is not None and value < self.last)):
+            raise ValueError("invalid or backward observation clock")
+        self.last = value
+        return value
+
+    def milliseconds(self):
+        remaining = self.end - self.sample()
+        if remaining <= 0:
+            raise TimeoutError("overall observation deadline exhausted")
+        return max(1, int(remaining * 1000))
+
+
+class _BudgetedUI:
+    _chains = {"locator", "get_by_role", "get_by_label", "get_by_text", "filter", "or_", "and_", "nth"}
+    _timed = {"click", "fill", "wait_for", "wait_for_function", "wait_for_load_state", "expect_response",
+              "select_option", "set_input_files", "inner_text", "get_attribute", "input_value",
+              "screenshot", "element_handle", "goto", "reload", "go_back", "go_forward"}
+
+    def __init__(self, target, budget):
+        self.target, self.budget = target, budget
+
+    def __getattr__(self, name):
+        # Cleanup must remain available after the budget expires.
+        if name in ("on", "remove_listener"):
+            return getattr(self.target, name)
+        self.budget.milliseconds()
+        value = getattr(self.target, name)
+        if name in ("first", "last"):
+            return _BudgetedUI(value, self.budget)
+        if not callable(value):
+            return value
+        def call(*args, **kwargs):
+            remaining = self.budget.milliseconds()
+            args = tuple(arg.target if isinstance(arg, _BudgetedUI) else arg for arg in args)
+            if name in self._timed:
+                requested = kwargs.get("timeout")
+                kwargs["timeout"] = remaining if requested is None or requested == 0 else min(requested, remaining)
+            result = value(*args, **kwargs)
+            self.budget.milliseconds()
+            return _BudgetedUI(result, self.budget) if name in self._chains else result
+        return call
+
+
+def observe(page, ctx, config, bound, session_info=None, *, budget_seconds=600, clock=time.monotonic):
     observation = {"fresh_project": False, "imported_version_selected": False, "evidence_saved": False}
     stage = "session provenance"
     listeners = []
+    callback_error = None
+    listening = True
     try:
+        budget = _ObservationBudget(budget_seconds, clock)
+        main_frame = page.main_frame
+        page = _BudgetedUI(page, budget)
         for key in ("source", "web_build"):
             value = (session_info or {}).get(key)
             if (not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
                     or value != ctx.source_sha):
                 raise ValueError("invalid session provenance")
         observation.update({key: session_info[key] for key in ("source", "web_build")})
-        catalog = _catalog_observer(ctx.base, observation)
-        project = _project_observer(ctx.base, observation)
+        catalog = _catalog_observer(ctx.base, observation, main_frame)
+        project = _project_observer(ctx.base, observation, main_frame)
 
         def callback(request):
             catalog(request)
@@ -838,48 +1315,120 @@ def observe(page, ctx, config, bound, session_info=None):
             catalog.failed(request)
             project.failed(request)
 
-        for event, listener in (("request", callback), ("response", response),
-                                ("requestfailed", failed)):
-            page.on(event, listener)
+        def navigation(frame):
+            if frame is main_frame:
+                observation.update(event_callback_failed=True, catalog_binding=None,
+                                   project_binding=None, project_versions=[])
+                observation["catalog_epoch"] += 1
+                observation["project_epoch"] += 1
+                observation["project_scope_epoch"] += 1
+                _invalidate_evidence(ctx, observation)
+
+        def protect(handler, kind):
+            def guarded(event=None):
+                nonlocal callback_error
+                if not listening:
+                    return
+                try:
+                    request_epochs = observation["catalog_epoch"], observation["project_epoch"]
+                    if kind in ("close", "crash"):
+                        navigation(main_frame)
+                        callback_error = callback_error or RuntimeError("page terminated")
+                        return
+                    if kind == "framenavigated":
+                        navigation(event)
+                        return
+                    def check_url(value):
+                        if not isinstance(value, str) or any(ord(char) < 33 for char in value):
+                            raise ValueError("invalid passive event URL")
+                        url = urlsplit(value)
+                        if url.scheme not in ("http", "https") or not url.hostname:
+                            raise ValueError("invalid passive event URL")
+                        _ = url.port
+                    check_url(event.url)
+                    if kind == "request" and not isinstance(event.method, str):
+                        raise ValueError("invalid passive request method")
+                    if kind == "response":
+                        check_url(event.request.url)
+                    if kind == "request" and request_epochs != (
+                            observation["catalog_epoch"], observation["project_epoch"]):
+                        return
+                    handler(event)
+                except Exception as exc:
+                    callback_error = callback_error or exc
+                    observation.update(event_callback_failed=True, catalog_binding=None,
+                                       project_binding=None, project_versions=[])
+                    observation["catalog_epoch"] += 1
+                    observation["project_epoch"] += 1
+            return guarded
+
+        for event, handler in (("request", callback), ("response", response), ("requestfailed", failed),
+                               ("framenavigated", navigation), ("close", navigation), ("crash", navigation)):
+            listener = protect(handler, event)
             listeners.append((event, listener))
+            page.on(event, listener)
         stage = "workspace profile"
         _prepare_workspace(page)
         stage = "fresh project creation"
         _create_project(page, ctx, config, observation)
         stage = "primary drawing attachment and version selection"
         if _import_primary(page, ctx, config, bound, observation) is False:
+            budget.milliseconds()
             return observation
         stage = "selected drawing workflow navigation"
         _open_workflow(page, config)
         stage = "rendered Ground Physical evidence"
         _ground(page, ctx, observation)
+        budget.milliseconds()
     except Exception as exc:
+        _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, stage, exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     finally:
+        listening = False
         cleanup_error = None
+        cleanup_cancel = None
         for event, listener in listeners:
             try:
                 page.remove_listener(event, listener)
             except Exception as exc:
                 cleanup_error = cleanup_error or exc
+            except (KeyboardInterrupt, SystemExit) as exc:
+                cleanup_cancel = cleanup_cancel or exc
         if cleanup_error is not None:
             _invalidate_evidence(ctx, observation)
             _diagnostic(ctx, observation, "listener cleanup", cleanup_error)
+        if callback_error is not None:
+            _invalidate_evidence(ctx, observation)
+            _diagnostic(ctx, observation, "passive UI event", callback_error)
+        if cleanup_cancel is not None:
+            _invalidate_evidence(ctx, observation)
+            raise cleanup_cancel
     return observation
 
 
 def run(ctx):
     try:
         config, bound, _expected, total = bindings(ctx)
+        # Validate configuration before the session context can open a browser.
+        budget_seconds = config.get("observation_budget_seconds", 600)
+        _ObservationBudget(budget_seconds, time.monotonic)
     except (ValueError, OSError, KeyError, TypeError, UnicodeError, InvalidOperation):
         return classify({"issue": "Missing or invalid fixture bindings/config, oracle or rates; browser not opened."})
+    observation = {}
     try:
         repo = Path(__file__).resolve().parents[3]
         with signed_in(repo, ctx.source_sha, origin=ctx.base) as (page, info):
-            observation = observe(page, ctx, config, bound, session_info=info)
+            observation = observe(page, ctx, config, bound, session_info=info,
+                                  budget_seconds=budget_seconds)
     except Exception as exc:
-        observation = {}
+        _invalidate_evidence(ctx, observation)
         _diagnostic(ctx, observation, "authentication/browser session", exc)
+    except (KeyboardInterrupt, SystemExit):
+        _invalidate_evidence(ctx, observation)
+        raise
     # Fixture arithmetic is retained as provenance only, never a measured outcome.
     observation["fixture_rate_total"] = str(total)
     return classify(observation, expected=_expected)

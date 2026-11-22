@@ -55,9 +55,15 @@ import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
 import { PortfolioProposalService } from "../src/agent/portfolioProposal.js";
+import { SdkProjectVideoInspector } from "../src/agent/projectVideoInspection.js";
+import { SdkRepoEditor } from "../src/vendor/mushy-author/ports/impl/repoEditRunner.js";
+import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
+import { prepareBranchPackage } from "../src/vendor/mushy-author/registry/branchPackageSchema.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
+import { allowedProviderHosts } from "../src/ports/impl/tenantProviderStore.js";
+import { createTenantRunnerFor } from "../src/ports/impl/tenantRunnerFor.js";
 import { HttpAppRunClient } from "../src/ports/impl/appRunClient.js";
 import { HttpGateClient } from "../src/ports/impl/gateClient.js";
 import { HttpInstantExecutorClient } from "../src/ports/impl/instantExecutorClient.js";
@@ -172,6 +178,7 @@ function tenantRepoDir(tenantId: string): string {
 function spineTurnRunner(
   oauth: OAuthGrantProvider,
   standardServicesResolver: StandardServicesResolver | undefined,
+  grantsDir: string,
 ): ConverseRunner | undefined {
   const appUrl = (process.env.LEAF_APP_URL ?? "").trim();
   const dispatchSecret = (process.env.LEAF_APP_DISPATCH_SECRET ?? "").trim();
@@ -190,6 +197,7 @@ function spineTurnRunner(
   instantExecutorClient = createEnabledProductionInstantExecutorClient(
     (options) => new HttpInstantExecutorClient(options),
   ) ?? null;
+  log(`[harness] tenant_provider_hosts=${allowedProviderHosts(process.env).size}`);
   return new SpineTurnAdapter({
     oauth,
     appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
@@ -197,6 +205,13 @@ function spineTurnRunner(
     store: sessionStoreHandle.store,
     runnerFor: (grant: AgentGrant) => new ConverseSdkRunner({
       grant,
+      ...(standardServicesResolver ? { standardServicesResolver } : {}),
+    }),
+    // Per-tenant provider override (default off), shared with server.ts startReal: a
+    // `<grantsDir>/<tenant>.provider.json` record routes only that tenant to an allowlisted
+    // OpenAI-compatible server; no record keeps Claude; an unhonourable record fails the turn.
+    tenantRunnerFor: createTenantRunnerFor({
+      grantsDir, env: process.env,
       ...(standardServicesResolver ? { standardServicesResolver } : {}),
     }),
     ...(standardServicesResolver ? { standardServicesResolver } : {}),
@@ -319,7 +334,7 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     ...(mockAgent
       ? { converseRunner: new FakeTurnRunner() }
       : (() => {
-          const spine = spineTurnRunner(oauth, standardServicesResolver);
+          const spine = spineTurnRunner(oauth, standardServicesResolver, grantsDir);
           return spine ? { converseRunner: spine } : {};
         })()),
     ...(customizationCoordination ? { customizationCoordination } : {}),
@@ -419,6 +434,24 @@ async function validatePostgresStartup(): Promise<void> {
   }
 }
 
+async function logBranchCompileSelfCheck(): Promise<void> {
+  const start = performance.now();
+  try {
+    const { manifest, files } = prepareBranchPackage({
+      name: "boot-compile-probe", version: "1.0.0", description: "Check ScriptHost compilation at startup.",
+      params: { type: "object" }, returns: { type: "object" }, capabilities: [],
+      hosts: { min_release: 2025, min_host_api: 1 }, timeout_ms: 30000, idempotent: true,
+      main_csx: "return new { ok = true };", lib: {},
+    }, "boot", new Date("2026-11-20T00:00:00Z"));
+    const outcome = await branchCompileCheck(manifest.name, files);
+    const allowlist = outcome.status === "accept" ? outcome.allowlistSha256 : "-";
+    // The fixed-format fields include a validated public SHA-256, which log() redacts as token-shaped.
+    process.stderr.write(`[harness] branch compile self-check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} allowlist=${allowlist}\n`);
+  } catch {
+    log(`[harness] branch compile self-check: decision=unavailable:spawn_failed ms=${Math.round(performance.now() - start)} allowlist=-`);
+  }
+}
+
 async function main(): Promise<void> {
   await validatePostgresStartup();
   const standardServicesConfigured = Boolean((process.env.LEAF_TENANT_MCP_BROKER_URL ?? "").trim());
@@ -457,7 +490,10 @@ async function main(): Promise<void> {
     : undefined;
   const serverOptions = {
     portfolioProposals: new PortfolioProposalService({ oauth: ports.oauth }),
-    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    ...(projectRepositoryEdits ? { projectRepositoryEdits,
+      projectSourceAuthoring: { oauth: ports.oauth,
+        editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }),
+        videoInspector: new SdkProjectVideoInspector() } } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
     ...(ports.labDocuments ? { labDocuments: ports.labDocuments } : {}),
@@ -472,6 +508,7 @@ async function main(): Promise<void> {
         `  tenants_dir=${TENANTS_DIR}  tenant_git_dir=${TENANT_GIT_DIR}  demo_override=${SINGLE_REPO_OVERRIDE || "(none)"}  broker=${BROKER_URL}`,
     );
     log(`[harness] per-tenant grant store active; grant admin at PUT/GET/DELETE /grants/{tenantId} (token never logged).`);
+    if (process.env.LEAF_BRANCH_COMPILE_BIN && !branchCompileDisabled()) void logBranchCompileSelfCheck();
   });
   server.on("error", (err: Error) => {
     log(`[harness] server error: ${err.message}`);

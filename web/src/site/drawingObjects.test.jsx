@@ -85,7 +85,12 @@ function setup() {
   return { probe, worker, viewer, viewerRef, history, scene, load, ...mounted,
     resize: () => { frustum = 3; pose = { ...pose, worldPerPixel: frustum / pose.zoom } } }
 }
-const input = () => screen.getByRole('combobox', { name: 'Find in drawing' })
+const input = () => {
+  if (!screen.queryByRole('combobox', { name: 'Find in drawing' })) {
+    fireEvent.click(screen.getByLabelText('Find in drawing', { selector: 'summary' }))
+  }
+  return screen.getByRole('combobox', { name: 'Find in drawing' })
+}
 const type = (query) => fireEvent.change(input(), { target: { value: query } })
 const enter = () => fireEvent.keyDown(input(), { key: 'Enter' })
 const find = (query) => { type(query); enter() }
@@ -323,7 +328,7 @@ it('KEYS-E06 an edit to the same drawing hides an open list, and Enter and the F
       expect(screen.getAllByRole('option')).toHaveLength(2)
       const before = h.probe.objects.index
       act(() => h.worker.emit({ type: 'editApplied', op: 'deleteEntity', ok: true,
-        entities: entities.filter((entity) => entity.id !== '42'), entityCount: entities.length - 1, byteLength: 1 }))
+        entities: entities.filter((entity) => entity.id !== '42'), entityCount: entities.length - 1, bytes: new Uint8Array([48]), byteLength: 1 }))
       expect(h.probe.objects.index).not.toBe(before)
       expect(h.probe.objects.index.drawingKey).toBe(before.drawingKey)
       expect(screen.queryAllByRole('option')).toHaveLength(0)

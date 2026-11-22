@@ -1,3 +1,15 @@
+// The server adopts only an ACCOUNT UPLOAD into a project: a canonical UUID or
+// the legacy `u-<10 lowercase hex>` receipt (platform/store.py
+// is_account_upload_source_id). The built-in sample drawing has neither, so the
+// import refuses it with a validation error. This mirror lets the shell say so
+// before the click instead of after a failed request; the server stays the
+// authority.
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const LEGACY_ACCOUNT_UPLOAD = /^u-[0-9a-f]{10}$/
+export function isAccountUploadDrawingId(drawingId) {
+  return typeof drawingId === 'string' && (CANONICAL_UUID.test(drawingId) || LEGACY_ACCOUNT_UPLOAD.test(drawingId))
+}
+
 export function mountedDrawingSource({ drawingState, requestedDrawingId, name } = {}) {
   const drawingId = drawingState?.drawing_id
   const version = drawingState?.head

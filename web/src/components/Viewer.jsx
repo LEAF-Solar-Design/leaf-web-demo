@@ -1,5 +1,6 @@
+import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
 import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { vertexZ, vertexSegments } from './viewerVertexZ.js'
@@ -9,7 +10,7 @@ import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
-import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
 import * as THREE from 'three'
@@ -222,7 +223,7 @@ const Viewer = forwardRef(function Viewer(
     selectedHandle, onSelectEntity, pendingEdit,
     marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady, solarOverlay = null,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, engineObservationBinding = null, onSceneReady, solarOverlay = null,
     onIntakeOverride,
   },
   ref,
@@ -318,6 +319,8 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  const observationBindingRef = useRef(null)
+  observationBindingRef.current = { binding: engineObservationBinding, parentDrawingKey: drawingKey }
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
 
   // Bumped at the end of each scene build so the dynamic-overlay effects
@@ -568,7 +571,8 @@ const Viewer = forwardRef(function Viewer(
       }
       return groups.get(layer)
     }
-    const hs = dataSpan * 0.02 // base half-size of the glyph
+    // A small marker (0.5% of the span): 88 roof circuit-tag dots at 2% covered a whole array as translucent tiles.
+    const hs = dataSpan * 0.005 // base half-size of the glyph
     let nInserts = 0
     const definitions = blockDefinitions(activeIntake)
     for (const ins of inserts) {
@@ -584,9 +588,8 @@ const Viewer = forwardRef(function Viewer(
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(ins.pt[0] - origin.x, ins.pt[1] - origin.y, 2)
       mesh.rotation.z = THREE.MathUtils.degToRad(ins.rot || 0)
-      const sx = ins.scale?.[0] ?? 1
-      const sy = ins.scale?.[1] ?? 1
-      mesh.scale.set(sx || 1, sy || 1, 1)
+      const [sx, sy] = insertGlyphScale(ins.scale)
+      mesh.scale.set(sx, sy, 1)
       mesh.userData = { kind: 'insert', handle: ins.handle }
       // outline square + a tick toward local +X so rotation reads visually
       const o = hs
@@ -602,7 +605,7 @@ const Viewer = forwardRef(function Viewer(
       entityLayerGroup(insertLayerGroups, ins.layer).add(mesh)
       pickables.push(mesh)
       nInserts++
-      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
+      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx, sy], hs })
     }
 
     // --- 3DFACEs: filled triangle-pair surfaces -----------------------------
@@ -993,16 +996,16 @@ const Viewer = forwardRef(function Viewer(
       }
       const mode = marqueeMode(start, end)
       const bounds = dom.getBoundingClientRect()
-      const rect = worldRect(unprojectClientToPlane(camera, bounds, start.x, start.y),
-        unprojectClientToPlane(camera, bounds, end.x, end.y))
+      const mapping = marqueeMapping(camera, bounds, start, end,
+        pl => bridge ? null : displayZ(pl) + 0.05)
       clearMarquee()
       const callbacks = marqueeRef.current
-      if (!rect || !callbacks.gate?.()) return
-      const handles = marqueeHandles(polylines, rect, mode,
-        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false)
+      if (!mapping || !callbacks.gate?.()) return
+      const handles = marqueeHandles(polylines, mapping.rect, mode,
+        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false, mapping.project)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
       const pending = armObservation(handles, 'marquee', additive, e)
-      callbacks.select?.(handles, { additive, mode })
+      callbacks.select?.(handles, e.altKey ? { additive, mode, subtract: true } : { additive, mode })
       finishObservation(pending)
     }
     function cancelMarquee(e) {
@@ -1100,7 +1103,8 @@ const Viewer = forwardRef(function Viewer(
             if (visible) rows.get(handle)[entry.field] += count
           }
         }
-        return { drawingKey: sceneDrawingKey, handles: [...rows.values()],
+        return { drawingKey: observationDrawingKey(sceneDrawingKey, activeIntake,
+          observationBindingRef.current.binding, observationBindingRef.current.parentDrawingKey), handles: [...rows.values()],
           omitted: { blocks: blocks.truncated, activeIntake: activeIntake.truncated || 0 },
           selections: observation.history.map(record => ({ ...record,
             selected_handles: [...record.selected_handles], requested_handles: [...record.requested_handles] })) }
@@ -1359,10 +1363,17 @@ const Viewer = forwardRef(function Viewer(
     // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
-    setHighlight: (ids) => {
-      setGroupHighlight(Array.from(ids || [], (id) => {
+    setHighlight: (ids, { nativeHandles = false, additive = false, subtract = false } = {}) => {
+      const handles = Array.from(ids || [], (id) => {
+        if (nativeHandles) return String(id)
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
-      }))
+      })
+      if (subtract) {
+        const removed = new Set(handles)
+        setGroupHighlight(current => current.filter(handle => !removed.has(handle)))
+      } else {
+        setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
+      }
     },
     // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
     // unknown kind or a bad point or size draws nothing.
@@ -1566,6 +1577,10 @@ const Viewer = forwardRef(function Viewer(
     const s = stateRef.current
     if (!s) return
     const g = s.selectionGroup
+    for (const child of g.children) {
+      child.geometry.dispose()
+      child.material.dispose()
+    }
     g.clear()
     const committed = { version: s.observation.committed.version + 1,
       handles: [...new Set([selectedHandle, ...groupHighlight].filter(Boolean))], entries: [], ms: performance.now() }
@@ -1577,6 +1592,7 @@ const Viewer = forwardRef(function Viewer(
     for (const handle of new Set([selectedHandle, ...groupHighlight].filter(Boolean))) {
     const firstChild = g.children.length
     for (const d of s.pickIndex.get(handle) || []) {
+    if (visibleLayers?.[d.layer] === false) continue
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
@@ -1622,7 +1638,7 @@ const Viewer = forwardRef(function Viewer(
       if (count) committed.entries.push({ object, handle, count })
     }
     }
-  }, [selectedHandle, groupHighlight, buildTick])
+  }, [selectedHandle, groupHighlight, visibleLayers, buildTick])
 
   // --- markers (result-driven) ---------------------------------------------
   useEffect(() => {

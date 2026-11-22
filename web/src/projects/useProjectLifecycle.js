@@ -33,6 +33,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { humanizeError } from '../errorHumanize.js'
 import {
+  archiveProject,
   cloneProject,
   renameProject,
   deleteProject,
@@ -41,6 +42,7 @@ import {
   getProjectLifecycle,
   inviteMember,
   resetProject,
+  restoreProject,
   revokeMember,
   setIdentityDisplayName,
 } from './api.js'
@@ -291,7 +293,9 @@ export default function useProjectLifecycle(projectId, { enabled = true } = {}) 
       return result
     },
     reset: () => runThenRefetch(() => resetProject(projectId)),
-    remove: () => deleteProject(projectId), // no refetch: the project is gone
+    archive: () => runThenRefetch(() => archiveProject(projectId)),
+    restore: () => runThenRefetch(() => restoreProject(projectId)),
+    deleteArchived: (confirmName) => deleteProject(projectId, { confirmName }), // no refetch: the project is gone
   }), [bindingFor, data.project?.org_id, load, projectId, runThenRefetch, stillCurrent])
 
   return { status, refreshing, error, refetch: load, actions, identities, identitiesStatus, loadIdentities, ...data }

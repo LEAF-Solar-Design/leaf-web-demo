@@ -17,13 +17,15 @@ import { gitWorkerAvailable, workerCommit } from "./gitWorker.js";
 import { redactTokens } from "../../redact.js";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { Pool } from "pg";
 import type { PoolClient, PoolConfig } from "pg";
 import { HARNESS_IDENTITY } from "../../registry/registerTool.js";
 import type { ForgeRemoteAuthority } from "./forgeRemoteAuthority.js";
 import type {
   HarnessIdentity,
+  StagedToolSource,
+  StagedToolSourceRequest,
   TenantBareRepo,
   TenantMutationFence,
   TenantRepo,
@@ -361,6 +363,38 @@ function gitTransport(cwd: string, args: string[], sourceRef: string): string {
   return withLocalGitTrust(sourceRef, env => git(cwd, args, undefined, env));
 }
 
+const STAGED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$(?![\s\S])/i;
+const STAGED_SHA = /^[0-9a-f]{40}$(?![\s\S])/i;
+const STAGED_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$(?![\s\S])/;
+const STAGED_SOURCE_BYTES = 256 * 1024;
+
+/** Object reads must not inherit Git redirection, credentials or lazy-fetch authority. */
+function stagedGit(dir: string, args: string[]): Buffer {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "SystemRoot", "WINDIR", "TEMP", "TMP"]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  Object.assign(env, {
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_NO_LAZY_FETCH: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+  });
+  try {
+    return execFileSync("git", [
+      "-c", "safe.directory=", "-c", `safe.directory=${dir.replaceAll("\\", "/")}`,
+      "-c", `core.hooksPath=${process.platform === "win32" ? "NUL" : "/dev/null"}`,
+      "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+      `--git-dir=${dir}`, ...args,
+    ], { cwd: dir, env, maxBuffer: STAGED_SOURCE_BYTES + 1024, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    throw new Error("staged tool Git read failed");
+  }
+}
+
 class GitTenantRepo implements TenantRepo {
   constructor(
     readonly dir: string,
@@ -648,6 +682,80 @@ export class TenantRepoProviderImpl implements TenantRepoProvider {
       });
     }
     this.catalogWorktrees.delete(lease);
+  }
+
+  async readStagedToolSource(tenantId: string, request: StagedToolSourceRequest): Promise<StagedToolSource> {
+    const { changeSetId, stagedCommit, slug } = request ?? {};
+    if (typeof tenantId !== "string" || !STAGED_UUID.test(tenantId)
+      || typeof changeSetId !== "string" || !STAGED_UUID.test(changeSetId)
+      || typeof stagedCommit !== "string" || !STAGED_SHA.test(stagedCommit)
+      || typeof slug !== "string" || !STAGED_SLUG.test(slug)) {
+      throw new Error("staged tool source requires tenant/change UUIDs, a full commit SHA and a safe tool slug");
+    }
+    const inherited = this.leaseContext.getStore();
+    if (inherited && (inherited.tenantId !== tenantId || inherited.lost)) {
+      throw new TenantRepoLeaseLostError(tenantId);
+    }
+    return this.withTenantReadLease(tenantId, async () => {
+      const checkLease = () => {
+        const lease = this.leaseContext.getStore();
+        if ((this.lease && !lease) || (lease && (lease.tenantId !== tenantId || lease.lost))) {
+          throw new TenantRepoLeaseLostError(tenantId);
+        }
+      };
+      checkLease();
+      // Deliberately do not call bare(): it can provision, bind an origin or fetch.
+      if (!this.opts.bareBase || (this.opts.remoteAuthority && (this.opts.isRemoteTenant?.(tenantId) ?? true))) {
+        throw new Error("staged tool source requires an existing local durable bare repository");
+      }
+      const sourceRef = await this.opts.locator.repoRef(tenantId);
+      checkLease();
+      if (!isAbsolute(sourceRef) || /^[/\\]{2}/.test(sourceRef)) {
+        throw new Error("staged tool source requires a canonical local tenant origin");
+      }
+      const source = realpathSync(sourceRef);
+      const base = realpathSync(this.opts.bareBase);
+      const expectedDir = join(base, `${tenantId}.git`);
+      const dir = realpathSync(expectedDir);
+      if (dir !== expectedDir) throw new Error("staged tool bare repository must not alias another path");
+      const read = (args: string[]) => stagedGit(dir, args).toString("utf8");
+      if (read(["rev-parse", "--is-bare-repository"]) !== "true\n"
+        || realpathSync(resolve(dir, read(["rev-parse", "--git-common-dir"]).trim())) !== dir) {
+        throw new Error("staged tool source requires a bare tenant repository");
+      }
+      const origins = read(["config", "--local", "--includes", "--null", "--get-all", "remote.origin.url"]).split("\0");
+      const origin = origins[0]!;
+      if (origins.length !== 2 || origins[1] !== "" || !origin || /^[/\\]{2}/.test(origin)
+        || (!isAbsolute(origin) && /[:\\]/.test(origin))
+        || realpathSync(resolve(dir, origin)) !== source) {
+        throw new Error("existing bare origin does not match the canonical local tenant repository");
+      }
+      // Refuse partial clones even on Git versions that predate GIT_NO_LAZY_FETCH.
+      const config = read(["config", "--local", "--includes", "--name-only", "--null", "--list"]).split("\0");
+      if (config.some(entry => /^(?:extensions\.partialclone|remote\..*\.promisor)(?:\n|$)/i.test(entry))) {
+        throw new Error("staged tool source cannot read a promisor repository");
+      }
+      const commit = stagedCommit.toLowerCase();
+      const ref = `refs/leaf/changes/${changeSetId.toLowerCase()}`;
+      if (read(["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ref]) !== `${ref}\t${commit}\t\n`
+        || read(["cat-file", "-t", commit]) !== "commit\n") {
+        throw new Error("staged change ref does not name the requested commit");
+      }
+      const path = `tools/${slug}/tool.py`;
+      const entry = read(["ls-tree", "-z", "--full-tree", commit, "--", path]);
+      const match = /^(?:100644|100755) blob ([0-9a-f]{40})\t([^\0]+)\0$(?![\s\S])/.exec(entry);
+      if (!match || match[2] !== path) throw new Error("staged tool.py must be a regular Git blob");
+      const blob = match[1]!;
+      const rawSize = read(["cat-file", "-s", blob]);
+      const size = Number(rawSize);
+      if (!/^[0-9]+\n$(?![\s\S])/.test(rawSize) || !Number.isSafeInteger(size) || size > STAGED_SOURCE_BYTES) {
+        throw new Error("staged tool source exceeds the 256KiB bound");
+      }
+      const bytes = stagedGit(dir, ["cat-file", "blob", blob]);
+      if (bytes.length !== size) throw new Error("staged tool blob size changed");
+      checkLease();
+      return { bytes, commit, blob, sha256: createHash("sha256").update(bytes).digest("hex") };
+    });
   }
 
   /**

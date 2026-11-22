@@ -109,10 +109,11 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 # Keep audit backoff instrumentation local to this runner. Patching the shared
 # time module also patches subprocess's POSIX timeout wait, whose internal
@@ -1130,6 +1131,199 @@ def build_suites() -> List[Suite]:
         # 31 tests + 4 more parametrizations = 35.
         Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
+        Suite("server-x07-offline", "server X07 isolated role and customer profile checks",
+              "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
+                  "tests/test_x07_role_selection.py",
+                  "tests/test_x07_customer_profile_store.py", "tests/test_x07_role_discovery_failures.py",
+                  "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
+                  "tests/test_x07_profile_storage_failures.py", "tests/test_x07_profile_json_roundtrip.py",
+                  "tests/test_x07_workflow_recovery.py", "tests/test_x07_workflow_scope_matrix.py",
+                  "tests/test_x07_selection_metamorphic.py", "tests/test_x07_adapter_snapshot_isolation.py",
+                  "tests/test_x07_adapter_payload_failures.py", "tests/test_x07_process_restart_durability.py",
+                  "tests/test_x07_selection_duplicate_identity.py", "tests/test_x07_profile_schema_evolution.py",
+                  "tests/test_x07_profile_crash_atomicity.py", "tests/test_x07_role_label_collisions.py",
+                  "tests/test_x07_selection_numeric_limits.py", "tests/test_x07_schema_init_races.py",
+                  "tests/test_x07_schema_semantic_tampering.py", "tests/test_x07_role_json_size_boundaries.py",
+                  "tests/test_x07_profile_sqlite_full.py", "tests/test_x07_profile_backup_restore.py",
+                  "tests/test_x07_scope_key_collisions.py", "tests/test_x07_drawing_revision_replay.py",
+                  "tests/test_x07_persisted_payload_corruption.py", "tests/test_x07_profile_readonly_store.py",
+                  "tests/test_x07_optional_role_compatibility.py", "tests/test_x07_confirmation_receipt_loss.py",
+                  "tests/test_x07_wal_reader_writer.py", "tests/test_x07_intake_budgets.py",
+                  "tests/test_x07_persisted_pin_corruption.py",
+                  "tests/test_x07_receipt_commit_gap.py", "tests/test_x07_receipt_retry_races.py",
+                  "tests/test_x07_receipt_journal_corruption.py",
+                  "tests/test_x07_receipt_restore_divergence.py", "tests/test_x07_receipt_readonly_replay.py",
+                  "tests/test_x07_receipt_request_identity.py",
+                  "tests/test_x07_receipt_sqlite_full.py", "tests/test_x07_receipt_schema_init_races.py",
+                  "tests/test_x07_store_path_aliasing.py", "tests/test_x07_offline_acceptance_report.py",
+                  "tests/test_x07_source_receipts.py", "tests/test_x07_receipt_scope_namespace.py",
+                  "tests/test_x07_receipt_lock_recovery.py", "tests/test_x07_wal_checkpoint_interruption.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_step_identity.py").as_posix(),
+                  "tests/test_x07_report_cli_integrity.py", "tests/test_x07_report_output_aliases.py",
+                  "tests/test_x07_selection_reflection_oracle.py", "tests/test_x07_store_vacuum_retention.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_encoding_failures.py").as_posix(),
+                  "tests/test_x07_report_json_budgets.py", "tests/test_x07_backup_active_transaction.py",
+                  "tests/test_x07_selection_scale_oracle.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_concurrent_publish.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_numeric_tokens.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_error_disclosure.py").as_posix(),
+                  "tests/test_x07_selection_partition_oracle.py", "tests/test_x07_discovery_order_oracle.py",
+                  "tests/test_x07_receipt_same_scope_tampering.py", "tests/test_x07_hot_journal_recovery.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_path_identity.py").as_posix(),
+                  "tests/test_x07_store_interrupt_rollback.py", "tests/test_x07_report_proof_budget.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_proof_order.py").as_posix(),
+                  "tests/test_x07_receipt_trigger_tampering.py", "tests/test_x07_commit_authorizer_refusal.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_link_retarget.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_receipt_mutation.py").as_posix(),
+                  "tests/test_x07_receipt_wal_snapshot.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_source_inventory_closure.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_failure_truth_table.py").as_posix(),
+                  "tests/test_x07_discovery_selection_agreement.py", "tests/test_x07_store_outer_transaction.py",
+                  "tests/test_x07_receipt_commit_authorizer.py", "tests/test_x07_model_based_histories.py",
+                  "tests/test_x07_sqlite_length_limits.py", "tests/test_x07_store_query_order.py",
+                  "tests/test_x07_receipt_schema_authorizer.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_closed_stdout.py").as_posix(),
+                  "tests/test_x07_receipt_backup_pending.py", "tests/test_x07_selection_nested_windows.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_report_special_files.py").as_posix(),
+                  "tests/test_x07_store_generation_swap.py", "tests/test_x07_store_io_errors.py",
+                  "tests/test_x07_embedded_nul_keys.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_history_reducer.py").as_posix(),
+                  "tests/test_x07_store_foreign_key_modes.py", "tests/test_x07_schema_column_limits.py",
+                  "tests/test_x07_sqlite_read_uncommitted.py", "tests/test_x07_connection_row_factories.py",
+                  "tests/test_x07_sqlite_variable_limits.py",
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_version_diff.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_oracle_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_minimality.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_metamorphic.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_cli_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_numeric_identity.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_repeated_commands.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_publication.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_special_files.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_concurrent_publish.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_hashseed_replay.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_wal_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_unicode_labels.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_oracle_mutation.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_input_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_publish_crash.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_reconstruction.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_hashseed.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_path_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_windows_metadata.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_output_aliases.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_reducer_encoding_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_version_diff_interrupt.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_history_audit.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_wal_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_row_limits.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_query_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_order_invariance.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_pin_types.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_scope_noninterference.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_payload_blindness.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_cli_arguments.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_workflow_journey.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_version_types.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_hashseed.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_schema_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_path_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_backup_restore.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_diff_consistency.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_lock_recovery.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_connection_policy.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_special_files.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_scope_key_identity.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_gap_output_budget.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_no_write_authorizer.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_profile_change_impact.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_history_audit.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_outer_transaction.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_shadow_tables.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_measurements.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_pin_value_oracle.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_wal_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_foreign_budget.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_json_budgets.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_interrupt.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_duplicate_keys.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_restore_generations.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_cross_store_snapshot.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_foreign_noninterference.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_query_interrupt.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_audit_composed_histories.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_lock_recovery.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_outer_transactions.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_shadow_tables.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_hashseed.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_row_boundaries.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_receipt_audit_perf.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_connection_policy.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_row_boundaries.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_cli_arguments.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_no_write_authorizer.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_encoding.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_tool_cli_arguments.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_lock_recovery.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_outer_transactions.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_shadow_tables.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_numeric_identity.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_query_order.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_receipt_resource_soak.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_schema_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_path_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_special_files.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_scope_key_identity.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_query_plan.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_jsx_journey.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_total_bytes.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_sqlite_limits.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_physical_corruption.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_wal_sidecars.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_schema_drift.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_stdout_encoding.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_file_swap.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_hot_journal.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_storage_classes.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_receipt_audit_output_budget.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_impact_schema_drift.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_jsx_failure_capsule.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_source_revalidation.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_early_parent_exit.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_stream_caps.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_preflight_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_output_race.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_replay_guide.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_publication_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_stream_encoding.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_check_confinement.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_numeric_arguments.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_measurements.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_bridge_worker_imports.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_interrupt_cleanup.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_reader_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_closed_stdout.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_concurrent_isolation.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_publication_crash.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_working_directory.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_json.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_budgets.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_integrity.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_schema.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_paths.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_encoding.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_file_swap.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_growth.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_io_failures.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_source.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_perf.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_capsule_consumer_portability.py").as_posix(),
+                  (Path("..") / "tools" / "xbench" / "tests" / "test_x07_role_product_journeys.py").as_posix()], 432,
+              allowed_skip_reasons=(r"X07 actual JSX dependency set unavailable on this host; Node-prepared replay required",)),
         # W5 Rooftop workflow flow (2026-09-24, contracts G34/G34a/G34b): server/solar_workflow_flow.py,
         # the pure progression engine (every step's CanAdvance and HasDrawingPrerequisites, the L1/L2
         # gates on the host's setting, AdvanceStep, GoBack and NavigateToStep Stale marking over the
@@ -1277,6 +1471,10 @@ def build_suites() -> List[Suite]:
         Suite("server-demo-sessions", "server demo identity and dark route boundaries", "pytest",
               # LD1a's boundary matrix plus LD1d2's three W1 route contracts.
               SERVER, _py_pytest("tests/test_demo_sessions.py"), 271),
+        Suite("server-investor-demo", "server staging investor identity and route boundaries", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo.py"), 29),
+        Suite("server-investor-demo-postgres", "server investor workspace provisioning and revocation", "pytest",
+              SERVER, _py_pytest("tests/test_investor_demo_postgres.py"), 9, db_gated=True),
         Suite("server-demo-policy", "server local W1 demo execution policy", "pytest",
               SERVER, _py_pytest("tests/test_demo_policy.py"), 27),
         Suite("server-demo-sessions-postgres", "server durable demo mint races", "pytest",
@@ -1385,6 +1583,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        Suite("server-agent-gate-build-plan", "server tests/test_agent_gate_build_plan.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_gate_build_plan.py"), 33),
         # TCM-04 cost transparency: tenant direct use and the aps:engine usage
         # observation. Hermetic (fixture rows, tmp_path marathon runs), exact count.
         Suite("server-cost-direct-use", "server tests/test_cost_direct_use.py", "pytest", SERVER,
@@ -1434,6 +1634,8 @@ def build_suites() -> List[Suite]:
               # ELAPSED lease, pinned in both states. Nothing here skips, so the
               # local count IS the CI count.
               _py_pytest("tests/test_context_packet.py"), 17),
+        Suite("server-inline-authoring-context-packet", "server tests/test_context_packet_inline_authoring.py", "pytest", SERVER,
+              _py_pytest("tests/test_context_packet_inline_authoring.py"), 8),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
@@ -1456,7 +1658,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_activation.py"), 49, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_surface.py"), 36),
+              _py_pytest("tests/test_lab_surface.py") + ["tests/test_lab_corpus_recovery.py"], 36),
+        Suite("server-estimator-handoff", "server tests/test_estimator_handoff.py", "pytest", SERVER,
+              _py_pytest("tests/test_estimator_handoff.py"), 35),
+        Suite("server-estimator-surface", "server tests/test_estimator_surface.py", "pytest", SERVER,
+              _py_pytest("tests/test_estimator_surface.py"), 38),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
@@ -1573,6 +1779,8 @@ def build_suites() -> List[Suite]:
         # store + uploads staging dirs (isolated per-test via tmp_path).
         Suite("server-guest-uploads", "server tests/test_guest_uploads.py", "pytest", SERVER,
               _py_pytest("tests/test_guest_uploads.py"), 70),
+        Suite("server-upload-extraction-concurrency", "server tests/test_x04_extraction_concurrency.py",
+              "pytest", SERVER, _py_pytest("tests/test_x04_extraction_concurrency.py"), 7),
         # The APS-free DWG read lane (dwg2dxf -> dxf_intake) + engine toggle.
         # FIVE real-binary tests run wherever their tools are installed (the app
         # container ships them; see deploy/Dockerfile.app) and skip with these
@@ -1746,8 +1954,265 @@ def build_suites() -> List[Suite]:
         # capabilities, dependency-free.
         Suite("server-appbundle-activity-spec", "server tests/test_appbundle_activity_spec.py",
               "pytest", SERVER, _py_pytest("tests/test_appbundle_activity_spec.py"), 7),
-        Suite("server-dxf-intake-lines-text", "server tests/test_dxf_intake_lines_text.py",
-              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py"), 4),
+        # X04 generic module counting and dependency replay, synthetic and offline.
+        Suite("server-x04-intake-selection", "server X04 module and dependency replay", "pytest", SERVER,
+              _py_pytest("tests/test_count_modules.py") + [
+                  "tests/test_drawing_dependency_report.py",
+                  "tests/test_x04_candidate_metadata_types.py",
+                  "tests/test_x04_count_differential.py",
+                  "tests/test_x04_count_json_roundtrip.py",
+                  "tests/test_x04_count_precision_boundary.py",
+                  "tests/test_x04_cross_kind_handle_conflicts.py",
+                  "tests/test_x04_dependency_control_characters.py",
+                  "tests/test_x04_dependency_flag_contract.py",
+                  "tests/test_x04_dependency_network_isolation.py",
+                  "tests/test_x04_dependency_record_boundaries.py",
+                  "tests/test_x04_dependency_replay_schema.py",
+                  "tests/test_x04_dependency_section_boundaries.py",
+                  "tests/test_x04_dependency_unicode_identity.py",
+                  "tests/test_x04_empty_drawing_replay.py",
+                  "tests/test_x04_handle_hex_identity.py",
+                  "tests/test_x04_handleless_identity.py",
+                  "tests/test_x04_hashseed_determinism.py",
+                  "tests/test_x04_intake_selection_e2e.py",
+                  "tests/test_x04_irrelevant_record_invariance.py",
+                  "tests/test_x04_minsert_arrays.py",
+                  "tests/test_x04_module_selection_failures.py",
+                  "tests/test_x04_optimized_validation.py",
+                  "tests/test_x04_original_byte_encodings.py",
+                  "tests/test_x04_original_bytes_replay.py",
+                  "tests/test_x04_parallel_replay.py",
+                  "tests/test_x04_polygon_numeric_limits.py",
+                  "tests/test_x04_polygon_planarity.py",
+                  "tests/test_x04_polygon_topology.py",
+                  "tests/test_x04_polygon_vertex_cycles.py",
+                  "tests/test_x04_polyline_curve_fields.py",
+                  "tests/test_x04_replay_extension_fields.py",
+                  "tests/test_x04_replay_schema_failures.py",
+                  "tests/test_x04_saved_byte_integrity.py",
+                  "tests/test_x04_saved_intake_replay.py",
+                  "tests/test_x04_selection_argument_contract.py",
+                  "tests/test_x04_selection_drawing_isolation.py",
+                  "tests/test_x04_selection_envelope_consistency.py",
+                  "tests/test_x04_selection_failure_recovery.py",
+                  "tests/test_x04_selector_type_failures.py",
+                  "tests/test_x04_set_identity_collisions.py",
+                  "tests/test_x04_space_layout_types.py",
+                  "tests/test_x04_polyline_closed_flags.py",
+                  "tests/test_x04_polygon_affine_invariance.py",
+                  "tests/test_x04_dependency_duplicate_conflicts.py",
+                  "tests/test_x04_untrusted_derived_counts.py",
+                  "tests/test_x04_bigfont_dependencies.py",
+                  "tests/test_x04_overlay_replay_consistency.py",
+                  "tests/test_x04_intake_truncation_recovery.py",
+                  "tests/test_x04_export_atomic_failures.py",
+                  "tests/test_x04_evidence_cli_json_boundaries.py",
+                  "tests/test_x04_evidence_claim_tampering.py",
+                  "tests/test_x04_evidence_cli_streams.py",
+                  "tests/test_x04_evidence_path_aliases.py",
+                  "tests/test_x04_evidence_concurrent_writers.py",
+                  "tests/test_x04_evidence_extension_policy.py",
+                  "tests/test_x04_evidence_broken_pipe.py",
+                  "tests/test_x04_evidence_nesting_limits.py",
+                  "tests/test_x04_evidence_scalar_type_confusion.py",
+                  "tests/test_x04_evidence_encoding_boundaries.py",
+                  "tests/test_x04_evidence_destination_types.py",
+                  "tests/test_x04_evidence_stdin_pipeline.py",
+                  "tests/test_x04_evidence_integer_token_limits.py",
+                  "tests/test_x04_evidence_input_budget.py",
+                  "tests/test_x04_evidence_cli_argument_contract.py",
+                  "tests/test_x04_evidence_short_reads.py",
+                  "tests/test_x04_evidence_stdout_flush.py",
+                  "tests/test_x04_evidence_diagnostic_injection.py",
+                  "tests/test_x04_evidence_export_fixed_point.py",
+                  "tests/test_x04_evidence_output_budget.py",
+                  "tests/test_x04_evidence_short_writes.py",
+                  "tests/test_x04_evidence_input_size_races.py",
+                  "tests/test_x04_evidence_seeded_mutations.py",
+                  "tests/test_x04_evidence_registry_failures.py",
+                  "tests/test_x04_evidence_file_finalization.py",
+                  "tests/test_x04_evidence_cancel_cleanup.py",
+                  "tests/test_x04_evidence_early_output_refusal.py",
+                  "tests/test_x04_evidence_temp_short_writes.py",
+                  "tests/test_x04_evidence_cleanup_failures.py",
+                  "tests/test_x04_evidence_absent_stdin.py",
+                  "tests/test_x04_evidence_ascii_locale.py",
+                  "tests/test_x04_evidence_compare.py",
+                  "tests/test_x04_evidence_batch.py",
+                  "tests/test_x04_evidence_equivalent_json_spellings.py",
+                  "tests/test_x04_comparison_delta_algebra.py",
+                  "tests/test_x04_review_path_aliases.py",
+                  "tests/test_x04_batch_occurrence_order.py",
+                  "tests/test_x04_comparison_stdin_budgets.py",
+                  "tests/test_x04_comparison_forged_sides.py",
+                  "tests/test_x04_batch_input_budget_isolation.py",
+                  "tests/test_x04_review_publication_failures.py",
+                  "tests/test_x04_comparison_dependency_row_deltas.py",
+                  "tests/test_x04_review_argument_contract.py",
+                  "tests/test_x04_batch_cancellation.py",
+                  "tests/test_x04_comparison_semantic_scope.py",
+                  "tests/test_x04_batch_terminal_boundaries.py",
+                  "tests/test_x04_batch_repeated_path_changes.py",
+                  "tests/test_x04_comparison_cancellation.py",
+                  "tests/test_x04_review_strict_json.py",
+                  "tests/test_x04_review_concurrent_budgets.py",
+                  "tests/test_x04_review_subprocess_chain.py",
+                  "tests/test_x04_review_hashseed_determinism.py",
+                  "tests/test_x04_batch_read_fault_isolation.py",
+                  "tests/test_x04_comparison_three_way_laws.py",
+                  "tests/test_x04_review_concurrent_writers.py",
+                  "tests/test_x04_review_optimized_python.py",
+                  "tests/test_x04_cross_tool_schema_confusion.py",
+                  "tests/test_x04_batch_permutation_law.py",
+                  "tests/test_x04_comparison_selection_only_deltas.py",
+                  "tests/test_x04_review_encoding_boundaries.py",
+                  "tests/test_x04_review_literal_operands.py",
+                  "tests/test_x04_review_destination_types.py",
+                  "tests/test_x04_comparison_report_contract.py",
+                  "tests/test_x04_batch_report_contract.py",
+                  "tests/test_x04_review_report_cli_boundaries.py",
+                  "tests/test_x04_report_validator_subprocess_chain.py",
+                  "tests/test_x04_report_validator_extension_scope.py",
+                  "tests/test_x04_report_validator_publication_interrupts.py",
+                  "tests/test_x04_report_validator_metamorphic.py",
+                  "tests/test_x04_report_validator_runtime_modes.py",
+                  "tests/test_x04_report_validator_alias_matrix.py",
+                  "tests/test_x04_report_validator_concurrent_limits.py",
+                  "tests/test_x04_report_validator_stream_faults.py",
+                  "tests/test_x04_report_validator_arguments.py",
+                  "tests/test_x04_report_validator_writer_races.py",
+                  "tests/test_x04_report_validator_missing_stdin.py",
+                  "tests/test_x04_report_validator_diagnostic_controls.py",
+                  "tests/test_x04_packet_cross_binding.py",
+                  "tests/test_x04_packet_reference_failures.py",
+                  "tests/test_x04_packet_replay_chain.py",
+                  "tests/test_x04_packet_json_limits.py",
+                  "tests/test_x04_packet_publication_faults.py",
+                  "tests/test_x04_packet_reference_metamorphic.py",
+                  "tests/test_x04_packet_runtime_modes.py",
+                  "tests/test_x04_packet_argument_aliases.py",
+                  "tests/test_x04_packet_schema_type_matrix.py",
+                  "tests/test_x04_packet_parallel_isolation.py",
+                  "tests/test_x04_packet_stream_recovery.py",
+                  "tests/test_x04_packet_validated_cache.py",
+                  "tests/test_x04_packet_selection_only_binding.py",
+                  "tests/test_x04_packet_dependency_only_binding.py",
+                  "tests/test_x04_packet_failed_batch_binding.py",
+                  "tests/test_x04_packet_output_independence.py",
+                  "tests/test_x04_packet_assembly.py",
+                  "tests/test_x04_packet_multiple_drawings.py",
+                  "tests/test_x04_packet_comparison_chain.py",
+                  "tests/test_x04_packet_equal_payload_ids.py",
+                  "tests/test_x04_assembly_manifest_types.py",
+                  "tests/test_x04_assembly_byte_boundaries.py",
+                  "tests/test_x04_assembly_read_faults.py",
+                  "tests/test_x04_assembly_relocation.py",
+                  "tests/test_x04_assembly_total_budget.py",
+                  "tests/test_x04_assembly_concurrent_writers.py",
+                  "tests/test_x04_assembly_source_churn.py",
+                  "tests/test_x04_assembly_encoding_boundaries.py",
+                  "tests/test_x04_assembly_path_contract.py",
+                  "tests/test_x04_assembly_arguments.py",
+                  "tests/test_x04_assembly_nesting_limits.py",
+                  "tests/test_x04_assembly_destination_types.py",
+                  "tests/test_x04_assembly_runtime_modes.py",
+                  "tests/test_x04_assembly_concurrent_budgets.py",
+                  "tests/test_x04_assembly_diagnostic_controls.py",
+                  "tests/test_x04_assembly_manifest_metamorphic.py",
+                  "tests/test_x04_assembly_source_role_confusion.py",
+                  "tests/test_x04_assembly_source_pins.py",
+                  "tests/test_x04_assembly_publication_faults.py",
+                  "tests/test_x04_assembly_output_budget.py",
+                  "tests/test_x04_assembly_alias_matrix.py",
+                  "tests/test_x04_assembly_repeated_path_pins.py",
+                  "tests/test_x04_assembly_pin_call_isolation.py",
+                  "tests/test_x04_assembly_pinned_forgery.py",
+                  "tests/test_x04_assembly_pin_failure_precedence.py",
+                  "tests/test_x04_assembly_manifest_pin.py",
+                  "tests/test_x04_assembly_hash_cancellation.py",
+                  "tests/test_x04_assembly_misplaced_pins.py",
+                  "tests/test_x04_pinned_assembly_portability.py",
+                  "tests/test_x04_assembly_required_pins.py",
+                  "tests/test_x04_assembly_manifest_pin_isolation.py",
+                  "tests/test_x04_assembly_manifest_redirect_pins.py",
+                  "tests/test_x04_manifest_pin_runtime_matrix.py",
+                  "tests/test_x04_packet_pin.py",
+                  "tests/test_x04_packet_pin_read_races.py",
+                  "tests/test_x04_packet_pin_semantic_refusal.py",
+                  "tests/test_x04_packet_pin_call_isolation.py",
+                  "tests/test_x04_packet_hash_cancellation.py",
+                  "tests/test_x04_packet_pin_failure_precedence.py",
+                  "tests/test_x04_full_pin_chain_replay.py",
+                  "tests/test_x04_packet_pin_serialization_matrix.py",
+                  "tests/test_x04_report_pin.py",
+                  "tests/test_x04_report_pin_semantic_refusal.py",
+                  "tests/test_x04_report_pin_read_races.py",
+                  "tests/test_x04_report_pin_isolation.py",
+                  "tests/test_x04_report_pin_hash_cancellation.py",
+                  "tests/test_x04_report_pin_failure_precedence.py",
+                  "tests/test_x04_report_pin_serialization_matrix.py",
+                  "tests/test_x04_report_pin_packet_handoff.py",
+                  "tests/test_x04_report_schema_guard_boundaries.py",
+                  "tests/test_x04_report_schema_guard_pin_order.py",
+                  "tests/test_x04_report_schema_guard_isolation.py",
+                  "tests/test_x04_schema_guard_serializations.py",
+                  "tests/test_x04_schema_guard_runtime_matrix.py",
+                  "tests/test_x04_schema_guard_read_races.py",
+                  "tests/test_x04_schema_guard_packet_handoff.py",
+                  "tests/test_x04_expected_drawing_boundaries.py",
+                  "tests/test_x04_expected_drawing_literal_identity.py",
+                  "tests/test_x04_expected_drawing_failure_order.py",
+                  "tests/test_x04_expected_drawing_serializations.py",
+                  "tests/test_x04_expected_drawing_runtime_matrix.py",
+                  "tests/test_x04_expected_drawing_read_races.py",
+                  "tests/test_x04_expected_drawing_call_isolation.py",
+                  "tests/test_x04_artifact_pin_boundaries.py",
+                  "tests/test_x04_artifact_pin_failure_order.py",
+                  "tests/test_x04_artifact_pin_buffer_binding.py",
+                  "tests/test_x04_artifact_pin_cancellation.py",
+                  "tests/test_x04_artifact_pin_serializations.py",
+                  "tests/test_x04_artifact_pin_runtime_matrix.py",
+                  "tests/test_x04_artifact_pin_call_isolation.py",
+                  "tests/test_x04_packet_inventory_arguments.py",
+                  "tests/test_x04_packet_inventory_substitution.py",
+                  "tests/test_x04_packet_inventory_precedence.py",
+                  "tests/test_x04_packet_inventory_serializations.py",
+                  "tests/test_x04_packet_inventory_runtime_matrix.py",
+                  "tests/test_x04_packet_inventory_read_races.py",
+                  "tests/test_x04_packet_inventory_call_isolation.py",
+                  "tests/test_x04_report_inventory.py",
+                  "tests/test_x04_report_inventory_arguments.py",
+                  "tests/test_x04_report_inventory_substitution.py",
+                  "tests/test_x04_report_inventory_precedence.py",
+                  "tests/test_x04_report_inventory_serializations.py",
+                  "tests/test_x04_report_inventory_runtime_matrix.py",
+                  "tests/test_x04_report_inventory_read_races.py",
+                  "tests/test_x04_report_inventory_call_isolation.py",
+                  "tests/test_x04_packet_drawing_arguments.py",
+                  "tests/test_x04_packet_drawing_substitution.py",
+                  "tests/test_x04_packet_drawing_precedence.py",
+                  "tests/test_x04_packet_drawing_serializations.py",
+                  "tests/test_x04_packet_drawing_runtime_matrix.py",
+                  "tests/test_x04_packet_drawing_read_races.py",
+                  "tests/test_x04_packet_drawing_call_isolation.py",
+                  "tests/test_x04_operand_binding_arguments.py",
+                  "tests/test_x04_operand_binding_substitution.py",
+                  "tests/test_x04_operand_binding_precedence.py",
+              ], 1934),
+        Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
+              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
+                  "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
+                  "tests/test_x03_joined_spline_author.py",
+                  "tests/test_x03_oblique_spline_author.py",
+                  "tests/test_x03_periodic_spline_author.py", "tests/test_x03_clip_holes_author.py",
+                  "tests/test_x03_clip_components_author.py", "tests/test_x03_clip_empty_author.py", "tests/test_x03_clip_cache_author.py", "tests/test_x03_clip_collinear_author.py", "tests/test_x03_clip_origin_author.py", "tests/test_x03_oblique_clip_author.py", "tests/test_x03_clip_exclusion_union_author.py", "tests/test_x03_clip_regroup_author.py", "tests/test_x03_viewport_panel_author.py", "tests/test_x03_reflected_clip_author.py", "tests/test_x03_clip_contact_author.py", "tests/test_x03_spline_poles_author.py", "tests/test_x03_spline_cusp_author.py", "tests/test_x03_spline_fit_only_author.py", "tests/test_x03_spline_degree_author.py", "tests/test_x03_spline_weight_scale_author.py", "tests/test_x03_spline_shear_author.py", "tests/test_x03_spline_units_author.py", "tests/test_x03_spline_subdivision_author.py", "tests/test_x03_spline_budget_author.py", "tests/test_x03_reversed_spline_author.py", "tests/test_x03_spline_refinement_author.py", "tests/test_x03_spline_parameter_author.py", "tests/test_x03_coincident_beam_author.py", "tests/test_x03_large_coordinate_author.py", "tests/test_x03_discontinuous_spline_author.py", "tests/test_x03_clip_budget_author.py", "tests/test_x03_clipped_area_author.py", "tests/test_x03_state_clip_author.py", "tests/test_x03_clipped_block_author.py", "tests/test_x03_dynamic_visibility_author.py", "tests/test_x03_aisle_detour_author.py",
+                  "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
+                  "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py",
+                  "tests/test_x03_multibundle_author.py", "tests/test_x03_instance_openings_author.py",
+                  "tests/test_x03_stepped_clearance_author.py",
+              ], 91),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
         # fail-closed legs, and the browser-edited version write-back (card
@@ -1760,6 +2225,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"could not import 'ezdxf': .*",)),
         Suite("server-drawing-dxf-route", "server tests/test_drawing_dxf_route.py", "pytest", SERVER,
               _py_pytest("tests/test_drawing_dxf_route.py"), 10),
+        Suite("server-drawing-plan-grammar", "server tests/test_drawing_plan_grammar.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_plan_grammar.py"), 12),
         Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_edited_version.py"), 9),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
@@ -1845,7 +2312,7 @@ def build_suites() -> List[Suite]:
         Suite("server-w4g7c-03s", "server tests/test_w4g7c_03s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7c_03s.py"), 37),
         Suite("server-w4g7b-01s", "server tests/test_w4g7b_01s.py", "pytest", SERVER,
-              _py_pytest("tests/test_w4g7b_01s.py"), 49),
+              [*_py_pytest("tests/test_w4g7b_01s.py"), "tests/test_x04_anonymous_block_intake.py"], 58),
         Suite("server-w4g7b-02s", "server tests/test_w4g7b_02s.py", "pytest", SERVER,
               _py_pytest("tests/test_w4g7b_02s.py"), 64,
               allowed_skip_reasons=(r"no AutoCAD console found; .+",)),
@@ -1869,6 +2336,9 @@ def build_suites() -> List[Suite]:
         Suite("server-mutation-contract-v2",
               "server tests/test_mutation_contract_v2.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_contract_v2.py"), 42),
+        Suite("server-plan-conformance-corpus",
+              "server tests/test_plan_conformance_corpus.py", "pytest", SERVER,
+              _py_pytest("tests/test_plan_conformance_corpus.py"), 52),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),
@@ -2486,7 +2956,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
-              SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),
+              SERVER, _py_pytest("tests/test_customization_stage_recovery.py")
+              + ["tests/test_c02_same_job_recovery.py"], 55),
         Suite("server-platform-release-policy", "server platform release policy", "pytest",
               SERVER, _py_pytest("tests/test_platform_release_policy.py"), 14),
         # --- operator control plane (cwd=server): each file its OWN process --- #
@@ -2943,6 +3414,9 @@ def build_suites() -> List[Suite]:
         # Staging audience (P-178): 14 offline plan/apply tests, no network.
         Suite("auth0-staging-audience-check", "scripts test_auth0_staging_audience.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_auth0_staging_audience.py"), 14),
+        Suite("scripts-investor-demo-link", "staging investor link provisioning and rotation",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_investor_demo_link.py"), 11 if os.name == "nt" else 10,
+              allowed_skip_reasons=(r"Windows file ACLs require Windows",)),
         # 33 cases: 19 original functions (27 parametrized cases), plus three
         # dry-run plans, two digest round trips and the CI deploy contract. No network.
         Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",
@@ -3312,6 +3786,11 @@ def build_suites() -> List[Suite]:
                   # B-C6 conversation e2e: Postgres-gated (needs a live
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
+                  # SBT-A compile gate: four real-binary parity cases need a
+                  # built Branch checker (LEAF_BRANCH_COMPILE_BIN/REFS). The
+                  # harness image build runs the same four packages against the
+                  # Windows goldens and fails on any mismatch.
+                  ("test/branchCompileCheck.test.ts", 4),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
@@ -3729,6 +4208,11 @@ def build_suites() -> List[Suite]:
         Suite("server-project-drawing-write", "server C01 project drawing.write producer on a private PostgreSQL project", "pytest", SERVER,
               _unprivileged_pytest("tests/test_project_drawing_write.py"), 9,
               uses_database=True, db_gated=True),
+        Suite("server-project-string-tags", "server project string tags on a private PostgreSQL project", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_project_string_tags.py"), 48,
+              uses_database=True, db_gated=True),
+        Suite("server-solar-string-tags", "server tests/test_solar_string_tags.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_string_tags.py"), 82),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
@@ -3803,9 +4287,19 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_integration_turn_grant_lifecycle.py"), 1),
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
-              + ["tests/test_integration_tool_routes.py"], 30),
+              + ["tests/test_integration_tool_routes.py", "tests/test_x03_material_provenance.py",
+                 "tests/test_x03_action_discovery.py", "tests/test_x03_action_discovery_author.py", "tests/test_x03_material_selection_author.py",
+                  "tests/test_x03_material_revision_author.py",
+                  "tests/test_x03_material_array_diff_author.py",
+                  "tests/test_x03_material_three_way_author.py", "tests/test_x03_dataset_page_alias_author.py", "tests/test_x03_dataset_schema_drift_author.py", "tests/test_x03_dataset_projection_author.py", "tests/test_x03_dataset_sort_null_author.py", "tests/test_x03_dataset_filter_author.py", "tests/test_x03_dataset_cursor_budget_author.py", "tests/test_x03_dataset_page_budget_author.py", "tests/test_x03_dataset_sort_ties_author.py", "tests/test_x03_dataset_cancel_author.py", "tests/test_x03_dataset_late_failure_author.py", "tests/test_x03_dataset_empty_page_author.py", "tests/test_x03_dataset_cursor_binding_author.py", "tests/test_x03_dataset_identity_author.py", "tests/test_x03_dataset_snapshot_author.py",
+                  "tests/test_x03_material_import_budget_author.py", "tests/test_x03_material_test_equality_author.py", "tests/test_x03_material_root_replace_author.py", "tests/test_x03_material_duplicate_keys_author.py", "tests/test_x03_material_pointer_decode_author.py", "tests/test_x03_material_index_author.py", "tests/test_x03_material_patch_budget_author.py", "tests/test_x03_material_move_cycle_author.py", "tests/test_x03_material_patch_guard_author.py", "tests/test_x03_material_copy_isolation_author.py", "tests/test_x03_material_patch_order_author.py", "tests/test_x03_material_numeric_author.py", "tests/test_x03_material_unicode_author.py", "tests/test_x03_material_null_author.py", "tests/test_x03_action_dynamic_refs_author.py", "tests/test_x03_action_annotations_author.py", "tests/test_x03_action_regex_budget_author.py", "tests/test_x03_action_dialect_author.py", "tests/test_x03_action_property_names_author.py", "tests/test_x03_action_dependent_schemas_author.py", "tests/test_x03_action_branch_budget_author.py", "tests/test_x03_action_unevaluated_items_author.py", "tests/test_x03_action_unevaluated_author.py", "tests/test_x03_action_string_length_author.py", "tests/test_x03_action_boolean_schema_author.py", "tests/test_x03_action_enum_author.py", "tests/test_x03_action_pattern_author.py", "tests/test_x03_action_decimal_schema_author.py", "tests/test_x03_action_array_schema_author.py", "tests/test_x03_action_conditional_author.py", "tests/test_x03_action_refs_author.py", "tests/test_x03_action_combinator_author.py", "tests/test_x03_action_extra_fields_author.py", "tests/test_x03_action_schema_author.py", "tests/test_x03_action_revocation_author.py", "tests/test_x03_role_action_author.py", "tests/test_x03_project_dataset_discovery.py",
+                 "tests/test_x03_dataset_discovery_author.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
-              _py_pytest("tests/test_integration_element_save.py"), 1),
+              _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py", "tests/test_x03_recipe_edit_author.py",
+                  "tests/test_x03_batch_recipe_author.py",
+                  "tests/test_x03_recipe_retry_author.py",
+                  "tests/test_x03_recipe_aba_author.py",
+                  "tests/test_x03_recipe_journal_swap_author.py", "tests/test_x03_recipe_journal_binding_author.py", "tests/test_x03_recipe_journal_budget_author.py", "tests/test_x03_recipe_journal_version_author.py", "tests/test_x03_recipe_recovery_access_author.py", "tests/test_x03_recipe_key_order_author.py", "tests/test_x03_recipe_retry_scope_author.py", "tests/test_x03_recipe_journal_corruption_author.py", "tests/test_x03_recipe_restart_author.py", "tests/test_x03_recipe_precommit_author.py", "tests/test_x03_recipe_delete_race_author.py", "tests/test_x03_recipe_key_collision_author.py", "tests/test_x03_recipe_concurrent_author.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
               _py_pytest("tests/test_integration_browser.py"), 51),
         Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
@@ -3871,6 +4365,24 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-tool-envelopes", "server tests/test_tool_envelopes.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_envelopes.py"), 14),
+        Suite("server-branch-package-check", "server tests/test_branch_package_check.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_package_check.py"), 35),
+        Suite("server-branch-dev-publish", "server tests/test_branch_dev_publish.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_dev_publish.py"), 40),
+        Suite("server-build-plan", "server tests/test_build_plan.py", "pytest", SERVER, _py_pytest("tests/test_build_plan.py"), 40),
+        Suite("server-inline-authoring-flags", "server tests/test_inline_authoring_flags.py", "pytest", SERVER, _py_pytest("tests/test_inline_authoring_flags.py"), 40),
+        Suite("server-customization-branch-target", "server tests/test_customization_branch_target.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_branch_target.py"), 40),
+        Suite("server-customization-inline-review", "server tests/test_customization_inline_review.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_inline_review.py"), 36),
+        Suite("server-customization-stage-status-inline", "server tests/test_customization_stage_status_inline.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_stage_status_inline.py"), 46),
+        Suite("server-customization-tool-target-store", "server tests/test_customization_tool_target_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_tool_target_store.py"), 20),
+        Suite("server-branch-dev-catalog", "server tests/test_branch_dev_catalog.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_dev_catalog.py"), 13),
+        Suite("server-branch-sync-receipts", "server tests/test_branch_sync_receipts.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_sync_receipts.py"), 37),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
@@ -3940,9 +4452,9 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               # Isolated test contexts use 3 workers on the same CI device;
+               # Isolated test contexts use 2 workers on the same CI device;
                # other suites retain their own worker limits.
-               "--workers=3"], None),
+               "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
@@ -5070,6 +5582,15 @@ AUDIT_SUBPROCESS_TIMEOUT_S = 90                # hard safety net if npm ignores 
 AUDIT_WORST_CASE_WALL_S = (AUDIT_MAX_ATTEMPTS * AUDIT_SUBPROCESS_TIMEOUT_S
                            + sum(AUDIT_BACKOFF_S))  # == 350
 AUDIT_ADVISORY_ENDPOINT = "registry.npmjs.org/-/npm/v1/security/advisories/bulk"
+# Operator, 2026-11-17 about 12:20 PM CT, relayed by orchestrator 61e6960b: 'yes approve the 14 day exception'. Approved scope: GHSA-fc5q-39xc-vjpf only, in harness-audit-high only, expires 2026-12-01 or when a patched picomatch publishes (whichever first); production high findings stay enforced.
+# remove this entry when a patched picomatch publishes (bump the lock instead) or on expiry
+AUDIT_ADVISORY_EXCEPTIONS = {
+    "GHSA-fc5q-39xc-vjpf": {
+        "expires": "2026-12-01",
+        "reason": "picomatch ReDoS, no patched release; dev-only test toolchain",
+        "approval": "operator 2026-11-17: 'yes approve the 14 day exception'",
+    },
+}
 # Real reason phrases npm itself prints next to a 5xx transport failure. Used
 # ONLY as a same-LINE co-occurrence check (see _audit_transport_signal) —
 # never a whole-blob substring test — specifically so this can never fire on
@@ -5123,8 +5644,81 @@ def _audit_transport_signal(combined: str) -> Optional[str]:
     return None
 
 
+def _excepted_high_findings(report, lock, today,
+                            exceptions=AUDIT_ADVISORY_EXCEPTIONS) -> tuple[bool, str]:
+    """Except only known, unexpired high leaves on exclusively dev packages."""
+    vulns = report.get("vulnerabilities")
+    if not isinstance(vulns, dict):
+        return False, "no vulnerabilities map"
+
+    def leaves(name, visited):
+        if name in visited:
+            return set(), True
+        finding = vulns.get(name)
+        if not isinstance(finding, dict) or not isinstance(finding.get("via"), list):
+            return set(), False
+        visited = visited | {name}
+        ids = set()
+        for via in finding["via"]:
+            if isinstance(via, str):
+                child_ids, known = leaves(via, visited)
+                if not known:
+                    return set(), False
+                ids.update(child_ids)
+            elif isinstance(via, dict):
+                if via.get("severity") not in ("high", "critical"):
+                    continue
+                url = via.get("url")
+                if not isinstance(url, str):
+                    return set(), False
+                try:
+                    parsed = urlparse(url)
+                except ValueError:
+                    return set(), False
+                advisory = parsed.path.rsplit("/", 1)[-1]
+                if (parsed.netloc != "github.com" or
+                        not parsed.path.startswith("/advisories/") or
+                        not advisory.startswith("GHSA-")):
+                    return set(), False
+                ids.add(advisory)
+            else:
+                return set(), False
+        return ids, True
+
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    count, all_ids, expiries = 0, set(), []
+    for name, finding in vulns.items():
+        if not isinstance(finding, dict) or finding.get("severity") not in ("high", "critical"):
+            continue
+        ids, known = leaves(name, set())
+        if not known or not ids:
+            return False, f"{name}: no complete high/critical advisory leaves"
+        for advisory in sorted(ids):
+            exception = exceptions.get(advisory)
+            try:
+                expiry = date.fromisoformat(exception["expires"])
+            except (TypeError, KeyError, ValueError):
+                return False, f"{name}: {advisory} has no valid exception"
+            if today >= expiry:
+                return False, f"{name}: {advisory} exception expired"
+            expiries.append(expiry)
+        key = f"node_modules/{name}"
+        if not isinstance(packages, dict) or key not in packages:
+            return False, f"{name}: missing lockfile package"
+        for path, package in packages.items():
+            if path == key or path.endswith("/" + key):
+                if not isinstance(package, dict) or package.get("dev") is not True:
+                    return False, f"{name}: lockfile package is not dev-only"
+        count += 1
+        all_ids.update(ids)
+    if not count:
+        return False, "no high/critical findings"
+    return True, (f"{count} high/critical finding(s) excepted: "
+                  f"{sorted(all_ids)} until {min(expiries).isoformat()}")
+
+
 def _classify_npm_audit(rc: int, stdout: str, stderr: str,
-                        timed_out: bool) -> tuple[str, str]:
+                        timed_out: bool, *, lock=None, today=None) -> tuple[str, str]:
     """Classify one npm-audit attempt. Never guesses: a real JSON advisory
     report wins on its own terms regardless of exit code text, and an
     unrecognized failure with no report and no transport signal FAILS closed
@@ -5170,6 +5764,10 @@ def _classify_npm_audit(rc: int, stdout: str, stderr: str,
             detail = f"{total} advisories reported (all severities)"
         else:
             detail = "advisories reported"
+        if lock is not None and today is not None:
+            excepted, note = _excepted_high_findings(report, lock, today)
+            if excepted:
+                return "PASS", f"real advisory report: {detail}; EXCEPTED: {note}"
         return "FAIL", f"real advisory report: {detail}"
     combined = f"{stdout}\n{stderr}"
     if timed_out:
@@ -5272,6 +5870,13 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
     argv = [str(a) for a in suite.argv]
     t0 = time.perf_counter()
     status, note = "FAIL", "no attempt executed"
+    try:
+        lock = json.loads((suite.cwd / "package-lock.json").read_text(encoding="utf-8"))
+    except Exception:
+        lock = None
+    # The operator's exception applies to this suite only.
+    if suite.id != "harness-audit-high":
+        lock = None
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         for i in range(1, AUDIT_MAX_ATTEMPTS + 1):
             rc, stdout, stderr, timed_out, spawn_err = _run_npm_audit_attempt(
@@ -5279,7 +5884,8 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
             if spawn_err:
                 status, note = "FAIL", f"spawn failure: {spawn_err}"
             else:
-                status, note = _classify_npm_audit(rc, stdout, stderr, timed_out)
+                status, note = _classify_npm_audit(
+                    rc, stdout, stderr, timed_out, lock=lock, today=date.today())
             if status != "UNAVAILABLE":
                 break
             if i < AUDIT_MAX_ATTEMPTS:
@@ -5295,7 +5901,8 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
                     f"NOT PROVEN BY AUDIT: registry unavailable, lockfile "
                     f"unchanged since {sha}")
         elif status == "PASS" and i > 1:
-            note = f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+            note = (f"recovered from registry outage on attempt {i}/{AUDIT_MAX_ATTEMPTS}"
+                    + (f"; {note}" if note else ""))
         logf.write((note or "(no note)") + "\n")
     return Result(suite, status,
                   {"PASS": "ok", "FAIL": "err", "UNAVAILABLE": "unavailable"}[status],
@@ -5856,6 +6463,53 @@ def selected_shard_suites(suites: List[Suite], plan_path: str,
 PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
 PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
 
+# These remain in the generated tier for main and conservative fallback. Only
+# explicit PR events may defer them when every changed path is clearly scoped.
+PR_TIER_DEFERRED_SCOPES = {
+    "web-studio-panels-proof": (
+        ("web/", "vendor/", "contract/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "web-version-restore-proof": (
+        ("web/", "vendor/", "contract/", "server/", "platform/", "harness/"),
+        ("web/package.json", "web/package-lock.json", "web/playwright.config.mjs")),
+    "studio-walk-regressions": (
+        ("web/", "server/", "platform/", "harness/", "vendor/", "engine/",
+         "executor/", "dispatch/", "contract/", "data/", "auth0/", "deploy/",
+         "device-agent/", "da/"), ()),
+    "harness-vitest": (
+        ("harness/", "contract/", "vendor/", "engine/", "executor/", "web/",
+         "server/", "platform/"), ()),
+    "server-lab-runs": (
+        ("server/", "platform/", "contract/", "executor/", "engine/", "data/"), ()),
+}
+PR_TIER_SCOPED_ROOTS = frozenset({
+    "web", "server", "platform", "harness", "vendor", "engine", "executor",
+    "dispatch", "contract", "data", "auth0", "deploy", "device-agent", "da",
+    "docs", "tools", "tests", "plans", "research", "tasks",
+})
+
+
+def pr_tier_deferred_required(rows, changed):
+    """Fail closed on shared or ambiguous paths; direct ownership is additive."""
+    if not changed:
+        return set(PR_TIER_DEFERRED_SCOPES)
+    for path in changed:
+        parts = path.split("/")
+        if (not path or "\\" in path or ":" in path
+                or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in path)
+                or any(not part or part.startswith(".") for part in parts)
+                or len(parts) < 2 or parts[0] not in PR_TIER_SCOPED_ROOTS):
+            return set(PR_TIER_DEFERRED_SCOPES)
+    required = set()
+    for row in rows:
+        if row["id"] not in PR_TIER_DEFERRED_SCOPES:
+            continue
+        prefixes, files = PR_TIER_DEFERRED_SCOPES[row["id"]]
+        if any(path.startswith(prefixes) or path in files or pr_tier_owns(row, path)
+               for path in changed):
+            required.add(row["id"])
+    return required
+
 
 def pr_tier_path(value: str) -> str:
     """Unify historical web test names without conflating server/harness paths."""
@@ -6118,6 +6772,7 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
         if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
             raise ValueError("invalid LEAF_PRIORITY_SUITES")
         selected.update(ids & set(priority))
+        rows = web_family_rows(suites)
         for suite in suites:
             row = {"id": suite.id, "command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
                    "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
@@ -6126,12 +6781,26 @@ def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
                         and not pr_tier_outside_web_closure(changed))
                     or any(pr_tier_owns(row, path) for path in changed)):
                 selected.add(suite.id)
+        event = os.environ.get("CODEBUILD_WEBHOOK_EVENT")
+        deferred = set(PR_TIER_DEFERRED_SCOPES) & ids
+        overlay = event in {"PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"}
+        main = (event == "PUSH"
+                and os.environ.get("CODEBUILD_WEBHOOK_HEAD_REF") == "refs/heads/main")
+        if overlay:
+            selected.difference_update(deferred)
+            selected.update(pr_tier_deferred_required(rows, changed) & ids)
+            selected.update(new | (ids & set(priority)))
+        elif main:
+            selected.update(deferred)
         selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
         try:
-            rows = web_family_rows(suites)
             family = {row["id"] for row in rows if row["cwd"] == "web"
                       or row["id"] in {"studio-walk-regressions", "web-demo-gate"}}
             protected = new | (ids & set(priority)) | (set(PR_TIER_PREREQUISITES) - family)
+            # The audited web-family decision can further narrow PR coverage.
+            # Main still runs the deferred suites even for web-independent changes.
+            if main:
+                protected.update(selected & deferred)
             decision, reason = load_web_family_decision()(
                 selected, rows, changed,
                 protected_ids=protected,
@@ -6454,6 +7123,23 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     return [sorted(b, key=lambda s: index_of[s.id]) for b in bins]
 
 
+def partition_pr_tier_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]:
+    """Keep LPT membership except for the measured three-shard tier moves."""
+    partitions = partition_suites(suites, shard_count)
+    if shard_count != 3:
+        return partitions
+    placement = {s.id: i for i, shard in enumerate(partitions) for s in shard}
+    for sid, target in {
+        "web-studio-panels-proof": 1,
+        "web-link-service-flow": 2,
+        "web-async-author-stage": 2,
+        "web-author-quota-gate": 2,
+    }.items():
+        if sid in placement:
+            placement[sid] = target
+    return [[s for s in suites if placement[s.id] == i] for i in range(shard_count)]
+
+
 # Source inventory for suites whose conflicts are not expressed by Suite flags
 # or an npm/npx executable. Keep ALL conflicts in ONE group, in catalog order.
 # The server integration fixtures bind :0, not a fixed host port, but the older
@@ -6532,7 +7218,7 @@ _BROWSER_DIRECT_PROOFS = {
     "web-studio-panels-proof": ["playwright.config.mjs", "e2e/campaign-panel.spec.mjs",
         "e2e/recovery-controls.spec.mjs", "e2e/workspace-create-no-prompt.spec.mjs",
         "e2e/viewer-grid-toggle.spec.mjs", "e2e/studio-ux-regressions.spec.mjs",
-        "e2e/project-page-editor.spec.mjs", "--workers=3"],
+        "e2e/project-page-editor.spec.mjs", "--workers=2"],
     "web-lifecycle-panel-proof": ["playwright.lifecycle.config.mjs",
         "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"],
     "web-ios-ship-surface-proof": ["playwright.ios.config.mjs",
@@ -7315,11 +8001,70 @@ def reused_from_problem(reused_from) -> str:
     return ""
 
 
-def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
+def device_verdict_problem(data: dict) -> str:
+    """Validate selected or full device evidence without inventing suite results."""
+    fields = {"schema", "kind", "tree", "mode", "coverage", "device_verdict"}
+    if set(data) != fields:
+        return f"device proof fields differ: missing {sorted(fields - set(data))}, unexpected {sorted(set(data) - fields)}"
+    if type(data["schema"]) is not int:
+        return "schema must be integer 2"
+    coverage = data["coverage"]
+    if coverage not in ("selected", "full"):
+        return "coverage must be selected or full"
+    verdict = data["device_verdict"]
+    fields = {"bucket", "key", "version_id", "sha256", "repository", "head_sha",
+              "run_id", "verdict_schema", "mode", "state", "shard_total", "shards"}
+    if not isinstance(verdict, dict):
+        return "device_verdict must be an object"
+    if set(verdict) != fields:
+        return f"device_verdict fields differ: missing {sorted(fields - set(verdict))}, unexpected {sorted(set(verdict) - fields)}"
+    for key in fields - {"shard_total", "shards"}:
+        if not isinstance(verdict[key], str) or not verdict[key].strip():
+            return f"device_verdict.{key} must be a non-empty string"
+    for key, expected in (("repository", "LEAF-Solar-Design/leaf-web-demo"),
+                          ("verdict_schema", "leaf.forge-ci.device-verdict.v1"),
+                          ("mode", coverage), ("state", "success")):
+        if verdict[key] != expected:
+            return f"device_verdict.{key} must be {expected}"
+    match = re.fullmatch(
+        r"forge-ci-relay/device-verdicts/v1/LEAF-Solar-Design/leaf-web-demo/([0-9a-f]{40})/(dv-[0-9a-f]{16})\.json",
+        verdict["key"])
+    if not match:
+        return "device_verdict.key has invalid format"
+    if verdict["head_sha"] != match[1]:
+        return "device_verdict.head_sha differs from key"
+    if verdict["run_id"] != match[2]:
+        return "device_verdict.run_id differs from key"
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", verdict["sha256"]):
+        return "device_verdict.sha256 must be 64 hex characters"
+    total = verdict["shard_total"]
+    required_total = 3 if coverage == "selected" else 6
+    if type(total) is not int or total != required_total:
+        return f"device_verdict.shard_total must be integer {required_total} for coverage {coverage}"
+    shards = verdict["shards"]
+    if not isinstance(shards, list) or len(shards) != total:
+        return "device_verdict.shards must be a list matching shard_total"
+    seen = set()
+    for shard in shards:
+        if not isinstance(shard, dict) or set(shard) != {"shard", "run_id", "state"}:
+            return "device_verdict.shards entry must have exactly shard, run_id, state"
+        index = shard["shard"]
+        if type(index) is not int or not 0 <= index < total or index in seen:
+            return "device_verdict.shards indices must be exactly 0..shard_total-1, each once"
+        seen.add(index)
+        if not isinstance(shard["run_id"], str) or not re.fullmatch(r"dv-[0-9a-f]{16}", shard["run_id"]):
+            return "device_verdict.shards run_id must be dv-hex16"
+        if shard["state"] != "success":
+            return "device_verdict.shards state must be success"
+    return ""
+
+
+def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdict: bool = False) -> int:
     """Exit code for --verify-gate-proof: 0 only when the document is a
-    schema-2 tree-bound gate proof whose tree equals `expect_tree`, whose
-    catalog fingerprint equals the one THIS checkout derives, AND whose
-    audit_suites carries no UNAVAILABLE status. Runs nothing.
+    schema-2 tree-bound gate proof whose tree equals `expect_tree`. Run and
+    reused proofs must match THIS checkout's catalog fingerprint and carry
+    passing audit_suites. Device-verdict proofs require explicit caller
+    opt-in and selected or full device evidence instead of suite results. Runs nothing.
 
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
@@ -7360,6 +8105,16 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     if tree != expect:
         print(f"NOT VERIFIED: proof is bound to tree {tree}, expected {expect}")
         return 1
+    if data.get("mode") == "device-verdict":
+        if not allow_device_verdict:
+            print("NOT VERIFIED: unknown proof mode 'device-verdict'; only run and reused are accepted")
+            return 1
+        problem = device_verdict_problem(data)
+        if problem:
+            print(f"NOT VERIFIED: {problem}")
+            return 1
+        print(f"VERIFIED mode: device-verdict coverage={data['coverage']}")
+        return 0
     suites = build_suites()
     if duplicate_suite_ids(suites):
         print("NOT VERIFIED: catalog has duplicate suite ids; fix "
@@ -7869,9 +8624,15 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
             # Prefer an actual Playwright failure marker with its source path.
             first = next((line for line in lines if playwright_failure.search(line)
                           and spec_path.search(line)), None)
-            first = first or next((line for line in lines if re.search(
-                r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
+            durations = re.compile(r"^\s*\d+(?:\.\d+)?s\s+(?:call|setup|teardown)\s")
+            for pattern in (r"^E\s", r"^FAILED\s", r"^not ok\s",
+                            r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b"):
+                if first is not None:
+                    break
+                first = next((line for line in lines if not durations.match(line)
+                              and re.search(pattern, line)
+                              and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), None)
+            first = first or "none matched"
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}"]
@@ -8206,7 +8967,12 @@ def main() -> int:
     ap.add_argument("--expect-tree", default=None, metavar="TREEHEX",
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
+    ap.add_argument("--allow-device-verdict", action="store_true",
+                    help="allow a selected or full device-verdict proof in proof-check mode")
     args = ap.parse_args()
+
+    if args.allow_device_verdict and not args.verify_gate_proof:
+        ap.error("--allow-device-verdict requires --verify-gate-proof")
 
     if args.before_heavy_command is not None and not args.early_feedback:
         ap.error("--before-heavy-command requires --early-feedback")
@@ -8259,7 +9025,8 @@ def main() -> int:
             print("--verify-gate-proof is a proof-check mode and takes no other "
                   "mode or run flags")
             return 2
-        return verify_gate_proof(Path(args.verify_gate_proof), args.expect_tree)
+        return verify_gate_proof(Path(args.verify_gate_proof), args.expect_tree,
+                                 allow_device_verdict=args.allow_device_verdict)
 
     if args.emit_proof and not args.verify_shard_results:
         print("--emit-proof requires --verify-shard-results: the proof is the "
@@ -8332,7 +9099,7 @@ def main() -> int:
         suites = select_pr_tier(suites, tier)
         if args.shard_index is not None:
             tier_suites = suites
-            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            partition = partition_pr_tier_suites(suites, args.shard_count)[args.shard_index]
             try:
                 local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
                                            tier.get("prerequisites"))

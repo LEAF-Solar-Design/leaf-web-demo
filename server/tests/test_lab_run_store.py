@@ -729,3 +729,22 @@ def test_required_selector_never_falls_back_to_sqlite(local, monkeypatch):
     with pytest.raises(store.StoreUnavailable, match="platform_unavailable"):
         create("tenant")
     assert not local.exists()
+
+
+
+def test_recovery_selection_skips_older_queue_and_expired_activation(authority, monkeypatch):
+    store.create(authority, 'doc', 'older-queued', 1, 'a' * 64, 'ops:1',
+                 'b' * 64, 'lab-worker.v1', 'build_1')
+    store.create(authority, 'doc', 'interactive', 1, 'a' * 64, 'ops:1',
+                 'b' * 64, 'lab-worker.v1', 'build_1')
+    assert store.claim(authority, 'interactive', 'old-worker', 1,
+                       build_revision='build_1', color='active')
+    clock = [store._now() + timedelta(seconds=2)]
+    monkeypatch.setattr(store, '_now', lambda: clock[0])
+    store.create(authority, 'doc', 'activation', 1, 'a' * 64, 'ops:1',
+                 'b' * 64, 'lab-activation.v1', 'build_1')
+    assert store.claim(authority, 'activation', 'activation-worker', 1,
+                       build_revision='build_1', color='active')
+    clock[0] += timedelta(seconds=2)
+    rows = store.claimable(1, ops_revisions={'ops:1'}, recovering_only=True)
+    assert [row['run_id'] for row in rows] == ['interactive']

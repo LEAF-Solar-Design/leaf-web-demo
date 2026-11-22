@@ -100,6 +100,69 @@ def test_table_created_in_earlier_migration_is_not_initialization(tmp_path):
     assert "REVOKE" in violations[0]
 
 
+@pytest.mark.parametrize("table,create", [
+    ("t1", "CREATE TABLE t1 (id INT);"),
+    ("t1", "CREATE TABLE IF NOT EXISTS t1 (id INT);"),
+    ("PUBLIC.T1", "create table public.t1 (id INT);"),
+])
+@pytest.mark.parametrize("trigger_create", ["CREATE TRIGGER", "CREATE OR REPLACE TRIGGER"])
+def test_initial_trigger_replace_passes(tmp_path, table, create, trigger_create):
+    root = _dir(tmp_path, {"0023_x.sql": (
+        create + "\n"
+        f"DROP TRIGGER IF EXISTS trg ON {table};\n"
+        f"{trigger_create} trg BEFORE UPDATE ON {table} "
+        "FOR EACH ROW EXECUTE FUNCTION f();\n")})
+    assert gate.check_migrations(root) == []
+
+
+@pytest.mark.parametrize("redeclare", ["", "CREATE TABLE IF NOT EXISTS t1 (id INT);\n"])
+def test_trigger_replace_on_prior_table_requires_marker(tmp_path, redeclare):
+    root = _dir(tmp_path, {
+        "0023_x.sql": "CREATE TABLE t1 (id INT);\n",
+        "0024_x.sql": (
+            redeclare +
+            "DROP TRIGGER IF EXISTS trg ON t1;\n"
+            "CREATE TRIGGER trg BEFORE UPDATE ON t1 FOR EACH ROW EXECUTE FUNCTION f();\n"),
+    })
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert "0024_x.sql" in violations[0]
+    assert "[DROP]" in violations[0]
+
+
+@pytest.mark.parametrize("drop,following", [
+    ("DROP TRIGGER IF EXISTS trg ON t1;", "SELECT 1; CREATE TRIGGER trg BEFORE UPDATE ON t1"),
+    ("DROP TRIGGER IF EXISTS trg ON t1;", "CREATE TRIGGER other BEFORE UPDATE ON t1"),
+    ("DROP TRIGGER IF EXISTS trg ON t1;", "CREATE TRIGGER trg BEFORE UPDATE ON t2"),
+    ("DROP TRIGGER IF EXISTS trg ON t1 CASCADE;", "CREATE TRIGGER trg BEFORE UPDATE ON t1"),
+    ("DROP TRIGGER IF EXISTS trg ON t1 RESTRICT;", "CREATE TRIGGER trg BEFORE UPDATE ON t1"),
+    ("DROP TRIGGER trg ON t1;", "CREATE TRIGGER trg BEFORE UPDATE ON t1"),
+    ("DROP TRIGGER IF EXISTS trg ON public.t1;", "CREATE TRIGGER trg BEFORE UPDATE ON public.t1"),
+    ("DROP TRIGGER IF EXISTS trg ON t1;", "CREATE TRIGGER trg BEFORE UPDATE ON public.t1"),
+])
+def test_other_trigger_drops_require_marker(tmp_path, drop, following):
+    root = _dir(tmp_path, {"0023_x.sql": (
+        "CREATE TABLE t1 (id INT);\n" + drop + "\n" + following
+        + " FOR EACH ROW EXECUTE FUNCTION f();\n")})
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert "[DROP]" in violations[0]
+
+
+@pytest.mark.parametrize("body", [
+    "DO $body$ BEGIN NULL; END $body$;\n",
+    "CREATE FUNCTION g() RETURNS INT LANGUAGE SQL BEGIN ATOMIC SELECT 1; END;\n",
+])
+def test_trigger_replace_in_unsupported_body_file_requires_marker(tmp_path, body):
+    root = _dir(tmp_path, {"0023_x.sql": (
+        body + "CREATE TABLE t1 (id INT);\n"
+        "DROP TRIGGER IF EXISTS trg ON t1;\n"
+        "CREATE TRIGGER trg BEFORE UPDATE ON t1 FOR EACH ROW EXECUTE FUNCTION f();\n")})
+    violations = gate.check_migrations(root)
+    assert len(violations) == 1
+    assert "[DROP]" in violations[0]
+
+
 def test_contract_without_marker_fails(tmp_path):
     root = _dir(tmp_path, {"0023_cleanup.sql": "ALTER TABLE orgs DROP COLUMN legacy;\n"})
     violations = gate.check_migrations(root)

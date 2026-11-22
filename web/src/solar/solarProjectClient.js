@@ -1,5 +1,6 @@
 import { createRunSubmissionRequest, projectSolarIntentExtras, projectSolarRequestExtras } from '../runIntent.js'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, sameSolarCheckoutBinding } from './solarDrawingBinding.js'
+import { engineeringTotalsPath, createEngineeringTotalsRecord, parseEngineeringTotalsRecord } from './projectReconciliation.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const HEX = /^[0-9a-f]{64}$/
@@ -22,6 +23,20 @@ const local = (reason) => ({ ok: false, status: null, reason, envelope: null })
 const utf8 = (value) => new TextEncoder().encode(value).byteLength
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const assert = (condition) => { if (!condition) throw new TypeError('Invalid Solar request') }
+
+async function engineeringContentHash(content) {
+  // Integrity is mandatory, including on browsers without SubtleCrypto.
+  assert(typeof globalThis.crypto?.subtle?.digest === 'function')
+  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(content))
+  assert(Object.prototype.toString.call(bytes) === '[object ArrayBuffer]' && bytes.byteLength === 32)
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function engineeringFile(file, path) {
+  return plain(file) && typeof file.file_id === 'string' && UUID.test(file.file_id) &&
+    file.path === path && file.media_type === 'application/json' && edgeHash(file.content_sha256) &&
+    Number.isInteger(file.revision) && file.revision >= 1 && file.revision <= 2147483647
+}
 
 function copyJson(value, seen = new Set()) {
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
@@ -92,6 +107,16 @@ function validCheckout(data, binding) {
     (plain(lease) && typeof lease.holder === 'string' && typeof lease.fence === 'string' &&
       /^[0-9]+$/.test(lease.fence) && Number.isFinite(Date.parse(lease.acquired)) &&
       Number.isFinite(Date.parse(lease.expires))))
+}
+
+function estimateMaterial(value, binding) {
+  return plain(value) && value.schema === 'leaf.solar-estimate.v1' &&
+    edgeHash(value.content_sha256) && matches(value.source_binding, binding, false) &&
+    UUID.test(value.source_binding.input_version_id) &&
+    ['graph_sha256', 'intake_sha256'].every((key) => edgeHash(value.source_binding[key])) &&
+    value.takeoff?.schema === 'leaf.solar-takeoff.v1' && Array.isArray(value.takeoff.lines) &&
+    value.takeoff.lines.length <= 128 && value.rate_card?.schema === 'leaf.solar-estimate-rate-card.v1' &&
+    Array.isArray(value.rate_card.rates) && value.rate_card.rates.length <= 128
 }
 
 // Reads a parsed response body exactly once into frozen plain data. Each property value is read
@@ -260,7 +285,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         if (interrupted()) return interrupted()
         return { ok: false, status: response.status, reason: reasonOf(envelope), envelope: publicData(envelope) }
       }
-      const data = await wait(consume ? consume(response, interrupted)
+      const data = await wait(consume ? consume(response, interrupted, controller.signal)
         : response.json().then((body) => responseSnapshot(body)).catch(() => { throw new TypeError('Invalid Solar response') }))
       if (interrupted()) return interrupted()
       if (validate && !validate(data, scope.binding)) return local('SIP_R7_RESPONSE_INVALID')
@@ -367,6 +392,75 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     },
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
+    loadEngineeringTotals: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { graphSha256, signal } = options
+      assert(edgeHash(graphSha256))
+      const path = engineeringTotalsPath(scope.binding)
+      return request(`/api/projects/${scope.binding.project_id}/files/by-path?path=${encodeURIComponent(path)}`, {
+        scope, signal,
+        consume: async (response) => {
+          const data = responseSnapshot(await response.json())
+          assert(data?.organization_id === scope.binding.organization_id && data?.project_id === scope.binding.project_id &&
+            typeof data.can_write === 'boolean')
+          if (data.file === null) return { record: null, revision: 0, canWrite: data.can_write }
+          assert(engineeringFile(data.file, path))
+          const record = parseEngineeringTotalsRecord(data.file.content, scope.binding, graphSha256)
+          assert(record !== null && await engineeringContentHash(data.file.content) === data.file.content_sha256)
+          return { record, revision: data.file.revision, canWrite: data.can_write }
+        },
+      })
+    }),
+    saveEngineeringTotals: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { graphSha256, drafts, expectedRevision, idempotencyKey, signal } = options
+      const record = createEngineeringTotalsRecord(scope.binding, graphSha256, drafts)
+      assert(record !== null && Number.isInteger(expectedRevision) && expectedRevision >= 0 && expectedRevision <= 2147483646 &&
+        typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0 && utf8(idempotencyKey) <= 256 &&
+        !CONTAINS_CAPABILITY.test(idempotencyKey))
+      const path = engineeringTotalsPath(scope.binding), content = JSON.stringify(record)
+      return request(`/api/projects/${scope.binding.project_id}/files`, {
+        scope, signal, method: 'PUT', headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify({ path, media_type: 'application/json', content, expected_revision: expectedRevision }),
+        consume: async (response) => {
+          const data = responseSnapshot(await response.json())
+          assert(engineeringFile(data?.file, path) && data.file.revision === expectedRevision + 1 &&
+            data.receipt?.project_id === scope.binding.project_id && data.receipt?.action === 'file_put' &&
+            typeof data.replayed === 'boolean')
+          assert(await engineeringContentHash(content) === data.file.content_sha256)
+          return { record, revision: data.file.revision, canWrite: true }
+        },
+      })
+    }),
+    readRoleProfile: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, validate: (data) => data?.customer_key === b.organization_id &&
+          data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
+    confirmRoleProfile: (selection, options = {}) => guarded((scope) => {
+      assert(plain(selection) && plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, method: 'POST',
+        body: JSON.stringify(copyJson({ block: selection.block, layer: selection.layer,
+          design_window: selection.design_window, expected_version: options.expected_version })),
+        validate: (data) => data?.ok === true && data?.customer_key === b.organization_id &&
+          data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
+    saveRoleProfile: (roles, options = {}) => guarded((scope) => {
+      assert(plain(roles) && plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile`, {
+        scope, signal: options.signal, method: 'PUT',
+        body: JSON.stringify(copyJson({ roles, expected_version: options.expected_version })),
+        validate: (data) => data?.customer_key === b.organization_id && data?.project_key === b.project_id &&
+          data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
     readContext: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { signal, prepareSolve = false, solveFrame } = options
@@ -491,11 +585,12 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         orgId: binding.organization_id, projectId: binding.project_id, catalogDigest: intent.catalogDigest,
         idempotencyKey: intent.idempotencyKey, checkoutCapability: capability,
         ...projectSolarIntentExtras(intent.tool, intent) })
-      return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
+      return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body),
+        headers: { ...built.headers, Prefer: 'respond-async' }, signal,
         // A queued run answers with its real job; a synchronous project run answers with a terminal
         // envelope, accepted only when it is bound to this exact captured context and tool.
         validate: (data, selected) => (typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted')
-          || terminalRun(data, selected, intent.tool) })
+          || persistedProjectRead(data, selected, intent) || terminalRun(data, selected, intent.tool) })
     }),
     // Editor Save and Undo restore under the checkout this client already holds. The proof is
     // attached here and never leaves the client. No held checkout answers locally, sending nothing.
@@ -522,6 +617,98 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       assert(typeof versionId === 'string' && UUID.test(versionId))
       return request(`${path}/restore`, { scope, signal, method: 'POST',
         body: JSON.stringify({ version_id: versionId }), headers, validate })
+    }),
+    readEstimate: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/estimates`,
+        { scope, signal: options.signal, validate: (data, selected) => {
+          const result = data?.result
+          return result?.schema === 'leaf.project-estimate.v1' && matches(result, selected) &&
+            (result.saved === false || (result.saved === true && estimateMaterial(result.estimate, selected) &&
+              result.content_sha256 === result.estimate.content_sha256))
+        } })
+    }),
+    saveEstimate: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { requestId, catalogDigest, signal } = options
+      assert(typeof requestId === 'string' && UUID.test(requestId) && typeof catalogDigest === 'string' && DIGEST.test(catalogDigest))
+      if (!capability || mutation || !checkout || Date.parse(checkout.expires) <= Date.now()) return local('SIP_R7_CHECKOUT_NOT_HELD')
+      const card = copyJson(options.rateCard)
+      assert(plain(card) && Object.keys(card).length === 5 && card.schema === 'leaf.solar-estimate-rate-card.v1' && card.label === 'TEST RATES' &&
+        card.currency === 'USD' && typeof card.version === 'string' && card.version.trim() && card.version.length <= 120 &&
+        Array.isArray(card.rates) && card.rates.length <= 128)
+      const ids = new Set()
+      assert(card.rates.every((row) => {
+        const valid = plain(row) && Object.keys(row).length === 3 && typeof row.line_id === 'string' &&
+          row.line_id.trim() && row.line_id.length <= 96 && !ids.has(row.line_id) &&
+          typeof row.unit === 'string' && row.unit.trim() && row.unit.length <= 120 &&
+          typeof row.rate === 'string' && row.rate.length <= 40 && /^\d+(\.\d+)?$/.test(row.rate) && Number(row.rate) <= 1000000000000
+        ids.add(row.line_id)
+        return valid
+      }))
+      const body = JSON.stringify({ rate_card: card, catalog_digest: catalogDigest })
+      assert(utf8(body) <= MAX_BODY)
+      const b = scope.binding, revision = leaseRevision
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/estimates`,
+        { scope, signal, method: 'POST', body, headers: { ...proof(), 'Idempotency-Key': requestId },
+          validate: (data, selected) => {
+            const r = data?.result, p = r?.publication, v = p?.drawing_version
+            return revision === leaseRevision && !!capability && Date.parse(checkout?.expires) > Date.now() &&
+              r?.schema === 'leaf.project-estimate.v1' && r.saved === true && estimateMaterial(r.estimate, selected) &&
+              matches(r.estimate.source_binding, selected) && r.content_sha256 === r.estimate.content_sha256 &&
+              matches(p, selected, false) && p.parent_version_id === selected.input_version_id && p.request_id === requestId &&
+              UUID.test(v?.version_id) && v.version_id !== selected.input_version_id &&
+              v.org_id === selected.organization_id && v.project_id === selected.project_id && v.drawing_id === selected.drawing_id
+          } })
+    }, false, true),
+    exportEstimate: (options = {}) => guarded((scope) => {
+      assert(plain(options) && edgeHash(options.contentSha256))
+      const { signal, contentSha256, isCurrent = () => true } = options
+      assert(typeof isCurrent === 'function' && isCurrent() === true)
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/estimates/export`,
+        { scope, signal, consume: async (response, interrupted, transportSignal) => {
+          const check = () => assert(!interrupted() && isCurrent() === true)
+          check()
+          assert(response.status === 200 && response.headers?.get('ETag') === `"${contentSha256}"`)
+          const length = response.headers?.get('Content-Length')
+          assert(length == null || (/^\d+$/.test(length) && Number(length) <= MAX_BODY))
+          const chunks = []
+          let total = 0
+          if (response.body?.getReader) {
+            const reader = response.body.getReader()
+            const cancel = () => { void reader.cancel().catch(() => {}) }
+            transportSignal.addEventListener('abort', cancel, { once: true })
+            try {
+              while (true) {
+                const { done, value } = await reader.read()
+                check()
+                if (done) break
+                assert(ArrayBuffer.isView(value))
+                const intrinsic = Object.getPrototypeOf(Uint8Array.prototype)
+                const size = Object.getOwnPropertyDescriptor(intrinsic, 'byteLength').get.call(value)
+                const offset = Object.getOwnPropertyDescriptor(intrinsic, 'byteOffset').get.call(value)
+                const buffer = Object.getOwnPropertyDescriptor(intrinsic, 'buffer').get.call(value)
+                total += size
+                assert(total <= MAX_BODY)
+                chunks.push(new Uint8Array(new Uint8Array(buffer, offset, size)))
+              }
+            } catch (failure) { await reader.cancel().catch(() => {}); throw failure }
+            finally { transportSignal.removeEventListener('abort', cancel); reader.releaseLock() }
+          } else {
+            const buffer = await response.arrayBuffer()
+            check(); assert(buffer.byteLength <= MAX_BODY)
+            total = buffer.byteLength; chunks.push(new Uint8Array(buffer))
+          }
+          const bytes = new Uint8Array(total)
+          let offset = 0
+          for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+          const estimate = responseSnapshot(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)))
+          assert(estimateMaterial(estimate, b) && estimate.content_sha256 === contentSha256)
+          check()
+          return { bytes, contentSha256 }
+        }, validate: () => isCurrent() === true })
     }),
     uploadSolarEdgePdf: (options = {}) => guarded((scope) => {
       assert(plain(options))
@@ -695,6 +882,21 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
   }
   publish()
   return Object.freeze(client)
+}
+
+// Canonical project reads finish inside their submission transaction. Only attach
+// a terminal job if both the stored execution context and its result match the intent.
+function persistedProjectRead(job, binding, intent) {
+  if (!plain(job) || !UUID.test(job.job_id) || !['complete', 'failed'].includes(job.status)
+    || job.kind !== 'run' || job.tool_name !== intent.tool || job.org_id !== binding.organization_id
+    || job.project_id !== binding.project_id || job.input_version_id !== binding.input_version_id) return false
+  const context = job.execution_context
+  const result = job.result
+  return plain(context) && context.schema === 'leaf.project-read-job.v1'
+    && context.catalog_digest === intent.catalogDigest && HEX.test(context.intake_sha256)
+    && ['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => context[key] === binding[key])
+    && terminalRun(result, binding, intent.tool) && result.ok === (job.status === 'complete')
+    && result.project_context.intake_sha256 === context.intake_sha256
 }
 
 // A synchronous project run result: never a job, and bound to the captured project context.
