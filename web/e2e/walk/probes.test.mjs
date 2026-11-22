@@ -23,7 +23,9 @@ test('WL70 census failure trace disables snapshots, screenshots and sources', ()
 test('WL70 rendered control census configures its trace before other suite statements', () => {
   const source = readFileSync(new URL('./control-inventory.spec.mjs', import.meta.url), 'utf8')
   assert.match(source, /import\s*\{[^}]*\bCENSUS_TRACE\b[^}]*\}\s*from\s*['"]\.\/controlCensus\.mjs['"]/)
-  assert.match(source, /test\.describe\('rendered control census',\s*\(\)\s*=>\s*\{\s*test\.use\(\{\s*trace:\s*CENSUS_TRACE\s*\}\)/)
+  // Playwright refuses use({ trace }) inside a describe group, so it is file level and precedes the census group.
+  assert.match(source, /^test\.use\(\{\s*trace:\s*CENSUS_TRACE\s*\}\)[\s\S]*test\.describe\('rendered control census'/m)
+  assert.doesNotMatch(source, /test\.describe\([^)]*\)\s*=>\s*\{\s*test\.use\(\{\s*trace:/)
 })
 
 function profilePage({ values = [], selectedName = null } = {}) {
