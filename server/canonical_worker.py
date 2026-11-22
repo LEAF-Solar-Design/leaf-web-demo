@@ -309,6 +309,16 @@ class _ToolAction(argparse.Action):
 
 
 def main() -> None:
+    # The decoder worker is dispatched before argparse so the canonical --tool
+    # choices stay exactly the solver set; it runs alone and never touches ADAPTERS.
+    argv = sys.argv[1:]
+    if "--tool=video-decode" in argv or any(a == "--tool" and argv[i + 1:i + 2] == ["video-decode"] for i, a in enumerate(argv)):
+        rest = [a for a in argv if a not in ("--tool", "video-decode", "--tool=video-decode")]
+        if rest not in ([], ["--once"]):
+            raise SystemExit("video-decode requires a dedicated decoder worker (only --once is accepted)")
+        import video_decode_worker
+        video_decode_worker.main(rest)
+        return
     import solar_project_graph
 
     parser = argparse.ArgumentParser(description="Leaf canonical solve worker")
@@ -317,7 +327,7 @@ def main() -> None:
     # parser accepted (--p for --poll-seconds) still resolves to the same option.
     parser.add_argument("--readiness", dest="project_readiness", action="store_true")
     parser.add_argument("--worker-id", type=_worker_id_argument)
-    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS | {"video-decode"}),
+    parser.add_argument("--tool", choices=sorted(set(ADAPTERS) | solar_project_graph.SUPPORTED_TOOLS),
                         action=_ToolAction, default=autofill.TOOL_NAME)
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--max-age-seconds", type=float)
@@ -326,12 +336,6 @@ def main() -> None:
         os.environ.get("LEAF_CANONICAL_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)))
     args = parser.parse_args()
     tools = [args.tool] if isinstance(args.tool, str) else args.tool
-    if "video-decode" in tools:
-        if tools != ["video-decode"] or args.health or args.project_readiness:
-            parser.error("video-decode requires a dedicated decoder worker")
-        import video_decode_worker
-        video_decode_worker.main(["--once"] if args.once else [])
-        return
     multi_tool = len(tools) > 1
     if len(set(tools)) != len(tools):
         parser.error("duplicate --tool values are refused even with LEAF_CANONICAL_MULTI_TOOL=1")
