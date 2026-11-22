@@ -34,7 +34,10 @@ export const GroupCountV1 = z.strictObject({
   group_by: z.array(groupKey).max(8), count,
   windows: z.array(z.strictObject({ id: IntegrationRefV1.shape.id, filters })).min(1).max(4),
   domain: z.strictObject({
-    keys: z.array(z.strictObject({ group_field: outputField, domain_field: field })).max(8),
+    keys: z.array(z.strictObject({
+      group_field: outputField, domain_field: field,
+      comparison: z.literal("ascii_case_insensitive").optional(),
+    })).max(8),
     order_field: field.optional(),
   }).optional(),
 }).superRefine((plan, ctx) => {
@@ -263,6 +266,9 @@ export const DatasetDerivationBoundRequestV1 = jsonPayload(524_288).pipe(z.stric
       for (const key of plan.domain.keys) {
         const source = outputs.get(key.group_field), dimension = getField(domain, key.domain_field);
         if (source && dimension && (dimension.nullable || !compatible(source, dimension))) fail("Domain key types must match group output", ["plan", "domain"]);
+        if (key.comparison === "ascii_case_insensitive" && source && dimension &&
+            (source.type.kind !== "identifier" || dimension.type.kind !== "identifier"))
+          fail("Case-insensitive domain comparison requires identifier fields on both sides", ["plan", "domain"]);
       }
       if (plan.domain.order_field) {
         const order = getField(domain, plan.domain.order_field);
