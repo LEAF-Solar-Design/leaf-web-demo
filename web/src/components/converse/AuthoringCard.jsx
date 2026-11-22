@@ -40,12 +40,20 @@ function resultLabel(report) {
 function attemptLabel(attempt) {
   const diagnostics = Array.isArray(attempt.diagnostics) ? attempt.diagnostics.map(diagnostic).filter(Boolean) : []
   const status = resultLabel(attempt)
-  const label = ['failed', 'compile_failed'].includes(status) ? 'refused' : status
+  const label = ['failed', 'compile_failed'].includes(status) ? 'refused' : status === 'accept' ? 'passed' : status
   return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}`
 }
 
+// The stage read reports the plugin's latest receipt as { last_event, at, plugin_version, diagnostics }.
+const branchEvents = { synced: 'Synced', compile_failed: 'Compile · refused', ran: 'Ran', run_failed: 'Run failed' }
+
 function branchSummary(report) {
   const lines = []
+  const event = branchEvents[string(report?.last_event)]
+  if (event) {
+    const codes = Array.isArray(report.diagnostics) ? report.diagnostics.map(diagnostic).filter(Boolean) : []
+    lines.push([event, ...codes].join(', '))
+  }
   if (typeof report?.synced === 'boolean') lines.push(report.synced ? 'Synced' : 'Not synced')
   if (resultLabel(report?.compile)) lines.push(`Compile · ${resultLabel(report.compile)}`)
   const run = report?.ran === true ? 'Ran' : resultLabel(report?.run)
@@ -145,7 +153,11 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         const reported = next.compile_attempts || next.compile?.attempts
         if (Array.isArray(reported)) setAttempts(previous => {
           const merged = new Map(previous.map(row => [row.attempt, row]))
-          for (const row of reported) if (Number.isInteger(row?.attempt)) merged.set(row.attempt, row)
+          // The stage read numbers attempts as `n`; older reports used `attempt`.
+          for (const row of reported) {
+            const number = Number.isInteger(row?.attempt) ? row.attempt : row?.n
+            if (Number.isInteger(number)) merged.set(number, { ...row, attempt: number })
+          }
           return [...merged.values()].sort((a, b) => a.attempt - b.attempt)
         })
         const published = [next.status, next.publication?.status, decision?.status].includes('published')
