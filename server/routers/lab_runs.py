@@ -59,7 +59,8 @@ def _authorize_corpus_run(tenant, row, *, write=False):
 
 
 @router.get('/corpus-options')
-def corpus_options(project_id: uuid.UUID | None = None, tenant=Depends(deps.require_tenant)):
+def corpus_options(project_id: uuid.UUID | None = None, manifest_only: bool = False,
+                   tenant=Depends(deps.require_tenant)):
     _admit(tenant, 'build')
     def operation():
         if not lab_tool_nodes.enabled():
@@ -68,6 +69,17 @@ def corpus_options(project_id: uuid.UUID | None = None, tenant=Depends(deps.requ
         actor = _corpus_actor(tenant)
         from leaf_platform import project_lifecycle, project_reference_materials
         corpus.require_executor()
+        if manifest_only:
+            if project_id is None:
+                raise GraphRefused('lab_corpus_project_required')
+            try:
+                project_lifecycle.require_project_role(str(tenant), project_id, actor, write=False)
+            except (project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
+                raise GraphRefused('lab_corpus_project_refused') from None
+            # A saved graph needs its pinned editor schema, not another scan of
+            # the project's materials or all projects visible to this caller.
+            return {'projects': [], 'materials': [],
+                    'manifest': lab_tool_manifests.corpus_capability()[0], 'limited': False}
         db = platform_link.platform_db()
         with db.cursor() as cur:
             cur.execute('SELECT project_id,name FROM projects WHERE org_id=%s '
