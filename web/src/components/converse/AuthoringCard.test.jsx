@@ -182,3 +182,19 @@ it('withholds review for a mismatched receipt and can re-read the stage', async 
   await act(async () => fireEvent.click(button('Check again')))
   expect(button('Approve your own tool')).toBeEnabled()
 })
+
+it('reads the stage contract: compile attempts by n and the Branch receipt by last_event', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: undefined,
+    compile: { attempts: [
+      { n: 1, decision: 'compile_failed', errors: 1, diagnostics: [{ code: 'CS1026', file: 'main.csx', line: 50 }] },
+      { n: 2, decision: 'accept', errors: 0, diagnostics: [] },
+    ] },
+    status: 'published', publication: { state: 'published' },
+    branch: { last_event: 'synced', at: '2026-11-21T14:46:00Z', plugin_version: '1.4.52.0' } })
+  reviewContext.mockResolvedValue({ viewer_may_approve: false, review: { decision: 'approve' } })
+  await mount()
+  expect(screen.getByText('Attempt 1: refused, CS1026 main.csx:50')).toBeVisible()
+  expect(screen.getByText('Attempt 2: passed')).toBeVisible()
+  expect(screen.getByText('Synced')).toBeVisible()
+  expect(screen.queryByText('Branch has not reported yet')).toBeNull()
+})
