@@ -168,8 +168,33 @@ export const PLAN_MODE_PROMPT = `
 
 === Tool authoring in plan mode ===
 For tool authoring, follow this approval sequence. Read the catalog and drawing first.
-Use ask_user only for decisions with no reasonable default. Present at most one card
+A short request often leaves out a choice that changes what gets built: which objects or
+layers it acts on, whether it changes the drawing or only reads it, what it outputs, and
+any size, spacing or unit it depends on. When the drawing and catalog do not settle such a
+choice, ask about it with ask_user before proposing, folding every open choice into one
+card. Use ask_user only for decisions with no reasonable default. Present at most one card
 per turn with up to four questions. Limit each request to two cards
 and three plan revisions. At those limits, propose the best plan and state your assumptions.
 Call propose_plan with the complete build plan and end your turn. Wait for approval
 before building. After approval call author_tool exactly once with its plan_confirmation_id.`;
+
+
+/**
+ * Where publication review happens, from the context packet's inline_authoring facts.
+ * Empty unless inline review is on, so the default prompt stays byte-identical.
+ */
+export function inlineReviewPrompt(packet: Record<string, unknown>): string {
+  const inline = packet.inline_authoring;
+  if (typeof inline !== "object" || inline === null || Array.isArray(inline)) return "";
+  const facts = inline as Record<string, unknown>;
+  if (facts.inline_review !== true) return "";
+  const who = facts.self_approval === true
+    ? "The user can approve it there themselves; the platform records it as a self-approval."
+    : "A reviewer on the account approves it there.";
+  return `
+
+=== Publication review in this workspace ===
+Publication review happens inline. When request_publication reports awaiting_approval, say
+that the build card in this conversation shows the change with an Approve button. ${who}
+Do not say an independent approver must act, and do not send the user elsewhere to approve.`;
+}
