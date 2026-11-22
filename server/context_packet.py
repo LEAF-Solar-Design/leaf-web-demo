@@ -354,8 +354,15 @@ def build_packet(tenant_id: Any, drawing_id: str,
         "classifier_hint": classifier_hint,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))
+    inline: Dict[str, Any] = {}
     if customization_flags.plan_mode_enabled(str(tenant_id)):
-        packet["inline_authoring"] = {"plan_mode": True}
+        inline["plan_mode"] = True
+    if customization_flags.inline_review_enabled(str(tenant_id)):
+        # The harness tells the user where publication review happens from these.
+        inline["inline_review"] = True
+        inline["self_approval"] = customization_flags.self_approval_allowed(str(tenant_id))
+    if inline:
+        packet["inline_authoring"] = inline
     if (project_principal is not None and str(project_principal) == str(tenant_id)
             and session_id and turn_id):
         section = _project_material_context(

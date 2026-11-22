@@ -739,7 +739,7 @@ def test_source_rejects_misbound_store_row(recovery, monkeypatch):
     change = _reserve(recovery, state=ChangeState.STAGED)
     post, _ = _source_hop(monkeypatch)
     for fields in ({"tenant_id": "tenant-b"}, {"change_set_id": _key()}, {"author_subject": ""},
-                   {"staged_commit": None}, {"catalog_digest": None}, {"tool_target": "branch"}):
+                   {"staged_commit": None}, {"catalog_digest": None}):
         monkeypatch.setattr(recovery.store, "get_change_set", Mock(return_value=replace(change, **fields)))
         _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
     post.assert_not_called()
@@ -794,3 +794,41 @@ def test_view_declaration_cannot_label_a_script_blob(recovery, monkeypatch):
     change = _reserve(recovery, state=ChangeState.STAGED)
     _source_tool(monkeypatch, kind="view", entry="tools/recovered-tool/view.html")
     _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+
+
+def test_branch_source_reads_main_csx_from_the_staged_commit(recovery, monkeypatch):
+    """A Branch package's source comes from its receipt-bound tree, not the harness
+    (staging walk 2026-11-21: the card showed 'source not available')."""
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _set_columns(recovery, change, "tool_target = 'branch'")
+    package = "branch-tools/recovered-tool"
+    monkeypatch.setattr(CustomizationService, "_branch_receipt_fields", staticmethod(lambda _c: {
+        "target": "branch", "package_path": package,
+        "package_files": [f"{package}/main.csx", f"{package}/tool.json"]}))
+    monkeypatch.setattr(customization_service, "_bare_repo", lambda tenant: tenant)
+    reads = []
+    monkeypatch.setattr(customization_service, "_git_blob",
+                        lambda bare, name: reads.append(name) or SOURCE)
+    post, _ = _source_hop(monkeypatch)
+    result = _source_response(recovery, change)
+    assert result.status_code == 200
+    assert result.content == SOURCE
+    assert result.headers["x-leaf-source-path"] == f"{package}/main.csx"
+    assert result.headers["x-leaf-source-commit"] == STAGED
+    assert result.headers["x-leaf-source-sha256"] == hashlib.sha256(SOURCE).hexdigest()
+    assert result.headers["x-leaf-source-blob"] == hashlib.sha1(
+        f"blob {len(SOURCE)}\0".encode() + SOURCE).hexdigest()
+    assert reads == [f"{STAGED}:{package}/main.csx"]
+    post.assert_not_called()
+
+
+def test_branch_source_refuses_a_package_without_main_csx(recovery, monkeypatch):
+    change = _reserve(recovery, state=ChangeState.STAGED)
+    _set_columns(recovery, change, "tool_target = 'branch'")
+    monkeypatch.setattr(CustomizationService, "_branch_receipt_fields", staticmethod(lambda _c: {
+        "target": "branch", "package_path": "branch-tools/recovered-tool",
+        "package_files": ["branch-tools/recovered-tool/tool.json"]}))
+    blob = Mock()
+    monkeypatch.setattr(customization_service, "_git_blob", blob)
+    _assert_refusal(_source_response(recovery, change), 404, "stage_source_not_available")
+    blob.assert_not_called()
