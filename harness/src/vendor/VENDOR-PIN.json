@@ -17,6 +17,10 @@
       "reason": "Isolate SDK transcript bindings by authenticated app conversation in leaf-web-demo (rebased onto mushy-code ad209705 by AD4; upstream candidate)",
       "sha256": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda"
     },
+    "ports/fakes/fakeTurnRunner.ts": {
+      "reason": "SDS-PMW (sds-plan-mode-walk-2): scripted plan-mode flow (questions_required, plan_proposed, plan approval resume) for the LEAF_AGENT_MOCK=1 local stack pre-merge walk; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "92fdd20cc85dcdd5b5e7af064c6389fa92f0b83a0a1c8c049268f1c569ff1b4a"
+    },
     "ports/impl/agentSdkRunner.ts": {
       "reason": "claude-sonnet-5-5 default and allowlist from mushy-code 14334d8 carried ahead of a re-pin; retire at the next re-pin past 14334d8; w22-d2b2: model-visible additive-minor revision rule; retire when upstream includes equivalent behavior.",
       "sha256": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef"
@@ -111,7 +115,7 @@
     "ports/fakes/fakeSessionStore.ts": "ad67275b16d64bd7525ec520dd36b2a6a7bd533107f6ec8132f2392e7e83afda",
     "ports/fakes/fakeStandardServiceProvider.ts": "23e90488798f5669baaf4bc67cc0d598aec666ef6f05c88e071cc79a572fa979",
     "ports/fakes/fakeTenantRepo.ts": "d1c545d5fe141870e1ceabbbcc15794b92e8c4e2a22ea8138e7b9da4234a1a0d",
-    "ports/fakes/fakeTurnRunner.ts": "2ec3b103d6a866265a756d756d6e28416bcd3390b5759394f1ad2faadae68f50",
+    "ports/fakes/fakeTurnRunner.ts": "92fdd20cc85dcdd5b5e7af064c6389fa92f0b83a0a1c8c049268f1c569ff1b4a",
     "ports/fakes/fakeUpstreamSink.ts": "ba55ed5b026a219ecf8f316af102638d7397a7d66363d1adafa53dd794c74d17",
     "ports/impl/agentSdkRunner.ts": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef",
     "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
