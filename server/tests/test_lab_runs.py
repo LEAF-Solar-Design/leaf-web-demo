@@ -83,6 +83,108 @@ def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
     assert graph == valid
 
 
+@pytest.fixture
+def manifest_only_rig(rig, monkeypatch):
+    with monkeypatch.context() as scoped:
+        import lab_corpus_executor as corpus
+        lab_runs.platform_link._ensure_platform_package()
+        from leaf_platform import project_lifecycle, project_reference_materials
+        scoped.setattr(lab_runs.lab_tool_nodes, 'enabled', lambda: True)
+        scoped.setattr(corpus, 'require_executor', lambda: None)
+        rig.context.org_id = rig.tenant
+        rig.context.authority_resolved = True
+        binding = SimpleNamespace(platform_tenant_id=rig.tenant, binding_id='manifest-reader')
+
+        def resolve(provider, subject):
+            assert (provider, subject) == ('auth0', 'run-actor')
+            return binding
+
+        scoped.setattr(lab_runs.platform_link, 'platform_store', lambda: SimpleNamespace(
+            resolve_active_identity_binding=resolve))
+        project = '11111111-2222-4333-8444-555555555555'
+        reads = []
+        state = {'revoked': False}
+
+        def role(tenant, target, actor, *, write):
+            reads.append((str(tenant), str(target), actor, write))
+            if state['revoked']:
+                raise project_lifecycle.LifecycleForbidden('synthetic revoked membership')
+
+        def unneeded(*args, **kwargs):
+            raise AssertionError('Manifest hydration must not depend on full project/material discovery')
+
+        scoped.setattr(project_lifecycle, 'require_project_role', role)
+        scoped.setattr(lab_runs.platform_link, 'platform_db', unneeded)
+        scoped.setattr(project_reference_materials, 'list_materials', unneeded)
+        yield SimpleNamespace(rig=rig, project=project, binding=binding, state=state, reads=reads,
+                               materials=project_reference_materials, patch=scoped)
+
+
+def test_manifest_only_skips_unneeded_catalog_discovery(manifest_only_rig):
+    lane = manifest_only_rig
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params={
+        'project_id': lane.project, 'manifest_only': 'true'})
+    assert response.status_code == 200, response.text
+    manifest = lab_runs.lab_tool_manifests.corpus_capability()[0]
+    assert response.json() == {'manifest': manifest, 'projects': [], 'materials': [], 'limited': False}
+    assert 'parameters' in manifest['settings_schema']['properties']
+    assert lane.reads == [(lane.rig.tenant, lane.project, 'manifest-reader', False)]
+
+
+@pytest.mark.parametrize('refusal', ['authority', 'binding', 'project', 'missing-project', 'tier'])
+def test_manifest_only_retains_current_admission(manifest_only_rig, refusal):
+    lane = manifest_only_rig
+    params = {'project_id': lane.project, 'manifest_only': 'true'}
+    if refusal == 'authority':
+        lane.rig.context.authority_resolved = False
+    elif refusal == 'binding':
+        lane.binding.platform_tenant_id = 'foreign-tenant'
+    elif refusal == 'project':
+        lane.state['revoked'] = True
+    elif refusal == 'missing-project':
+        params.pop('project_id')
+    else:
+        lane.rig.context.tier = 'free'
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params=params)
+    assert response.status_code == (403 if refusal == 'tier' else 422), response.text
+    if refusal == 'project':
+        assert response.json() == {'detail': 'lab_corpus_project_refused'}
+    elif refusal == 'missing-project':
+        assert response.json() == {'detail': 'lab_corpus_project_required'}
+    elif refusal != 'tier':
+        assert response.json() == {'detail': 'lab_corpus_authority_required'}
+
+
+def test_manifest_only_keeps_default_full_picker(manifest_only_rig):
+    from contextlib import contextmanager
+    lane = manifest_only_rig
+
+    class Cursor:
+        def execute(self, statement, arguments):
+            assert 'FROM projects' in statement
+            assert arguments == (lane.rig.tenant,)
+
+        def fetchall(self):
+            return [{'project_id': lane.project, 'name': 'Synthetic project'}]
+
+    @contextmanager
+    def cursor():
+        yield Cursor()
+
+    lane.patch.setattr(lab_runs.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=cursor))
+    material = {'material_id': 'synthetic-material', 'name': 'Original corpus'}
+
+    def materials(tenant, project, actor):
+        assert (tenant, str(project), actor) == (lane.rig.tenant, lane.project, 'manifest-reader')
+        return {'materials': [material]}
+
+    lane.patch.setattr(lane.materials, 'list_materials', materials)
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params={'project_id': lane.project})
+    assert response.status_code == 200, response.text
+    assert response.json()['projects'] == [{'project_id': lane.project, 'name': 'Synthetic project'}]
+    assert response.json()['materials'] == [material]
+
+
 @pytest.mark.parametrize('parent_number', [5, 5.0])
 def test_corpus_policy_compiles_saved_parameters_without_roundtripping_parent_numbers(rig, monkeypatch, parent_number):
     import hashlib
