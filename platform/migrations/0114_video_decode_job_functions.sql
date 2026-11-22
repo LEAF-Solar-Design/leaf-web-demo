@@ -44,9 +44,12 @@ BEGIN
     RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
     DECLARE changed integer;
     BEGIN
-      IF p_worker IS NULL OR pg_catalog.btrim(p_worker) = '' OR
-         p_lease_seconds IS NULL OR p_lease_seconds NOT BETWEEN 15 AND 300 THEN
-        RAISE EXCEPTION 'invalid decoder worker or lease';
+      IF p_lease_seconds IS NULL OR p_lease_seconds NOT BETWEEN 15 AND 300 THEN
+        RAISE EXCEPTION 'invalid decoder lease';
+      END IF;
+      -- A missing or blank worker cannot own a lease, so it simply extends nothing.
+      IF p_worker IS NULL OR pg_catalog.btrim(p_worker) = '' THEN
+        RETURN false;
       END IF;
       UPDATE %1$I.jobs j SET heartbeat_at = pg_catalog.now(), updated_at = pg_catalog.now(),
         lease_expires_at = pg_catalog.now() + pg_catalog.make_interval(secs => p_lease_seconds)

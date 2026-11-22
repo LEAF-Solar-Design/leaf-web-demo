@@ -194,7 +194,8 @@ def test_authority_and_live_project_required(jobs):
 
 def test_function_security_and_idempotent_migration(jobs):
     migration = Path(__file__).parents[1] / 'migrations' / '0114_video_decode_job_functions.sql'
-    jobs.execute(migration.read_text(encoding='utf-8'))
+    # Raw migration text holds format() placeholders, so run it without query parameters.
+    jobs.conn.execute(migration.read_text(encoding='utf-8'))
     for signature in SIGNATURES:
         # OID zero denotes PUBLIC, which is an ACL grantee rather than a pg_roles row.
         row = jobs.execute('SELECT pg_catalog.has_function_privilege(0::oid, %s::regprocedure, %s) AS public_execute, '
