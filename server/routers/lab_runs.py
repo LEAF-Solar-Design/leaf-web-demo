@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 import deps
@@ -259,13 +259,17 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
 
 
 @router.get("/{run_id}/recovery-plan")
-def recovery_plan(run_id: str, tenant=Depends(deps.require_tenant)):
+def recovery_plan(run_id: str, response: Response, include_cleanup: bool = Query(False),
+                  tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
     def operation():
         import lab_corpus_recovery
         return lab_corpus_recovery.prepare(str(tenant), run_id,
-            authorize=lambda row: _authorize_corpus_run(tenant, row))
-    return _call(operation)
+            authorize=lambda row: _authorize_corpus_run(tenant, row), include_cleanup=include_cleanup)
+    result = _call(operation)
+    if include_cleanup:
+        response.headers['Cache-Control'] = 'no-store'
+    return result
 
 
 def _public_event(event):

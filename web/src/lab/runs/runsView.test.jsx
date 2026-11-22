@@ -114,11 +114,124 @@ const reviewRecovery = () => fireEvent.click(screen.getByRole('button', { name: 
 const expectRecoveryGets = fetchImpl => {
   expect(fetchImpl.mock.calls.length).toBeGreaterThan(0)
   for (const [url, options] of fetchImpl.mock.calls) {
-    expect(url).toMatch(/\/recovery-plan$/)
+    expect(url).toMatch(/\/recovery-plan\?include_cleanup=true$/)
     expect(options.method).toBe('GET')
     expect(options.body).toBeUndefined()
   }
 }
+
+const cleanupFixture = (state = 'confirmed_reaped') => {
+  const plan = recoveryFixture([
+    ['BTC', 'retained', 'completed'], ['ETH', 'unresolved', 'cancelled'],
+  ])
+  plan.schema = 'leaf.lab-corpus-recovery-plan.v2'
+  plan.blocks.forEach(block => {
+    block.cleanup_evidence = { schema: 'leaf.lab-corpus-cleanup-evidence.v1', job_id: block.job_id,
+      attempt: 1, state: 'unconfirmed', cancel: null, receipt: null }
+  })
+  const evidence = plan.blocks[1].cleanup_evidence
+  if (state !== 'unconfirmed') {
+    const tag = { run_id: plan.source.run_id, block_id: 'ETH', attempt: 1, fence: 7, reason: 'deadline' }
+    Object.assign(evidence, { state, cancel: tag, receipt: { attempt: 1, cancel: { ...tag },
+      reaped: state === 'confirmed_reaped', not_started: state === 'confirmed_not_started' } })
+  }
+  return signPlan(plan)
+}
+
+describe('Runs factual cleanup evidence', () => {
+  it.each([
+    ['unconfirmed', 'Unconfirmed'], ['confirmed_reaped', 'Confirmed reaped'],
+    ['confirmed_not_started', 'Confirmed not started'],
+  ])('renders retained BTC and %s ETH from one source without execution calls', async (state, label) => {
+    const plan = freezePlan(cleanupFixture(state))
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(plan))
+    render(<RunsView store={recoveryStore(plan)} fetchImpl={fetchImpl} mock />)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    reviewRecovery()
+    const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
+    expect(preview.getByText('BTC')).toBeVisible()
+    expect(preview.getByText('ETH')).toBeVisible()
+    const eth = within(preview.getByText('ETH').closest('li'))
+    expect(eth.getByText(`Cleanup: ${label} · attempt: 1`)).toBeVisible()
+    expect(eth.getByText('Job: authoritative-job-1 · status: failed')).toBeVisible()
+    expect(preview.getByText(`Source run: ${plan.source.run_id} · finished`)).toBeVisible()
+    expect(preview.getByText(`Graph digest: ${plan.source.graph_sha256}`)).toBeVisible()
+    expect(preview.getByText('Execution is unavailable in this preview. A later execution stage requires confirmation.')).toBeVisible()
+    expect(screen.getAllByRole('button')).toHaveLength(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expectRecoveryGets(fetchImpl)
+  })
+  it('reads a default v1 plan as having no cleanup proof', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(smallRecoveryPlan))
+    render(<RunsView store={recoveryStore(smallRecoveryPlan)} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
+    expect(preview.getAllByText('Cleanup: Unconfirmed · attempt: Unavailable')).toHaveLength(3)
+    expectRecoveryGets(fetchImpl)
+  })
+  it.each([
+    ['extra block field', plan => { plan.blocks[1].safe_to_start = true }],
+    ['missing evidence', plan => { delete plan.blocks[1].cleanup_evidence }],
+    ['extra evidence', (plan, e) => { e.private = 'private-never-display' }],
+    ['wrong schema', (plan, e) => { e.schema = 'unexpected' }],
+    ['foreign job', (plan, e) => { e.job_id = 'private-never-display' }],
+    ['negative attempt', (plan, e) => { e.attempt = -1 }],
+    ['bool attempt', (plan, e) => { e.attempt = true }],
+    ['null attempt', (plan, e) => { e.attempt = null }],
+    ['wrong state', (plan, e) => { e.state = 'safe_to_start' }],
+    ['missing tag', (plan, e) => { e.cancel = null }],
+    ['foreign run', (plan, e) => { e.cancel.run_id = 'private-never-display' }],
+    ['foreign block', (plan, e) => { e.cancel.block_id = 'BTC' }],
+    ['wrong tag attempt', (plan, e) => { e.cancel.attempt = 2 }],
+    ['zero fence', (plan, e) => { e.cancel.fence = 0 }],
+    ['bool fence', (plan, e) => { e.cancel.fence = true }],
+    ['wrong reason', (plan, e) => { e.cancel.reason = 'private-never-display' }],
+    ['extra tag', (plan, e) => { e.cancel.actor = 'private-never-display' }],
+    ['missing receipt', (plan, e) => { e.receipt = null }],
+    ['extra receipt', (plan, e) => { e.receipt.worker_id = 'private-never-display' }],
+    ['wrong receipt attempt', (plan, e) => { e.receipt.attempt = 2 }],
+    ['changed receipt fence', (plan, e) => { e.receipt.cancel.fence = 8 }],
+    ['extra receipt tag', (plan, e) => { e.receipt.cancel.private = 'private-never-display' }],
+    ['both facts true', (plan, e) => { e.receipt.not_started = true }],
+    ['both facts false', (plan, e) => { e.receipt.reaped = false }],
+    ['nonboolean fact', (plan, e) => { e.receipt.reaped = 1 }],
+    ['inconsistent fact state', (plan, e) => { e.state = 'confirmed_not_started' }],
+    ['unconfirmed with receipt', (plan, e) => { e.state = 'unconfirmed' }],
+    ['unbound proof', (plan, e) => {
+      Object.assign(plan.blocks[1], { job_id: null, status: null, receipt_sha256: null })
+      e.job_id = null
+    }],
+    ['wrong source', plan => { plan.source.graph_sha256 = 'd'.repeat(64) }],
+    ['wrong revision', plan => { plan.source.graph_revision = 9 }],
+    ['v1 with proof fields', plan => { plan.schema = 'leaf.lab-corpus-recovery-plan.v1' }],
+    ['execution granted', plan => { plan.execution_allowed = true }],
+  ])('refuses signed v2 tamper: %s', async (unused, change) => {
+    const baseline = cleanupFixture(), mutable = JSON.parse(JSON.stringify(baseline))
+    change(mutable, mutable.blocks[1].cleanup_evidence)
+    const store = recoveryStore(baseline)
+    store.upsertRun(baseline.source.run_id, { doc_id: baseline.source.doc_id,
+      graph_sha256: baseline.source.graph_sha256 })
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(signPlan(mutable)))
+    render(<RunsView store={store} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    await screen.findByText('Recovery options unavailable. The plan could not be verified.')
+    expect(screen.queryByRole('region', { name: 'Recovery options preview' })).toBeNull()
+    expect(screen.queryByText(/private-never-display/)).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expectRecoveryGets(fetchImpl)
+  })
+  it('rejects a changed cleanup fact under the previous digest', async () => {
+    const baseline = cleanupFixture(), changed = JSON.parse(JSON.stringify(baseline))
+    changed.blocks[1].cleanup_evidence.cancel.fence = 8
+    changed.blocks[1].cleanup_evidence.receipt.cancel.fence = 8
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(changed))
+    render(<RunsView store={recoveryStore(baseline)} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    await screen.findByText('Recovery options unavailable. The plan could not be verified.')
+    expect(screen.queryByRole('region', { name: 'Recovery options preview' })).toBeNull()
+    expectRecoveryGets(fetchImpl)
+  })
+})
 
 describe('Runs recovery options preview', () => {
   it('reviews a frozen three-node plan only on explicit clicks and retains completed verdict fail', async () => {
@@ -131,7 +244,7 @@ describe('Runs recovery options preview', () => {
     const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     const [url, options] = fetchImpl.mock.calls[0]
-    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan`)
+    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan?include_cleanup=true`)
     expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
       headers: { Authorization: 'one', 'X-Tenant-Id': config.tenant, accept: 'application/json' } })
     expect(preview.getByText('Source document: original-document · revision 7')).toBeVisible()

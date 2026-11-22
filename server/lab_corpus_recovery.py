@@ -19,6 +19,8 @@ from lab_evaluate import GraphRefused, admit_graph
 from lab_doc_validators import validate_graph
 
 SCHEMA = 'leaf.lab-corpus-recovery-plan.v1'
+CLEANUP_SCHEMA = 'leaf.lab-corpus-cleanup-evidence.v1'
+SCHEMA_V2 = 'leaf.lab-corpus-recovery-plan.v2'
 
 
 def lookup_job(tenant, project, intent):
@@ -89,7 +91,44 @@ def _disposition(job, receipt, source):
     return 'unresolved', 'unknown_failure'
 
 
-def prepare(tenant, run_id, *, authorize):
+def _cleanup_evidence(job, receipt, run_id, block_id, *, stable):
+    evidence = {'schema': CLEANUP_SCHEMA, 'job_id': job['job_id'] if job else None,
+                'attempt': None, 'state': 'unconfirmed', 'cancel': None, 'receipt': None}
+    if not job or not stable:
+        return evidence
+    attempt = job.get('attempt')
+    if type(attempt) is not int or attempt < 0:
+        return evidence
+    evidence['attempt'] = attempt
+    tag = receipt.get('cancel')
+    if (not isinstance(tag, dict)
+            or set(tag) != {'run_id', 'block_id', 'attempt', 'fence', 'reason'}
+            or tag['run_id'] != run_id or tag['block_id'] != block_id
+            or type(tag['attempt']) is not int or tag['attempt'] != attempt
+            or type(tag['fence']) is not int or tag['fence'] <= 0
+            or tag['reason'] not in ('deadline', 'cancel')):
+        return evidence
+    evidence['cancel'] = dict(tag)
+    cleanup = receipt.get('cleanup')
+    # The native reap producer includes worker_id. It is never public evidence.
+    if (not isinstance(cleanup, dict)
+            or not {'attempt', 'cancel'} <= set(cleanup)
+            or set(cleanup) - {'attempt', 'cancel', 'reaped', 'not_started', 'worker_id'}
+            or type(cleanup['attempt']) is not int or cleanup['attempt'] != attempt
+            or not isinstance(cleanup['cancel'], dict)
+            or graph_digest(cleanup['cancel']) != graph_digest(tag)
+            or any(type(cleanup[key]) is not bool for key in ('reaped', 'not_started') if key in cleanup)):
+        return evidence
+    reaped, not_started = cleanup.get('reaped', False), cleanup.get('not_started', False)
+    if reaped == not_started:
+        return evidence
+    evidence['receipt'] = {'attempt': attempt, 'cancel': dict(tag),
+                           'reaped': reaped, 'not_started': not_started}
+    evidence['state'] = 'confirmed_reaped' if reaped else 'confirmed_not_started'
+    return evidence
+
+
+def prepare(tenant, run_id, *, authorize, include_cleanup=False):
     """Resolve immutable source and authoritative jobs, then recheck live access."""
     source = store.get(tenant, run_id)
     if source['tenant_id'] != tenant or source['run_id'] != run_id:
@@ -121,7 +160,7 @@ def prepare(tenant, run_id, *, authorize):
     blocks, selected, retained, unresolved = [], [], [], []
     for block in graph['blocks']:
         intent = f'lab:{run_id}:{block["id"]}:corpus:v1'
-        receipt = lookup_job(tenant, authority['project_id'], intent)
+        receipt = copy.deepcopy(lookup_job(tenant, authority['project_id'], intent))
         job = receipt.get('job')
         item = {'block_id': block['id'], 'idempotency_key': intent,
                 'job_id': None, 'status': None, 'receipt_sha256': None}
@@ -142,6 +181,17 @@ def prepare(tenant, run_id, *, authorize):
                         'lab_corpus', 'authority_mode')},
                     'cancel': receipt.get('cancel'), 'cleanup': receipt.get('cleanup')}))
         item.update(disposition=disposition, reason_category=reason)
+        if include_cleanup:
+            bound_job = job if item['job_id'] is not None else None
+            stable = False
+            if bound_job is not None:
+                readback = lookup_job(tenant, authority['project_id'], intent)
+                stable = (readback == receipt
+                    and type(readback['job'].get('attempt')) is type(job.get('attempt'))
+                    and graph_digest({key: readback.get(key) for key in ('cancel', 'cleanup')})
+                        == graph_digest({key: receipt.get(key) for key in ('cancel', 'cleanup')}))
+            item['cleanup_evidence'] = _cleanup_evidence(
+                bound_job, receipt, run_id, block['id'], stable=stable)
         blocks.append(item)
         {'selected': selected, 'retained': retained, 'unresolved': unresolved}[disposition].append(block['id'])
 
@@ -151,7 +201,7 @@ def prepare(tenant, run_id, *, authorize):
             blocks=[block for block in graph['blocks'] if block['id'] in selected],
             outputs={name: endpoint for name, endpoint in graph['outputs'].items()
                      if endpoint['node'] in selected}))
-    plan = {'schema': SCHEMA, 'source': {key: source[key] for key in (
+    plan = {'schema': SCHEMA_V2 if include_cleanup else SCHEMA, 'source': {key: source[key] for key in (
                 'run_id', 'doc_id', 'graph_revision', 'graph_sha256', 'state')},
             'blocks': blocks, 'selected_failed_block_ids': selected,
             'retained_completed_block_ids': retained, 'unresolved_block_ids': unresolved,
