@@ -1216,12 +1216,19 @@ export default function ToolCast({
   const createWorkspaceOrg = useCallback(async (name) => {
     if ((!sessionReady && !workspaceBootstrapRequired) || name == null) return
     const org = await workspace.createOrg(name)
+    if (org) {
+      // The unbound reads before this org existed left a 403 grant state
+      // ("access restricted") and a network banner behind; clear and re-read.
+      setSessionError(null)
+      setError(null)
+      platform.actions.refreshAll()
+    }
     if (org && workspaceBootstrapRequired) {
       setWorkspaceBootstrapRequired(false)
       setSessionRetry((current) => current + 1)
     }
     return org
-  }, [sessionReady, workspace, workspaceBootstrapRequired])
+  }, [sessionReady, workspace, workspaceBootstrapRequired, platform.actions])
 
   const createWorkspaceProject = useCallback(async (name) => {
     if (!sessionReady) return
