@@ -21,7 +21,8 @@
  * DERIVATION:
  *   tenant_id = app_metadata.leaf_platform_tenant_id (else the legacy
  *               organization_id, else the Auth0 sub)
- *   org_id    = app_metadata.leaf.organization_id  (null for a solo user)
+ *   org_id    = app_metadata.leaf.organization_id (omitted when there is no org;
+ *               self-serve POST /api/orgs refuses a present org_id claim)
  *   tier      = PLAN_TIER[plan]  (DeploymentTier enum; default hosted_starter).
  *               Surface-only — the server does NOT enforce entitlement here.
  *
@@ -211,7 +212,9 @@ exports.onExecutePostLogin = async (event, api) => {
     return;
   }
   api.accessToken.setCustomClaim(CLAIM_NS + 'tenant_id', claims.tenant_id);
-  api.accessToken.setCustomClaim(CLAIM_NS + 'org_id', claims.org_id);
+  if (typeof claims.org_id === 'string' && claims.org_id.length > 0) {
+    api.accessToken.setCustomClaim(CLAIM_NS + 'org_id', claims.org_id);
+  }
   api.accessToken.setCustomClaim(CLAIM_NS + 'tier', claims.tier);
   // Always set (possibly []) so a token's role state is explicit, never
   // ambiguous-absent. The server treats absent and [] identically (no roles).
