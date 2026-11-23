@@ -225,6 +225,67 @@ async function functionOutput(call: FunctionCall, catalog: Map<string, { tool: T
   return result.content.filter(block => block.type === "text").map(block => block.text).join("\n");
 }
 
+const LLAMA_SCHEMA_MAX_DEPTH = 64;
+const SCHEMA_MAP_KEYS = ["properties", "$defs", "definitions", "patternProperties"] as const;
+const SCHEMA_LIST_KEYS = ["prefixItems", "anyOf", "oneOf", "allOf"] as const;
+
+function isSchemaObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function capMaxItems(out: Record<string, unknown>, limit: number): void {
+  const existing = out.maxItems;
+  out.maxItems = typeof existing === "number" && existing < limit ? existing : limit;
+}
+
+/**
+ * llama.cpp's schema-to-grammar converter rejects any `items` that is not an object (a boolean or a draft-07
+ * array), which zod emits for closed tuples. Contract: pure; never mutates input; only rewrites non-object items.
+ * Recursion is bounded at 64 levels; deeper nodes are returned unchanged.
+ */
+export function llamaSafeToolSchema(schema: unknown): unknown {
+  return sanitizeSchemaNode(schema, 0);
+}
+
+function sanitizeSchemaNode(node: unknown, depth: number): unknown {
+  if (depth > LLAMA_SCHEMA_MAX_DEPTH || !isSchemaObject(node)) return node;
+  const out: Record<string, unknown> = { ...node };
+  const next = depth + 1;
+  for (const key of SCHEMA_MAP_KEYS) {
+    const map = node[key];
+    if (!isSchemaObject(map)) continue;
+    out[key] = Object.fromEntries(Object.entries(map).map(([name, child]) => [name, sanitizeSchemaNode(child, next)]));
+  }
+  for (const key of SCHEMA_LIST_KEYS) {
+    const list = node[key];
+    if (Array.isArray(list)) out[key] = list.map(child => sanitizeSchemaNode(child, next));
+  }
+  if (isSchemaObject(node.additionalProperties)) out.additionalProperties = sanitizeSchemaNode(node.additionalProperties, next);
+  if (isSchemaObject(node.not)) out.not = sanitizeSchemaNode(node.not, next);
+
+  const items = node.items;
+  if (items === false) {
+    delete out.items;
+    capMaxItems(out, Array.isArray(node.prefixItems) ? node.prefixItems.length : 0);
+  } else if (items === true) {
+    delete out.items;
+  } else if (Array.isArray(items)) {
+    delete out.items;
+    out.prefixItems = items.map(child => sanitizeSchemaNode(child, next));
+    const extra = node.additionalItems;
+    if (isSchemaObject(extra)) {
+      out.items = sanitizeSchemaNode(extra, next);
+      delete out.additionalItems;
+    } else if (extra === undefined || extra === false) {
+      capMaxItems(out, items.length);
+    }
+    if (typeof extra === "boolean") delete out.additionalItems;
+  } else if (isSchemaObject(items)) {
+    out.items = sanitizeSchemaNode(items, next);
+  }
+  return out;
+}
+
 export function createOpenAiSdkFacade(opts: OpenAiOptions) {
   const endpoint = (opts.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "") + "/responses";
   return {
@@ -247,7 +308,7 @@ export function createOpenAiSdkFacade(opts: OpenAiOptions) {
       }
       const tools = Array.from(catalog.values(), ({ tool }) => ({
         type: "function", name: tool.name, description: tool.description, strict: false,
-        parameters: z.toJSONSchema(z.object(tool.shape), { io: "input" }),
+        parameters: llamaSafeToolSchema(z.toJSONSchema(z.object(tool.shape), { io: "input" })),
       }));
       const input = await promptItems(prompt);
       const total: Usage = {};
