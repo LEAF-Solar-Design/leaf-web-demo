@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 import os
+import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -22,7 +24,7 @@ import investor_demo
 import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
-from branch_tools import dev_catalog, sync_receipts, tenant_catalog
+from branch_tools import dev_catalog, sync_receipts, tenant_catalog, tenant_publish, online_signer
 
 router = APIRouter()
 
@@ -117,10 +119,7 @@ _TENANT_CACHE = {"Cache-Control": "no-store"}
 
 
 def _plugin_builder_visible(tenant) -> bool:
-    invited = {part.strip() for part in os.environ.get("LEAF_PLUGIN_BUILDER_TENANTS", "").split(",")}
-    return (os.environ.get("LEAF_PLUGIN_BUILDER") == "1"
-            and bool(os.environ.get("LEAF_TENANT_TOOLS_DIR"))
-            and (str(tenant) in invited or str(tenant) in customization_flags.internal_tenants()))
+    return customization_flags.plugin_builder_enabled(str(tenant))
 
 
 def _tenant_missing(detail: str = "tool_not_published") -> Response:
@@ -142,6 +141,15 @@ def tenant_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
     raw = tenant_catalog.revocations_bytes(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
     if raw is None:
         return _tenant_missing("no_revocation_list")
+    now = datetime.now(timezone.utc)
+    issued_at = datetime.fromisoformat(json.loads(raw)["issued_at"].replace("Z", "+00:00"))
+    if now - issued_at > timedelta(days=3):
+        try:
+            raw = tenant_publish.refresh_revocations(
+                os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), online_signer.configured_signer(), now)
+        except (online_signer.SignerUnavailable, tenant_publish.TenantPublishError,
+                tenant_catalog.TenantCatalogError, OSError, ValueError):
+            pass  # Serve the last signed list if refresh is unavailable.
     return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
 
 

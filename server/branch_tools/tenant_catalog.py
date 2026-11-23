@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import tempfile
@@ -105,14 +106,15 @@ def _entry(root: str | Path, tenant_id: str, name: str, version: str,
         if digest in revoked or _read(path / "digest.txt", 65).decode("ascii").strip() != digest:
             return None
         package = path / "package.zip"
-        if hashlib.sha256(_read(package, PACKAGE_LIMIT)).hexdigest() != digest:
+        zip_digest = _read(path / "package.sha256", 65).decode("ascii").strip()
+        if hashlib.sha256(_read(package, PACKAGE_LIMIT)).hexdigest() != zip_digest:
             return None
         return value, raw, package
     except (*_READ_ERRORS, TenantCatalogError):
         return None
 
 
-def list_versions(root: str | Path, tenant_id: str) -> list[dict]:
+def list_versions(root: str | Path, tenant_id: str, *, include_revoked: bool = False) -> list[dict]:
     try:
         directory = _tenant(root, tenant_id)
         _, revoked = _revocations(directory)
@@ -122,12 +124,15 @@ def list_versions(root: str | Path, tenant_id: str) -> list[dict]:
                 continue
             _safe_path(name)
             for version in tool_envelopes._directories(name, 50):
-                entry = _entry(root, tenant_id, name.name, version.name, revoked)
+                entry = _entry(root, tenant_id, name.name, version.name,
+                               set() if include_revoked else revoked)
                 if entry is not None:
                     value = entry[0]
                     result.append({"name": name.name, "version": version.name,
                                    "package_digest": value["package"]["package_digest"],
                                    "signed_at": value["signed_at"]})
+                    if include_revoked:
+                        result[-1]["revoked"] = value["package"]["package_digest"] in revoked
         return sorted(result, key=lambda item: (item["name"], item["version"]))
     except (*_READ_ERRORS, TenantCatalogError):
         return []
@@ -177,10 +182,12 @@ def _sync_directory(path: Path) -> None:
 
 
 def write_version(root: str | Path, tenant_id: str, name: str, version: str,
-                  package: bytes, envelope: bytes) -> TenantEntry:
+                  package: bytes, envelope: bytes, package_digest: str) -> TenantEntry:
     destination = _version(root, tenant_id, name, version)
     if len(package) > PACKAGE_LIMIT or len(envelope) > ENVELOPE_LIMIT:
         raise TenantCatalogError("size_limit")
+    if not isinstance(package_digest, str) or re.fullmatch(r"[0-9a-f]{64}", package_digest) is None:
+        raise TenantCatalogError("invalid_digest")
     if destination.exists():
         raise TenantCatalogError("version_exists")
     directory = _tenant(root, tenant_id)
@@ -199,10 +206,11 @@ def write_version(root: str | Path, tenant_id: str, name: str, version: str,
         if destination.exists():
             raise TenantCatalogError("version_exists")
         temporary = Path(tempfile.mkdtemp(prefix=".publish-", dir=directory))
-        digest = hashlib.sha256(package).hexdigest()
+        digest = package_digest
         _write(temporary / "package.zip", package)
         _write(temporary / "envelope.json", envelope)
         _write(temporary / "digest.txt", (digest + "\n").encode("ascii"))
+        _write(temporary / "package.sha256", (hashlib.sha256(package).hexdigest() + "\n").encode("ascii"))
         _sync_directory(temporary)
         _safe_path(destination)
         if destination.exists():
