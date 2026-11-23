@@ -30,6 +30,7 @@ def test_extensions_are_named_and_frozen():
     assert set(EXTENSIONS) == {
         "job_linked", "question_required", "turn_usage", "session_state",
         "overlay_proposed", "overlay_decided", "overlay_revoked",
+        "questions_required", "plan_proposed",
     }
     assert len(NATIVE) == 11
 

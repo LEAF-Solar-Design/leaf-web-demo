@@ -188,6 +188,9 @@ HARNESS_EVENT_TYPES = S18_STREAM_TYPES - {"turn_started", "confirmation_resolved
 NON_TURN_STREAM_TYPES = {
     "turn_queued", "turn_queue_dropped",
     "overlay_proposed", "overlay_decided", "overlay_revoked",
+    # Inline authoring cards (SIA #3578): the harness converse loop emits them and
+    # the web subscribes; they are not rows in the frozen §18.3 doc table.
+    "plan_proposed", "questions_required",
 }
 
 #: What the web client MUST register an EventSource listener for. EventSource
