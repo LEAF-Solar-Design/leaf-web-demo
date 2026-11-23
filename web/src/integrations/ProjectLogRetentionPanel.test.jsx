@@ -49,15 +49,27 @@ describe('O03 standalone retention controls, inert client only', () => {
     click('Export definition'); expect(await screen.findByText('Exported definition')).toBeInTheDocument()
     expect(screen.getByText(/"schema_version": 1/)).toBeInTheDocument()
   })
-  it('prepares only actual imported ref/revision and explicit field mapping/UTC clock', async () => {
+  it.each([
+    ['1792230300000', '2026-10-17T09:45:00.000Z'],
+    ['2031-01-01T00:00:00.000Z', '2031-01-01T00:00:00.000Z'],
+    ['-1', '1969-12-31T23:59:59.999Z'],
+    ['0', '1970-01-01T00:00:00.000Z'],
+  ])('prepares the imported revision with explicit field mapping and clock %s', async (input, retentionClock) => {
     const h = setup(); render(<ProjectLogRetentionPanel {...h.props} />); click('Load datasets')
     await screen.findByRole('option', { name: '<img src=x>' }); change('Imported dataset', JSON.stringify([dataset.reference, dataset.revision]))
-    change('Logical table ID', 'my-original-logs'); change('Retention clock (UTC milliseconds)', '2031-01-01T00:00:00.000Z')
+    change('Logical table ID', 'my-original-logs'); change('Retention clock (UTC milliseconds)', input)
     change('Record ID field', 'record_id'); change('Source field', 'origin'); change('Level field', 'severity'); change('Timestamp field', 'recorded_at')
     click('Prepare records'); await idle()
-    expect(h.client.retentionPrepare).toHaveBeenCalledWith(projectId, { datasetRef: dataset.reference, expectedDatasetRevision: 7, tableId: 'my-original-logs', retentionClock: '2031-01-01T00:00:00.000Z', fields: { id: 'record_id', source: 'origin', level: 'severity', timestamp: 'recorded_at' } }, expect.any(Object))
+    expect(h.client.retentionPrepare).toHaveBeenCalledWith(projectId, { datasetRef: dataset.reference, expectedDatasetRevision: 7, tableId: 'my-original-logs', retentionClock, fields: { id: 'record_id', source: 'origin', level: 'severity', timestamp: 'recorded_at' } }, expect.any(Object))
     expect(screen.getByText(`Prepared table: ${table}.`)).toBeInTheDocument()
     expect(document.querySelector('img')).toBeNull()
+  })
+  it.each(['', '1.5', '1e6', '2031-02-29T00:00:00.000Z', '253402300800000', '9007199254740992'])('rejects invalid clock "%s" locally', async input => {
+    const h = setup(); render(<ProjectLogRetentionPanel {...h.props} />); click('Load datasets')
+    await screen.findByRole('option', { name: '<img src=x>' }); change('Imported dataset', JSON.stringify([dataset.reference, 7]))
+    change('Logical table ID', 'my-original-logs'); change('Retention clock (UTC milliseconds)', input); click('Prepare records')
+    expect(await screen.findByRole('alert')).toHaveTextContent('whole epoch milliseconds or a UTC timestamp')
+    expect(h.client.retentionPrepare).not.toHaveBeenCalled()
   })
   it('downloads only actual exported definition and redacted audit objects and revokes object URLs', async () => {
     const createObjectURL = vi.fn().mockReturnValue('blob:synthetic'), revokeObjectURL = vi.fn()

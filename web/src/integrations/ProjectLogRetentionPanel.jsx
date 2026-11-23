@@ -8,6 +8,15 @@ const failed = () => new Error('Retention action unavailable')
 const number = value => { const n = Number(value); if (!value.trim() || !Number.isSafeInteger(n)) throw failed(); return n }
 const refKey = dataset => JSON.stringify([dataset.reference, dataset.revision])
 const cell = value => typeof value === 'string' ? value : JSON.stringify(value)
+function normalizeRetentionClock(input) {
+  const value = input.trim()
+  const epoch = /^-?\d+$/.test(value)
+  const time = epoch ? Number(value) : Date.parse(value)
+  const date = new Date(time)
+  if (!Number.isSafeInteger(time) || !Number.isFinite(date.getTime())) return null
+  const iso = date.toISOString()
+  return iso.length === 24 && (epoch || iso === value) ? iso : null
+}
 
 export function ProjectLogRetentionPanel(props) {
   const binding = [props.client, props.projectId, props.signal]
@@ -260,8 +269,13 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
           <input id={`${prefix}-${key}`} list={`${prefix}-fields`} value={form[key]} onChange={event => edit(key, event.target.value)} /></label>)}
       </div><datalist id={`${prefix}-fields`}>{(dataset?.fields ?? []).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}</datalist>
       <button type="button" disabled={!dataset?.material_context || !!dataset?.derivation} onClick={() => action(async ctx => {
+        const retentionClock = normalizeRetentionClock(form.clock)
+        if (!retentionClock) {
+          setError('Enter the retention clock as whole epoch milliseconds or a UTC timestamp such as 2031-01-01T00:00:00.000Z (year 0000 through 9999).')
+          return
+        }
         const value = await invoke(ctx, 'retentionPrepare', [{ datasetRef: dataset.reference, expectedDatasetRevision: dataset.revision,
-          tableId: form.table.trim(), fields: { id: form.id, source: form.source, level: form.level, timestamp: form.timestamp }, retentionClock: form.clock.trim() }])
+          tableId: form.table.trim(), fields: { id: form.id, source: form.source, level: form.level, timestamp: form.timestamp }, retentionClock }])
         setPrepared(value); setSchedule(null); clearRun(); setNotice('Original records prepared from the selected imported revision.')
       })}>Prepare records</button>{prepared && <p>Prepared table: {prepared.tableId}.</p>}
     </fieldset>
