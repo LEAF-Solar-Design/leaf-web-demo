@@ -19,6 +19,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Literal
 from uuid import UUID
@@ -31,6 +32,7 @@ import author_quota
 import catalog
 import customization_flags
 import customization_service
+from branch_tools import online_signer, tenant_catalog, tenant_publish
 import deps
 import entitlements
 from customization_authority import AuthorityError, PublishRequest
@@ -692,7 +694,7 @@ def _customization_error(
     return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
         "error": error_obj("BAD_PARAMS", message, retryable=False),
         "reason_code": exc.code,
-        **({"failures": exc.failures} if exc.code == "branch_package_invalid" else {}),
+        **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 
 
@@ -1132,6 +1134,56 @@ def register(req: RegisterRequest, tenant=Depends(deps.require_tenant)) -> Dict[
 
 _review_calls: OrderedDict[str, deque[float]] = OrderedDict()
 _review_calls_lock = threading.Lock()
+
+
+class BranchRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: StrictStr = Field(min_length=1, max_length=200)
+
+
+@router.get("/api/author/branch-tools")
+def branch_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not customization_flags.plugin_builder_enabled(str(tenant)):
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    return JSONResponse({"tools": tenant_catalog.list_versions(
+        os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), include_revoked=True)},
+        headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/author/branch-tools/{name}/{version}/revoke")
+def revoke_branch_tool(name: str, version: str, req: BranchRevokeRequest,
+                       tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not customization_flags.plugin_builder_enabled(str(tenant)):
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    try:
+        binding = customization_service._binding(tenant)
+        if binding.role not in {"owner", "editor"}:
+            raise CustomizationServiceError("tenant_role_denied", 403)
+        if not _admit_review_call(binding.subject):
+            raise CustomizationServiceError("review_rate_limited", 429)
+        root = os.environ["LEAF_TENANT_TOOLS_DIR"]
+        # Resolve only this tenant's version before contacting the signer.
+        try:
+            tenant_publish.read_publication(root, str(tenant), name, version)
+        except tenant_publish.TenantPublishError:
+            return JSONResponse({"detail": "tool_not_published"}, status_code=404,
+                                headers={"Cache-Control": "no-store"})
+        result = tenant_publish.revoke_tenant_tool(
+            root, str(tenant), name, version, req.reason,
+            online_signer.configured_signer(), datetime.now(timezone.utc))
+        return JSONResponse({"name": name, "version": version,
+                             "package_digest": result.package_digest, "revoked": True},
+                            headers={"Cache-Control": "no-store"})
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except tenant_publish.TenantPublishError as exc:
+        return _customization_error(CustomizationServiceError(exc.code, exc.status_code))
+    except online_signer.SignerUnavailable:
+        return _customization_error(CustomizationServiceError("signer_unavailable", 503))
+    except (tenant_catalog.TenantCatalogError, OSError):
+        return _customization_error(CustomizationServiceError("tenant_catalog_unavailable", 503))
 
 
 def _admit_review_call(subject: str) -> bool:

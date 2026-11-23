@@ -22,17 +22,22 @@ PACKAGE = b"PK\x05\x06" + b"\x00" * 18
 SUFFIXES = ("", "/revocations", f"/{NAME}/{VERSION}/envelope", f"/{NAME}/{VERSION}/package")
 
 
+def content_digest(package):
+    line = f"payload.txt\t{len(package)}\t{hashlib.sha256(package).hexdigest()}\n"
+    return hashlib.sha256(line.encode()).hexdigest()
+
+
 def envelope(tenant=TENANT, package=PACKAGE, name=NAME, version=VERSION):
     return {"schema": "leaf.tool-envelope.v2", "audience_tenant": tenant,
             "package": {"name": name, "version": version,
-                        "package_digest": hashlib.sha256(package).hexdigest()},
+                        "package_digest": content_digest(package)},
             "tiers": ["hosted_pro"], "signed_at": "2026-11-22T12:00:00Z",
             "key_id": "b" * 16, "alg": "ECDSA_P256_SHA256", "signature": "c" * 140}
 
 
 def publish(root, tenant=TENANT, package=PACKAGE, value=None, name=NAME, version=VERSION):
     raw = json.dumps(envelope(tenant, package, name, version) if value is None else value).encode()
-    entry = catalog.write_version(root, tenant, name, version, package, raw)
+    entry = catalog.write_version(root, tenant, name, version, package, raw, content_digest(package))
     return entry, raw
 
 
@@ -62,13 +67,14 @@ def test_tenants_have_independent_versions(client, tmp_path, monkeypatch):
     first, raw = publish(tmp_path)
     other, other_raw = publish(tmp_path, OTHER, b"other package")
     assert first.path != other.path
-    assert first.package_digest == hashlib.sha256(PACKAGE).hexdigest()
+    assert first.package_digest == content_digest(PACKAGE)
+    assert first.package_digest != hashlib.sha256(PACKAGE).hexdigest()
     for tenant, package, expected_raw in ((TENANT, PACKAGE, raw), (OTHER, b"other package", other_raw)):
         monkeypatch.setitem(client.app.dependency_overrides, deps.require_active_tenant, lambda: UUID(tenant))
         response = client.get(BASE)
         assert response.status_code == 200
         assert response.json() == {"tools": [{"name": NAME, "version": VERSION,
-                                            "package_digest": hashlib.sha256(package).hexdigest(),
+                                            "package_digest": content_digest(package),
                                             "signed_at": "2026-11-22T12:00:00Z"}]}
         assert client.get(BASE + f"/{NAME}/{VERSION}/envelope").content == expected_raw
         assert client.get(BASE + f"/{NAME}/{VERSION}/package").content == package
@@ -142,7 +148,9 @@ def test_concurrent_writers_leave_one_complete_version(tmp_path):
         results = list(pool.map(write, packages))
     winner = next(entry for entry in results if entry is not None)
     assert sum(entry is not None for entry in results) == 1
-    assert hashlib.sha256((winner.path / "package.zip").read_bytes()).hexdigest() == winner.package_digest
+    package = (winner.path / "package.zip").read_bytes()
+    assert content_digest(package) == winner.package_digest
+    assert (winner.path / "package.sha256").read_text().strip() == hashlib.sha256(package).hexdigest()
     assert len(catalog.list_versions(tmp_path, TENANT)) == 1
 
 
@@ -245,7 +253,8 @@ def test_write_limits(tmp_path, target):
         else:
             catalog.write_version(tmp_path, TENANT, NAME, VERSION,
                                   b" " * (catalog.PACKAGE_LIMIT + 1) if target == "package" else PACKAGE,
-                                  b" " * (catalog.ENVELOPE_LIMIT + 1) if target == "envelope" else b"{}")
+                                  b" " * (catalog.ENVELOPE_LIMIT + 1) if target == "envelope" else b"{}",
+                                  content_digest(PACKAGE))
     assert not list(tmp_path.iterdir())
 
 
@@ -288,7 +297,7 @@ def test_invalid_revocations_fail_closed(client, tmp_path):
         assert client.get(BASE + suffix).status_code == 404
 
 
-@pytest.mark.parametrize("component", ["root", "tenant", "name", "version", "package.zip", "envelope.json", "digest.txt", "revocations.json"])
+@pytest.mark.parametrize("component", ["root", "tenant", "name", "version", "package.zip", "envelope.json", "digest.txt", "package.sha256", "revocations.json"])
 def test_symlinks_are_never_followed(tmp_path, component):
     root = tmp_path / "catalog"
     entry, _ = publish(root)
@@ -325,6 +334,16 @@ def test_enumeration_is_bounded(tmp_path, dimension, count, expected):
         (directory / "envelope.json").write_text(json.dumps(value))
         (directory / "package.zip").write_bytes(PACKAGE)
         (directory / "digest.txt").write_text(value["package"]["package_digest"])
+        (directory / "package.sha256").write_text(hashlib.sha256(PACKAGE).hexdigest())
     entries = catalog.list_versions(tmp_path, TENANT)
     assert len(entries) == expected
     assert entries == sorted(entries, key=lambda entry: (entry["name"], entry["version"]))
+
+
+@pytest.mark.parametrize("component", ["package.zip", "package.sha256", "digest.txt"])
+def test_tampered_package_or_digest_is_hidden(tmp_path, component):
+    entry, _ = publish(tmp_path)
+    (entry.path / component).write_bytes(b"f" * 64)
+    assert catalog.list_versions(tmp_path, TENANT) == []
+    assert catalog.envelope_bytes(tmp_path, TENANT, NAME, VERSION) is None
+    assert catalog.package_path(tmp_path, TENANT, NAME, VERSION) is None

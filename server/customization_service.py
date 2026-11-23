@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     msvcrt = None
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -46,6 +47,7 @@ import deps
 import entitlements
 import platform_link
 from branch_tools.package_check import check_branch_package
+from branch_tools import online_signer, tenant_catalog, tenant_publish
 from branch_tools.dev_publish import (
     DevPublishError, DevPublishResult, publish_branch_package, read_branch_publication,
 )
@@ -2899,7 +2901,7 @@ class CustomizationService:
             raise CustomizationServiceError("publish_superseded", 409)
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING}:
             raise CustomizationServiceError("publication_request_not_available")
-        if change.tool_target == "branch":
+        if change.tool_target == "branch" and not customization_flags.plugin_builder_enabled(tenant_id):
             self._branch_dev_root(tenant_id)
 
         # Denial is terminal for the durable request regardless of later
@@ -3100,7 +3102,7 @@ class CustomizationService:
             raise CustomizationServiceError("staged_receipt_mismatch")
         if change.state not in {ChangeState.STAGED, ChangeState.PUBLISHING, ChangeState.PUBLISHED}:
             raise CustomizationServiceError("publish_not_available")
-        if change.tool_target == "branch":
+        if change.tool_target == "branch" and not customization_flags.plugin_builder_enabled(tenant_id):
             self._branch_dev_root(tenant_id)
         self._verify_catalog(tenant_id, request.staged_commit, request.catalog_digest)
         self._verified_record_fields(change, set())
@@ -3163,9 +3165,20 @@ class CustomizationService:
                 review = None
                 if confirmation.approval_kind and confirmation.approver_role:
                     review = {"approval": confirmation.approval_kind, "approver_role": confirmation.approver_role}
-                result = publish_branch_package(files, name, self._branch_dev_root(tenant_id), review=review)
-            except DevPublishError as exc:
-                if confirmation.approval_kind is None or exc.code != "branch_dev_catalog_unavailable":
+                if customization_flags.plugin_builder_enabled(tenant_id):
+                    try:
+                        result = tenant_publish.publish_tenant_tool(
+                            files, name, tenant_id, online_signer.configured_signer(),
+                            os.environ["LEAF_TENANT_TOOLS_DIR"], datetime.now(timezone.utc))
+                    except online_signer.SignerUnavailable as exc:
+                        raise tenant_publish.TenantPublishError("signer_unavailable") from exc
+                    except tenant_catalog.TenantCatalogError as exc:
+                        raise tenant_publish.TenantPublishError("tenant_catalog_unavailable") from exc
+                else:
+                    result = publish_branch_package(files, name, self._branch_dev_root(tenant_id), review=review)
+            except (DevPublishError, tenant_publish.TenantPublishError) as exc:
+                if (exc.code not in {"signer_unavailable", "tenant_catalog_unavailable"}
+                        and (confirmation.approval_kind is None or exc.code != "branch_dev_catalog_unavailable")):
                     self.store.supersede_publish(
                         tenant_id=tenant_id, change_set_id=change.change_set_id,
                         expected_version=publishing.version,
@@ -3176,12 +3189,15 @@ class CustomizationService:
                         change.change_set_id, exc.code,
                     )
                 raise CustomizationServiceError(
-                    exc.code, 409 if exc.code == "branch_version_conflict" else (
+                    exc.code, exc.status_code if isinstance(exc, tenant_publish.TenantPublishError) else (
+                        409 if exc.code == "branch_version_conflict" else (
                         422 if exc.code == "branch_package_invalid" else 503
-                    ), failures=exc.failures,
+                    )), failures=exc.failures,
                 ) from exc
             except OSError as exc:
-                raise CustomizationServiceError("branch_dev_catalog_unavailable", 503) from exc
+                code = ("tenant_catalog_unavailable" if customization_flags.plugin_builder_enabled(tenant_id)
+                        else "branch_dev_catalog_unavailable")
+                raise CustomizationServiceError(code, 503) from exc
             try:
                 self.store.publish_branch(
                     tenant_id=tenant_id, change_set_id=change.change_set_id,
@@ -3245,15 +3261,32 @@ class CustomizationService:
         return files, package.split("/")[1]
 
     @staticmethod
-    def _branch_publish_result(change: ChangeSet, result: DevPublishResult) -> dict[str, Any]:
+    def _branch_publish_result(
+        change: ChangeSet, result: DevPublishResult | tenant_publish.TenantPublishResult,
+    ) -> dict[str, Any]:
         return {
             "contract": CONTRACT, "tenant_id": change.tenant_id,
             "change_set_id": change.change_set_id, "target": "branch",
             "name": result.name, "version": result.version,
-            "package_digest": result.package_digest, "dev_catalog": "/api/tool-envelopes/dev",
+            "package_digest": result.package_digest,
+            **({"catalog": "/api/tool-envelopes/tenant"}
+               if customization_flags.plugin_builder_enabled(change.tenant_id)
+               else {"dev_catalog": "/api/tool-envelopes/dev"}),
         }
 
     def _published_branch_result(self, change: ChangeSet) -> dict[str, Any]:
+        if customization_flags.plugin_builder_enabled(change.tenant_id):
+            files, name = self._branch_package_files(change)
+            try:
+                _, checked = tenant_publish.reviewed_package(files, name)
+                result = tenant_publish.read_publication(
+                    os.environ["LEAF_TENANT_TOOLS_DIR"], change.tenant_id,
+                    name, checked.manifest["version"])
+                if result.package_digest != checked.package_digest:
+                    raise tenant_publish.TenantPublishError("branch_version_conflict", 409)
+            except (tenant_publish.TenantPublishError, OSError) as exc:
+                raise CustomizationServiceError("publish_not_available", 409) from exc
+            return self._branch_publish_result(change, result)
         root = self._branch_dev_root(change.tenant_id)
         files, name = self._branch_package_files(change)
         checked = check_branch_package(files, name)

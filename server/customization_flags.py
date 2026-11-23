@@ -68,6 +68,19 @@ def inline_review_enabled(tenant_id: str) -> bool:
 
 
 def self_approval_allowed(tenant_id: str) -> bool:
-    """Internal self-approval rollout gate, never a security control."""
-    return (os.environ.get("LEAF_STUDIO_INLINE_REVIEW") == "internal"
-            and tenant_id in internal_tenants() and inline_review_enabled(tenant_id))
+    """Internal or Plugin Builder self-approval, conditional on inline review."""
+    return inline_review_enabled(tenant_id) and (
+        plugin_builder_enabled(tenant_id)
+        or (os.environ.get("LEAF_STUDIO_INLINE_REVIEW") == "internal"
+            and tenant_id in internal_tenants()))
+
+
+def plugin_builder_enabled(tenant_id: str) -> bool:
+    if not os.environ.get("LEAF_TENANT_TOOLS_DIR", "").strip():
+        return False
+    selected = os.environ.get("LEAF_PLUGIN_BUILDER", "").strip().lower()
+    internal = str(tenant_id) in internal_tenants()
+    invited = {part.strip() for part in os.environ.get(
+        "LEAF_PLUGIN_BUILDER_TENANTS", "").split(",") if part.strip()}
+    return (selected == "all" or (selected == "internal" and internal)
+            or (selected == "1" and (internal or str(tenant_id) in invited)))
