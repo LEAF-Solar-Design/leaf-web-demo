@@ -537,3 +537,60 @@ def test_absolute_deadline_also_covers_body_producer(context, monkeypatch):
     headers = context["headers"]() + [("Origin", LOCAL), ("Content-Type", "application/json")]
     error(context, context["request"]("POST", ELEMENT_PATH, headers, slow()), 504)
     assert not context["calls"]
+
+
+@pytest.mark.parametrize("case,status,code,stage,failure_class", [
+    ("upstream", 503, "WORKSPACE_UNAVAILABLE", "upstream_http", "http_response"),
+    ("config", 503, "WORKSPACE_CONFIG_REQUIRED", "local_config", "integration_config"),
+    ("origin", 503, "WORKSPACE_CONFIG_REQUIRED", "local_config", "bridge_failure"),
+    ("timeout", 504, "WORKSPACE_UNAVAILABLE", "mapped_exception", "timeout"),
+    ("transport", 502, "WORKSPACE_UNAVAILABLE", "mapped_exception", "http_error"),
+])
+def test_dataset_read_failure_attribution(context, monkeypatch, caplog, case, status, code,
+                                          stage, failure_class):
+    sentinel = "private-diagnostic-sentinel"
+    headers = context["headers"]() + [("X-Fixture-Private", sentinel)]
+
+    def missing_config():
+        raise IntegrationConfigError(sentinel)
+
+    def respond(_):
+        if case == "timeout":
+            raise httpx.ReadTimeout(sentinel)
+        if case == "transport":
+            raise httpx.ConnectError(sentinel)
+        return httpx.Response(503, json={"error": {"code": sentinel, "correlationId": OTHER}},
+                              headers={"X-Fixture-Private": sentinel})
+
+    if case == "config":
+        monkeypatch.setattr(bridge, "load_integration_config", missing_config)
+    if case == "origin":
+        headers = [(k, sentinel if k == "X-Leaf-Integration-Origin" else v) for k, v in headers]
+    context["respond"] = respond
+    path = f"/api/v1/projects/{PROJECT}/integrations/datasets?limit=1"
+    response = context["request"](path=path, headers=headers)
+    error(context, response, status)
+    detail = response.json()["error"]
+    assert detail == {"code": code, "message": "Integration request could not complete.",
+                      "correlationId": response.headers["x-correlation-id"]}
+    if case == "upstream":
+        assert detail["correlationId"] == OTHER
+    assert len(context["calls"]) == (0 if case in {"origin", "config"} else 1)
+    [record] = [r for r in caplog.records if r.name == bridge.__name__]
+    assert record.getMessage() == f"dataset_read_failure stage={stage} status={status} class={failure_class}"
+    assert record.args == (stage, status, failure_class)
+    assert record.exc_info is None and record.stack_info is None
+    for private in (sentinel, PROJECT, OTHER, BINDING, TOKEN, SECRET, path):
+        assert private not in caplog.text
+
+
+def test_dataset_read_diagnostic_excludes_success_and_other_operations(context, caplog):
+    path = f"/api/v1/projects/{PROJECT}/integrations/datasets"
+    context["respond"] = lambda _: httpx.Response(200, json={"items": []})
+    assert context["request"](path=path).status_code == 200
+    context["respond"] = lambda _: httpx.Response(503, json={"error": {}})
+    assert context["request"](path=ELEMENT_PATH).status_code == 503
+    assert context["request"]("POST", path, headers=context["headers"]() +
+                              [("Origin", LOCAL), ("Content-Type", "application/json")],
+                              content=b"{}").status_code >= 400
+    assert not [r for r in caplog.records if r.name == bridge.__name__]

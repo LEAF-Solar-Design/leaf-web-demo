@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import string
@@ -50,6 +51,13 @@ def _error(status, code, correlation=None):
                                                     "X-Correlation-ID": correlation})
 
 
+def _dataset_read_failure(request, resource, status, stage, failure_class):
+    if request.method == "GET" and resource == "integrations/datasets":
+        logging.getLogger(__name__).warning(
+            "dataset_read_failure stage=%s status=%d class=%s", stage, status, failure_class
+        )
+
+
 class _Failure(Exception):
     def __init__(self, status, code):
         self.status, self.code = status, code
@@ -63,6 +71,9 @@ class _BridgeRoute(APIRoute):
             try:
                 return await handler(request)
             except HTTPException as exc:
+                if request.path_params.get("resource") == "datasets":
+                    _dataset_read_failure(request, "integrations/datasets", exc.status_code,
+                                          "mapped_exception", "http_exception")
                 return _error(exc.status_code, "WORKSPACE_AUTH_REQUIRED" if exc.status_code == 401
                               else "WORKSPACE_SCOPE_DENIED")
         return guarded
@@ -322,17 +333,29 @@ async def _forward(request, project_id, resource, tenant):
 async def _handle(request, project_id, resource, tenant):
     try:
         async with asyncio.timeout(DEADLINE_SECONDS):
-            return await _forward(request, project_id, resource, tenant)
+            response = await _forward(request, project_id, resource, tenant)
+        if response.status_code < 400:
+            return response
+        stage, failure_class = "upstream_http", "http_response"
     except _Failure as exc:
-        return _error(exc.status, exc.code)
+        response = _error(exc.status, exc.code)
+        stage = "local_config" if exc.code == "WORKSPACE_CONFIG_REQUIRED" else "mapped_exception"
+        failure_class = "bridge_failure"
     except HTTPException:
-        return _error(403, "WORKSPACE_SCOPE_DENIED")
+        response = _error(403, "WORKSPACE_SCOPE_DENIED")
+        stage, failure_class = "mapped_exception", "http_exception"
     except IntegrationConfigError:
-        return _error(503, "WORKSPACE_CONFIG_REQUIRED")
+        response = _error(503, "WORKSPACE_CONFIG_REQUIRED")
+        stage, failure_class = "local_config", "integration_config"
     except (TimeoutError, httpx.TimeoutException):
-        return _error(504, "WORKSPACE_UNAVAILABLE")
-    except (httpx.HTTPError, ValueError):
-        return _error(502, "WORKSPACE_UNAVAILABLE")
+        response = _error(504, "WORKSPACE_UNAVAILABLE")
+        stage, failure_class = "mapped_exception", "timeout"
+    except (httpx.HTTPError, ValueError) as exc:
+        response = _error(502, "WORKSPACE_UNAVAILABLE")
+        stage = "mapped_exception"
+        failure_class = "http_error" if isinstance(exc, httpx.HTTPError) else "value_error"
+    _dataset_read_failure(request, resource, response.status_code, stage, failure_class)
+    return response
 
 
 @router.get("/api/v1/projects/{project_id}/scope")
