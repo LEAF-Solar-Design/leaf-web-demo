@@ -1053,35 +1053,41 @@ def recover_stage(
 
 
 @router.get("/api/author/stages/{change_set_id}")
-def stage_status(
+def stage_status_route(
     change_set_id: str, request: Request, tenant=Depends(deps.require_tenant)
 ) -> Dict[str, Any]:
-    if "view" in request.query_params:
-        headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
-        try:
-            denied = _customization_gate(5, tenant)
-            if denied is not None:
-                denied.headers.update(headers)
-                return denied
-            if (len(request.scope.get("query_string", b"")) > 1024
-                    or request.query_params.multi_items() != [("view", "source")]):
-                raise CustomizationServiceError("invalid_stage_source_request", 422)
-            data, binding = CustomizationService.configured().stage_source(
-                tenant=tenant, change_set_id=change_set_id)
-            return Response(data, media_type="application/octet-stream", headers={**binding, **headers})
-        except ChangeSetNotFoundError:
-            response = _customization_error(CustomizationServiceError("stage_source_not_available", 404))
-        except (CustomizationServiceError, AuthorityError) as exc:
-            if isinstance(exc, AuthorityError):
-                response = _customization_error(
-                    CustomizationServiceError(exc.reason_code, 403), from_authority=True
-                )
-            else:
-                response = _customization_error(exc)
-        except Exception as exc:
-            response = _customization_error(CustomizationServiceError("stage_source_failed", 503), cause=exc)
-        response.headers.update(headers)
-        return response
+    """HTTP route: ?view=source returns the staged source; otherwise the stage status."""
+    if "view" not in request.query_params:
+        return stage_status(change_set_id, tenant=tenant)
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    try:
+        denied = _customization_gate(5, tenant)
+        if denied is not None:
+            denied.headers.update(headers)
+            return denied
+        if (len(request.scope.get("query_string", b"")) > 1024
+                or request.query_params.multi_items() != [("view", "source")]):
+            raise CustomizationServiceError("invalid_stage_source_request", 422)
+        data, binding = CustomizationService.configured().stage_source(
+            tenant=tenant, change_set_id=change_set_id)
+        return Response(data, media_type="application/octet-stream", headers={**binding, **headers})
+    except ChangeSetNotFoundError:
+        response = _customization_error(CustomizationServiceError("stage_source_not_available", 404))
+    except (CustomizationServiceError, AuthorityError) as exc:
+        if isinstance(exc, AuthorityError):
+            response = _customization_error(
+                CustomizationServiceError(exc.reason_code, 403), from_authority=True
+            )
+        else:
+            response = _customization_error(exc)
+    except Exception as exc:
+        response = _customization_error(CustomizationServiceError("stage_source_failed", 503), cause=exc)
+    response.headers.update(headers)
+    return response
+
+
+def stage_status(change_set_id: str, tenant) -> Dict[str, Any]:
+    """Plain call (also used by campaign_acquisition_service): the stage status read model."""
     denied = _customization_gate(5, tenant)
     if denied is not None:
         return denied
