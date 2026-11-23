@@ -4365,6 +4365,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-tool-envelopes", "server tests/test_tool_envelopes.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_envelopes.py"), 14),
+        Suite("server-online-signer", "server tests/test_online_signer.py", "pytest", SERVER,
+              _py_pytest("tests/test_online_signer.py"), 15),
         Suite("server-branch-package-check", "server tests/test_branch_package_check.py", "pytest", SERVER,
               _py_pytest("tests/test_branch_package_check.py"), 35),
         Suite("server-branch-dev-publish", "server tests/test_branch_dev_publish.py", "pytest", SERVER,
