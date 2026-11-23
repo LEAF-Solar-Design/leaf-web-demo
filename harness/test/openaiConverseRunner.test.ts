@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
-  converseProviderFromEnv, createOpenAiSdkFacade, OpenAiConverseRunner,
+  converseProviderFromEnv, createOpenAiSdkFacade, llamaSafeToolSchema, OpenAiConverseRunner,
 } from "../src/ports/impl/openaiConverseRunner.js";
 
 const apiKey = "test-openai-key-not-real-0000000000";
@@ -360,5 +360,117 @@ describe("LEAF_OPENAI_TURN_TIMEOUT_S", () => {
       expect(() => converseProviderFromEnv({ ...openai, LEAF_OPENAI_TURN_TIMEOUT_S: invalid }))
         .toThrow(/^Invalid LEAF_OPENAI_TURN_TIMEOUT_S$/);
     }
+  });
+});
+
+describe("llamaSafeToolSchema", () => {
+  const rewrite = (schema: unknown) => llamaSafeToolSchema(schema) as Record<string, any>;
+
+  it("turns items:false with prefixItems into maxItems", () => {
+    const out = rewrite({ type: "array", prefixItems: [{ type: "string" }, { type: "string" }], items: false });
+    expect(out).toEqual({ type: "array", prefixItems: [{ type: "string" }, { type: "string" }], maxItems: 2 });
+    expect("items" in out).toBe(false);
+  });
+
+  it("keeps a smaller existing maxItems", () => {
+    expect(rewrite({ prefixItems: [{}, {}, {}], items: false, maxItems: 1 }).maxItems).toBe(1);
+    expect(rewrite({ prefixItems: [{}, {}], items: false, maxItems: 9 }).maxItems).toBe(2);
+  });
+
+  it("turns items:false without prefixItems into maxItems 0", () => {
+    expect(rewrite({ type: "array", items: false })).toEqual({ type: "array", maxItems: 0 });
+  });
+
+  it("drops items:true", () => {
+    expect(rewrite({ type: "array", items: true })).toEqual({ type: "array" });
+  });
+
+  it("turns a draft-07 tuple into prefixItems with maxItems", () => {
+    const out = rewrite({ type: "array", items: [{ type: "string" }, { type: "array", items: false }] });
+    expect(out.prefixItems).toEqual([{ type: "string" }, { type: "array", maxItems: 0 }]);
+    expect(out.maxItems).toBe(2);
+    expect("items" in out).toBe(false);
+  });
+
+  it("handles additionalItems on a draft-07 tuple", () => {
+    const closed = rewrite({ items: [{}, {}], additionalItems: false });
+    expect(closed.maxItems).toBe(2);
+    expect("additionalItems" in closed).toBe(false);
+    const open = rewrite({ items: [{}, {}], additionalItems: true });
+    expect(open.maxItems).toBeUndefined();
+    expect("additionalItems" in open).toBe(false);
+  });
+
+  it("recurses into object items", () => {
+    const out = rewrite({ type: "array", items: { type: "array", items: false } });
+    expect(out.items).toEqual({ type: "array", maxItems: 0 });
+  });
+
+  it("rewrites nested inside properties, anyOf, $defs, allOf, not and additionalProperties", () => {
+    const tuple = { type: "array", prefixItems: [{ type: "string" }], items: false };
+    const out = rewrite({
+      properties: { a: { anyOf: [{ type: "null" }, { anyOf: [tuple] }] }, b: { not: tuple } },
+      $defs: { t: tuple },
+      allOf: [{ properties: { c: tuple } }],
+      additionalProperties: tuple,
+    });
+    const fixed = { type: "array", prefixItems: [{ type: "string" }], maxItems: 1 };
+    expect(out.properties.a.anyOf[1].anyOf[0]).toEqual(fixed);
+    expect(out.properties.b.not).toEqual(fixed);
+    expect(out.$defs.t).toEqual(fixed);
+    expect(out.allOf[0].properties.c).toEqual(fixed);
+    expect(out.additionalProperties).toEqual(fixed);
+  });
+
+  it("does not mutate its input", () => {
+    const input = {
+      properties: { p: { prefixItems: [{ type: "string" }], items: false }, q: { items: [{}, {}] } },
+      anyOf: [{ items: true }],
+    };
+    const snapshot = structuredClone(input);
+    llamaSafeToolSchema(input);
+    expect(input).toEqual(snapshot);
+  });
+
+  it("returns nodes deeper than 64 levels unchanged", () => {
+    let deep: Record<string, unknown> = { items: false };
+    for (let i = 0; i < 70; i++) deep = { properties: { x: deep } };
+    const out = rewrite(deep);
+    let cursor: any = out;
+    for (let i = 0; i < 70; i++) cursor = cursor.properties.x;
+    expect(cursor).toEqual({ items: false });
+    let shallow: Record<string, unknown> = { items: false };
+    for (let i = 0; i < 3; i++) shallow = { properties: { x: shallow } };
+    let top: any = rewrite(shallow);
+    for (let i = 0; i < 3; i++) top = top.properties.x;
+    expect(top).toEqual({ maxItems: 0 });
+  });
+
+  it("leaves no boolean or array items in the parameters sent for a zod tuple tool", async () => {
+    const shape = {
+      row_grouping: z.object({ providers: z.tuple([z.string(), z.string()]) }).optional(),
+      nested: z.union([z.null(), z.object({ pair: z.tuple([z.number(), z.number()]) })]),
+      list: z.array(z.string()),
+    };
+    expect(JSON.stringify(z.toJSONSchema(z.object(shape), { io: "input" }))).toMatch(/"items":(false|true)/);
+    const { sdk, options, body } = setup(reply(answer));
+    const spine = sdk.createSdkMcpServer({ name: "spine", tools: [
+      sdk.tool("save_element", "Save", shape, async () => ({ content: [{ type: "text", text: "ok" }] })),
+    ] });
+    await collect(sdk.query({ prompt: "hi", options: { ...options, mcpServers: { spine } } }));
+    const parameters = body(0).tools[0].parameters;
+    const bad: string[] = [];
+    const walk = (node: unknown, path: string): void => {
+      if (Array.isArray(node)) return node.forEach((child, i) => walk(child, `${path}/${i}`));
+      if (typeof node !== "object" || node === null) return;
+      for (const [key, value] of Object.entries(node)) {
+        if (key === "items" && (typeof value !== "object" || Array.isArray(value))) bad.push(`${path}/items`);
+        walk(value, `${path}/${key}`);
+      }
+    };
+    walk(parameters, "#");
+    expect(bad).toEqual([]);
+    expect(JSON.stringify(parameters)).toContain("prefixItems");
+    expect(JSON.stringify(parameters)).toContain('"maxItems":2');
   });
 });
