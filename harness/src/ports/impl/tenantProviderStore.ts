@@ -2,7 +2,7 @@
 //
 // One small JSON record per tenant, beside that tenant's grant files in the grant directory
 // (`<grantsDir>/<tenant>.provider.json`), routes ONLY that tenant's assistant turns to an
-// OpenAI-compatible server such as the Mac mini's local model. No record means the tenant is
+// OpenAI- or Anthropic-compatible server such as the Mac mini's local model. No record means the tenant is
 // unchanged. The record never holds a credential: it names an environment variable
 // (`LEAF_PROVIDER_KEY_*`) that the harness task receives from its secret store, and the value
 // is resolved server-side per turn.
@@ -17,15 +17,15 @@ import { randomUUID } from "node:crypto";
 
 /** Same tenant-id rule as the grant store (server/tenant_id_validator.py). */
 const TENANT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-const KEY_ENV_RE = /^LEAF_PROVIDER_KEY_[A-Z0-9_]{1,64}$/;
+const KEY_ENV_RE = /^LEAF_PROVIDER_KEY_[A-Z0-9_]+$/;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9 .,()'&/+-]{0,63}$/;
 const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const MAX_RECORD_BYTES = 4096;
 
 export interface TenantProviderOverride {
-  provider: "openai_compatible";
-  /** Absolute https base URL of an OpenAI Responses-compatible server, no trailing slash. */
+  provider: "openai_compatible" | "anthropic_compatible";
+  /** Absolute https base URL of a compatible server, no trailing slash. */
   base_url: string;
   model: string;
   /** Name (never value) of the harness environment variable holding the bearer key. */
@@ -66,7 +66,9 @@ export function parseTenantProviderOverride(raw: unknown, allowedHosts: Readonly
   const record = raw as Record<string, unknown>;
   const known = new Set(["provider", "base_url", "model", "api_key_env", "label", "turn_timeout_s", "updated_at"]);
   if (Object.keys(record).some(key => !known.has(key))) throw new TenantProviderConfigError("unknown field");
-  if (record.provider !== "openai_compatible") throw new TenantProviderConfigError("invalid provider");
+  if (record.provider !== "openai_compatible" && record.provider !== "anthropic_compatible") {
+    throw new TenantProviderConfigError("invalid provider");
+  }
   if (typeof record.base_url !== "string" || record.base_url.length > 256) {
     throw new TenantProviderConfigError("invalid base_url");
   }
@@ -84,17 +86,19 @@ export function parseTenantProviderOverride(raw: unknown, allowedHosts: Readonly
   if (typeof record.api_key_env !== "string" || !KEY_ENV_RE.test(record.api_key_env)) {
     throw new TenantProviderConfigError("invalid api_key_env");
   }
-  if (typeof record.label !== "string" || !LABEL_RE.test(record.label)) throw new TenantProviderConfigError("invalid label");
+  if (record.label !== undefined && (typeof record.label !== "string" || !LABEL_RE.test(record.label))) {
+    throw new TenantProviderConfigError("invalid label");
+  }
   const timeout = record.turn_timeout_s;
   if (timeout !== undefined && (typeof timeout !== "number" || !Number.isInteger(timeout) || timeout < 10 || timeout > 1800)) {
     throw new TenantProviderConfigError("invalid turn_timeout_s");
   }
   return {
-    provider: "openai_compatible",
+    provider: record.provider,
     base_url: url.href.replace(/\/+$/, ""),
     model: record.model,
     api_key_env: record.api_key_env,
-    label: record.label,
+    label: record.label ?? "tenant model",
     ...(timeout !== undefined ? { turn_timeout_s: timeout as number } : {}),
   };
 }

@@ -185,7 +185,8 @@ export async function runBranchTargetSession(
       prompt: `${input.systemPrompt}\n\nAuthor this requested branch package:\n${input.description}`,
       options: {
         cwd: input.repoDir, env: buildScrubbedEnv(input.grant, process.env),
-        model: resolveAuthorModel(undefined), effort: resolveAuthorEffort(undefined),
+        model: (input.grant.kind === "api_key" ? input.grant.model : undefined) ?? resolveAuthorModel(undefined),
+        effort: resolveAuthorEffort(undefined),
         maxTurns: 24, settingSources: [], permissionMode: "default", tools: [],
         abortController: abort, mcpServers: { branch_author: server }, allowedTools: allowed,
         canUseTool: async (name: string, args: Record<string, unknown>) => allowed.includes(name)

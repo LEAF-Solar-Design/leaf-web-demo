@@ -176,7 +176,7 @@ export interface AuthorResponse {
  */
 export type AgentGrant =
   | { kind: "oauth"; oauthToken: string } // consumed as CLAUDE_CODE_OAUTH_TOKEN
-  | { kind: "api_key"; apiKey: string }; //  consumed as ANTHROPIC_API_KEY
+  | { kind: "api_key"; apiKey: string; baseUrl?: string; model?: string }; //  consumed as ANTHROPIC_API_KEY
 
 /** The credential kind of a linked grant (web-lane OAuth vs enterprise BYO API key). */
 export type GrantKind = AgentGrant["kind"];

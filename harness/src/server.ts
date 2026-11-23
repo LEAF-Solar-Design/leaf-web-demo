@@ -1944,6 +1944,7 @@ export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
   const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } = await import("./ports/impl/oauthGrantProvider.js");
+  const { TenantAnthropicGrantProvider } = await import("./ports/impl/tenantAnthropicGrant.js");
   const { grantKeyProviderFromEnv } = await import("./security/grantEnvelope/fromEnv.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
@@ -1986,9 +1987,10 @@ export async function startReal(port = 8130): Promise<Server> {
   const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
   console.log(`grant_store_backend=${grantBackend}`);
   const standardServicesResolver = standardServicesResolverFromEnv();
-  const oauth = new StandardServicesOAuthGrantProvider(
+  // Inert in production: no provider records or LEAF_TENANT_PROVIDER_HOSTS are provisioned there.
+  const oauth = new TenantAnthropicGrantProvider(new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
-  );
+  ), grantsDir, process.env);
   const sessionStore = appUrl && dispatchSecret ? createProbedSessionStore() : null;
   // GET /ready probes exactly the stores built above; nothing is constructed per request.
   // File and vault records share the grant directory, so both use its directory probe.
