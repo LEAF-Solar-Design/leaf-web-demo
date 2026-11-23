@@ -44,6 +44,11 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
   const [historyPending, setHistoryPending] = useState(false), [historyFailed, setHistoryFailed] = useState(false)
   const historyAvailable = typeof client?.retentionHistory === 'function'
   const dataset = datasets.find(value => refKey(value) === selected)
+  const [schema, setSchema] = useState(null)
+  useLayoutEffect(() => {
+    setSchema(null)
+    return () => scope.current?.reads.get('schema')?.abort()
+  }, [dataset])
   const current = ctx => ctx && scope.current === ctx && !ctx.controller.signal.aborted && !signal?.aborted
   const clearReviews = () => { setReview(null); setRestoreReview(null) }
   const clearRun = () => {
@@ -264,6 +269,17 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
       })}>More datasets</button></div>
       <label htmlFor={`${prefix}-dataset`}>Imported dataset<select id={`${prefix}-dataset`} value={selected} onChange={event => { setSelected(event.target.value); setPrepared(null); setSchedule(null); clearRun() }}>
         <option value="">Choose imported records</option>{datasets.map(value => <option key={refKey(value)} value={refKey(value)} disabled={!value.material_context || !!value.derivation}>{value.title || value.reference.id}</option>)}</select></label>
+      <button type="button" disabled={!dataset} onClick={() => read('schema', async (ctx, requestSignal) => {
+        setSchema(null)
+        const result = await invoke(ctx, 'getDataset', [dataset.reference], requestSignal, { revision: dataset.revision })
+        if (!current(ctx) || requestSignal.aborted) return
+        setSchema({ fields: result.fields.map(field => ({ id: field.id, kind: field.type.kind })) })
+      })}>Inspect schema</button>
+      {schema && dataset && <section aria-label="Imported dataset schema">
+        <p>{dataset.reference.id}, version {dataset.reference.version}, revision {dataset.revision}</p>
+        <p>Digest: <code>{dataset.reference.digest}</code></p>
+        <dl>{schema.fields.map(field => <div key={field.id}><dt>{field.id}</dt><dd>{field.kind}</dd></div>)}</dl>
+      </section>}
       <div className="retention-grid">{input('table', 'Logical table ID')}{input('clock', 'Retention clock (UTC milliseconds)')}
         {['id', 'source', 'level', 'timestamp'].map(key => <label key={key} htmlFor={`${prefix}-${key}`}>{({ id: 'Record ID field', source: 'Source field', level: 'Level field', timestamp: 'Timestamp field' })[key]}
           <input id={`${prefix}-${key}`} list={`${prefix}-fields`} value={form[key]} onChange={event => edit(key, event.target.value)} /></label>)}
