@@ -43,10 +43,34 @@
       }
     },
     {
+      "id": "server-campaign-acquisition",
+      "reason": "main-broke",
+      "added": "2026-11-23",
+      "evidence": {
+        "pr": 3565,
+        "failure": "#3565 added a required request param to routers/author.stage_status while campaign_acquisition_service calls it directly; launch full run on d482aca5 RED (job 16576)",
+        "job": 16576,
+        "date": "2026-11-23",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
       "id": "server-capabilities-project-read",
       "reason": "contract-keep",
       "added": "2026-11-18",
       "evidence": null
+    },
+    {
+      "id": "server-contract-freeze",
+      "reason": "main-broke",
+      "added": "2026-11-23",
+      "evidence": {
+        "pr": 3578,
+        "failure": "#3578 added plan_proposed/questions_required to web STREAM_EVENT_TYPES without the server vocabulary; launch full run on a8c91bd3 RED (job 16541)",
+        "job": 16541,
+        "date": "2026-11-23",
+        "note": "promoted by the CI owner 01c45d41"
+      }
     },
     {
       "id": "server-engine-registry-scripts",
@@ -63,6 +87,30 @@
         "failure": "full run 20 on 107d6439 RED, job 13042: #3477 changed the DXF block intake shape this suite pins",
         "job": 13042,
         "date": "2026-11-19",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-integration-element-save",
+      "reason": "main-broke",
+      "added": "2026-11-23",
+      "evidence": {
+        "pr": 3565,
+        "failure": "#3565 edited contract/assistant.schema.json without re-pinning agent_policy.json; suite outside the PR tier, so main went RED from bedce141 on (job 15088)",
+        "job": 15088,
+        "date": "2026-11-23",
+        "note": "promoted by the CI owner 01c45d41"
+      }
+    },
+    {
+      "id": "server-kit-stream-superset",
+      "reason": "main-broke",
+      "added": "2026-11-23",
+      "evidence": {
+        "pr": 3578,
+        "failure": "same #3578 stream vocabulary drift; launch full run on a8c91bd3 RED (job 16544)",
+        "job": 16544,
+        "date": "2026-11-23",
         "note": "promoted by the CI owner 01c45d41"
       }
     },
