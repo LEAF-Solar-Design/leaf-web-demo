@@ -94,6 +94,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "ports/fakes/fakeTurnRunner.ts",
         "ports/impl/agentSdkRunner.ts",
         "ports/impl/converseSdkRunner.ts",
+        "ports/impl/envScrub.ts",
         "ports/impl/forgeRemoteAuthority.ts",
         "ports/impl/harnessSchema.ts",
         "ports/impl/oauthGrantProvider.ts",
