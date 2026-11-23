@@ -22,7 +22,7 @@ import investor_demo
 import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
-from branch_tools import dev_catalog, sync_receipts
+from branch_tools import dev_catalog, sync_receipts, tenant_catalog
 
 router = APIRouter()
 
@@ -111,6 +111,58 @@ def dev_receipt(name: str, version: str, receipt: sync_receipts.Receipt = Body(.
     store = customization_service.CustomizationService.configured().store
     sync_receipts.append(store, str(tenant), subject, name, version, receipt)
     return Response(status_code=204, headers=_DEV_CACHE)
+
+
+_TENANT_CACHE = {"Cache-Control": "no-store"}
+
+
+def _plugin_builder_visible(tenant) -> bool:
+    invited = {part.strip() for part in os.environ.get("LEAF_PLUGIN_BUILDER_TENANTS", "").split(",")}
+    return (os.environ.get("LEAF_PLUGIN_BUILDER") == "1"
+            and bool(os.environ.get("LEAF_TENANT_TOOLS_DIR"))
+            and (str(tenant) in invited or str(tenant) in customization_flags.internal_tenants()))
+
+
+def _tenant_missing(detail: str = "tool_not_published") -> Response:
+    return JSONResponse({"detail": detail}, status_code=404, headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant")
+def tenant_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    entries = tenant_catalog.list_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    return JSONResponse({"tools": entries}, headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/revocations")
+def tenant_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant):
+        return _tenant_missing()
+    raw = tenant_catalog.revocations_bytes(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
+    if raw is None:
+        return _tenant_missing("no_revocation_list")
+    return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/{name:path}/{version}/envelope")
+def tenant_envelope(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _tenant_missing()
+    raw = tenant_catalog.envelope_bytes(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), name, version)
+    if raw is None:
+        return _tenant_missing()
+    return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
+
+
+@router.get("/api/tool-envelopes/tenant/{name:path}/{version}/package")
+def tenant_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not _plugin_builder_visible(tenant) or not tool_envelopes.valid_identity(name, version):
+        return _tenant_missing()
+    path = tenant_catalog.package_path(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), name, version)
+    if path is None:
+        return _tenant_missing()
+    return FileResponse(path, media_type="application/zip", headers=_TENANT_CACHE)
 
 
 @router.get("/api/tool-envelopes/{name:path}/{version}/envelope")
