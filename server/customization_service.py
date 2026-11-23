@@ -3177,7 +3177,8 @@ class CustomizationService:
                 else:
                     result = publish_branch_package(files, name, self._branch_dev_root(tenant_id), review=review)
             except (DevPublishError, tenant_publish.TenantPublishError) as exc:
-                if confirmation.approval_kind is None or exc.code != "branch_dev_catalog_unavailable":
+                if (exc.code not in {"signer_unavailable", "tenant_catalog_unavailable"}
+                        and (confirmation.approval_kind is None or exc.code != "branch_dev_catalog_unavailable")):
                     self.store.supersede_publish(
                         tenant_id=tenant_id, change_set_id=change.change_set_id,
                         expected_version=publishing.version,

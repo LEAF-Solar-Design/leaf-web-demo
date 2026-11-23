@@ -143,7 +143,7 @@ def test_forbidden_capabilities_write_nothing(tmp_path, signer, capability):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_missing_signer_never_marks_change_published(publishing, monkeypatch):
+def test_missing_signer_never_marks_change_published(publishing, monkeypatch, signer):
     monkeypatch.setattr(online_signer, "configured_signer", lambda: None)
     with pytest.raises(customization_service.CustomizationServiceError) as error:
         publishing.approve()
@@ -151,6 +151,14 @@ def test_missing_signer_never_marks_change_published(publishing, monkeypatch):
     change = publishing.store.get_change_set(tenant_id=TENANT, change_set_id=publishing.change.change_set_id)
     assert change.state is not ChangeState.PUBLISHED
     assert not publishing.root.exists()
+    monkeypatch.setattr(online_signer, "configured_signer", lambda: signer)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    result = publishing.service.request_publication(
+        tenant=deps.TenantContext(TENANT, subject="auth0|author"),
+        change_set_id=publishing.change.change_set_id)
+    assert result["status"] == "published"
+    change = publishing.store.get_change_set(tenant_id=TENANT, change_set_id=publishing.change.change_set_id)
+    assert change.state is ChangeState.PUBLISHED
 
 
 def test_capability_error_survives_service_mapping(publishing):
@@ -258,6 +266,15 @@ def test_old_revocations_refreshed_best_effort(publishing, signer, monkeypatch):
     tenant_catalog.write_revocations(state.root, TENANT, raw)
     monkeypatch.setattr(online_signer, "configured_signer", lambda: None)
     assert state.client.get(BASE + "/revocations").content == raw
+
+
+@pytest.mark.parametrize("raw", [b"{", b"{}", b'{"issued_at":"invalid"}', b'{"issued_at":null}',
+                                  b'{"issued_at":"2026-11-22T12:00:00"}'])
+def test_malformed_revocation_timestamp_serves_stored_list(publishing, monkeypatch, raw):
+    monkeypatch.setattr(tenant_catalog, "revocations_bytes", lambda *args: raw)
+    response = publishing.client.get(BASE + "/revocations")
+    assert response.status_code == 200
+    assert response.content == raw
 
 
 @pytest.mark.parametrize("selected,internal,invited,expected", [

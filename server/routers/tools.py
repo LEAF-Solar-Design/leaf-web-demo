@@ -142,14 +142,14 @@ def tenant_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
     if raw is None:
         return _tenant_missing("no_revocation_list")
     now = datetime.now(timezone.utc)
-    issued_at = datetime.fromisoformat(json.loads(raw)["issued_at"].replace("Z", "+00:00"))
-    if now - issued_at > timedelta(days=3):
-        try:
+    try:
+        issued_at = datetime.fromisoformat(json.loads(raw)["issued_at"].replace("Z", "+00:00"))
+        if now - issued_at > timedelta(days=3):
             raw = tenant_publish.refresh_revocations(
                 os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant), online_signer.configured_signer(), now)
-        except (online_signer.SignerUnavailable, tenant_publish.TenantPublishError,
-                tenant_catalog.TenantCatalogError, OSError, ValueError):
-            pass  # Serve the last signed list if refresh is unavailable.
+    except (online_signer.SignerUnavailable, tenant_publish.TenantPublishError,
+            tenant_catalog.TenantCatalogError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass  # Serve the last signed list if refresh is unavailable.
     return Response(raw, media_type="application/json", headers=_TENANT_CACHE)
 
 
