@@ -78,6 +78,7 @@ import {
   type SessionStoreHandle,
 } from "../src/ports/impl/sessionStoreFactory.js";
 import { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } from "../src/ports/impl/oauthGrantProvider.js";
+import { TenantAnthropicGrantProvider } from "../src/ports/impl/tenantAnthropicGrant.js";
 import { grantKeyProviderFromEnv } from "../src/security/grantEnvelope/fromEnv.js";
 import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
@@ -243,9 +244,10 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
     log("[harness] author runner: AgentSdkRunner (structured source submission; generated code executes only through broker)");
     log("[harness] converse runner: spine ConverseLoop via SpineTurnAdapter (gate-before-exec; SDK loads on first /turn).");
   }
-  const oauth = new StandardServicesOAuthGrantProvider(
+  // Inert in production: no provider records or LEAF_TENANT_PROVIDER_HOSTS are provisioned there.
+  const oauth = new TenantAnthropicGrantProvider(new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
-  );
+  ), grantsDir, process.env);
   const tenantForge = createTenantForgeConfigurationFromEnv(process.env, tenantRepoDir);
   let lease: PgTenantRepoLeaseCoordinator | undefined;
   if ((process.env.LEAF_HARNESS_SESSION_STORE ?? "file").trim().toLowerCase() === "postgres") {

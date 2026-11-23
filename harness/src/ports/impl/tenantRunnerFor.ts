@@ -37,7 +37,7 @@ export function createTenantRunnerFor(options: TenantRunnerForOptions): TenantRu
   const { standardServicesResolver } = options;
   return async (tenantId, grant) => {
     const resolved = await resolveTenantProvider(store, tenantId, env);
-    if (!resolved) return null;
+    if (!resolved || resolved.override.provider !== "openai_compatible") return null;
     const { override, apiKey } = resolved;
     return {
       secrets: [apiKey],
