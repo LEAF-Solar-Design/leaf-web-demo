@@ -97,7 +97,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   expect(build).toHaveTextContent('source not available')
   await click('Approve')
   expect(build).toHaveTextContent('Approved by you (reviewer)')
-  expect(build).toHaveTextContent('Published to the internal dev catalog')
+  expect(build).toHaveTextContent('Published to your plugin catalog')
   expect(requests.at(-1)).toEqual(['GET', stagePath, undefined])
   await tick(3199)
   expect(build).toHaveTextContent('Branch has not reported yet')

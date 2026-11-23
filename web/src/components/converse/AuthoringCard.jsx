@@ -232,6 +232,12 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const publication = reportedPublication === 'published' ? stage.publication : decision
   const failedCompile = ['refused', 'failed', 'compile_failed'].includes(resultLabel(latest))
     || /compile/.test(string(stage?.error?.reason_code))
+  const published = publication?.status === 'published' || stage?.status === 'published'
+  // A self approval is a one-click deploy: approving publishes the tool to the tenant catalog.
+  const selfDeploy = review
+    ? review.decision === 'approve' && (review.approval_kind === 'self' || (!!decision && self))
+    : mayApprove && self
+  const checksPassed = approvalReady && !failedCompile && stage?.status !== 'failed'
   const decide = async (choice) => {
     if (!visible || !mayApprove || busy || (choice === 'approve' && !approvalReady)) return
     setBusy(true)
@@ -282,15 +288,23 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         {stage?.status === 'failed' && failedCompile && <div><p>Fixing these errors uses one author run.</p>
           <button type="button" className="chip-neutral" disabled={busy || retried || disabled} onClick={retry}>
             {retried ? 'Retry requested' : 'Fix with these errors'}</button></div>}</dd>
-      <dt>Review</dt><dd>{review ? <p>
+      <dt>{selfDeploy ? 'Deploy' : 'Review'}</dt><dd>{selfDeploy ? review ? <p>
+        {published ? <>Deployed to AutoCAD<DecisionTime at={publication?.published_at ?? review.decided_at} /></>
+          : 'Deploying to AutoCAD...'}</p> : <>
+        {checksPassed ? <div className="inline-actions">
+          <button type="button" className="chip-act" disabled={busy || !visible}
+            onClick={() => { track('deploy.clicked'); void decide('approve') }}>{busy ? 'Deploying...' : 'Deploy to AutoCAD'}</button>
+        </div> : <p>Deploy is available once the checks pass.</p>}
+        <details><summary>What will be deployed</summary>
+          <ReviewDetails plan={plan} files={files} source={sourceReady && source.file} loadingSource={!sourceReady} compile={compile} />
+        </details></> : review ? <p>
         {review.decision === 'approve' ? 'Approved' : 'Changes requested'} by {decision
           ? `you (${review.approver_role})` : review.approver_role}<DecisionTime at={review.decided_at} />
       </p> : mayApprove ? <>
         <ReviewDetails plan={plan} files={files} source={sourceReady && source.file} loadingSource={!sourceReady} compile={compile} />
-        {self && <p>This will be recorded as a self-approval.</p>}
         <div className="inline-actions">
           <button type="button" className="chip-act" disabled={busy || !approvalReady || !visible} onClick={() => decide('approve')}>
-            {self ? 'Approve your own tool' : 'Approve'}</button>
+            Approve</button>
           <button type="button" className="chip-neutral" disabled={busy} aria-expanded={editing}
             onClick={() => setEditing(!editing)}>Request changes</button>
           {editing && <div className="inline-comment"><label>Review comment<textarea maxLength={500} value={comment} disabled={busy}
@@ -298,8 +312,8 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
             <button type="button" className="chip-act" disabled={busy || !comment.trim()}
               onClick={() => decide('request_changes')}>Send change request</button></div>}
         </div></> : notReported}</dd>
-      <dt>Publish</dt><dd>{publication?.status === 'published' || stage?.status === 'published'
-        ? <>Published to the internal dev catalog<DecisionTime at={publication?.published_at ?? decision?.decided_at
+      <dt>Publish</dt><dd>{published
+        ? <>Published to your plugin catalog<DecisionTime at={publication?.published_at ?? decision?.decided_at
           ?? (stage?.status === 'published' ? stage.updated_at : null)} /></>
         : notReported}</dd>
       <dt>Branch</dt><dd>{branchSummary(stage?.branch) || 'Branch has not reported yet'}</dd>

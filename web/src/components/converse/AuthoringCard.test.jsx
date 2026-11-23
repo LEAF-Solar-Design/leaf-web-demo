@@ -29,11 +29,14 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAllGlobals() })
 
-it('shows the staged files, source, compile and plan risks before a self-approval', async () => {
+const openDeployDetails = () => fireEvent.click(screen.getByText('What will be deployed'))
+
+it('shows the staged files, source, compile and plan risks behind a self deploy', async () => {
   postReview.mockResolvedValue({ change_set_id: 'change', decision: 'approve', approval_kind: 'self',
     approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z', status: 'published' })
   await mount()
-  for (const text of ['Label every roof', 'Group by roof layer', 'This will be recorded as a self-approval.',
+  openDeployDetails()
+  for (const text of ['Label every roof', 'Group by roof layer',
     'Changes your drawing · network.read · Revises the existing tool roof', 'Branch has not reported yet']) {
     expect(screen.getByText(text)).toBeVisible()
   }
@@ -43,16 +46,70 @@ it('shows the staged files, source, compile and plan risks before a self-approva
   expect(source.closest('details')).toHaveAttribute('open')
   expect(screen.getByText(/<img src=x>/)).toBeVisible()
   expect(document.querySelector('img')).toBeNull()
-  const approve = button('Approve your own tool')
+  const approve = button('Deploy to AutoCAD')
   approve.focus()
   expect(approve).toHaveFocus()
   await act(async () => approve.click())
   expect(postReview).toHaveBeenCalledWith({ change_set_id: 'change', staged_commit: receipt.staged_commit,
     catalog_digest: receipt.catalog_digest, decision: 'approve' })
-  expect(screen.getByText(/Approved by you \(owner\)/)).toHaveTextContent(/\d+:\d{2}/)
-  expect(screen.getByText(/Published to the internal dev catalog/)).toBeVisible()
+  expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
+  expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'self' })
+  expect(track).toHaveBeenCalledWith('deploy.clicked')
   expect(screen.queryByRole('button')).toBeNull()
+})
+
+it('deploys a self-built tool that passed its checks with one inline button', async () => {
+  let finishDeploy
+  postReview.mockReturnValue(new Promise(resolve => { finishDeploy = resolve }))
+  await mount()
+  expect(screen.getAllByRole('button', { name: 'Deploy to AutoCAD' })).toHaveLength(1)
+  expect(screen.getByText('Deploy')).toBeVisible()
+  expect(screen.queryByText('Review')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Request changes' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  expect(screen.queryByRole('textbox')).toBeNull()
+  expect(screen.queryByText(/self-approval/)).toBeNull()
+  expect(screen.getByText('What will be deployed').closest('details')).not.toHaveAttribute('open')
+  expect(screen.getByText('Label every roof')).not.toBeVisible()
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(track).toHaveBeenCalledWith('deploy.clicked')
+  expect(button('Deploying...')).toBeDisabled()
+  expect(postReview).toHaveBeenCalledTimes(1)
+  expect(postReview).toHaveBeenCalledWith({ change_set_id: 'change', staged_commit: receipt.staged_commit,
+    catalog_digest: receipt.catalog_digest, decision: 'approve' })
+  let finishStage
+  getAuthorStage.mockReturnValue(new Promise(resolve => { finishStage = resolve }))
+  await act(async () => finishDeploy({ change_set_id: 'change', decision: 'approve', approval_kind: 'self',
+    approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z', status: 'approved' }))
+  expect(screen.getByText('Deploying to AutoCAD...')).toBeVisible()
+  expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
+  await act(async () => finishStage({ ...staged,
+    publication: { status: 'published', published_at: '2026-11-21T03:15:00Z' } }))
+  expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
+  expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
+  expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
+})
+
+it('offers no deploy for a self-built tool whose compile failed, only the retry', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'failed',
+    error: { reason_code: 'compile_failed', message: 'Unexpected delimiter' },
+    compile_attempts: [{ attempt: 1, status: 'refused', diagnostics: [{ code: 'CS1026', file: 'main.csx', line: 50 }] }] })
+  await mount()
+  expect(screen.getByText('Deploy is available once the checks pass.')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(button('Fix with these errors')).toBeEnabled()
+  expect(postReview).not.toHaveBeenCalled()
+})
+
+it('keeps the independent review buttons for a reviewer who is not the author', async () => {
+  reviewContext.mockResolvedValue({ viewer_may_approve: true, approval_kind_if_approved: 'independent', review: null })
+  await mount()
+  expect(button('Approve')).toBeEnabled()
+  expect(button('Request changes')).toBeEnabled()
+  expect(screen.getByText('Review')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(screen.queryByText('What will be deployed')).toBeNull()
 })
 
 it('sends a bound change request and shows an unavailable export honestly', async () => {
@@ -77,39 +134,41 @@ it('sends a bound change request and shows an unavailable export honestly', asyn
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'request_changes', approval_kind: 'independent' })
 })
 
-it('uses the stage-bound plan and waits for its staged source before enabling approval', async () => {
+it('uses the stage-bound plan and waits for its staged source before offering deploy', async () => {
   let finishSource
   getAuthorStageSource.mockReturnValue(new Promise(resolve => { finishSource = resolve }))
   getAuthorStage.mockResolvedValue({ ...staged, plan: { ...proposal.plan, summary: 'Place labels on ridgelines' } })
   await mount({ proposal: undefined })
+  openDeployDetails()
   expect(screen.getByText('Place labels on ridgelines')).toBeVisible()
   expect(screen.getByText('Group by roof layer')).toBeVisible()
   expect(screen.getByText('Reading source…')).toBeVisible()
-  const approve = button('Approve your own tool')
-  expect(approve).toBeDisabled()
-  fireEvent.click(approve)
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(screen.getByText('Deploy is available once the checks pass.')).toBeVisible()
   expect(postReview).not.toHaveBeenCalled()
   await act(async () => finishSource(null))
   expect(screen.getByText('source not available')).toBeVisible()
-  expect(approve).toBeEnabled()
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
 })
 
 it.each(['branch_package', 'tool'])('uses the staged %s manifest in the absence of a plan', async field => {
   const tool = { name: 'roof-label', version: '1.2.0', description: 'Labels <roof> faces', capabilities: ['drawing.write'] }
   getAuthorStage.mockResolvedValue({ ...staged, change_kind: 'revise', result: { [field]: tool } })
   await mount({ proposal: undefined })
+  openDeployDetails()
   expect(screen.getByRole('heading', { name: 'roof-label · 1.2.0' })).toBeVisible()
   expect(screen.getByText('Labels <roof> faces')).toBeVisible()
   expect(document.querySelector('roof')).toBeNull()
   expect(screen.getByText('Changes your drawing · Revises the existing tool roof-label')).toBeVisible()
-  expect(button('Approve your own tool')).toBeEnabled()
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
 })
 
-it('keeps approval disabled without a bound plan or staged manifest, even after reading source', async () => {
+it('withholds deploy without a bound plan or staged manifest, even after reading source', async () => {
   await mount({ proposal: undefined })
+  openDeployDetails()
   expect(screen.getByText(/main\.csx · 2 lines/)).toBeVisible()
   expect(screen.getByText('Build context not reported')).toBeVisible()
-  expect(button('Approve your own tool')).toBeDisabled()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
 })
 
 it('keeps the staged polling deadline across a hidden interval', async () => {
@@ -180,7 +239,7 @@ it('withholds review for a mismatched receipt and can re-read the stage', async 
   expect(screen.getByRole('alert')).toHaveTextContent('did not match')
   expect(reviewContext).not.toHaveBeenCalled()
   await act(async () => fireEvent.click(button('Check again')))
-  expect(button('Approve your own tool')).toBeEnabled()
+  expect(button('Deploy to AutoCAD')).toBeEnabled()
 })
 
 it('reads the stage contract: compile attempts by n and the Branch receipt by last_event', async () => {
