@@ -247,6 +247,7 @@ def _org_self_provision_allowed() -> bool:
 # Live auth is invite-only for unbound verified subjects unless explicitly enabled
 # by LEAF_ORG_SELF_PROVISION=1 or LEAF_RUNTIME_ENV=staging/development/test/local.
 # Existing active bindings remain authoritative; client identity hints are refused.
+# Unbound org claims require a handoff unless absent, null, or a blank string.
 # Auth-off demo bootstrap stays open. Tiers are always server-derived.
 @router.post("/orgs")
 def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)):
@@ -264,7 +265,10 @@ def create_org(body: CreateOrgBody, _auth: Any = Depends(require_auth_when_live)
         if not subject:
             raise HTTPException(status_code=403, detail="verified token has no external subject")
         binding = store.resolve_active_identity_binding("auth0", str(subject))
-        if binding is None and platform_deps._server_auth().claim_ns() + "org_id" in _auth:
+        org_claim = _auth.get(platform_deps._server_auth().claim_ns() + "org_id")
+        if binding is None and org_claim is not None and (
+            not isinstance(org_claim, str) or org_claim.strip()
+        ):
             raise HTTPException(
                 status_code=409,
                 detail="This identity requires authorized workspace provisioning. "
