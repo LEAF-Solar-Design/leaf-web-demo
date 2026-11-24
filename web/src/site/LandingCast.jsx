@@ -9,13 +9,18 @@
 import { useEffect, useState } from 'react'
 import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
-import { submitDemandCapture } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
 import { isSignedIn } from '../auth.js'
 import { notYetAvailable } from './studioAvailability.js'
 
 export function enterWorkspace() {
   navigate(isSignedIn() ? '/app' : '/try')
+}
+
+// The account door: /app signs a visitor in (or up) and creates their workspace on first sign-in.
+// Signed-out visitors were offered only the guest sandbox and a waitlist (rehearsal issue 1).
+export function enterAccount() {
+  navigate('/app')
 }
 
 export function enterDemo() {
@@ -36,7 +41,7 @@ const SHEETS = [
   { code: '06', target: 's-501', label: '06 Docs' },
 ]
 
-export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo }) {
+export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo, onAccount = enterAccount }) {
   // Availability manifest (site/studioAvailability.js). On an app-only host
   // the sheet tabs leave for the marketing hub, whose sheets 02 to 06 are not
   // drawn yet, so the tabs are disabled with the manifest's sentence instead
@@ -47,19 +52,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
   const [solve, setSolve] = useState(null)
   const [solveError, setSolveError] = useState('')
   const [solveAttempt, setSolveAttempt] = useState(0)
-  const [email, setEmail] = useState('')
-  const [demandStatus, setDemandStatus] = useState('idle')
-  async function registerInterest(event) {
-    event.preventDefault()
-    if (demandStatus === 'pending' || demandStatus === 'saved') return
-    setDemandStatus('pending')
-    try {
-      await submitDemandCapture({ email: email.trim(), interest: 'Workspace with your own API key' })
-      setDemandStatus('saved')
-    } catch {
-      setDemandStatus('error')
-    }
-  }
+  const signedIn = isSignedIn()
   useEffect(() => {
     let live = true
     setSolveError('')
@@ -87,7 +80,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
         <div className="lp-top-slot">
           <div className="lp-top-site" data-cast="site" style={{ '--rank': 0 }}>
             <span className="lp-sheetno">Sheet 01 of {String(SHEETS.length + 1).padStart(2, '0')}, Cover</span>
-            <button type="button" className="lp-trial" onClick={onTryTool}>Open workspace</button>
+            <button type="button" className="lp-trial" onClick={onAccount}>{signedIn ? 'Open workspace' : 'Sign in / Create account'}</button>
           </div>
         </div>
       </div>
@@ -106,15 +99,12 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
           <button type="button" className="lp-cta" onClick={onTryDemo}>Try Branch on the sample rooftop</button>
           <span className="lp-price">{pricingReason ? `Free to try. ${pricingReason}` : 'Free to try.'}</span>
         </div>
-        <form onSubmit={registerInterest} aria-label="Register interest">
-          <label htmlFor="front-door-email">Want a workspace that uses your own API key?</label>
-          <input id="front-door-email" type="email" autoComplete="email" required disabled={demandStatus === 'pending' || demandStatus === 'saved'} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email address" />
-          <button type="submit" className="chip-act" disabled={demandStatus === 'pending' || demandStatus === 'saved'}>
-            {demandStatus === 'pending' ? 'Saving interest' : 'Register interest'}
-          </button>
-          {demandStatus === 'saved' && <span role="status">Interest saved. No payment required.</span>}
-          {demandStatus === 'error' && <span role="alert">Could not save your interest. Please try again.</span>}
-        </form>
+        {!signedIn && (
+          <div className="lp-account-row">
+            <button type="button" className="lp-cta lp-account" onClick={onAccount}>Create your Studio account</button>
+            <span className="lp-price">Sign in with Google or email. Your workspace is set up for you.</span>
+          </div>
+        )}
         <div className="lp-stats">
           <div>
             <div className="lp-stat-big">25 hrs <span className="lp-stat-accent">→ 3 min</span></div>

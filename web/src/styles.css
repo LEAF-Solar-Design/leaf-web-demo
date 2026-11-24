@@ -1466,6 +1466,9 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-field { display: flex; flex-direction: column; gap: 4px; }
 .ca-field-k { font-size: var(--leaf-size-caption); color: var(--muted); } /* F1: 12px muted label above */
 .ca-field input { width: 100%; }
+/* masked credential field without type=password, so no browser offers to save it (rehearsal issue 25) */
+.ca-field input.ca-secret { -webkit-text-security: disc; font-family: var(--leaf-font-mono, monospace); }
+.ca-form-err { margin: 6px 0 0; }
 .ca-act { align-self: flex-start; }
 .ca-note { font-size: var(--leaf-size-caption); color: var(--muted-2); line-height: 1.5; margin: 0; }
 /* linking hiccup — calm amber, not a red alarm (retryable coordination state) */

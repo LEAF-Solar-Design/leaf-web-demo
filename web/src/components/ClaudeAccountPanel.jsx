@@ -38,6 +38,7 @@ export default function ClaudeAccountPanel({
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [formError, setFormError] = useState(null)
   const copyCommand = async () => {
     try {
       await navigator.clipboard.writeText(SETUP_TOKEN_COMMAND)
@@ -108,7 +109,11 @@ export default function ClaudeAccountPanel({
 
   const submit = async () => {
     const value = token.trim()
-    if (!canManage || !value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
+    if (!canManage || !value || busy) return
+    // A click with a missing choice explains itself instead of doing nothing (rehearsal issue 24).
+    if (kind === 'oauth' && !plan) { setFormError('Choose your Claude plan above (Pro, Max, Team or Enterprise).'); return }
+    if (kind === 'oauth' && !label.trim()) { setFormError('Enter an account label.'); return }
+    setFormError(null)
     const result = await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
     if (result?.linked === true) setToken('')
   }
@@ -195,8 +200,8 @@ export default function ClaudeAccountPanel({
                 </p>
               )}
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
-                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
-                <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => setKind('api_key')} disabled={busy}>Anthropic API key</button>
+                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => { setKind('oauth'); setFormError(null) }} disabled={busy}>Claude subscription</button>
+                <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => { setKind('api_key'); setFormError(null) }} disabled={busy}>Anthropic API key</button>
               </div>
 
               {!isApiKey && (
@@ -213,7 +218,7 @@ export default function ClaudeAccountPanel({
                   </ol>
                   <div className="ca-choice" role="radiogroup" aria-label="Claude workspace plan">
                     {['pro', 'max', 'team', 'enterprise'].map((value) => (
-                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => setPlan(value)} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
+                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => { setPlan(value); setFormError(null) }} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
                     ))}
                   </div>
                   <label className="ca-field">
@@ -232,7 +237,16 @@ export default function ClaudeAccountPanel({
               <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                 <span className="ca-field-k">{isApiKey ? 'Anthropic API key' : 'Claude setup token'}</span>
                 <input
-                  type="password"
+                  // A masked text field, not type=password: Chrome offers to save a password
+                  // field's value, and this token must never land in a password manager (issue 25).
+                  type="text"
+                  className="ca-secret"
+                  name="leaf-claude-credential"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-form-type="other"
                   value={token}
                   onChange={(event) => changeToken(event.target.value)}
                   onKeyDown={(event) => {
@@ -246,9 +260,10 @@ export default function ClaudeAccountPanel({
                   aria-label={isApiKey ? 'Anthropic API key' : 'Claude token'}
                 />
               </label>
-              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && (!label.trim() || !plan))} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : !isApiKey && (!label.trim() || !plan) ? 'Choose a plan and enter an account label.' : undefined}>
+              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim()} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : undefined}>
                 {busy ? 'Linking…' : isApiKey ? 'Link API key' : 'Link Claude account'}
               </button>
+              {formError && <p className="field-err ca-form-err" role="alert">{formError}</p>}
               {linked && <button className="chip-neutral" onClick={() => setShowAdd(false)} disabled={busy}>Cancel</button>}
               <p className="ca-note">Credentials are stored securely for your workspace and are hidden after linking.</p>
             </div>

@@ -2,7 +2,7 @@ import { expect, it } from 'vitest'
 import { headerChromeFor } from '../App.jsx'
 
 it.each([
-  ['cad', { grant: { linked: true } }, false, false],
+  ['cad', { grant: { linked: true } }, false, true],
   ['cad', { grant: { linked: false } }, false, true],
   ['cad', { grant: null }, false, true],
   ['cad', { grant: { linked: true }, signedOut: true }, false, true],

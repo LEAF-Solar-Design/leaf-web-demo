@@ -57,7 +57,7 @@ describe('signed-out Studio banners', () => {
     const panel = opening('ClaudeAccountPanel')
     expect(prop(panel.node, 'signedOut')).toBe('signedOut')
     const guards = panel.ancestors.filter((node) => node.type === 'LogicalExpression' && node.operator === '&&')
-    // Live only, and on the CAD drawing surface only while no account is linked (headerChromeFor).
+    // Live only; headerChromeFor keeps it on every surface so a link shows "1 linked".
     expect(guards.map((node) => text(node.left))).toEqual(['!mock && headerChrome.accounts'])
   })
 })
