@@ -58,6 +58,15 @@ export default function ClaudeAccountPanel({
     else if (wasOpen.current && (document.activeElement === document.body || dialogRef.current?.contains(document.activeElement))) triggerRef.current?.focus()
     wasOpen.current = open
   }, [open, mock])
+  // The card is right-anchored to its trigger. When the trigger sits near the left edge (the
+  // cockpit header), a right-anchored card runs off screen, so anchor it to the left instead.
+  const [alignStart, setAlignStart] = useState(false)
+  useLayoutEffect(() => {
+    if (mock || !open) return
+    const trigger = triggerRef.current?.getBoundingClientRect()
+    const width = dialogRef.current?.offsetWidth || 320
+    if (trigger) setAlignStart(trigger.right - width < 8)
+  }, [open, mock])
   const known = typeof grant?.linked === 'boolean'
   const restricted = grant?.read_status === 'restricted'
   const canManage = !loading && known
@@ -137,7 +146,7 @@ export default function ClaudeAccountPanel({
       </button>
 
       {pop.shown && (
-        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the account update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude accounts">
+        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the account update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} data-align={alignStart ? 'start' : undefined} role="dialog" aria-label="Claude accounts">
           <div className="ca-head">
             <span>Claude accounts</span>
             <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close Claude account panel" />

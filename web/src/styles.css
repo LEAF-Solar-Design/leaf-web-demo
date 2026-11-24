@@ -1469,6 +1469,8 @@ footer .warn-txt { color: var(--status-warning); }
 /* masked credential field without type=password, so no browser offers to save it (rehearsal issue 25) */
 .ca-field input.ca-secret { -webkit-text-security: disc; font-family: var(--leaf-font-mono, monospace); }
 .ca-form-err { margin: 6px 0 0; }
+/* a trigger near the left edge anchors the card to its left, so it stays on screen (desktop only; phones use the fixed sheet) */
+@media (min-width: 600px) { .claude-pop[data-align="start"] { left: 0; right: auto; } }
 .ca-act { align-self: flex-start; }
 .ca-note { font-size: var(--leaf-size-caption); color: var(--muted-2); line-height: 1.5; margin: 0; }
 /* linking hiccup — calm amber, not a red alarm (retryable coordination state) */

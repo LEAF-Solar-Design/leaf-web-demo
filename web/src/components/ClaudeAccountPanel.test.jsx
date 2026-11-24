@@ -206,3 +206,20 @@ describe('Claude account link form (rehearsal issues 24 and 25)', () => {
     expect(document.querySelector('input[type="password"]')).toBeNull()
   })
 })
+
+describe('Claude account card placement', () => {
+  it('anchors the card to the left when its trigger sits near the left edge', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 70, right: 200, top: 40, bottom: 60, width: 130, height: 20 })
+    try {
+      panel({ grant: { linked: false, accounts: [] } })
+      expect(screen.getByRole('dialog', { name: 'Claude accounts' })).toHaveAttribute('data-align', 'start')
+    } finally { rect.mockRestore() }
+  })
+  it('keeps the right anchor when there is room', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 1200, right: 1320, top: 40, bottom: 60, width: 120, height: 20 })
+    try {
+      panel({ grant: { linked: false, accounts: [] } })
+      expect(screen.getByRole('dialog', { name: 'Claude accounts' })).not.toHaveAttribute('data-align')
+    } finally { rect.mockRestore() }
+  })
+})
