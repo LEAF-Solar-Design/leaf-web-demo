@@ -157,3 +157,25 @@ it('KEYS-D19 credential Enter yields native composition', async () => {
 it('KEYS-D20 credential Enter yields key code 229', async () => {
   await credentialComposition({ isComposing: false, keyCode: 229 })
 })
+
+describe('Claude account onboarding instructions', () => {
+  it('tells a new owner how to get a subscription token and an API key, with a copyable command', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    panel({ grant: { linked: false, accounts: [] } })
+    const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
+    expect(dialog).toHaveTextContent('No Claude account is linked yet.')
+    const steps = within(dialog).getByRole('list', { name: 'How to get a Claude setup token' })
+    expect(within(steps).getAllByRole('listitem')).toHaveLength(4)
+    expect(within(steps).getByRole('link', { name: 'Claude Code' })).toHaveAttribute('href', expect.stringMatching(/^https:\/\/docs\.anthropic\.com\//))
+    expect(steps).toHaveTextContent('claude setup-token')
+    expect(steps).toHaveTextContent('Approve the request in the browser')
+    expect(steps).toHaveTextContent('sk-ant-oat01-')
+    fireEvent.click(within(steps).getByRole('button', { name: 'Copy' }))
+    expect(writeText).toHaveBeenCalledWith('claude setup-token')
+    await waitFor(() => expect(within(steps).getByRole('button', { name: 'Copied' })).toBeInTheDocument())
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Anthropic API key' }))
+    expect(dialog).toHaveTextContent('Create a key at console.anthropic.com under API keys, then paste it below.')
+    expect(within(dialog).getByRole('link', { name: 'console.anthropic.com' })).toHaveAttribute('href', 'https://console.anthropic.com/settings/keys')
+  })
+})
