@@ -8,6 +8,10 @@ import useRelativeNow from '../lib/useRelativeNow.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
 
+export const SETUP_TOKEN_COMMAND = 'claude setup-token'
+const CLAUDE_CODE_INSTALL_URL = 'https://docs.anthropic.com/en/docs/claude-code/setup'
+const ANTHROPIC_CONSOLE_KEYS_URL = 'https://console.anthropic.com/settings/keys'
+
 function detectKind(token) {
   if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
   if (/^sk-ant-oat/i.test((token || '').trim())) return 'oauth'
@@ -33,6 +37,14 @@ export default function ClaudeAccountPanel({
   const [label, setLabel] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const copyCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_TOKEN_COMMAND)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { /* clipboard denied: the command stays visible to copy by hand */ }
+  }
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -176,6 +188,12 @@ export default function ClaudeAccountPanel({
 
           {!signedOut && canManage && (!linked || showAdd) && (
             <div className="ca-setup">
+              {!linked && (
+                <p className="ca-copy ca-empty">
+                  No Claude account is linked yet. Paste an Anthropic API key, or link your Claude
+                  subscription with a token from <code>claude setup-token</code>.
+                </p>
+              )}
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
                 <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
                 <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => setKind('api_key')} disabled={busy}>Anthropic API key</button>
@@ -184,10 +202,14 @@ export default function ClaudeAccountPanel({
               {!isApiKey && (
                 <>
                   <p className="ca-copy">Link your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
-                  <ol className="ca-steps">
-                    <li>Run <code>claude setup-token</code> in a terminal.</li>
-                    <li>Approve the request for your Claude subscription.</li>
-                    <li>Paste the one-time token below.</li>
+                  <ol className="ca-steps" aria-label="How to get a Claude setup token">
+                    <li>Install <a href={CLAUDE_CODE_INSTALL_URL} target="_blank" rel="noreferrer">Claude Code</a> (free, one time).</li>
+                    <li>
+                      Open a terminal and run <code>{SETUP_TOKEN_COMMAND}</code>
+                      {' '}<button type="button" className="chip-neutral ca-copy-cmd" onClick={copyCommand}>{copied ? 'Copied' : 'Copy'}</button>
+                    </li>
+                    <li>Approve the request in the browser window that opens.</li>
+                    <li>Copy the token it prints (it starts with <code>sk-ant-oat01-</code>) and paste it below.</li>
                   </ol>
                   <div className="ca-choice" role="radiogroup" aria-label="Claude workspace plan">
                     {['pro', 'max', 'team', 'enterprise'].map((value) => (
@@ -201,7 +223,12 @@ export default function ClaudeAccountPanel({
                 </>
               )}
 
-              {isApiKey && <p className="ca-copy">Link an Anthropic organization API key billed at API rates.</p>}
+              {isApiKey && (
+                <p className="ca-copy">
+                  Create a key at <a href={ANTHROPIC_CONSOLE_KEYS_URL} target="_blank" rel="noreferrer">console.anthropic.com</a> under
+                  {' '}API keys, then paste it below. Usage is billed at API rates.
+                </p>
+              )}
               <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                 <span className="ca-field-k">{isApiKey ? 'Anthropic API key' : 'Claude setup token'}</span>
                 <input

@@ -1435,12 +1435,23 @@ export default function App() {
     listProjects,
     createProject,
     openProject,
+    // A 409 on first-workspace create adopts the org the verified session resolves to.
+    resolveOrgId: async () => (await getSessionIdentity(false)).org,
   }), [])
+  // First sign-in creates the caller's workspace without a prompt; the
+  // handler (assigned below, once identity state exists) re-reads tenant
+  // state in place so no reload is needed.
+  const autoProvisionEnabled = !mock && !knownGuest && authConfigured && signedIn
+  const workspaceProvisionedRef = useRef(null)
   const workspaceController = useWorkspaceController({
     mock,
     readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
+    autoProvision: {
+      enabled: autoProvisionEnabled,
+      onProvisioned: (org) => workspaceProvisionedRef.current?.(org),
+    },
   })
   const {
     orgId,
@@ -2060,6 +2071,19 @@ export default function App() {
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
       session.recoveries, sessionProof, sessionActions, knownGuest])
+
+  // After the first workspace exists, drop the unbound reads' 403 state and
+  // re-read identity, intake and the platform trust state (Claude accounts).
+  workspaceProvisionedRef.current = () => {
+    setIdentityFailure(null)
+    setIntakeRetryKey((key) => key + 1)
+    platformActions.refreshAll()
+  }
+  // While the first workspace is being set up, the setup card explains the
+  // unbound identity 403; the identity card would only repeat it.
+  useEffect(() => {
+    if (autoProvisionEnabled && workspaceController.autoProvision !== 'idle') setIdentityFailure(null)
+  }, [autoProvisionEnabled, workspaceController.autoProvision])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -5791,6 +5815,17 @@ export default function App() {
           >
             Restart guided tour
           </button>
+        )}
+        {autoProvisionEnabled && workspaceController.autoProvision === 'creating' && (
+          <div className="card enter workspace-setup" role="status">Setting up your workspace…</div>
+        )}
+        {autoProvisionEnabled && workspaceController.autoProvision === 'failed' && (
+          <div className="card enter workspace-setup">
+            <p role="alert">{workspaceController.autoProvisionError}</p>
+            <button type="button" className="btn primary" onClick={() => {
+              void workspaceController.retryAutoProvision()
+            }}>Retry</button>
+          </div>
         )}
         {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active' && (
           <div className="card enter">
