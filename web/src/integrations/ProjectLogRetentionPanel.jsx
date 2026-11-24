@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react'
 import './ProjectLogRetentionPanel.css'
 
-const initialForm = () => ({ slug: '', version: '1', title: '', batchSize: '5000', maxBatches: '200',
+const initialForm = () => ({ preparedRef: '', slug: '', version: '1', title: '', batchSize: '5000', maxBatches: '200',
   table: '', clock: '', scheduleSlug: '', scheduleVersion: '1', dueDate: '', execution: '',
   id: 'id', source: 'source', level: 'level', timestamp: 'timestamp' })
 const failed = () => new Error('Retention action unavailable')
@@ -114,6 +114,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     finally { ctx.controller.signal.removeEventListener('abort', abort); if (ctx.reads.get(key) === controller) ctx.reads.delete(key) }
   }
   function edit(key, value) {
+    if (key === 'preparedRef') { setPrepared(null); setSchedule(null); clearRun() }
     setForm(previous => ({ ...previous, [key]: value })); clearReviews(); setExported(null)
     if (['slug', 'version', 'title', 'batchSize', 'maxBatches'].includes(key)) { setDefinition(null); setSchedule(null); clearRun() }
     if (['table', 'clock', 'id', 'source', 'level', 'timestamp'].includes(key)) { setPrepared(null); setSchedule(null); clearRun() }
@@ -285,6 +286,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
           <input id={`${prefix}-${key}`} list={`${prefix}-fields`} value={form[key]} onChange={event => edit(key, event.target.value)} /></label>)}
       </div><datalist id={`${prefix}-fields`}>{(dataset?.fields ?? []).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}</datalist>
       <button type="button" disabled={!dataset?.material_context || !!dataset?.derivation} onClick={() => action(async ctx => {
+        ctx.reads.get('prepared')?.abort()
         const retentionClock = normalizeRetentionClock(form.clock)
         if (!retentionClock) {
           setError('Enter the retention clock as whole epoch milliseconds or a UTC timestamp such as 2031-01-01T00:00:00.000Z (year 0000 through 9999).')
@@ -293,7 +295,17 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
         const value = await invoke(ctx, 'retentionPrepare', [{ datasetRef: dataset.reference, expectedDatasetRevision: dataset.revision,
           tableId: form.table.trim(), fields: { id: form.id, source: form.source, level: form.level, timestamp: form.timestamp }, retentionClock }])
         setPrepared(value); setSchedule(null); clearRun(); setNotice('Original records prepared from the selected imported revision.')
-      })}>Prepare records</button>{prepared && <p>Prepared table: {prepared.tableId}.</p>}
+      })}>Prepare records</button>
+      {input('preparedRef', 'Prepared table reference')}
+      <button type="button" disabled={!form.preparedRef.trim()} onClick={() => {
+        setPrepared(null); setSchedule(null); clearRun()
+        read('prepared', async (ctx, requestSignal) => {
+          const found = await invoke(ctx, 'retentionGetPreparedTable', [form.preparedRef.trim()], requestSignal)
+          if (current(ctx) && !requestSignal.aborted) setPrepared(found)
+        })
+      }}>Open prepared table</button>
+      {prepared && <p>Prepared table: {prepared.tableId}.</p>}
+      {prepared?.revision && <p>Prepared table revision: {prepared.revision}.</p>}
     </fieldset>
     <fieldset disabled={disabled}><legend>Internal schedule and occurrence</legend><div className="retention-grid">{input('scheduleSlug', 'Schedule slug')}{input('scheduleVersion', 'Schedule version', 'number')}{input('dueDate', 'Occurrence due date', 'date')}</div>
       <div className="retention-actions"><button type="button" disabled={typeof client?.retentionGetSchedule !== 'function'} onClick={openSchedule}>Open internal schedule</button>

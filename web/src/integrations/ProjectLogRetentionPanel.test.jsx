@@ -42,6 +42,20 @@ async function previewAndReview() { click('Preview retention'); await screen.fin
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('O03 standalone retention controls, inert client only', () => {
+  it('opens a stored table by reference without preparing or scheduling', async () => {
+    const h = setup()
+    h.client.retentionGetPreparedTable = vi.fn().mockResolvedValue({ tableId: table, revision: 1 })
+    render(<ProjectLogRetentionPanel {...h.props} />)
+    change('Prepared table reference', table)
+    expect(h.client.retentionGetPreparedTable).not.toHaveBeenCalled()
+    click('Open prepared table')
+    expect(await screen.findByText('Prepared table revision: 1.')).toBeInTheDocument()
+    expect(h.client.retentionGetPreparedTable).toHaveBeenCalledWith(projectId, table, { signal: expect.any(AbortSignal) })
+    expect(h.client.retentionPrepare).not.toHaveBeenCalled()
+    expect(h.client.retentionRegisterSchedule).not.toHaveBeenCalled()
+    change('Prepared table reference', '')
+    expect(screen.queryByText('Prepared table revision: 1.')).not.toBeInTheDocument()
+  })
   it.each(['instant', 'text', 'number'])('inspects only the selected revision on click and shows %s fields', async kind => {
     const h = setup()
     h.client.getDataset = vi.fn().mockResolvedValue({ ...dataset, fields: [{ id: 'event_value', type: { kind } }] })
