@@ -17,3 +17,9 @@ returns the same org.
 ## Turning it off
 
 Unset `LEAF_ORG_SELF_PROVISION` on the environment. Existing orgs and bindings are unaffected.
+
+## Linking AutoCAD to the same account
+
+LEAFLOGIN opens the system default browser. If that browser already holds a session for a different Leaf Automation
+account, the consent page signs AutoCAD in to that account, and LEAFTOOLSYNC then pulls that account's tools. Sign in
+to AutoCAD from the same browser profile that signed in to Studio.
