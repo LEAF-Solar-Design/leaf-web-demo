@@ -178,7 +178,7 @@ import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake, fetchInlineAuthoringFlags,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
-  createOrg, listProjects, createProject, openProject, subscribeUnauthorized, isWorkspaceBootstrapRequired,
+  createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
   saveEditedDrawingVersion,
   saveDrawingVersionPlan,
   fetchDrawingDxf,
@@ -1942,13 +1942,6 @@ export default function App() {
   // first proof, so an old token/project cannot publish into a new one.
   const sessionAuthorization = authHeaders().Authorization
   const [identityFailure, setIdentityFailure] = useState(null)
-  // After the first workspace exists, drop the unbound reads' 403 state and
-  // re-read identity, intake and the platform trust state (Claude accounts).
-  workspaceProvisionedRef.current = () => {
-    setIdentityFailure(null)
-    setIntakeRetryKey((key) => key + 1)
-    platformActions.refreshAll()
-  }
   const sessionProofScope = useMemo(() => ({}), [mock, orgId, openProjectId,
     sessionAuthorization, session.tokenRevision, session.recoveries, intakeRetryKey])
   const sessionProofScopeRef = useRef(sessionProofScope)
@@ -1996,8 +1989,7 @@ export default function App() {
           sessionActions.requireAuth('/api/session/identity')
           if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
         } else if (session.controller.getSnapshot().status !== 'active') {
-          setIdentityFailure({ scope: sessionProofScope, message: humanizeError(e),
-            bootstrap: isWorkspaceBootstrapRequired(e) })
+          setIdentityFailure({ scope: sessionProofScope, message: humanizeError(e) })
         }
       })
     return () => { alive = false }
@@ -2079,6 +2071,19 @@ export default function App() {
     // Both proofs share token, recovery and workspace fencing.
   }, [mock, isEditFixture, intakeRetryKey, REQUESTED_DRAWING_ID, DRAWING_SOURCE, isScopeCurrent, resetCatalogTransient, resetDrawing, seatIntake,
       session.recoveries, sessionProof, sessionActions, knownGuest])
+
+  // After the first workspace exists, drop the unbound reads' 403 state and
+  // re-read identity, intake and the platform trust state (Claude accounts).
+  workspaceProvisionedRef.current = () => {
+    setIdentityFailure(null)
+    setIntakeRetryKey((key) => key + 1)
+    platformActions.refreshAll()
+  }
+  // While the first workspace is being set up, the setup card explains the
+  // unbound identity 403; the identity card would only repeat it.
+  useEffect(() => {
+    if (autoProvisionEnabled && workspaceController.autoProvision !== 'idle') setIdentityFailure(null)
+  }, [autoProvisionEnabled, workspaceController.autoProvision])
 
   // App owns the transport; controls only express the user's choice.
   const localCadUpdateRef = useRef(null)
@@ -5822,9 +5827,7 @@ export default function App() {
             }}>Retry</button>
           </div>
         )}
-        {/* An unbound caller's identity 403 is the setup card's to explain. */}
-        {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active'
-          && !(identityFailure.bootstrap && autoProvisionEnabled) && (
+        {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active' && (
           <div className="card enter">
             <p role="alert">{identityFailure.message}</p>
             <button type="button" className="btn primary" onClick={() => {
