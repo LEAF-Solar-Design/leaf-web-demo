@@ -104,6 +104,8 @@ def _route(request, project_id, resource):
         retention_slug = r"[a-z0-9]+(?:-[a-z0-9]+)*"
         if tail in {"prepare", "definitions", "schedules", "occurrences"}:
             methods, query = {"POST"}, set()
+        elif re.fullmatch(r"tables/retention-table:[a-f0-9]{64}", tail):
+            methods, query = {"GET"}, set()
         elif tail == "executions":
             methods, query = {"GET"}, {"limit", "after"}
         elif re.fullmatch(rf"definitions/({retention_slug})/versions/({_VERSION})(?:/export)?", tail):

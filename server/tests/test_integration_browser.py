@@ -34,6 +34,7 @@ PROTECTION_FIXTURE = "synthetic-protection-binding"  # Inert test text, never a 
 RETENTION = f"/api/v1/projects/{PROJECT}/integrations/retention/"
 EXECUTION = "retention-execution:" + "a" * 64
 RETENTION_ROUTES = [
+    ("GET", "tables/retention-table:" + "b" * 64),
     ("POST", "prepare"), ("POST", "definitions"),
     ("GET", "definitions/logs/versions/1"), ("GET", "definitions/logs/versions/1/export"),
     ("GET", "definitions/versions/versions/1"),
