@@ -2074,7 +2074,6 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-size: var(--leaf-size-body);
 }
 .converse-msg[data-converse-role="user"]::before,
-.converse-msg[data-converse-role="assistant"]::before,
 .converse-confirm[data-converse-role="decision"]::before,
 .converse-question[data-converse-role="question"]::before {
   display: block;
@@ -2082,7 +2081,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
 }
 .converse-msg[data-converse-role="user"]::before { content: "You"; }
-.converse-msg[data-converse-role="assistant"]::before { content: "Assistant"; }
+/* Assistant turns carry no per-turn label: the panel head already says
+   Assistant, and repeating it on every reply was noise (P8, D21). */
 .converse-tool-row[data-converse-role="tool"] {
   display: flex; gap: 8px; flex-wrap: wrap;
   list-style: none; margin: 0; padding: 0;
@@ -2094,7 +2094,9 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   color: var(--foreground);
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  /* control radius, not a 999px pill: a wrapped multi-line chip stays a
+     rounded box instead of an ellipse that clips its text (P4, D07) */
+  border-radius: var(--leaf-radius-control);
   padding: 3px 9px;
   box-sizing: border-box;
   min-width: 0;
@@ -2108,7 +2110,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .converse-tool-chip[data-state="failed"]::before { content: "✕"; color: var(--status-danger); }
 .converse-tool-chip[data-state="failed"] > .converse-step-state { font-size: 0; }
 .converse-tool-chip[data-state="failed"] > .converse-step-state::before {
-  content: "Unavailable"; font-size: var(--leaf-size-dense);
+  content: "Failed"; font-size: var(--leaf-size-dense);
 }
 @media (prefers-reduced-motion: no-preference) {
   .converse-tool-chip[data-state="running"]::before {

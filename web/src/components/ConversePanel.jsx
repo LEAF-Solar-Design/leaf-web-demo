@@ -263,6 +263,9 @@ export default function ConversePanel({
   projectContext = null,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
+  // App's one New conversation handler (the Profile ribbon calls the same
+  // function); null while starting one is unavailable, which hides the chip.
+  onNewConversation = null,
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
   onAttachJob,               // (jobId, tool) -> App's existing §7 job attach affordance
   onJobLinked,               // a job_linked event arrived -> refresh the job rail
@@ -1271,7 +1274,12 @@ export default function ConversePanel({
       // The object is what the call acted on (args_summary); the result, once
       // it lands, follows it rather than replacing it.
       const object = c.summary
-      const outcome = c.result && c.result !== c.summary ? c.result : ''
+      const rawOutcome = c.result && c.result !== c.summary ? c.result : ''
+      // A failed chip already says Failed: drop the stacked "error: tool
+      // error:" wire prefixes so the chip reads as the reason itself.
+      const outcome = st.state === 'failed'
+        ? String(rawOutcome).replace(/^(?:\s*(?:tool\s+)?error:\s*)+/i, '')
+        : rawOutcome
       return (
         <li key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
           <span className={st.dot} aria-hidden="true" />
@@ -1703,6 +1711,9 @@ export default function ConversePanel({
           <span className="dim"> · </span>
           <span className="route-tool">{usageCostLabel(model.latestUsage?.cost_tokens, usageCost(model.latestUsage))}</span>
         </span>
+        {typeof onNewConversation === 'function' && (
+          <button type="button" className="chip-neutral converse-new" onClick={onNewConversation}>New conversation</button>
+        )}
         <button type="button" className="chip-neutral" onClick={dismiss}>Hide</button>
       </div>
       {engineChangesAccess ? (

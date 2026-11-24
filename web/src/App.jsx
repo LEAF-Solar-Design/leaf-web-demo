@@ -4964,6 +4964,12 @@ export default function App() {
   // so they can read the ONE engine session through context. Studio-only:
   // off a studio drafting surface the ribbon never mounts and this list is
   // never read.
+  // The one New conversation handler: the Profile ribbon and the assistant
+  // head both call it, so the two controls share one set of guards (null
+  // while the agent is unavailable, signed out, running or routing).
+  const startNewConversation = useMemo(() => (!agentDisabled && signedIn && !running && !routing
+    ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null),
+  [agentDisabled, signedIn, running, routing, clearAgentSession, openAgentMode])
   // One profile ribbon over the same project, catalog and conversation owners.
   const profileTabs = useMemo(() => {
     const openProjects = () => {
@@ -4995,16 +5001,14 @@ export default function App() {
       },
       files: { onUpload: !mock && (openProjectId ? signedIn : standalonePolicyReady) ? () => setProjectPane('material') : null },
       conversation: {
-        onNew: !agentDisabled && signedIn && !running && !routing
-          ? () => { clearAgentSession(); openAgentMode(); barInputRef.current?.focus() } : null,
+        onNew: startNewConversation,
       },
       activity: { onJobs: openJobs, onReceipts: jobs.length ? openJobs : null },
       ship,
     })
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
-    orgId, openProjectId, standalonePolicyReady, projectBusy, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, ship, openToolRail, setJobRailExpanded,
+    orgId, openProjectId, standalonePolicyReady, projectBusy, startNewConversation, jobs.length, ship, openToolRail, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId, onOpenSolarForm])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
@@ -6857,6 +6861,7 @@ export default function App() {
             onCatalogChanged={refreshCatalog}
             consumeCatalogPublication={catalogController.consumeCatalogPublication}
             onDismiss={() => { clearAgentMode(); if (boardConversation) setProjectPane(null) }}
+            onNewConversation={startNewConversation}
             onLinkClaude={() => setClaudeOpen(true)}
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}

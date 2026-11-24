@@ -17,8 +17,29 @@
   overflow: visible;
 }
 .command-transcript-host:empty { display: none; }
-.command-transcript-host .converse-log { max-height: min(40vh, 420px); overflow-y: auto; }
+/* P1 (D01): the docked chat log grows with the screen instead of a fixed
+   420 px letterbox, so a tall plan card is mostly visible at desktop sizes.
+   The calc() term reserves the chrome above the dock (ribbon, tabs, the
+   assistant head) and the command bar and status bar below it, so the head
+   never rides up under the ribbon; the max() floor is the old cap, so no
+   screen gets a shorter log than before. Measured on the CAT fixture:
+   1920x1080 = 680 px, 1440x900 = 576 px. */
+.command-transcript-host .converse-log {
+  max-height: max(min(40vh, 420px), min(64dvh, 680px, calc(100dvh - 320px)));
+  overflow-y: auto;
+}
+/* Below the 1024 px wide cockpit the tablet layout stacks about 320 px of
+   header chrome (D13), so it reserves more: 960x1040 = 480 px. */
+@media (max-width: 1023px) {
+  .command-transcript-host .converse-log {
+    max-height: max(min(40vh, 420px), min(64dvh, 680px, calc(100dvh - 560px)));
+  }
+}
 .command-transcript-host .converse-input { display: none; }
+/* P3 (D06): token counts and dollar estimates stay in the DOM (and in the
+   cost panel) but are not shown in the Studio chat; the model badge stays. */
+.studio-shell .converse-status,
+.studio-shell .converse-usage { display: none; }
 
 /* ================= W4e: the reference cockpit, band for band ===============
    Operator, 2026-09-03: "no pixel parity, no organization, no icons, dont
