@@ -176,6 +176,12 @@ export default function ClaudeAccountPanel({
 
           {!signedOut && canManage && (!linked || showAdd) && (
             <div className="ca-setup">
+              {!linked && (
+                <p className="ca-copy ca-empty">
+                  No Claude account is linked yet. Paste an Anthropic API key, or link your Claude
+                  subscription with a token from <code>claude setup-token</code>.
+                </p>
+              )}
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
                 <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
                 <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => setKind('api_key')} disabled={busy}>Anthropic API key</button>

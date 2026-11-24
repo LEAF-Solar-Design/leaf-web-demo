@@ -178,7 +178,7 @@ import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync, attachToJob,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake, fetchInlineAuthoringFlags,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
-  createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
+  createOrg, listProjects, createProject, openProject, subscribeUnauthorized, isWorkspaceBootstrapRequired,
   saveEditedDrawingVersion,
   saveDrawingVersionPlan,
   fetchDrawingDxf,
@@ -1435,12 +1435,23 @@ export default function App() {
     listProjects,
     createProject,
     openProject,
+    // A 409 on first-workspace create adopts the org the verified session resolves to.
+    resolveOrgId: async () => (await getSessionIdentity(false)).org,
   }), [])
+  // First sign-in creates the caller's workspace without a prompt; the
+  // handler (assigned below, once identity state exists) re-reads tenant
+  // state in place so no reload is needed.
+  const autoProvisionEnabled = !mock && !knownGuest && authConfigured && signedIn
+  const workspaceProvisionedRef = useRef(null)
   const workspaceController = useWorkspaceController({
     mock,
     readsPaused: knownGuest,
     services: workspaceServices,
     formatError: humanizeError,
+    autoProvision: {
+      enabled: autoProvisionEnabled,
+      onProvisioned: (org) => workspaceProvisionedRef.current?.(org),
+    },
   })
   const {
     orgId,
@@ -1931,6 +1942,13 @@ export default function App() {
   // first proof, so an old token/project cannot publish into a new one.
   const sessionAuthorization = authHeaders().Authorization
   const [identityFailure, setIdentityFailure] = useState(null)
+  // After the first workspace exists, drop the unbound reads' 403 state and
+  // re-read identity, intake and the platform trust state (Claude accounts).
+  workspaceProvisionedRef.current = () => {
+    setIdentityFailure(null)
+    setIntakeRetryKey((key) => key + 1)
+    platformActions.refreshAll()
+  }
   const sessionProofScope = useMemo(() => ({}), [mock, orgId, openProjectId,
     sessionAuthorization, session.tokenRevision, session.recoveries, intakeRetryKey])
   const sessionProofScopeRef = useRef(sessionProofScope)
@@ -1978,7 +1996,8 @@ export default function App() {
           sessionActions.requireAuth('/api/session/identity')
           if (shouldAutoDemo({ authRequired: true, authConfigured, mock, signedIn: isSignedIn() })) setMock(true)
         } else if (session.controller.getSnapshot().status !== 'active') {
-          setIdentityFailure({ scope: sessionProofScope, message: humanizeError(e) })
+          setIdentityFailure({ scope: sessionProofScope, message: humanizeError(e),
+            bootstrap: isWorkspaceBootstrapRequired(e) })
         }
       })
     return () => { alive = false }
@@ -5792,7 +5811,20 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active' && (
+        {autoProvisionEnabled && workspaceController.autoProvision === 'creating' && (
+          <div className="card enter workspace-setup" role="status">Setting up your workspace…</div>
+        )}
+        {autoProvisionEnabled && workspaceController.autoProvision === 'failed' && (
+          <div className="card enter workspace-setup">
+            <p role="alert">{workspaceController.autoProvisionError}</p>
+            <button type="button" className="btn primary" onClick={() => {
+              void workspaceController.retryAutoProvision()
+            }}>Retry</button>
+          </div>
+        )}
+        {/* An unbound caller's identity 403 is the setup card's to explain. */}
+        {!mock && identityFailure?.scope === sessionProofScope && session.status !== 'active'
+          && !(identityFailure.bootstrap && autoProvisionEnabled) && (
           <div className="card enter">
             <p role="alert">{identityFailure.message}</p>
             <button type="button" className="btn primary" onClick={() => {
