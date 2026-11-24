@@ -28,13 +28,6 @@
   max-height: max(min(40vh, 420px), min(64dvh, 680px, calc(100dvh - 320px)));
   overflow-y: auto;
 }
-/* Below the 1024 px wide cockpit the tablet layout stacks about 320 px of
-   header chrome (D13), so it reserves more: 960x1040 = 480 px. */
-@media (max-width: 1023px) {
-  .command-transcript-host .converse-log {
-    max-height: max(min(40vh, 420px), min(64dvh, 680px, calc(100dvh - 560px)));
-  }
-}
 .command-transcript-host .converse-input { display: none; }
 /* P3 (D06): token counts and dollar estimates stay in the DOM (and in the
    cost panel) but are not shown in the Studio chat; the model badge stays. */
@@ -207,6 +200,13 @@
   .studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }
   .studio-shell .app[data-surface="solar"] .solar-flow-seat-content { display: contents; }
   .studio-shell .app[data-surface="solar"] .solar-flow-seat-toggle { display: none; }
+  /* P1 (D01): below the 1024 px wide cockpit the tablet layout stacks about
+     320 px of header chrome (D13), so the docked chat log reserves more:
+     960x1040 = 480 px. Later than the base rule, so it wins at equal
+     specificity. */
+  .command-transcript-host .converse-log {
+    max-height: max(min(40vh, 420px), min(64dvh, 680px, calc(100dvh - 560px)));
+  }
 }
 .cockpit-quick button, .cockpit-strip button, .doc-tab-add, .cockpit-pane-tools button {
   width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--leaf-radius-key);
