@@ -99,14 +99,15 @@ describe('Leaf workspace guest front door', () => {
     await mountFrontDoor('/', hostname)
     expect(document.querySelector('.stage-root').getAttribute('data-scene')).toBe('site')
     expect(mocks.replace).not.toHaveBeenCalled()
-    for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
+    for (const name of ['Try Branch on the sample rooftop', 'Sign in / Create account', 'Create your Studio account', 'Open in workspace']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     // The trial button is a full navigation so the boot path reads ?demo=1,
-    // landing in the cockpit demo (the one shell); the workspace buttons stay
-    // on the SPA router and on /try.
+    // landing in the cockpit demo (the one shell). The account buttons go to
+    // /app (sign in, then the workspace is created); the solver stays on /try.
     expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
-    expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try']])
+    expect(mocks.navigate.mock.calls).toEqual([['/app'], ['/app'], ['/try']])
+    expect(screen.queryByRole('form', { name: 'Register interest' })).toBeNull()
     expect(mocks.hrefSet).not.toHaveBeenCalled()
     expect(mocks.demand).not.toHaveBeenCalled()
   })
@@ -153,6 +154,7 @@ describe('Leaf workspace guest front door', () => {
     for (const name of ['Try Branch on the sample rooftop', 'Open workspace', 'Open in workspace']) {
       fireEvent.click(screen.getByRole('button', { name }))
     }
+    expect(screen.queryByRole('button', { name: 'Create your Studio account' })).toBeNull()
     fireEvent.keyDown(document.body, { key: 'T' })
     expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
     expect(mocks.navigate.mock.calls).toEqual([['/app'], ['/app'], ['/app']])
@@ -162,14 +164,14 @@ describe('Leaf workspace guest front door', () => {
   it('checks sign-in at the time a workspace action is invoked', async () => {
     await mountFrontDoor()
     mocks.signedIn.mockReturnValue(true)
-    fireEvent.click(screen.getByRole('button', { name: 'Open workspace' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open in workspace' }))
     mocks.signedIn.mockReturnValue(false)
     fireEvent.keyDown(document.body, { key: 'T' })
     expect(mocks.navigate.mock.calls).toEqual([['/app'], ['/try']])
     expect(mocks.assign).not.toHaveBeenCalled()
   })
 
-  it('shows honest pricing copy and routes pricing interest to demand capture', async () => {
+  it('shows honest pricing copy and no waitlist box', async () => {
     await mountFrontDoor()
     expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing is not yet available.')
     expect(screen.queryByText(/\$299|14-day trial|Start free trial/)).toBeNull()
@@ -183,30 +185,11 @@ describe('Leaf workspace guest front door', () => {
     expect(document.getElementById(pricingTab.getAttribute('aria-describedby')).textContent).toBe(sheetsNote)
     fireEvent.click(pricingTab)
     expect(mocks.navigate).not.toHaveBeenCalledWith('/sheets#c-201')
-    const email = screen.getByLabelText('Want a workspace that uses your own API key?')
-    fireEvent.change(email, { target: { value: 'guest@example.com' } })
-    fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))
-    await screen.findByText('Interest saved. No payment required.')
-    expect(mocks.demand).toHaveBeenCalledWith({
-      email: 'guest@example.com', interest: 'Workspace with your own API key',
-    })
+    expect(screen.queryByLabelText('Want a workspace that uses your own API key?')).toBeNull()
+    expect(mocks.demand).not.toHaveBeenCalled()
     expect(mocks.assign).not.toHaveBeenCalled()
     // Nothing navigated: the disabled Pricing tab above was the only click.
     expect(mocks.navigate).not.toHaveBeenCalled()
-  })
-
-  it('keeps the sandbox available when demand capture fails', async () => {
-    mocks.demand.mockRejectedValueOnce(new Error('unavailable'))
-    await mountFrontDoor()
-    fireEvent.change(screen.getByLabelText('Want a workspace that uses your own API key?'), {
-      target: { value: 'guest@example.com' },
-    })
-    fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))
-    await screen.findByRole('alert')
-    expect(screen.queryByText('Interest saved. No payment required.')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Register interest' }).disabled).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Try Branch on the sample rooftop' }))
-    expect(mocks.assign).toHaveBeenCalledWith('/try?demo=1')
   })
 
   it('contains no handler assigning the visitor to leafautomation.ai or a payment funnel', () => {

@@ -804,11 +804,12 @@ export function RunningJobStrip({ jobId, runProgress, runStatus, toolName, runEl
   )
 }
 
-export function headerChromeFor({ studioGround, surface, grant, signedOut, grantLoading, grantErr }) {
+export function headerChromeFor({ studioGround, surface }) {
   // The drafting toolbar marks the CAD drawing surface (surface contract, never a surface-id literal).
   const drawing = studioGround && surfaceContract(surface).toolbar.profile === 'drafting'
-  const linked = grant?.linked === true && !signedOut && !grantLoading && !grantErr
-  return { cost: !drawing, accounts: !drawing || !linked }
+  // The Claude accounts control stays on every surface: after a link it is the user's
+  // confirmation ("1 linked") and the way to add or remove accounts (rehearsal issue 26).
+  return { cost: !drawing, accounts: true }
 }
 
 function storedPlanMode(sessionId) {

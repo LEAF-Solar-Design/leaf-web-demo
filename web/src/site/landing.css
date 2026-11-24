@@ -415,6 +415,7 @@
 .lp-headline-accent { color: var(--leaf-accent); font-weight: 500; }
 .lp-sub { font: 400 var(--leaf-size-body)/1.6 'Inter Tight', sans-serif; color: var(--leaf-ink-muted); max-width: 470px; }
 .lp-cta-row { display: flex; gap: 14px; align-items: center; }
+.lp-account-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
 .lp-cta {
   display: inline-flex; align-items: center; border: 0; border-radius: var(--leaf-radius-card);
   background: var(--leaf-accent); color: #04140a;
@@ -1467,8 +1468,11 @@
   background: color-mix(in srgb, var(--leaf-ground) 84%, transparent); backdrop-filter: blur(8px);
   border-bottom: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
-/* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6) while open */
-.studio-shell header.top:has(.claude-pop) { z-index: calc(var(--leaf-layer-base) + 7); }
+/* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6), the
+   start chooser's scrim (.workspace-environment, z-index 12) and the Studio activity panel
+   (#project-workspace-activity, z-index 14) while open; all share the fixed shell's stacking
+   context. Rehearsal issue 23: the panel opened dimmed under the scrim and half under the panel. */
+.studio-shell header.top:has(.claude-pop) { z-index: var(--leaf-layer-popover); }
 /* on phones the header popover is position: fixed; a backdrop-filter here would make header.top its
    containing block and its overflow: hidden would clip the sheet, so cancel it while one is open */
 @media (max-width: 599px) {
@@ -2020,6 +2024,7 @@
   .lp-stats { flex-wrap: wrap; gap: 16px; }
   .stage-loading { left: 16px; bottom: 96px; }
   .lp-stmt .lp-cta-row button { min-height: 44px; box-sizing: border-box; }
+  .lp-stmt .lp-account-row button { min-height: 44px; box-sizing: border-box; }
   .lp-stmt form input, .lp-stmt form button { min-height: 44px; box-sizing: border-box; }
   .lp-index .lp-tab { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
   .tc-product-tabs button { min-height: 44px; box-sizing: border-box; }
