@@ -645,3 +645,40 @@ def test_dxf_refuses_ambiguous_block_names_in_either_order(first, second, base, 
     assert list(result["blocks"]) == [first, second + "_ALT"]
     assert result["inserts"][0]["name"] == first
     assert result["blocks"][second + "_ALT"]["base"] == [base, 0, 0]
+
+
+@pytest.mark.parametrize("transform", [
+    {"x": 1},
+    {"x": -9, "rot": 1.570796, "scale": [-2, 1, 1]},
+    {"x": 50, "y": -110, "z": 8, "scale": [2, 3, 5]},
+])
+def test_invisible_insert_round_trip_preserves_identity_and_transform(transform):
+    hidden = dict({"handle": "1A", "name": "Rail", "layer": "Equipment",
+                   "y": 0, "z": 0, "invisible": True}, **transform)
+    shown = {**hidden, "handle": "1B", "invisible": False}
+    intake = {"layers": ["Equipment"], "polylines": [],
+              "blocks": {"Rail": {"base": [1, 2, 0], "children": []}},
+              "inserts": [hidden, shown]}
+    first, raw = _roundtrip(intake)
+    assert raw.count(b"60\n1\n") == 1
+    hidden, shown = first["inserts"]
+    assert hidden["handle"] == "1A" and hidden["invisible"] is True
+    assert shown["handle"] == "1B" and "invisible" not in shown
+    assert all(hidden[key] == shown[key] for key in ("name", "x", "y", "z", "rot", "scale"))
+    second, _ = _roundtrip(first)
+    assert second["inserts"] == first["inserts"]
+
+
+def test_invisible_nested_insert_keeps_definition_and_handle():
+    pairs = [
+        0, "SECTION", 2, "BLOCKS",
+        0, "BLOCK", 2, "Frame",
+        0, "INSERT", 5, "1A", 2, "Rail", 60, 1, 10, 2, 20, 3,
+        0, "INSERT", 5, "1B", 2, "Rail", 60, 0, 10, 5, 20, 7,
+        0, "ENDBLK", 0, "BLOCK", 2, "Rail", 0, "ENDBLK",
+        0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    hidden, shown = intake["blocks"]["Frame"]["nested_inserts"]
+    assert (hidden["handle"], hidden["name"], hidden["invisible"]) == ("1A", "Rail", True)
+    assert shown["handle"] == "1B" and "invisible" not in shown

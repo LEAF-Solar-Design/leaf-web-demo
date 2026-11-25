@@ -711,6 +711,7 @@ def _parse_insert(pairs, i, dropped=None):
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
+            **({"invisible": True} if groups.get(60) == "1" else {}),
             **array,
             "_properties": _entity_properties(
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
