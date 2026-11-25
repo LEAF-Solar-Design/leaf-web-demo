@@ -1493,7 +1493,7 @@ export default function ConversePanel({
             : "The linked account's organization does not allow it here. Link a different account, then resend your message."}</span>
           <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>
           {typeof model.grantRefused.text === 'string' && model.grantRefused.text.trim() && !input && !busy && (
-            <button type="button" className="chip-act" onClick={() => { setInput(model.grantRefused.text); composerRef.current?.focus() }}>Use my message again</button>
+            <button type="button" className="chip-act" onClick={() => { setSecretNotice(null); setInput(model.grantRefused.text); composerRef.current?.focus() }}>Use my message again</button>
           )}
         </div>
       ) : showGrant && (

@@ -1470,6 +1470,7 @@ footer .warn-txt { color: var(--status-warning); }
 /* masked credential field without type=password, so no browser offers to save it (rehearsal issue 25) */
 .ca-field input.ca-secret { -webkit-text-security: disc; font-family: var(--leaf-font-mono, monospace); }
 .ca-form-err { margin: 6px 0 0; }
+.claude-pop.vh-pop { max-height: 340px; }
 .ca-success { margin: 0; color: var(--primary); font-size: var(--leaf-size-dense); line-height: 1.5; }
 .ca-refused { color: var(--status-warning); font-size: var(--leaf-size-caption); }
 .ca-refused-why { margin: 0; color: var(--muted); font-size: var(--leaf-size-caption); line-height: 1.5; }

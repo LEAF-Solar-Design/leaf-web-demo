@@ -74,13 +74,14 @@ export default function ClaudeAccountPanel({
     refreshOpen.current = open
   }, [open, mock, signedOut, onRefresh])
   useEffect(() => {
-    if (!open || signedOut) {
+    if (!open || signedOut || mock) {
       panelLifetime.current += 1
       setToken('')
+      setFormError(null)
       setSuccess(null)
       replacement.current = null
     }
-  }, [open, signedOut])
+  }, [open, signedOut, mock])
   useEffect(() => () => { panelLifetime.current += 1 }, [])
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
@@ -165,6 +166,7 @@ export default function ClaudeAccountPanel({
     if (!canManage || signedOut || !value || busy || pending.current) return
     setSuccess(null)
     // A click with a missing choice explains itself instead of doing nothing (rehearsal issue 24).
+    if (/sk-ant-/i.test(label)) { setLabel(''); setFormError('The token goes in the token field, not the account label.'); return }
     if (kind === 'oauth' && !plan) { setFormError('Choose your Claude plan above (Pro, Max, Team or Enterprise).'); return }
     if (kind === 'oauth' && !label.trim()) { setFormError('Enter an account label.'); return }
     if (kind === 'oauth' && (value.includes('#') || /^https?:\/\//.test(value))) {
@@ -187,7 +189,7 @@ export default function ClaudeAccountPanel({
           : ['pro', 'max', 'team', 'enterprise'].includes(added?.plan) ? added.plan[0].toUpperCase() + added.plan.slice(1) : null
         let finalResult = result
         let oldListed = false
-        if (oldId && result.accounts?.some((account) => account.id === oldId)
+        if (oldId && result.accounts?.some((account) => account.id === oldId && account.auth_refused_code)
             && result.accounts.some((account) => account.id !== oldId && !account.auth_refused_code)) {
           try {
             const removed = await onUnlink(oldId)
@@ -202,7 +204,7 @@ export default function ClaudeAccountPanel({
         replacement.current = null
       }
     } catch {
-      setFormError('The link could not be finished. Reload and check your Claude accounts before you retry.')
+      if (lifetime === panelLifetime.current) setFormError('The link could not be finished. Reload and check your Claude accounts before you retry.')
     } finally { pending.current = false }
   }
 
@@ -361,7 +363,7 @@ export default function ClaudeAccountPanel({
                   data-1p-ignore="true"
                   data-lpignore="true"
                   data-bwignore="true"
-                  writingSuggestions="false"
+                  writingsuggestions="false"
                   data-form-type="other"
                   value={token}
                   onChange={(event) => changeToken(event.target.value)}

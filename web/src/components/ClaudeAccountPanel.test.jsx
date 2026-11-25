@@ -518,3 +518,28 @@ describe('Claude account card placement', () => {
     } finally { rect.mockRestore() }
   })
 })
+
+describe('Claude account form safety', () => {
+  it('refuses a token typed into the visible account label and clears it', () => {
+    const onLink = vi.fn()
+    panel({ grant: { linked: false, accounts: [] }, onLink })
+    fireEvent.change(screen.getByLabelText('Account label'), { target: { value: 'sk-ant-oat01-FAKE' } })
+    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE' } })
+    fireEvent.click(screen.getByRole('radio', { name: 'Max' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    expect(onLink).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Account label')).toHaveValue('')
+    expect(screen.getByRole('alert')).toHaveTextContent('not the account label')
+  })
+  it('does not unlink an account that is no longer refused when its replacement links', async () => {
+    const old = { id: 'a', label: 'Mine', kind: 'oauth', plan: 'max' }
+    const onUnlink = vi.fn()
+    const onLink = vi.fn().mockResolvedValue({ linked: true, active_account_id: 'b', accounts: [old, { id: 'b', label: 'Mine', kind: 'oauth', plan: 'max', active: true }] })
+    panel({ grant: { linked: true, accounts: [{ ...old, auth_refused_code: 'authentication_failed' }] }, onLink, onUnlink })
+    fireEvent.click(screen.getByRole('button', { name: 'Link again: Mine' }))
+    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    expect(await screen.findByText(/2 accounts linked/)).toBeInTheDocument()
+    expect(onUnlink).not.toHaveBeenCalled()
+  })
+})
