@@ -9,7 +9,6 @@ describe("decodeOperatorEntities", () => {
     ["x &gt;= y", "x >= y", 1],
     ["&lt; &gt; &amp; &#60; &#62; &#38; &#x3c; &#X3E; &#x26;", "< > & < > & < > &", 9],
     ["&#0060; &#0062; &#0038; &#x003C; &#X003e; &#x0026;", "< > & < > &", 6],
-    ["&amp;lt;", "&lt;", 1],
     ["\ufeff\ufffd\r\nx &lt; y\r\n", "\ufeff\ufffd\r\nx < y\r\n", 1],
     ["// &lt; &quot; &#34;\nx &lt; y /* &apos; &#xA; */", "// &lt; &quot; &#34;\nx < y /* &apos; &#xA; */", 1],
     ["x &lt; y; // keep // &gt;\n", "x < y; // keep // &gt;\n", 1],
@@ -36,14 +35,13 @@ describe("decodeOperatorEntities", () => {
     ["int lt = 1; x &gt; y &amp;&amp; z", "int lt = 1; x > y && z", 3],
     ["int lt = 1; var r = a &#60; b &#x3C; c;", "int lt = 1; var r = a < b < c;", 2],
     ["/*\n# &lt; */\na &lt; b", "/*\n# &lt; */\na < b", 1],
-    ["&custom; a &lt; b", "&custom; a < b", 1],
-    ["&constructor; a &lt; b", "&constructor; a < b", 1],
   ])("decodes once and preserves tokens: %s", (source, expected, entities) => {
     expect(decodeOperatorEntities(source as string)).toEqual({ source: expected, entities });
   });
 
   it.each([
     "a < b", "// &lt;\nreturn 1;", "/* &lt; */", '"&lt;"',
+    "&amp;lt;", "&custom; a &lt; b", "&constructor; a &lt; b",
     'var s = "&lt;"; a &gt; b;', "char c = '&amp;'; a &lt; b;",
     'var s = @"&gt;"; a &lt; b;', 'var s = $"&lt; {x}"; a &gt; b;',
     'var s = $@"&lt; {x}"; a &gt; b;', 'var s = @$"&lt; {x}"; a &gt; b;',
@@ -76,6 +74,15 @@ describe("decodeOperatorEntities", () => {
     "int l\u200ct = 1; x &lt; y", 'var s = "bad\u2028literal"; a &lt; b;',
     '// comment\u2028var s = "&lt;";\nx &lt; y', "// comment\u0085#if x &lt; y\n#endif",
   ])("refuses ambiguous or non-operator source: %s", source => {
+    expect(decodeOperatorEntities(source)).toBeNull();
+  });
+
+  it.each([
+    "int lt = 1; a &amp;lt; Foo(); if (x {",
+    "a &amp;lt; b; if (x {",
+    "a &amp;#60; b; if (x {",
+    "a &amp;custom; b; if (x {",
+  ])("refuses residual entities despite an unrelated parser error: %s", source => {
     expect(decodeOperatorEntities(source)).toBeNull();
   });
 

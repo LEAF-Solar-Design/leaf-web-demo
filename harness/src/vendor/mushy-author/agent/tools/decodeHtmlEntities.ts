@@ -178,7 +178,7 @@ function literalEnd(source: string, start: number, multiline: boolean, depth: nu
 }
 
 /** Conservative C# literal/comment lexer. Interpolation holes it cannot follow fail closed. */
-function lex(source: string, decoding: boolean): Lexed | null {
+function lex(source: string, decoding: boolean, rejectEntities = false): Lexed | null {
   const tokens: string[] = [];
   const replacements: Replacement[] = [];
   const names = new Set<string>();
@@ -246,6 +246,7 @@ function lex(source: string, decoding: boolean): Lexed | null {
     if (char === "&") {
       const entity = entityAt(source, i);
       if (entity) {
+        if (rejectEntities) return null;
         // The line can still start with # when that # closes a block comment or literal.
         if (decoding && (entity.forbidden || (line !== undefined && line.start <= i))) return null;
         if (entity.value !== undefined) {
@@ -357,7 +358,7 @@ export function decodeOperatorEntities(source: string, otherSources: readonly st
   }
   chunks.push(source.slice(cursor));
   const decoded = chunks.join("");
-  const checked = lex(decoded, false);
+  const checked = lex(decoded, false, true);
   if (!checked || original.tokens.length !== checked.tokens.length || original.tokens.some((token, i) => token !== checked.tokens[i])) return null;
   return { source: decoded, entities: original.replacements.length };
 }

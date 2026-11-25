@@ -95,7 +95,7 @@
     },
     "agent/tools/decodeHtmlEntities.ts": {
       "reason": "SCD-2: Decode operator entities once with conservative C# literal and comment fidelity; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "7eb2b4676c3b5807ae808e194ce441804de49884cadec6adcb2cd7e8af077d4e"
+      "sha256": "b6b21d03e6a861feb93efe98c963bdbf875590a7dbc90b7b5d6b4c9d7b9690f2"
     }
   },
   "files": {
@@ -172,7 +172,7 @@
     "registry/api-allowlist.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
     "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090",
     "agent/tools/branchCompileCheck.ts": "c7c9098df0f4a4df3cb065d595e535e4e095b3f163cd9e3d460ecf96ed9a5aca",
-    "agent/tools/decodeHtmlEntities.ts": "7eb2b4676c3b5807ae808e194ce441804de49884cadec6adcb2cd7e8af077d4e"
+    "agent/tools/decodeHtmlEntities.ts": "b6b21d03e6a861feb93efe98c963bdbf875590a7dbc90b7b5d6b4c9d7b9690f2"
   },
   "single_files": {
     "harness/scripts/git-worker.cjs": "0bf589a31f3231fee7304c4fd6e5b23389c827650fc740a2adb4ae3c2e595eac"
