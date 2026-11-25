@@ -606,7 +606,7 @@ def test_bounds_hold(monkeypatch):
 def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
     dxf = ("0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n3\n"
            "0\nLAYER\n2\nRAILS\n70\n1\n62\n7\n"
-           "0\nLAYER\n2\nMODULES\n70\n0\n62\n5\n"
+           "0\nLAYER\n2\nMODULES\n70\n0\n62\n5\n290\n0\n"
            "0\nLAYER\n2\nTAGS\n70\n0\n62\n-3\n"
            "0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nENDSEC\n0\nEOF\n").encode()
     intake = dxf_intake.parse_dxf_bytes(dxf, source_name="x")
@@ -614,5 +614,6 @@ def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
     assert intake["hidden_layers"] == ["RAILS", "TAGS"]
     again, _ = _roundtrip(intake)
     assert again["hidden_layers"] == ["RAILS", "TAGS"]
+    assert intake["nonplot_layers"] == again["nonplot_layers"] == ["MODULES"]
     shown = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf({"layers": ["A"], "polylines": []}), source_name="x")
     assert "hidden_layers" not in shown

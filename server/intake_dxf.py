@@ -556,9 +556,13 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     # the parse of this file reads the same hidden_layers back.
     hidden_in = intake.get("hidden_layers")
     hidden_set = {h for h in hidden_in if isinstance(h, str)} if isinstance(hidden_in, list) and len(hidden_in) <= MAX_LAYERS else set()
+    nonplot = intake.get("nonplot_layers")
+    nonplot_set = {n for n in nonplot if isinstance(n, str)} if isinstance(nonplot, list) and len(nonplot) <= MAX_LAYERS else set()
     for name in layer_order:
         out += ["0", "LAYER", "100", "AcDbSymbolTableRecord", "100", "AcDbLayerTableRecord",
                 "2", name, "70", "0", "62", "-7" if name in hidden_set else "7", "6", "Continuous"]
+        if name in nonplot_set:
+            out += ["290", "0"]
     out += ["0", "ENDTAB"]
     if emit_dimstyle_table:
         out += ["0", "TABLE", "2", "DIMSTYLE", "70", str(len(dimstyle_order))]

@@ -3,6 +3,7 @@ import InviteAccept from './invites/InviteAccept.jsx'
 import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
+import { PlotLayerWarning } from './solar/PlotLayerWarning.jsx'
 import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 import './site/studioShell.css'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, Suspense } from 'react'
@@ -6597,6 +6598,7 @@ export default function App() {
           <div className="viewer-wrap">
             {projectMode ? (
               <>
+                {projectDrawing.mode === 'ready' && <PlotLayerWarning intake={projectDrawing.intake} />}
                 {(projectSolarRuntime.notice || projectDrawing.mode !== 'ready') && (
                   <p role="status" aria-live="polite">
                     {projectSolarRuntime.notice || projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}

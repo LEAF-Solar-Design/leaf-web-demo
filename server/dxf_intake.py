@@ -91,6 +91,7 @@ def parse_dxf_bytes(
     # 1, or off, a negative 62 colour), in table order, so a viewer starts
     # with AutoCAD's own visibility instead of drawing frozen rails and tags.
     hidden_layers: List[str] = []
+    nonplot_layers: dict[str, None] = {}
     hidden_seen: set[str] = set()
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
@@ -172,7 +173,7 @@ def parse_dxf_bytes(
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
             j = i + 1
-            name, hidden = None, False
+            name, hidden, nonplot = None, False, False
             while j < n and pairs[j][0] != 0:
                 code_j, value_j = pairs[j]
                 if code_j == 2 and name is None:
@@ -180,6 +181,8 @@ def parse_dxf_bytes(
                     if value_j not in seen_layers:
                         seen_layers.add(value_j)
                         layers.append(value_j)
+                elif code_j == 290 and value_j.strip() == "0":
+                    nonplot = True
                 elif code_j == 70:
                     try:
                         hidden = hidden or bool(int(value_j.strip()) & 1)
@@ -191,6 +194,8 @@ def parse_dxf_bytes(
                     except ValueError:
                         pass
                 j += 1
+            if nonplot and name is not None:
+                nonplot_layers[name] = None
             if hidden and name is not None and name not in hidden_seen:
                 hidden_seen.add(name)
                 hidden_layers.append(name)
@@ -366,6 +371,8 @@ def parse_dxf_bytes(
         out["insunits"] = insunits
     if active_layer is not None:
         out["active_layer"] = active_layer
+    if nonplot_layers:
+        out["nonplot_layers"] = list(nonplot_layers)
     if hidden_layers:
         out["hidden_layers"] = hidden_layers
     mlstyles = {}

@@ -14,7 +14,7 @@ import solar_project_context as project
 
 MAX_DXF_BYTES = 16 * 1024 * 1024
 _SHA = re.compile(r"[0-9a-f]{64}", re.ASCII)
-_DXF_FIELDS = frozenset(("dwg", "layers", "polylines", "texts", "circles", "arcs", "inserts",
+_DXF_FIELDS = frozenset(("dwg", "layers", "hidden_layers", "nonplot_layers", "polylines", "texts", "circles", "arcs", "inserts",
     "dimensions", "dimstyles", "dimensions_unsupported", "blocks", "blocksCapped", "mlstyles",
     "mleaders", "mleaders_unsupported", "mleaders_unsupported_handles", "properties",
     "propertiesDropped", "groups", "memberEvidenceCovered", "parseErrors", "polylineWidthCovered"))
