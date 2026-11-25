@@ -85,9 +85,9 @@ describe("static Next S3 adapter", () => {
 });
 
 describe("static Next CodeBuild adapter", () => {
-  function fixture() {
+  function fixture(projectName = "static-next") {
     const send = vi.fn();
-    return { send, provider: createCodeBuildStaticNextBuildProvider({ client: { send }, projectName: "static-next" }) };
+    return { send, provider: createCodeBuildStaticNextBuildProvider({ client: { send }, projectName }) };
   }
 
   it("starts the selected project with the execution ID", async () => {
@@ -96,7 +96,30 @@ describe("static Next CodeBuild adapter", () => {
     await expect(f.provider.start(executionId)).resolves.toBe("project:build");
     expect(f.send.mock.calls[0][0]).toBeInstanceOf(StartBuildCommand);
     expect(f.send.mock.calls[0][0].input).toEqual({ projectName: "static-next",
+      idempotencyToken: expect.stringMatching(/^[a-f0-9]{64}$/),
       environmentVariablesOverride: [{ name: "EXECUTION_ID", value: executionId, type: "PLAINTEXT" }] });
+  });
+
+  it("reuses the token for a retry and separates execution and project identities", async () => {
+    const original = fixture();
+    const restarted = fixture();
+    const otherProject = fixture("different-static-next");
+    for (const f of [original, restarted, otherProject]) {
+      f.send.mockResolvedValue({ build: { id: "project:build" } });
+    }
+    // Distinct execution digests for chart data, gallery captions and report export.
+    const executions = ["a", "b", "c"].map(character => character.repeat(64));
+    const tokens: string[] = [];
+    for (const id of executions) {
+      await original.provider.start(id);
+      await restarted.provider.start(id);
+      await otherProject.provider.start(id);
+      const token = original.send.mock.lastCall![0].input.idempotencyToken;
+      expect(restarted.send.mock.lastCall![0].input.idempotencyToken).toBe(token);
+      expect(otherProject.send.mock.lastCall![0].input.idempotencyToken).not.toBe(token);
+      tokens.push(token);
+    }
+    expect(new Set(tokens).size).toBe(executions.length);
   });
 
   it("rejects a start response with no build ID", async () => {
