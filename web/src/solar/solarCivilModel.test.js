@@ -55,6 +55,15 @@ const resultOf = (operation = 'frame-generate', outcome = 'published', base = H)
 })
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
 
+it.each([['m', 1], ['ft', 0.3048], ['in', 0.0254]])('checks Civil request and response units for %s', (drawing_units, meters_per_unit) => {
+  const body = { ...bodyOf(), drawing_units }
+  const request = { drawingId: 'solar', projectId: 'p', body }
+  const result = { ...resultOf(), units: { drawing_units, meters_per_unit } }
+  expect(validateCivilBody(body)).toEqual({ ok: true, body })
+  expect(validateCivilOperation(result, request)).toEqual(result)
+  expect(validateCivilOperation({ ...result, units: { drawing_units, meters_per_unit: 0 } }, request)).toBeNull()
+})
+
 it('PC8 request validation', () => {
   expect(CIVIL_OPERATIONS).toEqual(['frame-generate', 'frame-collision-detect', 'piling-generate', 'pile-length-range-check', 'grade-pad'])
   for (const op of CIVIL_OPERATIONS) {
