@@ -20,14 +20,14 @@ def viewport_handle(description):
 
 
 def _crop(fields, boundaries):
-    """Read the paper crop and model-to-paper mapping for an orthographic view."""
+    """Read the paper crop, depth planes, and model-to-paper mapping."""
     flags = int(fields.get(90, 0))
     direction = tuple(float(fields.get(code, default))
                       for code, default in ((16, 0), (26, 0), (36, 1)))
     twist = math.radians(float(fields.get(51, 0)))
     direction_length = math.hypot(*direction)
-    if flags & 7 or not math.isfinite(direction_length) or not direction_length or not math.isfinite(twist):
-        raise ValueError("Viewport crop requires a finite orthographic view without depth clipping.")
+    if not math.isfinite(direction_length) or not direction_length or not math.isfinite(twist):
+        raise ValueError("Viewport crop requires a finite view direction and twist.")
     cx, cy, width, height, view_height = (float(fields[code]) for code in (10, 20, 40, 41, 45))
     view_center = tuple(float(fields.get(code, 0)) for code in (12, 22))
     target = tuple(float(fields.get(code, 0)) for code in (17, 27, 37))
@@ -37,6 +37,23 @@ def _crop(fields, boundaries):
     scale = height / view_height
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError("Viewport projection exceeds the numeric range.")
+    eye_distance = None
+    if flags & 1:
+        lens = float(fields.get(42, 0))
+        # Match the drawing raster camera model. Require the DXF camera
+        # distance and 42 mm film-diagonal framing to agree independently.
+        calibrated_distance = (lens / 42) * view_height * (math.hypot(width, height) / height)
+        if (36 not in fields or 37 not in fields or not math.isfinite(lens) or lens <= 0
+                or not math.isclose(direction_length, calibrated_distance, rel_tol=1e-8)):
+            raise ValueError("Unsupported perspective viewport calibration.")
+        eye_distance = direction_length
+    if flags & 2 and not flags & 16 and eye_distance is None:
+        raise ValueError("Orthographic front clipping requires an explicit plane.")
+    front = float(fields[43]) if flags & 2 and flags & 16 else math.inf
+    back = float(fields[44]) if flags & 4 else -math.inf
+    if ((flags & 2 and flags & 16 and not math.isfinite(front))
+            or (flags & 4 and not math.isfinite(back)) or front < back):
+        raise ValueError("Invalid viewport depth planes.")
     clip_handle = fields.get(340, "").upper()
     if clip_handle or flags & 65536:
         matches = boundaries.get(clip_handle, ())
@@ -55,7 +72,10 @@ def _crop(fields, boundaries):
         raise ValueError("Viewport crop exceeds the numeric range.")
     return {"points": polygon, "inverted": False, "scale": scale,
             "paper_center": (cx, cy), "view_center": view_center,
-            "target": target, "direction": direction, "twist": twist}
+            "target": target, "direction": direction, "twist": twist,
+            "eye_distance": eye_distance,
+            "front": front if math.isfinite(front) else None,
+            "back": back if math.isfinite(back) else None}
 
 
 def attach_viewports(pairs, out):
@@ -132,7 +152,19 @@ def project_to_paper(crop, axes, point):
     # WCS to DCS is the inverse of the viewport's negative view twist about
     # its WCS target. DCS-to-paper then pans and scales around the view center.
     relative = tuple(value - target for value, target in zip(point, crop["target"]))
-    x, y = (dot(axis, relative) for axis in axes[:2])
+    x, y, depth = (dot(axis, relative) for axis in axes)
+    if not all(map(math.isfinite, (x, y, depth))):
+        raise ValueError("Viewport placement exceeds the numeric range.")
+    front, back = crop["front"], crop["back"]
+    if (front is not None and depth > front) or (back is not None and depth < back):
+        return None
+    eye_distance = crop["eye_distance"]
+    if eye_distance is not None:
+        distance = eye_distance - depth
+        if distance <= max(1e-12 * eye_distance, math.ulp(eye_distance)):
+            return None
+        factor = eye_distance / distance
+        x, y = x * factor, y * factor
     angle = crop["twist"]
     cosine, sine = math.cos(angle), math.sin(angle)
     dcs = (cosine * x - sine * y, sine * x + cosine * y)
@@ -143,7 +175,7 @@ def project_to_paper(crop, axes, point):
     return paper
 
 
-def has_projected_area(frame, view_normal):
+def has_projected_area(crop, frame, view_normal):
     a, b = frame[1:3]
     normal = (a[1] * b[2] - a[2] * b[1],
               a[2] * b[0] - a[0] * b[2],
@@ -151,6 +183,15 @@ def has_projected_area(frame, view_normal):
     magnitude = math.hypot(*normal)
     if not magnitude or not math.isfinite(magnitude):
         raise ValueError("Panel footprint has a degenerate placement.")
+    if crop["eye_distance"] is not None:
+        ray = tuple(target + direction - origin for target, direction, origin in
+                    zip(crop["target"], crop["direction"], frame[0]))
+        ray_length = math.hypot(*ray)
+        if not math.isfinite(ray_length):
+            raise ValueError("Viewport camera exceeds the numeric range.")
+        if not ray_length:
+            return False
+        view_normal = tuple(component / ray_length for component in ray)
     return abs(dot(normal, view_normal)) > 16 * math.ulp(magnitude)
 
 
@@ -226,13 +267,14 @@ def run(intake, params):
                 outline = intake.get("panel_footprints", {}).get(ref["name"].casefold(), {})
                 if not outline.get("points") or not block.get("complete") or block.get("nested_inserts"):
                     raise ValueError(outline.get("error", "Missing complete panel footprint."))
-                if not has_projected_area(frame, axes[2]):
+                if not has_projected_area(crop, frame, axes[2]):
                     return False
                 footprint = [project_to_paper(crop, axes, transform_point(frame, (*point, 0)))
                              for point in outline["points"]]
-                return crop_contains_footprint(crop, footprint, budget)
+                return None not in footprint and crop_contains_footprint(crop, footprint, budget)
             anchor = transform_point(frame, block.get("base", (0, 0, 0)))
-            return clip_accepts(crop, project_to_paper(crop, axes, anchor))
+            paper = project_to_paper(crop, axes, anchor)
+            return paper is not None and clip_accepts(crop, paper)
         scope = ("complete thawed panel footprints inside the viewport crop" if __FOOTPRINT__
                  else "thawed panel placement anchors inside the viewport crop")
     result = visible_instances(intake, evidence, hidden, set(layers.values()), placement_filter)

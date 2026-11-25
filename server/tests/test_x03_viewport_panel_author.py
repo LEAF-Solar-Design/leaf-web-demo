@@ -1,4 +1,6 @@
-"""Independent path enumeration through each paper viewport's frozen layer handles."""
+"""Independent path enumeration for paper viewport layers, crops, and cameras."""
+import math
+
 import pytest
 
 from test_x03_oblique_spline_author import section
@@ -107,8 +109,9 @@ def test_crop_and_thaw_composition(ask, raw, expected):
 
 @pytest.mark.parametrize("tags,expected", [
     (((340, "FF"),), "missing or ambiguous"),
-    (((90, 1),), "orthographic view without depth clipping"),
-    (((36, 0),), "orthographic view without depth clipping"),
+    (((90, 1),), "unsupported perspective viewport calibration"),
+    (((36, 0),), "finite view direction"),
+    (((90, 22), (43, -2), (44, 2)), "invalid viewport depth planes"),
 ])
 def test_crop_evidence_refused_without_changing_layer_count(tags, expected):
     raw = crop_drawing(6, tags)
@@ -188,6 +191,50 @@ def test_complete_footprints_in_oblique_viewports(ask, tags, boundary, half_widt
         rack = b"5\nC1\n2\nRack\n"
         assert raw.count(rack) == 1
         raw = raw.replace(rack, rack + b"210\n1\n220\n0\n230\n0\n")
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, raw, {"viewport_handle": "A1"})
+    assert status == "ok", payload
+    assert payload[0]["visible_paths"] == expected
+    assert payload[0]["total"] == len(expected)
+
+
+def perspective_drawing(service_x, boundary, front, back, lens=50, eye=100):
+    tags = ((90, 23), (36, eye), (37, 0), (42, lens), (43, front), (44, back))
+    raw = with_module_footprint(crop_drawing(service_x, tags, boundary), .25)
+    # Square paper viewport: image-plane height is its diagonal divided by sqrt(2).
+    view_height = eye * 42 / (lens * math.sqrt(2))
+    marker = b"41\n200\n45\n200\n68\n1\n69\n2\n"
+    assert raw.count(marker) == 1
+    return raw.replace(marker, f"41\n200\n45\n{view_height}\n68\n1\n69\n2\n".encode())
+
+
+@pytest.mark.parametrize("ask,case,expected", [
+    ("Count only complete thawed panel footprints that fit a perspective viewport crop and its depth planes.",
+     "target", ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
+    ("Which unfrozen PV modules fit entirely inside perspective viewport A1's clipping boundary?",
+     "far", ["C2[0,0]"]),
+    ("List whole panel footprints on thawed layers within viewport A1's perspective crop and front plane.",
+     "straddle", ["C2[0,0]"]),
+])
+def test_complete_footprints_in_perspective_viewports(ask, case, expected):
+    square = ((-12, -12), (12, -12), (12, 12), (-12, 12))
+    if case == "target":
+        # Both array slots are at the target plane and the direct module is offscreen.
+        raw = perspective_drawing(1000, square, 2, -2)
+    elif case == "far":
+        # At z=-100, the module at X=3 shrinks by exactly 1/2. Its paper
+        # X bounds are approximately [4.63, 5.47]; the X=2 slot misses the crop.
+        raw = perspective_drawing(3, ((4.5, -1), (5.5, -1), (5.5, 1), (4.5, 1)), 2, -120)
+        marker = b"5\nC2\n2\nPV Module\n"
+        assert raw.count(marker) == 1
+        raw = raw.replace(marker, marker + b"30\n-100\n")
+    else:
+        # Rack-local Y contributes 0.6*Y to world Z. Both rack footprints
+        # straddle the front plane at z=0.1 while the service footprint is flat.
+        raw = perspective_drawing(3, square, .1, -2)
+        marker = b"5\nC1\n2\nRack\n"
+        assert raw.count(marker) == 1
+        raw = raw.replace(marker, marker + b"210\n0\n220\n3\n230\n4\n")
     _, source, _ = tools_fallback.author_tool(ask)
     status, payload = invoke(source, raw, {"viewport_handle": "A1"})
     assert status == "ok", payload
