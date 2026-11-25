@@ -197,6 +197,97 @@ def bind(solved, pieces, split_state=None):
         tenant_id=TENANT, job_id=JOB, split_state=split_state or {"jogs": 1, "depth": 10})
 
 
+@pytest.mark.parametrize("count,depth,jogs,should_split", [
+    (24, 10, 1, False), (294, 10, 1, True), (294, 1, 2, True),
+])
+def test_compact_ground_split_matches_canonical_expansion(
+        graph, b18, monkeypatch, count, depth, jogs, should_split):
+    import solar_ground_graph_codec as codec
+
+    compact = ground_graph(graph, b18, 2)
+    frame = compact["frames"][0]
+    table = codec.decode_slots(frame["ground_slots"])
+    centres = [list(table.centres[2 * col:2 * col + 2]) for col in range(count)]
+    centres[0] = [-0.0, -0.0]
+    angle = -0.0 if count == 24 else table.angle
+    frame["ground_slots"] = codec.encode_slots(table.ids[:count], centres, angle, table.panel)
+    frame.update(module_columns=count, module_slots=count)
+    frame["tracker"]["module_slots"] = count
+    compact = validate_graph(compact)
+    expanded = validate_graph(codec.expand_graph(compact))
+    before = copy.deepcopy(compact)
+    ref = frame["id"]
+    args = dict(max_string_length=21)
+    expected_grid = solve_request.frame_split_grid(expanded, ref, **args)
+    expected_route = solve_request.needs_split_solve(expanded, ref, **args)
+    expected_pieces = solve_request.build_split_requests(
+        expanded, ref, **args, dwgname=DWG, depth=depth, jogs=jogs)
+    assert expected_route is should_split
+
+    def no_site_materialization(*args, **kwargs):
+        pytest.fail("Split routing and piece validation must read only the selected frame")
+
+    decoded = []
+    decode = codec.decode_slots
+
+    def selected_decode(block):
+        decoded.append(block)
+        assert block is compact["frames"][0]["ground_slots"]
+        return decode(block)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(codec, "expand_graph", no_site_materialization)
+        patch.setattr(codec, "decode_graph_slots", no_site_materialization)
+        patch.setattr(codec, "decode_slots", selected_decode)
+        assert solve_request.frame_split_grid(compact, ref, **args) == expected_grid
+        assert solve_request.needs_split_solve(compact, ref, **args) is expected_route
+        pieces = solve_request.build_split_requests(
+            compact, ref, **args, dwgname=DWG, depth=depth, jogs=jogs)
+        assert cloud.canonical_bytes(pieces) == cloud.canonical_bytes(expected_pieces)
+        solve._frame_pieces(compact, ref, pieces)
+    assert decoded
+    assert b"-0.0" not in cloud.canonical_bytes(pieces)
+
+    state = {"jogs": jogs, "depth": depth}
+    binding = bind(compact, pieces, state)
+    assert binding["pieces"] == bind(expanded, expected_pieces, state)["pieces"]
+    # Check binding independently of generation: saved identities, coordinates,
+    # row/column placement and complete coverage must all survive serialization.
+    for field in ("X", "Y", "Angle", "Id", "row_indices", "column", "coverage", "duplicate"):
+        bad = copy.deepcopy(pieces)
+        cells = bad[0]["request"]["grid"]["Rows"][0]["Panels"]
+        wire = next(cell for cell in cells if cell["Code"] == 1)
+        if field in ("X", "Y", "Angle"):
+            wire[field] += 1.0
+        elif field == "Id":
+            wire["Id"] = expanded["frames"][1]["panel_refs"][0]
+        elif field == "row_indices":
+            bad[0]["row_indices"] = [1]
+        elif field == "column":
+            a, b = [i for i, cell in enumerate(cells) if cell["Code"] == 1][:2]
+            cells[a], cells[b] = cells[b], cells[a]
+        elif field == "coverage":
+            wire.update(Code=0, Id="")
+        else:
+            bad.append(copy.deepcopy(bad[0]))
+        with pytest.raises(GraphValidationError, match="SOLVE_GRID_MISMATCH"):
+            solve._frame_pieces(compact, ref, bad)
+        with pytest.raises(GraphValidationError, match="SOLVE_GRID_MISMATCH"):
+            bind(compact, bad, state)
+    assert compact == before
+
+
+def test_rooftop_split_routing_does_not_gather_panel_geometry(graph, monkeypatch):
+    ref = graph["frames"][0]["id"]
+    expected = solve_request.needs_split_solve(graph, ref, max_string_length=14)
+
+    def no_geometry(*args, **kwargs):
+        pytest.fail("Rooftop split routing only needs the frame's cell identities")
+
+    monkeypatch.setattr(solve_request, "_frame_geometry", no_geometry)
+    assert solve_request.needs_split_solve(graph, ref, max_string_length=14) is expected
+
+
 def layout(piece, handles):
     grid = piece["request"]["grid"]
     return {"cells": [[handles[wire["Id"]] if wire["Code"] == 1 else None
