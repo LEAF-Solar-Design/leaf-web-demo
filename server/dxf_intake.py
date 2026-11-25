@@ -1165,7 +1165,10 @@ def _finish_entity(entity: Dict[str, Any], seq: int, layers: List[str],
 
 def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
     """DXF is (code line, value line) pairs. Tolerates \r\n and blank tail."""
-    lines = text.splitlines()
+    # DXF records end at CR, LF or CRLF. Other separators belong to the value.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()  # A terminal newline ends the preceding line.
     pairs: List[Tuple[int, str]] = []
     inline_record = False
     for k in range(0, len(lines) - 1, 2):
