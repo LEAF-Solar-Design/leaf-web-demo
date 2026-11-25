@@ -322,6 +322,21 @@ def test_duplicate_sections_handles_and_unmanaged_leaf_refused(generated):
     refuse("OWNERSHIP_AMBIGUOUS", write, generated[0], generated[1], unmanaged)
 
 
+def test_solar_write_preserves_tiled_viewport_configuration(generated):
+    source = intake_dxf.intake_to_dxf({"layers": ["0", "Defpoints"]})
+    start = source.index(b"0\nVPORT\n")
+    end = source.index(b"0\nENDTAB\n", start)
+    original = source[start:end]
+    left = original.replace(b"11\n1.0\n", b"11\n0.5\n")
+    right = original.replace(b"10\n0.0\n", b"10\n0.5\n").replace(b"5\n101\n", b"5\nF001\n")
+    table = left + right
+    assert left != original and right != original
+    assert source[:start].endswith(b"70\n1\n")
+    source = source[:start - 2] + b"2\n" + table + source[end:]
+    output = write(generated[0], generated[1], source)
+    assert table in output
+
+
 def test_namespace_corruption_scope_and_entity_tampering_refused(generated):
     document, parameters, _ = generated
     raw = write(document, parameters)

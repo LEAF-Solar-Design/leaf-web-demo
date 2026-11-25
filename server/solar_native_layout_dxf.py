@@ -323,7 +323,11 @@ class _Drawing:
             _fail("SOURCE_INVALID")
         if not {"LAYER", "APPID", "BLOCK_RECORD"} <= self.tables.keys():
             _fail("SOURCE_UNSAFE")
-        for _, records, _ in self.tables.values():
+        for table, (_, records, _) in self.tables.items():
+            # A tiled viewport configuration has one VPORT row per tile,
+            # all under the configuration name. Handles still identify rows.
+            if table == "VPORT":
+                continue
             names = [r.one(2, "").casefold() for r in records]
             if len(names) != len(set(names)):
                 _fail("SOURCE_AMBIGUOUS")
