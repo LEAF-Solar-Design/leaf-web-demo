@@ -154,6 +154,8 @@ _DIAGNOSTIC_CODES = frozenset({
 
 
 class CustomizationServiceError(RuntimeError):
+    harness_not_called = False
+
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
@@ -2116,7 +2118,9 @@ class CustomizationService:
             or not active_subject
             or active_subject != change.author_subject
         ):
-            raise CustomizationServiceError("stage_authority_invalid", 409)
+            exc = CustomizationServiceError("stage_authority_invalid", 409)
+            exc.harness_not_called = True
+            raise exc
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)

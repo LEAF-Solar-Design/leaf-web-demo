@@ -254,6 +254,167 @@ def _admission_service(store, monkeypatch):
     return service, tenant
 
 
+def _enqueue_expired_build(store, monkeypatch, active_author_turn):
+    service, tenant = _admission_service(store, monkeypatch)
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda _tenant: SimpleNamespace(subject=ALICE, role="owner"),
+    )
+    monkeypatch.setattr(customization_service.customization_flags, "plan_mode_enabled", lambda _: False)
+    sid, turn = active_author_turn
+    assert deps.active_stage_author_subject("tenant-a", sid, turn) == ALICE
+    result = service.enqueue_stage(
+        tenant=tenant, description=DESCRIPTION, mode="build",
+        idempotency_key="expired-build", authority_session_id=sid, authority_turn_id=turn,
+    )
+    session_store.end_turn(sid, turn)
+    assert deps.active_stage_author_subject("tenant-a", sid, turn) is None
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    return service, result["change_set_id"]
+
+
+def test_unstarted_expired_build_is_charged_by_default(
+    store, monkeypatch, active_author_turn,
+):
+    monkeypatch.delenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", raising=False)
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    monkeypatch.setattr(author_quota, "refund_unstarted", lambda *_a: pytest.fail("refund store called"))
+    assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert service.stage_status_change(change)["error"]["retryable"] is False
+
+
+def test_unstarted_expired_build_refunds_when_enabled(
+    store, monkeypatch, active_author_turn, caplog,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", " 1 ")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.INFO, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert change.stage_attempt == 1
+    assert list(author_quota._MEMORY_STATE.values()) == [0]
+    assert author_quota.lookup_attempt("tenant-a", change_id).accepted is True
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    refunds = [record for record in caplog.records
+               if record.getMessage().startswith("author_quota_refund_unstarted:")]
+    assert len(refunds) == 1
+    assert refunds[0].levelno == logging.INFO
+    assert refunds[0].getMessage() == f"author_quota_refund_unstarted: change_set={change_id} refunded=True"
+
+
+def test_unstarted_refund_cap_keeps_charge_and_terminal_failure_retryable(
+    store, monkeypatch, active_author_turn, caplog,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    admitted = author_quota.lookup_attempt("tenant-a", change_id)
+    for index in range(3):
+        key = f"earlier-refund-{index}"
+        author_quota.charge("tenant-a", admitted.day, 5, idempotency_key=key)
+        assert author_quota.refund_unstarted("tenant-a", key) is True
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.INFO, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert author_quota.lookup_attempt("tenant-a", change_id) == admitted
+    refunds = [record.getMessage() for record in caplog.records
+               if record.getMessage().startswith("author_quota_refund_unstarted:")]
+    assert refunds == [f"author_quota_refund_unstarted: change_set={change_id} refunded=False"]
+
+
+@pytest.mark.parametrize("case", ["attempt_two", "answered_failure", "lost_lease"])
+def test_unstarted_refund_excludes_retries_answered_failures_and_lost_claims(
+    store, monkeypatch, active_author_turn, case,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr(author_quota, "refund_unstarted", lambda *_a: pytest.fail("unexpected refund"))
+    posts = []
+    if case == "attempt_two":
+        store.claim_stage(owner="earlier-worker", lease_seconds=30)
+        store.defer_stage_claim(
+            tenant_id="tenant-a", change_set_id=change_id, owner="earlier-worker",
+            reason_code="customization_harness_unavailable", delay_seconds=0,
+        )
+    elif case == "answered_failure":
+        monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_a: ALICE)
+        monkeypatch.setattr(customization_service, "_harness_config", lambda: ("http://harness", "secret"))
+
+        def post(*_args, **_kwargs):
+            posts.append(True)
+            return _HarnessErrorResponse(500, {"error": {"message": "authoring failed"}})
+
+        monkeypatch.setattr("requests.post", post)
+    else:
+        real_fail = store.fail_stage_claim
+
+        def lose_claim(**kwargs):
+            # A competing worker owns and terminates the row; our fenced write loses.
+            with store._transaction() as conn:
+                conn.execute(
+                    "UPDATE customization_change_sets SET stage_lease_owner = ? WHERE change_set_id = ?",
+                    ("winner", change_id),
+                )
+            winner_args = dict(kwargs, owner="winner")
+            assert real_fail(**winner_args) is not None
+            return real_fail(**kwargs)
+
+        monkeypatch.setattr(store, "fail_stage_claim", lose_claim)
+    if case != "answered_failure":
+        monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_attempt == (2 if case == "attempt_two" else 1)
+    assert change.stage_error_code == (
+        "customization_author_job_failed" if case == "answered_failure" else "stage_authority_invalid"
+    )
+    assert posts == ([True] if case == "answered_failure" else [])
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert author_quota.lookup_attempt("tenant-a", change_id).accepted
+
+
+@pytest.mark.parametrize("error_type", [author_quota.AuthorQuotaStoreError, RuntimeError])
+def test_unstarted_refund_outage_preserves_terminal_failure(
+    store, monkeypatch, active_author_turn, caplog, error_type,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    calls = []
+
+    def refund(*args):
+        calls.append(args)
+        raise error_type("secret connection details")
+
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.WARNING, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert calls == [("tenant-a", change_id)]
+    warnings = [record for record in caplog.records
+                if record.getMessage().startswith("author_quota_refund_unstarted_failed:")]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == f"author_quota_refund_unstarted_failed: exception={error_type.__name__}"
+    assert "secret" not in caplog.text
+
+
 @pytest.mark.parametrize("outcome", ["success", "callback", "failure", "defer", "cancel", "expiry"])
 def test_real_authority_route_survives_repository_admission_until_stage_terminal(
     store, monkeypatch, tmp_path, outcome,
