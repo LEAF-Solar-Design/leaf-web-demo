@@ -1287,6 +1287,9 @@ class CustomizationService:
                 idempotency_key=f"stage:{idempotency_key}",
                 expected_state=ChangeState.CREATED,
             )
+            import customization_stage_grants
+            if customization_stage_grants.ttl_s() is not None:
+                customization_stage_grants.issue(self, change)
         return self.stage_status_change(change)
 
     def stage_removal(
@@ -2111,12 +2114,19 @@ class CustomizationService:
             change.authority_session_id,
             change.authority_turn_id,
         )
+        without_services = False
         if (
             tenant_id != change.tenant_id
             or not active_subject
             or active_subject != change.author_subject
         ):
-            raise CustomizationServiceError("stage_authority_invalid", 409)
+            import customization_stage_grants
+            if (tenant_id == change.tenant_id and not active_subject and self is not None
+                    and customization_stage_grants.ttl_s() is not None):
+                customization_stage_grants.admit(self, change, change.stage_lease_owner)
+                without_services = True
+            else:
+                raise CustomizationServiceError("stage_authority_invalid", 409)
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
@@ -2129,7 +2139,7 @@ class CustomizationService:
                 f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
                 headers={
                     "X-Harness-Secret": secret,
-                    **({
+                    **({"X-Author-Services": "none"} if without_services else {
                         "X-Authority-Session-Id": change.authority_session_id,
                         "X-Authority-Turn-Id": change.authority_turn_id,
                     } if change.authority_session_id and change.authority_turn_id else {}),

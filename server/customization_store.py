@@ -142,6 +142,23 @@ CREATE TABLE IF NOT EXISTS customization_stage_attempt_history (
   PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)
 );
 
+CREATE TABLE IF NOT EXISTS customization_stage_grants (
+  change_set_id TEXT PRIMARY KEY REFERENCES customization_change_sets(change_set_id),
+  tenant_id TEXT NOT NULL,
+  author_subject TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  binding_digest TEXT NOT NULL,
+  authority_session_id TEXT NOT NULL,
+  authority_turn_id TEXT NOT NULL,
+  issued_ms BIGINT NOT NULL,
+  expires_ms BIGINT NOT NULL,
+  dispatches INTEGER NOT NULL DEFAULT 0 CHECK (dispatches BETWEEN 0 AND 2),
+  last_attempt INTEGER NOT NULL DEFAULT 0,
+  revoked_ms BIGINT,
+  revoked_reason TEXT,
+  CHECK (expires_ms > issued_ms)
+);
+
 CREATE TABLE IF NOT EXISTS customization_confirmations (
   confirmation_id TEXT PRIMARY KEY,
   tenant_id TEXT,
@@ -671,6 +688,94 @@ class SQLiteCustomizationStore(CustomizationRepository):
             if row is None:
                 raise ChangeSetNotFoundError("change set was not found")
             return self._change_set(row)
+
+    def insert_stage_grant(
+        self, *, tenant_id: str, change_set_id: str, author_subject: str,
+        tier: str, binding_digest: str, authority_session_id: str,
+        authority_turn_id: str, issued_ms: int, expires_ms: int,
+    ) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "INSERT OR IGNORE INTO customization_stage_grants "
+                "(change_set_id, tenant_id, author_subject, tier, binding_digest, "
+                "authority_session_id, authority_turn_id, issued_ms, expires_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (change_set_id, tenant_id, author_subject, tier, binding_digest,
+                 authority_session_id, authority_turn_id, issued_ms, expires_ms),
+            )
+            if result.rowcount != 1:
+                return False
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            self._append_audit(conn, row, row.state, row.state,
+                               f"stage-grant-issued:{change_set_id}", "stage_grant_issued")
+            return True
+
+    def get_stage_grant(self, tenant_id: str, change_set_id: str) -> dict | None:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM customization_stage_grants "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (tenant_id, change_set_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def consume_stage_grant(
+        self, *, tenant_id: str, change_set_id: str, owner: str,
+        attempt: int, binding_digest: str, now_ms: int,
+    ) -> bool:
+        with self._transaction() as conn:
+            result = conn.execute(
+                "UPDATE customization_stage_grants SET dispatches = dispatches + 1, "
+                "last_attempt = ? WHERE tenant_id = ? AND change_set_id = ? "
+                "AND binding_digest = ? AND revoked_ms IS NULL AND expires_ms > ? "
+                "AND dispatches < 2 AND last_attempt < ? AND EXISTS "
+                "(SELECT 1 FROM customization_change_sets c WHERE c.tenant_id = ? "
+                "AND c.change_set_id = ? AND c.state = 'staging' "
+                "AND c.stage_lease_owner = ? AND c.stage_lease_expires_at > ? "
+                "AND c.stage_attempt = ?)",
+                (attempt, tenant_id, change_set_id, binding_digest, now_ms, attempt,
+                 tenant_id, change_set_id, owner, now_ms, attempt),
+            )
+            if result.rowcount != 1:
+                return False
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            self._append_audit(conn, row, row.state, row.state,
+                               f"stage-grant-consumed:{change_set_id}:{attempt}",
+                               "stage_grant_consumed")
+            return True
+
+    def withdraw_stage(
+        self, *, tenant_id: str, change_set_id: str, author_subject: str, now_ms: int,
+    ) -> bool:
+        with self._transaction() as conn:
+            row = self._find_change_set(conn, tenant_id, change_set_id)
+            if (row.state is not ChangeState.STAGING or row.author_subject != author_subject
+                    or (row.stage_lease_owner and row.stage_lease_expires_at is not None
+                        and row.stage_lease_expires_at > now_ms)):
+                return False
+            result = conn.execute(
+                "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = 'withdrawn' "
+                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ? "
+                "AND revoked_ms IS NULL AND dispatches = 0",
+                (now_ms, tenant_id, change_set_id, author_subject),
+            )
+            if result.rowcount != 1:
+                return False
+            self._transition_row(
+                conn, row, ChangeState.FAILED, row.version,
+                f"stage-grant-withdrawn:{change_set_id}:{row.stage_attempt}",
+                expected_state=ChangeState.STAGING, reason_code="stage_grant_withdrawn",
+            )
+            conn.execute(
+                "UPDATE customization_change_sets SET stage_lease_owner = NULL, "
+                "stage_lease_expires_at = NULL, stage_error_code = 'stage_grant_withdrawn', "
+                "stage_error_message = NULL, stage_error_retryable = ?, stage_phase = 'failed', "
+                "stage_finished_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                "WHERE tenant_id = ? AND change_set_id = ?",
+                (False, tenant_id, change_set_id),
+            )
+            return True
 
     def claim_stage(
         self, *, owner: str, lease_seconds: float = 30.0

@@ -298,6 +298,7 @@
     "server-converse-registry",
     "server-customization-adversarial",
     "server-customization-async-stage",
+    "server-customization-stage-grants",
     "server-author-stage-status",
     "server-customization-authority",
     "server-customization-contract",

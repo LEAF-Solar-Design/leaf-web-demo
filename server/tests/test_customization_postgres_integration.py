@@ -326,6 +326,87 @@ def create(store, tenant: str, key: str):
     )
 
 
+def test_postgres_stage_grant_consume_race_has_one_winner(store):
+    from threading import Barrier
+    from uuid import uuid4
+
+    key = f"grant-race:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    # Prioritize this exact row among unrelated module fixtures, then claim
+    # through the real store operation and its PostgreSQL write fence.
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET created_at = '0000' WHERE change_set_id = ?",
+            (change.change_set_id,),
+        )
+    claimed = store.claim_stage(owner=key)
+    assert claimed.change_set_id == change.change_set_id
+    barrier = Barrier(2)
+
+    def consume(_):
+        repository = PostgresCustomizationStore()
+        barrier.wait()
+        return repository.consume_stage_grant(
+            tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+            owner=key, attempt=1, binding_digest=DIGEST, now_ms=int(time.time() * 1000),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(consume, range(2))) == [False, True]
+    assert store.get_stage_grant(change.tenant_id, change.change_set_id)["dispatches"] == 1
+    store.fail_stage_claim(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, reason_code="test_complete", retryable=False,
+    )
+
+
+def test_postgres_stage_grant_withdraw_loses_to_claim(store):
+    from uuid import uuid4
+
+    key = f"grant-withdraw:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET created_at = '0000' WHERE change_set_id = ?",
+            (change.change_set_id,),
+        )
+    claimed = store.claim_stage(owner=key)
+    assert claimed.change_set_id == change.change_set_id
+    assert not store.withdraw_stage(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, now_ms=now_ms,
+    )
+    assert store.get_stage_grant(change.tenant_id, change.change_set_id)["revoked_ms"] is None
+    store.fail_stage_claim(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, reason_code="test_complete", retryable=False,
+    )
+
+
 def stage(store, change, prefix: str):
     staging = store.transition(
         tenant_id=change.tenant_id,
