@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 import json
 from uuid import UUID, uuid4
 
-from x07_tracker_roles import encode_roles
-from x07_customer_profile_store import CustomerProfileStore, MAX_PROFILE_VERSION, ProfileScopeError
+from x07_customer_profile_store import (
+    CustomerProfileStore, MAX_PROFILE_VERSION, ProfileScopeError, encode_roles,
+)
 
 
 class PostgresProfileStore:

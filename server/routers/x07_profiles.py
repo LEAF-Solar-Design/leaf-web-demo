@@ -11,10 +11,10 @@ import platform_link
 import solar_project_context as context_service
 from routers.project_drawings import _headers, _dispatch
 from envelopes import with_envelope_fields
+from x07_customer_profile_store import TrackerRole, validate_trackers
 from x07_postgres_profile_store import PostgresProfileStore
 from x07_profile_compatibility import check_compatibility
 from x07_profile_workflow import ProfileWorkflow
-from x07_tracker_roles import TrackerRole, validate_trackers
 from x07_role_selection import select_modules
 
 router = APIRouter()

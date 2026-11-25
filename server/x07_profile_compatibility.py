@@ -5,9 +5,10 @@ requires an injected alias. No customer identity is inferred from drawing data.
 """
 import copy
 import math
-from x07_tracker_roles import validate_trackers
 import unicodedata
+
 from solar_drawing_roles import discover_roles
+from x07_customer_profile_store import validate_trackers
 
 
 def _label(value):
