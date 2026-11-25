@@ -1135,6 +1135,131 @@ def test_estimate_half_even_per_line_and_caller_precision():
         assert encode_estimate(decode_estimate(raw)) == raw
 
 
+@pytest.mark.parametrize("rate,minimum,amount", [
+    pytest.param("1.005", "1.01", "1.01", id="below"),
+    pytest.param("1.015", "1.02", "1.02", id="equal-after-rounding"),
+    pytest.param("1.025", "1.01", "1.02", id="above"),
+])
+def test_estimate_line_minimum_threshold_export_reopen(rate, minimum, amount):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs(rates=(rate,))
+    inputs[0]["complete"] = True
+    original = estimate_price(inputs)
+    inputs[1]["rates"][0].update(minimum_amount=minimum,
+        minimum_semantics="per_line_floor_after_rounding")
+    saved = copy.deepcopy(inputs)
+    with decimal.localcontext() as ctx:
+        ctx.prec = 2
+        ctx.rounding = decimal.ROUND_UP
+        ctx.traps[decimal.Inexact] = True
+        value = estimate_price(inputs)
+        raw = encode_estimate(value)
+        reopened = decode_estimate(raw)
+        assert reopened == value and encode_estimate(reopened) == raw
+    assert value["lines"][0]["amount"] == value["priced_subtotal"] == amount
+    assert value["unpriced_count"] == 0 and value["complete"] is True
+    assert value["rate_card"] == inputs[1] and inputs == saved
+    assert value["takeoff_sha256"] == original["takeoff_sha256"]
+    assert value["rate_card_sha256"] != original["rate_card_sha256"]
+    assert value["content_sha256"] != original["content_sha256"]
+
+
+@pytest.mark.parametrize("minimum", ["0", "0.00", "01.2300", "1000000000000.00"])
+def test_estimate_line_minimum_zero_quantity_and_exact_cent_bounds(minimum):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs(("0",))
+    inputs[1]["rates"][0].update(minimum_amount=minimum,
+        minimum_semantics="per_line_floor_after_rounding")
+    value = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert value["lines"][0]["amount"] == format(decimal.Decimal(minimum), ".2f")
+    assert value["priced_subtotal"] == value["lines"][0]["amount"]
+    assert value["rate_card"]["rates"][0]["minimum_amount"] == minimum
+
+
+@pytest.mark.parametrize("minimum", [None, True, False, 1, 1.0, "", "-0", "-1",
+    "+1", "1e2", "NaN", "Infinity", " 1", "1 ", "1\n", ".5", "1.", "١", "１",
+    "0.001", "1.0010", "1000000000000.01", "0" * 41, [], {}])
+def test_estimate_invalid_line_minimum_rejected(minimum):
+    inputs = estimate_inputs()
+    inputs[0]["lines"][0]["priceable"] = False
+    inputs[1]["rates"][0].update(minimum_amount=minimum,
+        minimum_semantics="per_line_floor_after_rounding")
+    refused("ESTIMATE_RATE_CARD_INVALID", estimate_price, inputs)
+
+
+@pytest.mark.parametrize("fields", [
+    {"minimum_amount": "1.00"},
+    {"minimum_semantics": "per_line_floor_after_rounding"},
+    *[{"minimum_amount": "1.00", "minimum_semantics": value}
+      for value in (None, True, 1, "", "per_line", "per_line_floor_before_rounding", [], {})],
+])
+def test_estimate_line_minimum_fields_required_together(fields):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(fields)
+    refused("ESTIMATE_RATE_CARD_INVALID", estimate_price, inputs)
+
+
+def test_estimate_line_minimum_preserves_all_unpriced_reasons():
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs(("1", "1", None, "bad", "1", "1", "1"))
+    summary, card, _ = inputs
+    summary["lines"][0]["status"] = "unavailable"
+    summary["lines"][1]["priceable"] = False
+    card["rates"][4]["unit"] = "m"
+    card["rates"].pop(5)
+    summary["lines"][6]["status"] = "not-computed"
+    for rate in card["rates"]:
+        rate.update(minimum_amount="100.00", minimum_semantics="per_line_floor_after_rounding")
+    value = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert [line["amount"] for line in value["lines"]] == [None] * 7
+    assert [line["pricing_reason"] for line in value["lines"]] == [
+        "NONCOMPUTED_LINE", "NONPRICEABLE_LINE", "QUANTITY_MISSING", "QUANTITY_INVALID",
+        "UNIT_MISMATCH", "RATE_MISSING", "NONCOMPUTED_LINE"]
+    assert value["priced_subtotal"] is None and value["unpriced_count"] == 7
+    assert value["complete"] is False
+
+
+def test_estimate_line_minimum_applies_to_every_eligible_takeoff_line():
+    from solar_estimate import decode_estimate, encode_estimate, price_takeoff
+    _, card, binding = estimate_inputs()
+    source = {key: binding[key] for key in ("drawing_id", "project_id", "graph_sha256")}
+    source["drawing_version"] = 7
+    graph = {"strings": [{"module_count": 10}],
+             "inverters": [{"is_l2": False, "model": "test"}],
+             "routes": [{"route_kind": "feeder", "wire_gauge": "test", "length_ft": 2}]}
+    summary = takeoff_direct(graph, physical=takeoff_wrapper(), source=source).summary
+    card["rates"] = [{"line_id": line["line_id"], "unit": line["unit"], "rate": "0",
+                      "minimum_amount": "1.23", "minimum_semantics": "per_line_floor_after_rounding"}
+                     for line in summary["lines"]]
+    value = decode_estimate(encode_estimate(price_takeoff(summary, card, source_binding=binding)))
+    eligible = [line for line in value["lines"] if line["status"] == "computed" and line["priceable"]]
+    assert {line["unit"] for line in eligible} == {"ea", "m", "ft", "m3", "kWp"}
+    assert all(line["amount"] == "1.23" and line["pricing_reason"] is None for line in eligible)
+    assert all(line["amount"] is None for line in value["lines"] if line not in eligible)
+    assert value["priced_subtotal"] == format(decimal.Decimal("1.23") * len(eligible), ".2f")
+    assert value["unpriced_count"] == len(value["lines"]) - len(eligible)
+
+
+def test_estimate_legacy_material_bytes_without_minimum_fields():
+    from solar_estimate import decode_estimate, encode_estimate
+    summary, card, binding = estimate_inputs(("2", "3"), ("1.25", "2"))
+    def raw(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, allow_nan=False).encode("utf-8")
+    # The original v1 material shape and amounts, with no optional defaults added.
+    expected = {"schema": "leaf.solar-estimate.v1", "label": "TEST RATES", "currency": "USD",
+                "rate_version": "synthetic v1", "complete": False, "priced_subtotal": "8.50",
+                "unpriced_count": 0, "source_binding": binding, "takeoff": summary,
+                "rate_card": card, "takeoff_sha256": hashlib.sha256(raw(summary)).hexdigest(),
+                "rate_card_sha256": hashlib.sha256(raw(card)).hexdigest(),
+                "lines": [dict(summary["lines"][0], rate="1.25", amount="2.50", pricing_reason=None),
+                          dict(summary["lines"][1], rate="2", amount="6.00", pricing_reason=None)]}
+    expected["content_sha256"] = hashlib.sha256(raw(expected)).hexdigest()
+    legacy_bytes = raw(expected)
+    assert encode_estimate(estimate_price((summary, card, binding))) == legacy_bytes
+    assert encode_estimate(decode_estimate(legacy_bytes)) == legacy_bytes
+
+
 def test_estimate_bounds_and_long_exact_decimals():
     inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
                              ("1000000000000", "0.12345678901234567890123456789012345678"))
