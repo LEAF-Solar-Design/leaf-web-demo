@@ -35,3 +35,28 @@ def test_author_counts_each_matching_layer(ask, layers, excluded):
     assert tool_loader._run_source_in_sandbox(source, "layer_subtotals.py", empty, {}) == (
         "ok", ({"counts": {}, "total": 0}, None)
     )
+
+@pytest.mark.parametrize(("ask", "first", "second"), [
+    ("Give me separate joist and beam subtotals, and flag any layer whose name matches both.",
+     "joist", "beam"),
+    ("Compare duct and pipe layer subtotals and show overlapping layers.", "duct", "pipe"),
+    ("List separate door and window subtotals, and list layers that match both.",
+     "door", "window"),
+])
+def test_compare_layer_families(ask, first, second):
+    tool, source, _ = tools_fallback.author_tool(ask)
+    assert tool["engine_op"] == "layer_family_subtotals"
+    overlap = f"A_{first}_{second}"
+    layers = [f"A_{first}", overlap, overlap, f"B_{second}", "other"]
+    intake = {"polylines": [{"layer": layer} for layer in layers]}
+    status, payload = tool_loader._run_source_in_sandbox(source, "layer_subtotals.py", intake, {})
+    assert status == "ok", payload
+    result, _ = payload
+    assert result == {
+        "table": {
+            "columns": ["Layer", first, second, "Overlap"],
+            "rows": [[layers[0], 1, "", ""], [overlap, 2, 2, "Yes"], [layers[3], "", 1, ""]],
+        },
+        "overlapping_layers": [overlap],
+        "total": 4,
+    }
