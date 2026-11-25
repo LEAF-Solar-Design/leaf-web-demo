@@ -17,7 +17,8 @@ _LENGTHS = {
     for alias in aliases.split()
 }
 _LENGTH_UNIT = "(?:" + "|".join(_LENGTHS) + ")"
-_LENGTH = rf"([+-]?(?:\d{{1,12}}(?:\.\d{{1,12}})?|\.\d{{1,12}}))\s*({_LENGTH_UNIT})\b"
+_DECIMAL = r"[+-]?(?:\d{1,12}(?:\.\d{1,12})?|\.\d{1,12})"
+_LENGTH = rf"({_DECIMAL})\s*({_LENGTH_UNIT})\b"
 
 
 def requests_clearance(prompt):
@@ -72,16 +73,16 @@ def equipment_headings(prompt):
 
 
 def compares_ports(prompt):
-    return bool(re.search(r"\b(?:cables?|wires?|conduits?)\b", prompt)
+    return bool(re.search(r"\b(?:cables?|wires?|conduits?|equipment)\b", prompt)
                 and re.search(r"\b(?:paths?|routes?|runs?|detours?)\b", prompt)
                 and re.search(r"\bports?\b", prompt)
                 and (prefers_fewer_bends(prompt) or re.search(r"\b(?:equivalent|shortest)\b", prompt)))
 
 
 def equipment_ports(description):
-    """Read explicit named options at the two fixed routing endpoints."""
+    """Read named travel headings with optional points in drawing units."""
     sections = {}
-    for clause in re.split(r"[.;\n]", description):
+    for clause in re.split(r"[;\n]|\.(?=\s|$)", description):
         match = re.fullmatch(r"\s*(departure|arrival) ports\s*:\s*(.+?)\s*", clause, re.I)
         if not match:
             continue
@@ -90,16 +91,22 @@ def equipment_ports(description):
         if side in sections:
             return {}
         options = {}
-        for entry in re.split(r"\s*,\s*|\s+or\s+", entries, flags=re.I):
-            port = re.fullmatch(rf"([a-z0-9][a-z0-9_-]{{0,31}})(?:\s*=\s*|\s+)({_COMPASS})", entry, re.I)
+        for entry in re.split(r"\s*,(?![^()]*\))\s*|\s+or\s+", entries, flags=re.I):
+            port = re.fullmatch(
+                rf"([a-z0-9][a-z0-9_-]{{0,31}})(?:\s*=\s*|\s+)({_COMPASS})"
+                rf"(?:\s+at\s*\(\s*({_DECIMAL})\s*,\s*({_DECIMAL})\s*\))?", entry, re.I)
             if not port or len(options) >= 16:
                 return {}
-            name, heading = port.groups()
+            name, heading, x, y = port.groups()
             if name.casefold() in options:
                 return {}
-            options[name.casefold()] = (name, _HEADINGS[heading.lower()])
+            point = (x, y) if x is not None else None
+            options[name.casefold()] = (name, _HEADINGS[heading.lower()], point)
         sections[side] = tuple(options.values())
-    return sections if sections.keys() == {"departure", "arrival"} else {}
+    if sections.keys() != {"departure", "arrival"}:
+        return {}
+    located = {point is not None for options in sections.values() for _, _, point in options}
+    return sections if len(located) == 1 else {}
 
 
 def matches(description):
@@ -313,52 +320,64 @@ def best_port(options, heading):
     return min(options, key=lambda option: (option[1] != heading, option[0]))
 
 
+def ports_by_point(options, endpoint):
+    grouped = {}
+    for name, heading, point in options:
+        node = endpoint if point is None else tuple(map(Fraction, point))
+        grouped.setdefault(node, []).append((name, heading))
+    return grouped
+
+
 def shortest(graph, start, end, departure=None, arrival=None, ports=None):
     if ports:
-        # Each distinct initial heading is a zero-length source. The best
-        # arrival port depends only on the final heading.
-        initial = {(start, heading): best_port(ports["departure"], heading)[0]
-                   for _, heading in ports["departure"]}
+        initial = {(point, heading): best_port(options, heading)[0]
+                   for point, options in ports["departure"].items() for _, heading in options}
+        terminals = ports["arrival"]
     else:
         initial = {(start, departure or (0, 0)): None}
+        terminals = {end: [(None, arrival)]}
     costs = {state: (0.0, 0) for state in initial}
     previous = {}
     queue = []
     for state in initial:
         heappush(queue, (0.0, 0, state))
+    terminal = None
     while queue:
         length, bends, state = heappop(queue)
+        if terminal and length > terminal[0]:
+            break
         if (length, bends) != costs[state]:
             continue
         node, incoming = state
-        if node == end:
-            path = [node]
-            terminal_heading = incoming
-            while state not in initial:
-                state = previous[state]
-                path.append(state[0])
-            result = {"status": "found", "length": length,
-                      "points": [[float(x), float(y)] for x, y in reversed(path)]}
-            if __FEWER_BENDS__:
-                result["bends"] = bends
-            if ports:
-                result["ports"] = {"departure": initial[state],
-                                   "arrival": best_port(ports["arrival"], terminal_heading)[0]}
-            return result
+        if node in terminals:
+            name, heading = best_port(terminals[node], incoming)
+            candidate = (length, bends + (heading is not None and heading != incoming), state, name)
+            if terminal is None or candidate < terminal:
+                terminal = candidate
+            continue
         for neighbor, weight in graph.get(node, {}).items():
             heading = direction(node, neighbor) if __FEWER_BENDS__ else (0, 0)
             next_state = neighbor, heading
             turn = incoming != (0, 0) and incoming != heading
-            arrival_heading = arrival
-            if neighbor == end and ports:
-                arrival_heading = best_port(ports["arrival"], heading)[1]
-            entry_turn = neighbor == end and arrival_heading is not None and heading != arrival_heading
-            candidate = length + weight, bends + turn + entry_turn
+            candidate = length + weight, bends + turn
             if candidate < costs.get(next_state, (math.inf, 0)):
                 costs[next_state] = candidate
                 previous[next_state] = state
                 heappush(queue, (*candidate, next_state))
-    return {"status": "no_legal_detour"}
+    if terminal is None:
+        return {"status": "no_legal_detour"}
+    length, bends, state, name = terminal
+    path = [state[0]]
+    while state not in initial:
+        state = previous[state]
+        path.append(state[0])
+    result = {"status": "found", "length": length,
+              "points": [[float(x), float(y)] for x, y in reversed(path)]}
+    if __FEWER_BENDS__:
+        result["bends"] = bends
+    if ports:
+        result["ports"] = {"departure": initial[state], "arrival": name}
+    return result
 
 
 def run(intake, params):
@@ -385,14 +404,26 @@ def run(intake, params):
         headings = __EQUIPMENT_HEADINGS__ if ports is None else None
         if ports == {}:
             return ({"status": "needs_equipment_ports",
-                     "message": "List allowed travel headings as Departure ports: name north, name east; Arrival ports: name east, name south."},
+                     "message": "List headings under Departure ports and Arrival ports. For distinct locations, give every port as name east at (x, y) in drawing units."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         if headings is not None and None in headings:
             return ({"status": "needs_equipment_headings",
                      "message": "Specify the cable travel heading at departure and arrival."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         departure, arrival = headings or (None, None)
+        located = bool(ports and ports["departure"][0][2] is not None)
+        if located and len(cables) != 1:
+            return ({"status": "needs_single_cable_route",
+                     "message": "Draw one cable route to bind these departure and arrival port lists."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
+        if located:
+            bound_ports = {side: ports_by_point(options, None) for side, options in ports.items()}
+            if bound_ports["departure"].keys() & bound_ports["arrival"].keys():
+                return ({"status": "needs_distinct_equipment_port_locations",
+                         "message": "Use separate locations for departure and arrival ports."},
+                        {"highlight_handles": [], "markers": [], "polylines": []})
+            endpoints.update(point for options in bound_ports.values() for point in options)
         graph = build_graph(arrays, aisles, centerlines, endpoints, radius)
         findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
         legal, violations = {}, {}
@@ -407,10 +438,13 @@ def run(intake, params):
                 if too_close:
                     violations[handle] = too_close
             start, end = edges[0][0], edges[-1][1]
-            if start == end:
+            if start == end and not located:
                 unavailable[handle] = "closed_route"
                 continue
-            route = shortest(graph, start, end, departure, arrival, ports)
+            if ports and not located:
+                bound_ports = {"departure": ports_by_point(ports["departure"], start),
+                               "arrival": ports_by_point(ports["arrival"], end)}
+            route = shortest(graph, start, end, departure, arrival, bound_ports if ports else None)
             if route["status"] != "found":
                 unavailable[handle] = route["status"]
                 continue
@@ -418,6 +452,8 @@ def run(intake, params):
                 choices[handle] = route
             if radius is not None:
                 legal[handle] = route
+            if located:
+                continue
             drawn = math.fsum(math.dist(a, b) for a, b in edges)
             best = route["length"]
             if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
@@ -445,6 +481,8 @@ def run(intake, params):
             report["clearance_violations"] = violations
             report["swept_half_width"] = float(radius)
         alternatives = {**findings, **tied}
+        if located:
+            alternatives.update(choices)
         alternatives.update({handle: legal[handle] for handle in violations if handle in legal})
         return (report, {"highlight_handles": list(alternatives), "markers": [],
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})

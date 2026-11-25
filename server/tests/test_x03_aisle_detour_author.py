@@ -225,6 +225,64 @@ def test_named_equipment_ports_require_both_ends():
     assert output[0]["status"] == "needs_equipment_ports"
 
 
+@pytest.mark.parametrize("ask, aisles, expected_points, names", [
+    (
+        "Choose among equipment ports for the shortest legal route and fewest elbows. "
+        "Departure ports: Lower east at (0,0), Upper east at (0,4); "
+        "Arrival ports: Right east at (8,0), UpperRight east at (8,4).",
+        [[(0, 0), (0, 4), (8, 4), (8, 0)], [(0, 0), (0, -2), (8, -2), (8, 0)]],
+        [(0, 4), (8, 4)], ("Upper", "UpperRight"),
+    ),
+    (
+        "Find the fewest conduit elbows among shortest routes using equipment ports. "
+        "Arrival ports: A north at (8,0) or B east at (8,4); "
+        "Departure ports: C east at (0,0) or D east at (0,4).",
+        [[(0, 0), (8, 0)], [(0, 4), (8, 4)]],
+        [(0, 4), (8, 4)], ("D", "B"),
+    ),
+    (
+        "Choose ports for the shortest wire paths. "
+        "Departure ports: Off east at (-3.5,1.25), On=east at (-3.5,-.25); "
+        "Arrival ports: Stop=east at (+4.5,-.25), OffEnd east at (4.5,1.25).",
+        [[(-5, -.25), (6, -.25)]],
+        [(-3.5, -.25), (4.5, -.25)], ("On", "Stop"),
+    ),
+])
+def test_equipment_ports_at_distinct_locations(ask, aisles, expected_points, names):
+    rows = [entity("Aisle", f"C{i:X}", path) for i, path in enumerate(aisles)]
+    rows.append(entity("Cable", "B1", aisles[0]))
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Aisle", "Cable"], polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    route = report["port_choices"]["B1"]
+    points = [list(point) for point in expected_points]
+    assert (route["length"], route["bends"], route["points"]) == (8, 0, points)
+    assert route["ports"] == dict(zip(("departure", "arrival"), names))
+    assert overlay["polylines"] == [{"pts": points}]
+    assert report["avoidable_detours"] == {}
+
+
+@pytest.mark.parametrize("description,cables,status", [
+    ("Choose equipment ports in different physical locations for the shortest legal route and fewest elbows.",
+     1, "needs_equipment_ports"),
+    ("Choose the shortest cable route. Departure ports: A east at (0,0); Arrival ports: B east.",
+     1, "needs_equipment_ports"),
+    ("Choose the shortest cable route. Departure ports: A east at (0,0); Arrival ports: B east at (8,0).",
+     2, "needs_single_cable_route"),
+    ("Choose the shortest cable route. Departure ports: A east at (0,0); Arrival ports: B east at (0,0).",
+     1, "needs_distinct_equipment_port_locations"),
+])
+def test_equipment_port_locations_require_unambiguous_inputs(description, cables, status):
+    rows = [entity("Cable", f"B{i:X}", [(0, i), (8, i)]) for i in range(cables)]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Cable"], polylines=rows))
+    _, source, _ = tools_fallback.author_tool(description)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    assert output[0]["status"] == status
+
+
 def clearance_drawing(units, scale=1, closed_aisle=False):
     upper = [START, (-5, 2), (5, 2), END]
     lower = [START, (-5, -4), (5, -4), END]
