@@ -22,7 +22,7 @@ import {
   type BranchAuthorInput, type BranchAuthorSdk,
 } from "../src/vendor/mushy-author/agent/branchTargetPrompt.js";
 import { submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
-import { setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
+import { branchCompileCheck, setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
 import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
@@ -37,6 +37,7 @@ const CHANGE = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
 const NOW = new Date("2026-11-20T00:00:00.000Z");
 const ALLOWLIST_SHA = "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd";
+const COMPILE_CONFIGURED = Boolean(process.env.LEAF_BRANCH_COMPILE_BIN && process.env.LEAF_BRANCH_COMPILE_REFS);
 const dirs: string[] = [];
 const servers: Server[] = [];
 
@@ -140,7 +141,28 @@ describe("branch package proposals", () => {
     expect(prompt).toContain("Write C# operators literally (&&, <, >); never HTML entities.");
   });
 
-  it.each(["good-panel-count", "good-label-writer"])("writes exactly the recorded %s package", name => {
+  it("includes the area-marks source verbatim and documents types and members outside the allowlist", () => {
+    const prompt = branchTargetPrompt();
+    expect(prompt).toContain(fixture("good-area-marks").main_csx.replace(/\n$/, ""));
+    const traps = ["HatchPatternType", "HatchLoopTypes", "LineWeight", "TextHorizontalMode",
+      "TextVerticalMode", "AttachmentPoint", "RXClass", "WriteMessage", "JTokenType", "Insunits", "Viewport"];
+    const allowlist = JSON.parse(readFileSync(new URL("../src/vendor/mushy-author/registry/api-allowlist.json", import.meta.url), "utf8"));
+    for (const name of traps) expect(prompt).toContain(name);
+    for (const name of traps.filter(name => name !== "WriteMessage" && name !== "Insunits")) {
+      expect(allowlist.allowed_types.some((type: string) => type.endsWith(`.${name}`))).toBe(false);
+    }
+    expect(prompt).toContain("After a successful submission, end the turn at once with the single word Done: no summary, no more tool calls.");
+  });
+
+  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and refuses HTML-encoded operators", async () => {
+    const proposal = fixture("good-area-marks");
+    const good = prepareBranchPackage(proposal, "compile-test", NOW);
+    expect((await branchCompileCheck(proposal.name, good.files)).status).toBe("accept");
+    const encoded = prepareBranchPackage({ ...proposal, main_csx: proposal.main_csx.replace(/</g, "&lt;") }, "compile-test", NOW);
+    expect((await branchCompileCheck(proposal.name, encoded.files)).status).toBe("refused");
+  }, 60_000);
+
+  it.each(["good-panel-count", "good-label-writer", "good-area-marks"])("writes exactly the recorded %s package", name => {
     const root = temp();
     const proposal = fixture(name);
     const submitted = submitBranchToolProposal(root, proposal, { session: "fixture-session", now: NOW });
@@ -228,6 +250,79 @@ describe("branch package proposals", () => {
         expect.objectContaining({ type: "text", text: expect.stringContaining(`${rule}:`) }),
       ]));
       expect(readdirSync(root)).toEqual([]);
+    } finally {
+      await client.close();
+      await mcp?.close();
+    }
+  });
+
+  it("preserves source bytes through installed SDK MCP, submission, compile check and staged Git tree", async () => {
+    vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", undefined);
+    const source = 'int a = 1, b = 2, c = 4, d = 3;\nif (a < b && c >= d) { }\nstring entities = "&lt;&amp;&quot;";\nreturn entities;\n';
+    const proposal = { ...fixture("good-label-writer"), main_csx: source,
+      lib: { "literal.csx": '// π and literal entities\nstring literal = "&lt;&amp;&quot;";\n' } };
+    const { bare, base, ports } = await setup([]);
+    const compiled: Array<{ name: string; files: Record<string, string> }> = [];
+    setBranchCompileCheckForTests(async (name, files) => {
+      compiled.push({ name, files: { ...files } });
+      return { status: "accept", ms: 0, allowlistSha256: ALLOWLIST_SHA,
+        summary: { pass: true, decision: "accept", errors: 0 } };
+    });
+    const installed = await import(["@anthropic-ai", "claude-agent-sdk"].join("/")) as BranchAuthorSdk;
+    const client = new Client({ name: "branch-source-fidelity-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    let mcp: McpServer | undefined;
+    let response: Awaited<ReturnType<Client["callTool"]>> | undefined;
+    const sdk: BranchAuthorSdk = {
+      tool: installed.tool,
+      createSdkMcpServer(options) {
+        const config = installed.createSdkMcpServer(options) as { instance: McpServer };
+        mcp = config.instance;
+        return config;
+      },
+      query() {
+        return {
+          close() {},
+          async *[Symbol.asyncIterator]() {
+            await mcp!.connect(serverTransport);
+            await client.connect(clientTransport);
+            response = await client.callTool({ name: "submitBranchToolProposal",
+              arguments: proposal as unknown as Record<string, unknown> });
+            yield { type: "result", subtype: "success", is_error: false };
+          },
+        };
+      },
+    };
+    const received: unknown[] = [];
+    const written: Record<string, string>[] = [];
+    const loop = new AuthorLoop(ports, input => runBranchTargetSession({
+      ...input,
+      submitBranchToolProposal: async value => {
+        received.push(value);
+        const result = await input.submitBranchToolProposal(value);
+        written.push(Object.fromEntries(Object.keys(result.contents).map(path => [path,
+          readFileSync(join(input.repoDir, result.package_path, path), "utf8")])));
+        return result;
+      },
+    }, { sdkImport: async () => sdk }));
+    try {
+      const { receipt } = await loop.stage(TENANT, "preserve literal source", request(base));
+      expect(response?.isError).not.toBe(true);
+      expect(received).toEqual([proposal]);
+      expect(compiled).toHaveLength(1);
+      expect(compiled[0].name).toBe(proposal.name);
+      expect(written).toEqual([compiled[0].files]);
+      const sources = { "main.csx": source, "lib/literal.csx": proposal.lib["literal.csx"] };
+      for (const [path, text] of Object.entries(sources)) {
+        expect(Buffer.from(compiled[0].files[path], "utf8")).toEqual(Buffer.from(text, "utf8"));
+      }
+      expect(receipt.package_files).toEqual(Object.keys(compiled[0].files)
+        .map(path => `${receipt.package_path}/${path}`).sort());
+      for (const [path, text] of Object.entries(compiled[0].files)) {
+        // Read blobs directly: the git helper trims whitespace and would mask byte changes.
+        const blob = execFileSync("git", ["show", `${receipt.staged_commit}:${receipt.package_path}/${path}`], { cwd: bare.dir });
+        expect(blob).toEqual(Buffer.from(text, "utf8"));
+      }
     } finally {
       await client.close();
       await mcp?.close();
@@ -326,7 +421,7 @@ describe("branch package proposals", () => {
 
 describe("branch stage lifecycle", () => {
   beforeEach(() => { vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", "off"); });
-  it.each(["good-panel-count", "good-label-writer"])("stages %s through the branch SDK tool without registering Python", async name => {
+  it.each(["good-panel-count", "good-label-writer", "good-area-marks"])("stages %s through the branch SDK tool without registering Python", async name => {
     const proposal = fixture(name);
     const { bare, base, sdk, coordination, studioRun, loop } = await setup([proposal]);
     const staged = await loop.stage(TENANT, "author this C# package", request(base));

@@ -31,13 +31,31 @@ Inspect with fs_tenant_repo; it is read-only. Fix rule diagnostics before resubm
 Every submission is compiled with Branch's ScriptHost compiler against AutoCAD 2025
 reference assemblies. Fix compile and API-allowlist errors reported as V18 diagnostics and resubmit.
 Write C# operators literally (&&, <, >); never HTML entities.
-After a successful submission, finish. Success still does not prove CAD execution. Do not call an APS Python test.
+After a successful submission, end the turn at once with the single word Done: no summary, no more tool calls. Success still does not prove CAD execution. Do not call an APS Python test.
 
 ToolGlobals exposes Ctx (IToolContext): Db (Database), Doc (Document), Ed (Editor,
 identity only), Args (JObject), Cancel (CancellationToken), Log (IToolLog), and Service.
 Use Ctx.Db.TransactionManager.StartTransaction(), open objects through that
 transaction, and commit. Honor Ctx.Cancel. Return a JSON-serializable result.
 Use drawing.write for modifications. Disk and network APIs are unavailable.
+
+Allowlist traps. These are refused by the scan even where the entity type is allowed (an unlisted
+enum or return type refuses the expression):
+- Hatch patterns and loops (HatchPatternType, HatchLoopTypes): for fills use Solid (3 or 4 corners,
+  Z order) or a Polyline with ConstantWidth.
+- LineWeight on entities or layers: use Polyline ConstantWidth or vertex widths, and Color.
+- TextHorizontalMode, TextVerticalMode, AttachmentPoint (DBText HorizontalMode, VerticalMode,
+  Justify; MText Attachment): set DBText.Position, or MText Location and Width, and compute the offset.
+- ObjectId.ObjectClass, GetRXClass, RXClass, GetType, typeof: open the object and test with is or as.
+- Ctx.Ed.WriteMessage, Regen and every other Editor member: use Ctx.Log.Info and the returned result.
+- JTokenType and JToken.ToObject: use Ctx.Args.Value<T?>("name") ?? fallback, as JArray, or an explicit cast.
+- Database.Insunits, CurrentSpaceId, Dimstyle, SymbolUtilityServices: take units and sizes as arguments
+  and open BlockTableRecord.ModelSpace through the BlockTable.
+- Viewport, Table, Leader, MLeader, Wipeout, dynamic block properties, Clone, Explode, GetOffsetCurves,
+  IntersectWith, Polyline.GetSegmentType: build new Line, Polyline, Solid, MText, dimension or
+  BlockReference entities.
+- Autodesk.AutoCAD.Runtime.Exception, System.Random, Regex: catch System.Exception, use deterministic
+  arithmetic, use string methods.
 
 Worked example panel-gap-check (drawing.read):
 main_csx:
@@ -83,6 +101,70 @@ using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
   tr.Commit();
 }
 return new { added = 1 };
+
+Worked example area-marks (drawing.read and drawing.write; visible color, Solid, Polyline, MText, AlignedDimension, BlockReference; idempotent=false):
+main_csx:
+using System.Collections.Generic;
+using Autodesk.AutoCAD.Colors;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+using Newtonsoft.Json.Linq;
+double limit = Ctx.Args.Value<double?>("area_limit") ?? 5000.0;
+int marked = 0, blocks = 0;
+using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
+  var layers = (LayerTable)tr.GetObject(Ctx.Db.LayerTableId, OpenMode.ForRead);
+  if (!layers.Has("AREA-MARKS")) {
+    layers.UpgradeOpen();
+    var rec = new LayerTableRecord { Name = "AREA-MARKS", Color = Color.FromRgb(255, 200, 0) };
+    layers.Add(rec);
+    tr.AddNewlyCreatedDBObject(rec, true);
+  }
+  var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);
+  var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
+  var ids = new List<ObjectId>();
+  foreach (ObjectId id in ms) ids.Add(id);
+  void Add(Entity e, Color c) {
+    e.SetDatabaseDefaults(Ctx.Db);
+    e.Layer = "AREA-MARKS";
+    e.Color = c;
+    ms.AppendEntity(e);
+    tr.AddNewlyCreatedDBObject(e, true);
+  }
+  foreach (var id in ids) {
+    Ctx.Cancel.ThrowIfCancellationRequested();
+    var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+    if (ent == null) continue;
+    if (ent.Layer == "AREA-MARKS") { ent.UpgradeOpen(); ent.Erase(); continue; }
+    if (ent is BlockReference br) {
+      blocks++;
+      br.UpgradeOpen();
+      br.Color = Color.FromRgb(0, 160, 255);
+      continue;
+    }
+    var pl = ent as Polyline;
+    if (pl == null || !pl.Closed || pl.NumberOfVertices < 3) continue;
+    var ext = pl.GeometricExtents;
+    Point3d lo = ext.MinPoint, hi = ext.MaxPoint;
+    var mid = new Point3d((lo.X + hi.X) / 2, (lo.Y + hi.Y) / 2, 0);
+    double size = System.Math.Max(System.Math.Min(hi.X - lo.X, hi.Y - lo.Y) / 10, 0.01);
+    var color = pl.Area < limit ? Color.FromRgb(230, 40, 40) : Color.FromRgb(40, 180, 80);
+    var outline = new Polyline();
+    for (int i = 0; i < pl.NumberOfVertices; i++)
+      outline.AddVertexAt(i, pl.GetPoint2dAt(i), pl.GetBulgeAt(i), size / 4, size / 4);
+    outline.Closed = true;
+    Add(outline, color);
+    // Solid corner order is Z-shaped: lower left, lower right, upper left, upper right.
+    Add(new Solid(new Point3d(mid.X - size, mid.Y - size, 0), new Point3d(mid.X + size, mid.Y - size, 0),
+      new Point3d(mid.X - size, mid.Y + size, 0), new Point3d(mid.X + size, mid.Y + size, 0)), color);
+    Add(new MText { Location = new Point3d(mid.X - size, mid.Y - 2 * size, 0), TextHeight = size,
+      Contents = pl.Area.ToString("F0") }, color);
+    Add(new AlignedDimension { XLine1Point = lo, XLine2Point = new Point3d(hi.X, lo.Y, 0),
+      DimLinePoint = new Point3d(mid.X, lo.Y - 2 * size, 0), Dimtxt = size, Dimasz = size }, color);
+    marked++;
+  }
+  tr.Commit();
+}
+return new { marked, blocks };
 
 Pinned API allowlist (types, members, namespaces, denials and capability gates):
 ${JSON.stringify(allowlist, null, 2)}`;
