@@ -1438,7 +1438,6 @@ export default function useEngineSession({
           return
         }
         const entities = projectionEntities(message)
-        const others = (message.unsupported ?? []).length
         const history = historyRef.current
         const reload = history.reload
         if (reload) {
@@ -1492,7 +1491,7 @@ export default function useEngineSession({
           errorKind: null,
           undoDepth: 0,
           redoDepth: 0,
-          status: 'Drawing opened.' + (others ? ' Some objects can only be viewed.' : ''),
+          status: 'Drawing opened.',
         })
         return
       }

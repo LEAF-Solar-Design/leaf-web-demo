@@ -1,0 +1,39 @@
+{
+  "name": "panel-count",
+  "version": "1.0.0",
+  "description": "Count entities on the selected panel layer.",
+  "params": {
+    "type": "object",
+    "properties": {
+      "layer": {
+        "type": "string",
+        "default": "PANELS"
+      }
+    },
+    "additionalProperties": false
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "count": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "count"
+    ]
+  },
+  "capabilities": [
+    "drawing.read"
+  ],
+  "hosts": {
+    "min_release": 2023,
+    "min_host_api": 1
+  },
+  "timeout_ms": 30000,
+  "idempotent": true,
+  "main_csx": "#load \"lib/counts.csx\"\nusing Autodesk.AutoCAD.DatabaseServices;\nusing Newtonsoft.Json.Linq;\nstring layer = Ctx.Args.Value<string>(\"layer\") ?? \"PANELS\";\nint count = 0;\nusing (var tr = Ctx.Db.TransactionManager.StartTransaction()) {\n    var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);\n    var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);\n    foreach (ObjectId id in ms) {\n        Ctx.Cancel.ThrowIfCancellationRequested();\n        var ent = tr.GetObject(id, OpenMode.ForRead) as Entity;\n        if (IsPanel(ent, layer)) count++;\n    }\n    tr.Commit();\n}\nreturn new { count };\n",
+  "lib": {
+    "counts.csx": "using Autodesk.AutoCAD.DatabaseServices;\nbool IsPanel(Entity entity, string layer) { return entity != null && entity.Layer == layer; }\n"
+  }
+}

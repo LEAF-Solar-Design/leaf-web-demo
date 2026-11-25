@@ -83,6 +83,108 @@ def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
     assert graph == valid
 
 
+@pytest.fixture
+def manifest_only_rig(rig, monkeypatch):
+    with monkeypatch.context() as scoped:
+        import lab_corpus_executor as corpus
+        lab_runs.platform_link._ensure_platform_package()
+        from leaf_platform import project_lifecycle, project_reference_materials
+        scoped.setattr(lab_runs.lab_tool_nodes, 'enabled', lambda: True)
+        scoped.setattr(corpus, 'require_executor', lambda: None)
+        rig.context.org_id = rig.tenant
+        rig.context.authority_resolved = True
+        binding = SimpleNamespace(platform_tenant_id=rig.tenant, binding_id='manifest-reader')
+
+        def resolve(provider, subject):
+            assert (provider, subject) == ('auth0', 'run-actor')
+            return binding
+
+        scoped.setattr(lab_runs.platform_link, 'platform_store', lambda: SimpleNamespace(
+            resolve_active_identity_binding=resolve))
+        project = '11111111-2222-4333-8444-555555555555'
+        reads = []
+        state = {'revoked': False}
+
+        def role(tenant, target, actor, *, write):
+            reads.append((str(tenant), str(target), actor, write))
+            if state['revoked']:
+                raise project_lifecycle.LifecycleForbidden('synthetic revoked membership')
+
+        def unneeded(*args, **kwargs):
+            raise AssertionError('Manifest hydration must not depend on full project/material discovery')
+
+        scoped.setattr(project_lifecycle, 'require_project_role', role)
+        scoped.setattr(lab_runs.platform_link, 'platform_db', unneeded)
+        scoped.setattr(project_reference_materials, 'list_materials', unneeded)
+        yield SimpleNamespace(rig=rig, project=project, binding=binding, state=state, reads=reads,
+                               materials=project_reference_materials, patch=scoped)
+
+
+def test_manifest_only_skips_unneeded_catalog_discovery(manifest_only_rig):
+    lane = manifest_only_rig
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params={
+        'project_id': lane.project, 'manifest_only': 'true'})
+    assert response.status_code == 200, response.text
+    manifest = lab_runs.lab_tool_manifests.corpus_capability()[0]
+    assert response.json() == {'manifest': manifest, 'projects': [], 'materials': [], 'limited': False}
+    assert 'parameters' in manifest['settings_schema']['properties']
+    assert lane.reads == [(lane.rig.tenant, lane.project, 'manifest-reader', False)]
+
+
+@pytest.mark.parametrize('refusal', ['authority', 'binding', 'project', 'missing-project', 'tier'])
+def test_manifest_only_retains_current_admission(manifest_only_rig, refusal):
+    lane = manifest_only_rig
+    params = {'project_id': lane.project, 'manifest_only': 'true'}
+    if refusal == 'authority':
+        lane.rig.context.authority_resolved = False
+    elif refusal == 'binding':
+        lane.binding.platform_tenant_id = 'foreign-tenant'
+    elif refusal == 'project':
+        lane.state['revoked'] = True
+    elif refusal == 'missing-project':
+        params.pop('project_id')
+    else:
+        lane.rig.context.tier = 'free'
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params=params)
+    assert response.status_code == (403 if refusal == 'tier' else 422), response.text
+    if refusal == 'project':
+        assert response.json() == {'detail': 'lab_corpus_project_refused'}
+    elif refusal == 'missing-project':
+        assert response.json() == {'detail': 'lab_corpus_project_required'}
+    elif refusal != 'tier':
+        assert response.json() == {'detail': 'lab_corpus_authority_required'}
+
+
+def test_manifest_only_keeps_default_full_picker(manifest_only_rig):
+    from contextlib import contextmanager
+    lane = manifest_only_rig
+
+    class Cursor:
+        def execute(self, statement, arguments):
+            assert 'FROM projects' in statement
+            assert arguments == (lane.rig.tenant,)
+
+        def fetchall(self):
+            return [{'project_id': lane.project, 'name': 'Synthetic project'}]
+
+    @contextmanager
+    def cursor():
+        yield Cursor()
+
+    lane.patch.setattr(lab_runs.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=cursor))
+    material = {'material_id': 'synthetic-material', 'name': 'Original corpus'}
+
+    def materials(tenant, project, actor):
+        assert (tenant, str(project), actor) == (lane.rig.tenant, lane.project, 'manifest-reader')
+        return {'materials': [material]}
+
+    lane.patch.setattr(lane.materials, 'list_materials', materials)
+    response = lane.rig.http.get('/api/lab/runs/corpus-options', params={'project_id': lane.project})
+    assert response.status_code == 200, response.text
+    assert response.json()['projects'] == [{'project_id': lane.project, 'name': 'Synthetic project'}]
+    assert response.json()['materials'] == [material]
+
+
 @pytest.mark.parametrize('parent_number', [5, 5.0])
 def test_corpus_policy_compiles_saved_parameters_without_roundtripping_parent_numbers(rig, monkeypatch, parent_number):
     import hashlib
@@ -621,6 +723,135 @@ def test_corpus_reap_ack_never_accepts_old_attempt_or_expired_open_intent(corpus
     assert tag['attempt'] == 2
     lane.jobs._ack_corpus_reap(job_id, 'stale-producer', 1)
     assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
+
+
+@pytest.fixture
+def durable_history(rig, monkeypatch):
+    from test_lab_run_store import intent_id
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now)
+
+    def seed(age, state, *, context=None, project_id="", doc_id="doc"):
+        context = rig.context if context is None else context
+        tenant, actor = str(context), lab_runs._actor(context)
+        with monkeypatch.context() as clock:
+            clock.setattr(store, "_now", lambda: now - age)
+            body = {"doc_id": doc_id, "graph_revision": 1, "submission_id": intent_id()}
+            lab_runs._remember_submission(context, body, project_id)
+            row = store.create(tenant, doc_id, "fixture", 1, rig.artifact["sha256"],
+                               "lab-ops.v1", graph_digest({}), "lab-worker.v1", "abc1234",
+                               submission_id=body["submission_id"], authority=actor)
+            # Inert saved metadata only: no worker, evaluator or creating HTTP call.
+            store._run(tenant, lambda sql: sql.execute(
+                "UPDATE lab_runs SET state=?,finished_at=? WHERE tenant_id=? AND run_id=?",
+                (state, (now - age).isoformat() if state in {"finished", "failed", "cancelled"}
+                 else None, tenant, row["run_id"])), write=True)
+        return {"run_id": row["run_id"], "state": state, "graph_revision": 1,
+                "doc_id": doc_id, "project_id": project_id, "submission_id": body["submission_id"]}
+
+    return SimpleNamespace(seed=seed, now=now)
+
+
+@pytest.mark.parametrize("state,age", [
+    ("finished", timedelta(hours=48)), ("failed", timedelta(days=7)),
+    ("cancelled", timedelta(days=30)),
+])
+def test_durable_history_retains_terminal_identity(rig, durable_history, state, age):
+    saved = durable_history.seed(age, state)
+    recent = durable_history.seed(timedelta(hours=1), "finished")
+    active = durable_history.seed(timedelta(days=31), "queued")
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"runs": [active, recent, saved]}
+    assert jsonable_encoder(store.get(rig.tenant, saved["run_id"])["created_at"]) == (
+        durable_history.now - age).isoformat()
+    # Saved history is durable; the same expired identity cannot create or reconcile.
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_expired"):
+        store.submission_run_id(rig.tenant, lab_runs._actor(rig.context), saved["submission_id"])
+
+
+def test_durable_history_scope_isolation(rig, durable_history):
+    saved = durable_history.seed(timedelta(days=2), "finished")
+    foreign_actor = deps.TenantContext(rig.tenant, tier="hosted_pro", subject="other-actor")
+    foreign_tenant = deps.TenantContext(rig.tenant + "-foreign", tier="hosted_pro", subject="run-actor")
+    controls = [
+        durable_history.seed(timedelta(minutes=1), "finished", context=foreign_actor),
+        durable_history.seed(timedelta(minutes=1), "finished", context=foreign_tenant),
+        durable_history.seed(timedelta(minutes=1), "finished", project_id="other-project"),
+        durable_history.seed(timedelta(minutes=1), "finished", doc_id="other-doc"),
+    ]
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"runs": [saved]}
+    for control in controls:
+        assert control["run_id"] not in response.text
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: foreign_actor
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"runs": [controls[0]]}
+    rig.app.dependency_overrides[deps.require_tenant] = lambda: foreign_tenant
+    assert rig.http.get("/api/lab/runs", params={"doc_id": "doc"}).status_code == 404
+
+
+def test_durable_history_active_first_order_and_twenty_row_bound(rig, durable_history):
+    terminals = [durable_history.seed(timedelta(days=2, hours=index // 2), "finished")
+                 for index in range(24)]
+    queued = durable_history.seed(timedelta(days=30), "queued")
+    running = durable_history.seed(timedelta(days=31), "running")
+    expected = [queued, running]
+    for index in range(0, 18, 2):
+        expected.extend(sorted(terminals[index:index + 2], key=lambda row: row["run_id"], reverse=True))
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    assert len(response.json()["runs"]) == 20
+    assert response.json() == {"runs": expected}
+
+
+def test_durable_history_rechecks_current_read_admission(rig, durable_history):
+    durable_history.seed(timedelta(days=2), "finished")
+    rig.context.tier = "free"
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 403
+    assert response.json() == {"detail": "lab_entitlement_required"}
+    rig.context.tier = "hosted_pro"
+    rig.context.subject = None
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 422
+    assert response.json() == {"detail": "lab_run_authority_required"}
+
+
+def test_durable_history_rechecks_current_project_read_role(rig, durable_history, monkeypatch):
+    lab_runs.platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    rig.context.org_id = rig.tenant
+    rig.context.authority_resolved = True
+    binding = SimpleNamespace(platform_tenant_id=rig.tenant, binding_id="history-member")
+
+    def resolve(provider, subject):
+        assert (provider, subject) == ("auth0", "run-actor")
+        return binding
+
+    monkeypatch.setattr(lab_runs.platform_link, "platform_store", lambda: SimpleNamespace(
+        resolve_active_identity_binding=resolve))
+    reads = []
+
+    def require_role(tenant, project, actor, *, write):
+        reads.append((tenant, project, actor, write))
+        if revoked:
+            raise project_lifecycle.LifecycleForbidden("fixture membership revoked")
+
+    monkeypatch.setattr(project_lifecycle, "require_project_role", require_role)
+    saved = durable_history.seed(timedelta(days=7), "failed", project_id="history-project")
+    revoked = False
+    params = {"doc_id": "doc", "project_id": "history-project"}
+    response = rig.http.get("/api/lab/runs", params=params)
+    assert response.status_code == 200, response.text
+    assert response.json() == {"runs": [saved]}
+    revoked = True
+    response = rig.http.get("/api/lab/runs", params=params)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "lab_corpus_project_refused"}
+    assert reads == [(rig.tenant, "history-project", "history-member", False)] * 2
 
 
 def test_submission_recovery_rechecks_admission_and_authority(rig, monkeypatch):

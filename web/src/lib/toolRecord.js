@@ -17,8 +17,7 @@ export const WRITE_CAPABILITY = 'drawing.write'
 // reason (not in this engine yet), so it is never a valid placement target.
 export const RIBBON_TAB_IDS = Object.freeze(['draw', 'insert', 'annotate', 'view', 'manage'])
 export const PLACEMENT_SIZES = Object.freeze(['large', 'small', 'row'])
-// What a tool that declares nothing has always rendered as. Changing either
-// constant changes every undeclared tool, which is why they live here.
+// Shared defaults for every tool-record consumer.
 export const DEFAULT_TOOL_ICON = 'toolbox'
 export const DEFAULT_TOOL_SIZE = 'large'
 
@@ -63,14 +62,54 @@ export function isWriteTool(tool) {
 }
 
 /**
- * The tool's CockpitIcon key, or the shared default.
- * The key is not validated against the sprite here — CockpitIcon already
- * degrades a miss to an honest monogram, and cockpitIcons.test.js is the gate
- * that keeps declared keys real.
+ * The tool's declared CockpitIcon key, or the shared fallback.
  */
 export function toolIcon(tool) {
   const icon = tool && tool.icon
   return typeof icon === 'string' && icon ? icon : DEFAULT_TOOL_ICON
+}
+
+/** Studio-only solar category glyphs; undeclared tools are text buttons. */
+export function studioToolIcon(tool) {
+  const icon = tool && tool.icon
+  const solar = /solar|panel|zone|string|inverter|trench/i.test(tool?.name || '')
+  if (solar) {
+    const name = tool.name
+    if (/panel/i.test(name)) return 'grid'
+    if (/zone/i.test(name)) return 'rectangle'
+    if (/string/i.test(name)) return 'polyline'
+    if (/inverter/i.test(name)) return 'block-insert'
+    if (/trench/i.test(name)) return 'line'
+  }
+  return typeof icon === 'string' && icon ? icon : ''
+}
+
+// Presentation metadata beside the tool schema readers. Never infer a value
+// or convert units: the proposal supplies the numbers in these declared units.
+export const humanKey = Object.freeze({
+  panelsPerString: { label: 'Panels per string' },
+  panels_in_scope: { label: 'Panels in scope' },
+  panelsInScope: { label: 'Panels in scope' },
+  module: { label: 'Module' },
+  module_name: { label: 'Module' },
+  design_min_temp: { label: 'Design min temp', unit: '°C' },
+  designMinTemp: { label: 'Design min temp', unit: '°C' },
+  design_min_temp_c: { label: 'Design min temp', unit: '°C' },
+  min_temp_c: { label: 'Design min temp', unit: '°C' },
+  max_system_v: { label: 'Max system V', unit: 'V' },
+  maxSystemV: { label: 'Max system V', unit: 'V' },
+  max_system_voltage: { label: 'Max system V', unit: 'V' },
+  max_system_voltage_v: { label: 'Max system V', unit: 'V' },
+  module_power_w: { label: 'Module power', unit: 'W' },
+  voc: { label: 'Open circuit voltage', unit: 'V' },
+  spacing: { label: 'Spacing' },
+})
+
+export function proposalField(key, schema = {}) {
+  const mapped = humanKey[key]
+  const words = key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase()
+  return { label: mapped?.label || words.charAt(0).toUpperCase() + words.slice(1),
+    unit: mapped?.unit || schema.unit || schema.units || '' }
 }
 
 /**

@@ -88,3 +88,36 @@ export function fmtDetail(value) {
   if (text.length <= DETAIL_MAX_CHARS) return text
   return `${text.slice(0, DETAIL_MAX_CHARS)}\n… ${text.length - DETAIL_MAX_CHARS} more characters`
 }
+
+// A display name for one model id. Known families read as people say them
+// ("claude-sonnet-5-5" -> "Claude Sonnet 5.5", "qwen3.8-27b" -> "Qwen3.8-27B");
+// anything else is shown as the id itself, never guessed.
+export function modelDisplayName(id) {
+  if (typeof id !== 'string' || !id.trim()) return null
+  const value = id.trim()
+  const claude = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/i.exec(value)
+  if (claude) return `Claude ${claude[1][0].toUpperCase()}${claude[1].slice(1).toLowerCase()} ${claude[2].replace(/-/g, '.')}`
+  const qwen = /^qwen(\d+(?:\.\d+)*)-(.+)$/i.exec(value)
+  if (qwen) return `Qwen${qwen[1]}-${qwen[2].replace(/(\d)b$/i, '$1B')}`
+  return value
+}
+
+const BADGE_LABEL_MAX = 64
+
+/**
+ * Which model answered a turn, from that turn's own turn_usage (the runner's
+ * real provider and model, never a constant). Returns null when the turn did
+ * not report a model. `where` names a non-default provider: the label a
+ * tenant's self-hosted provider reports (for example "local on Mac mini"), or
+ * "OpenAI"; the default Claude path has none.
+ */
+export function modelBadge(usage) {
+  const models = Array.isArray(usage?.models) ? usage.models : (usage?.model ? [usage.model] : [])
+  const name = modelDisplayName(models.find((m) => typeof m === 'string' && m.trim()))
+  if (!name) return null
+  const provider = typeof usage?.provider === 'string' ? usage.provider : null
+  const label = typeof usage?.provider_label === 'string' ? usage.provider_label.trim().slice(0, BADGE_LABEL_MAX) : ''
+  const local = provider === 'openai_compatible'
+  const where = local ? (label || 'self-hosted') : provider === 'openai' ? 'OpenAI' : null
+  return { name, where, local, text: where ? `${name} · ${where}` : name }
+}

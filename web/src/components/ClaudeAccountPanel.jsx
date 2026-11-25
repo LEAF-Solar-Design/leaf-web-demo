@@ -8,6 +8,10 @@ import useRelativeNow from '../lib/useRelativeNow.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
 
+export const SETUP_TOKEN_COMMAND = 'claude setup-token'
+const CLAUDE_CODE_INSTALL_URL = 'https://docs.anthropic.com/en/docs/claude-code/setup'
+const ANTHROPIC_CONSOLE_KEYS_URL = 'https://console.anthropic.com/settings/keys'
+
 function detectKind(token) {
   if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
   if (/^sk-ant-oat/i.test((token || '').trim())) return 'oauth'
@@ -33,6 +37,15 @@ export default function ClaudeAccountPanel({
   const [label, setLabel] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [formError, setFormError] = useState(null)
+  const copyCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_TOKEN_COMMAND)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { /* clipboard denied: the command stays visible to copy by hand */ }
+  }
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -44,6 +57,15 @@ export default function ClaudeAccountPanel({
     if (open) closeRef.current?.focus()
     else if (wasOpen.current && (document.activeElement === document.body || dialogRef.current?.contains(document.activeElement))) triggerRef.current?.focus()
     wasOpen.current = open
+  }, [open, mock])
+  // The card is right-anchored to its trigger. When the trigger sits near the left edge (the
+  // cockpit header), a right-anchored card runs off screen, so anchor it to the left instead.
+  const [alignStart, setAlignStart] = useState(false)
+  useLayoutEffect(() => {
+    if (mock || !open) return
+    const trigger = triggerRef.current?.getBoundingClientRect()
+    const width = dialogRef.current?.offsetWidth || 320
+    if (trigger) setAlignStart(trigger.right - width < 8)
   }, [open, mock])
   const known = typeof grant?.linked === 'boolean'
   const restricted = grant?.read_status === 'restricted'
@@ -96,7 +118,11 @@ export default function ClaudeAccountPanel({
 
   const submit = async () => {
     const value = token.trim()
-    if (!canManage || !value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
+    if (!canManage || !value || busy) return
+    // A click with a missing choice explains itself instead of doing nothing (rehearsal issue 24).
+    if (kind === 'oauth' && !plan) { setFormError('Choose your Claude plan above (Pro, Max, Team or Enterprise).'); return }
+    if (kind === 'oauth' && !label.trim()) { setFormError('Enter an account label.'); return }
+    setFormError(null)
     const result = await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
     if (result?.linked === true) setToken('')
   }
@@ -120,7 +146,7 @@ export default function ClaudeAccountPanel({
       </button>
 
       {pop.shown && (
-        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the account update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Claude accounts">
+        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the account update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} data-align={alignStart ? 'start' : undefined} role="dialog" aria-label="Claude accounts">
           <div className="ca-head">
             <span>Claude accounts</span>
             <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close Claude account panel" />
@@ -176,22 +202,32 @@ export default function ClaudeAccountPanel({
 
           {!signedOut && canManage && (!linked || showAdd) && (
             <div className="ca-setup">
+              {!linked && (
+                <p className="ca-copy ca-empty">
+                  No Claude account is linked yet. Paste an Anthropic API key, or link your Claude
+                  subscription with a token from <code>claude setup-token</code>.
+                </p>
+              )}
               <div className="ca-choice" role="radiogroup" aria-label="Credential type">
-                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => setKind('oauth')} disabled={busy}>Claude subscription</button>
-                <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => setKind('api_key')} disabled={busy}>Anthropic API key</button>
+                <button type="button" role="radio" aria-checked={!isApiKey} className={`ca-opt ${!isApiKey ? 'on' : ''}`} onClick={() => { setKind('oauth'); setFormError(null) }} disabled={busy}>Claude subscription</button>
+                <button type="button" role="radio" aria-checked={isApiKey} className={`ca-opt ${isApiKey ? 'on' : ''}`} onClick={() => { setKind('api_key'); setFormError(null) }} disabled={busy}>Anthropic API key</button>
               </div>
 
               {!isApiKey && (
                 <>
                   <p className="ca-copy">Link your authorized <b>Claude Pro, Max, Team, or Enterprise</b> subscription.</p>
-                  <ol className="ca-steps">
-                    <li>Run <code>claude setup-token</code> in a terminal.</li>
-                    <li>Approve the request for your Claude subscription.</li>
-                    <li>Paste the one-time token below.</li>
+                  <ol className="ca-steps" aria-label="How to get a Claude setup token">
+                    <li>Install <a href={CLAUDE_CODE_INSTALL_URL} target="_blank" rel="noreferrer">Claude Code</a> (free, one time).</li>
+                    <li>
+                      Open a terminal and run <code>{SETUP_TOKEN_COMMAND}</code>
+                      {' '}<button type="button" className="chip-neutral ca-copy-cmd" onClick={copyCommand}>{copied ? 'Copied' : 'Copy'}</button>
+                    </li>
+                    <li>Approve the request in the browser window that opens.</li>
+                    <li>Copy the token it prints (it starts with <code>sk-ant-oat01-</code>) and paste it below.</li>
                   </ol>
                   <div className="ca-choice" role="radiogroup" aria-label="Claude workspace plan">
                     {['pro', 'max', 'team', 'enterprise'].map((value) => (
-                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => setPlan(value)} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
+                      <button key={value} type="button" role="radio" aria-checked={plan === value} className={`ca-opt ${plan === value ? 'on' : ''}`} onClick={() => { setPlan(value); setFormError(null) }} disabled={busy}>{value[0].toUpperCase() + value.slice(1)}</button>
                     ))}
                   </div>
                   <label className="ca-field">
@@ -201,11 +237,25 @@ export default function ClaudeAccountPanel({
                 </>
               )}
 
-              {isApiKey && <p className="ca-copy">Link an Anthropic organization API key billed at API rates.</p>}
+              {isApiKey && (
+                <p className="ca-copy">
+                  Create a key at <a href={ANTHROPIC_CONSOLE_KEYS_URL} target="_blank" rel="noreferrer">console.anthropic.com</a> under
+                  {' '}API keys, then paste it below. Usage is billed at API rates.
+                </p>
+              )}
               <label className={`ca-field${error ? ' field-invalid' : ''}`}>
                 <span className="ca-field-k">{isApiKey ? 'Anthropic API key' : 'Claude setup token'}</span>
                 <input
-                  type="password"
+                  // A masked text field, not type=password: Chrome offers to save a password
+                  // field's value, and this token must never land in a password manager (issue 25).
+                  type="text"
+                  className="ca-secret"
+                  name="leaf-claude-credential"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  data-1p-ignore="true"
+                  data-lpignore="true"
+                  data-form-type="other"
                   value={token}
                   onChange={(event) => changeToken(event.target.value)}
                   onKeyDown={(event) => {
@@ -219,9 +269,10 @@ export default function ClaudeAccountPanel({
                   aria-label={isApiKey ? 'Anthropic API key' : 'Claude token'}
                 />
               </label>
-              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim() || (!isApiKey && (!label.trim() || !plan))} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : !isApiKey && (!label.trim() || !plan) ? 'Choose a plan and enter an account label.' : undefined}>
+              <button className="btn primary ca-act" onClick={submit} disabled={busy || !token.trim()} title={busy ? 'Please wait for the account update.' : !token.trim() ? 'Enter your credential to link an account.' : undefined}>
                 {busy ? 'Linking…' : isApiKey ? 'Link API key' : 'Link Claude account'}
               </button>
+              {formError && <p className="field-err ca-form-err" role="alert">{formError}</p>}
               {linked && <button className="chip-neutral" onClick={() => setShowAdd(false)} disabled={busy}>Cancel</button>}
               <p className="ca-note">Credentials are stored securely for your workspace and are hidden after linking.</p>
             </div>

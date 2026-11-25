@@ -869,6 +869,9 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "server-campaign-acquisition": [
+      "main-broke"
+    ],
     "server-campaign-capability-job-access": [
       "hard-harm-sentinel",
       "proposal"
@@ -878,6 +881,9 @@
     ],
     "server-capabilities-project-read": [
       "contract-keep"
+    ],
+    "server-contract-freeze": [
+      "main-broke"
     ],
     "server-demo-actor": [
       "proposal"
@@ -916,6 +922,12 @@
       "hard-harm-sentinel",
       "proposal"
     ],
+    "server-intake-dxf-envelope": [
+      "main-broke"
+    ],
+    "server-integration-element-save": [
+      "main-broke"
+    ],
     "server-integration-turn-grant-capture": [
       "hard-harm-sentinel",
       "proposal"
@@ -935,6 +947,9 @@
     "server-jobs-tenant-inflight-cap": [
       "hard-harm-sentinel",
       "proposal"
+    ],
+    "server-kit-stream-superset": [
+      "main-broke"
     ],
     "server-lab-capability-coverage": [
       "contract-keep"
@@ -1062,6 +1077,15 @@
     "server-w2-string-delete": [
       "hard-harm-sentinel",
       "proposal"
+    ],
+    "server-w4g7b-01s": [
+      "main-broke"
+    ],
+    "server-w4g7b-02s": [
+      "main-broke"
+    ],
+    "server-w4g7b-06i": [
+      "main-broke"
     ],
     "studio-walk-regressions": [
       "proposal"
@@ -1303,9 +1327,11 @@
     "server-authored-execution-live-gate",
     "server-authored-tenant-isolation",
     "server-broker-tenant-state",
+    "server-campaign-acquisition",
     "server-campaign-capability-job-access",
     "server-campaign-dxf-inventory",
     "server-capabilities-project-read",
+    "server-contract-freeze",
     "server-demo-actor",
     "server-drawings-cross-tenant-canary",
     "server-engine-corpus-harness",
@@ -1316,11 +1342,14 @@
     "server-entity-scope-transport",
     "server-grant-admin-authority",
     "server-guest-session-auth",
+    "server-intake-dxf-envelope",
+    "server-integration-element-save",
     "server-integration-turn-grant-capture",
     "server-integration-turn-grant-lifecycle",
     "server-integration-turn-grants",
     "server-integration-turn-grants-postgres",
     "server-jobs-tenant-inflight-cap",
+    "server-kit-stream-superset",
     "server-lab-capability-coverage",
     "server-lab-contract",
     "server-lab-runs",
@@ -1360,6 +1389,9 @@
     "server-w1c-solve-proposal",
     "server-w2-panel-group-delete",
     "server-w2-string-delete",
+    "server-w4g7b-01s",
+    "server-w4g7b-02s",
+    "server-w4g7b-06i",
     "studio-walk-regressions",
     "web-app-wiring",
     "web-author-quota-gate",

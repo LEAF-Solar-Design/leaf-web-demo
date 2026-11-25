@@ -15,6 +15,7 @@ import {
   TurnInProgressError,
 } from "../src/agent/converseLoop.js";
 import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
+import { SPINE_SYSTEM_PROMPT } from "../src/agent/spineSystemPrompt.js";
 import { FakeConverseRunner } from "../src/ports/fakes/fakeConverseRunner.js";
 import { FakeGateClient } from "../src/ports/fakes/fakeGateClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
@@ -233,6 +234,12 @@ function makeLoop() {
     { model: "claude-sonnet-5" },
   );
   return { loop, runner, appRun, gate, store };
+}
+
+function makeApprovalLoop() {
+  const fixture = makeLoop();
+  fixture.gate.approvalRequired.add("run_drawing_edit_tool");
+  return fixture;
 }
 
 async function sendText(
@@ -548,7 +555,7 @@ describe("ConverseLoop — turn lock", () => {
   });
 
   it("a confirm during an active turn -> TurnInProgressError WITHOUT consuming the confirmation", async () => {
-    const { loop, runner, appRun, gate, store } = makeLoop();
+    const { loop, runner, appRun, gate, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
 
     // Propose a write -> pending confirmation.
@@ -1109,9 +1116,39 @@ describe("ConverseLoop — read auto-dispatch", () => {
   });
 });
 
+it("instructs the assistant to act on reversible drawing edits", () => {
+  expect(SPINE_SYSTEM_PROMPT).toContain("=== Default: do what the user asks ===");
+  expect(SPINE_SYSTEM_PROMPT.replace(/\s+/g, " ")).toContain("Do not ask permission for a reversible edit");
+  expect(SPINE_SYSTEM_PROMPT).not.toContain("NEVER dispatched directly");
+  expect(SPINE_SYSTEM_PROMPT).not.toContain("Prefer one clarifying question over a wrong dispatch");
+});
+
+it("dispatches a registered standalone drawing edit with its version pins and no proposal", async () => {
+  const { loop, appRun, gate, store } = makeLoop();
+  const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+  await sendText(loop, session, "RUN:add-panel");
+  expect(gate.checks.map(check => [check.action, check.decision])).toEqual([["run_drawing_edit_tool", "allow"]]);
+  expect(appRun.submitCalls).toHaveLength(1);
+  expect(appRun.submitCalls[0]).toMatchObject({
+    tool: "add-panel", params: { drawing_id: "rooftop_demo" }, drawingVersion: 3, expectedDrawingHead: 3,
+  });
+  expect(ofType(await store.eventsAfter(session.session_id, 0), "proposed_run")).toHaveLength(0);
+});
+
+it("rejects an unknown drawing tool before consulting the gate without a catalog digest", async () => {
+  const { loop, appRun, gate, store } = makeLoop();
+  const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+  await sendText(loop, session, "RUN:unregistered-tool");
+  expect(gate.checks).toHaveLength(0);
+  expect(appRun.submitCalls).toHaveLength(0);
+  const result = ofType(await store.eventsAfter(session.session_id, 0), "tool_result")[0];
+  expect(result?.data).toMatchObject({ ok: false });
+  expect(result?.data.summary).toContain("requires a current server-issued catalog digest");
+});
+
 describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   it("run_capability on a WRITE tool proposes and the turn ends awaiting_approval", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, 'RUN:add-panel PARAMS:{"row":2}');
 
@@ -1150,7 +1187,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("an approved confirm message resumes and dispatches (gate grants on confirmation_id)", async () => {
-    const { loop, appRun, gate, store, runner } = makeLoop();
+    const { loop, appRun, gate, store, runner } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
 
@@ -1179,7 +1216,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
     // The re-invoked run_capability carried the confirmation_id to the gate (as
     // the write-rung catalog action)...
     const confirmedCheck = gate.checks.find(
-      (c) => c.action === "run_write_tool" && c.args.confirmation_id === cid,
+      (c) => c.action === "run_drawing_edit_tool" && c.args.confirmation_id === cid,
     );
     expect(confirmedCheck?.decision).toBe("allow");
 
@@ -1206,7 +1243,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("rejects an approved write when the drawing head changed", async () => {
-    const { loop, appRun, gate, store } = makeLoop();
+    const { loop, appRun, gate, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1225,7 +1262,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
 
     expect(appRun.submitCalls).toHaveLength(0);
     expect(gate.checks).toContainEqual(expect.objectContaining({
-      action: "run_write_tool",
+      action: "run_drawing_edit_tool",
       args: expect.objectContaining({
         confirmation_id: cid,
         drawing_version: 4,
@@ -1236,7 +1273,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("a denied confirm message resumes without dispatching", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1259,7 +1296,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("a valid confirmation posted from ANOTHER session (another tenant) answers missing and is NOT consumed", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const sA = await loop.createOrGetSession("tenant-a", "rooftop_demo");
     await sendText(loop, sA, "RUN:add-panel");
     const cid = String(
@@ -1299,7 +1336,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("a confirm past the TTL is rejected as expired, marked expired, and dispatches NOTHING", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1328,7 +1365,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("a second confirm for an already-decided record is rejected as already_decided", async () => {
-    const { loop, store } = makeLoop();
+    const { loop, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1356,7 +1393,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
   });
 
   it("fails closed when confirmation resolution returns the opposite decision", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1384,7 +1421,7 @@ describe("ConverseLoop — write split turns (wire contract section 7)", () => {
 
 describe("ConverseLoop — atomic confirmation race", () => {
   it("a confirm whose decide loses the race is already_decided and dispatches nothing", async () => {
-    const { loop, appRun, store } = makeLoop();
+    const { loop, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
     await sendText(loop, s, "RUN:add-panel");
     const cid = String(
@@ -1562,7 +1599,7 @@ describe("ConverseLoop — gate action vocabulary (app policy catalog)", () => {
       "read_platform_state",
       "read_platform_state",
       "run_read_tool",
-      "run_write_tool",
+      "run_drawing_edit_tool",
     ]);
     // read_platform_state args honor its {what} args_schema (additionalProperties: false).
     expect(gate.checks[0]!.args).toEqual({ what: "capabilities" });
@@ -1900,7 +1937,7 @@ describe("ConverseLoop — remaining spine tools", () => {
 
 describe("ConverseLoop — approval ids are APP truth (wire contract section 6)", () => {
   it("every confirmation_id on the wire is one the gate returned — none is minted locally", async () => {
-    const { loop, gate, store } = makeLoop();
+    const { loop, gate, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
 
     // request_confirmation is always-confirm too, so BOTH chip shapes are covered.
@@ -1929,7 +1966,7 @@ describe("ConverseLoop — approval ids are APP truth (wire contract section 6)"
   });
 
   it("awaiting_approval WITHOUT a confirmation_id is malformed: denied, nothing proposed", async () => {
-    const { loop, gate, appRun, store } = makeLoop();
+    const { loop, gate, appRun, store } = makeApprovalLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
 
     // A gate that says "approval needed" but mints no record: the app would 404

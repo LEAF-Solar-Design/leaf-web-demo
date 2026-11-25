@@ -270,7 +270,7 @@ _QUOTED_LAYER = re.compile(
 _RELATIVE_LAYER = re.compile(r"\b(?:active|current)\s+layer\b", re.IGNORECASE)
 
 _PANEL_COUNT_TARGET = re.compile(
-    r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
+    r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:nested\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
     re.IGNORECASE,
 )
 
@@ -371,13 +371,45 @@ __LAYER_BINDING__
     if is_module_name(layer):
         total += sum(1 for poly in intake.get("polylines", [])
                      if poly.get("layer", "0") == layer and poly.get("closed") and poly.get("pts"))
-    for insert in intake.get("inserts", []):
-        if insert.get("layer", "0") == layer and is_module_name(insert.get("name", "")):
-            rows, columns = insert.get("rows", 1), insert.get("columns", 1)
-            if type(rows) is not int or type(columns) is not int or min(rows, columns) < 1:
-                raise ValueError("Invalid module array size.")
-            total += rows * columns
-    return ({"layer": layer, "counts": {layer: total}, "total": total}, None)
+    blocks = {name.casefold(): block for name, block in (intake.get("blocks") or {}).items()}
+    paths = []
+    stack = [(insert, "0", [], (), 1) for insert in reversed(intake.get("inserts", []))]
+    visited = 0
+    while stack:
+        insert, parent_layer, parent_path, ancestors, copies = stack.pop()
+        visited += 1
+        if visited > 100000:
+            raise ValueError("Block traversal exceeds the supported instance-path limit.")
+        name = insert.get("name", "").casefold()
+        if not name:
+            raise ValueError("Missing block name for panel count.")
+        own_layer = insert.get("layer", "0")
+        effective_layer = parent_layer if own_layer == "0" else own_layer
+        rows, columns = insert.get("rows", 1), insert.get("columns", 1)
+        if type(rows) is not int or type(columns) is not int or min(rows, columns) < 1:
+            raise ValueError("Invalid module array size.")
+        copies *= rows * columns
+        path = parent_path + [insert.get("handle", "")]
+        if is_module_name(name):
+            if effective_layer.casefold() == layer.casefold():
+                total += copies
+                paths.append({"path": path, "multiplicity": copies})
+            continue
+        block = blocks.get(name)
+        if block is None and not __REQUIRE_NESTED__:
+            continue  # Older flat intakes omit definitions for unrelated symbols.
+        if block is None or block.get("nested_inserts_incomplete"):
+            raise ValueError("Incomplete block catalogue for panel count.")
+        if "nested_inserts" not in block and block.get("count", 0) > len(block.get("children", [])) and __REQUIRE_NESTED__:
+            raise ValueError("Incomplete block catalogue for panel count.")
+        if name in ancestors:
+            raise ValueError("Cyclic block reference in panel count.")
+        children = block.get("nested_inserts", [])
+        if any(child.get("type") == "INSERT" for child in block.get("children", [])) and not children and __REQUIRE_NESTED__:
+            raise ValueError("Missing nested block reference evidence.")
+        stack.extend((child, effective_layer, path, ancestors + (name,), copies)
+                     for child in reversed(children))
+    return ({"layer": layer, "counts": {layer: total}, "total": total, "instance_paths": paths}, None)
 """
 
 _BODY_MEASURE = """
@@ -488,10 +520,139 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     the dynamic loader runs THAT FILE, not a hardcoded primitive. Families:
     list_layers | count | measure | highlight (all read-only, deterministic)."""
     description = (description or "").strip()
-    verb, engine_op = _detect_op(description)
+    import authored_material_selection
+    import authored_action_discovery
+    import authored_viewport_panels
+    import authored_dynamic_visibility
+    import authored_clipped_panels
+    import authored_joined_spline
+    import authored_recipe_retry
+    import authored_action_revocation
+    import authored_batch_recipe
+    import authored_material_three_way
+    import authored_material_patch
+    import authored_material_revision
+    import authored_panel_regions
+    import authored_role_action
+    import authored_recipe_edit
+    import authored_dataset_discovery
+    import authored_multibundle
+    import authored_aisle_detour
+    import authored_revision_panel_moves
+    import authored_spatial_clearance
+    import authored_beam_openings
+    import authored_beam_lengths
+    import authored_route_crossings
 
-    relative_layer = engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
-    if engine_op == "list_layers":
+    verb, engine_op = _detect_op(description)
+    drawing_body = None
+    drawing_params = {"type": "object", "properties": {}, "required": []}
+    if authored_revision_panel_moves.matches(description):
+        verb, engine_op = "compare", "revision_panel_moves"
+        drawing_body = authored_revision_panel_moves.build_body(description)
+        drawing_params = authored_revision_panel_moves.PARAMS
+        summary = "compares host-bound parent and current DXFs using the supplied floor base elevations"
+    elif authored_recipe_retry.matches(description):
+        verb, engine_op = "report", "recipe_save_recovery"
+        drawing_body = authored_recipe_retry.build_body(description)
+        summary = "checks the pinned successor after an unconfirmed recipe save"
+    elif authored_action_revocation.matches(description):
+        verb, engine_op = "select", "guarded_action_selection"
+        drawing_body = authored_action_revocation.build_body(description)
+        summary = "selects a pinned local action subject to its current grant"
+    elif authored_joined_spline.matches(description):
+        verb, engine_op = "measure", "joined_spline_beams"
+        drawing_body = authored_joined_spline.build_body(description)
+        summary = "measures joined spline beams and checks endpoint continuity"
+    elif authored_batch_recipe.matches(description):
+        verb, engine_op = "edit", "batch_recipe_edit"
+        drawing_body = authored_batch_recipe.build_body(description)
+        summary = "edits selected tables and reports each revision result"
+    elif authored_material_patch.matches(description):
+        verb, engine_op = "edit", "material_array_patch"
+        drawing_body = authored_material_patch.build_body(description)
+        summary = "applies ordered edits to a verified material selection"
+    elif authored_material_three_way.matches(description):
+        verb, engine_op = "merge", "material_three_way_merge"
+        drawing_body = authored_material_three_way.build_body(description)
+        summary = "previews a merge of two material revisions against their verified common ancestor"
+    elif authored_material_revision.matches(description):
+        verb, engine_op = "compare", "material_revision_diff"
+        drawing_body = authored_material_revision.build_body(description)
+        summary = "compares verified records across pinned import revisions"
+    elif authored_viewport_panels.matches(description):
+        verb, engine_op = "count", "viewport_layer_panels"
+        drawing_body = authored_viewport_panels.build_body(description)
+        drawing_params = {"type": "object", "properties": {"viewport_handle": {"type": "string"}},
+                          "required": [] if authored_viewport_panels.viewport_handle(description) else ["viewport_handle"]}
+        summary = "counts model-space panel placements by viewport layer visibility"
+    elif authored_panel_regions.matches(description):
+        verb, engine_op = "measure", authored_panel_regions.operation(description)
+        drawing_body = authored_panel_regions.build_body(description)
+        summary = "evaluates visible panels against nested drawing boundaries"
+    elif authored_role_action.matches(description):
+        verb, engine_op = "compare", "role_action_comparison"
+        drawing_body = authored_role_action.build_body(description)
+        summary = "compares the authorized actions visible to project roles"
+    elif authored_dynamic_visibility.matches(description):
+        verb, engine_op = "count", "count_visible_state_panels"
+        drawing_body = authored_dynamic_visibility.build_body(description)
+        summary = "counts panel instances in resolved block visibility states"
+    elif authored_clipped_panels.matches(description):
+        verb, engine_op = "count", "count_clipped_panels"
+        drawing_body = authored_clipped_panels.build_body(description)
+        summary = "counts panel insertion points inside the effective clipping region"
+    elif authored_material_selection.matches(description):
+        verb, engine_op = "report", "material_selection_provenance"
+        drawing_body = authored_material_selection.build_body(description)
+        summary = "reports verified JSON pointers and digests for the checker selection"
+    elif authored_action_discovery.matches(description):
+        verb, engine_op = "list", "project_action_discovery"
+        drawing_body = authored_action_discovery.build_body(description)
+        summary = "lists authorized version-pinned actions for this project"
+    elif authored_recipe_edit.matches(description):
+        verb, engine_op = "edit", "inspection_recipe_edit"
+        drawing_body = authored_recipe_edit.build_body(description)
+        summary = "prepares the requested edit against the inspected recipe revision"
+    elif authored_dataset_discovery.matches(description):
+        verb, engine_op = "list", "project_dataset_discovery"
+        drawing_body = authored_dataset_discovery.build_body(description)
+        summary = "reports project dataset freshness from a turn-authorized catalog"
+    elif authored_multibundle.matches(description):
+        verb, engine_op = "route", "multibundle"
+        drawing_body = authored_multibundle.build_body(description)
+        summary = "assigns cable bundles on Bundle load N layers to routes on Tray cap N layers within each tray's capacity"
+    elif authored_aisle_detour.matches(description):
+        verb, engine_op = "route", "aisle_detour"
+        drawing_body = authored_aisle_detour.build_body(description)
+        summary = "finds legal cable detours along the drawn aisles"
+    elif authored_spatial_clearance.matches(description):
+        verb, engine_op = "check", "spatial_route_clearance"
+        drawing_body = authored_spatial_clearance.build_body(description)
+        summary = "checks vertical separation above and below panel footprints in drawing units"
+        drawing_params = {"type": "object", "properties": {"clearance": {
+            "type": "number", "exclusiveMinimum": 0,
+            "description": "Required vertical separation in drawing units"}}, "required": [] if authored_spatial_clearance.measures_minimum(description) else ["clearance"]}
+    elif authored_beam_openings.matches(description):
+        verb, engine_op = "measure", "installed_steel_by_level"
+        drawing_body = authored_beam_openings.build_body(description)
+        summary = "ranks floor deductions from model-space Openings marks: OPENING <instance path or unique beam handle> <start> <end>, in world drawing units"
+    elif authored_beam_lengths.matches(description):
+        verb, engine_op = "measure", "beam_lengths_by_layer"
+        drawing_body = authored_beam_lengths.build_body(description)
+        summary = "measures model-space beam centerlines by layer, including supported block references"
+    elif authored_route_crossings.is_route_crossing_request(description):
+        verb, engine_op = "check", "check_route_crossings"
+        drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
+        summary = "checks cable routes against array and aisle boundaries"
+
+    relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
+    if drawing_body is not None:
+        layer = ""
+        name = engine_op.replace("_", "-")
+        default_params = {}
+        body = drawing_body
+    elif engine_op == "list_layers":
         layer = ""
         name = _slugify(description) or "list-layers"
         default_params: Dict[str, Any] = {}
@@ -509,7 +670,8 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             binding = f'    layer = params.get("layer", {layer!r})'
         body = _BODIES[engine_op]
         if engine_op == "count_by_layer" and _PANEL_COUNT_TARGET.search(description):
-            body = _BODY_COUNT_PANELS
+            requires_nested = bool(re.search(r"\b(?:nested|inside|repeated|references)\b", description, re.I))
+            body = _BODY_COUNT_PANELS.replace("__REQUIRE_NESTED__", str(requires_nested))
             if relative_layer:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)
@@ -524,7 +686,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "description": (description or f"{verb} on layer {layer}")[:200],
         "kind": "script",
         "engine_op": engine_op,
-        "params": _params_schema(engine_op, layer),
+        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer),
         "returns": {"type": "object"},
         "capabilities": ["drawing.read"],
         "provenance": {"author": "agent", "created": _iso_now()},
@@ -532,7 +694,9 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "default_params": default_params,
     }
 
-    if relative_layer:
+    if drawing_body is not None:
+        preview = f"Tool '{name}' {summary}."
+    elif relative_layer:
         preview = f"Tool '{name}': runs '{verb}' on the drawing's current layer at execution time."
     elif engine_op == "list_layers":
         preview = (f"Tool '{name}': lists the distinct layer names in the drawing "

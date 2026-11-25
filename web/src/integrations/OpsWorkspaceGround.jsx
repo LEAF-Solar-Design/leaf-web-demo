@@ -8,6 +8,7 @@ import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createInt
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
+import { SavedDatasetViewExport } from './SavedDatasetViewExport.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -798,6 +799,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               </>}
             </> : <>
             {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            <SavedDatasetViewExport projectId={projectId} record={state.selected} read={state.read}
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))}
+              readIdentity={state.readIdentity} scopeKey={context.current?.cacheIdentity} preferences={preferences}
+              unavailable={pending || state.previousRead || Boolean(viewError)} guard={guardSchedulePreview} />
             {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={retryView}

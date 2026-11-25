@@ -157,3 +157,69 @@ it('KEYS-D19 credential Enter yields native composition', async () => {
 it('KEYS-D20 credential Enter yields key code 229', async () => {
   await credentialComposition({ isComposing: false, keyCode: 229 })
 })
+
+describe('Claude account onboarding instructions', () => {
+  it('tells a new owner how to get a subscription token and an API key, with a copyable command', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    panel({ grant: { linked: false, accounts: [] } })
+    const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
+    expect(dialog).toHaveTextContent('No Claude account is linked yet.')
+    const steps = within(dialog).getByRole('list', { name: 'How to get a Claude setup token' })
+    expect(within(steps).getAllByRole('listitem')).toHaveLength(4)
+    expect(within(steps).getByRole('link', { name: 'Claude Code' })).toHaveAttribute('href', expect.stringMatching(/^https:\/\/docs\.anthropic\.com\//))
+    expect(steps).toHaveTextContent('claude setup-token')
+    expect(steps).toHaveTextContent('Approve the request in the browser')
+    expect(steps).toHaveTextContent('sk-ant-oat01-')
+    fireEvent.click(within(steps).getByRole('button', { name: 'Copy' }))
+    expect(writeText).toHaveBeenCalledWith('claude setup-token')
+    await waitFor(() => expect(within(steps).getByRole('button', { name: 'Copied' })).toBeInTheDocument())
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Anthropic API key' }))
+    expect(dialog).toHaveTextContent('Create a key at console.anthropic.com under API keys, then paste it below.')
+    expect(within(dialog).getByRole('link', { name: 'console.anthropic.com' })).toHaveAttribute('href', 'https://console.anthropic.com/settings/keys')
+  })
+})
+
+describe('Claude account link form (rehearsal issues 24 and 25)', () => {
+  it('explains a missing plan instead of silently doing nothing', () => {
+    const onLink = vi.fn()
+    panel({ grant: { linked: false, accounts: [] }, onLink })
+    const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
+    fireEvent.change(within(dialog).getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-example' } })
+    const link = within(dialog).getByRole('button', { name: 'Link Claude account' })
+    expect(link).not.toBeDisabled()
+    fireEvent.click(link)
+    expect(onLink).not.toHaveBeenCalled()
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose your Claude plan above')
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Max' }))
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(link)
+    expect(onLink).toHaveBeenCalledWith('sk-ant-oat01-example', 'oauth', 'My Claude account', 'max')
+  })
+
+  it('masks the credential without a password field, so browsers do not offer to save it', () => {
+    panel({ grant: { linked: false, accounts: [] } })
+    const field = screen.getByLabelText('Claude token')
+    expect(field).toHaveAttribute('type', 'text')
+    expect(field).toHaveAttribute('autocomplete', 'off')
+    expect(field).toHaveClass('ca-secret')
+    expect(document.querySelector('input[type="password"]')).toBeNull()
+  })
+})
+
+describe('Claude account card placement', () => {
+  it('anchors the card to the left when its trigger sits near the left edge', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 70, right: 200, top: 40, bottom: 60, width: 130, height: 20 })
+    try {
+      panel({ grant: { linked: false, accounts: [] } })
+      expect(screen.getByRole('dialog', { name: 'Claude accounts' })).toHaveAttribute('data-align', 'start')
+    } finally { rect.mockRestore() }
+  })
+  it('keeps the right anchor when there is room', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 1200, right: 1320, top: 40, bottom: 60, width: 120, height: 20 })
+    try {
+      panel({ grant: { linked: false, accounts: [] } })
+      expect(screen.getByRole('dialog', { name: 'Claude accounts' })).not.toHaveAttribute('data-align')
+    } finally { rect.mockRestore() }
+  })
+})

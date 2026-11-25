@@ -1,0 +1,222 @@
+{
+ "_provenance": "Subset of the staging intake for roof-site.dwg (wtc-ours-3 roof, 660 modules): GET /api/drawings/ab264efb-bb81-45e4-93de-a68982a1fef8/intake?version=head on platform-staging, source 7c74e52c, captured 2026-11-19. Rows copied verbatim; only the selection is reduced.",
+ "dwg": "roof-site.dwg",
+ "insunits": 1,
+ "layers": [
+  "Defpoints",
+  "_CE MODULES",
+  "E-CIRCUITING-TAGS-#",
+  "_CE EQUIPMENT PAD"
+ ],
+ "polylines": [
+  {
+   "layer": "E-CIRCUITING-TAGS-#",
+   "closed": false,
+   "pts": [
+    [
+     -3452.121255231046,
+     -4266.685564150011,
+     0.0
+    ],
+    [
+     -3050.647982830663,
+     -4653.572128982806,
+     0.0
+    ]
+   ],
+   "xdata": null,
+   "handle": "BA49",
+   "width": true
+  },
+  {
+   "layer": "_CE EQUIPMENT PAD",
+   "closed": true,
+   "pts": [
+    [
+     -5685.270993169626,
+     -2792.072033718265,
+     0.0
+    ],
+    [
+     -5469.290059251745,
+     -3000.284031893105,
+     0.0
+    ],
+    [
+     -5528.4222667334,
+     -3061.622617125784,
+     0.0
+    ],
+    [
+     -5744.403200651281,
+     -2853.410618950943,
+     0.0
+    ]
+   ],
+   "xdata": null,
+   "handle": "10B14"
+  },
+  {
+   "layer": "Defpoints",
+   "closed": true,
+   "pts": [
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     36.0,
+     0.0,
+     0.0
+    ],
+    [
+     36.0,
+     24.0,
+     0.0
+    ],
+    [
+     0.0,
+     24.0,
+     0.0
+    ]
+   ],
+   "xdata": null,
+   "handle": "E5FA",
+   "space": "paper"
+  }
+ ],
+ "inserts": [
+  {
+   "name": "1L-Dot",
+   "layer": "E-CIRCUITING-TAGS-#",
+   "x": -4487.591,
+   "y": -3269.174,
+   "z": 0.0,
+   "rot": 0.0,
+   "nrm": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    180.0,
+    180.0,
+    180.0
+   ],
+   "handle": "BC41"
+  },
+  {
+   "name": "Module",
+   "layer": "_CE MODULES",
+   "x": -3412.393,
+   "y": -3254.082,
+   "z": 0.0,
+   "rot": 5.5161,
+   "nrm": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "scale": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "handle": "122CA"
+  }
+ ],
+ "blocks": {
+  "1L-Dot": {
+   "base": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "count": 1,
+   "complete": false,
+   "children": [
+    {
+     "kind": "OTHER",
+     "type": "HATCH",
+     "layer": ""
+    }
+   ]
+  },
+  "Module": {
+   "base": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "count": 2,
+   "complete": true,
+   "children": [
+    {
+     "kind": "LINE",
+     "layer": "_CE MODULES",
+     "pts": [
+      [
+       -0.015,
+       79.262,
+       0.0
+      ],
+      [
+       39.198,
+       79.27,
+       0.0
+      ]
+     ]
+    },
+    {
+     "kind": "LWPOLYLINE",
+     "layer": "_CE MODULES",
+     "closed": true,
+     "nrm": [
+      0.0,
+      0.0,
+      1.0
+     ],
+     "elev": 0.0,
+     "pts": [
+      [
+       -0.015,
+       79.319
+      ],
+      [
+       39.198,
+       79.327
+      ],
+      [
+       39.213,
+       0.007
+      ],
+      [
+       -0.0,
+       0.0
+      ]
+     ]
+    }
+   ],
+   "beam_paths": [
+    {
+     "layer": "_CE MODULES",
+     "closed": false,
+     "pts": [
+      [
+       -0.01489412791738687,
+       79.26227686629318,
+       0.0
+      ],
+      [
+       39.19770517978532,
+       79.26964528281042,
+       0.0
+      ]
+     ],
+     "handle": "122AA"
+    }
+   ]
+  }
+ }
+}

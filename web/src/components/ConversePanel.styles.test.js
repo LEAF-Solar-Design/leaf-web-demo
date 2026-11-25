@@ -34,7 +34,7 @@ function blockAt(start) {
 }
 
 describe('ConversePanel V2 attribute styles', () => {
-  it('distinguishes user bubbles from full-width assistant prose with role labels', () => {
+  it('distinguishes user bubbles from full-width assistant prose with a You label only', () => {
     expect(declarations(user)).toMatch(/align-self:\s*flex-end\s*;/)
     expect(declarations(user)).toMatch(/max-width:\s*85%\s*;/)
     expect(declarations(user)).toMatch(/background:\s*var\(--accent-tint\)\s*;/)
@@ -43,7 +43,10 @@ describe('ConversePanel V2 attribute styles', () => {
     expect(declarations(assistant)).toMatch(/width:\s*100%\s*;/)
     expect(declarations(assistant)).toMatch(/background:\s*transparent\s*;/)
     expect(declarations(assistant)).toMatch(/font-size:\s*var\(--leaf-size-body\)\s*;/)
-    for (const [selector, label] of [[user, 'You'], [assistant, 'Assistant']]) {
+    // P8: the panel head already says Assistant, so assistant turns carry no
+    // per-turn label; user turns keep "You".
+    expect(rules.some(([selectors]) => selectors.split(',').some((value) => value.trim() === `${assistant}::before`))).toBe(false)
+    for (const [selector, label] of [[user, 'You']]) {
       const body = declarations(`${selector}::before`)
       expect(body).toContain(`content: "${label}"`)
       expect(body).toMatch(/display:\s*block\s*;/)
@@ -54,7 +57,7 @@ describe('ConversePanel V2 attribute styles', () => {
     }
   })
 
-  it('lays out tool pills with state glyphs and the unavailable label', () => {
+  it('lays out tool chips with state glyphs and the failed label', () => {
     const row = declarations('.converse-tool-row[data-converse-role="tool"]')
     expect(row).toMatch(/display:\s*flex\s*;/)
     expect(row).toMatch(/gap:\s*8px\s*;/)
@@ -63,7 +66,7 @@ describe('ConversePanel V2 attribute styles', () => {
     const pill = declarations('.converse-tool-chip')
     expect(pill).toMatch(/display:\s*inline-flex\s*;/)
     expect(pill).toMatch(/border:\s*1px solid var\(--border\)\s*;/)
-    expect(pill).toMatch(/border-radius:\s*999px\s*;/)
+    expect(pill).toMatch(/border-radius:\s*var\(--leaf-radius-control\)\s*;/)
     expect(pill).toMatch(/font:\s*500 var\(--leaf-size-dense\) var\(--font-mono\)\s*;/)
     for (const [state, glyph, color] of [
       ['running', '◌'], ['done', '✓', '--status-success'], ['failed', '✕', '--status-danger'],
@@ -73,7 +76,7 @@ describe('ConversePanel V2 attribute styles', () => {
       if (color) expect(body).toContain(`color: var(${color})`)
     }
     expect(declarations('.converse-tool-chip[data-state] > .dot')).toMatch(/display:\s*none\s*;/)
-    expect(declarations(`${chip('failed')} > .converse-step-state::before`)).toContain('content: "Unavailable"')
+    expect(declarations(`${chip('failed')} > .converse-step-state::before`)).toContain('content: "Failed"')
   })
 
   it('pulses only the running glyph when reduced motion is not requested', () => {

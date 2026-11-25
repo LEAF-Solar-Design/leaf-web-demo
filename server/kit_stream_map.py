@@ -36,6 +36,8 @@ NATIVE = {
 EXTENSIONS = {
     "job_linked": "Job handoff: a Kit artifact block needs a content digest that a job id does not have.",
     "question_required": "Display-only question card: the Kit has no question block.",
+    "questions_required": "Multi-question card (inline authoring): the Kit has no question block.",
+    "plan_proposed": "Build plan card awaiting approval (inline authoring): the Kit has no plan block.",
     "turn_usage": "Per-turn token usage: the Kit carries quota on ThreadV1, not as an event.",
     "session_state": "Session lifecycle: the Kit has no session event.",
     "overlay_proposed": "T1 overlay proposal lifecycle is outside the assistant contract.",

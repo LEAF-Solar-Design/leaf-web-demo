@@ -9,6 +9,7 @@ Run:  cd server && python -m pytest tests/test_nl_router.py -q
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,10 +23,22 @@ from nl_router import LANE_BUILD, LANE_RUN, LANE_SOLVE, classify  # noqa: E402
 
 # The live catalog the endpoint matches against (registry + write seed + authored).
 CATALOG = deps.all_tools()
+AUTHORING_ASKS = json.loads(
+    (Path(__file__).parent / "fixtures/nl_router/authoring_asks.json").read_text(encoding="utf-8")
+)
 
 
 def _c(text):
     return classify(text, CATALOG)
+
+
+@pytest.mark.parametrize("lane,text", [
+    (lane, text) for lane in (LANE_BUILD, LANE_RUN) for text in AUTHORING_ASKS[lane]
+])
+def test_authoring_and_count_requests(lane, text):
+    result = _c(text)
+    assert result["lane"] == lane
+    assert result["tool"] == ("count-modules" if lane == LANE_RUN else None)
 
 
 # --------------------------------------------------------------------------- #

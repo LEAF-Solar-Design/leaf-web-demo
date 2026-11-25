@@ -106,6 +106,30 @@ def _process_diagnostic(name, returncode, stderr):
                 reason=reason, stderr_state=stderr_state, stderr_prefix=stderr_prefix)
 
 
+def _library_symlinks():
+    """Recreate only the supported Debian numerical-library alternatives."""
+    mounts = []
+    for library, directory in (('libblas', 'blas'), ('liblapack', 'lapack')):
+        link = Path(f'/etc/alternatives/{library}.so.3-x86_64-linux-gnu')
+        target = Path(f'/usr/lib/x86_64-linux-gnu/{directory}/{library}.so.3')
+        try:
+            if not link.is_symlink():
+                if link.exists():
+                    raise VideoError('video_unavailable')
+                continue
+            if link.readlink() != target:
+                raise VideoError('video_unavailable')
+            resolved = target.resolve(strict=True)
+            if not resolved.is_relative_to('/usr') or not resolved.is_file():
+                raise VideoError('video_unavailable')
+        except (OSError, RuntimeError):
+            raise VideoError('video_unavailable') from None
+        mounts.extend(['--symlink', str(target), str(link)])
+    if mounts:
+        return ['--dir', '/etc/alternatives', *mounts]
+    return []
+
+
 def _run(scratch, binary, args, name, deadline, recheck):
     output = scratch / 'output'
     argv = [
@@ -114,6 +138,7 @@ def _run(scratch, binary, args, name, deadline, recheck):
         TOOLS[1], '--unshare-all', '--die-with-parent', '--cap-drop', 'ALL',
         '--ro-bind', '/usr', '/usr', '--symlink', 'usr/lib', '/lib',
         '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
+        *_library_symlinks(),
         '--dir', '/tmp', '--ro-bind', str(scratch / 'original.mov'), '/input.mov',
         '--bind', str(output), '/output', '--chdir', '/output',
         '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'LC_ALL', 'C',

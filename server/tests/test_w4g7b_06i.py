@@ -120,7 +120,7 @@ def test_mock_full_v3_case_set_round_trips_through_dxf():
     # then the same live-shaped verifier proves every effect (no UNVERIFIED
     # note: the EP record is present).
     data = intake_dxf.intake_to_dxf(result)
-    parsed = dxf_intake.parse_dxf_bytes(data)
+    parsed = dxf_intake.parse_dxf_bytes(data, include_measurement_evidence=False)
     note = write_loop.verify_live_mutation_effects(base, parsed, canonical)
     assert note is None
     parsed_dims = {d["type"]: d for d in parsed["dimensions"]}

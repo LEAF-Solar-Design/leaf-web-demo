@@ -162,6 +162,19 @@ export const SOLAR_REFUSAL_REASONS = Object.freeze({
   unlisted: 'The server refused this solar tool',
 })
 
+export function routeErrorText(code) {
+  if (typeof code !== 'string' || !code.length) return 'The request could not be routed.'
+  if (code.length > 2000) return code
+  const parts = code.split('; ')
+  if (!parts.some((part) => Object.hasOwn(SOLAR_REFUSAL_REASONS, part))) return code
+  return parts.map((part) => {
+    if (part === 'drawing_context_required') {
+      return 'Leaf does not know which drawing to use. Open a saved drawing, or save this one as a version first, then ask again.'
+    }
+    return Object.hasOwn(SOLAR_REFUSAL_REASONS, part) ? SOLAR_REFUSAL_REASONS[part] + '.' : part
+  }).join(' ')
+}
+
 export function solarRailReason(availability, options) {
   if (options?.openTypedForm === true) return ''
   if (!availability || typeof availability !== 'object' || Array.isArray(availability)) {

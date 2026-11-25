@@ -29,6 +29,7 @@ _FAILURES = {
     "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
     "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
     "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+    "SIP_R1_PROJECT_ARCHIVED": (409, False),
     "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
     "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
     "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
@@ -113,6 +114,9 @@ def _dispatch(operation):
             body.update(acquired=False, locked_by=exc.checkout.holder if exc.checkout else None,
                         checkout=service.public_checkout(exc.checkout))
         return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
+    except HTTPException as exc:
+        return JSONResponse(content={"detail": exc.detail}, status_code=exc.status_code,
+                            headers=_NO_STORE)
     except Exception:
         return _dispatch(lambda: service.refuse("INTERNAL"))
 
@@ -156,6 +160,9 @@ def status_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.require
     return _dispatch(operation)
 
 
+# Archive enforcement must live in the service/store mutation transaction.
+# A router preflight both releases the project lock too early and bypasses the
+# service's injected store (including stores without archive state).
 @router.post("/api/projects/{project_id}/drawings/{drawing_id}/checkout")
 def acquire_route(project_id: UUID, drawing_id: UUID, req: Optional[CheckoutRequest] = None,
                   tenant=Depends(deps.require_active_tenant),

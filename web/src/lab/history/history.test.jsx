@@ -907,6 +907,71 @@ describe('Strategy revision ledger', () => {
 })
 
 
+describe('bounded nested History setting evidence', () => {
+  const show = (before, after, extra = {}) => render(<LabDiffView beforeGraph={first} afterGraph={first} changes={[
+    { op: before === undefined ? 'add' : after === undefined ? 'remove' : 'replace',
+      path: '/blocks/0/settings/parameters', before, after, ...extra },
+  ]} />)
+  const rows = () => within(screen.getByRole('list', { name: 'Revision changes' })).getAllByRole('listitem').map(row => row.textContent)
+
+  it.each([
+    [undefined, { seed: 1730 }, 'unset -> 1730'],
+    [{ seed: 1730 }, undefined, '1730 -> unset'],
+    [{ seed: 8 }, { seed: 9 }, '8 -> 9'],
+  ])('shows exact nested integer values for additions, removals and changes', (before, after, value) => {
+    show(before, after)
+    expect(rows()).toEqual([`Changed setting parameters.seed on field-1: ${value}`])
+  })
+
+  it('orders nested keys deterministically, distinguishes omitted/null, and shows booleans', () => {
+    show({ z: { enabled: false }, nullable: null }, { z: { enabled: true }, a: null })
+    expect(rows()).toEqual([
+      'Changed setting parameters.a on field-1: unset -> null',
+      'Changed setting parameters.nullable on field-1: null -> unset',
+      'Changed setting parameters.z.enabled on field-1: false -> true',
+    ])
+  })
+
+  it('renders hostile values and ambiguous keys as inert text without requests or links', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const hostile = '<img src=x onerror="alert(1)"><script>location.href="https://evil.invalid"</script>'
+    const view = show(undefined, { 'seed.value': hostile, literal: 'null' })
+    expect(rows()).toContain(`Changed setting parameters["seed.value"] on field-1: unset -> ${hostile}`)
+    expect(rows()).toContain('Changed setting parameters.literal on field-1: unset -> "null"')
+    expect(view.container.querySelector('img,script,a')).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
+  it('bounds array children, string values and depth with explicit incomplete evidence', () => {
+    show(undefined, { array: Array.from({ length: 10000 }, (_, i) => i),
+      deep: { a: { b: { c: { d: { e: { f: { seed: 91 } } } } } } }, text: 'x'.repeat(10000) })
+    const text = rows().join('\n')
+    expect(text).toContain('parameters.array[0] on field-1: unset -> 0')
+    expect(text).not.toContain('parameters.array[32]')
+    expect(text).not.toContain('seed on field-1')
+    expect(text).not.toContain('x'.repeat(161))
+    expect(text).toContain('[truncated]')
+    expect(text).toContain('Setting changes truncated; some paths or values are not shown.')
+    expect(rows().length).toBeLessThanOrEqual(65)
+    expect(text.length).toBeLessThan(30000)
+  })
+
+  it('shares its row budget across changed blocks and preserves empty/type changes', () => {
+    const before = { ...first, blocks: Array.from({ length: 10 }, (_, i) => ({ ...first.blocks[0], id: `block-${i}`, settings: {} })) }
+    const after = { ...before, blocks: before.blocks.map(block => ({ ...block, settings: { p: Array.from({ length: 20 }, (_, i) => i) } })) }
+    const view = render(<LabDiffView changes={[{ op: 'replace', path: '/blocks', before: before.blocks, after: after.blocks }]} />)
+    expect(rows()).toHaveLength(65)
+    expect(rows().at(-1)).toMatch(/^Setting changes truncated/)
+    view.rerender(<LabDiffView beforeGraph={first} afterGraph={first} changes={[
+      { op: 'replace', path: '/blocks/0/settings/parameters', before: { empty: {}, arr: [] }, after: { empty: {}, arr: null, added: {} } },
+    ]} />)
+    expect(rows()).toContain('Changed setting parameters.added on field-1: unset -> {}')
+    expect(rows()).toContain('Changed setting parameters.arr on field-1: [] -> null')
+    expect(rows().some(row => row.includes('parameters.empty'))).toBe(false)
+  })
+})
+
 describe('original export response text', () => {
   it.each(['numeric tokens', 'larger multilingual report'])('preserves producer text for %s', async variant => {
     const { bundle, client, fetchImpl } = exportFixture()

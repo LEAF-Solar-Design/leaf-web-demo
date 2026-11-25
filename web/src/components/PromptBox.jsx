@@ -27,6 +27,7 @@
 
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
+import PlanToggle from './converse/PlanToggle.jsx'
 import useExit from '../useExit.js'
 import { digest, trackUsage } from '../telemetry.js'
 import { byId } from '../lib/actionRegistry.js'
@@ -124,6 +125,7 @@ const IMAGE_ACCEPT = [...IMAGE_MEDIA_TYPES].join(',')
 export default function PromptBox({
   value, onChange, onDispatch: dispatchWithContext, routing, hintLane, projectName, inputRef, routeActive,
   onOpenAuthor, tools = [], skills = [], sessionId = null,
+  planMode = false, onTogglePlanMode,
   // action name -> handler, for registry entries of kind "command". An entry
   // whose action has no handler here is filtered out of the menu entirely
   // (composer.js filterRunnable), so the picker can never offer something this
@@ -571,6 +573,11 @@ export default function PromptBox({
 
   const onKeyDown = (e) => {
     if (isCompositionKey(e)) return
+    if (onTogglePlanMode && e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault()
+      if (!e.repeat) onTogglePlanMode()
+      return
+    }
     // Slice 10b/10c: the act/find resolver takes the SAME arrow/Enter/Esc
     // keys the "/" picker uses (menuOpen below) — the two never overlap
     // (scopeMenuOpen stands down the instant `trigger` fires), so this
@@ -1035,6 +1042,7 @@ export default function PromptBox({
           </div>
         )}
         <div className="bar-controls">
+          {onTogglePlanMode && <PlanToggle pressed={planMode} onToggle={onTogglePlanMode} />}
           <button
             type="button"
             className="bar-add"

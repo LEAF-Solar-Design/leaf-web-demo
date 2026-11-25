@@ -361,8 +361,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // Ops adds ready/desktop and signed-out/desktop triples.
   // WL32 adds one ready/desktop chooser-open triple.
   // WL39b adds invalid-vertex on desktop and phone.
-  assert.equal(previousTriples.length, 867)
-  assert.equal(triples(map).length, 833)
+  // Estimator (estimator-studio-tab-20261119) adds surface:estimator ready/desktop to both inventories.
+  assert.equal(previousTriples.length, 868)
+  assert.equal(triples(map).length, 834)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))

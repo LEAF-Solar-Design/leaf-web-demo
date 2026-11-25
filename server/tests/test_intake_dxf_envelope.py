@@ -236,7 +236,7 @@ def test_r2000_document_envelope_and_legacy_handles(case):
         assert layer[-2:] == [("370", "-3"), ("390", _get(normal, 5))]
         if _get(layer, 2).casefold() == "defpoints":
             assert layer[-3] == ("290", "0")
-    back = parse_dxf_bytes(raw)
+    back = parse_dxf_bytes(raw, include_measurement_evidence=False)
     assert back["layers"] == intake["layers"]
     assert "dimstyles" not in back
     if case == "blocks-groups":
@@ -244,6 +244,13 @@ def test_r2000_document_envelope_and_legacy_handles(case):
         assert _get(user_block, 5) == "109"
         child = next(r for r in blocks if r[0] == ("0", "LINE"))
         assert _get(child, 5) == "10A"
+        # The default measurement view adds a handle-bound child path.
+        block = dict(parse_dxf_bytes(raw)["blocks"]["Fixture"])
+        path, = block.pop("beam_paths")
+        expected_child = intake["blocks"]["Fixture"]["children"][0]
+        assert path["pts"] == expected_child["pts"]
+        assert path["handle"] and path["layer"] == expected_child["layer"] and path["closed"] is False
+        assert {"Fixture": block} == intake["blocks"]
         assert back["blocks"] == intake["blocks"]
         assert back["groups"] == [{"handle": "10E", "owner": "10D", "name": "RACK",
                                    "flags": 0, "selectable": 1, "members": ["A", "100"]}]

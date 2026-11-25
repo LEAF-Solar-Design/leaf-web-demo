@@ -1169,3 +1169,53 @@ def test_service_browser_cli_sends_named_user_agent(monkeypatch):
     assert recorded == ["leaf-studio-agent-login/1"]
     assert not recorded[0].startswith("Python-urllib")
     assert result == {"ok": True}
+
+
+def test_platform_tenant_claim_matches_active_binding():
+    deps.require_matching_platform_tenant_claim(
+        {"tenant_id": PLATFORM_TENANT_ID}, PLATFORM_TENANT_ID)
+
+
+def test_platform_tenant_claim_accepts_verified_subject_fallback():
+    subject = "auth0|self-serve"
+    deps.require_matching_platform_tenant_claim(
+        {"tenant_id": subject}, PLATFORM_TENANT_ID, subject=subject)
+
+
+@pytest.mark.parametrize("tenant_claim", [
+    "cfd4d2c5-25b3-4a48-b339-3bf0ae25117a", "auth0|another-user",
+])
+def test_platform_tenant_claim_rejects_foreign_tenant_or_subject(tenant_claim):
+    with pytest.raises(HTTPException) as error:
+        deps.require_matching_platform_tenant_claim(
+            {"tenant_id": tenant_claim}, PLATFORM_TENANT_ID, subject="auth0|self-serve")
+    assert error.value.status_code == 409
+    assert error.value.detail == (
+        "verified tenant claim conflicts with the active platform binding")
+
+
+@pytest.mark.parametrize("subject", [None, ""])
+def test_platform_tenant_claim_rejects_empty_subject_fallback(subject):
+    with pytest.raises(HTTPException) as error:
+        deps.require_matching_platform_tenant_claim(
+            {"tenant_id": subject}, PLATFORM_TENANT_ID, subject=subject)
+    assert error.value.status_code == 409
+    assert error.value.detail == (
+        "verified tenant claim conflicts with the active platform binding")
+
+
+def test_require_tenant_subject_fallback_uses_active_binding(monkeypatch):
+    subject = "auth0|self-serve"
+
+    def active_binding(verified_subject):
+        assert verified_subject == subject
+        return PLATFORM_TENANT_ID, "hosted_free"
+
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", active_binding)
+    token = mint(tenant_id=subject, extra_claims={"sub": subject})
+    response = _raw_tenant_client().get(
+        "/tenant", headers={"Authorization": bearer(token)})
+    assert response.status_code == 200, response.text
+    assert response.json()["tenant_id"] == PLATFORM_TENANT_ID
+    assert response.json()["org_id"] == PLATFORM_TENANT_ID
+    assert response.json()["tier"] == "hosted_free"

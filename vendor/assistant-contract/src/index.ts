@@ -5,3 +5,4 @@ export * from "./thread";
 export * from "./emit";
 export * from "./mushy";
 export * from "./integration";
+export * from "./project-resource-retention";

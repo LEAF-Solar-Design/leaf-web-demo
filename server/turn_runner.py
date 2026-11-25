@@ -708,12 +708,36 @@ def _safe_retry_after_s(raw: Any) -> Optional[float]:
 # --------------------------------------------------------------------------- #
 # start_turn
 # --------------------------------------------------------------------------- #
+def validate_answers(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != {"question_id", "answers"}:
+        raise ValueError("answers must identify a question card and its answers")
+    if not isinstance(value["question_id"], str) or not value["question_id"]:
+        raise ValueError("answers require a question_id")
+    answers = value["answers"]
+    if not isinstance(answers, dict) or not 1 <= len(answers) <= 4:
+        raise ValueError("a card takes 1 to 4 answers")
+    for key, answer in answers.items():
+        if key not in ("q1", "q2", "q3", "q4") or not isinstance(answer, dict):
+            raise ValueError("invalid answer key or value")
+        if set(answer) == {"other"}:
+            if not isinstance(answer["other"], str) or not 1 <= len(answer["other"]) <= 500:
+                raise ValueError("other must be 1 to 500 characters")
+        elif set(answer) == {"labels"}:
+            labels = answer["labels"]
+            if (not isinstance(labels, list) or not 1 <= len(labels) <= 4
+                    or any(not isinstance(label, str) or not 1 <= len(label) <= 60 for label in labels)):
+                raise ValueError("select 1 to 4 labels of 1 to 60 characters")
+        else:
+            raise ValueError("an answer must contain either labels or other")
+
+
 def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                confirm: Optional[Dict[str, Any]] = None,
                classifier_hint: Optional[Dict[str, Any]] = None,
                model: Optional[str] = None,
                credential_grant: Optional[Dict[str, Any]] = None,
                images: Optional[List[Dict[str, str]]] = None,
+               answers: Optional[Dict[str, Any]] = None,
                tier: Optional[str] = None,
                subject: Optional[str] = None,
                queued_id: Optional[str] = None,
@@ -728,6 +752,14 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                integration_capture=None) -> str:
     if queued_id is not None or journal_claimed:
         integration_capture = None
+    if answers is not None:
+        try:
+            validate_answers(answers)
+        except ValueError as exc:
+            raise TurnRejected(400, ErrorCode.BAD_PARAMS, str(exc), pre_harness=True) from exc
+        if text is not None or images is not None or confirm is not None or queued_id is not None:
+            raise TurnRejected(400, ErrorCode.BAD_PARAMS, "answers must be the only input on an unqueued turn",
+                               pre_harness=True)
     project_principal = tenant_id
     entity_scope = deepcopy(entity_scope)
     # In live auth this is a deps.TenantContext, a str subclass carrying the
@@ -773,7 +805,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
             raise TurnRejected(exc.status_code, ErrorCode.BAD_PARAMS, str(exc), pre_harness=True) from exc
 
     authority_only = is_stage_authority_hint(classifier_hint)
-    if authority_only and (not subject or confirm is not None or images
+    if authority_only and (not subject or confirm is not None or images or answers is not None
                            or credential_grant is not None or queued_id is not None):
         raise TurnRejected(400, ErrorCode.BAD_PARAMS,
                            "stage authority requires an authenticated plain-text turn",
@@ -802,6 +834,10 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     _secret = _grant_secret(credential_grant)
     if _secret:
         text = _scrub_secret(text, _secret)
+        if answers is not None:
+            answers = _scrub_tree(answers, _secret)
+        if confirm is not None and isinstance(confirm.get("feedback"), str):
+            confirm = {**confirm, "feedback": _scrub_secret(confirm["feedback"], _secret)}
         # Scrub before both the durable log and context packet (see _scrub_tree).
         if classifier_hint is not None:
             classifier_hint = _scrub_tree(classifier_hint, _secret)
@@ -839,6 +875,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         user_data[project_context_binding.KEY] = deepcopy(project_execution_context)
     if text is not None:
         user_data["text"] = text
+    if answers is not None:
+        user_data["answers"] = answers
     if images:
         # The harness receives full bytes on this turn's wire request. The
         # durable event intentionally keeps only replay-safe metadata, so every
@@ -925,6 +963,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     }
     if text is not None:
         payload["text"] = text
+    if answers is not None:
+        payload["answers"] = answers
     if confirm is not None:
         payload["confirm"] = confirm
     # The current harness validator accepts and ignores unknown fields. Forward
@@ -2398,7 +2438,23 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                     if isinstance(data.get("dwg"), str)
                                     else None
                                 ), entity_scope), project_execution_context),
-                                ttl_s=approval_ttl_s(),
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
+                            )
+                        except sqlite3.IntegrityError:
+                            pass  # row already exists (duplicate line / replay)
+                elif ev_type == "plan_proposed":
+                    # Plan mode emits plan_proposed ALONE for a propose_build_plan
+                    # confirmation, so the plan card's Approve needs its row here
+                    # too, created before the card is published.
+                    cid = data.get("confirmation_id") if isinstance(data, dict) else None
+                    if isinstance(cid, str) and cid:
+                        try:
+                            session_store.create_approval(
+                                confirmation_id=cid, session_id=session_id, tenant_id=tenant_id,
+                                turn_id=turn_id, tool=None, params=None,
+                                capability=None, rationale=None, kind="propose_build_plan",
+                                payload=None,
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row already exists (duplicate line / replay)
@@ -2413,7 +2469,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 params=proposal.get("params"), capability=proposal.get("capability"),
                                 rationale=proposal.get("rationale"), kind=data.get("kind"),
                                 payload=project_context_binding.approval_payload(entity_scope_binding.approval_payload(
-                                    data.get("payload"), entity_scope), project_execution_context), ttl_s=approval_ttl_s(),
+                                    data.get("payload"), entity_scope), project_execution_context),
+                                ttl_s=agent_gate.session_card_ttl_s(tenant_id, cid, approval_ttl_s()),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row created at proposed_run (pair flow)

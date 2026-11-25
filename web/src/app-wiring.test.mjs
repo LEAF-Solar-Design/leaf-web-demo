@@ -6247,7 +6247,7 @@ it('BSP5 imported drawing labels and counts follow source objects', () => {
   const facts = r13Evaluate(init('paneDrawingFacts').arguments[0], {
     studioGround: true, drafting: true, drawingIntake, activeDrawingName: 'rooftop.dxf',
     projectMode: false, activeIntake: { documentId: 'rooftop.dxf' }, engineHistory: { canUndo: true },
-    visibleLayers: { Panels: false }, drawingExtents: () => null, mock: true,
+    visibleLayers: { Panels: false }, shownLayers: { Panels: false }, drawingExtents: () => null, mock: true,
   })()
   assert.deepEqual({ name: facts.name, entities: facts.entities, polylines: facts.polylines,
     inserts: facts.inserts, faces: facts.faces, layers: facts.layers, layersShown: facts.layersShown, canUndo: facts.canUndo },

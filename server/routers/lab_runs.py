@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 import deps
@@ -59,7 +59,8 @@ def _authorize_corpus_run(tenant, row, *, write=False):
 
 
 @router.get('/corpus-options')
-def corpus_options(project_id: uuid.UUID | None = None, tenant=Depends(deps.require_tenant)):
+def corpus_options(project_id: uuid.UUID | None = None, manifest_only: bool = False,
+                   tenant=Depends(deps.require_tenant)):
     _admit(tenant, 'build')
     def operation():
         if not lab_tool_nodes.enabled():
@@ -68,6 +69,17 @@ def corpus_options(project_id: uuid.UUID | None = None, tenant=Depends(deps.requ
         actor = _corpus_actor(tenant)
         from leaf_platform import project_lifecycle, project_reference_materials
         corpus.require_executor()
+        if manifest_only:
+            if project_id is None:
+                raise GraphRefused('lab_corpus_project_required')
+            try:
+                project_lifecycle.require_project_role(str(tenant), project_id, actor, write=False)
+            except (project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
+                raise GraphRefused('lab_corpus_project_refused') from None
+            # A saved graph needs its pinned editor schema, not another scan of
+            # the project's materials or all projects visible to this caller.
+            return {'projects': [], 'materials': [],
+                    'manifest': lab_tool_manifests.corpus_capability()[0], 'limited': False}
         db = platform_link.platform_db()
         with db.cursor() as cur:
             cur.execute('SELECT project_id,name FROM projects WHERE org_id=%s '
@@ -176,11 +188,9 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
                 'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id '
                 'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
                 'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
-                "AND (r.state IN ('queued','running') OR r.created_at>=?) "
                 "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"
                 'r.created_at DESC,r.run_id DESC LIMIT 20',
-                (str(tenant), _actor(tenant), project_id, doc_id,
-                 (store._now() - store.SUBMISSION_TTL).isoformat())).fetchall()]
+                (str(tenant), _actor(tenant), project_id, doc_id)).fetchall()]
         rows = store._run(str(tenant), select, write=True)
         for row in rows:
             _authorize_corpus_run(tenant, store.get(str(tenant), row['run_id']))
@@ -259,13 +269,17 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
 
 
 @router.get("/{run_id}/recovery-plan")
-def recovery_plan(run_id: str, tenant=Depends(deps.require_tenant)):
+def recovery_plan(run_id: str, response: Response, include_cleanup: bool = Query(False),
+                  tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
     def operation():
         import lab_corpus_recovery
         return lab_corpus_recovery.prepare(str(tenant), run_id,
-            authorize=lambda row: _authorize_corpus_run(tenant, row))
-    return _call(operation)
+            authorize=lambda row: _authorize_corpus_run(tenant, row), include_cleanup=include_cleanup)
+    result = _call(operation)
+    if include_cleanup:
+        response.headers['Cache-Control'] = 'no-store'
+    return result
 
 
 def _public_event(event):

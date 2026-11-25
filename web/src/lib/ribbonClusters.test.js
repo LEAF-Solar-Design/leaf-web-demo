@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { canOpenSolarSettingsForm } from '../solar/solarSettingsWire.js'
-import { SOLAR_REFUSAL_REASONS, solarRailReason } from './ribbonClusters.js'
+import { SOLAR_REFUSAL_REASONS, routeErrorText, solarRailReason } from './ribbonClusters.js'
 import { solarRefusalEnvelope, solarRunRefusal } from './ribbonClusters.js'
 import conversionDeclaration from '../../../server/solar_tools/solar_trackers_to_panel_groups.json'
 
@@ -39,6 +39,35 @@ import {
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
+
+describe('routeErrorText', () => {
+  const drawingMessage = 'Leaf does not know which drawing to use. Open a saved drawing, or save this one as a version first, then ask again.'
+
+  it.each([undefined, null, 0, ''])('uses a generic routing message for %s', (value) => {
+    expect(routeErrorText(value)).toBe('The request could not be routed.')
+  })
+
+  it('renders each solar refusal as a sentence and gives drawing-specific recovery steps', () => {
+    for (const [code, reason] of Object.entries(SOLAR_REFUSAL_REASONS)) {
+      expect(routeErrorText(code)).toBe(code === 'drawing_context_required' ? drawingMessage : reason + '.')
+    }
+  })
+
+  it('renders joined refusals in order', () => {
+    expect(routeErrorText('drawing_context_required; capability_not_ready')).toBe(
+      drawingMessage + ' ' + SOLAR_REFUSAL_REASONS.capability_not_ready + '.')
+  })
+
+  it.each(['Could not reach the server; try again.', 'unknown_code', 'toString'])('preserves %s', (message) => {
+    expect(routeErrorText(message)).toBe(message)
+  })
+
+  it('only processes messages up to 2000 characters', () => {
+    const limit = 'drawing_context_required; '.padEnd(2000, 'x')
+    expect(routeErrorText(limit)).toBe(drawingMessage + ' ' + limit.split('; ')[1])
+    expect(routeErrorText(limit + 'x')).toBe(limit + 'x')
+  })
+})
 
 describe('humanizeToolName', () => {
   it.each([

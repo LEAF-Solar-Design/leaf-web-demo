@@ -35,11 +35,32 @@ const recoveryKeys = (value, keys) => value && typeof value === 'object' && !Arr
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const recoveryText = (value, max = 256) => typeof value === 'string' && value.length > 0 && value.length <= max
 const recoveryHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
+function verifyCleanupEvidence(evidence, block, source, refuse) {
+  if (!recoveryKeys(evidence, ['schema', 'job_id', 'attempt', 'state', 'cancel', 'receipt'])
+    || evidence.schema !== 'leaf.lab-corpus-cleanup-evidence.v1' || evidence.job_id !== block.job_id
+    || (evidence.attempt !== null && (!Number.isSafeInteger(evidence.attempt) || evidence.attempt < 0))
+    || !['unconfirmed', 'confirmed_reaped', 'confirmed_not_started'].includes(evidence.state)) refuse()
+  const tag = evidence.cancel, receipt = evidence.receipt
+  if (block.job_id === null && (evidence.attempt !== null || tag !== null || receipt !== null)) refuse()
+  if (tag !== null && (!recoveryKeys(tag, ['run_id', 'block_id', 'attempt', 'fence', 'reason'])
+    || tag.run_id !== source.run_id || tag.block_id !== block.block_id || evidence.attempt === null
+    || tag.attempt !== evidence.attempt || !Number.isSafeInteger(tag.fence) || tag.fence <= 0
+    || !['deadline', 'cancel'].includes(tag.reason))) refuse()
+  if (evidence.state === 'unconfirmed') {
+    if (receipt !== null) refuse()
+    return
+  }
+  if (tag === null || !recoveryKeys(receipt, ['attempt', 'cancel', 'reaped', 'not_started'])
+    || receipt.attempt !== evidence.attempt || canonicalJSON(receipt.cancel) !== canonicalJSON(tag)
+    || typeof receipt.reaped !== 'boolean' || typeof receipt.not_started !== 'boolean'
+    || receipt.reaped === receipt.not_started
+    || evidence.state !== (receipt.reaped ? 'confirmed_reaped' : 'confirmed_not_started')) refuse()
+}
 function verifyRecoveryPlan(plan, run) {
   const refuse = () => { throw new Error(recoveryUnavailable) }
   if (!recoveryKeys(plan, ['schema', 'source', 'blocks', 'selected_failed_block_ids', 'retained_completed_block_ids',
     'unresolved_block_ids', 'draft_graph', 'execution_allowed', 'confirmation_required', 'digest'])
-    || plan.schema !== 'leaf.lab-corpus-recovery-plan.v1' || plan.execution_allowed !== false
+    || !['leaf.lab-corpus-recovery-plan.v1', 'leaf.lab-corpus-recovery-plan.v2'].includes(plan.schema) || plan.execution_allowed !== false
     || plan.confirmation_required !== true || !recoveryHash(plan.digest)) refuse()
   const source = plan.source
   if (!recoveryKeys(source, ['run_id', 'doc_id', 'graph_revision', 'graph_sha256', 'state'])
@@ -60,8 +81,10 @@ function verifyRecoveryPlan(plan, run) {
     }
   }
   const seen = new Set()
+  const cleanup = plan.schema === 'leaf.lab-corpus-recovery-plan.v2'
   for (const block of plan.blocks) {
-    if (!recoveryKeys(block, ['block_id', 'idempotency_key', 'job_id', 'status', 'receipt_sha256', 'disposition', 'reason_category'])
+    if (!recoveryKeys(block, ['block_id', 'idempotency_key', 'job_id', 'status', 'receipt_sha256', 'disposition', 'reason_category',
+      ...(cleanup ? ['cleanup_evidence'] : [])])
       || !recoveryText(block.block_id) || seen.has(block.block_id)
       || !membership.has(block.block_id) || membership.get(block.block_id) !== block.disposition
       || block.idempotency_key !== `lab:${run.id}:${block.block_id}:corpus:v1`
@@ -75,6 +98,7 @@ function verifyRecoveryPlan(plan, run) {
     if (block.disposition === 'retained' && (block.status !== 'complete' || block.reason_category !== 'completed')) refuse()
     if (block.status === 'complete' && block.disposition !== 'retained') refuse()
     if (block.disposition === 'unresolved' && ['timeout', 'resource_exhausted', 'lease_or_budget', 'completed'].includes(block.reason_category)) refuse()
+    if (cleanup) verifyCleanupEvidence(block.cleanup_evidence, block, source, refuse)
   }
   if (seen.size !== membership.size) refuse()
   const draft = plan.draft_graph, selected = plan.selected_failed_block_ids
@@ -136,6 +160,8 @@ function RecoveryPlan({ plan }) {
         {plan.blocks.some(block => block.disposition === disposition) ? <ul>{plan.blocks.filter(block => block.disposition === disposition).map(block =>
           <li key={block.block_id}><strong>{block.block_id}</strong>
             <p>Job: {block.job_id ?? 'Unavailable'} · status: {block.status ?? 'Unavailable'}</p>
+            <p>Cleanup: {block.cleanup_evidence?.state === 'confirmed_reaped' ? 'Confirmed reaped'
+              : block.cleanup_evidence?.state === 'confirmed_not_started' ? 'Confirmed not started' : 'Unconfirmed'} · attempt: {block.cleanup_evidence?.attempt ?? 'Unavailable'}</p>
             <p>{recoveryReasons[block.reason_category]} ({block.reason_category})</p>
           </li>)}</ul> : <p>None</p>}
       </section>)}
@@ -188,7 +214,7 @@ function RecoveryReview({ run, store, fetchImpl }) {
     }, 10000)
     const headers = { accept: 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() }
     try {
-      const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/recovery-plan`, {
+      const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/recovery-plan?include_cleanup=true`, {
         method: 'GET', headers, signal: controller.signal, credentials: 'same-origin', redirect: 'error', cache: 'no-store',
       })
       if (!current()) { void response.body?.cancel?.().catch(() => {}); return }

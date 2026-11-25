@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 import json
 import math
 from pathlib import Path
 import re
+import secrets
 import time
 import httpx
 from urllib.parse import quote, quote_plus, unquote, unquote_plus
@@ -39,14 +41,22 @@ from leaf_platform.integration_turn_grant_store import (
 
 REQUEST_CAP = 128 * 1024
 RESPONSE_CAP = 256 * 1024
+DATASET_ROW_BUDGET = 1000
+CURSOR_BYTE_BUDGET = 1024
 STATUS = {"invalid_input": 400, "unauthenticated": 401, "denied": 403,
           "unavailable": 503, "conflict": 409, "invalid_response": 502,
           "timeout": 504, "response_too_large": 502, "not_found": 404,
-          "outcome_unknown": 502}
+          "outcome_unknown": 502, "deleted_conflict": 409}
 
 
 class ReadFailure(Exception):
     """Only a fixed category may cross an internal boundary."""
+
+
+class IncompleteInventory(ReadFailure):
+    def __init__(self, pages_read):
+        super().__init__("incomplete_inventory")
+        self.pages_read = pages_read
 
 
 class DefiniteHTTPFailure(ReadFailure):
@@ -145,7 +155,7 @@ def normalize(operation, value):
         args = {"operation": operation, "limit": limit}
         if "after" in value:
             after = value["after"]
-            if (type(after) is not str or not 1 <= len(after) <= 1024
+            if (type(after) is not str or not 1 <= len(after) <= CURSOR_BYTE_BUDGET
                     or re.fullmatch(r"[A-Za-z0-9_-]+", after) is None):
                 raise ReadFailure("invalid_input")
             args["after"] = after
@@ -379,14 +389,27 @@ def validate_material_context(value):
     return value
 
 
-def project_discovery(value, limit):
+def project_discovery(value, limit, *, include_snapshot=False):
     """Project the Ops application-service discovery envelope, without receipts."""
-    if type(value) is not dict or set(value) != {"records", "nextCursor"}:
+    if (type(value) is not dict or not {"records", "nextCursor"} <= value.keys()
+            or value.keys() - {"records", "nextCursor", "snapshotId", "schemaRevision", "totalCount"}):
+        raise ReadFailure("invalid_response")
+    if "totalCount" in value and (type(value["totalCount"]) is not int or value["totalCount"] < 0):
+        raise ReadFailure("invalid_response")
+    if "snapshotId" in value and (type(value["snapshotId"]) is not str
+                                  or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["snapshotId"])):
+        raise ReadFailure("invalid_response")
+    if "schemaRevision" in value and not (
+        (type(value["schemaRevision"]) is int and 0 <= value["schemaRevision"] <= 9007199254740991)
+        or (type(value["schemaRevision"]) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value["schemaRevision"]))
+    ):
         raise ReadFailure("invalid_response")
     records, cursor = value["records"], value["nextCursor"]
     if type(records) is not list or len(records) > limit:
         raise ReadFailure("invalid_response")
-    if cursor is not None and (type(cursor) is not str or not 1 <= len(cursor) <= 1024
+    if isinstance(cursor, str) and len(cursor.encode("utf-8", errors="surrogatepass")) > CURSOR_BYTE_BUDGET:
+        raise ReadFailure("cursor_too_large" if include_snapshot else "invalid_response")
+    if cursor is not None and (type(cursor) is not str or not cursor
                               or re.fullmatch(r"[A-Za-z0-9_-]+", cursor) is None):
         raise ReadFailure("invalid_response")
     datasets = []
@@ -435,6 +458,12 @@ def project_discovery(value, limit):
             dataset["material_context"] = context
         datasets.append(dataset)
     result = {"datasets": datasets, "next_cursor": cursor}
+    if include_snapshot and "snapshotId" in value:
+        result["_snapshot"] = value["snapshotId"]
+    if include_snapshot and "schemaRevision" in value:
+        result["_schema_revision"] = value["schemaRevision"]
+    if include_snapshot and "totalCount" in value:
+        result["_total_count"] = value["totalCount"]
     if len(json.dumps(result, allow_nan=False, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
         raise ReadFailure("response_too_large")
     return result
@@ -456,6 +485,8 @@ async def bounded_http(method, url, token, body, deadline, transport=None, *, sa
                 if 300 <= response.status_code < 400:
                     raise ReadFailure("invalid_response")
                 if response.status_code != 200:
+                    if save and expected_revision is not None and response.status_code == 410:
+                        raise DefiniteHTTPFailure("deleted_conflict")
                     if save and response.status_code in {400, 401, 403, 404, 409}:
                         raise DefiniteHTTPFailure({400: "invalid_input", 401: "unauthenticated",
                                                    403: "denied", 404: "not_found",
@@ -512,20 +543,226 @@ class IntegrationToolService:
         self.store = store if store is not None else IntegrationTurnGrantStore()
         self.decrypt, self.gate, self.clock = decrypt, gate, clock
         self.transport, self.keys = transport, keys
+        self._dataset_cursor_key = secrets.token_bytes(32)
+
+    def iter_dataset_pages(self, tenant, session, turn, *, limit=50):
+        """Read each catalog page under the same turn authority, with bounded cursor history."""
+        authority = self.resolve(tenant, session, turn).authority
+        yield from self._catalog_pages("datasets", tenant, session, turn, limit, authority)
+
+    def _resolve_operation(self, operation, tenant, session, turn):
+        if operation in {"elements", "action_catalog"}:
+            if self.resolve_write is not None:
+                return self.resolve_write(tenant, session, turn)
+            return resolve_current(tenant, session, turn, write=True)
+        return self.resolve(tenant, session, turn)
+
+    def _catalog_pages(self, operation, tenant, session, turn, limit, authority, *,
+                       require_snapshot=False, cancel_event=None, provider_statuses=None, require_schema=False):
+        visited = set()
+        first_snapshot = None
+        first_schema_revision = None
+        schema_by_ref = {}
+        rows_read = 0
+        dataset_ids = set()
+        declared_total = None
+        args = {"limit": limit}
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise IncompleteInventory(len(visited))
+            if self._resolve_operation(operation, tenant, session, turn).authority != authority:
+                raise ReadFailure("denied")
+            reply = self._execute(operation, args, tenant, session, turn, authority,
+                                  provider_statuses=provider_statuses)
+            if self._resolve_operation(operation, tenant, session, turn).authority != authority:
+                raise ReadFailure("denied")
+            if "result" not in reply:
+                code = reply.get("error", {}).get("code", "denied")
+                if operation == "datasets" and code == "cursor_too_large":
+                    raise IncompleteInventory(len(visited))
+                if operation == "datasets" and visited and code in {"unavailable", "timeout"}:
+                    raise IncompleteInventory(len(visited))
+                raise ReadFailure(code)
+            page = reply["result"]
+            if cancel_event is not None and cancel_event.is_set():
+                raise IncompleteInventory(len(visited) + 1)
+            if operation == "datasets":
+                if provider_statuses is not None and any(row["status"] not in provider_statuses
+                                                          for row in page["datasets"]):
+                    raise ReadFailure("provider_filter_mismatch")
+                rows_read += len(page["datasets"])
+                if rows_read > DATASET_ROW_BUDGET:
+                    raise ReadFailure("response_too_large")
+                schema_revision = page.pop("_schema_revision", None)
+                if require_schema and schema_revision is None:
+                    raise IncompleteInventory(len(visited) + 1)
+                if not visited:
+                    first_schema_revision = schema_revision
+                elif first_schema_revision != schema_revision:
+                    raise IncompleteInventory(len(visited) + 1)
+                for dataset in page["datasets"]:
+                    ref = dataset["dataset_ref"]
+                    identity = (ref["id"], ref["version"], ref["digest"])
+                    fields = sorted(dataset["fields"], key=lambda field: field["id"])
+                    digest = hashlib.sha256(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode()).digest()
+                    if schema_by_ref.setdefault(identity, digest) != digest:
+                        raise IncompleteInventory(len(visited) + 1)
+                dataset_ids.update(row["dataset_ref"]["id"] for row in page["datasets"])
+                page_total = page.pop("_total_count", None)
+                if page_total is not None:
+                    if declared_total is not None and declared_total != page_total:
+                        raise IncompleteInventory(len(visited) + 1)
+                    declared_total = page_total
+                if declared_total is not None and (len(dataset_ids) > declared_total or
+                        (page["next_cursor"] is None and len(dataset_ids) != declared_total)):
+                    raise IncompleteInventory(len(visited) + 1)
+                snapshot = page.pop("_snapshot", None)
+                if require_snapshot and snapshot is None:
+                    raise ReadFailure("snapshot_unavailable")
+                if not visited:
+                    first_snapshot = snapshot
+                elif first_snapshot != snapshot:
+                    raise ReadFailure("snapshot_changed")
+            cursor = page["next_cursor"]
+            if cursor is not None:
+                if cursor in visited:
+                    raise ReadFailure("invalid_response")
+                if len(visited) >= 1000:
+                    raise ReadFailure("response_too_large")
+                visited.add(cursor)
+            yield page
+            if cursor is None:
+                return
+            args = {"limit": limit, "after": cursor}
+
+    def recover_recipe_save(self, description, original_args, tenant, session, turn, *, read_revision=None,
+                            journal_sha256=None):
+        from authored_recipe_retry import recover_recipe_save
+        return recover_recipe_save(self, description, original_args, tenant, session, turn,
+                                   read_revision=read_revision, journal_sha256=journal_sha256)
+
+    def edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn):
+        from authored_batch_recipe import edit_table_recipes
+        return edit_table_recipes(self, description, snapshots, saved_edits, tenant, session, turn)
+
+    def compare_role_actions(self, description, tenant, session, turn, *, policy, limit=50):
+        from authored_role_action import compare_role_actions
+        return compare_role_actions(self, description, tenant, session, turn, policy=policy, limit=limit)
+
+    def edit_inspection_recipe(self, description, snapshot, tenant, session, turn, *,
+                               issue_retry_key=False, retry_key=None, read_revision=None, record_attempt=None):
+        from authored_recipe_edit import edit_inspection_recipe
+        return edit_inspection_recipe(self, description, snapshot, tenant, session, turn,
+                                      issue_retry_key=issue_retry_key, retry_key=retry_key,
+                                      read_revision=read_revision, record_attempt=record_attempt)
+
+    def run_authored_dataset_report(self, description, tenant, session, turn, *, limit=50,
+                                    page_size=None, sort="catalog", cursor=None, cancel_event=None):
+        if page_size is not None or sort != "catalog" or cursor is not None:
+            from authored_dataset_cursor import paged_report
+            return paged_report(self, description, tenant, session, turn, limit=limit,
+                                page_size=page_size, sort=sort, cursor=cursor, cancel_event=cancel_event)
+        return self._run_catalog_report("datasets", description, tenant, session, turn, limit,
+                                        cancel_event=cancel_event)
+
+    def run_authored_action_report(self, description, tenant, session, turn, *, limit=50, include_form_digest=False):
+        return self._run_catalog_report("action_catalog", description, tenant, session, turn, limit,
+                                        include_form_digest=include_form_digest)
+
+    def _run_catalog_report(self, operation, description, tenant, session, turn, limit, *, include_form_digest=False,
+                            expected_authority=None, cancel_event=None, dataset_sort="catalog"):
+        """Run authored source on bounded catalog metadata, outside the credential-holding process."""
+        import tools_fallback
+        import tool_loader
+
+        if not isinstance(description, str) or not 1 <= len(description) <= 4000:
+            raise ReadFailure("invalid_input")
+        package, source, _ = tools_fallback.author_tool(description)
+        if operation == "action_catalog":
+            kind, collection = "action", "actions"
+            keys = ("connection_id", "connection_title", "title", "connector_ref", "operation_ref")
+        else:
+            kind, collection = "dataset", "datasets"
+            keys = ("dataset_ref", "title", "status")
+        if package["engine_op"] != f"project_{kind}_discovery":
+            raise ReadFailure("invalid_input")
+        authority = self._resolve_operation(operation, tenant, session, turn).authority
+        if expected_authority is not None and authority != expected_authority:
+            raise ReadFailure("denied")
+        rows = []
+        size = 0
+        pages = 0
+        datasets_by_id = {}
+        from authored_dataset_discovery import (
+            TIMESTAMPS, provider_status_filter, report_columns, requires_schema_revision, requires_snapshot,
+        )
+        pinned = operation == "datasets" and requires_snapshot(description)
+        provider_statuses = provider_status_filter(description) if operation == "datasets" else None
+        columns = report_columns(description) if operation == "datasets" else None
+        if columns == ():
+            raise ReadFailure("invalid_input")
+        for page in self._catalog_pages(operation, tenant, session, turn, limit, authority,
+                                        require_snapshot=pinned, cancel_event=cancel_event,
+                                        provider_statuses=provider_statuses,
+                                        require_schema=operation == "datasets" and requires_schema_revision(description)):
+            pages += 1
+            for entry in page[collection]:
+                row = {key: entry[key] for key in keys}
+                if columns:
+                    for key in columns:
+                        if key in ("freshness", "fields"):
+                            row[key] = entry[key]
+                        elif key in TIMESTAMPS and entry["freshness"] is not None and key in entry["freshness"]:
+                            row[key] = entry["freshness"][key]
+                if operation == "action_catalog" and include_form_digest:
+                    from authored_action_revocation import form_digest
+                    row["form_digest"] = form_digest(entry["form"])
+                size += len(json.dumps(row, separators=(",", ":")).encode("utf-8")) + 1
+                if size > RESPONSE_CAP:
+                    raise ReadFailure("response_too_large")
+                if operation == "datasets":
+                    dataset_id = row["dataset_ref"]["id"]
+                    previous = datasets_by_id.get(dataset_id)
+                    if previous is not None:
+                        if previous != row:
+                            raise ReadFailure("identity_conflict")
+                        continue
+                    datasets_by_id[dataset_id] = row
+                rows.append(row)
+        if self._resolve_operation(operation, tenant, session, turn).authority != authority:
+            raise ReadFailure("denied")
+        if dataset_sort != "catalog":
+            rows.sort(key=lambda row: (row["title"], row["dataset_ref"]["id"]), reverse=dataset_sort == "-title")
+        catalog = {collection: rows, "pages_read": pages}
+        if pinned:
+            catalog["snapshot_verified"] = True
+        intake = {f"project_{kind}_catalog": catalog}
+        status, payload = tool_loader._run_source_in_sandbox(source, f"{kind}_report.py", intake, {})
+        if status != "ok":
+            raise ReadFailure("unavailable")
+        report, _ = payload
+        if len(json.dumps(report, separators=(",", ":")).encode("utf-8")) > RESPONSE_CAP:
+            raise ReadFailure("response_too_large")
+        if self._resolve_operation(operation, tenant, session, turn).authority != authority:
+            raise ReadFailure("denied")
+        return report
 
     def execute(self, operation, value, tenant, session, turn):
+        return self._execute(operation, value, tenant, session, turn, None)
+
+    def _execute(self, operation, value, tenant, session, turn, expected_authority, *, provider_statuses=None):
         result = None
         code = "unavailable"
         try:
             args = normalize(operation, value)
+            if provider_statuses is not None:
+                args["statuses"] = list(provider_statuses)
             saving = operation == "elements"
             def resolve():
-                if saving or operation == "action_catalog":
-                    if self.resolve_write is not None:
-                        return self.resolve_write(tenant, session, turn)
-                    return resolve_current(tenant, session, turn, write=True)
-                return self.resolve(tenant, session, turn)
+                return self._resolve_operation(operation, tenant, session, turn)
             current = resolve()
+            if expected_authority is not None and current.authority != expected_authority:
+                raise ReadFailure("denied")
             custody = self.store.load_active(current.authority, self.clock())
             if custody is None:
                 raise ReadFailure("unavailable")
@@ -574,6 +811,8 @@ class IntegrationToolService:
                             url = base + "?limit=" + str(args["limit"])
                             if "after" in args:
                                 url += "&after=" + quote(args["after"], safe="")
+                            if provider_statuses is not None:
+                                url += "&statuses=" + quote(",".join(provider_statuses), safe="")
                         else:
                             ref = args["dataset_ref"]
                             method = "POST"
@@ -601,6 +840,7 @@ class IntegrationToolService:
                                 validate("IntegrationElementV1", value.get("element"))
                                 revision = value.get("revision")
                                 if (type(revision) is not int or not 1 <= revision <= 9007199254740991
+                                        or revision != args.get("expectedRevision", 0) + 1
                                         or json.dumps(value["element"], sort_keys=True, allow_nan=False)
                                         != json.dumps(args["recipe"], sort_keys=True, allow_nan=False)):
                                     raise ReadFailure("invalid_response")
@@ -608,9 +848,11 @@ class IntegrationToolService:
                             elif operation == "action_catalog":
                                 projected = validate_action_catalog(value, args["limit"])
                             else:
-                                projected = (project_discovery(value, args["limit"]) if operation == "datasets"
+                                projected = (project_discovery(value, args["limit"], include_snapshot=expected_authority is not None) if operation == "datasets"
                                              else validate_read(value, args["dataset_ref"]))
                         except ReadFailure as exc:
+                            if str(exc) == "cursor_too_large":
+                                return failure("cursor_too_large")
                             if str(exc) == "response_too_large":
                                 raise
                             raise ReadFailure("invalid_response") from None
@@ -622,6 +864,10 @@ class IntegrationToolService:
                     return output
                 except DefiniteHTTPFailure as exc:
                     category = str(exc)
+                except httpx.ConnectError:
+                    category = "unavailable"
+                except httpx.ConnectTimeout:
+                    category = "timeout"
                 except ReadFailure as exc:
                     category = ("outcome_unknown" if saving and started else
                                 str(exc) if str(exc) in STATUS else "unavailable")

@@ -97,6 +97,47 @@ describe("versioned dataset derivation contracts", () => {
     expect(DatasetDerivationRequestV1.safeParse({ ...scoped, inputs: { ...scoped.inputs, events: history } }).success).toBe(false);
   });
 
+  it.each([
+    ["identifier", "identifier"], ["text", "identifier"], ["identifier", "text"], ["text", "text"], ["count", "count"],
+  ] as const)("keeps omitted domain comparison exact for %s and %s", (primaryKind, domainKind) => {
+    const scoped = { ...groupRequest(), inputs: { primary: history, domain },
+      plan: { ...groupRequest().plan, domain: { keys: [{ group_field: "repository", domain_field: "repo" }] } } };
+    const bound = { request: scoped, bindings: [
+      { ...boundGroup().bindings[0], definition: { ...historyDefinition,
+        fields: historyDefinition.fields.map(item => item.id === "repo" ? field("repo", primaryKind) : item) } },
+      { alias: "domain", dataset_ref: domain, resource_revision: 2,
+        definition: definition(domain, [field("repo", domainKind)], "repo") },
+    ] };
+    expect(DatasetDerivationBoundRequestV1.parse(bound)).toEqual(bound);
+    expect(DatasetDerivationRequestV1.parse(scoped)).toEqual(scoped);
+    expect(scoped.plan.domain.keys[0]).not.toHaveProperty("comparison");
+  });
+
+  it.each([
+    ["identifier", "identifier", true], ["text", "identifier", false], ["identifier", "text", false],
+    ["text", "text", false], ["count", "count", false],
+  ] as const)("restricts opted-in domain comparison for %s and %s", (primaryKind, domainKind, accepted) => {
+    const scoped = { ...groupRequest(), inputs: { primary: history, domain },
+      plan: { ...groupRequest().plan, domain: { keys: [{ group_field: "repository", domain_field: "repo",
+        comparison: "ascii_case_insensitive" }] } } };
+    const bound = { request: scoped, bindings: [
+      { ...boundGroup().bindings[0], definition: { ...historyDefinition,
+        fields: historyDefinition.fields.map(item => item.id === "repo" ? field("repo", primaryKind) : item) } },
+      { alias: "domain", dataset_ref: domain, resource_revision: 2,
+        definition: definition(domain, [field("repo", domainKind)], "repo") },
+    ] };
+    const before = JSON.stringify(bound);
+    expect(DatasetDerivationRequestV1.parse(scoped)).toEqual(scoped);
+    const result = DatasetDerivationBoundRequestV1.safeParse(bound);
+    expect(result.success).toBe(accepted);
+    if (result.success) expect(result.data).toEqual(bound);
+    else expect(result.error.issues.some(issue =>
+      issue.message === "Case-insensitive domain comparison requires identifier fields on both sides")).toBe(true);
+    expect(JSON.stringify(bound)).toBe(before);
+    expect(DatasetDerivationRequestV1.safeParse({ ...scoped, plan: { ...scoped.plan,
+      domain: { keys: [{ ...scoped.plan.domain.keys[0], comparison: "unicode_case_insensitive" }] } } }).success).toBe(false);
+  });
+
   it.each(["tenant_id", "principal", "token", "url", "sql", "role"])("rejects caller-supplied authority or execution field %s", key => {
     expect(DatasetDerivationRequestV1.safeParse({ ...groupRequest(), [key]: "caller assertion" }).success).toBe(false);
   });

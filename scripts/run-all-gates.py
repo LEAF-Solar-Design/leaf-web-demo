@@ -1583,6 +1583,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_agent_policy.py"), 33),
         Suite("server-agent-gate", "server tests/test_agent_gate.py", "pytest", SERVER,
               _py_pytest("tests/test_agent_gate.py"), 57),
+        Suite("server-agent-gate-build-plan", "server tests/test_agent_gate_build_plan.py", "pytest", SERVER,
+              _py_pytest("tests/test_agent_gate_build_plan.py"), 33),
         # TCM-04 cost transparency: tenant direct use and the aps:engine usage
         # observation. Hermetic (fixture rows, tmp_path marathon runs), exact count.
         Suite("server-cost-direct-use", "server tests/test_cost_direct_use.py", "pytest", SERVER,
@@ -1632,6 +1634,8 @@ def build_suites() -> List[Suite]:
               # ELAPSED lease, pinned in both states. Nothing here skips, so the
               # local count IS the CI count.
               _py_pytest("tests/test_context_packet.py"), 17),
+        Suite("server-inline-authoring-context-packet", "server tests/test_context_packet_inline_authoring.py", "pytest", SERVER,
+              _py_pytest("tests/test_context_packet_inline_authoring.py"), 8),
         Suite("server-contract-freeze", "server tests/test_contract_freeze.py", "pytest", SERVER,
               _py_pytest("tests/test_contract_freeze.py"), 14),
         Suite("server-lab-contract", "server tests/test_lab_contract.py", "pytest", SERVER,
@@ -1655,6 +1659,10 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-surface", "server tests/test_lab_surface.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_surface.py") + ["tests/test_lab_corpus_recovery.py"], 36),
+        Suite("server-estimator-handoff", "server tests/test_estimator_handoff.py", "pytest", SERVER,
+              _py_pytest("tests/test_estimator_handoff.py"), 35),
+        Suite("server-estimator-surface", "server tests/test_estimator_surface.py", "pytest", SERVER,
+              _py_pytest("tests/test_estimator_surface.py"), 38),
         Suite("server-lab-artifacts", "server tests/test_lab_artifacts.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_artifacts.py"), 51, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
@@ -1844,7 +1852,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py") + ["tests/test_solar_graph_job_events.py"], 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
+              SERVER, _py_pytest("tests/test_canonical_worker.py") + ["tests/test_solar_graph_job_events.py", "tests/test_video_decode_worker.py"], 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 20),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
@@ -2192,7 +2200,19 @@ def build_suites() -> List[Suite]:
                   "tests/test_x04_operand_binding_precedence.py",
               ], 1934),
         Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
-              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + ["tests/test_x03_offline_drawing_author.py"], 13),
+              "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
+                  "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
+                  "tests/test_x03_joined_spline_author.py",
+                  "tests/test_x03_oblique_spline_author.py",
+                  "tests/test_x03_periodic_spline_author.py", "tests/test_x03_clip_holes_author.py",
+                  "tests/test_x03_clip_components_author.py", "tests/test_x03_clip_empty_author.py", "tests/test_x03_clip_cache_author.py", "tests/test_x03_clip_collinear_author.py", "tests/test_x03_clip_origin_author.py", "tests/test_x03_oblique_clip_author.py", "tests/test_x03_clip_exclusion_union_author.py", "tests/test_x03_clip_regroup_author.py", "tests/test_x03_viewport_panel_author.py", "tests/test_x03_reflected_clip_author.py", "tests/test_x03_clip_contact_author.py", "tests/test_x03_spline_poles_author.py", "tests/test_x03_spline_cusp_author.py", "tests/test_x03_spline_fit_only_author.py", "tests/test_x03_spline_degree_author.py", "tests/test_x03_spline_weight_scale_author.py", "tests/test_x03_spline_shear_author.py", "tests/test_x03_spline_units_author.py", "tests/test_x03_spline_subdivision_author.py", "tests/test_x03_spline_budget_author.py", "tests/test_x03_reversed_spline_author.py", "tests/test_x03_spline_refinement_author.py", "tests/test_x03_spline_parameter_author.py", "tests/test_x03_coincident_beam_author.py", "tests/test_x03_large_coordinate_author.py", "tests/test_x03_discontinuous_spline_author.py", "tests/test_x03_clip_budget_author.py", "tests/test_x03_clipped_area_author.py", "tests/test_x03_state_clip_author.py", "tests/test_x03_clipped_block_author.py", "tests/test_x03_dynamic_visibility_author.py", "tests/test_x03_aisle_detour_author.py",
+                  "tests/test_x03_beam_openings_author.py", "tests/test_x03_revision_panel_moves.py",
+                  "tests/test_x03_spatial_route_clearance.py", "tests/test_x03_scaled_curve_author.py",
+                  "tests/test_x03_multibundle_author.py", "tests/test_x03_instance_openings_author.py",
+                  "tests/test_x03_stepped_clearance_author.py",
+              ], 91),
         # W4g engine reach (2026-09-04): the intake -> DXF synthesizer (the
         # pinned inverse of dxf_intake), the drawing DXF route with its three
         # fail-closed legs, and the browser-edited version write-back (card
@@ -2205,6 +2225,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"could not import 'ezdxf': .*",)),
         Suite("server-drawing-dxf-route", "server tests/test_drawing_dxf_route.py", "pytest", SERVER,
               _py_pytest("tests/test_drawing_dxf_route.py"), 10),
+        Suite("server-drawing-plan-grammar", "server tests/test_drawing_plan_grammar.py", "pytest", SERVER,
+              _py_pytest("tests/test_drawing_plan_grammar.py"), 12),
         Suite("server-save-edited-version", "server tests/test_save_edited_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_edited_version.py"), 9),
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
@@ -2314,6 +2336,9 @@ def build_suites() -> List[Suite]:
         Suite("server-mutation-contract-v2",
               "server tests/test_mutation_contract_v2.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_contract_v2.py"), 42),
+        Suite("server-plan-conformance-corpus",
+              "server tests/test_plan_conformance_corpus.py", "pytest", SERVER,
+              _py_pytest("tests/test_plan_conformance_corpus.py"), 52),
         Suite("server-panel-transforms",
               "server tests/test_panel_transforms.py", "pytest", SERVER,
               _py_pytest("tests/test_panel_transforms.py"), 41),
@@ -3761,6 +3786,11 @@ def build_suites() -> List[Suite]:
                   # B-C6 conversation e2e: Postgres-gated (needs a live
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
+                  # SBT-A compile gate: four real-binary parity cases need a
+                  # built Branch checker (LEAF_BRANCH_COMPILE_BIN/REFS). The
+                  # harness image build runs the same four packages against the
+                  # Windows goldens and fails on any mismatch.
+                  ("test/branchCompileCheck.test.ts", 4),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
@@ -4257,9 +4287,19 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_integration_turn_grant_lifecycle.py"), 1),
         Suite("server-integration-tools", "turn-bound integration read endpoints", "pytest", SERVER,
               _py_pytest("tests/test_integration_tool_service.py")
-              + ["tests/test_integration_tool_routes.py"], 30),
+              + ["tests/test_integration_tool_routes.py", "tests/test_x03_material_provenance.py",
+                 "tests/test_x03_action_discovery.py", "tests/test_x03_action_discovery_author.py", "tests/test_x03_material_selection_author.py",
+                  "tests/test_x03_material_revision_author.py",
+                  "tests/test_x03_material_array_diff_author.py",
+                  "tests/test_x03_material_three_way_author.py", "tests/test_x03_dataset_page_alias_author.py", "tests/test_x03_dataset_schema_drift_author.py", "tests/test_x03_dataset_projection_author.py", "tests/test_x03_dataset_sort_null_author.py", "tests/test_x03_dataset_filter_author.py", "tests/test_x03_dataset_cursor_budget_author.py", "tests/test_x03_dataset_page_budget_author.py", "tests/test_x03_dataset_sort_ties_author.py", "tests/test_x03_dataset_cancel_author.py", "tests/test_x03_dataset_late_failure_author.py", "tests/test_x03_dataset_empty_page_author.py", "tests/test_x03_dataset_cursor_binding_author.py", "tests/test_x03_dataset_identity_author.py", "tests/test_x03_dataset_snapshot_author.py",
+                  "tests/test_x03_material_import_budget_author.py", "tests/test_x03_material_test_equality_author.py", "tests/test_x03_material_root_replace_author.py", "tests/test_x03_material_duplicate_keys_author.py", "tests/test_x03_material_pointer_decode_author.py", "tests/test_x03_material_index_author.py", "tests/test_x03_material_patch_budget_author.py", "tests/test_x03_material_move_cycle_author.py", "tests/test_x03_material_patch_guard_author.py", "tests/test_x03_material_copy_isolation_author.py", "tests/test_x03_material_patch_order_author.py", "tests/test_x03_material_numeric_author.py", "tests/test_x03_material_unicode_author.py", "tests/test_x03_material_null_author.py", "tests/test_x03_action_dynamic_refs_author.py", "tests/test_x03_action_annotations_author.py", "tests/test_x03_action_regex_budget_author.py", "tests/test_x03_action_dialect_author.py", "tests/test_x03_action_property_names_author.py", "tests/test_x03_action_dependent_schemas_author.py", "tests/test_x03_action_branch_budget_author.py", "tests/test_x03_action_unevaluated_items_author.py", "tests/test_x03_action_unevaluated_author.py", "tests/test_x03_action_string_length_author.py", "tests/test_x03_action_boolean_schema_author.py", "tests/test_x03_action_enum_author.py", "tests/test_x03_action_pattern_author.py", "tests/test_x03_action_decimal_schema_author.py", "tests/test_x03_action_array_schema_author.py", "tests/test_x03_action_conditional_author.py", "tests/test_x03_action_refs_author.py", "tests/test_x03_action_combinator_author.py", "tests/test_x03_action_extra_fields_author.py", "tests/test_x03_action_schema_author.py", "tests/test_x03_action_revocation_author.py", "tests/test_x03_role_action_author.py", "tests/test_x03_project_dataset_discovery.py",
+                 "tests/test_x03_dataset_discovery_author.py"], 41),
         Suite("server-integration-element-save", "turn-bound native element saves", "pytest", SERVER,
-              _py_pytest("tests/test_integration_element_save.py"), 1),
+              _py_pytest("tests/test_integration_element_save.py") + ["tests/test_x03_recipe_revision.py", "tests/test_x03_recipe_edit_author.py",
+                  "tests/test_x03_batch_recipe_author.py",
+                  "tests/test_x03_recipe_retry_author.py",
+                  "tests/test_x03_recipe_aba_author.py",
+                  "tests/test_x03_recipe_journal_swap_author.py", "tests/test_x03_recipe_journal_binding_author.py", "tests/test_x03_recipe_journal_budget_author.py", "tests/test_x03_recipe_journal_version_author.py", "tests/test_x03_recipe_recovery_access_author.py", "tests/test_x03_recipe_key_order_author.py", "tests/test_x03_recipe_retry_scope_author.py", "tests/test_x03_recipe_journal_corruption_author.py", "tests/test_x03_recipe_restart_author.py", "tests/test_x03_recipe_precommit_author.py", "tests/test_x03_recipe_delete_race_author.py", "tests/test_x03_recipe_key_collision_author.py", "tests/test_x03_recipe_concurrent_author.py"], 4),
         Suite("server-integration-browser", "verified browser dataset bridge", "pytest", SERVER,
               _py_pytest("tests/test_integration_browser.py"), 51),
         Suite("server-integration-browser-derivation", "finite browser derivation transport", "pytest", SERVER,
@@ -4325,6 +4365,31 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-tool-envelopes", "server tests/test_tool_envelopes.py", "pytest", SERVER,
               _py_pytest("tests/test_tool_envelopes.py"), 14),
+        Suite("server-online-signer", "server tests/test_online_signer.py", "pytest", SERVER,
+              _py_pytest("tests/test_online_signer.py"), 15,
+              allowed_skip_reasons=(r"no signed v1 JSON fixture exists in the specified directories",)),
+        Suite("server-branch-package-check", "server tests/test_branch_package_check.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_package_check.py"), 35),
+        Suite("server-branch-dev-publish", "server tests/test_branch_dev_publish.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_dev_publish.py"), 40),
+        Suite("server-build-plan", "server tests/test_build_plan.py", "pytest", SERVER, _py_pytest("tests/test_build_plan.py"), 40),
+        Suite("server-inline-authoring-flags", "server tests/test_inline_authoring_flags.py", "pytest", SERVER, _py_pytest("tests/test_inline_authoring_flags.py"), 40),
+        Suite("server-customization-branch-target", "server tests/test_customization_branch_target.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_branch_target.py"), 40),
+        Suite("server-customization-inline-review", "server tests/test_customization_inline_review.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_inline_review.py"), 36),
+        Suite("server-customization-stage-status-inline", "server tests/test_customization_stage_status_inline.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_stage_status_inline.py"), 46),
+        Suite("server-customization-tool-target-store", "server tests/test_customization_tool_target_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_customization_tool_target_store.py"), 20),
+        Suite("server-branch-dev-catalog", "server tests/test_branch_dev_catalog.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_dev_catalog.py"), 13),
+        Suite("server-branch-sync-receipts", "server tests/test_branch_sync_receipts.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_sync_receipts.py"), 37),
+        Suite("server-tenant-catalog", "server tests/test_tenant_catalog.py", "pytest", SERVER,
+              _py_pytest("tests/test_tenant_catalog.py"), 25),
+        Suite("server-tenant-publish", "server tests/test_tenant_publish.py", "pytest", SERVER,
+              _py_pytest("tests/test_tenant_publish.py"), 25),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
@@ -7944,14 +8009,15 @@ def reused_from_problem(reused_from) -> str:
 
 
 def device_verdict_problem(data: dict) -> str:
-    """Validate the staging-only selected proof without inventing suite results."""
+    """Validate selected or full device evidence without inventing suite results."""
     fields = {"schema", "kind", "tree", "mode", "coverage", "device_verdict"}
     if set(data) != fields:
         return f"device proof fields differ: missing {sorted(fields - set(data))}, unexpected {sorted(set(data) - fields)}"
     if type(data["schema"]) is not int:
         return "schema must be integer 2"
-    if data["coverage"] != "selected":
-        return "coverage must be selected"
+    coverage = data["coverage"]
+    if coverage not in ("selected", "full"):
+        return "coverage must be selected or full"
     verdict = data["device_verdict"]
     fields = {"bucket", "key", "version_id", "sha256", "repository", "head_sha",
               "run_id", "verdict_schema", "mode", "state", "shard_total", "shards"}
@@ -7964,7 +8030,7 @@ def device_verdict_problem(data: dict) -> str:
             return f"device_verdict.{key} must be a non-empty string"
     for key, expected in (("repository", "LEAF-Solar-Design/leaf-web-demo"),
                           ("verdict_schema", "leaf.forge-ci.device-verdict.v1"),
-                          ("mode", "selected"), ("state", "success")):
+                          ("mode", coverage), ("state", "success")):
         if verdict[key] != expected:
             return f"device_verdict.{key} must be {expected}"
     match = re.fullmatch(
@@ -7979,8 +8045,9 @@ def device_verdict_problem(data: dict) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{64}", verdict["sha256"]):
         return "device_verdict.sha256 must be 64 hex characters"
     total = verdict["shard_total"]
-    if type(total) is not int or total < 1:
-        return "device_verdict.shard_total must be an integer >= 1"
+    required_total = 3 if coverage == "selected" else 6
+    if type(total) is not int or total != required_total:
+        return f"device_verdict.shard_total must be integer {required_total} for coverage {coverage}"
     shards = verdict["shards"]
     if not isinstance(shards, list) or len(shards) != total:
         return "device_verdict.shards must be a list matching shard_total"
@@ -8004,7 +8071,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
     schema-2 tree-bound gate proof whose tree equals `expect_tree`. Run and
     reused proofs must match THIS checkout's catalog fingerprint and carry
     passing audit_suites. Device-verdict proofs require explicit caller
-    opt-in and selected device evidence instead of suite results. Runs nothing.
+    opt-in and selected or full device evidence instead of suite results. Runs nothing.
 
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
@@ -8053,7 +8120,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str, *, allow_device_verdic
         if problem:
             print(f"NOT VERIFIED: {problem}")
             return 1
-        print("VERIFIED mode: device-verdict coverage=selected")
+        print(f"VERIFIED mode: device-verdict coverage={data['coverage']}")
         return 0
     suites = build_suites()
     if duplicate_suite_ids(suites):
@@ -8908,7 +8975,7 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     ap.add_argument("--allow-device-verdict", action="store_true",
-                    help="allow a staging selected device-verdict proof in proof-check mode")
+                    help="allow a selected or full device-verdict proof in proof-check mode")
     args = ap.parse_args()
 
     if args.allow_device_verdict and not args.verify_gate_proof:

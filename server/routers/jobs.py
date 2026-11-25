@@ -655,34 +655,51 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+    import project_drawing_editor
+
     def execute_read():
+        intake = context.intake
+        if tool.get("engine_op") == "revision_panel_moves":
+            from authored_revision_panel_moves import bind_project_parent
+            intake = bind_project_parent(tenant, context)
+        # The project request also carries the drawing selector for binding and
+        # idempotency. A closed tool schema can exclude it from its own inputs.
+        schema = tool.get("params") or {}
+        tool_params = params
+        if ("drawing_id" in params and schema.get("additionalProperties") is False
+                and "drawing_id" not in schema.get("properties", {})
+                and not schema.get("patternProperties")):
+            tool_params = {key: value for key, value in params.items() if key != "drawing_id"}
         return tool_loader.run_tool_dynamic(
-            tool, context.intake, params, aps_live=False, da=None,
+            tool, intake, tool_params, aps_live=False, da=None,
             tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
 
-    if persist:
-        try:
+    try:
+        if persist:
             record = jobs.platform_link.run_project_read_job(
                 tenant, context, {**tool, "catalog_digest": req.catalog_digest},
                 params, idempotency_key, execute_read)
-        except jobs.platform_link.CanonicalEntitlementDenied as exc:
-            return exc.response
-        except jobs.platform_link.ProjectSessionForbidden:
-            return error_response(ErrorCode.FORBIDDEN, "project access denied",
-                                  retryable=False, status_code=403)
-        except solar_project_context.ProjectContextError as exc:
-            def refusal():
-                raise exc
-            return project_drawings._dispatch(refusal)
-        except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
-                                  status_code=400 if "required" in str(exc) else 409)
-        except Exception:
-            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-        return JSONResponse(status_code=202, content=record,
-                            headers={"Cache-Control": "no-store"})
-
-    env = execute_read()
+            return JSONResponse(status_code=202, content=record, headers={"Cache-Control": "no-store"})
+        env = execute_read()
+    except jobs.platform_link.CanonicalEntitlementDenied as exc:
+        return exc.response
+    except jobs.platform_link.ProjectSessionForbidden:
+        return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                              retryable=False, status_code=403)
+    except solar_project_context.ProjectContextError as exc:
+        def refusal():
+            raise exc
+        return project_drawings._dispatch(refusal)
+    except project_drawing_editor.EditorError as exc:
+        return JSONResponse(status_code=exc.status, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.BAD_PARAMS, exc.code, retryable=exc.retryable),
+            "reason_code": exc.code,
+        }), headers={"Cache-Control": "no-store"})
+    except ValueError as exc:
+        return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                              status_code=400 if "required" in str(exc) else 409)
+    except Exception:
+        return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
     body = {
         key: env[key]
         for key in (
@@ -814,7 +831,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             default=None, alias="X-Authority-Session-Id"),
         authority_turn_id: Optional[str] = Header(
             default=None, alias="X-Authority-Turn-Id"),
-        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault")):
+        x_xbench_solver_fault: Optional[str] = Header(default=None, alias="X-XBench-Solver-Fault"),
+        prefer: Optional[str] = Header(default=None)):
     """Submit a tool run as a durable background job (202), or block with ?wait=1.
 
     OPTIONAL project context: when the caller sends BOTH ``X-Org-Id`` and
@@ -1111,7 +1129,9 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
         return _run_project_read(
             tool, tenant_id, (x_org_id, x_project_id), req, params,
-            persist=persist == 1 or selected_binding is not None,
+            persist=persist == 1 or selected_binding is not None or (
+                isinstance(prefer, str) and "respond-async" in {item.strip().lower() for item in prefer.split(",")}
+            ),
             idempotency_key=idempotency_key, selected_binding=selected_binding)
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_write_tool(tool):

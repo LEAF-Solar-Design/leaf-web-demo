@@ -169,3 +169,36 @@ def test_auth_off_identity_seam_uses_server_tier(bootstrap, monkeypatch):
     assert response.json()["org"]["tier"] == "hosted_free"
     assert bootstrap.writes == [("identity", "Bootstrap Org", "hosted_free")]
     bootstrap.resolve.assert_not_called()
+
+
+def test_null_org_claim_allows_staging_bootstrap(bootstrap, monkeypatch):
+    bootstrap.claims[CLAIM_NS + "org_id"] = None
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    _assert_created(bootstrap)
+
+
+@pytest.mark.parametrize("org_claim", ["", " \t\n"])
+def test_blank_org_claim_allows_staging_bootstrap(bootstrap, monkeypatch, org_claim):
+    bootstrap.claims[CLAIM_NS + "org_id"] = org_claim
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
+    _assert_created(bootstrap)
+
+
+@pytest.mark.parametrize("org_claim", [123, {"x": 1}, False, 0, [], {}])
+def test_non_string_org_claim_requires_handoff_without_writes(bootstrap, org_claim):
+    bootstrap.claims[CLAIM_NS + "org_id"] = org_claim
+    response = bootstrap.client.post("/api/orgs", json={"name": "Bootstrap Org"})
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": (
+        "This identity requires authorized workspace provisioning. "
+        "Contact your workspace administrator to complete provisioning, "
+        "then sign in again."
+    )}
+    assert bootstrap.writes == []
+    assert bootstrap.events == []
+    bootstrap.ensure.assert_not_called()
+
+
+def test_null_org_claim_keeps_default_invite_only_gate(bootstrap):
+    bootstrap.claims[CLAIM_NS + "org_id"] = None
+    _assert_invite_only(bootstrap)

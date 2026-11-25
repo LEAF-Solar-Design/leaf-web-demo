@@ -36,9 +36,9 @@ export function solarSettingsFormChoice({ enabled, mock, toolName, context }) {
 }
 
 export function solarSettingsScope({ enabled, mock, profile, context }) {
-  if (enabled === true && mock === false && profile === 'solar' && context?.projectId === null &&
+  if (enabled === true && mock === false && context?.projectId === null &&
       typeof context.drawingId === 'string' && context.drawingId.length > 0) {
-    return { drawingId: context.drawingId, drawingVersion: context.drawingVersion ?? null, solarSettingsFormEnabled: true }
+    return { drawingId: context.drawingId, drawingVersion: context.drawingVersion ?? null, solarSettingsFormEnabled: profile === 'solar' }
   }
   return { drawingId: undefined, drawingVersion: undefined, solarSettingsFormEnabled: false }
 }

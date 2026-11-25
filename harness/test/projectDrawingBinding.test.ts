@@ -99,7 +99,9 @@ it("connects real adapter, loop and HTTP client to canonical summary and Solar w
   const summary = await run("STATE:summary");
   expect(JSON.stringify(summary)).toContain(version);
   expect(JSON.stringify(summary)).toContain("entity_total");
-  await run('RUN:solar-settings PARAMS:{"expected_rev":1,"changes":{"panels_in_sequence":10}}');
+  const events = await run('RUN:solar-settings PARAMS:{"expected_rev":1,"changes":{"panels_in_sequence":10}}');
+  expect(events.find(e => e.type === "proposed_run")?.data).toMatchObject({ tool: "solar-settings", dwg: drawing });
+  expect(requests.some(r => r.path === "/api/run")).toBe(false);
   expect(gate.checks.find(c => c.action === "run_write_tool")?.args).toMatchObject({ dwg: drawing,
     drawing_version: 3, expected_drawing_head: 3, input_version_id: version,
     intake_sha256: "a".repeat(64), project_execution_context: state.binding,

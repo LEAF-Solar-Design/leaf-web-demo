@@ -1297,3 +1297,17 @@ def test_job_list_keeps_auth_off_and_demo_paths(job_list_binding_lane, monkeypat
                           "org_id": str(O1), "project_id": str(P1)}]
     assert route.list_jobs(20, "demo")["jobs"][0]["job_id"] == "demo-job"
     assert lane.calls["binding"] == lane.calls["membership"] == []
+
+
+def test_project_catalog_preference_persists_read_without_authority_turn(lane, read_job_store):
+    headers = {"X-Org-Id": str(O1), "X-Project-Id": str(P1),
+               "Idempotency-Key": "project-toolbar-read", "Prefer": "respond-async"}
+    response = request(lane, headers=headers)
+    assert response.status_code == 202, response.text
+    row = response.json()
+    assert row["status"] == "complete" and UUID(row["job_id"])
+    assert row["input_version_id"] == str(V2)
+    assert row["execution_context"]["drawing_id"] == str(D1)
+    assert row["result"]["project_context"]["organization_id"] == str(O1)
+    repeat = request(lane, headers=headers)
+    assert repeat.status_code == 202 and repeat.json()["job_id"] == row["job_id"]

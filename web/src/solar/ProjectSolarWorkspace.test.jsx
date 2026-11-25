@@ -39,6 +39,26 @@ it('prices TEST decimals with half-even cents and refuses missing or nonpriceabl
   expect(estimateLineCents(takeoffLine('a', '1', { priceable: false }), '1')).toBeNull()
 })
 
+it('counts missing rates separately from unavailable quantities in a partial estimate', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([
+    takeoffLine('zero', '0'), takeoffLine('missing', null), takeoffLine('invalid', '-1'),
+    takeoffLine('excluded', '1', { priceable: false }), takeoffLine('later', '1', { status: 'not-computed' }),
+  ]))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  const input = await screen.findByLabelText('TEST rate USD zero')
+  const breakdown = () => screen.getByLabelText('Unpriced line breakdown')
+  expect(breakdown()).toHaveTextContent('Missing rates: 1')
+  expect(breakdown()).toHaveTextContent('Unavailable quantities: 2')
+  fireEvent.change(input, { target: { value: 'invalid' } })
+  expect(breakdown()).toHaveTextContent('Missing rates: 0')
+  expect(breakdown()).toHaveTextContent('Invalid rates: 1')
+  fireEvent.change(input, { target: { value: '0' } })
+  expect(breakdown()).toHaveTextContent('Invalid rates: 0')
+  expect(screen.getByText('Priced subtotal (preview): $0.00')).toBeTruthy()
+})
+
 it('mounts the takeoff inspection host and edits preview rates without worker submission', async () => {
   const h = fixture('solar-takeoff')
   h.client.readSolar.mockResolvedValue(takeoffResult([
@@ -279,6 +299,8 @@ it('saves through the validated callback boundary, reopens all saved quantities 
     h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
     fireEvent.click(screen.getByRole('button', { name: 'Reopen saved estimate' }))
     await screen.findByText('Saved estimate reopened.')
+      expect(screen.getByLabelText('Unpriced line breakdown')).toHaveTextContent('Missing rates: 1')
+      expect(screen.getByLabelText('Unpriced line breakdown')).toHaveTextContent('Unavailable quantities: 1')
     expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-saved')
     expect(screen.getByText('2.000')).toBeTruthy()
     expect(screen.getAllByText('Unpriced')).toHaveLength(2)
@@ -1804,6 +1826,16 @@ it.each(['solar-panel-groups', 'solar-solaredge-accept'])('explains revoked writ
   expect(screen.queryByText(guidance)).toBeNull()
   expect(h.submit).not.toHaveBeenCalled()
 })
+
+it.each(['project_request_required', 'SIP_R4_WORKER_UNAVAILABLE', 'capability_not_ready'])(
+  'does not describe %s as a write permission denial', (reason) => {
+    const h = fixture('solar-panel-groups')
+    const row = { ...h.row, availability: { ...h.row.availability, entitled: false,
+      entitlement_reason: null, runnable: false, refusal_reasons: [reason] } }
+    h.mount({ openTool: row, projectCatalog: { ...h.catalog, families: [{ capabilities: [row] }] } })
+    expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
+    expect(h.submit).not.toHaveBeenCalled()
+  })
 
 it('does not describe denied read permission as lost write access', () => {
   const h = fixture('solar-string-data')

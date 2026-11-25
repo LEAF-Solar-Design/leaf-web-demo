@@ -199,12 +199,21 @@ def test_routes_confirm_replay_edit_and_old_pin(routes, connection):
     status, confirmed = call_route(routes, 'confirm', request)
     assert status == 200 and confirmed['ok'] is True
     assert confirmed['applied_profile']['roles'] == ROLES
+    assert confirmed['profile']['roles'] == ROLES
+    assert confirmed['profile']['version'] == 1
+    assert confirmed['profile']['profile_id'] == confirmed['applied_profile']['profile_id']
     status, replay = call_route(routes, 'confirm', request)
     assert status == 200 and replay == confirmed
     assert connection.db.execute('SELECT COUNT(*) FROM x07_profile_versions').fetchone()[0] == 1
     status, edited = call_route(routes, 'edit', routes.Edit(
         roles={'module': {'block': 'Edited', 'layer': 'PV'}}, expected_version=1))
     assert status == 200 and edited['profile']['version'] == 2
+    status, after_edit = call_route(routes, 'confirm', request)
+    assert status == 200
+    assert after_edit['applied_profile'] == confirmed['applied_profile']
+    assert after_edit['profile'] == edited['profile']
+    assert connection.db.execute('SELECT COUNT(*) FROM x07_project_applications').fetchone()[0] == 1
+    assert connection.db.execute('SELECT COUNT(*) FROM x07_profile_versions').fetchone()[0] == 2
     status, reopened = call_route(routes, 'read')
     assert status == 200
     assert reopened['profile']['version'] == 2

@@ -269,6 +269,7 @@ describe("mount your LLM — a credential pasted into the prompt", () => {
     // two args hashes disagreed and approval replay failed as args_mismatch.
     // Scrubbing the source means every copy derives from the same scrubbed text.
     const { adapter, runner, store, gate, appRun } = build();
+    gate.approvalRequired.add("run_drawing_edit_tool");
     gate.nextConfirmationId = "credential-dwg-confirm";
     const proposedEvents = await drain(
       adapter.runTurn(

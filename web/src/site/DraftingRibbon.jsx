@@ -30,19 +30,21 @@
 // run" uses (onRequestRun -> commitCatalogDecision, source 'ribbon'). NEVER
 // dispatchSlash here: that stamps slash provenance into the P2 funnel and
 // silently no-ops on gated writes.
-import { useLayoutEffect, useRef, useState } from 'react'
+import { Children, cloneElement, createContext, isValidElement, useContext, useLayoutEffect, useRef, useState } from 'react'
 
 import { accessibleName, reasonCode } from '../lib/actionRegistry.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { familyMonogram } from '../lib/surfaceRails.js'
-import CockpitIcon from './CockpitIcon.jsx'
+import { DEFAULT_TOOL_ICON, studioToolIcon } from '../lib/toolRecord.js'
+import CockpitIcon, { hasIcon } from './CockpitIcon.jsx'
 
 // The band's measured height, published on the workspace card as a CSS
 // variable so the floating import pane clears it (landing.css). jsdom has no
 // ResizeObserver; the one-shot measurement still runs there, so the variable
 // always exists.
 export const RIBBON_HEIGHT_VAR = '--cockpit-ribbon-h'
+const CompactStudioRibbon = createContext(false)
 
 function useBandHeight(ref) {
   useLayoutEffect(() => {
@@ -134,6 +136,7 @@ export function RibbonTool({ tool }) {
     <button
       type="button"
       className={`ribbon-tool${write ? ' write' : ''}`}
+      data-text-only={!hasIcon(icon) ? 'true' : undefined}
       data-tool={id}
       data-element-id={formatElementId('tool', id) || undefined}
       data-size={size}
@@ -147,7 +150,7 @@ export function RibbonTool({ tool }) {
       aria-controls={controls || undefined}
       onClick={onClick}
     >
-      <CockpitIcon id={icon} fallback={text || label} size={size} />
+      {hasIcon(icon) && <CockpitIcon id={icon} fallback={text || label} size={size} />}
       {swatch ? <span className="ribbon-swatch" style={{ background: swatch }} aria-hidden="true" /> : null}
       <span className="ribbon-tool-label">{text || label}</span>
     </button>
@@ -217,6 +220,24 @@ export function RibbonWidget({ widget }) {
 }
 
 export function RibbonCluster({ id, label, kind = 'group', note = null, extra = null, widgets = [], onLabelClick = null, labelTitle = '', children }) {
+  const compact = useContext(CompactStudioRibbon)
+  const seen = new Set()
+  const disabled = []
+  const visible = Children.toArray(children).flatMap((child) => {
+    if (!compact || !isValidElement(child) || child.type !== RibbonTool) return [child]
+    const tool = child.props.tool
+    if (tool.disabled) {
+      disabled.push(<div key={child.key}>
+        {cloneElement(child, { tool: { ...tool, icon: '' } })}
+        {tool.reason && <p className="ribbon-tool-reason">{tool.reason}</p>}
+      </div>)
+      return []
+    }
+    const studioIcon = studioToolIcon({ ...tool, name: tool.name || tool.id, icon: tool.icon === DEFAULT_TOOL_ICON ? '' : tool.icon })
+    const icon = seen.has(studioIcon) ? '' : studioIcon
+    if (icon) seen.add(icon)
+    return [cloneElement(child, { tool: { ...tool, icon } })]
+  })
   const attrs = kind === 'family' ? { 'data-family': id } : { 'data-group': id }
   if (note) attrs['data-note'] = 'true'
   const labelBody = (
@@ -229,7 +250,8 @@ export function RibbonCluster({ id, label, kind = 'group', note = null, extra = 
   return (
     <div className="ribbon-cluster" role="group" aria-label={label} {...attrs}>
       <div className="ribbon-cluster-tools">
-        {children}
+        {visible}
+        {disabled.length > 0 && <details className="ribbon-disabled-more"><summary>More</summary>{disabled}</details>}
         {/* W4g-4b: a seat's slot (the Clipboard, Script and Properties seats
             the engine consumer portals into) sits ON the tools row, between
             the tools and the widgets. Rendered after the row it was a third
@@ -272,6 +294,11 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
   const measuredWidthRef = useRef(0)
   const [overflow, setOverflow] = useState(false)
   const [open, setOpen] = useState(false)
+  const [compact, setCompact] = useState(false)
+  const [drawOpen, setDrawOpen] = useState(false)
+  useLayoutEffect(() => {
+    setCompact(!!ref.current?.closest('.app[data-studio-shell="cockpit"]:is([data-surface="cad"], [data-surface="solar"])'))
+  }, [clusters, children, tab])
   useLayoutEffect(() => { setOpen(false) }, [tab])
   useLayoutEffect(() => {
     const ribbon = ref.current
@@ -363,11 +390,13 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       aria-label="Drafting tools"
       data-testid="drafting-ribbon"
       data-tab={tab}
+      data-collapsed={compact && !drawOpen ? 'true' : undefined}
       data-overflow-open={open ? 'true' : undefined}
       onBlur={(event) => {
         if (open && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}
     >
+      {compact && <button type="button" className="ribbon-draw-toggle" aria-expanded={drawOpen} aria-controls="drafting-ribbon-panels" onClick={() => setDrawOpen((value) => !value)}>Draw</button>}
       {catalogError && (
         <div className="ribbon-catalog-error" role="status">
           <span>Couldn't load tools: {catalogError}</span>
@@ -389,6 +418,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           if (button && event.currentTarget.contains(button) && !button.disabled) setOpen(false)
         }}
       >
+      <CompactStudioRibbon.Provider value={compact}>
       {children}
       {list.length === 0 && !children && !catalogError && (
         // Honest empty: a sentence, never a fabricated cluster.
@@ -409,6 +439,7 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
           {(cluster.tools || []).map((tool) => <RibbonTool key={tool.id} tool={tool} />)}
         </RibbonCluster>
       ))}
+      </CompactStudioRibbon.Provider>
       </div>
       <button
         ref={moreRef}

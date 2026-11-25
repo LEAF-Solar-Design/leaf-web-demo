@@ -1,0 +1,93 @@
+"""Exercise the offline author on three real DXF aisle networks."""
+import math
+
+import pytest
+
+from test_x03_offline_drawing_author import intake_dxf, invoke, tools_fallback
+from test_x03_route_author_product import entity
+
+
+START, END = (-5, 0), (5, 0)
+ASKS = (
+    "Find cable crossings through rotated arrays and show the shortest legal aisle detour.",
+    "Reroute wires that cut through panel footprints using the shortest access aisle path.",
+    "Show the minimum-length aisle detour for conduit runs intersecting angled module arrays.",
+)
+
+
+def simple_paths(edges, start, end):
+    # Exhaust every simple path in the independently enumerated legal graph.
+    pending = [([start], 0.0)]
+    while pending:
+        path, length = pending.pop()
+        if path[-1] == end:
+            yield length, path
+            continue
+        for a, b in edges:
+            if path[-1] in (a, b):
+                other = b if a == path[-1] else a
+                if other not in path:
+                    pending.append((path + [other], length + math.dist(other, path[-1])))
+
+
+@pytest.mark.parametrize("case", range(3), ids=["competing-centerlines", "aisle-footprint", "disconnected"])
+def test_shortest_legal_detour(case):
+    top, bottom = (0, 2), (1, -3)
+    crossing = ["B1", "9E", "11F"][case]
+    entities = [
+        entity("PV Array", "A1", [(-2, 0), top, (3, -1), bottom], closed=True),
+        entity("DC Cable", crossing, [START, END]),
+        entity("Wire", "B2", [(-2, 1.75), (-1.5, 1.75)]),  # inside bbox only
+        entity("Wire", "B3", [(-2, 2), (2, 2)]),  # touches the top vertex
+        dict(entity("Wire", "B4", [START, END]), space="paper"),
+        entity("Notes", "D1", [START, END]),
+    ]
+    if case == 0:
+        # Upper and lower candidates intersect the side aisles in their interiors.
+        left, right = (-5, 3), (5, 3)
+        low_left, low_right = (-5, -5), (5, -5)
+        entities += [
+            entity("Aisle", "C1", [low_left, (-5, 4)]),
+            entity("Aisle", "C2", [low_right, (5, 4)]),
+            entity("Aisle", "C3", [(-6, 3), (6, 3)]),
+            entity("Aisle", "C4", [low_left, low_right]),
+            entity("Aisle", "C5", [START, END]),  # illegal shortcut
+        ]
+        edges = [(START, left), (left, right), (right, END),
+                 (START, low_left), (low_left, low_right), (low_right, END)]
+    elif case == 1:
+        entities.append(entity("Access Aisles", "C6", [(-6, -4), (6, -4), (6, 4), (-6, 4)], True))
+        entities.append(entity("Conduit", "EE", [END, (1, 0), START]))
+        # At these endpoints a taut path around the convex diamond turns at
+        # its top or bottom. The outer aisle rectangle contains both paths.
+        edges = [(START, top), (top, END), (START, bottom), (bottom, END)]
+    else:
+        entities += [entity("Aisles", "C7", [START, (-5, 4)]),
+                     entity("Aisles", "C8", [(5, 4), END]),
+                     dict(entity("Aisles", "C9", [(-5, 4), (5, 4)]), space="paper")]
+        edges = [(START, (-5, 4)), ((5, 4), END)]
+
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({e["layer"] for e in entities}), polylines=entities))
+    _, source, _ = tools_fallback.author_tool(ASKS[case])
+    status, payload = invoke(source, raw)
+    assert status == "ok", payload
+    result, overlay = payload
+    expected = [crossing, "EE"] if case == 1 else [crossing]
+    assert sorted(result.get("crosses_array") or []) == sorted(expected), result
+    assert sorted(overlay["highlight_handles"]) == sorted(expected)
+    assert set(result["detours"]) == set(expected)
+    detour = result["detours"][crossing]
+    alternatives = sorted(simple_paths(edges, START, END))
+    if alternatives:
+        shortest, path = alternatives[0]
+        assert detour["length"] == pytest.approx(shortest)
+        assert detour["points"] == [list(pt) for pt in path]
+        if case == 1:
+            reverse = result["detours"]["EE"]
+            assert reverse["length"] == pytest.approx(shortest)
+            assert reverse["points"] == list(reversed(detour["points"]))
+        assert sorted(poly["pts"] for poly in overlay["polylines"]) == sorted(
+            row["points"] for row in result["detours"].values())
+    else:
+        assert detour["status"] == "no_legal_detour"
+        assert overlay["polylines"] == []

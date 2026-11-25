@@ -1466,6 +1466,11 @@ footer .warn-txt { color: var(--status-warning); }
 .ca-field { display: flex; flex-direction: column; gap: 4px; }
 .ca-field-k { font-size: var(--leaf-size-caption); color: var(--muted); } /* F1: 12px muted label above */
 .ca-field input { width: 100%; }
+/* masked credential field without type=password, so no browser offers to save it (rehearsal issue 25) */
+.ca-field input.ca-secret { -webkit-text-security: disc; font-family: var(--leaf-font-mono, monospace); }
+.ca-form-err { margin: 6px 0 0; }
+/* a trigger near the left edge anchors the card to its left, so it stays on screen (desktop only; phones use the fixed sheet) */
+@media (min-width: 600px) { .claude-pop[data-align="start"] { left: 0; right: auto; } }
 .ca-act { align-self: flex-start; }
 .ca-note { font-size: var(--leaf-size-caption); color: var(--muted-2); line-height: 1.5; margin: 0; }
 /* linking hiccup — calm amber, not a red alarm (retryable coordination state) */
@@ -2074,7 +2079,6 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-size: var(--leaf-size-body);
 }
 .converse-msg[data-converse-role="user"]::before,
-.converse-msg[data-converse-role="assistant"]::before,
 .converse-confirm[data-converse-role="decision"]::before,
 .converse-question[data-converse-role="question"]::before {
   display: block;
@@ -2082,7 +2086,8 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
 }
 .converse-msg[data-converse-role="user"]::before { content: "You"; }
-.converse-msg[data-converse-role="assistant"]::before { content: "Assistant"; }
+/* Assistant turns carry no per-turn label: the panel head already says
+   Assistant, and repeating it on every reply was noise (P8, D21). */
 .converse-tool-row[data-converse-role="tool"] {
   display: flex; gap: 8px; flex-wrap: wrap;
   list-style: none; margin: 0; padding: 0;
@@ -2094,7 +2099,9 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   color: var(--foreground);
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  /* control radius, not a 999px pill: a wrapped multi-line chip stays a
+     rounded box instead of an ellipse that clips its text (P4, D07) */
+  border-radius: var(--leaf-radius-control);
   padding: 3px 9px;
   box-sizing: border-box;
   min-width: 0;
@@ -2108,7 +2115,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .converse-tool-chip[data-state="failed"]::before { content: "✕"; color: var(--status-danger); }
 .converse-tool-chip[data-state="failed"] > .converse-step-state { font-size: 0; }
 .converse-tool-chip[data-state="failed"] > .converse-step-state::before {
-  content: "Unavailable"; font-size: var(--leaf-size-dense);
+  content: "Failed"; font-size: var(--leaf-size-dense);
 }
 @media (prefers-reduced-motion: no-preference) {
   .converse-tool-chip[data-state="running"]::before {
@@ -2257,6 +2264,14 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   display: flex; align-items: center; gap: 10px;
   font-size: var(--leaf-size-caption); color: var(--muted-2);
 }
+.converse-model-badge {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted-2);
+  font-size: var(--leaf-size-caption); white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+.converse-model-badge.local { border-color: var(--primary); color: var(--primary); }
 .converse-usage {
   margin-left: auto;
   font-size: var(--leaf-size-caption); color: var(--muted-2);

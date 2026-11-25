@@ -1114,6 +1114,18 @@ export async function getEntitlements() {
   }
 }
 
+export async function fetchInlineAuthoringFlags() {
+  const disabled = { plan_mode: false, inline_review: false, self_approval: false }
+  try {
+    const flags = await http('/api/author/inline-authoring', { headers: { 'X-Tenant-Id': TENANT } })
+    if (!Object.keys(disabled).every(key => typeof flags?.[key] === 'boolean')) return disabled
+    const { plan_mode, inline_review, self_approval } = flags
+    return { plan_mode, inline_review, self_approval }
+  } catch {
+    return disabled
+  }
+}
+
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
@@ -1564,9 +1576,14 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
 // corrupted body can never become a version. `parentVersion` rides the
 // server's compare-and-set (409 when the head moved). The single-writer
 // checkout capability travels the same header undo/redo use.
-export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null) {
+export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   const headers = { 'X-Tenant-Id': TENANT, ...authHeaders() }
@@ -2102,6 +2119,41 @@ export function authorRetryDelay(value) {
   return Number.isFinite(delay) ? Math.min(5000, Math.max(250, delay)) : 1000
 }
 
+export function getAuthorStage(changeSetId, signal) {
+  return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function getAuthorStageSource(changeSetId, commit, signal) {
+  const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
+  const response = await apiFetch(`${API_BASE}${path}`, {
+    headers: { 'X-Tenant-Id': TENANT, ...authHeaders() }, signal, cache: 'no-store', redirect: 'error',
+  }, path)
+  const file = response.headers.get('X-Leaf-Source-Path')
+  if (!response.ok || response.headers.get('X-Leaf-Source-Commit') !== commit
+    || !/(?:^|\/)(main\.csx|tool\.py)$/.test(file || '')) return null
+  return { path: file, text: await response.text() }
+}
+
+export function reviewContext(changeSetId, signal) {
+  return http(`/api/author/reviews/context?change_set_id=${encodeURIComponent(changeSetId)}`, {
+    headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
+  })
+}
+
+export async function postReview({ change_set_id, staged_commit, catalog_digest, decision, comment }) {
+  if (comment != null) {
+    const guard = guardedText(comment)
+    if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+  }
+  return http('/api/author/reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT },
+    body: JSON.stringify({ change_set_id, staged_commit, catalog_digest, decision, comment }),
+  })
+}
+
 function authorStageResult(body) {
   if (body?.result?.receipt) return body.result
   if (body?.receipt && body?.result && typeof body.result === 'object') {
@@ -2374,6 +2426,77 @@ async function toolManagementPost(mock, path, payload) {
 }
 
 const managementString = (value) => typeof value === 'string' && value.trim().length > 0
+
+export function stagedSourceIdentity(staged) {
+  const receipt = staged?.receipt
+  const tool = staged?.tool
+  if (staged?.demo || staged?.legacy_demo || staged?.published || receipt?.state !== 'staged'
+    || !isSourceUuid(receipt?.change_set_id) || !sourceHash(receipt?.staged_commit, 40)
+    || !sourceHash(receipt?.catalog_digest, 64) || tool?.kind !== 'script'
+    || typeof tool?.name !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(tool.name)
+    || tool.entry !== `tools/${tool.name}/tool.py`) return null
+  return { changeSetId: receipt.change_set_id, commit: receipt.staged_commit,
+    path: tool.entry, filename: `${tool.name}.py` }
+}
+
+export async function downloadStagedSource(staged, { expectedScope, signal } = {}) {
+  const identity = stagedSourceIdentity(staged)
+  const unavailable = () => new Error('Staged source could not be verified. Refresh the saved request and try again.')
+  const check = () => {
+    if (!identity || !expectedScope || signal?.aborted || readActiveScope() !== expectedScope
+      || !authHeaders().Authorization || isMockConversation()) throw unavailable()
+  }
+  check()
+  const path = `/api/author/stages/${identity.changeSetId}?view=source`
+  const url = new URL(`${API_BASE}${path}`, window.location.origin)
+  if (url.origin !== window.location.origin || url.pathname !== path.split('?')[0]
+    || url.search !== '?view=source' || url.hash || url.username || url.password) throw unavailable()
+  const response = await apiFetch(url.href, { method: 'GET', headers: authHeaders(),
+    cache: 'no-store', redirect: 'error', signal }, path)
+  check()
+  if (response.status !== 200 || response.redirected) throw unavailable()
+  const headers = response.headers
+  const length = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Source-Sha256')
+  const blob = headers.get('X-Leaf-Source-Blob')
+  if (!/^(0|[1-9][0-9]{0,5})$/.test(length || '') || Number(length) > 262144
+    || headers.get('Content-Type') !== 'application/octet-stream'
+    || ![null, 'identity'].includes(headers.get('Content-Encoding'))
+    || headers.get('X-Leaf-Source-Commit') !== identity.commit
+    || headers.get('X-Leaf-Source-Path') !== identity.path
+    || !sourceHash(sha256, 64) || !sourceHash(blob, 40)
+    || !globalThis.crypto?.subtle || !response.body?.getReader) throw unavailable()
+  const reader = response.body.getReader()
+  const bytes = new Uint8Array(Number(length))
+  const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      check()
+      if (done) break
+      if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+        || total + value.byteLength > bytes.length) throw unavailable()
+      bytes.set(value, total)
+      total += value.byteLength
+    }
+    if (total !== bytes.length) throw unavailable()
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+  const prefix = new TextEncoder().encode(`blob ${bytes.length}\0`)
+  const gitBytes = new Uint8Array(prefix.length + bytes.length)
+  gitBytes.set(prefix)
+  gitBytes.set(bytes, prefix.length)
+  const hex = (buffer) => Array.from(new Uint8Array(buffer), (n) => n.toString(16).padStart(2, '0')).join('')
+  const [actualSha, actualBlob] = await Promise.all([
+    crypto.subtle.digest('SHA-256', bytes), crypto.subtle.digest('SHA-1', gitBytes),
+  ])
+  check()
+  if (hex(actualSha) !== sha256 || hex(actualBlob) !== blob) throw unavailable()
+  return { bytes, filename: identity.filename }
+}
 
 export async function getToolRemovalAuthority(mock, toolName) {
   const body = await toolManagementPost(mock, '/api/author/removals/authority', { tool_name: toolName })

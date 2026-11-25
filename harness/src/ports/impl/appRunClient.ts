@@ -15,6 +15,7 @@
 
 import type {
   AppRunClient,
+  PlanBuildRequest,
   ProjectDrawingState,
   CapabilityEntry,
   SubmitRunRequest,
@@ -800,6 +801,30 @@ export class HttpAppRunClient implements AppRunClient {
     idempotencyKey: string,
     authority?: { sessionId?: string; turnId?: string },
     targetToolName?: string,
+    target?: "branch",
+  ): Promise<Record<string, unknown>> {
+    return this.postAuthor(tenantId, {
+      description, mode,
+      ...(targetToolName ? { target_tool_name: targetToolName } : {}),
+      ...(target === "branch" ? { target: "branch" } : {}),
+    }, idempotencyKey, authority);
+  }
+
+  async authorToolFromPlan(
+    tenantId: string,
+    { plan_confirmation_id, mode, retry_of_change_set_id }: PlanBuildRequest,
+    idempotencyKey: string,
+    authority: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.postAuthor(tenantId, {
+      plan_confirmation_id, mode,
+      ...(retry_of_change_set_id ? { retry_of_change_set_id } : {}),
+    }, idempotencyKey, authority);
+  }
+
+  private postAuthor(
+    tenantId: string, body: Record<string, unknown>, idempotencyKey: string,
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>> {
     // The back edge authenticates as a tenant and cannot assert a user. Naming
     // the app-owned session/turn that authenticated this turn lets the app read
@@ -808,10 +833,7 @@ export class HttpAppRunClient implements AppRunClient {
       tenantId,
       "POST",
       "/api/author",
-      {
-        description, mode,
-        ...(targetToolName ? { target_tool_name: targetToolName } : {}),
-      },
+      body,
       {
         "idempotency-key": idempotencyKey,
         ...(authority?.sessionId

@@ -68,6 +68,17 @@ describe('header popover layout', () => {
     expect(layerValue(declaration(header, 'z-index'))).toBeGreaterThan(6)
   })
 
+  it('lifts the open header popover above the start chooser scrim and the Studio activity panel', () => {
+    // Rehearsal issue 23: the Claude accounts panel opened dimmed under the chooser and half under the panel.
+    const environment = css('./workspaceEnvironment.css')
+    const scrim = environment.match(/^\.workspace-environment\s*\{([^{}]*)\}/m)?.[1]
+    const activity = environment.match(/> #project-workspace-activity\s*\{([^{}]*)\}/)?.[1]
+    const header = landing.match(/^\.studio-shell header\.top:has\(\.claude-pop\)\s*\{([^{}]*)\}/m)?.[1]
+    const lifted = layerValue(declaration(header, 'z-index'))
+    expect(lifted).toBeGreaterThan(layerValue(declaration(scrim, 'z-index')))
+    expect(lifted).toBeGreaterThan(layerValue(declaration(activity, 'z-index')))
+  })
+
   it('cancels the header backdrop filter on phones so the fixed sheet escapes the header', () => {
     const phoneBlocks = [...landing.matchAll(
       /@media\s*\(\s*max-width\s*:\s*599px\s*\)\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g,

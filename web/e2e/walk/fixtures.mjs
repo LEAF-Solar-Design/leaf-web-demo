@@ -872,6 +872,7 @@ const control = (page, recipe) => {
 export async function discloseControlPanel(page, recipe) {
   const name = recipe.panelName || groupNames[recipe.group]
   if (!name) return
+  await expandCompactRibbon(page)
   const toolbar = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
   const panel = toolbar.getByRole('group', { name, exact: true, includeHidden: true })
   if (await panel.count() === 0 || await panel.isVisible()) return
@@ -879,6 +880,42 @@ export async function discloseControlPanel(page, recipe) {
   if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') {
     await more.click({ timeout: 15_000 })
   }
+}
+
+// #3592 (quiet shell B) seats the cockpit CAD and Solar drafting ribbon
+// collapsed behind its Draw toggle: every panel and More panels stay
+// display:none until it is expanded, once per ribbon mount (a reload or a
+// surface change collapses it again). The state is read in one DOM call; a
+// band without the toggle, or a unit fake that does not model one, is left
+// untouched and the tool assertions that follow remain the verdict.
+const COMPACT_RIBBON_TOGGLE = '#drafting-ribbon > button.ribbon-draw-toggle'
+export async function expandCompactRibbon(page) {
+  let states
+  try {
+    states = await page.locator(COMPACT_RIBBON_TOGGLE)
+      .evaluateAll((toggles) => toggles.map((toggle) => toggle.getAttribute('aria-expanded')))
+  } catch { return false }
+  if (!Array.isArray(states) || states.length !== 1 || states[0] !== 'false') return false
+  const toggle = page.locator(COMPACT_RIBBON_TOGGLE)
+  await toggle.click({ timeout: 15_000 })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  // The overflow measure re-runs from the band's ResizeObserver; let it settle
+  // before anyone reads More panels.
+  await toggle.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  return true
+}
+
+// #3592: the compact ribbon also moves a panel's disabled tools, each with its
+// reason, into a closed "More" disclosure on that panel. Open it only when the
+// probed tool is not already on the panel's visible row.
+export async function discloseDisabledRibbonTools(page, recipe, locator) {
+  const name = recipe?.panelName || groupNames[recipe?.group]
+  if (!name || await locator.isVisible()) return false
+  const summary = page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+    .getByRole('group', { name, exact: true }).locator('details.ribbon-disabled-more:not([open]) > summary')
+  if (await summary.count() !== 1) return false
+  await summary.click({ timeout: 15_000 })
+  return true
 }
 
 export function studioJobMonitorContent(page) {
@@ -2588,6 +2625,7 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
   }
   await closeProjectPanelIfOpen(page)
   await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
+  await expandCompactRibbon(page)
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
   const more = page.getByRole('button', { name: 'More panels', exact: true })
@@ -3885,6 +3923,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'ribbon-tab':
       await page.getByRole('tablist', { name: 'Ribbon', exact: true }).getByRole('tab', { name: recipe.name, exact: true }).click({ timeout: 15_000 })
+      await expandCompactRibbon(page)
       // Narrow viewports offer the extra panels through a real disclosure.
       { const more = page.getByRole('button', { name: 'More panels', exact: true })
          if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') await more.click({ timeout: 15_000 }) }
@@ -5221,6 +5260,9 @@ export async function runProbe(probe, runtime) {
     if (typeof railExpandLauncher === 'function' && probe.featureId === 'action:rail-expand'
       && probe.state === 'ready' && runtime.testInfo.project.name !== 'phone') {
       locator = await railExpandLauncher(probe, runtime, locator, description => { locatorDescription = description }) || locator
+    }
+    if (typeof discloseDisabledRibbonTools === 'function' && !runtime.failedDrawing) {
+      await discloseDisabledRibbonTools(page, targetRecipe, locator)
     }
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)

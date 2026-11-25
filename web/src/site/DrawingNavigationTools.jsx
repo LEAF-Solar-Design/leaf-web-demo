@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { createPortal } from 'react-dom'
 import { useDrawingObjects } from './DrawingObjectsContext.jsx'
 import { useEngineSessionOptional } from '../cadedit/EngineSessionProvider.jsx'
 import { useSurfaceFrame } from './SurfaceFrame.jsx'
@@ -8,6 +9,23 @@ import { projectServerBlocks } from '../cadedit/engineIntake.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
+import CockpitIcon from './CockpitIcon.jsx'
+
+// The engine consumer keeps ownership of Objects and its announcements; the
+// navigation rail supplies its one visual seat, including when it mounts later.
+let objectsSeat = null
+const seatListeners = new Set()
+const subscribeSeat = (listener) => { seatListeners.add(listener); return () => seatListeners.delete(listener) }
+const getSeat = () => objectsSeat
+const setObjectsSeat = (node) => {
+  objectsSeat = node
+  seatListeners.forEach((listener) => listener())
+}
+
+export function DrawingObjectsMount({ children }) {
+  const seat = useSyncExternalStore(subscribeSeat, getSeat, () => null)
+  return seat ? createPortal(children, seat) : children
+}
 
 export function focusFailureMessage(reason) {
   if (reason === 'This object is hidden by its layers.') return humanizeError(reason)
@@ -57,6 +75,17 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   const frame = useSurfaceFrame()
   const ground = useStudioGround()
   const [query, setQuery] = useState('')
+  const [railOpen, setRailOpen] = useState(false)
+  const [findOpen, setFindOpen] = useState(false)
+  const [layersOpen, setLayersOpen] = useState(false)
+  const railRef = useRef(null)
+  useEffect(() => {
+    const rail = railRef.current
+    if (!rail) return undefined
+    const sync = () => setRailOpen(!!rail.querySelector('details[open]'))
+    rail.addEventListener('toggle', sync, true)
+    return () => rail.removeEventListener('toggle', sync, true)
+  }, [objects?.index])
   // A match list belongs to the index it was computed from. An edit to the same drawing builds a new
   // index, which hides the old list, so neither Enter nor the Find button acts on a record the drawing
   // may no longer have; the next Enter or Find runs the query fresh.
@@ -148,7 +177,12 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   }
   if (!ground || frame?.contract?.ground !== 'drawing' || !index) return null
   const focused = index.byId.get(objects.focusId)
-  return <div className="drawing-navigation">
+  const railToggle = (event) => setRailOpen(!!event.currentTarget.parentElement.querySelector('details[open]'))
+  return <div ref={railRef} className="drawing-navigation drawing-left-rail" data-collapsed={railOpen ? 'false' : 'true'} aria-label="Drawing navigation">
+    <div className="drawing-rail-objects-seat" ref={setObjectsSeat} />
+    <details className="drawing-rail-find" open={findOpen} onToggle={railToggle}>
+    <summary aria-label="Find in drawing" title="Find" onClick={(event) => { event.preventDefault(); setFindOpen((open) => !open) }}><CockpitIcon id="zoom-in" /><span>Find</span></summary>
+    {findOpen && <>
     <div className="drawing-find-band" data-nav-find>
     <div className="drawing-find-field">
     <label htmlFor={inputId}>Find in drawing</label>
@@ -180,5 +214,13 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
       </ul>
       {results.truncated && <p>More matches; refine your search</p>}
     </div>}
+    </>}
+    </details>
+    <details className="drawing-rail-layers" open={layersOpen} onToggle={railToggle}>
+      <summary aria-label="Layers" title="Layers" onClick={(event) => { event.preventDefault(); setLayersOpen((open) => !open) }}><CockpitIcon id="layers" /><span>Layers</span></summary>
+      {layersOpen && <div className="drawing-rail-layer-list">{index.records.filter((record) => record.kind === 'layer').map((record) =>
+        <button type="button" key={record.id} onClick={() => choose(record)}>{record.name}</button>)}
+      </div>}
+    </details>
   </div>
 }

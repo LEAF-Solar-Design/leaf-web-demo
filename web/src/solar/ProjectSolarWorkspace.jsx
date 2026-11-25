@@ -223,7 +223,10 @@ export default function ProjectSolarWorkspace(props) {
   }
   if (view.row?.name !== openTool?.name) view = { row: openTool, retired: false, generation: view.generation + 1, drafts: new Map() }
   const currentRow = owner.rows.find((row) => row.name === openTool?.name)
-  const writeAccessDenied = !owner.reason && currentRow?.availability?.entitled === false &&
+  const availability = currentRow?.availability
+  const writeAccessDenied = !owner.reason && availability?.entitled === false &&
+    (availability.entitlement_reason === 'entitlement_required' ||
+      availability.refusal_reasons?.includes('ENTITLEMENT_REQUIRED')) &&
     ['solar-panel-groups', 'solar-solaredge-accept'].includes(openTool?.name)
   // Value snapshots survive a stale scope without keeping its editor mounted or authorizing a run.
   const keptDraft = view.drafts.get(currentRow?.name)

@@ -95,6 +95,7 @@ export function shellWiring(source, shell, owner, extra = {}) {
     agentSessionId: 'session-1', sessionId: 'session-1', agentTurns: [], turns: [],
     boardConversation: false, setProjectPane: noop, setClaudeOpen: noop, setRightView: noop,
     onAttachAgentJob: noop, refreshJobs: noop, closeStartForChange: noop, attachJob: noop,
+    startNewConversation: noop,
     engineDirty: false, writeLocked: false, projectMode: false,
     // Publication fixtures have no selected canonical project or write owner.
     projectSolar: { ready: false, projectClient: null },
