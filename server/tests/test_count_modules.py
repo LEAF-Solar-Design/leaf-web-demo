@@ -552,6 +552,28 @@ def test_layer_ranking_includes_cutoff_ties(limit, expected):
     assert result["count"] == 11 and set(overlay["highlight_handles"]) == set("ABCD")
 
 
+@pytest.mark.parametrize("counts,threshold,expected", [
+    ((4, 2, 1), 50, ["A"]),
+    ((4, 2, 2), 50, []),
+    ((3, 3, 2), 50, []),
+    ((5, 4, 3), 25, ["A", "B"]),
+])
+def test_strict_layer_share_threshold_and_contributing_handles(counts, threshold, expected):
+    intake = {"inserts": [
+        {"handle": layer, "layer": layer, "name": "Panel", "rows": count}
+        for layer, count in zip("ABC", counts)
+    ]}
+    result, overlay = module.run(intake, {
+        "group_by": "layer", "panel_scope": "all_layers", "layer_share_above": threshold,
+    })
+    assert result["count"] == sum(counts)
+    assert [(r["layer"], r["numerator"], r["denominator"])
+            for r in result["layers_above_share"]] == [
+        (layer, counts["ABC".index(layer)], sum(counts)) for layer in expected
+    ]
+    assert overlay == {"highlight_handles": expected}
+
+
 @pytest.mark.parametrize("prompt,expected", [
     ("Which roof layer has the most panels?", ["Roof A", "Roof C"]),
     ("Which roof layers are tied for the largest module count?", ["Roof A", "Roof C"]),

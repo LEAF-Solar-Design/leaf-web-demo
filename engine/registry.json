@@ -68,6 +68,7 @@
         "type": "object",
         "properties": {
           "layer_shares": {"type": "boolean", "description": "Return each layer share of the selected physical module total."},
+          "layer_share_above": {"type": "number", "minimum": 0, "maximum": 100, "description": "With group_by layer, report and highlight each selected layer strictly above this percent of the selection. If ranked highlights are also requested, highlight only layers that meet both criteria."},
           "layer_names": {"type": ["array", "null"], "default": null, "minItems": 1, "items": {"type": "string"}, "description": "Exact layer names for named panel selection."},
           "cumulative_shares": {"type": "boolean", "description": "Return running physical fractions in descending count order, ties by literal layer name."},
           "coverage_percent": {"type": "number", "minimum": 0, "description": "List every minimum-size layer set reaching this percentage of the selected module total."},

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import re
 import math
+from fractions import Fraction
 
 MAX_EXACT_COUNT = 2**53 - 1
 
@@ -338,6 +339,13 @@ def _run(intake, params, *, allow_absent_in_window=False):
     top = params.get("top_layers")
     if "top_layers" in params and (type(top) is not int or top < 1):
         raise InputValidationError("Choose a positive integer for the number of top layers.")
+    share_threshold = params.get("layer_share_above")
+    if "layer_share_above" in params and (
+        type(share_threshold) not in (float, int)
+        or not 0 <= share_threshold <= 100
+        or params.get("group_by") != "layer"
+    ):
+        raise InputValidationError("Choose a layer share threshold from 0 to 100 and group by layer.")
     highlight_ranked = params.get("highlight_ranked_layers", False)
     if type(highlight_ranked) is not bool or (highlight_ranked and top is None):
         raise InputValidationError("Ranked-layer highlights require a top layer ranking.")
@@ -449,13 +457,20 @@ def _run(intake, params, *, allow_absent_in_window=False):
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)
 
-        if shares:
+        if shares or share_threshold is not None:
             total = _module_total(counts.values())
-            breakdown["shares"] = [
+            layer_shares = [
                 {"layer": layer, "numerator": count, "denominator": total,
                  "percentage": 100 * count / total}
                 for layer, count in counts.items()
             ]
+            if shares:
+                breakdown["shares"] = layer_shares
+            if share_threshold is not None:
+                threshold = Fraction(str(share_threshold)) * total
+                breakdown["layers_above_share"] = [
+                    row for row in layer_shares if 100 * row["numerator"] > threshold
+                ]
 
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
@@ -464,6 +479,9 @@ def _run(intake, params, *, allow_absent_in_window=False):
     if highlight_ranked and selected_sets:
         ranked_layers = {row["layer"] for row in breakdown["ranking"]}
         highlighted_sets = [group for group in selected_sets if group["layer"] in ranked_layers]
+    if share_threshold is not None and selected_sets:
+        qualifying_layers = {row["layer"] for row in breakdown["layers_above_share"]}
+        highlighted_sets = [group for group in highlighted_sets if group["layer"] in qualifying_layers]
 
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
