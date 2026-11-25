@@ -240,3 +240,67 @@ def test_complete_footprints_in_perspective_viewports(ask, case, expected):
     assert status == "ok", payload
     assert payload[0]["visible_paths"] == expected
     assert payload[0]["total"] == len(expected)
+
+
+COMPARE_ASK = ("Compare the complete thawed panel footprints visible in two perspective viewports "
+               "and list the placements that only one viewport contains.")
+RACK_PATHS = ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]
+
+
+def comparison_drawing(case):
+    raw = perspective_drawing(1 if case == "depth" else 1000,
+                              ((-12, -12), (12, -12), (12, 12), (-12, 12)), 2, -2)
+    marker = b"45\n200\n68\n1\n69\n3\n331\n11\n331\n13\n"
+    assert raw.count(marker) == 1
+    freezes = {"distinct": "331\n11\n331\n13\n", "shared": "331\n13\n", "depth": ""}[case]
+    front, back = (-1, -10) if case == "depth" else (2, -2)
+    replacement = (f"45\n{100 * 42 / (50 * math.sqrt(2))}\n68\n1\n69\n3\n{freezes}"
+                   f"90\n23\n36\n100\n37\n0\n42\n50\n43\n{front}\n44\n{back}\n")
+    raw = raw.replace(marker, replacement.encode())
+    if case == "depth":
+        service = b"5\nC2\n2\nPV Module\n"
+        assert raw.count(service) == 1
+        raw = raw.replace(service, service + b"30\n-3\n")
+    return raw
+
+
+@pytest.mark.parametrize("ask,params,case,order,only_in,shared", [
+    (COMPARE_ASK, {"viewport_handles": ["a1", "0xA2"]}, "distinct", ["A1", "A2"],
+     {"A1": RACK_PATHS, "A2": ["C4[0,0]"]}, []),
+    ("Which unfrozen PV module footprints appear in only one of viewports A1 and A2 after cropping?",
+     {}, "shared", ["A1", "A2"], {"A1": [], "A2": ["C1[0,0]/B2[0,0]", "C4[0,0]"]}, RACK_PATHS),
+    ("List complete thawed panel footprints exclusive to viewport A2 versus A1's crop.",
+     {}, "depth", ["A2", "A1"], {"A2": ["C2[0,0]"], "A1": RACK_PATHS}, []),
+])
+def test_viewport_comparison_uses_independent_visibility(ask, params, case, order, only_in, shared):
+    manifest, source, _ = tools_fallback.author_tool(ask)
+    assert manifest["engine_op"] == "viewport_panel_comparison"
+    assert manifest["params"]["required"] == (["viewport_handles"] if params else [])
+    assert manifest["params"]["properties"]["viewport_handles"]["minItems"] == 2
+    status, payload = invoke(source, comparison_drawing(case), params)
+    assert status == "ok", payload
+    result = payload[0]
+    assert result["viewport_handles"] == order
+    assert result["only_in"] == only_in
+    assert result["shared_paths"] == shared
+    assert result["counts_by_viewport"] == {key: len(paths) + len(shared) for key, paths in only_in.items()}
+    assert result["total"] == sum(map(len, only_in.values()))
+
+
+@pytest.mark.parametrize("params", [
+    {},
+    {"viewport_handles": ["A1", "a1"]},
+    {"viewport_handles": ["A1", "A2", "A3"]},
+    {"viewport_handles": ["A1", "FF"]},
+])
+def test_viewport_comparison_refuses_incomplete_duplicate_or_unknown_selection(params):
+    _, source, _ = tools_fallback.author_tool(COMPARE_ASK)
+    status, payload = invoke(source, comparison_drawing("distinct"), params)
+    assert status == "tool_error" and "viewport identit" in str(payload).lower(), payload
+
+
+def test_bound_viewport_comparison_refuses_conflicting_selection():
+    _, source, _ = tools_fallback.author_tool(
+        "Compare whole thawed panels within the crop of viewports A1 and A2.")
+    status, payload = invoke(source, comparison_drawing("distinct"), {"viewport_handles": ["A2", "A1"]})
+    assert status == "tool_error" and "conflicting viewport identities" in str(payload).lower(), payload

@@ -11,12 +11,52 @@ def matches(description):
     return (re.search(r"\bviewports?\b", description, re.I)
             and re.search(r"\b(?:panels?|modules?)\b", description, re.I)
             and re.search(r"\b(?:frozen|unfrozen|thawed|layers?)\b", description, re.I)
-            and re.search(r"\b(?:count|list|enumerate|tally|which|how many)\b", description, re.I))
+            and (comparison_requested(description)
+                 or re.search(r"\b(?:count|list|enumerate|tally|which|how many)\b", description, re.I)))
 
 
 def viewport_handle(description):
     match = re.search(r"\bviewport\s+(?:handle\s+)?(?:0x)?([a-f0-9]+)\b", description, re.I)
     return match[1].upper() if match else ""
+
+
+_VIEWPORT_IDS = re.compile(
+    r"\bviewports?\s+(?:handles?\s+)?((?:0x)?[a-f0-9]+\b"
+    r"(?:\s*(?:,\s*(?:and\s+)?|and\s+|versus\s+|vs\.?\s+)"
+    r"(?:viewport\s+(?:handle\s+)?)?(?:0x)?[a-f0-9]+\b)*)", re.I)
+
+
+def comparison_requested(description):
+    names = re.findall(r"\bviewports?\b", description, re.I)
+    return ((len(names) > 1 or any(name.casefold() == "viewports" for name in names)
+             or len(_explicit_viewport_ids(description)) > 1)
+            and bool(re.search(r"\b(?:compare|comparison|differences?|only one|exclusive|versus|vs)\b",
+                               description, re.I)))
+
+
+def _explicit_viewport_ids(description):
+    return [value.upper() for match in _VIEWPORT_IDS.finditer(description)
+            for value in re.findall(r"\b(?:0x)?([a-f0-9]+)\b", match[1], re.I)]
+
+
+def comparison_handles(description):
+    handles = _explicit_viewport_ids(description)
+    if handles and (len(handles) != 2 or handles[0] == handles[1]):
+        raise ValueError("Viewport comparison requires two distinct viewport identities.")
+    return handles
+
+
+def parameter_schema(description):
+    if comparison_requested(description):
+        field = "viewport_handles"
+        prop = {"type": "array", "items": {"type": "string", "pattern": "^(?:0[xX])?[a-fA-F0-9]+$"},
+                "minItems": 2, "maxItems": 2, "uniqueItems": True,
+                "description": "Two paper-space viewport handles in comparison order."}
+        bound = comparison_handles(description)
+    else:
+        field, prop = "viewport_handle", {"type": "string"}
+        bound = viewport_handle(description)
+    return {"type": "object", "properties": {field: prop}, "required": [] if bound else [field]}
 
 
 def _crop(fields, boundaries):
@@ -131,12 +171,17 @@ def attach_viewports(pairs, out):
 
 
 def build_body(description):
-    crop = bool(re.search(r"\b(?:crops?|cropped|clip(?:ped|ping)?|boundar(?:y|ies))\b", description, re.I))
-    footprint = crop and bool(re.search(r"\b(?:footprints?|whole|fully|entirely|wholly|completely)\b",
-                                       description, re.I))
-    return CLIP_SOURCE + INSTANCE_SOURCE + _GEOMETRY + _BODY.replace(
-        "__HANDLE__", repr(viewport_handle(description))).replace(
-        "__CROP__", repr(crop)).replace("__FOOTPRINT__", repr(footprint))
+    crop = bool(re.search(r"\b(?:crops?|cropped|cropping|clip(?:ped|ping)?|boundar(?:y|ies))\b", description, re.I))
+    explicit_footprint = bool(re.search(r"\bfootprints?\b", description, re.I))
+    crop = crop or explicit_footprint
+    footprint = explicit_footprint or (crop and bool(re.search(
+        r"\b(?:whole|fully|entirely|wholly|completely)\b", description, re.I)))
+    body = _BODY.replace("__CROP__", repr(crop)).replace("__FOOTPRINT__", repr(footprint))
+    if comparison_requested(description):
+        entry = _COMPARE.replace("__HANDLES__", repr(comparison_handles(description)))
+    else:
+        entry = _SINGLE.replace("__HANDLE__", repr(viewport_handle(description)))
+    return CLIP_SOURCE + INSTANCE_SOURCE + _GEOMETRY + body + entry
 
 
 _GEOMETRY = """
@@ -231,12 +276,7 @@ def crop_contains_footprint(crop, footprint, budget):
 
 
 _BODY = """
-def run(intake, params):
-    bound = __HANDLE__
-    selected = params.get("viewport_handle", bound)
-    if not isinstance(selected, str) or not selected or (bound and selected.upper() != bound):
-        raise ValueError("Missing or conflicting viewport identity.")
-    selected = selected.upper()
+def measure_viewport(intake, selected):
     inventory = intake.get("viewport_layers", {})
     if inventory.get("error"):
         raise ValueError(inventory["error"])
@@ -278,5 +318,36 @@ def run(intake, params):
         scope = ("complete thawed panel footprints inside the viewport crop" if __FOOTPRINT__
                  else "thawed panel placement anchors inside the viewport crop")
     result = visible_instances(intake, evidence, hidden, set(layers.values()), placement_filter)
-    return {**result, "viewport_handle": selected, "scope": scope}, None
+    return {**result, "viewport_handle": selected, "scope": scope}
+"""
+
+
+_SINGLE = """
+def run(intake, params):
+    bound = __HANDLE__
+    selected = params.get("viewport_handle", bound)
+    if not isinstance(selected, str) or not selected or (bound and selected.upper() != bound):
+        raise ValueError("Missing or conflicting viewport identity.")
+    return measure_viewport(intake, selected.upper()), None
+"""
+
+
+_COMPARE = """
+def run(intake, params):
+    bound = __HANDLES__
+    selected = params.get("viewport_handles", bound)
+    if ("viewport_handle" in params or not isinstance(selected, list) or len(selected) != 2
+            or any(not isinstance(handle, str)
+                   or not re.fullmatch(r"(?:0[xX])?[a-fA-F0-9]+", handle) for handle in selected)):
+        raise ValueError("Viewport comparison requires two distinct viewport identities.")
+    selected = [handle.upper().removeprefix("0X") for handle in selected]
+    if len(set(selected)) != 2 or (bound and selected != bound):
+        raise ValueError("Duplicate or conflicting viewport identities.")
+    left_id, right_id = selected
+    left, right = (measure_viewport(intake, handle) for handle in selected)
+    left_paths, right_paths = set(left["visible_paths"]), set(right["visible_paths"])
+    only_in = {left_id: sorted(left_paths - right_paths), right_id: sorted(right_paths - left_paths)}
+    return {"viewport_handles": selected, "counts_by_viewport": {left_id: left["total"], right_id: right["total"]},
+            "only_in": only_in, "shared_paths": sorted(left_paths & right_paths),
+            "total": len(left_paths ^ right_paths), "scope": left["scope"]}, None
 """
