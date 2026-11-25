@@ -91,3 +91,31 @@ def test_shortest_legal_detour(case):
     else:
         assert detour["status"] == "no_legal_detour"
         assert overlay["polylines"] == []
+
+@pytest.mark.parametrize("ask", [
+    "Show which cable routes take an avoidable detour around the roof obstacles.",
+    "Which wire runs are inefficient along my access aisles?",
+    "Find a shorter conduit path around the keepouts.",
+])
+def test_avoidable_legal_detour(ask):
+    top, bottom = (0, 2), (0, -4)
+    rows = [entity("Roof Obstacles", "A1", [(-1, 0), (0, 1), (1, 0), (0, -1)], closed=True),
+            entity("Aisle", "C1", [START, top, END]),
+            entity("Aisle", "C2", [START, bottom, END]),
+            entity("Cable", "B1", [START, bottom, END]),
+            entity("Wire", "B2", [END, top, START]),
+            entity("Conduit", "B3", [(20, 20), (25, 20)]),
+            entity("Cable", "B4", [START, END])]
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({e["layer"] for e in rows}), polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    assert set(report["avoidable_detours"]) == {"B1"}
+    route = report["avoidable_detours"]["B1"]
+    assert route["points"] == [list(START), list(top), list(END)]
+    assert route["length"] == pytest.approx(2 * math.hypot(5, 2))
+    assert route["saving"] == pytest.approx(2 * (math.hypot(5, 4) - math.hypot(5, 2)))
+    assert report["crossed_obstacles"] == {"B4": ["A1"]}
+    assert report["unavailable"] == {"B3": "no_legal_detour"}
+    assert overlay["highlight_handles"] == ["B1"]
