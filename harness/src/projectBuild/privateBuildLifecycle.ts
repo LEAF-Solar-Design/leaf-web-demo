@@ -6,7 +6,7 @@ import type { ProjectRepositoryAuthority } from "../ports/index.js";
 import { NextBuildError } from "./genericNextBuild.js";
 import type { GenericNextProducer } from "./genericNextBuild.js";
 import { BrowserCandidateBuildAdapter } from "./browserCandidateBuild.js";
-import type { BrowserCandidateBuildRequest, BrowserCandidatePreview, PublishedBrowserCandidate } from "./browserCandidateBuild.js";
+import type { BrowserCandidateBuildRequest, BrowserCandidatePreview, BrowserStaticCustody, PublishedBrowserCandidate } from "./browserCandidateBuild.js";
 
 type Loader = (authority: ProjectRepositoryAuthority, requestId: string) => Promise<PublishedBrowserCandidate | null>;
 type Record = { identity: string; result?: BrowserCandidatePreview; failed: boolean };
@@ -27,6 +27,7 @@ export class PrivateBuildLifecycle {
   constructor(private readonly deps: {
     producer: Pick<GenericNextProducer,"build"|"status"|"lastValid">;
     loadCandidate: Loader;
+    custody?: BrowserStaticCustody;
   }) { this.adapter = new BrowserCandidateBuildAdapter(deps); }
 
   private snapshot(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest) {
@@ -88,6 +89,8 @@ export class PrivateBuildLifecycle {
 }
 
 /** One producer supplies execution, cleanup status and asset reads. */
-export function createPrivateBuildServices(options: {producer: GenericNextProducer; loadCandidate: Loader}) {
+export function createPrivateBuildServices(options: {
+  producer: GenericNextProducer; loadCandidate: Loader; custody?: BrowserStaticCustody;
+}) {
   return {projectStaticPreviews:options.producer,projectStaticBuilds:new PrivateBuildLifecycle(options)};
 }

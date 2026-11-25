@@ -5,6 +5,9 @@
 import type { ProjectRepositoryAuthority } from "../ports/index.js";
 import { NextBuildError, nextRequestDigest, staticManifestDigest } from "./genericNextBuild.js";
 import type { GenericNextProducer, NextPreview } from "./genericNextBuild.js";
+import { publishStaticNextCustody } from "./staticNextCustody.js";
+
+export type BrowserStaticCustody = Pick<Parameters<typeof publishStaticNextCustody>[0], "store" | "now" | "retentionMs">;
 
 export interface BrowserCandidateWitness {
   readonly sourceRequestId: string;
@@ -66,6 +69,7 @@ export class BrowserCandidateBuildAdapter {
   constructor(private readonly deps: {
     producer: Pick<GenericNextProducer, "build" | "status">;
     loadCandidate(authority: ProjectRepositoryAuthority, sourceRequestId: string): Promise<PublishedBrowserCandidate | null>;
+    custody?: BrowserStaticCustody;
   }) {}
 
   private async current(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness): Promise<void> {
@@ -97,7 +101,15 @@ export class BrowserCandidateBuildAdapter {
 
   private async execute(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness, jobId: string): Promise<BrowserCandidatePreview> {
     const request = Object.freeze({ jobId, sourceCommit: w.sourceCommit, sourceTree: w.sourceTree });
-    const value = await this.deps.producer.build(a, request);
+    const { custody, producer } = this.deps;
+    const value = await (custody ? producer.build(a, request, {
+      witness: witnessKey(w),
+      publish: async (artifacts, { result, stop }) => {
+        await this.current(a, w);
+        return publishStaticNextCustody({ ...custody, artifacts, authority: a, request: { ...w, jobId },
+          result, providerBuildId: result.providerBuildId, stop });
+      },
+    }) : producer.build(a, request));
     // Copy before another await so a mutable producer response cannot relabel
     // the terminal projection. Asset bytes remain behind the producer's read.
     const preview = this.previewCopy(a, request, value);
