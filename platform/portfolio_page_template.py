@@ -125,6 +125,9 @@ def image_references(document):
 
 
 PORTFOLIO_CSS = """*{box-sizing:border-box}body{margin:0}.portfolio{background:white;color:#202020;font:16px/1.6 Arial,sans-serif;min-height:100%;padding:clamp(20px,4vw,64px);overflow-wrap:anywhere}.portfolio nav{display:flex;flex-wrap:wrap;gap:12px 24px;margin-bottom:48px}.portfolio button,.portfolio a{color:inherit;font:inherit}.portfolio nav button{background:none;border:0;padding:4px;cursor:pointer}.portfolio h1{font:400 clamp(32px,5vw,64px)/1.15 Georgia,serif}.portfolio p{white-space:pre-wrap;max-width:70ch}.portfolio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px}.portfolio-grid button,.portfolio-grid a{display:block;min-width:0;background:none;border:0;text-align:left;padding:0;text-decoration:none;cursor:pointer}.portfolio img{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain}.portfolio figure{margin:0;min-width:0}.portfolio-viewer{position:fixed;inset:0;z-index:200;background:white;overflow:auto;padding:24px}.portfolio-viewer img{max-height:80vh}.portfolio-viewer button{margin-bottom:16px}.portfolio :focus-visible{outline:2px solid #202020;outline-offset:4px}@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}.portfolio nav{margin-bottom:24px}}
+.portfolio-viewer{scroll-padding-block-start:5em}.portfolio-viewer>button:first-child{position:sticky;top:0;z-index:1}
+.portfolio-viewer:has(> [role="status"]:focus-within){scroll-padding-block:6px}
+.portfolio-viewer:has(> [role="status"]:focus-within)>button:first-child{position:static}
 """
 
 _VIEWER = """'use client';
@@ -284,7 +287,13 @@ export default function Gallery({page,category}){
    if(e.key==='Escape')close();
    if(e.key==='Tab'){
     const buttons=[...(dialog.current?.querySelectorAll('button:not([disabled])')||[])];
-    if(buttons.length){e.preventDefault();const index=buttons.indexOf(document.activeElement);buttons[index<0?0:(index+(e.shiftKey?-1:1)+buttons.length)%buttons.length].focus();}
+    if(buttons.length){
+     e.preventDefault();
+     const index=buttons.indexOf(document.activeElement);
+     const next=buttons[index<0?0:(index+(e.shiftKey?-1:1)+buttons.length)%buttons.length];
+     next.focus();
+     if(next!==closeButton.current)next.scrollIntoView({block:'center',inline:'nearest'});
+    }
    }
   };
    window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
