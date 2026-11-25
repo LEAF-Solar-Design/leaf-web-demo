@@ -523,6 +523,11 @@ def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(
             assert version == VERSION_ID and kwargs == dict(timeout=30000)
             events.append(('version', version))
 
+        def get_by_role(self, role, *, name):
+            assert self.name == 'version-row' and role == 'button'
+            assert name.fullmatch('Preview v7 in the drawing')
+            return Control('Preview v7 in the drawing')
+
     hidden = Control('hidden-project', visible=False)
     visible = Control('visible-project')
     later = Control('later-visible-project')
@@ -564,6 +569,8 @@ def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(
             return Control(label)
 
         def locator(self, selector):
+            if selector == f'li[data-element-id="version:{VERSION_ID}"]':
+                return Control('version-row')
             assert selector == '.viewer-canvas canvas'
             return canvas
 
@@ -601,7 +608,7 @@ def test_navigate_exact_opener_visible_duplicate_canonical_version_and_observer(
         ('wait', 'hidden-project', dict(state='attached', timeout=30000)),
         ('click', 'visible-project'), ('click', 'Continue workspace'),
         ('click', 'Project'), ('version', VERSION_ID),
-        ('click', 'Preview v1 in the drawing'), ('click', 'Return to drawing'),
+        ('click', 'Preview v7 in the drawing'), ('click', 'Return to drawing'),
         ('wait', 'canvas', dict(state='visible', timeout=60000)), ('observer',)]
 
 
@@ -763,6 +770,105 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
     value.close()
     assert events[-2:] == ['project-delete', 'browser-close']
     assert page.unrelated.disposed == 0
+
+
+RETAINED = dict(retained_org_id=ORG_ID, retained_project_id=PROJECT_ID,
+                retained_drawing_id=DRAWING_ID, retained_version_id=VERSION_ID,
+                retained_intake_sha256='b' * 64, retained_source_sha='a' * 40)
+
+
+@pytest.mark.parametrize('field', RETAINED)
+@pytest.mark.parametrize('fault', ['missing', 'malformed'])
+def test_invalid_retained_options_stop_before_setup(monkeypatch, field, fault):
+    import xbench_session
+
+    options = RETAINED.copy()
+    if fault == 'missing':
+        del options[field]
+    else:
+        options[field] = 'invalid'
+    monkeypatch.setattr(live, 'permitted_path', lambda *_: pytest.fail('setup started'))
+    ctx = SimpleNamespace(base=xbench_session.STAGING_ORIGIN, out_dir='unused', options=options)
+    with pytest.raises(live.RuntimeSetupError):
+        live.make_live_runtime(ctx)
+
+
+def test_retained_source_drift_stops_before_setup(monkeypatch):
+    import xbench_session
+
+    monkeypatch.setattr(live, 'permitted_path', lambda *_: pytest.fail('setup started'))
+    ctx = SimpleNamespace(base=xbench_session.STAGING_ORIGIN, out_dir='unused',
+                          source_sha='c' * 40, options=RETAINED)
+    with pytest.raises(live.RuntimeSetupError):
+        live.make_live_runtime(ctx)
+
+
+@pytest.mark.parametrize('fault', [None, 'project.org_id', 'project.project_id',
+                                  'organization_id', 'project_id', 'drawing_id',
+                                  'input_version_id', 'intake_sha256'])
+def test_retained_factory_checks_server_binding_before_input(monkeypatch, tmp_path, fault):
+    import xbench_session
+    import xbench_studio
+
+    events = []
+    page, canvas = Page(), Canvas()
+
+    @contextmanager
+    def session(*args, **kwargs):
+        try:
+            yield page, dict(web_build='a' * 40)
+        finally:
+            events.append('close')
+
+    class Client:
+        def __init__(self, transport):
+            pass
+
+        def project(self, project_id):
+            assert project_id == PROJECT_ID
+            events.append('project')
+            row = dict(name='Kept project', org_id=ORG_ID, project_id=PROJECT_ID)
+            if fault and fault.startswith('project.'):
+                row[fault.split('.')[1]] = VERSION_ID
+            return row
+
+        def drawing_context(self, project_id, version_id, drawing_id):
+            assert (project_id, version_id, drawing_id) == (PROJECT_ID, VERSION_ID, DRAWING_ID)
+            events.append('context')
+            row = dict(organization_id=ORG_ID, project_id=PROJECT_ID, drawing_id=DRAWING_ID,
+                       input_version_id=VERSION_ID, intake_sha256='b' * 64, is_head=False,
+                       head_version_id='55555555-5555-4555-8555-555555555555')
+            if fault:
+                row[fault] = 'c' * 64 if fault == 'intake_sha256' else row['head_version_id']
+            return dict(context=row)
+
+    def navigate(actual_page, name, version, *, expected_drawing_key):
+        assert (actual_page, name, version, expected_drawing_key) == (
+            page, 'Kept project', VERSION_ID, PROJECT_KEY)
+        events.append('navigate')
+        return canvas
+
+    monkeypatch.setattr(xbench_session, 'signed_in', session)
+    monkeypatch.setattr(xbench_studio, 'StudioClient', Client)
+    monkeypatch.setattr(xbench_studio, 'disposable_project', lambda *_: pytest.fail('mutation'))
+    monkeypatch.setattr(live, 'permitted_path', lambda value: tmp_path)
+    monkeypatch.setattr(live, 'load_native_oracle', lambda _: dict(modules=[],
+                        window=dict(expected_handles=[])))
+    monkeypatch.setattr(live, 'navigate', navigate)
+    monkeypatch.setattr(live, 'frame_native_modules', lambda _: events.append('frame'))
+    ctx = SimpleNamespace(base=xbench_session.STAGING_ORIGIN, out_dir=tmp_path, manifest={},
+                          source_sha='a' * 40, options=RETAINED)
+    if fault:
+        with pytest.raises(live.RuntimeSetupError):
+            live.make_live_runtime(ctx)
+        reads = ['project'] if fault.startswith('project.') else ['project', 'context']
+        assert events == reads + ['close']
+    else:
+        value = live.make_live_runtime(ctx)
+        assert dict(value.expected_run_binding) == dict(org_id=ORG_ID, project_id=PROJECT_ID,
+            drawing_id=DRAWING_ID, version_id=VERSION_ID, tool='count-by-layer')
+        value.close()
+        assert events == ['project', 'context', 'navigate', 'frame', 'close']
 
 
 @pytest.mark.parametrize('mode', ['cumulative', 'ready', 'disabled', 'hidden', 'late', 'stalled'])
