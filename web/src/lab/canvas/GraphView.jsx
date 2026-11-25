@@ -614,7 +614,9 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       setRestored({ graph: client.state.restoredGraph, key: client.state.restoredKey })
     }
   }), [client, restored.key, live.onChange])
-  const waitingForCorpusManifest = savedCorpusBlock && !corpusOptions?.manifest
+  const activeGraph = live.draft?.document || restored.graph || initialDocument
+  const waitingForCorpusManifest = !corpusOptions?.manifest && savedCorpusBlock
+    && activeGraph.blocks.some(block => block.registry.id === 'corpus-evaluator')
   const savedCorpusError = corpusFailure?.graph === (restored.graph || initialDocument) ? corpusFailure?.message : null
   const validDocument = !waitingForCorpusManifest && live.ready ? live.draft.document : null
   const pollers = useRef(new Map())

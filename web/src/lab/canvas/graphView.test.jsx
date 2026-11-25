@@ -360,6 +360,36 @@ describe('project corpus evaluation flow', () => {
     expect(client.state.restoredGraph).toEqual(graph)
   })
 
+  it('restores ordinary readiness when the last unresolved corpus block is removed from the draft', async () => {
+    const { manifest } = options()
+    const graph = addBlock(addBlock(emptyGraph(), registry['constant@1.0.0']), manifest)
+    graph.blocks[0].settings = { value: 2 }
+    graph.blocks[1].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const client = clientFor(graph, {})
+    const fetchImpl = vi.fn(async url => String(url).includes('/corpus-options')
+      ? { ok: false, status: 403 }
+      : { ok: true, json: async () => ({ runs: [] }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const onRun = vi.fn()
+    render(<GraphView client={client} onRun={onRun} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    await readiness.findByRole('button', { name: 'Retry corpus controls' })
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove block' }))
+    await readiness.findByText('Ready', { exact: true })
+    expect(readiness.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(readiness.getByRole('button', { name: /^Run/ }))
+    expect(onRun).toHaveBeenCalledOnce()
+    expect(onRun.mock.calls[0][0].blocks).toEqual([graph.blocks[0]])
+    expect(client.state.restoredGraph).toEqual(graph)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+  })
+
   // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.
   it('selects named project originals and saves/reloads immutable descriptors with existing graph links', { retry: 1 }, async () => {
     let graph = addBlock(emptyGraph(), registry['constant@1.0.0'])
