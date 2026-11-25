@@ -88,10 +88,25 @@ def equipment_headings(prompt):
 
 def compares_ports(prompt):
     return bool(re.search(r"\b(?:cables?|wires?|conduits?|equipment)\b", prompt)
-                and re.search(r"\b(?:paths?|routes?|runs?|detours?)\b", prompt)
+                and re.search(r"\b(?:paths?|routes?|runs?|detours?|routing)\b", prompt)
                 and re.search(r"\bports?\b", prompt)
                 and (prefers_fewer_bends(prompt)
+                     or joint_ports(prompt)
                      or re.search(r"\b(?:equivalent|shortest|best (?:physical )?ports)\b", prompt)))
+
+
+def joint_ports(prompt):
+    return bool(re.search(r"\b(?:joint(?:ly)?|combined|exclusive|shareable|same physical port)\b", prompt))
+
+
+def shareable_ports(prompt):
+    lists = re.findall(r"(?:^|[;.\n])\s*shareable ports\s*:\s*([^;.\n]*)", prompt)
+    if not lists:
+        return ()
+    names = re.split(r"\s*,\s*", lists[0].strip())
+    if len(lists) != 1 or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name) for name in names):
+        return None
+    return tuple(names)
 
 
 def equipment_ports(description):
@@ -165,6 +180,8 @@ def build_body(description):
     equipment = fewer_bends and (any(headings) or bool(re.search(r"\bequipment\b", prompt)))
     body = _BODY.replace("__FEWER_BENDS__", str(fewer_bends))
     body = body.replace("__EQUIPMENT_PORTS__", repr(ports))
+    body = body.replace("__JOINT_PORTS__", str(ports is not None and joint_ports(prompt)))
+    body = body.replace("__SHAREABLE_PORTS__", repr(shareable_ports(prompt)))
     body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
     body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
     body = body.replace("__CORRIDOR_CHECK__", str(corridor_check))
@@ -412,6 +429,70 @@ def shortest(graph, start, end, departure=None, arrival=None, ports=None):
     return result
 
 
+def joint_port_report(graph, ports, shareable):
+    empty = {"highlight_handles": [], "markers": [], "polylines": []}
+    handles = sorted(ports)
+    positions = {
+        handle: {side: {name: point for point, entries in options.items() for name, _ in entries}
+                 for side, options in ports[handle].items()}
+        for handle in handles
+    }
+    allowed = set()
+    for name in shareable or ():
+        points = {point for sides in positions.values() for options in sides.values()
+                  for label, point in options.items() if label.lower() == name}
+        if len(points) != 1:
+            return ({"status": "needs_unambiguous_shareable_ports", "port": name}, empty)
+        allowed.update(points)
+    if shareable is None:
+        return ({"status": "needs_shareable_port_list",
+                 "message": "List the port names after Shareable ports, separated by commas."}, empty)
+
+    cache = {}
+    queue, seen = [], set()
+
+    def submit(blocked):
+        if blocked in seen:
+            return
+        seen.add(blocked)
+        picks = []
+        for handle, exclusion in zip(handles, blocked):
+            key = handle, exclusion
+            if key not in cache:
+                options = {side: {p: entries for p, entries in group.items() if p not in exclusion}
+                           for side, group in ports[handle].items()}
+                cache[key] = shortest(graph, None, None, ports=options)
+            pick = cache[key]
+            if pick["status"] != "found":
+                return
+            picks.append(pick)
+        length = math.fsum(route["length"] for route in picks)
+        bends = sum(route["bends"] for route in picks)
+        heappush(queue, (length, bends, len(seen), blocked, picks))
+
+    submit((frozenset(), frozenset()))
+    while queue and len(seen) <= 512:
+        length, bends, _, blocked, picks = heappop(queue)
+        used = [{positions[h][side][name] for side, name in route["ports"].items()}
+                for h, route in zip(handles, picks)]
+        conflicts = (used[0] & used[1]) - allowed
+        if not conflicts:
+            choices = dict(zip(handles, picks))
+            return ({"status": "found", "port_choices": choices, "combined_length": length,
+                     "combined_bends": bends, "units": "drawing_units"},
+                    {"highlight_handles": handles, "polylines": [{"pts": r["points"]} for r in picks],
+                     "markers": [{"pt": r["points"][0],
+                                  "label": f"{h}: {r['ports']['departure']} to {r['ports']['arrival']}"}
+                                 for h, r in choices.items()]})
+
+        # Any legal assignment must leave this physical port unused by one cable.
+        point = min(conflicts)
+        submit((blocked[0] | {point}, blocked[1]))
+        submit((blocked[0], blocked[1] | {point}))
+    status = "joint_port_search_limit" if queue else "no_joint_port_assignment"
+    return ({"status": status, "port_choices": {}, "units": "drawing_units"}, empty)
+
+
 def dot(u, v):
     return u[0]*v[0] + u[1]*v[1]
 
@@ -566,7 +647,13 @@ def run(intake, params):
                         {"highlight_handles": [], "markers": [], "polylines": []})
             located_ports[handle] = bound_ports
             endpoints.update(point for options in bound_ports.values() for point in options)
+        if __JOINT_PORTS__ and (not scoped or len(located_ports) != 2 or len(cables) != 2):
+            return ({"status": "needs_two_located_port_groups",
+                     "message": "Give located departure and arrival ports for each of two saved cable handles."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
         graph = build_graph(arrays, aisles, centerlines, endpoints, radius)
+        if __JOINT_PORTS__:
+            return joint_port_report(graph, located_ports, __SHAREABLE_PORTS__)
         findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
         legal, violations, located_choices = {}, {}, {}
         for handle, edges in cables.items():

@@ -345,6 +345,45 @@ def test_equipment_ports_bind_to_each_saved_cable(ask, expected):
         assert {"pt": [start, y], "label": f"{handle}: {departure} to {arrival}"} in overlay["markers"]
 
 
+@pytest.mark.parametrize("ask, declarations, expected", [
+    ("Choose ports jointly for two cables and find the shortest legal combined routing.",
+     ("Cable B1 departure ports: A east at (0,0) or X east at (-4,0); "
+      "Cable B1 arrival ports: B east at (8,0); "
+      "Cable B2 departure ports: Alias east at (0,0) or C east at (-2,0); "
+      "Cable B2 arrival ports: D east at (10,0)."), (20, "A", "C")),
+    ("Find the best combined route for these wires and allow explicit shareable ports.",
+     ("Wire B1 departure ports: A east at (0,0); Wire B1 arrival ports: B east at (8,0); "
+      "Wire B2 departure ports: Alias east at (0,0); Wire B2 arrival ports: D east at (10,0); "
+      "Shareable ports: a."), (18, "A", "Alias")),
+    ("Find shortest joint conduit routes with no use of the same physical port.",
+     ("Conduit B1 departure ports: Upstream east at (0,0); Conduit B1 arrival ports: Shared east at (8,0); "
+      "Conduit B2 departure ports: Other east at (8,0); Conduit B2 arrival ports: D east at (10,0)."), None),
+], ids=["least-cost-exclusive", "explicit-sharing", "infeasible-cross-role"])
+def test_joint_equipment_port_assignments(ask, declarations, expected):
+    rows = [entity("Aisle", "C1", [(-4, 0), (10, 0)]),
+            entity("Cable", "B1", [(0, 0), (8, 0)]),
+            entity("Cable", "B2", [(0, 0), (10, 0)])]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Aisle", "Cable"], polylines=rows))
+    spec, source, _ = tools_fallback.author_tool(f"{ask} {declarations}")
+    assert spec["engine_op"] == "aisle_detour"
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    if expected is None:
+        assert report["status"] == "no_joint_port_assignment"
+        assert report["port_choices"] == {}
+        assert overlay == {"highlight_handles": [], "markers": [], "polylines": []}
+        return
+    length, first, second = expected
+    assert report["status"] == "found", report
+    assert (report["combined_length"], report["combined_bends"]) == (length, 0)
+    choices = report["port_choices"]
+    assert choices["B1"]["ports"] == {"departure": first, "arrival": "B"}
+    assert choices["B2"]["ports"] == {"departure": second, "arrival": "D"}
+    assert overlay["polylines"] == [{"pts": choices[h]["points"]} for h in ("B1", "B2")]
+    assert [m["label"] for m in overlay["markers"]] == [f"B1: {first} to B", f"B2: {second} to D"]
+
+
 @pytest.mark.parametrize("description,cables,status", [
     ("Choose equipment ports in different physical locations for the shortest legal route and fewest elbows.",
      1, "needs_equipment_ports"),
