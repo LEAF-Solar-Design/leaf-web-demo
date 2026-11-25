@@ -51,7 +51,7 @@ describe("opt-in static Next host wiring", () => {
     const deps = clients();
     const env = config();
     const result = createHostStaticNextExecutor(env, deps)!;
-    expect(Object.keys(result).sort()).toEqual(["artifactRoot", "executor", "resolveStaticNextBundle"]);
+    expect(Object.keys(result).sort()).toEqual(["artifactRoot", "custodyStore", "executor", "resolveStaticNextBundle"]);
     expect(result.artifactRoot).toBe(env.LEAF_STATIC_NEXT_ARTIFACT_ROOT);
     expect(result.executor).toMatchObject({ bindingId: env.LEAF_STATIC_NEXT_BINDING_ID,
       toolchainSha256: env.LEAF_STATIC_NEXT_TOOLCHAIN_SHA256, isolation: "filesystem-and-network" });

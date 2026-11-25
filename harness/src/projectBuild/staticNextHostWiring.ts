@@ -1,3 +1,4 @@
+import { DiskStaticNextCustodyStore } from "./diskStaticNextCustodyStore.js";
 import { tmpdir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -38,5 +39,6 @@ export function createHostStaticNextExecutor(env: Record<string, string | undefi
   const provider = createCodeBuildStaticNextBuildProvider({ projectName,
     client: deps.codeBuildClient ?? new CodeBuildClient({ region }) });
   return { executor: createCodeBuildStaticNextExecutor({ bindingId, toolchainSha256, store, provider }),
+    custodyStore: new DiskStaticNextCustodyStore(artifactRoot),
     resolveStaticNextBundle: createStaticNextBundleResolver(store), artifactRoot };
 }

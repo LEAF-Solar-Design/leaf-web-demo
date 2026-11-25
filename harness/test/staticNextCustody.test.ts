@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { DiskStaticNextCustodyStore } from "../src/projectBuild/diskStaticNextCustodyStore.js";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StaticNextObjectStore } from "../src/projectBuild/codebuildStaticNextExecutor.js";
 import type { StaticNextJobResult } from "../src/projectBuild/managedNextRuntime.js";
@@ -28,24 +29,10 @@ const base = `static-next/${bundleSha256}/${executionId}`;
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
 
-/** A fresh instance shares only persisted objects, never an in-process job map. */
-class DiskObjects implements StaticNextObjectStore {
-  constructor(readonly root: string) {}
-  async get(key: string): Promise<Buffer | null> {
-    try { return await readFile(join(this.root, key)); }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return null; throw e; }
-  }
-  async putIfAbsent(key: string, body: Buffer): Promise<"created" | "exists"> {
-    await mkdir(dirname(join(this.root, key)), { recursive: true });
-    try { await writeFile(join(this.root, key), body, { flag: "wx" }); return "created"; }
-    catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return "exists"; throw e; }
-  }
-}
-
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "nx3c-custody-"));
   directories.push(root);
-  const store = new DiskObjects(join(root, "custody"));
+  const store = new DiskStaticNextCustodyStore(root);
   const artifactOptions = { root: join(root, "artifacts"), bindingId: artifactBindingId, isCurrent: async () => true };
   const artifacts = new DiskPrivateStaticArtifacts(artifactOptions);
   // Deliberately unsorted: custody must preserve the producer's manifest order.
@@ -63,6 +50,32 @@ async function fixture() {
 }
 
 describe("static Next durable custody writer and READY loader", () => {
+  it.each([
+    ["chart with a data download", "/series.json", "application/json", "[1,2]"],
+    ["captioned photo gallery", "/caption.txt", "text/plain", "North roof"],
+    ["schedule with a CSV export", "/schedule.csv", "text/csv", "box,input"],
+  ])("reopens the private output of a %s", async (_ask, path, contentType, text) => {
+    const f = await fixture();
+    const file = { path, contentType, body: Buffer.from(text) };
+    const result = { ...f.result, files: [f.files[0], file] };
+    await publishStaticNextCustody({ ...f.publish, result });
+    const artifacts = new DiskPrivateStaticArtifacts(f.artifactOptions);
+    const view = await loadPrivateStaticView({ ...f.load, artifacts, store: new DiskStaticNextCustodyStore(f.root) });
+    expect(view).not.toBeNull();
+    const asset = await artifacts.read(scope, view!.preview.artifactId, path, file.body.length);
+    expect(asset.body).toEqual(file.body);
+  });
+
+  it("keeps the first complete receipt when independent writers race", async () => {
+    const f = await fixture();
+    const key = base + "/receipt.json";
+    const bodies = ["chart", "gallery", "schedule"].map(value => Buffer.from(value.repeat(1000)));
+    const outcomes = await Promise.all(bodies.map(body => new DiskStaticNextCustodyStore(f.root).putIfAbsent(key, body)));
+    expect(outcomes.filter(result => result === "created")).toHaveLength(1);
+    expect(await f.store.get(key)).toEqual(bodies[outcomes.indexOf("created")]);
+    await expect(f.store.get("../receipt.json")).rejects.toThrow();
+  });
+
   it("publishes the raw receipt and reopens the exact normalized view and bytes through fresh readers", async () => {
     const f = await fixture();
     const receipt = await publishStaticNextCustody(f.publish);
@@ -79,7 +92,7 @@ describe("static Next durable custody writer and READY loader", () => {
       terminalState: "READY", sandboxCleanupConfirmed: true, artifactBindingId,
       artifactId: published.artifactId, manifestSha256: staticManifestDigest(manifest), manifest,
       createdAt: "2026-11-01T00:00:00.000Z", cleanupAt: "2026-11-01T00:01:00.000Z" });
-    const store = new DiskObjects(f.store.root);
+    const store = new DiskStaticNextCustodyStore(f.root);
     const artifacts = new DiskPrivateStaticArtifacts(f.artifactOptions);
     expect(JSON.parse((await store.get(`${base}/receipt.json`))!.toString())).toEqual(receipt);
     const record = await loadPrivateStaticView({ ...f.load, store, artifacts });
