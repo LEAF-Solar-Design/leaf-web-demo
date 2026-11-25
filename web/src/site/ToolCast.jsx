@@ -2552,6 +2552,7 @@ export default function ToolCast({
               open={claudeOpen}
               onToggle={setClaudeOpen}
               onLink={platform.actions.linkClaude}
+              onRefresh={platform.actions.loadGrant}
               onUnlink={platform.actions.unlinkClaude}
             />
             {/* Standardization slice 8c: the Link-a-service drawer sits in

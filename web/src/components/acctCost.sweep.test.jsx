@@ -26,7 +26,7 @@ async function openCosts() {
 }
 
 describe('account and cost issue sweep', () => {
-  it('S1-62 retains a rejected token and the existing failure feedback', async () => {
+  it('S1-62 clears a rejected token and retains the existing failure feedback', async () => {
     const onLink = vi.fn().mockResolvedValue(null)
     render(<ClaudeAccountPanel {...accountProps} onLink={onLink} error="This token was rejected. Try another token." />)
     fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
@@ -34,7 +34,7 @@ describe('account and cost issue sweep', () => {
     fireEvent.change(input, { target: { value: 'rejected-token' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     expect(onLink).toHaveBeenCalledTimes(1)
-    expect(input).toHaveValue('rejected-token')
+    expect(input).toHaveValue('')
     expect(screen.getByRole('alert')).toHaveTextContent('This token was rejected. Try another token.')
   })
 

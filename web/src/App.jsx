@@ -5737,6 +5737,7 @@ export default function App() {
               open={claudeOpen}
               onToggle={setClaudeOpen}
               onLink={onLinkClaude}
+              onRefresh={platformActions.loadGrant}
               onUnlink={onUnlinkClaude}
             />
           )}
