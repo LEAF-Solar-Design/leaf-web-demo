@@ -4,8 +4,16 @@ import re
 from authored_route_crossings import PLANAR_GEOMETRY_BODY
 
 
+def compares_lengths(prompt):
+    return bool(re.search(r"\b(?:avoidable|unnecessary|shorter|shorten|shortening|inefficient|excess)\b", prompt)
+                and re.search(r"\b(?:detours?|routes?|paths?|runs?|length)\b", prompt))
+
+
 def matches(description):
     prompt = description.casefold()
+    if (compares_lengths(prompt) and re.search(r"\b(?:cables?|wires?|wiring|conduits?)\b", prompt)
+            and re.search(r"\b(?:aisles?|obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt)):
+        return True
     return all(re.search(pattern, prompt) for pattern in (
         r"\b(?:cables?|wires?|wiring|conduits?)\b",
         r"\b(?:arrays?|panels?|modules?)\b",
@@ -15,7 +23,7 @@ def matches(description):
 
 
 def build_body(description):
-    return PLANAR_GEOMETRY_BODY + _BODY
+    return PLANAR_GEOMETRY_BODY + _BODY.replace("__COMPARE_LENGTHS__", str(compares_lengths(description.casefold())))
 
 
 _BODY = r"""
@@ -25,6 +33,7 @@ from heapq import heappop, heappush
 
 def read_geometry(intake):
     arrays, aisles, centerlines, cables = [], [], [], {}
+    obstacle_ids = []
     for entity in intake.get("polylines", []):
         if entity.get("space") == "paper":
             continue
@@ -34,6 +43,8 @@ def read_geometry(intake):
         elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"}:
             role = "cable"
         elif words & {"array", "arrays", "panel", "panels", "module", "modules"}:
+            role = "array"
+        elif __COMPARE_LENGTHS__ and words & {"obstacle", "obstacles", "keepout", "keepouts"}:
             role = "array"
         else:
             continue
@@ -56,11 +67,13 @@ def read_geometry(intake):
         elif closed:
             collection = arrays if role == "array" else aisles
             collection.append((bounds(points), edges))
+            if role == "array":
+                obstacle_ids.append(handle)
         elif role == "aisle":
             centerlines.extend(edges)
         else:
             raise ValueError(f"Array footprint {handle} must be closed.")
-    return arrays, aisles, centerlines, cables
+    return arrays, aisles, centerlines, cables, obstacle_ids
 
 
 def at(a, direction, t):
@@ -158,7 +171,32 @@ def shortest(graph, start, end):
 
 
 def run(intake, params):
-    arrays, aisles, centerlines, cables = read_geometry(intake)
+    arrays, aisles, centerlines, cables, obstacle_ids = read_geometry(intake)
+    if __COMPARE_LENGTHS__:
+        endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
+        graph = build_graph(arrays, aisles, centerlines, endpoints)
+        findings, unavailable, crossings = {}, {}, {}
+        for handle, edges in cables.items():
+            crossed = [name for name, outline in zip(obstacle_ids, arrays)
+                       if any(enters_array(a, b, [outline]) for a, b in edges)]
+            if crossed:
+                crossings[handle] = crossed
+            start, end = edges[0][0], edges[-1][1]
+            if start == end:
+                unavailable[handle] = "closed_route"
+                continue
+            route = shortest(graph, start, end)
+            if route["status"] != "found":
+                unavailable[handle] = route["status"]
+                continue
+            drawn = math.fsum(math.dist(a, b) for a, b in edges)
+            best = route["length"]
+            if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
+                findings[handle] = dict(route, drawn_length=drawn, saving=drawn-best)
+        return ({"avoidable_detours": findings, "crossed_obstacles": crossings,
+                 "unavailable": unavailable, "units": "drawing_units"},
+                {"highlight_handles": list(findings), "markers": [],
+                 "polylines": [{"pts": row["points"]} for row in findings.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
     endpoints = {h: (cables[h][0][0], cables[h][-1][1]) for h in crossings}
     if any(start == end for start, end in endpoints.values()):
