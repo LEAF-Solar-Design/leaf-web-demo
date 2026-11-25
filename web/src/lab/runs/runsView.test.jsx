@@ -642,3 +642,73 @@ describe('Runs view', () => {
     await waitFor(() => expect(screen.getByText(/result:.*99/)).toBeVisible())
   })
 })
+
+describe('corpus job lineage', () => {
+  const lineage = (first = 'queued', second = 'running') => ({
+    corpus: true,
+    source: { run_id: 'r', graph_revision: 4, graph_sha256: 'a'.repeat(64), input_digest: 'b'.repeat(64) },
+    blocks: [first, second, 'not submitted'].map((status, index) => ({
+      block_id: ['first', 'second', 'third'][index], status,
+      job_id: index === 2 ? null : 'job-' + index, attempt: index === 2 ? null : index + 1,
+      inputs: { corpus_sha256: 'c'.repeat(64), suite_sha256: 'd'.repeat(64), settings_sha256: 'e'.repeat(64) },
+    })),
+  })
+  const respond = value => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
+  const show = () => fireEvent.click(screen.getByRole('button', { name: 'Show corpus jobs' }))
+  const panel = () => within(screen.getByRole('region', { name: 'Corpus jobs' }))
+
+  it('reads active jobs on demand and refreshes the same pinned lineage after the run finishes', async () => {
+    const store = seed()
+    const terminal = lineage('failed', 'completed')
+    terminal.blocks[2].status = 'unavailable'
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValueOnce(respond(lineage())).mockResolvedValueOnce(respond(terminal))
+    render(<RunsView store={store} fetchImpl={fetchImpl} />)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    show()
+    expect(await panel().findByText('job-0')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Queued')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Running')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Not submitted')
+    expect(panel().getByText('b'.repeat(64))).toBeTruthy()
+    expect(panel().getAllByText('e'.repeat(64))).toHaveLength(3)
+    act(() => store.apply('r', { seq: 1, kind: 'finished', payload: {} }))
+    fireEvent.click(panel().getByRole('button', { name: 'Refresh corpus jobs' }))
+    expect(await panel().findByText('job-1')).toBeTruthy()
+    expect(panel().getByText('first').closest('li').textContent).toContain('Failed')
+    expect(panel().getByText('second').closest('li').textContent).toContain('Completed')
+    expect(panel().getByText('third').closest('li').textContent).toContain('Unavailable')
+    expect(fetchImpl.mock.calls).toHaveLength(2)
+    for (const [url, options] of fetchImpl.mock.calls) {
+      expect(url).toMatch(/\/runs\/r\/corpus-jobs$/)
+      expect(options.method).toBe('GET')
+    }
+  })
+
+  it.each(['wrong revision', 'missing job ID', 'ordinary run'])('withholds lineage for %s', async variant => {
+    const data = lineage()
+    if (variant === 'wrong revision') data.source.graph_revision = 3
+    if (variant === 'missing job ID') data.blocks[0].job_id = null
+    surface.current = { worker: { workers: [] } }
+    const fetchImpl = vi.fn().mockResolvedValue(respond(variant === 'ordinary run' ? { corpus: false } : data))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    expect(await panel().findByText(variant === 'ordinary run'
+      ? 'No corpus jobs for this run.' : 'Corpus job status unavailable. Try refreshing.')).toBeTruthy()
+    expect(panel().queryByText('job-1')).toBeNull()
+  })
+
+  it('discards in-flight lineage when account scope changes', async () => {
+    surface.current = { worker: { workers: [] } }
+    let complete
+    const fetchImpl = vi.fn().mockImplementation(() => new Promise(resolve => { complete = resolve }))
+    render(<RunsView store={seed()} fetchImpl={fetchImpl} />)
+    show()
+    const signal = fetchImpl.mock.calls[0][1].signal
+    act(() => { authority.account = 'account-two'; notifyActiveScopeChanged() })
+    expect(signal.aborted).toBe(true)
+    await act(async () => complete(respond(lineage())))
+    expect(panel().queryByText('job-0')).toBeNull()
+    expect(panel().getByRole('button', { name: 'Show corpus jobs' }).disabled).toBe(false)
+  })
+})

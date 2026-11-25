@@ -52,6 +52,9 @@ export async function discoverRuns({ docId, projectId = '', fetchImpl }) {
 }
 export const cancelRun = ({ runId, fetchImpl }) => request(`runs/${encodeURIComponent(runId)}/cancel`, { fetchImpl, body: {} })
 
+export const readCorpusJobs = ({ runId, fetchImpl, signal }) =>
+  request(`runs/${encodeURIComponent(runId)}/corpus-jobs`, { fetchImpl, signal, snapshot: true })
+
 const defaultSleep = (ms, signal) => new Promise(resolve => {
   const finish = () => { clearTimeout(timer); signal?.removeEventListener('abort', finish); resolve() }
   const timer = setTimeout(finish, ms)
