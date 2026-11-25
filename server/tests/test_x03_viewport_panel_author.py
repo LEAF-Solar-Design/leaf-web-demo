@@ -107,7 +107,8 @@ def test_crop_and_thaw_composition(ask, raw, expected):
 
 @pytest.mark.parametrize("tags,expected", [
     (((340, "FF"),), "missing or ambiguous"),
-    (((16, 1),), "orthographic top view"),
+    (((90, 1),), "orthographic view without depth clipping"),
+    (((36, 0),), "orthographic view without depth clipping"),
 ])
 def test_crop_evidence_refused_without_changing_layer_count(tags, expected):
     raw = crop_drawing(6, tags)
@@ -164,3 +165,31 @@ def test_footprint_request_rejects_missing_outline():
         "Count thawed panels whose complete footprints fit in the viewport A1 crop.")
     status, payload = invoke(source, crop_drawing(3, ((51, 45),)))
     assert status == "tool_error" and "missing complete panel footprint" in str(payload).lower()
+
+
+@pytest.mark.parametrize("ask,tags,boundary,half_width,tilt_rack,expected", [
+    ("Count whole thawed panel footprints inside an oblique orthographic viewport crop.",
+     ((26, 3), (36, 4)), ((-3, -1), (-1, -1), (-1, 1), (-3, 1)), .25, False,
+     ["C1[0,0]/B1[0,1]"]),
+    ("Which unfrozen PV modules are entirely inside the crop of side viewport A1?",
+     ((16, 1), (36, 0)), ((-1, -1), (3, -1), (3, 1), (-1, 1)), .25, True,
+     ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
+    ("List thawed panel footprints wholly inside viewport A1's oblique clipping boundary.",
+     ((26, 3), (36, 4), (37, 5)),
+     ((-5, -4), (3, -4), (3, -2), (.5, -2), (.5, -3), (.25, -3), (.25, -2), (-5, -2)),
+     2, False, ["C1[0,0]/B1[0,1]", "C2[0,0]"]),
+])
+def test_complete_footprints_in_oblique_viewports(ask, tags, boundary, half_width, tilt_rack, expected):
+    # For the (0,3,4) view, DCS X = -WCS X and DCS Y = (-4Y + 3Z)/5.
+    # A target at z=5 shifts the footprints down three units into the notch.
+    # The side view sees the rack in YZ fully and the service module edge-on.
+    raw = with_module_footprint(crop_drawing(3, tags, boundary), half_width)
+    if tilt_rack:
+        rack = b"5\nC1\n2\nRack\n"
+        assert raw.count(rack) == 1
+        raw = raw.replace(rack, rack + b"210\n1\n220\n0\n230\n0\n")
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, raw, {"viewport_handle": "A1"})
+    assert status == "ok", payload
+    assert payload[0]["visible_paths"] == expected
+    assert payload[0]["total"] == len(expected)
