@@ -316,4 +316,4 @@ def test_decoder_db_sets_timeout_after_connect_without_startup_options(monkeypat
     assert connect_kwargs['connect_timeout'] == 5
     assert connect_kwargs['autocommit'] is True
     assert executed[0][0] == 'SET statement_timeout = 5000'
-    assert executed[1][0].startswith('SELECT * FROM video_decode_heartbeat(')
+    assert executed[1][0].startswith('SELECT * FROM leaf_platform.video_decode_heartbeat(')
