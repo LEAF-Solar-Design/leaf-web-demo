@@ -471,7 +471,12 @@ def make_live_runtime(ctx):
     try:
         if ctx.base != STAGING_ORIGIN:
             raise ValueError('Staging required')
-        retained = _retained_binding(getattr(ctx, 'options', {}))
+        options = getattr(ctx, 'options', {})
+        retained = _retained_binding(options)
+        if retained:
+            source = options.get('retained_source_sha', '')
+            if not re.fullmatch('[0-9a-f]{40}', source) or source != ctx.source_sha:
+                raise ValueError('Retained staging source mismatch')
         permitted_path(ctx.out_dir)
         oracle = load_native_oracle(ctx.manifest)
         page, info = stack.enter_context(signed_in(

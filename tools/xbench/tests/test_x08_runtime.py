@@ -774,7 +774,7 @@ def test_successful_factory_uses_supported_transport_and_owns_until_close(tmp_pa
 
 RETAINED = dict(retained_org_id=ORG_ID, retained_project_id=PROJECT_ID,
                 retained_drawing_id=DRAWING_ID, retained_version_id=VERSION_ID,
-                retained_intake_sha256='b' * 64)
+                retained_intake_sha256='b' * 64, retained_source_sha='a' * 40)
 
 
 @pytest.mark.parametrize('field', RETAINED)
@@ -789,6 +789,16 @@ def test_invalid_retained_options_stop_before_setup(monkeypatch, field, fault):
         options[field] = 'invalid'
     monkeypatch.setattr(live, 'permitted_path', lambda *_: pytest.fail('setup started'))
     ctx = SimpleNamespace(base=xbench_session.STAGING_ORIGIN, out_dir='unused', options=options)
+    with pytest.raises(live.RuntimeSetupError):
+        live.make_live_runtime(ctx)
+
+
+def test_retained_source_drift_stops_before_setup(monkeypatch):
+    import xbench_session
+
+    monkeypatch.setattr(live, 'permitted_path', lambda *_: pytest.fail('setup started'))
+    ctx = SimpleNamespace(base=xbench_session.STAGING_ORIGIN, out_dir='unused',
+                          source_sha='c' * 40, options=RETAINED)
     with pytest.raises(live.RuntimeSetupError):
         live.make_live_runtime(ctx)
 
