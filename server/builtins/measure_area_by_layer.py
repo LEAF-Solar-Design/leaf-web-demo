@@ -15,7 +15,7 @@ if _SERVER_DIR not in sys.path:
 import tools_fallback as fb  # noqa: E402
 
 
-InputValidationError = fb.AreaUnitValidationError
+InputValidationError = fb.AreaMeasurementInputError
 
 
 def run(intake, params):

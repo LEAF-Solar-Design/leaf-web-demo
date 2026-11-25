@@ -107,7 +107,7 @@
     {
       "name": "measure-panel-area",
       "version": "1.0.0",
-      "description": "Measures total and average closed-polyline area on a layer. Use output_units=ft2 for square feet with DXF insertion-unit provenance.",
+      "description": "Measures closed-polyline area on a layer. Use area_mode=net to subtract nested holes. Use output_units=ft2 for square feet with DXF insertion-unit provenance.",
       "kind": "script",
       "engine_op": "measure_panel_area",
       "script": "engine/tools/measure_panel_area.lsp",
@@ -115,7 +115,8 @@
         "type": "object",
         "properties": {
           "layer": { "type": "string", "default": "Panels" },
-          "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" }
+          "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" },
+          "area_mode": { "type": "string", "enum": ["gross", "net"], "default": "gross" }
         },
         "required": []
       },
@@ -126,6 +127,8 @@
           "avg_area": { "type": "number" },
           "units": { "enum": ["drawing", "ft2"] },
           "unit_conversion": { "type": "object" },
+          "area_mode": { "enum": ["net"] },
+          "hole_count": { "type": "integer" },
           "area_sqft": { "type": "number" },
           "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
           "units_assumption": { "type": "string" }

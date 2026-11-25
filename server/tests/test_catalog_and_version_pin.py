@@ -795,3 +795,64 @@ def test_panel_area_square_feet_refuses_unknown_drawing_units(intake):
     assert not result["ok"]
     assert result["error"]["error_code"] == "BAD_PARAMS"
     assert "$INSUNITS" in result["error"]["message"]
+
+
+def _panel_ring(x, y, size):
+    return [(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
+
+
+def _run_panel_area_rings(rings, *, net):
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import run_tool_dynamic
+
+    pairs = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, 2), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES")]
+    for handle, ring in enumerate(rings, 16):
+        pairs.extend([(0, "LWPOLYLINE"), (5, f"{handle:X}"), (8, "Roof"), (90, len(ring)), (70, 1)])
+        for x, y in ring:
+            pairs.extend([(10, x), (20, y)])
+    pairs.extend([(0, "ENDSEC"), (0, "EOF")])
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode("ascii"))
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    params = {"layer": "Roof", "output_units": "ft2"}
+    if net:
+        params["area_mode"] = "net"
+    return run_tool_dynamic(tool, intake, params, aps_live=False)
+
+
+@pytest.mark.parametrize("holes, reverse, expected", [(1, False, 96), (2, False, 92), (1, True, 96)])
+def test_panel_area_net_subtracts_holes_independent_of_winding(holes, reverse, expected):
+    rings = [_panel_ring(0, 0, 10)] + [_panel_ring(x, 1, 2) for x in (1, 5)[:holes]]
+    if reverse:
+        rings = [ring[::-1] for ring in rings[::-1]]
+    net = _run_panel_area_rings(rings, net=True)
+    assert net["ok"], net
+    assert net["result"]["total_area"] == expected
+    assert net["result"]["avg_area"] == expected
+    assert net["result"]["count"] == 1
+    assert net["result"]["hole_count"] == holes
+    assert net["result"]["unit_conversion"]["source_code"] == 2
+    gross = _run_panel_area_rings(rings, net=False)
+    assert gross["result"]["total_area"] == 100 + holes * 4
+
+
+def test_panel_area_net_adds_island_and_separate_region():
+    rings = [_panel_ring(0, 0, 10), _panel_ring(1, 1, 6), _panel_ring(2, 2, 2), _panel_ring(20, 0, 3)]
+    result = _run_panel_area_rings(rings, net=True)["result"]
+    assert result["total_area"] == 100 - 36 + 4 + 9
+    assert result["count"] == 3 and result["hole_count"] == 1
+
+
+@pytest.mark.parametrize("other", [_panel_ring(9, 1, 2), _panel_ring(0, 1, 2)])
+def test_panel_area_net_refuses_touching_or_crossing_contours(other):
+    result = _run_panel_area_rings([_panel_ring(0, 0, 10), other], net=True)
+    assert not result["ok"]
+    assert result["error"]["error_code"] == "BAD_PARAMS"
+    assert "touch or cross" in result["error"]["message"]
+
+
+def test_panel_area_net_keeps_nearby_disjoint_regions_separate():
+    rings = [_panel_ring(0, 0, 10), _panel_ring(10 + 1e-10, 1, 2)]
+    result = _run_panel_area_rings(rings, net=True)["result"]
+    assert result["total_area"] == 104
+    assert result["count"] == 2 and result["hole_count"] == 0

@@ -11,6 +11,7 @@ so the demo runs before Lane B lands, and it also backs authored tools.
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -87,8 +88,8 @@ def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[d
     return ({"counts": counts, "total": sum(counts.values())}, None)
 
 
-class AreaUnitValidationError(ValueError):
-    """The drawing cannot support the requested physical area conversion."""
+class AreaMeasurementInputError(ValueError):
+    """The drawing cannot support the requested area measurement."""
 
 
 _DXF_AREA_SOURCE_UNITS = {
@@ -104,22 +105,86 @@ _DXF_AREA_SOURCE_UNITS = {
 }
 
 
+def _boundaries_touch(edges, other_edges):
+    def turn(a, b, p):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+    for a, b in edges:
+        for c, d in other_edges:
+            if any(max(a[i], b[i]) < min(c[i], d[i]) or max(c[i], d[i]) < min(a[i], b[i])
+                   for i in (0, 1)):
+                continue
+            left, right = turn(a, b, c), turn(a, b, d)
+            near, far = turn(c, d, a), turn(c, d, b)
+            if min(left, right) <= 0 <= max(left, right) and min(near, far) <= 0 <= max(near, far):
+                return True
+    return False
+
+
+def _net_panel_area(polys):
+    from dxf_spatial_clips import _polygon
+    from solar_ground_analysis import is_inside_polygon
+
+    rings = [p for p in polys if p.get("space", "model") != "paper"]
+    if sum(len(p.get("pts", [])) for p in rings) > 2048:
+        raise AreaMeasurementInputError("Net area supports at most 2048 boundary vertices per selection.")
+
+    boundaries = []
+    elevations = set()
+    for poly in rings:
+        points = poly.get("pts", [])
+        if poly.get("width") or any(poly.get("bulges", ())) or any(
+            len(p) not in (2, 3) or not all(math.isfinite(v) for v in p) for p in points
+        ):
+            raise AreaMeasurementInputError("Net area requires straight finite boundaries without width.")
+        elevations.update(p[2] if len(p) == 3 else 0 for p in points)
+        if len(points) < 3 or len(elevations) > 1:
+            raise AreaMeasurementInputError("Net area requires closed boundaries on the same XY plane.")
+        try:
+            outline = _polygon([(p[0], p[1]) for p in points], (1, 0, 0, 0, 0, 1, 0, 0))
+        except ValueError as exc:
+            raise AreaMeasurementInputError("Net area requires simple polygon boundaries.") from exc
+        x, y = outline[0]
+        area = _shoelace_area([(px - x, py - y) for px, py in outline])
+        if not math.isfinite(area) or area == 0:
+            raise AreaMeasurementInputError("Net area requires finite, nonzero boundary areas.")
+        boundaries.append((outline, list(zip(outline, outline[1:] + outline[:1])), area))
+
+    depths = [0] * len(boundaries)
+    for i, (outline, edges, _) in enumerate(boundaries):
+        for j in range(i):
+            other, other_edges, _ = boundaries[j]
+            if _boundaries_touch(edges, other_edges):
+                raise AreaMeasurementInputError("Net area cannot decide boundaries that touch or cross.")
+            x, y = outline[0]
+            u, v = other[0]
+            depths[i] += int(is_inside_polygon(other, x, y))
+            depths[j] += int(is_inside_polygon(outline, u, v))
+
+    holes = sum(depth % 2 for depth in depths)
+    area = math.fsum(record[2] * (-1 if depth % 2 else 1) for record, depth in zip(boundaries, depths))
+    return area, len(boundaries) - holes, holes
+
+
 def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
     layer = params.get("layer", DEFAULT_LAYER)
-    polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
-    areas = [_shoelace_area(p.get("pts", [])) for p in polys if p.get("closed")]
-    total = sum(areas)
-    count = len(areas)
+    polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer and p.get("closed")]
+    details = {}
+    if params.get("area_mode") == "net":
+        total, count, holes = _net_panel_area(polys)
+        details.update(area_mode="net", hole_count=holes)
+    else:
+        total = sum(_shoelace_area(p.get("pts", [])) for p in polys)
+        count = len(polys)
     units = params.get("output_units", "drawing")
-    conversion = {}
     if units == "ft2":
         code = intake.get("insunits")
         if intake.get("insunits_error") or type(code) is not int or code not in _DXF_AREA_SOURCE_UNITS:
-            raise AreaUnitValidationError("Square feet requires a supported, unambiguous $INSUNITS value.")
+            raise AreaMeasurementInputError("Square feet requires a supported, unambiguous $INSUNITS value.")
         source_unit, metres_per_unit = _DXF_AREA_SOURCE_UNITS[code]
         area_factor = (metres_per_unit / _DXF_AREA_SOURCE_UNITS[2][1]) ** 2
         total *= area_factor
-        conversion["unit_conversion"] = {
+        details["unit_conversion"] = {
             "source": "$INSUNITS",
             "source_code": code,
             "source_unit": source_unit,
@@ -133,7 +198,7 @@ def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> 
             "total_area": round(total, 3),
             "avg_area": round(total / count, 3) if count else 0.0,
             "units": units,
-            **conversion,
+            **details,
         },
         None,
     )
@@ -236,7 +301,7 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "measure-panel-area",
         "version": "1.0.0",
-        "description": "Measures total and average closed-polyline area on a layer.",
+        "description": "Measures gross or net closed-polyline area on a layer. Net area subtracts nested holes.",
         "kind": "script",
         "engine_op": "measure_area_by_layer",
         "entry": "builtins/measure_area_by_layer.py",
@@ -245,6 +310,7 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
             "properties": {
                 "layer": {"type": "string", "default": DEFAULT_LAYER},
                 "output_units": {"type": "string", "enum": ["drawing", "ft2"], "default": "drawing"},
+                "area_mode": {"type": "string", "enum": ["gross", "net"], "default": "gross"},
             },
             "required": [],
         },
