@@ -219,7 +219,11 @@ def _stamp_report(content, *, stamp=None, rect=b"0 0 1000 1000", matrix=b"", sta
         objects.append(stream(stamp, form))
         if state:
             objects.append(stream(_stamp_layout(750, 750), form))
-    pdf = bytearray(b"%PDF-1.4\n")
+    return _vector_pdf(objects)
+
+
+def _vector_pdf(objects, version=b"1.4"):
+    pdf = bytearray(b"%PDF-" + version + b"\n")
     offsets = []
     for number, obj in enumerate(objects, 1):
         offsets.append(len(pdf))
@@ -269,3 +273,68 @@ def test_stamp_content_counts_toward_the_page_content_budget(monkeypatch):
     assert "matrices" in json.loads(verdict_bytes(_stamp_report(base)))
     verdict = json.loads(verdict_bytes(_stamp_report(base, stamp=stamp)))
     assert verdict["refusal"] == "REPORT_RESOURCE_LIMIT"
+
+
+def _layer_report(content, membership=b"5 0 R", *, form=None):
+    font = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+    def stream(data, attrs=b""):
+        return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), attrs, data)
+
+    xobjects = b"/XObject << /Panel 8 0 R >>" if form is not None else b""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] "
+        b"/D << /BaseState /OFF /ON [5 0 R] >> >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 4 0 R "
+        b"/Resources << %s %s /Properties << /Visible %s /Hidden 6 0 R >> >> >>"
+        % (font, xobjects, membership),
+        stream(content),
+        b"<< /Type /OCG /Name (On) >>",
+        b"<< /Type /OCG /Name (Off) >>",
+        b"<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /AnyOn >>",
+    ]
+    if form is not None:
+        objects.append(stream(form, b"/Subtype /Form /BBox [0 0 1000 1000] /Resources << %s >>" % font))
+    return _vector_pdf(objects, version=b"1.5")
+
+
+@pytest.mark.parametrize("membership", [
+    b"5 0 R",
+    b"7 0 R",
+    b"<< /Type /OCMD /VE [/And 5 0 R [/Not 6 0 R]] >>",
+], ids=["registered-group", "membership-policy", "nested-expression"])
+def test_import_uses_visible_layout_and_wiring_from_default_layers(membership):
+    base = _stamp_layout(100, 500)
+    hidden = _stamp_layout(700, 100)
+    layered = b"/OC /Visible BDC\n" + base + b"EMC\n/OC /Hidden BDC\n" + hidden + b"EMC\n"
+    assert verdict_bytes(_layer_report(layered, membership)) == verdict_bytes(_stamp_report(base))
+
+
+def test_reused_layer_form_matches_visible_page_space_wiring():
+    form = _stamp_layout(100, 500)
+    layered = _layer_report(
+        b"/OC /Hidden BDC /Panel Do EMC\n"
+        b"/OC /Visible BDC q 1 0 0 1 400 -100 cm /Panel Do Q EMC", form=form,
+    )
+    assert verdict_bytes(layered) == verdict_bytes(_stamp_report(_stamp_layout(500, 400)))
+
+
+def test_hidden_text_still_advances_the_visible_text_matrix():
+    before = b"BT /F1 10 Tf 100 500 Td "
+    hidden = b"/OC /Hidden BDC (hidden) Tj EMC "
+    after = b"(visible) Tj ET"
+    layered = pdf.extract_primitives(_layer_report(before + hidden + after))
+    control = pdf.extract_primitives(_stamp_report(before + b"(hidden) Tj " + after))
+    assert layered.letters == control.letters[6:]
+
+
+@pytest.mark.parametrize("membership", [
+    b"<< /Type /OCMD /VE [/Or 5 0 R [/Bogus 6 0 R]] >>",
+    b"<< /Type /OCMD /OCGs [5 0 R 7 0 R] /P /AnyOn >>",
+    b"<< /Type /OCMD /VE [/Not 5 0 R 6 0 R] >>",
+    b"<< /Type /OCMD /VE 5 0 R >>",
+])
+def test_invalid_layer_membership_is_refused_even_after_a_visible_operand(membership):
+    report = _layer_report(b"/OC /Visible BDC\n" + _stamp_layout(100, 500) + b"EMC", membership)
+    assert json.loads(verdict_bytes(report))["refusal"] == "REPORT_PDF_UNSUPPORTED"
