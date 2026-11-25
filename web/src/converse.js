@@ -15,6 +15,9 @@ import { trackErrorShown, trackStreamDown } from './telemetry.js'
 // endpoint every conversational surface shares, so it carries the guard rather
 // than each of its four callers. See lib/secretGuardTransport.js.
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
+import { composerDraftAccountScope } from './lib/composerDraft.js'
+import { readActiveScope } from './auth/activeScope.js'
+import { announceViewRequest } from './lib/viewControl.js'
 
 const API_BASE = config.apiBase
 const TENANT = config.tenant
@@ -24,6 +27,7 @@ const TENANT = config.tenant
 //   RACE_MIN..CHIP_ONLY (lane run)      -> chip AND an agent turn race
 //   below RACE_MIN / build / solve      -> ConversePanel primary
 export const THRESHOLDS = { CHIP_ONLY: 0.80, RACE_MIN: 0.55 }
+export const PLAN_MODE_CONTEXT_KEY = 'planMode'
 
 const EMPTY_ACTIVITY = Object.freeze({ queued: 0, executing: 0, total: 0 })
 
@@ -46,6 +50,7 @@ export function projectActivityProjection(value) {
 export const STREAM_EVENT_TYPES = [
   'turn_started', 'text_delta', 'tool_call', 'tool_result', 'job_linked',
   'proposed_run', 'confirmation_required', 'question_required', 'confirmation_resolved',
+  'questions_required', 'plan_proposed',
   'turn_usage', 'turn_complete', 'session_state', 'error',
   // Durable queue events (turn_runner appends them; composer.js reads them).
   'turn_queued', 'turn_queue_dropped',
@@ -307,7 +312,7 @@ function isCompletedJournalReply(res, body, requestId) {
 // turn_in_progress · 401 grant_required · 429 llm_quota_exhausted /
 // llm_rate_limited · 404 session_not_found).
 export async function postMessage(sessionId, {
-  text, confirm, images, classifier_hint, credential_grant, queue, request_id,
+  text, confirm, answers, images, classifier_hint, credential_grant, queue, request_id,
   entity_scope,
   projectContext,
   // Slice 6b hand-off identity: WHO asked for this background start. Bounded
@@ -332,6 +337,7 @@ export async function postMessage(sessionId, {
   const payload = {}
   if (text != null) payload.text = text
   if (confirm != null) payload.confirm = confirm
+  if (confirm?.feedback != null) guardPlanText(confirm.feedback)
   if (images != null) payload.images = images
   if (classifier_hint != null) payload.classifier_hint = classifier_hint
   if (credential_grant != null) payload.credential_grant = credential_grant
@@ -352,6 +358,14 @@ export async function postMessage(sessionId, {
   if (queue === true && typeof requested_by === 'string') {
     const who = requested_by.trim()
     if (who && who.length <= SCOPE_HANDLE_MAX) payload.requested_by = who
+  }
+  if (answers != null) {
+    if (Object.keys(payload).length) throw new Error('Send answers in a separate turn.')
+    for (const answer of Object.values(answers.answers || {})) {
+      for (const value of answer.labels || []) guardPlanText(value)
+      if (answer.other != null) guardPlanText(answer.other)
+    }
+    payload.answers = answers
   }
   const { res, body } = await post(
     `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
@@ -435,6 +449,15 @@ export async function approve(confirmationId, approved) {
   return body || { resolved: true, approved: !!approved }
 }
 
+function guardPlanText(value) {
+  const guard = guardedText(value)
+  if (!guard.ok) throw new SecretRefusedError(guard.refusal)
+}
+
+export function sendAnswers(sessionId, questionId, answers) {
+  return postMessage(sessionId, { answers: { question_id: questionId, answers } })
+}
+
 export async function listPendingApprovals(sessionId, limit = 100) {
   const bounded = Math.max(1, Math.min(Number(limit) || 100, 100))
   const query = `session_id=${encodeURIComponent(sessionId)}&limit=${bounded}`
@@ -464,17 +487,44 @@ export async function approveStandardService(approvalId, argumentDigest) {
  * nothing runs until the caller permits the resume.
  */
 export async function resolveApproval(
-  confirmationId, owningSessionId, approved, decisionRecorded = false, { beforeResume = null } = {},
+  confirmationId, owningSessionId, approved, decisionRecorded = false,
+  { beforeResume = null, feedback, onRecorded, isCurrent } = {},
 ) {
-  if (!decisionRecorded) {
-    await approve(confirmationId, approved)
+  // Keep the feedback in this tab across the gap between the two POSTs.
+  // Only a server-recorded denial can resume with a previously saved note.
+  const scope = readActiveScope() || composerDraftAccountScope()
+  const feedbackKey = scope && 'leaf.planFeedback:' + JSON.stringify([scope, owningSessionId, confirmationId])
+  let storage
+  if (!approved && feedbackKey) {
+    try { storage = globalThis.sessionStorage } catch { /* Tab storage is optional for ordinary denials. */ }
+    if (decisionRecorded && feedback == null) feedback = storage?.getItem(feedbackKey)
   }
+  if (feedback != null) {
+    if (approved || typeof feedback !== 'string' || feedback.length > 1000) throw new Error('Invalid plan feedback.')
+    guardPlanText(feedback)
+  }
+  if (!decisionRecorded) {
+    if (feedback != null) {
+      if (!storage) throw new Error('Could not save the pending plan feedback.')
+      storage.setItem(feedbackKey, feedback)
+    } else if (storage?.getItem(feedbackKey) != null) {
+      storage.removeItem(feedbackKey)
+    }
+    await approve(confirmationId, approved)
+    onRecorded?.()
+  }
+  if (isCurrent && !isCurrent()) return { held: true, recorded: true }
   if (approved && typeof beforeResume === 'function' && (await beforeResume()) === false) {
     return { held: true, recorded: true }
   }
-  return postMessage(owningSessionId, {
-    confirm: { confirmationId, approved: !!approved },
+  const result = await postMessage(owningSessionId, {
+    confirm: { confirmationId, approved: !!approved, ...(feedback != null ? { feedback } : {}) },
   })
+  if (feedback != null) {
+    storage?.removeItem(feedbackKey)
+    return { ...result, planRevised: true }
+  }
+  return result
 }
 
 // --- Event stream ---------------------------------------------------------
@@ -530,6 +580,7 @@ export function openStream(sessionId, afterSeq = 0, handlers = {}) {
       lastSeq = seq
     }
     try {
+      announceViewRequest(envelope, sessionId)
       const h = handlers[envelope.type]
       if (h) h(envelope.data || {}, envelope)
       if (!closed && handlers.onEvent) handlers.onEvent(envelope)

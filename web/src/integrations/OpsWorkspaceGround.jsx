@@ -8,6 +8,7 @@ import { actionRunMatches, canonicalRecordsPointer, recordsAtOriginal, createInt
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import { IntegrationSetupPanel } from './IntegrationSetupPanel.jsx'
 import { DatasetDerivationPanel, DatasetDerivationEvidence, isImportedMaterialDataset } from './DatasetDerivationPanel.jsx'
+import { SavedDatasetViewExport } from './SavedDatasetViewExport.jsx'
 import { ManualWorkflowRunPanel } from './ManualWorkflowRunPanel.jsx'
 import { ManualWorkflowStartPanel } from './ManualWorkflowStartPanel.jsx'
 import { ManualWorkflowDefinitionPanel } from './ManualWorkflowDefinitionPanel.jsx'
@@ -196,7 +197,7 @@ function ProjectMaterialImport({ projectId, client, signal, guard, onImported, o
         <label>Import dataset title<input required value={title} onChange={(event) => setTitle(event.target.value)} /></label>
         <label>Import dataset version<input required type="number" min="1" value={version} onChange={(event) => setVersion(event.target.value)} /></label>
         {fields.map((field, index) => <fieldset key={index}><legend>Import field {index + 1}</legend>
-          {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
+          {['id', 'label', 'pointer'].map((key) => <label key={key}>{`Field ${index + 1} ${key}`}<input required={key !== 'pointer'} placeholder={key === 'pointer' ? 'Blank maps the whole record' : undefined} value={field[key]} onChange={(event) => updateField(index, key, event.target.value)} /></label>)}
           <label>{`Field ${index + 1} type`}<select value={field.kind} onChange={(event) => updateField(index, 'kind', event.target.value)}>{['text', 'identifier', 'count', 'number', 'ratio', 'boolean', 'date', 'instant'].map((kind) => <option key={kind}>{kind}</option>)}</select></label>
           {field.kind === 'ratio' && <label>{`Field ${index + 1} ratio scale`}<select value={field.ratioScale || 'percent'} onChange={(event) => updateField(index, 'ratioScale', event.target.value)}>
             <option value="percent">Percent (80 means 80%)</option><option value="fraction">Fraction (0.8 means 80%)</option>
@@ -319,7 +320,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         ctx.cacheIdentity = scopeCacheIdentity(scope, sessionGeneration)
         const [datasets, elements] = await Promise.all([
           client.listDatasets(projectId, { signal: ctx.controller.signal }),
-          client.listElements(projectId, { signal: ctx.controller.signal }),
+          // Each saved view is validated against its source during discovery.
+          // Keep that work within one request; remaining views use the cursor below.
+          client.listElements(projectId, { signal: ctx.controller.signal, limit: 1 }),
         ])
         if (!current(ctx)) return
         setState({ ...empty(), identity, scope, datasets: datasets.records, elements: elements.records,
@@ -623,7 +626,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     operation('Loading more…', async (ctx) => {
       const isDataset = resource === 'datasets'
       const page = await client[isDataset ? 'listDatasets' : 'listElements'](projectId, { signal: ctx.controller.signal,
-        after: isDataset ? state.datasetCursor : state.elementCursor })
+        after: isDataset ? state.datasetCursor : state.elementCursor, ...(!isDataset ? { limit: 1 } : {}) })
       if (current(ctx)) setState((old) => {
         let records = [...old[resource], ...page.records]
         if (!isDataset) {
@@ -796,6 +799,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
               </>}
             </> : <>
             {state.read && state.previousRead && <p role="status">Previous result. {pending ? 'Refreshing view…' : 'The latest read failed; showing the last successful result.'}</p>}
+            <SavedDatasetViewExport projectId={projectId} record={state.selected} read={state.read}
+              dataset={state.datasets.find(item => referenceKey(item.reference) === referenceKey(state.selected.element.dataset_ref))}
+              readIdentity={state.readIdentity} scopeKey={context.current?.cacheIdentity} preferences={preferences}
+              unavailable={pending || state.previousRead || Boolean(viewError)} guard={guardSchedulePreview} />
             {viewError && <div role="alert" ref={viewFeedback} tabIndex={-1}><p>{humanizeError(state.error)}</p>{state.retryable && <button disabled={pending} onClick={retryView}>Retry view</button>}</div>}
             {(state.read || pending) && <DatasetElement element={state.selected.element} read={state.read} preferences={preferences} isLoading={pending}
               onRetry={retryView}

@@ -83,12 +83,17 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
   const [atField, setAtField] = useState(''), [eventTime, setEventTime] = useState(''), [seconds, setSeconds] = useState(604800)
   const [lowerInclusive, setLowerInclusive] = useState(false), [upperInclusive, setUpperInclusive] = useState(true)
   const [pairs, setPairs] = useState([]), [domainFields, setDomainFields] = useState({}), [orderField, setOrderField] = useState('')
+  const [ignoreCase, setIgnoreCase] = useState({})
   const [calculations, setCalculations] = useState([])
   const eligible = datasets.filter(isImportedMaterialDataset)
   const primary = eligible.find(dataset => refKey(dataset.reference) === primaryKey)
   const events = eligible.find(dataset => refKey(dataset.reference) === eventsKey)
   const domain = eligible.find(dataset => refKey(dataset.reference) === domainKey)
   const fields = primary?.fields ?? [], eventFields = events?.fields ?? [], domainOptions = domain?.fields ?? []
+  const canIgnoreCase = field => fields.find(item => item.id === field)?.type.kind === 'identifier'
+    && domainOptions.find(item => item.id === domainFields[field])?.type.kind === 'identifier' && !dayFields.includes(field)
+  const comparisonContext = JSON.stringify([primary?.reference, fields, domain?.reference, domainOptions])
+  useLayoutEffect(() => { setIgnoreCase({}) }, [comparisonContext])
   const current = ctx => scope.current === ctx && ctx && !ctx.controller.signal.aborted && !signal.aborted
   useLayoutEffect(() => {
     const ctx = { controller: new AbortController() }; scope.current = ctx
@@ -110,7 +115,7 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
   }, [client, projectId, signal, reload])
   const choosePrimary = key => {
     setPrimaryKey(key); setGroupFields([]); setDayFields([]); setAnchorFields([]); setDistinct([]); setFilters([]); setPairs([]); setDomainFields({}); setAtField(''); setCalculations([])
-    setWindows([freshWindow()]); setCreated(null)
+    setWindows([freshWindow()]); setCreated(null); setIgnoreCase({})
   }
   const datasetSelect = (label, value, change, optional = false) => <label>{label}<select required={!optional} value={value} onChange={event => change(event.target.value)}>
     <option value="">{optional ? 'None' : 'Select imported dataset'}</option>{eligible.map(dataset => <option key={refKey(dataset.reference)} value={refKey(dataset.reference)}>{dataset.title} · version {dataset.reference.version}</option>)}
@@ -126,7 +131,8 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
       const plan = kind === 'group_count' ? { kind, filters: predicates(filters, fields), group_by: groupFields.map(field => ({ field, as: field,
         bucket: dayFields.includes(field) ? 'day' : 'value', ...(dayFields.includes(field) && fields.find(item => item.id === field)?.type.kind === 'instant' ? { time_zone: timezone } : {}) })), count,
         windows: windows.map(window => ({ id: window.id, filters: predicates(window.filters, fields) })),
-        ...(domain ? { domain: { keys: groupFields.map(field => ({ group_field: field, domain_field: domainFields[field] || '' })), ...(orderField ? { order_field: orderField } : {}) } } : {}) }
+        ...(domain ? { domain: { keys: groupFields.map(field => ({ group_field: field, domain_field: domainFields[field] || '',
+          ...(ignoreCase[field] && canIgnoreCase(field) ? { comparison: 'ascii_case_insensitive' } : {}) })), ...(orderField ? { order_field: orderField } : {}) } } : {}) }
         : { kind, anchor_fields: anchorFields, anchor_filters: predicates(filters, fields), at_field: atField, event_time_field: eventTime,
           event_filters: predicates(eventFilters, eventFields), partition_by: pairs, lookback_seconds: Number(seconds), lower_inclusive: lowerInclusive, upper_inclusive: upperInclusive, count }
       request = DatasetDerivationRequestV1.parse({ schema_version: 1, output: { id, version: Number(version), title },
@@ -160,7 +166,7 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
     {!capabilities ? <button type="button" onClick={() => setReload(value => value + 1)}>Retry derivation availability</button> : <form onSubmit={create}>
       <fieldset disabled={pending || signal.aborted}><legend>Derivation choices</legend>
-        <label>Operation<select value={kind} onChange={event => { setKind(event.target.value); setDistinct([]); setCreated(null); setCalculations([]) }}>
+        <label>Operation<select value={kind} onChange={event => { setKind(event.target.value); setDistinct([]); setCreated(null); setCalculations([]); setIgnoreCase({}) }}>
           {capabilities.operations.map(operation => <option key={operation} value={operation}>{operation === 'group_count' ? 'Grouped counts' : 'Counts before each observation'}</option>)}
         </select></label>
         {datasetSelect(kind === 'group_count' ? 'Source dataset' : 'Observation dataset', primaryKey, choosePrimary)}
@@ -171,11 +177,14 @@ function ScopedDerivation({ client, projectId, signal, datasets, guard, onCreate
         <label>Count label<input required value={countLabel} onChange={event => setCountLabel(event.target.value)} /></label>
         <Filters label={kind === 'group_count' ? 'Source conditions' : 'Observation conditions'} fields={fields} rows={filters} onChange={setFilters} />
         {kind === 'group_count' ? <>
-          <FieldChecks label="Group fields" fields={fields} values={groupFields} onChange={setGroupFields} />
-          <FieldChecks label="Group these date or time fields by day" fields={fields.filter(field => groupFields.includes(field.id) && ['date', 'instant'].includes(field.type.kind))} values={dayFields} onChange={setDayFields} />
+          <FieldChecks label="Group fields" fields={fields} values={groupFields} onChange={value => { setGroupFields(value); setIgnoreCase({}) }} />
+          <FieldChecks label="Group these date or time fields by day" fields={fields.filter(field => groupFields.includes(field.id) && ['date', 'instant'].includes(field.type.kind))} values={dayFields} onChange={value => { setDayFields(value); setIgnoreCase({}) }} />
           {dayFields.some(id => fields.find(field => field.id === id)?.type.kind === 'instant') && <label>Grouping timezone<input required value={timezone} onChange={event => setTimezone(event.target.value)} /></label>}
-          {datasetSelect('Ordered scope dataset', domainKey, key => { setDomainKey(key); setDomainFields({}); setOrderField('') }, true)}
-          {domain && <><p>Only the declared scope tuples are included. Zero counts require complete admitted inputs.</p>{groupFields.map(field => <FieldSelect key={field} label={`Scope field for ${field}`} fields={domainOptions} value={domainFields[field] || ''} onChange={value => setDomainFields(old => ({ ...old, [field]: value }))} />)}
+          {datasetSelect('Ordered scope dataset', domainKey, key => { setDomainKey(key); setDomainFields({}); setOrderField(''); setIgnoreCase({}) }, true)}
+          {domain && <><p>Only the declared scope tuples are included. Zero counts require complete admitted inputs.</p>{groupFields.map(field => <div key={field}>
+            <FieldSelect label={`Scope field for ${field}`} fields={domainOptions} value={domainFields[field] || ''} onChange={value => { setDomainFields(old => ({ ...old, [field]: value })); setIgnoreCase(old => ({ ...old, [field]: false })) }} />
+            {canIgnoreCase(field) && <label><input type="checkbox" checked={!!ignoreCase[field]} onChange={event => setIgnoreCase(old => ({ ...old, [field]: event.target.checked }))} />Ignore ASCII letter case for {field} matched to {domainFields[field]} (preserves original spelling)</label>}
+          </div>)}
             <FieldSelect label="Scope order field" fields={domainOptions.filter(field => numeric.includes(field.type.kind) && !field.nullable)} value={orderField} onChange={setOrderField} optional /></>}
           {windows.map((window, index) => <fieldset key={index}><legend>Named window {index + 1}</legend>
             <label>Window ID<input required value={window.id} onChange={event => setWindows(old => old.map((item, i) => i === index ? { ...item, id: event.target.value } : item))} /></label>

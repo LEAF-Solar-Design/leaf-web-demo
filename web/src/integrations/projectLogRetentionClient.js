@@ -140,6 +140,10 @@ export function createProjectLogRetentionMethods(request, invalid) {
       const query = new URLSearchParams({ limit: String(value.limit) }); if (value.after !== undefined) query.set('after', value.after)
       return send(projectId, 'executions?' + query, signal, 'GET', undefined, historyPage, result => result.items.length <= value.limit)
     },
+    async retentionGetPreparedTable(projectId, reference, context) {
+      const signal = validateOptions(context), id = parse(table, reference)
+      return send(projectId, 'tables/' + id, signal, 'GET', undefined, z.strictObject({ tableId: table, revision }), value => value.tableId === id)
+    },
     async retentionPrepare(projectId, input, context) { const signal = validateOptions(context); const body = parse(prepareInput, input)
       return send(projectId, 'prepare', signal, 'POST', body, z.strictObject({ tableId: table, revision: z.literal(1) })) },
     async retentionRegisterDefinition(projectId, input, context) { const signal = validateOptions(context); const body = parse(definitionInput, input)

@@ -311,3 +311,33 @@ def test_split_replay_refuses_a_piece_echo_that_does_not_match(tmp_path, capsys)
     assert "exactly one matching response (found 0)" in capsys.readouterr().err
     assert not (tmp_path / "graph.json").exists()
     assert not (tmp_path / "metadata.json").exists()
+
+
+@pytest.mark.parametrize("split", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_only_recorded_script_transport_selects_plugin_parity(monkeypatch, split, recorded):
+    from types import SimpleNamespace
+    seen = []
+    graph = {"rev": 0}
+    frame = {"id": "frame", "name": "Group 1"}
+    def commit(graph, params, *, candidate, plugin_parity=False):
+        seen.append(plugin_parity)
+        return graph
+    monkeypatch.setattr(producer, "builtin", lambda name: SimpleNamespace(commit_solve=commit))
+    monkeypatch.setattr(producer, "needs_split_solve", lambda *a, **k: split)
+    monkeypatch.setattr(producer, "build_stringer_request", lambda *a, **k: {})
+    monkeypatch.setattr(producer, "bind_request", lambda *a, **k: {})
+    monkeypatch.setattr(producer, "bind_split_request", lambda *a, **k: {})
+    monkeypatch.setattr(producer, "complete_search", lambda *a, **k: {})
+    monkeypatch.setattr(producer, "complete_split_search", lambda *a, **k: {})
+    monkeypatch.setattr(producer, "solve_split_frame", lambda *a, **k:
+        {"pieces": [{}], "proposals": [{}], "split_state": {"jogs": 1, "depth": 1}})
+    monkeypatch.setattr(producer.cloud, "proposal", lambda *a, **k: {})
+    monkeypatch.setattr(producer.cloud.requests.sessions.Session, "request", lambda *a, **k:
+        pytest.fail("script parity dispatch control attempted network"))
+    result, bodies, hashes, splits = producer.solve_frames(graph, [frame], maximum=14,
+        dwgname="inert", tenant="inert", grant_ref=None, replay=[] if recorded else None)
+    assert result == graph
+    assert seen == [recorded]
+    assert bodies == [] and hashes == []
+    assert bool(splits) is split

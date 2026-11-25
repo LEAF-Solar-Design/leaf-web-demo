@@ -12,8 +12,9 @@ import uuid
 import catalog
 import entitlements
 import lab_registry
+import lab_corpus_failures
 import lab_tool_manifests
-from lab_evaluate import RunBudgetExceeded, RunCancelled, canonical_json
+from lab_evaluate import GraphRefused, RunBudgetExceeded, RunCancelled, admit_graph, canonical_json
 
 
 _tenant_locks_guard = threading.Lock()
@@ -118,6 +119,122 @@ class ToolNodeAdapter:
         self.corpus_authority = corpus_authority
         self.corpus_owned, self.corpus_cancel = corpus_owned, corpus_cancel
         self.corpus_requested = corpus_requested
+        self._corpus_jobs = {}
+        self._corpus_deadline = None
+        self._corpus_cleanup_result = None
+
+    def _corpus_running(self, deadline):
+        if (self.cancelled() or (self.corpus_requested and self.corpus_requested())
+                or self.corpus_owned is None or not self.corpus_owned()):
+            raise RunCancelled()
+        if deadline is not None and self.monotonic() >= deadline:
+            raise RunBudgetExceeded()
+
+    def prime_corpus(self, graph, registry, *, deadline):
+        """Admit independent native intents, leaving observation to the evaluator."""
+        if (not isinstance(graph, dict) or graph.get('pipes') != []
+                or not graph.get('blocks') or any(
+                    block.get('registry', {}).get('id') != 'corpus-evaluator'
+                    for block in graph['blocks'])):
+            return False
+        manifests = admit_graph(graph, registry)
+        from lab_doc_validators import validate_graph
+        validate_graph(graph)
+        import lab_corpus_executor as corpus
+
+        prepared = []
+        for block in graph['blocks']:
+            ref = block['registry']
+            trusted = lab_tool_manifests.trusted_for(self.tenant, ref['id'], ref['version'])
+            if (manifests[block['id']]['id'] != 'corpus-evaluator'
+                    or trusted is None or trusted.kind != 'corpus-evaluator'
+                    or not self.admissible(trusted)):
+                raise GraphRefused('lab_graph_effect_refused', block['id'])
+            self._corpus_running(deadline)
+            context = self._corpus_context(block['id'], block['settings'])
+            # Custody and policy validity for every material precede any submission.
+            sources = corpus.read_sources(context)
+            corpus.compiled_suite(sources['suite'], context['policy'])
+            key = f"lab:{self.run_id}:{block['id']}:corpus:v1"
+            if len(key) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in key):
+                raise ValueError('Invalid corpus intent key.')
+            prepared.append((block['id'], context))
+        self._corpus_deadline = deadline
+        for block_id, context in prepared:
+            self._corpus_running(deadline)
+            if block_id not in self._corpus_jobs:
+                job_id = corpus.submit_policy(context,
+                    idempotency_key=f'lab:{self.run_id}:{block_id}:corpus:v1')
+                self._corpus_jobs[block_id] = (context, job_id)
+        return True
+
+    def cleanup_corpus(self, *, deadline=False):
+        """Fence all outstanding intents, then share one bounded receipt wait.
+
+        The existing deadline fence also closes abandoned intents on parent
+        failure. The worker retains the actual parent terminal cause separately.
+        """
+        import jobs
+
+        if self._corpus_cleanup_result is not None:
+            return self._corpus_cleanup_result
+        self._corpus_cleanup_result = False
+        if not self._corpus_jobs:
+            self._corpus_cleanup_result = True
+            return True
+        until = self.monotonic() + 10
+        pending = {}
+        confirmed = True
+        for block_id, (_, job_id) in list(self._corpus_jobs.items()):
+            if self.corpus_owned is None or not self.corpus_owned():
+                return False
+            try:
+                row = jobs.get_job(job_id)
+                if (row is not None and row['tenant_id'] == self.tenant
+                        and row['status'] == 'complete'):
+                    if not self.corpus_owned():
+                        return False
+                    del self._corpus_jobs[block_id]
+                    continue
+                tag = self.corpus_cancel(block_id, job_id, deadline)
+                if not self.corpus_owned():
+                    return False
+                if tag is None:
+                    # The fence returns any existing cancellation before checking
+                    # terminal status. Only its absence permits terminal readback.
+                    row = jobs.get_job(job_id)
+                    if not self.corpus_owned():
+                        return False
+                    if (row is not None and row['tenant_id'] == self.tenant
+                            and row['status'] in jobs.TERMINAL):
+                        del self._corpus_jobs[block_id]
+                    else:
+                        confirmed = False
+                else:
+                    pending[block_id] = (job_id, tag)
+            except Exception:
+                confirmed = False
+        while pending:
+            if not self.corpus_owned():
+                return False
+            for block_id, (job_id, tag) in list(pending.items()):
+                try:
+                    receipt = jobs.corpus_cleanup(job_id, self.tenant)
+                    if not self.corpus_owned():
+                        return False
+                    if (receipt and receipt.get('cancel') == tag
+                            and (receipt.get('reaped') is True or receipt.get('not_started') is True)):
+                        del pending[block_id]
+                        del self._corpus_jobs[block_id]
+                except Exception:
+                    confirmed = False
+            if not pending:
+                break
+            if self.monotonic() >= until:
+                return False
+            self.sleep(min(0.25, max(0, until - self.monotonic())))
+        self._corpus_cleanup_result = confirmed and not self._corpus_jobs
+        return self._corpus_cleanup_result
 
     def admissible(self, trusted):
         return tool_block_admissible(trusted, self.effects)
@@ -275,29 +392,44 @@ class ToolNodeAdapter:
                 return {"outputs": {port: data.get(port) for port in ports}}
             self.sleep(max(0, min(0.5, deadline - self.monotonic())))
 
-    def _corpus(self, block_id, settings, deadline):
-        import jobs
+    def _corpus_context(self, block_id, settings):
         import lab_corpus_executor as corpus
         authority = self.corpus_authority
         if (not authority or authority['tenant_id'] != self.tenant
                 or settings['project_id'] != authority['project_id']
                 or self.corpus_owned is None or not self.corpus_owned()):
-            return {'error': 'lab_corpus_authority_refused'}
+            raise ValueError('lab_corpus_authority_refused')
         def descriptor(value):
             value = dict(value)
             size = value.get('byte_size')
             if type(size) is float and math.isfinite(size) and size.is_integer():
                 value['byte_size'] = int(size)
             return value
-        context = corpus.validate_context({'schema': corpus.SCHEMA, 'tenant_id': self.tenant,
+        return corpus.validate_context({'schema': corpus.SCHEMA, 'tenant_id': self.tenant,
             'org_id': self.tenant, 'project_id': authority['project_id'],
             'actor_id': authority['actor_id'], 'corpus': descriptor(settings['corpus']), 'suite': descriptor(settings['suite']),
             'capability_sha256': corpus.ARCHIVE_SHA256,
             'policy': corpus.compile_policy(authority, block_id, settings)})
-        key = f'lab:{self.run_id}:{block_id}:corpus:v1'
-        job_id = corpus.submit_policy(context, idempotency_key=key)
-        stopping = None
-        cleanup_deadline = None
+
+    def _corpus(self, block_id, settings, deadline):
+        import jobs
+        import lab_corpus_executor as corpus
+
+        authority = self.corpus_authority
+        if self._corpus_deadline is not None:
+            deadline = self._corpus_deadline if deadline is None else min(deadline, self._corpus_deadline)
+        self._corpus_running(deadline)
+        if block_id in self._corpus_jobs:
+            context, job_id = self._corpus_jobs[block_id]
+        else:
+            try:
+                context = self._corpus_context(block_id, settings)
+            except ValueError:
+                return {'error': 'lab_corpus_authority_refused'}
+            self._corpus_running(deadline)
+            key = f'lab:{self.run_id}:{block_id}:corpus:v1'
+            job_id = corpus.submit_policy(context, idempotency_key=key)
+            self._corpus_jobs[block_id] = (context, job_id)
         while True:
             # Lease loss suspends this observer. It cannot cancel the shared
             # intent that a successor Lab worker may already own.
@@ -305,26 +437,19 @@ class ToolNodeAdapter:
                 raise RunCancelled()
             expired = deadline is not None and self.monotonic() >= deadline
             requested = bool(self.corpus_requested and self.corpus_requested())
-            if stopping is None and (expired or requested):
-                stopping = self.corpus_cancel(block_id, job_id, expired)
-                cleanup_deadline = self.monotonic() + 10
-                if stopping is None:
-                    return {'error': 'lab_corpus_cleanup_unconfirmed'}
-            if stopping is not None:
-                receipt = jobs.corpus_cleanup(job_id, self.tenant)
-                if (receipt and receipt.get('cancel') == stopping
-                        and (receipt.get('reaped') is True or receipt.get('not_started') is True)):
-                    if expired:
-                        raise RunBudgetExceeded()
-                    raise RunCancelled()
-                if self.monotonic() >= cleanup_deadline:
-                    return {'error': 'lab_corpus_cleanup_unconfirmed'}
+            if expired or requested:
+                self.cleanup_corpus(deadline=expired)
+                if expired:
+                    raise RunBudgetExceeded()
+                raise RunCancelled()
             else:
                 row = jobs.get_job(job_id)
                 if row is None or row['tenant_id'] != self.tenant:
                     return {'error': 'lab_corpus_job_unavailable'}
                 if row['status'] == 'failed':
-                    return {'error': 'lab_corpus_failed'}
+                    # A failed status may still carry a fenced cancellation
+                    # whose factual reap receipt has not arrived.
+                    return {'error': lab_corpus_failures.failure_code(row.get('error'))}
                 if row['status'] == 'complete':
                     value = row['result']['result']
                     if value['context'] != context:
@@ -345,5 +470,6 @@ class ToolNodeAdapter:
                     encoded = json.dumps(projected, sort_keys=True, separators=(',', ':'), allow_nan=False)
                     if len(encoded.encode()) > corpus.MAX_EVIDENCE_BYTES:
                         return {'error': 'lab_corpus_evidence_too_large'}
+                    del self._corpus_jobs[block_id]
                     return {'outputs': {'result': encoded}}
             self.sleep(0.25)

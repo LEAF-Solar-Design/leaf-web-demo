@@ -518,6 +518,40 @@ def test_confirmation_required_creates_approval_row_with_ttl(monkeypatch, turn_s
     _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
 
 
+def test_plan_proposed_creates_plan_approval_row(monkeypatch, turn_stub):
+    """Plan mode emits plan_proposed alone; without a row the plan card's
+    Approve 404s (staging walk 2026-11-21)."""
+    url, stub = turn_stub
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", url)
+    monkeypatch.setenv("TURN_MAX_S", "30")
+
+    stub.SCRIPT = [
+        {"type": "plan_proposed", "data": {"confirmation_id": "cid-plan-1",
+                                           "plan": {"title": "spiral"},
+                                           "plan_digest": "d", "revision": 1}},
+        {"type": "turn_complete", "data": {"stop_reason": "awaiting_approval"}},
+    ]
+
+    sess = _new_session("tenant-plan")
+    session_id = sess["session_id"]
+    turn_id = turn_runner.start_turn("tenant-plan", session_id, text="make a tool")
+
+    ok = _wait_until(lambda: session_store.get_approval("cid-plan-1") is not None)
+    assert ok, "plan approval row was never created"
+
+    approval = session_store.get_approval("cid-plan-1")
+    assert approval["session_id"] == session_id
+    assert approval["tenant_id"] == "tenant-plan"
+    assert approval["turn_id"] == turn_id
+    # No tool: the confirm path treats a tool row as a drawing run and
+    # refuses it without a stored dwg.
+    assert approval["tool"] is None
+    assert approval["kind"] == "propose_build_plan"
+    assert approval["decided"] is False
+
+    _wait_until(lambda: session_store.get_session(session_id)["active_turn_id"] is None)
+
+
 def test_spine_proposed_run_creates_approval_row_at_awaiting_approval_end(monkeypatch, turn_stub):
     """Spine unification (census #12 chip 1): the mounted §18 engine proposes a
     write with proposed_run ONLY — no confirmation_required follows — so the

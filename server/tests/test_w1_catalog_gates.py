@@ -536,7 +536,7 @@ def test_no_routing_literal_outside_the_table():
             )
             for node in ast.walk(tree)
         )
-    assert call_sites == {"routers/jobs.py": 1, "jobs.py": 7, "broker_client.py": 1, "broker.py": 3}
+    assert call_sites == {"routers/jobs.py": 2, "jobs.py": 7, "broker_client.py": 1, "broker.py": 3}
     source = (SERVER / "product_capability_availability.py").read_text(encoding="utf-8")
     for comparison in ('== "solar-solve-proposal"', '!= "solar-solve-proposal"',
                        'is "solar-solve-proposal"'):

@@ -72,6 +72,49 @@
                           "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
                         }
                       },
+                      "row_grouping": {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "provider_pairs"
+                          },
+                          "pair_key_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                          },
+                          "provider_field": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                          },
+                          "providers": {
+                            "type": "array",
+                            "prefixItems": [
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              },
+                              {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 120
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "pair_key_field",
+                          "provider_field",
+                          "providers"
+                        ],
+                        "additionalProperties": false
+                      },
                       "row_limit": {
                         "type": "integer",
                         "minimum": 1,
@@ -1079,6 +1122,65 @@
       ],
       "cost_class": "write"
     },
+    "run_drawing_edit_tool": {
+      "description": "Dispatch a registered drawing.write tool on the user's own standalone drawing via POST /api/run (R3; creates vN+1, undoable from version history). Runs without an approval card; project drawings, solves, live APS runs, authoring, publishing and platform edits keep their own approval actions.",
+      "rung": 3,
+      "required_capability": "run_write",
+      "policy": "auto",
+      "tenant_tightenable": true,
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/run"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          },
+          "dwg": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "drawing_version": {
+            "type": "integer"
+          },
+          "expected_drawing_head": {
+            "type": "integer"
+          },
+          "catalog_commit": {
+            "type": "string"
+          },
+          "effective_catalog_digest": {
+            "type": "string"
+          },
+          "tool_manifest_sha256": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "medium",
+      "timeout_s": 120,
+      "audit_extra": [
+        "tool",
+        "dwg"
+      ],
+      "cost_class": "write"
+    },
     "run_solve_tool": {
       "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
       "rung": 4,
@@ -1259,6 +1361,21 @@
         "to_version"
       ]
     },
+    "propose_build_plan": {
+      "description": "Ask the user to approve an exact tool build plan.",
+      "rung": 5,
+      "required_capability": "build",
+      "policy": "always-confirm",
+      "approval_ttl_s": 1800,
+      "dispatch": {"kind": "none", "routes": []},
+      "args_schema": {
+        "type": "object",
+        "properties": {"plan": {"type": "object"}},
+        "required": ["plan"],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "high"
+    },
     "author_tool": {
       "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6).",
       "rung": 5,
@@ -1285,6 +1402,15 @@
           },
           "target_tool_name": {
             "type": "string"
+          },
+          "plan_confirmation_id": {"type": "string"},
+          "retry_of_change_set_id": {"type": "string", "format": "uuid"},
+          "target": {
+            "type": "string",
+            "enum": [
+              "studio",
+              "branch"
+            ]
           },
           "confirmation_id": {
             "type": "string"

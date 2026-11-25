@@ -146,9 +146,9 @@ describe('Lab rail selection and tab visibility', () => {
     await act(async () => {})
     await findCanvas()
     expect(screen.getByRole('tab', { name: 'Lab' })).toBeInTheDocument()
-    // Shared surface authority and retained GraphView each own logout cleanup.
-    // Unauthorized transport remains a single shared surface subscription.
-    expect(subscribe).toHaveBeenCalledTimes(subscribe === subscribeBeforeLogout ? 2 : 1)
+    // Lab authority and retained GraphView own logout cleanup; the estimator
+    // probe adds one logout and one unauthorized subscription.
+    expect(subscribe).toHaveBeenCalledTimes(subscribe === subscribeBeforeLogout ? 3 : 2)
     const tokenStored = subscribeTokenStored.mock.calls[0][0]
     act(() => { localStorage.setItem('leaf.jwt', 'replacement'); tokenStored('replacement') })
     expect(screen.queryByRole('tab', { name: 'Lab' })).toBeNull()

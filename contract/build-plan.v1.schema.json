@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leafautomation.ai/contracts/build-plan.v1.schema.json",
+  "title": "leaf.build-plan.v1",
+  "$comment": "The server also checks the 16384-byte canonical UTF-8 limit and uniqueness of inputs by name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "target", "change_kind", "tool_name", "title", "summary", "behavior", "inputs", "output", "capabilities", "undo", "assumptions", "acceptance", "answers"],
+  "properties": {
+    "schema": {"const": "leaf.build-plan.v1"},
+    "target": {"enum": ["branch", "studio"]},
+    "change_kind": {"enum": ["create", "revise"]},
+    "tool_name": {"$ref": "#/$defs/toolName"},
+    "target_tool_name": {"$ref": "#/$defs/toolName"},
+    "title": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 80},
+    "summary": {"$ref": "#/$defs/multiline", "minLength": 1, "maxLength": 500},
+    "behavior": {"type": "array", "minItems": 1, "maxItems": 12, "items": {"$ref": "#/$defs/item"}},
+    "inputs": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/input"}},
+    "output": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 300},
+    "capabilities": {
+      "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true,
+      "items": {"enum": ["drawing.read", "drawing.write"]}
+    },
+    "undo": {"$ref": "#/$defs/text", "maxLength": 200},
+    "assumptions": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/item"}},
+    "acceptance": {"type": "array", "maxItems": 6, "items": {"$ref": "#/$defs/item"}},
+    "answers": {
+      "type": "object", "maxProperties": 4,
+      "propertyNames": {"$ref": "#/$defs/text", "pattern": "^[a-z0-9_-]{1,32}$"},
+      "additionalProperties": {"$ref": "#/$defs/answer"}
+    }
+  },
+  "if": {"properties": {"change_kind": {"const": "revise"}}},
+  "then": {
+    "required": ["target_tool_name"],
+    "properties": {
+      "tool_name": {"description": "Must equal target_tool_name. Both runtime validators enforce this cross-field constraint."}
+    }
+  },
+  "else": {"not": {"required": ["target_tool_name"]}},
+  "$defs": {
+    "multiline": {
+      "type": "string",
+      "not": {"pattern": "[\\u0000-\\u0009\\u000b-\\u001f\\u007f\\ud800-\\udfff]|^[\\u000a \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]|[\\u000a \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000](?![\\s\\S])"}
+    },
+    "text": {"$ref": "#/$defs/multiline", "not": {"pattern": "\\n"}},
+    "item": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 240},
+    "toolName": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"},
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "type", "default", "description"],
+      "properties": {
+        "name": {"$ref": "#/$defs/text", "pattern": "^[a-z][a-z0-9_]{0,39}$"},
+        "type": {"enum": ["string", "integer", "boolean", "number"]},
+        "default": {"type": ["string", "number", "boolean", "null"], "maxLength": 200},
+        "description": {"$ref": "#/$defs/text", "maxLength": 200}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "string"}}}, "then": {"properties": {"default": {"anyOf": [{"$ref": "#/$defs/text"}, {"type": "null"}]}}}},
+        {"if": {"properties": {"type": {"const": "integer"}}}, "then": {"properties": {"default": {"type": ["integer", "null"]}}}},
+        {"if": {"properties": {"type": {"const": "boolean"}}}, "then": {"properties": {"default": {"type": ["boolean", "null"]}}}},
+        {"if": {"properties": {"type": {"const": "number"}}}, "then": {"properties": {"default": {"type": ["number", "null"]}}}}
+      ]
+    },
+    "answer": {
+      "type": "object", "additionalProperties": false, "minProperties": 1, "maxProperties": 1,
+      "properties": {
+        "labels": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 60}},
+        "other": {"$ref": "#/$defs/text", "minLength": 1, "maxLength": 500}
+      }
+    }
+  }
+}

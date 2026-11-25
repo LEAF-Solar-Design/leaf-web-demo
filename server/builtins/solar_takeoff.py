@@ -19,6 +19,7 @@ READS_SOURCE_BINDING = True
 TOOL = "solar-takeoff"
 SCHEMA = "leaf.solar-takeoff.v1"
 PROJECT_REF_SCHEMA = "leaf.solar-project-artifact-ref.v1"
+NATIVE_REF_SCHEMA = "leaf.solar-canonical-native-state-ref.v1"
 MAX_LINES = 128
 MAX_INVERTER_GROUPS = 64
 MAX_GAUGE_GROUPS = 32
@@ -104,10 +105,18 @@ def _physical(wrapper):
             raise ValueError()
         ref = head["state"]
         if (type(head["index"]) is not int or not 0 <= head["index"] <= 4095
-                or type(ref) is not dict or not _hex(ref["artifact_id"])
-                or not _hex(ref["content_sha256"])):
+                or type(ref) is not dict):
             raise ValueError()
-        if "source_version_id" in ref:
+        if ref.get("schema") == NATIVE_REF_SCHEMA:
+            value = ref["version_id"]
+            if (set(ref) != {"schema", "version_id", "intake_sha256", "state_sha256"}
+                    or type(value) is not str or str(uuid.UUID(value)) != value
+                    or not _hex(ref["intake_sha256"]) or not _hex(ref["state_sha256"])
+                    or head.get("kind") != "canonical_version_intake" or head.get("version_id") != value):
+                raise ValueError()
+        elif not _hex(ref["artifact_id"]) or not _hex(ref["content_sha256"]):
+            raise ValueError()
+        elif "source_version_id" in ref:
             value = ref["source_version_id"]
             if (set(ref) != _PROJECT_KEYS or ref["schema"] != PROJECT_REF_SCHEMA
                     or type(value) is not str or str(uuid.UUID(value)) != value):
@@ -143,11 +152,12 @@ def _line(line_id, category, description, unit, quantity, kind, basis, source, p
     provenance = {"kind": kind, "drawing_version": source["drawing_version"], "basis": basis}
     if kind == "physical" and physical is not None:
         head = physical["head"]
-        provenance["physical_state"] = {
+        provenance["physical_state"] = ({"head_index": head["index"], **head["state"]}
+            if head["state"].get("schema") == NATIVE_REF_SCHEMA else {
             "head_index": head["index"], "artifact_id": head["state"]["artifact_id"],
             "content_sha256": head["state"]["content_sha256"],
             "state_source_version": head["state"].get("source_version"),
-        }
+        })
     computed = reason is None
     return {"line_id": line_id, "category": category, "description": description[:MAX_DESCRIPTION],
             "unit": unit, "quantity": _quantity(quantity, unit) if computed else None,

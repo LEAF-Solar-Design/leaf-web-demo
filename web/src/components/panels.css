@@ -38,6 +38,14 @@ button.chip-act, button.chip-neutral { border: 0; font-family: inherit; }
    presented as runnable until the publish response succeeds. */
 .customization-state { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: var(--leaf-size-caption); color: var(--muted); }
 .customization-state.error { color: var(--status-warning); }
+/* Recovery is a form, not a row of lifecycle badges. Keep the request and
+   actions readable in the narrow Studio rail. */
+.author-request-recovery { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; overflow-wrap: anywhere; }
+.author-request-recovery label { display: grid; gap: 4px; min-width: 0; }
+.author-request-recovery input { box-sizing: border-box; min-width: 0; width: 100%; }
+.author-request-recovery p { margin: 0; }
+.author-request-recovery button { justify-self: start; max-width: 100%; white-space: normal; text-align: left; }
+
 .customization-detail { margin: 8px 0; font-size: var(--leaf-size-caption); color: var(--muted); }
 .customization-detail > span { display: block; margin-bottom: 3px; }
 .customization-detail pre { margin: 0; max-height: 144px; overflow: auto; white-space: pre-wrap; }

@@ -1,4 +1,5 @@
 import StudioClient from './StudioClient.jsx'
+import { INVESTOR_LINK_CAPTURE_SOURCE } from '../lib/investorLinkCapture.js'
 
 export const metadata = {
   title: 'Leaf Automation Studio',
@@ -13,6 +14,7 @@ export default function RootLayout({ children }) {
   return (
     <html lang="en">
       <head>
+        <script dangerouslySetInnerHTML={{ __html: INVESTOR_LINK_CAPTURE_SOURCE }} />
         <link rel="preload" href="/fonts/barlow-400-latin.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
         <link rel="preload" href="/fonts/ibm-plex-mono-400-latin.woff2" as="font" type="font/woff2" crossOrigin="anonymous" />
       </head>

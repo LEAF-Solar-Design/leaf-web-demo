@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
 import * as drawingApi from '../api.js'
 import { resolveDrawingStore, pull, publish } from './drawingSync.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
+import BranchToolsPanel from './BranchToolsPanel.jsx'
 import { humanizeError } from '../errorHumanize.js'
 import './leafPlatform.css'
 
@@ -42,7 +43,23 @@ function commandMessage(outcome) {
   return null
 }
 
-function DrawingSyncRow({ project, ready, bridge, working }) {
+function syncStatus({ cursor, head }) {
+  if (cursor == null) return 'Not published from this drawing yet.'
+  if (head == null || head < cursor) return `AutoCAD has version ${cursor}.`
+  if (head === cursor) return `Up to date with version ${cursor}.`
+  return `Studio has version ${head}. Pull to update AutoCAD.`
+}
+
+function syncMessage(kind, result) {
+  if (result.reason) return result.reason
+  if (kind === 'publish') return `Published as version ${result.cursor}.`
+  const versions = result.applied
+  if (!versions.length) return 'Already up to date.'
+  if (versions.length === 1) return `Pulled version ${versions[0]} into AutoCAD.`
+  return `Pulled versions ${versions[0]} to ${versions[versions.length - 1]} into AutoCAD.`
+}
+
+function DrawingSyncRow({ project, ready, bridge, working, setWorking }) {
   const [sync, setSync] = useState(null)
   const operation = useRef(null)
   useEffect(() => {
@@ -51,10 +68,16 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     try {
       const { drawingStoreId } = resolveDrawingStore(project, ready)
       const cursor = ready.syncCursor?.drawingStoreId === drawingStoreId ? ready.syncCursor.version : null
-      setSync({ drawingStoreId, cursor, head: null, busy: false, message: '' })
+      setSync({ drawingStoreId, cursor, head: null, message: '' })
       Promise.resolve().then(() => drawingApi.getDrawingVersions(false, drawingStoreId)).then(({ head }) => {
-        if (live) setSync((value) => ({ ...value, head }))
-      }).catch(() => { if (live) setSync((value) => ({ ...value, message: 'Head version could not be loaded.' })) })
+        if (live) setSync((value) => {
+          if (value?.drawingStoreId !== drawingStoreId) return value
+          return { ...value, head: value.cursor !== cursor ? Math.max(value.cursor, head ?? 0) : head }
+        })
+      }).catch(() => {
+        if (live) setSync((value) => value?.drawingStoreId === drawingStoreId
+          ? { ...value, message: 'Head version could not be loaded.' } : value)
+      })
     } catch {
       setSync({ message: 'drawing_store_unmapped' })
     }
@@ -65,37 +88,42 @@ function DrawingSyncRow({ project, ready, bridge, working }) {
     if (operation.current || !sync?.drawingStoreId || working) return
     const token = {}
     operation.current = token
-    setSync((value) => ({ ...value, busy: true, message: 'Syncing drawing.' }))
+    setWorking(token)
+    setSync((value) => ({ ...value, message: 'Syncing drawing.' }))
     // A session change invalidates subsequent host commands, including a late export/save result.
     const boundBridge = Object.fromEntries(['applyPlan', 'exportDxf', 'syncCursor'].map((name) => [name, (...args) => {
       if (operation.current !== token) throw new Error('connection_changed')
       return bridge[name](...args)
     }]))
     try {
-      const result = await (kind === 'pull' ? pull : publish)({ api: drawingApi, bridge: boundBridge,
-        drawingStoreId: sync.drawingStoreId, cursor: sync.cursor })
+      const args = { api: drawingApi, bridge: boundBridge, drawingStoreId: sync.drawingStoreId, cursor: sync.cursor }
+      const artifacts = Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : []
+      const fileName = artifacts.find((row) => row?.drawing_id === sync.drawingStoreId)?.name
+      const result = kind === 'pull' ? await pull(args) : await publish({ ...args, fileName })
       if (operation.current !== token) return
       setSync((value) => ({ ...value, cursor: result.cursor ?? value.cursor,
-        message: result.reason || (kind === 'pull' ? `Pulled ${result.applied.length} versions.` : 'Drawing published.') }))
+        head: result.cursor != null && !result.reason ? Math.max(value.head ?? 0, result.cursor) : value.head,
+        message: syncMessage(kind, result) }))
       const { head } = await drawingApi.getDrawingVersions(false, sync.drawingStoreId)
-      if (operation.current === token) setSync((value) => ({ ...value, head }))
+      if (operation.current === token) setSync((value) => ({ ...value,
+        head: result.cursor != null && !result.reason ? Math.max(result.cursor, head ?? 0) : head }))
     } catch {
       if (operation.current === token) setSync((value) => ({ ...value, message: 'Drawing sync could not be completed.' }))
     } finally {
       if (operation.current === token) {
         operation.current = null
-        setSync((value) => ({ ...value, busy: false }))
       }
+      setWorking((current) => current === token ? false : current)
     }
   }
 
   return <div className="leaf-platform-summary" aria-label="Drawing sync">
     <h2>Drawing sync</h2>
     {sync?.drawingStoreId && <>
-      <p>Drawing store: {sync.drawingStoreId}. Synced version: {sync.cursor ?? 'not synced'}. Head version: {sync.head ?? 'loading'}.</p>
+      <p title={sync.drawingStoreId}>{syncStatus(sync)}</p>
       <div className="leaf-platform-actions">
-        <button type="button" disabled={sync.cursor == null || sync.busy || !!working} onClick={() => run('pull')}>Pull</button>
-        <button type="button" disabled={sync.busy || !!working} onClick={() => run('publish')}>{sync.cursor == null ? 'Publish drawing' : 'Publish'}</button>
+        <button type="button" disabled={sync.cursor == null || !!working} onClick={() => run('pull')}>Pull</button>
+        <button type="button" disabled={!!working} onClick={() => run('publish')}>{sync.cursor == null ? 'Publish drawing' : 'Publish'}</button>
       </div>
     </>}
     <p aria-live="polite">{sync?.message}</p>
@@ -237,7 +265,7 @@ export default function LeafPlatformScene() {
         const version = Array.isArray(project?.drawing_versions) && project.drawing_versions.find((item) =>
           sameId(item?.version_id, boundVersionId) && sameId(item?.drawing_id, boundDrawingId) &&
           sameId(item?.project_id, boundProjectId) && sameId(item?.org_id, tenantId))
-        return { project, label: version ? `${drawingName(version, Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : [])}, Version ${version.seq ?? '?'}` : null }
+        return { project, label: version ? drawingName(version, Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : []) : null }
       }).catch(() => null))
     }
     boundRequests.current.get(boundIdentity).then((detail) => {
@@ -246,7 +274,8 @@ export default function LeafPlatformScene() {
     return () => { live = false }
   }, [boundIdentity])
 
-  useEffect(() => {
+  // Reset the old connection before child effects can acquire the shared command slot.
+  useLayoutEffect(() => {
     if (state.ready) { setAwaitingReady(false); setReadyTimedOut(false) }
     setGrantFailed(false)
     if (bindingPending.current && state.status === 'connected') headingRef.current?.focus()
@@ -376,7 +405,7 @@ export default function LeafPlatformScene() {
   }
 
   async function runAction(action, name = true) {
-    if (actionInFlight.current) return
+    if (actionInFlight.current || working) return
     const operation = {}
     actionInFlight.current = operation
     setWorking(name)
@@ -476,7 +505,9 @@ export default function LeafPlatformScene() {
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'focus'), 'focus')}>{working === 'focus' ? 'Zooming...' : 'Zoom to'}</button>
           </div>
           {boundDetail?.identity === boundIdentity && boundDetail.project &&
-            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} />}
+            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} setWorking={setWorking} />}
+          {state.ready?.capabilities?.runTool === true &&
+            <BranchToolsPanel key={boundIdentity + ':' + state.ready.sessionId} bridge={bridge} working={working} setWorking={setWorking} />}
         </>}
       </section>}
       <DiagnosticsDetails />

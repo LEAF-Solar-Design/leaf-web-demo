@@ -23,6 +23,7 @@ import jobs
 import product_capability_availability as availability
 import solar_electrical_state_bridge as bridge
 import solar_local_graph
+import solar_local_read
 import solar_tools
 import store
 from solar_design_graph import GraphValidationError, entities, validate_graph
@@ -335,6 +336,109 @@ def test_assign_strings_partial_assignment_refuses(graph):
     with pytest.raises(GraphValidationError, match="STRING_ASSIGNMENT_INCOMPLETE"):
         builtin().run(g, request)
     assert g == before and request == sent
+
+
+def assignment_report(g, **params):
+    request = dict(expected_rev=g["rev"], accept_excess_capacity=True)
+    request.update(params)
+    return solar_local_read._load_builtin("solar-assignment-report").run(g, request)
+
+
+@pytest.mark.parametrize("case", ["complete", "reordered", "scaled", "partial", "unassigned"])
+def test_assignment_report_accounts_for_every_string_without_publication(graph, case):
+    g = four_input_graph(graph) if case in ("complete", "reordered", "scaled") else variant(graph, "U")
+    if case == "reordered":
+        g["strings"].reverse()
+    if case == "scaled":
+        for string in g["strings"]:
+            string["route"] = [[coordinate * 100 for coordinate in point] for point in string["route"]]
+    if case == "partial":
+        g["strings"][1]["route"] = [[1e200, 0], [1e200, 1]]
+    if case == "unassigned":
+        g["inverters"][0]["total_dc_inputs"] = 1
+    g = validate_graph(g)
+    before = copy.deepcopy(g)
+    report = assignment_report(g)
+    assigned = [row["string_ref"] for row in report["candidate_assignments"]]
+    remaining = report["remaining_string_refs"]
+    eligible = sorted(string["id"] for string in g["strings"] if string["inverter_ref"] is None)
+    assert report["eligible_string_refs"] == eligible
+    assert sorted(assigned + remaining) == eligible
+    assert len(set(assigned + remaining)) == len(eligible)
+    assert report["counts"] == {"eligible": len(eligible), "candidate_assigned": len(assigned),
+                                "remaining": len(remaining)}
+    assert report["expected_rev"] == g["rev"]
+    assert report["committed"] is False
+    assert report["status"] == (case if case in ("partial", "unassigned") else "complete")
+    assert g == before and assignment_report(g) == report
+    if remaining:
+        with pytest.raises(GraphValidationError) as error:
+            call(g)
+        assert error.value.code == report["commit_refusal_code"]
+    else:
+        committed = call(g)["graph"]
+        strings = {string["id"]: string for string in committed["strings"]}
+        for row in report["candidate_assignments"]:
+            assert strings[row["string_ref"]]["inverter_ref"] == row["inverter_ref"]
+            assert strings[row["string_ref"]]["circuit_tag"] == row["circuit_tag"]
+    assert g == before
+
+
+def test_assignment_report_read_adapter_pins_version_and_preserves_store(graph, tmp_path, monkeypatch):
+    g = four_input_graph(graph)
+    backend, _ = seed(tmp_path, monkeypatch, g)
+    before = store.load_manifest(backend, TENANT, "solar")
+    params = {"expected_rev": 0, "accept_excess_capacity": True}
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, "solar-assignment-report", params,
+        drawing_id="solar", source_version=1, job_id="assignment-report-test")
+    assert result["output"] == assignment_report(g)
+    assert result["source_version"] == 1 and result["drawing_changed"] is False
+    assert result["graph_sha256"] == sha(g)
+    assert store.load_manifest(backend, TENANT, "solar") == before
+    assert head_graph(backend) == g
+    with pytest.raises(GraphValidationError, match="STALE_GRAPH_REVISION"):
+        assignment_report(g, expected_rev=1)
+
+
+def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainder(graph):
+    g = variant(graph, "P")
+    before = copy.deepcopy(g)
+    occupied = {(inverter["id"], item["mppt_letter"], item["input_number"])
+                for inverter in g["inverters"] for item in inverter["input_assignments"]}
+    report = assignment_report(g)
+    assert report["eligible_string_refs"] == [S2]
+    assert report["remaining_string_refs"] == []
+    assert all((item["inverter_ref"], item["mppt_letter"], item["input_number"]) not in occupied
+               for item in report["candidate_assignments"])
+    assert g == before
+    g = variant(graph, "L2")
+    before = copy.deepcopy(g)
+    report = assignment_report(g, accept_excess_capacity=False)
+    assert report["candidate_assignments"] == []
+    assert report["remaining_string_refs"] == sorted(string["id"] for string in g["strings"])
+    assert report["commit_refusal_code"] == "EXCESS_CAPACITY_DECLINED"
+    assert g == before
+
+
+@pytest.mark.parametrize("patch", [{"unexpected": 1}, {"accept_excess_capacity": "Yes"},
+                                   {"expected_rev": True}])
+def test_assignment_report_closed_request(graph, patch):
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        assignment_report(variant(graph, "U"), **patch)
+
+
+def test_assignment_report_registry_schema_and_output_limit(graph, monkeypatch):
+    record = solar_tools.trusted_record("solar-assignment-report")
+    assert record["capabilities"] == ["drawing.read"]
+    assert record["allow_local_fallback"] is False
+    assert solar_tools.get("solar-assignment-report")["adapter"] == "local-graph-read"
+    output = assignment_report(variant(graph, "U"))
+    Draft7Validator(record["returns"]).validate(output)
+    monkeypatch.setattr(solar_local_read, "MAX_OUTPUT_BYTES", 1)
+    with pytest.raises(GraphValidationError, match="READ_OUTPUT_LIMIT_EXCEEDED"):
+        solar_local_read._read_output("solar-assignment-report", variant(graph, "U"),
+                                     {"expected_rev": 0, "accept_excess_capacity": True})
 
 
 def test_assign_strings_malformed_generated_letter_refuses(graph):

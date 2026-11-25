@@ -22,31 +22,43 @@ function read(rows = [row("a", "match", "Alpha"), row("b", "match", "Beta", 29)]
     freshness: { fetched_at: "2026-11-12T12:00:00Z", synced_at: null, source_updated_at: null } };
 }
 const show = (value: unknown, recipe: unknown = element) => render(<DatasetElement element={recipe} read={value} preferences={resolveDisplayPreferences()} />);
-it("renders an explicit labelled pair with both original metrics and reset values", () => {
+it("renders one paired row with separate provider cells, original metrics and reset values", () => {
   const value = read(), before = JSON.stringify(value); show(value);
-  const pair = screen.getByRole("region", { name: "Pair match" });
-  expect(within(pair).getByRole("heading", { name: "Pair match" })).toBeTruthy();
+  const pair = screen.getByRole("row", { name: /^Pair match\b/ });
+  expect(within(pair).getByRole("cell", { name: "Pair match", exact: true })).toBeTruthy();
   expect(within(pair).getByText("17")).toBeTruthy(); expect(within(pair).getByText("29")).toBeTruthy();
   expect(within(pair).getAllByText(/Nov 12, 2026/)).toHaveLength(2);
+  expect(screen.getAllByRole("table")).toHaveLength(1);
+  expect(screen.getAllByRole("row")).toHaveLength(2);
+  expect(screen.getByRole("columnheader", { name: "Alpha remaining" })).toBeTruthy();
+  expect(screen.getByRole("columnheader", { name: "Beta remaining" })).toBeTruthy();
+  expect(screen.queryByText("46")).toBeNull();
   expect(JSON.stringify(value)).toBe(before);
 });
 it("keeps a third provider separate even with the paired key, with all unpaired rows last", () => {
   show(read([row("third", "match", "Gamma"), row("a", "match", "Alpha"), row("b", "match", "Beta"), row("alone", "", "Alpha")]));
-  const regions = screen.getAllByRole("region").map(node => node.getAttribute("aria-label"));
-  expect(regions.indexOf("Pair match")).toBeLessThan(regions.indexOf("Unpaired accounts"));
-  const singles = screen.getByRole("region", { name: "Unpaired accounts" });
-  expect(within(singles).getByText("third")).toBeTruthy(); expect(within(singles).getByText("alone")).toBeTruthy();
+  const rendered = screen.getAllByRole("row");
+  expect(rendered).toHaveLength(4);
+  expect(rendered[1]!.textContent).toContain("Pair match");
+  expect(rendered[2]!.textContent).toContain("Unpaired Gamma");
+  expect(rendered[3]!.textContent).toContain("Unpaired Alpha");
+  expect(within(rendered[2]!).getByText("third")).toBeTruthy();
+  expect(within(rendered[3]!).getByText("alone")).toBeTruthy();
+  expect(within(rendered[3]!).getByLabelText("Beta remaining unavailable")).toHaveTextContent("Unavailable");
+  expect(within(rendered[2]!).getByLabelText("Alpha remaining unavailable")).toHaveTextContent("Unavailable");
+  expect(within(rendered[2]!).getByLabelText("Beta reset unavailable")).toHaveTextContent("Unavailable");
+
 });
 it.each(["", " ", null])("does not pair blank/missing key %s", key => {
   show(read([row("a", key, "Alpha"), row("b", key, "Beta")]));
-  expect(screen.queryByRole("region", { name: /^Pair / })).toBeNull();
-  expect(within(screen.getByRole("region", { name: "Unpaired accounts" })).getAllByRole("row")).toHaveLength(3);
+  expect(screen.queryByRole("cell", { name: /^Pair / })).toBeNull();
+  expect(screen.getAllByRole("row")).toHaveLength(3);
 });
 it("keeps duplicates, missing partners and distinct key case/space separate", () => {
   show(read([row("a1", "duplicate", "Alpha"), row("a2", "duplicate", "Alpha"), row("b", "duplicate", "Beta"),
     row("case", "X", "Alpha"), row("case2", "x", "Beta"), row("space", " x", "Alpha")]));
-  expect(screen.queryByRole("region", { name: /^Pair / })).toBeNull();
-  expect(within(screen.getByRole("region", { name: "Unpaired accounts" })).getAllByRole("row")).toHaveLength(7);
+  expect(screen.queryByRole("cell", { name: /^Pair / })).toBeNull();
+  expect(screen.getAllByRole("row")).toHaveLength(7);
 });
 it.each(["absent", "query-limit", "last-page", "byte-limit", "table-limit", "stale"])("does not assert verified pairs for %s coverage", mode => {
   const value = read(); let recipe: unknown = element;
@@ -58,7 +70,7 @@ it.each(["absent", "query-limit", "last-page", "byte-limit", "table-limit", "sta
   if (mode === "stale") value.status = "stale";
   show(value, recipe);
   expect(screen.getByText("Pair grouping is incomplete. Original rows are shown.")).toBeTruthy();
-  expect(screen.queryByRole("region", { name: "Pair match" })).toBeNull();
+  expect(screen.queryByRole("row", { name: /^Pair match\b/ })).toBeNull();
   expect(screen.getAllByRole("row")).toHaveLength(mode === "table-limit" ? 2 : 3);
 });
 it("refuses tampered counts, incompatible grouping fields and changed dataset binding", () => {
@@ -76,5 +88,25 @@ it("leaves ordinary table presentation untouched without the optional setting", 
   const { row_grouping, ...props } = element.props; show(read(), { ...element, props });
   expect(screen.getAllByRole("table")).toHaveLength(1);
   expect(screen.queryByText(/Pair grouping is incomplete/)).toBeNull();
-  expect(screen.queryByRole("region", { name: "Pair match" })).toBeNull();
+  expect(screen.queryByRole("row", { name: /^Pair match\b/ })).toBeNull();
+});
+
+it("renders two pairs as two rows and two independent unmatched rows without changing input", () => {
+  const value = read([row("main-a", "main", "Alpha", 80), row("main-b", "main", "Beta", 65),
+    row("second-a", "second", "Alpha", 45), row("second-b", "second", "Beta", 30),
+    row("alone", "", "Alpha", 20), row("kimi", "", "Gamma", 90)]);
+  const before = JSON.stringify(value); show(value);
+  const rendered = screen.getAllByRole("row");
+  expect(rendered).toHaveLength(5);
+  expect(rendered.slice(1, 3).every(row => row.textContent!.startsWith("Pair "))).toBe(true);
+  expect(within(rendered[1]!).getByText("80")).toBeTruthy();
+  expect(within(rendered[1]!).getByText("65")).toBeTruthy();
+  expect(within(rendered[2]!).getByText("45")).toBeTruthy();
+  expect(within(rendered[2]!).getByText("30")).toBeTruthy();
+  expect(within(rendered[3]!).getByText("20")).toBeTruthy();
+  expect(within(rendered[3]!).getByLabelText("Beta remaining unavailable")).toHaveTextContent("Unavailable");
+  expect(within(rendered[4]!).getByText("kimi")).toBeTruthy();
+  expect(within(rendered[4]!).getByText("90")).toBeTruthy();
+  expect(screen.getByRole("region", { name: "Capacity data: provider pairs" })).toHaveAttribute("tabindex", "0");
+  expect(JSON.stringify(value)).toBe(before);
 });

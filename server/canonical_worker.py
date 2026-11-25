@@ -309,6 +309,16 @@ class _ToolAction(argparse.Action):
 
 
 def main() -> None:
+    # The decoder worker is dispatched before argparse so the canonical --tool
+    # choices stay exactly the solver set; it runs alone and never touches ADAPTERS.
+    argv = sys.argv[1:]
+    if "--tool=video-decode" in argv or any(a == "--tool" and argv[i + 1:i + 2] == ["video-decode"] for i, a in enumerate(argv)):
+        rest = [a for a in argv if a not in ("--tool", "video-decode", "--tool=video-decode")]
+        if rest not in ([], ["--once"]):
+            raise SystemExit("video-decode requires a dedicated decoder worker (only --once is accepted)")
+        import video_decode_worker
+        video_decode_worker.main(rest)
+        return
     import solar_project_graph
 
     parser = argparse.ArgumentParser(description="Leaf canonical solve worker")

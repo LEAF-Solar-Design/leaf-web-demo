@@ -1,4 +1,16 @@
 """Canonical proposal admission, single-send recovery and offline proof seams."""
+import json
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+import deployment_identity
+import solar_project_context as assembly_project
+import solar_project_graph as assembly_graph_api
+import solar_tools
+from leaf_platform import project_solve_store as assembly_store
+from routers import jobs as assembly_route
+from solar_design_graph import validate_graph
+from test_w1_design_graph import app_id
+
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import base64
@@ -29,6 +41,58 @@ import test_sip_r5_policy as r5
 import test_sip_r5_routes as routes
 
 _blocking_transport = cloud.post_stringer
+
+
+@pytest.mark.parametrize("stage", ["split.restitch", "split.coverage", "split.string_length"])
+def test_split_failure_diagnostics_persist_stage_and_piece_order(monkeypatch, caplog, stage):
+    """The real assembly refusal must remain classifiable through GET job.error."""
+    children = [{"piece_index": index, **{key: str(index + 1) * 64 for key in (
+        "request_sha256", "response_sha256", "candidate_sha256", "proof_sha256")}}
+        for index in range(2)]
+    store = SimpleNamespace(get_exchange=lambda *args: {})
+    monkeypatch.setattr(solve, "_store", lambda: store)
+    monkeypatch.setattr(solve, "_piece_scope", lambda *args: None)
+    monkeypatch.setattr(solve, "_piece_plan", lambda *args: {})
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_prepare_piece", lambda *args: children[args[3]])
+    failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", stage)
+    monkeypatch.setattr(solve, "_derive_split", lambda *args: (_ for _ in ()).throw(failure))
+    job_id = str(uuid4())
+    with caplog.at_level("WARNING"), pytest.raises(GraphValidationError) as caught:
+        solve._prepare_split({"job_id": job_id}, None,
+            {"split_binding": {"pieces": [{}, {}]}}, {"classification": "live"},
+            None, None, SimpleNamespace(lost=False))
+    assert caught.value is failure
+    error = service._preparation_error(failure)
+    assert error["reason_code"] == "INVALID_FINAL_GRID_ORDER"
+    assert error["retryable"] is False
+    assert error["solve_progress"] == {"status": "partial", "completed_pieces": 2,
+        "total_pieces": 2, "phase": "assembly", "validation_stage": stage,
+        "piece_order": [0, 1], "piece_order_truncated": False}
+    assert job_id in caplog.text and stage in caplog.text
+    assert "request_sha256" not in caplog.text
+    assert "response_sha256" not in caplog.text
+
+
+def test_split_failure_diagnostics_bound_order_and_omit_exception_text(monkeypatch, caplog):
+    children = [{"piece_index": index, **{key: "a" * 64 for key in (
+        "request_sha256", "response_sha256", "candidate_sha256", "proof_sha256")}}
+        for index in range(40)]
+    monkeypatch.setattr(solve, "_store", lambda: SimpleNamespace(get_exchange=lambda *args: {}))
+    monkeypatch.setattr(solve, "_piece_scope", lambda *args: None)
+    monkeypatch.setattr(solve, "_piece_plan", lambda *args: {})
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_prepare_piece", lambda *args: children[args[3]])
+    failure = GraphValidationError("INVALID_FINAL_GRID_ORDER", "private-exception-material")
+    monkeypatch.setattr(solve, "_derive_split", lambda *args: (_ for _ in ()).throw(failure))
+    with caplog.at_level("WARNING"), pytest.raises(GraphValidationError):
+        solve._prepare_split({"job_id": str(uuid4())}, None,
+            {"split_binding": {"pieces": [{}] * 40}}, {}, None, None, SimpleNamespace(lost=False))
+    diagnostic = service._preparation_error(failure)["solve_progress"]
+    assert diagnostic["validation_stage"] == "split.unknown"
+    assert diagnostic["piece_order"] == list(range(32))
+    assert diagnostic["piece_order_truncated"] is True
+    assert "private-exception-material" not in caplog.text
 
 
 def ready_graph(value):
@@ -732,3 +796,562 @@ def test_flag_off_read_timeout_keeps_single_blocking_post(world, monkeypatch):
     assert "Idempotency-Key" not in calls[0]["headers"]
     assert a.store.exchange["send_protocol"] is None
     assert a.store.exchange["state"] == "outcome_unknown"
+
+
+# X02: real staging-only header and durable single-send fault custody.
+def _fault_staging(monkeypatch):
+    import xbench_solver_fault as fault
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: True)
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: False)
+    monkeypatch.setattr(fault.deployment_identity, "deployment_identity",
+                        lambda: {"environment": "staging"})
+    return fault
+
+
+@pytest.mark.parametrize("mode", ["upstream-400", "timeout"])
+def test_x02_fault_requires_both_runtime_and_deployment_identity(monkeypatch, mode):
+    fault = _fault_staging(monkeypatch)
+    assert fault.validate(mode) == mode
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: False)
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: False)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: True)
+    monkeypatch.setattr(fault.deployment_identity, "deployment_identity",
+                        lambda: {"environment": "production"})
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        fault.validate(mode)
+    assert fault.validate(None) is None
+
+
+@pytest.mark.parametrize("mode", [True, "", "TIMEOUT", "upstream-500", {}, []])
+def test_x02_fault_mode_is_closed(monkeypatch, mode):
+    fault = _fault_staging(monkeypatch)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_INVALID"):
+        fault.validate(mode)
+
+
+def test_x02_fault_context_resets_after_exception(monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    assert fault.current_mode() is None
+    with pytest.raises(RuntimeError):
+        with fault.request_mode("timeout"):
+            assert fault.current_mode() == "timeout"
+            with fault.request_mode("upstream-400"):
+                assert fault.current_mode() == "upstream-400"
+            assert fault.current_mode() == "timeout"
+            raise RuntimeError("synthetic scope exit")
+    assert fault.current_mode() is None
+
+
+def test_x02_fault_in_durable_identity_and_replay(admitted, monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    with fault.request_mode("timeout"):
+        assert request(admitted, preview=False)["status_code"] == 202
+    saved = admitted.accepted[-1][-1]
+    assert saved["execution_context"]["xbench_solver_fault"] == "timeout"
+    monkeypatch.setattr(jobs, "get_project_graph_job_by_key", lambda *args, **kwargs:
+        {"job_id": "saved-fault", "deleted_at": None, **saved})
+    count = len(admitted.accepted)
+    with fault.request_mode("timeout"):
+        assert request(admitted, preview=False)["content"]["job_id"] == "saved-fault"
+    assert len(admitted.accepted) == count
+    with fault.request_mode("upstream-400"):
+        conflict = request(admitted, preview=False)
+    assert conflict["content"]["error"]["reason_code"] == "SIP_R4_IDEMPOTENCY_CONFLICT"
+    assert request(admitted, preview=False)["content"]["error"]["reason_code"] == "SIP_R4_IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.parametrize("mode,cause,state", [("upstream-400", "CLOUD_REQUEST_REJECTED", "refused"),
+                                              ("timeout", "solve_outcome_unknown", "outcome_unknown")])
+def test_x02_fault_real_adapter_and_reconcile_no_second_send(world, monkeypatch, mode, cause, state):
+    fault = _fault_staging(monkeypatch)
+    a = world
+    a.row["execution_context"]["xbench_solver_fault"] = mode
+    jobs._graph_ids(a.row)  # The real closed durable-context validator admits only the enum.
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    monkeypatch.setattr(cloud, "post_stringer", _blocking_transport)
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs:
+                        pytest.fail("fault must not contact a provider"))
+    calls = []
+    real_post = fault.Transport.post
+    def post(self, *args, **kwargs):
+        assert a.store.exchange["state"] == "sending"
+        calls.append(self.mode)
+        return real_post(self, *args, **kwargs)
+    monkeypatch.setattr(fault.Transport, "post", post)
+    before = deepcopy((a.s.versions, a.s.writes))
+    for attempt in [1, 2]:
+        a.row["attempt"] = attempt
+        with pytest.raises(CloudError) as exc:
+            solve.prepare_job(a.row, a.guard)
+        assert exc.value.classification == cause
+        assert service._preparation_error(exc.value)["reason_code"] == cause
+    assert a.store.exchange["state"] == state
+    assert a.store.exchange["classification"] == "synthetic"
+    assert a.store.exchange["send_protocol"] is None
+    assert calls == [mode] and a.store.events.count("begin_send") == 1
+    assert (a.s.versions, a.s.writes) == before and not a.calls
+
+
+def test_x02_stored_fault_cannot_activate_in_production(world, monkeypatch):
+    fault = _fault_staging(monkeypatch)
+    world.row["execution_context"]["xbench_solver_fault"] = "timeout"
+    monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+    with pytest.raises(GraphValidationError, match="XBENCH_SOLVER_FAULT_UNAVAILABLE"):
+        solve.prepare_job(world.row, world.guard)
+    assert world.store.events == [] and not world.calls
+
+
+@pytest.mark.parametrize("value", [True, "invalid", None])
+def test_x02_durable_fault_context_rejects_invalid_enum(world, value):
+    world.row["execution_context"]["xbench_solver_fault"] = value
+    from leaf_platform.project_graph_store import ProjectContextError
+    with pytest.raises(ProjectContextError, match="SIP_R4_JOB_BINDING_MISMATCH"):
+        jobs._graph_ids(world.row)
+
+
+@pytest.mark.parametrize("auth,mode,status", [(True, "timeout", 202),
+    (False, "timeout", 403), (True, "invalid", 403)])
+def test_x02_header_route_preserves_auth_and_durable_context(case, monkeypatch, auth, mode, status):
+    fault = _fault_staging(monkeypatch)
+    for lane in routes.lane.__wrapped__(monkeypatch):
+        monkeypatch.setattr(deps, "auth_live", lambda: auth)
+        monkeypatch.setattr(cloud, "resolve_grant", lambda ref, tenant: CloudGrant(tenant, "t1"))
+        value = ready_graph(case[0]);lane.s.set_parent(b3.embedded(value))
+        body = {"tool": solve.TOOL_NAME, "dwg": str(lane.s.parent.version_id),
+            "params": {"grant_ref": "g1", "request": case[1]}, "solve_context": solve_context(value),
+            "catalog_digest": deps.catalog_tool_digest(lane.tools[solve.TOOL_NAME])}
+        response = lane.client.post("/api/run", json=body,
+            headers={**routes.headers(lane), fault.HEADER: mode})
+        assert response.status_code == status, response.text
+        if status == 202:
+            assert lane.a.accepted[-1][-1]["execution_context"]["xbench_solver_fault"] == mode
+        else:
+            assert not lane.a.accepted
+        assert fault.current_mode() is None
+
+
+@pytest.mark.parametrize("kind", [
+    "production", "local", "missing_project", "conversation", "wrong_tool",
+    "unknown_tool", "invalid_identity",
+])
+def test_x02_fault_header_cannot_escape_scope(case, monkeypatch, kind):
+    fault = _fault_staging(monkeypatch)
+    for lane in routes.lane.__wrapped__(monkeypatch):
+        monkeypatch.setattr(deps, "auth_live", lambda: True)
+        body = {"tool": solve.TOOL_NAME, "dwg": str(lane.s.parent.version_id),
+                "params": {}, "catalog_digest": deps.catalog_tool_digest(lane.tools[solve.TOOL_NAME])}
+        headers = {**routes.headers(lane), fault.HEADER: "timeout"}
+        if kind == "production":
+            monkeypatch.setattr(fault.runtime_posture, "_production_runtime", lambda: True)
+        elif kind == "local":
+            monkeypatch.setattr(fault.runtime_posture, "_deployed_runtime", lambda: False)
+        elif kind == "missing_project":
+            headers = {key: value for key, value in headers.items() if key.lower() != "x-project-id"}
+        elif kind == "conversation":
+            headers.update({"X-Authority-Session-Id": "session", "X-Authority-Turn-Id": "turn"})
+        elif kind == "wrong_tool":
+            body["tool"] = "solar-settings"
+        elif kind == "unknown_tool":
+            body["tool"] = "xbench-unknown-tool"
+        else:
+            monkeypatch.setattr(fault.deployment_identity, "deployment_identity", lambda:
+                (_ for _ in ()).throw(ValueError("unattested deployment")))
+        response = lane.client.post("/api/run", json=body, headers=headers)
+        assert response.status_code == 403, response.text
+        if kind in ("wrong_tool", "unknown_tool"):
+            assert response.json()["error"]["reason_code"] == "XBENCH_SOLVER_FAULT_SCOPE_REQUIRED"
+        assert not lane.a.accepted and fault.current_mode() is None
+
+
+# Read-only saved-child assembly attribution.
+ASSEMBLY_ORG, ASSEMBLY_PROJECT, ASSEMBLY_DRAWING, ASSEMBLY_VERSION, ASSEMBLY_JOB, ASSEMBLY_ACTOR = [UUID(int=n) for n in range(1, 7)]
+ASSEMBLY_SOURCE = "a" * 40
+
+
+def assembly_native_response(request):
+    """Hand-built producer response, with genuine wire echo and visited topology."""
+    model = cloud.PieceStringerRequest.model_validate(request)
+    final = model.wire_payload()["grid"]
+    path = []
+    for r, row in enumerate(final["Rows"], 1):
+        columns = range(len(row["Panels"])) if r % 2 else reversed(range(len(row["Panels"])))
+        for c in columns:
+            cell = row["Panels"][c]
+            if cell["Code"] == 1:
+                path.append([r, c + 1])
+                cell["Seq"] = len(path)
+    lengths, counts = model.grid.Sequences
+    sequence = [length for length, count in zip(lengths, counts) for _ in range(count)]
+    info = {name: 0 for name in cloud.StringerInfo.model_fields}
+    info.update(steps_taken=len(path), sequence_length=sequence, num_panels=len(path),
+                visited_path=path, terminated=True, allow_one_gap_hops=False,
+                last_agent_x=path[-1][0], last_agent_y=path[-1][1])
+    return {"status": "completed", "job_id": "synthetic-grid", "data": {
+        "status": "completed", "best_result": {"last_action": 0, "terminated": True,
+            "info": info, "beam_idx": 0, "grid_id": "synthetic-grid", "model_id": "synthetic",
+            "gumbel_scale": 0, "string_start_split_count": 0, "model": "synthetic"},
+        "final_grid": final, "model_used": "synthetic", "gumbel_scale_used": 0,
+        "distance_total": 0, "total_valid_solutions": 1, "gumbel_summary": {},
+        "first_pass_best_distance": 0, "improvement": None, "second_pass_triggered": False}}
+
+
+class AssemblyReadStore:
+    """Two scoped tables behind the real bounded SELECT projection."""
+    def __init__(self, parent, children):
+        self.parent = parent
+        self.children = children
+        self.queries = []
+        self.oversized = False
+
+    def cursor(self):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def execute(self, sql, args):
+        assert sql.startswith("SELECT ") and "FOR UPDATE" not in sql
+        assert args["org_id"] == ASSEMBLY_ORG and args["project_id"] == ASSEMBLY_PROJECT
+        assert args["drawing_id"] == ASSEMBLY_DRAWING and args["job_id"] == ASSEMBLY_JOB
+        self.queries.append(sql)
+        if sql.startswith("SELECT count"):
+            rows = [self.parent, *self.children]
+            size = sum(len(row[key] or b"") for row in rows for key in (
+                "request_bytes", "response_bytes", "candidate_bytes", "proof_bytes"))
+            if self.oversized:
+                size = 16 * assembly_store.MAX_RESPONSE_BYTES + 1
+            self.value = {"count": len(rows), "bytes": size}
+        elif "project_solve_piece_exchanges" in sql:
+            self.value = deepcopy(self.children)
+        else:
+            self.value = deepcopy(self.parent)
+
+    def fetchone(self):
+        return self.value
+
+    def fetchall(self):
+        return self.value
+
+
+@pytest.fixture
+def assembly_world(graph, monkeypatch):
+    frame = graph["frames"][0]
+    template = graph["panels"][0]
+    panels, matrix = [], []
+    for r in range(15):
+        row = []
+        for c in range(14):
+            n = r * 14 + c
+            ref = app_id("panel", n + 1) if n < 201 else None
+            if ref:
+                panel = deepcopy(template)
+                panel.update(id=ref, centre=[float(c), float(r * 2)], matrix_cell={"row": r, "col": c},
+                             assignment={"string_ref": None, "seq": None})
+                panels.append(panel)
+            row.append({"code": "panel" if ref else "empty", "panel_ref": ref,
+                        "seq": None, "inverter_id": None, "string_input_number": None,
+                        "x": float(c), "y": float(r * 2), "angle": 0})
+        matrix.append(row)
+    frame.update(panel_refs=[p["id"] for p in panels], matrix=matrix, module_rows=15,
+                 module_columns=14, module_slots=210, sequences=[], electrical_zone_ref=None,
+                 panel_assignments=[{"panel_ref": p["id"], "string_ref": None, "seq": None,
+                                     "inverter_id": None, "string_input_number": None} for p in panels])
+    graph.update(panels=panels, strings=[], inverters=[], electrical_zones=[], routes=[], schedules=[])
+    graph["settings"].update(panels_in_sequence=14, voc_cold=sizing.manual_voltage())
+    graph["settings"]["extra"]["string_sizing"] = sizing.manual_sizing_evidence(graph)
+    validate_graph(graph)
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.kernel.digest(graph)}
+    raw = cloud.canonical_bytes(intake)
+    version = SimpleNamespace(org_id=ASSEMBLY_ORG, project_id=ASSEMBLY_PROJECT, drawing_id=ASSEMBLY_DRAWING,
+        version_id=ASSEMBLY_VERSION, deleted_at=None, intake_ref="synthetic-private-input",
+        created_at=datetime(2030, 1, 1, tzinfo=timezone.utc))
+    binding = assembly_project.VersionBinding(ASSEMBLY_ORG, ASSEMBLY_PROJECT, ASSEMBLY_DRAWING, ASSEMBLY_VERSION, ASSEMBLY_VERSION, True, version)
+    verified = assembly_project.VerifiedProjectContext(binding, raw, intake, solve._sha(raw), version.intake_ref)
+    context = assembly_graph_api.resolve_project_graph_context(verified)
+    request = solve.requests.build_stringer_request(graph, frame["id"], max_string_length=14,
+                                                    dwgname=graph["project"]["name"], full_frame=True)
+    params = {"grant_ref": "synthetic-grant", "request": request}
+    plan = solve.plan_request(context, params, {"frame_ref": frame["id"], "expected_rev": 0,
+                                              "phase": "initial"}, job_id=ASSEMBLY_JOB)
+    job = {"kind": "run", "job_id": ASSEMBLY_JOB, "org_id": ASSEMBLY_ORG, "project_id": ASSEMBLY_PROJECT,
+        "input_version_id": ASSEMBLY_VERSION, "request_tenant_id": str(ASSEMBLY_ORG), "tool_name": solve.TOOL_NAME,
+        "params": params, "status": "failed", "attempt": 1, "max_attempts": 3, "lease_owner": None,
+        "execution_context": {"schema": jobs.PROJECT_GRAPH_JOB_SCHEMA,
+            "authority_mode": "postgres_canonical", "execution_path": "local",
+            "drawing_id": str(ASSEMBLY_DRAWING), "actor_binding_id": str(ASSEMBLY_ACTOR), "checkout_fence": "1",
+            "tool_manifest_sha256": deps.catalog_tool_digest(solar_tools.trusted_record(solve.TOOL_NAME)),
+            "parent_intake_sha256": context.intake_sha256, "initialized": False,
+            "solve_binding": plan["solve_binding"]}}
+    scope = assembly_store.ExchangeScope(ASSEMBLY_ORG, ASSEMBLY_PROJECT, ASSEMBLY_DRAWING, ASSEMBLY_JOB)
+    parent = {**solve._reservation(job, context, plan, "live"), **vars(scope), "state": "prepared"}
+    for name in ("response", "candidate", "proof"):
+        parent[name + "_bytes"] = parent[name + "_sha256"] = None
+    children = []
+    for i, piece in enumerate(plan["split_binding"]["pieces"]):
+        child_scope = solve._piece_scope(scope, plan["split_binding"], i)
+        child = {**solve._reservation(job, context, solve._piece_plan(plan, piece), "live"),
+                 **vars(child_scope), "state": "completed", "solver_endpoint": cloud.SOLVER_URL,
+                 "solver_version": "1.0.0", "response_bytes": cloud.canonical_bytes(assembly_native_response(piece["request"]))}
+        child["response_sha256"] = solve._sha(child["response_bytes"])
+        _, child["candidate_bytes"], child["proof_bytes"] = solve._piece_evidence(job, context, plan, i, child)
+        child["candidate_sha256"] = solve._sha(child["candidate_bytes"])
+        child["proof_sha256"] = solve._sha(child["proof_bytes"])
+        children.append(child)
+    db = AssemblyReadStore(parent, children)
+    monkeypatch.setattr(platform_link, "platform_db", lambda: SimpleNamespace(
+        run_transaction=lambda fn, **kwargs: fn(db)))
+    monkeypatch.setattr(assembly_graph_api, "_stored_job", lambda job_id, conn: deepcopy(job))
+    monkeypatch.setattr(jobs, "_graph_scope", lambda *args: None)
+    monkeypatch.setattr(assembly_project, "resolve_context", lambda *args, **kwargs: verified)
+    monkeypatch.setattr(deployment_identity, "release_source_identity", lambda:
+                        {"release_source_sha": ASSEMBLY_SOURCE, "source_identity": "built"})
+    principal = {"tenant": deps.TenantContext(str(ASSEMBLY_ORG), subject="synthetic-reader"), "member": True}
+    observed = platform_link._canonical_record(jobs._record(job))
+    monkeypatch.setattr(assembly_route, "_job_for_tenant", lambda job_id, tenant:
+                        deepcopy(observed) if tenant == str(ASSEMBLY_ORG) and job_id == str(ASSEMBLY_JOB) else None)
+    def access(tenant, project_id, **kwargs):
+        if not principal["member"]:
+            raise platform_link.ProjectSessionForbidden()
+        assert project_id == ASSEMBLY_PROJECT
+        return str(ASSEMBLY_ORG)
+    monkeypatch.setattr(platform_link, "require_project_access", access)
+    def forbidden(*args, **kwargs):
+        pytest.fail("dispatch, grant, write or checkout called by attribution")
+    for name in ("post_stringer", "submit_stringer_async", "get_stringer_result", "resolve_grant"):
+        monkeypatch.setattr(cloud, name, forbidden)
+    for name in ("prepare_exchange", "begin_send", "capture_response", "complete_exchange", "complete_split_manifest"):
+        monkeypatch.setattr(assembly_store, name, forbidden)
+    monkeypatch.setattr(assembly_project.graph_store(), "acquire_checkout", forbidden)
+    app = FastAPI()
+    app.include_router(assembly_route.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: principal["tenant"]
+    with TestClient(app) as client:
+        yield SimpleNamespace(client=client, db=db, parent=parent, children=children,
+                              job=job, observed=observed, principal=principal,
+                              context=context, plan=plan)
+
+
+def read_assembly(assembly_world, version=ASSEMBLY_VERSION):
+    return assembly_world.client.get(f"/api/jobs/{ASSEMBLY_JOB}?assembly_input_version={version}")
+
+
+def test_assembly_attribution_valid_completed_children_rederive_without_mutation(assembly_world):
+    before = deepcopy((assembly_world.parent, assembly_world.children, assembly_world.job))
+    response = read_assembly(assembly_world)
+    assert response.status_code == 200
+    result = response.json()["assembly_attribution"]
+    assert result["status"] == "validated", result
+    assert result["historical_instruction_attributed"] is False
+    assert result["implementation_source_sha"] == ASSEMBLY_SOURCE
+    assert result["completed_pieces"] == len(assembly_world.children)
+    assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
+    assert len(assembly_world.db.queries) == 3
+
+
+def test_assembly_attribution_real_assembly_refusal_is_sanitized_current_source_attribution(assembly_world):
+    # Positive but repeated sequence numbers pass the piece echo/path checks,
+    # then lose members in final cut coverage. Recompute genuine stored custody.
+    for i, child in enumerate(assembly_world.children):
+        response = json.loads(child["response_bytes"])
+        for row in response["data"]["final_grid"]["Rows"]:
+            for cell in row["Panels"]:
+                cell["Seq"] = 1 if cell["Code"] == 1 else 0
+        child["response_bytes"] = cloud.canonical_bytes(response)
+        child["response_sha256"] = solve._sha(child["response_bytes"])
+        _, child["candidate_bytes"], child["proof_bytes"] = solve._piece_evidence(
+            assembly_world.job, assembly_world.context, assembly_world.plan, i, child)
+        child["candidate_sha256"] = solve._sha(child["candidate_bytes"])
+        child["proof_sha256"] = solve._sha(child["proof_bytes"])
+    before = deepcopy((assembly_world.parent, assembly_world.children, assembly_world.job))
+    result = read_assembly(assembly_world).json()["assembly_attribution"]
+    assert result == {"schema": "leaf.solar-assembly-attribution.v1",
+        "mode": "current-source-read-only-rederivation", "historical_instruction_attributed": False,
+        "implementation_source_sha": ASSEMBLY_SOURCE, "job_id": str(ASSEMBLY_JOB), "input_version_id": str(ASSEMBLY_VERSION),
+        "status": "attributed", "reason": "INVALID_FINAL_GRID_ORDER", "validation_stage": "split.coverage",
+        "completed_pieces": len(assembly_world.children), "total_pieces": len(assembly_world.children),
+        "piece_order": list(range(len(assembly_world.children))), "piece_order_truncated": False,
+        "coverage": {"empty_extraction": False, "unknown_identity": False,
+            "repeated_identity": False, "missing_members": True,
+            "expected_members": 201, "extracted_members": len(assembly_world.children), "unknown_members": 0,
+            "repeated_members": 0, "missing_member_count": 201 - len(assembly_world.children),
+            "before_restitch": {"identified_cells": 201, "positive_sequences": 201,
+                "nonpositive_sequences": 0, "repeated_positive_sequences": 200},
+            "after_restitch": {"identified_cells": 201, "positive_sequences": 201,
+                "nonpositive_sequences": 0,
+                "repeated_positive_sequences": 201 - len(assembly_world.children)}}}
+    assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
+
+
+def test_assembly_attribution_byte_limit_refuses_before_loading_evidence(assembly_world):
+    assembly_world.db.oversized = True
+    result = read_assembly(assembly_world).json()["assembly_attribution"]
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "evidence_integrity_or_limit_refusal"
+    assert len(assembly_world.db.queries) == 1
+
+
+@pytest.mark.parametrize("kind", ["unknown", "repeated", "missing"])
+def test_assembly_coverage_predicates_preserve_refusal_and_hide_identities(assembly_world, monkeypatch, kind):
+    members = assembly_world.context.graph["frames"][0]["panel_refs"]
+    extracted = [ref.upper() for ref in members]
+    if kind == "unknown":
+        extracted[0] = "PRIVATE-UNKNOWN-IDENTITY"
+    elif kind == "repeated":
+        extracted[0] = extracted[1]
+    else:
+        extracted.pop()
+    # Isolate the extraction boundary after real stored evidence verification.
+    monkeypatch.setattr(solve.kernel, "ordered_strings", lambda merged: [extracted])
+    before = deepcopy((assembly_world.parent, assembly_world.children, assembly_world.job))
+    result = read_assembly(assembly_world).json()["assembly_attribution"]
+    assert result["status"] == "attributed"
+    assert result["reason"] == "INVALID_FINAL_GRID_ORDER"
+    assert result["validation_stage"] == "split.coverage"
+    coverage = result["coverage"]
+    assert coverage["empty_extraction"] is False
+    assert coverage["unknown_identity"] is (kind == "unknown")
+    assert coverage["repeated_identity"] is (kind == "repeated")
+    assert coverage["missing_members"] is True
+    assert coverage["expected_members"] == 201
+    assert coverage["extracted_members"] == (200 if kind == "missing" else 201)
+    assert coverage["unknown_members"] == int(kind == "unknown")
+    assert coverage["repeated_members"] == int(kind == "repeated")
+    assert coverage["missing_member_count"] == 1
+    for stage in ("before_restitch", "after_restitch"):
+        counts = coverage[stage]
+        assert set(counts) == {"identified_cells", "positive_sequences",
+                              "nonpositive_sequences", "repeated_positive_sequences"}
+        assert counts["identified_cells"] == counts["positive_sequences"] == 201
+        assert counts["nonpositive_sequences"] == 0
+        assert all(type(value) is int and 0 <= value <= 201 for value in counts.values())
+    assert set(coverage) == {"empty_extraction", "unknown_identity", "repeated_identity",
+        "missing_members", "expected_members", "extracted_members", "unknown_members",
+        "repeated_members", "missing_member_count", "before_restitch", "after_restitch"}
+    serialized = json.dumps(result)
+    assert "PRIVATE-UNKNOWN-IDENTITY" not in serialized
+    assert all(ref not in serialized and ref.upper() not in serialized for ref in members)
+    assert (assembly_world.parent, assembly_world.children, assembly_world.job) == before
+
+
+def test_assembly_attribution_unattested_current_source_is_explicitly_unavailable(assembly_world, monkeypatch):
+    monkeypatch.setattr(deployment_identity, "release_source_identity", lambda:
+                        {"release_source_sha": None, "source_identity": "unattested"})
+    result = read_assembly(assembly_world).json()["assembly_attribution"]
+    assert result["reason"] == "implementation_source_unavailable"
+    assert assembly_world.db.queries == []
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_assembly_attribution_completed_parent_custody_is_still_checked(assembly_world, corrupt):
+    manifest = solve._piece_manifest(assembly_world.children)
+    assembly_world.parent.update(response_bytes=manifest, response_sha256=solve._sha(manifest),
+                        solver_endpoint=cloud.SOLVER_URL, solver_version="1.0.0")
+    candidate, proof, _ = solve._derive_split(assembly_world.job, assembly_world.context, assembly_world.plan,
+                                             assembly_world.parent, children=assembly_world.children)
+    if corrupt:
+        candidate = b'{"private-candidate":"must-not-leak"}'
+    assembly_world.parent.update(state="completed", candidate_bytes=candidate, proof_bytes=proof,
+                        candidate_sha256=solve._sha(candidate), proof_sha256=solve._sha(proof))
+    response = read_assembly(assembly_world)
+    result = response.json()["assembly_attribution"]
+    assert result["status"] == ("unavailable" if corrupt else "validated")
+    assert "must-not-leak" not in response.text
+
+
+@pytest.mark.parametrize("fault", ["tenant", "member", "version", "stored_parent", "stored_tenant",
+    "missing", "duplicate", "incomplete", "corrupt", "child_version", "child_parent", "proof"])
+def test_assembly_attribution_invalid_authority_or_evidence_fails_closed(assembly_world, fault):
+    version = ASSEMBLY_VERSION
+    if fault == "tenant":
+        assembly_world.principal["tenant"] = deps.TenantContext(str(UUID(int=99)), subject="other")
+    elif fault == "member":
+        assembly_world.principal["member"] = False
+    elif fault == "version":
+        version = UUID(int=99)
+    elif fault == "stored_parent":
+        assembly_world.job["input_version_id"] = UUID(int=99)
+    elif fault == "stored_tenant":
+        assembly_world.job["request_tenant_id"] = "other"
+    elif fault == "missing":
+        assembly_world.children.pop()
+    elif fault == "duplicate":
+        assembly_world.children[-1] = deepcopy(assembly_world.children[0])
+    elif fault == "incomplete":
+        assembly_world.children[0]["state"] = "responded"
+    elif fault == "corrupt":
+        assembly_world.children[0]["response_sha256"] = "0" * 64
+    elif fault == "child_version":
+        assembly_world.children[0]["input_version_id"] = UUID(int=99)
+    elif fault == "child_parent":
+        assembly_world.children[0]["job_id"] = UUID(int=99)
+    elif fault == "proof":
+        assembly_world.children[0]["proof_bytes"] = b'{"private-response":"must-not-leak"}'
+        assembly_world.children[0]["proof_sha256"] = solve._sha(assembly_world.children[0]["proof_bytes"])
+    response = read_assembly(assembly_world, version)
+    if fault in {"tenant", "member"}:
+        assert response.status_code in {403, 404}
+    else:
+        assert response.status_code == 200
+        assert response.json()["assembly_attribution"]["status"] == "unavailable"
+    assert "must-not-leak" not in response.text
+    if fault in {"tenant", "member", "version", "stored_parent", "stored_tenant"}:
+        assert assembly_world.db.queries == []
+
+
+def test_roof_continuity_single_refuses_before_proposal_completion(case, monkeypatch):
+    from test_w1_solve_commit import roof_continuity_case
+    roof_continuity_case(case, step=40.0)
+    a = world.__wrapped__(admitted.__wrapped__(case, monkeypatch), case, monkeypatch)
+    before = deepcopy((a.context.graph, a.s.versions, a.s.writes))
+    with pytest.raises(CloudError) as refused:
+        solve.prepare_job(a.row, a.guard)
+    assert refused.value.classification == "cloud_response_invalid"
+    assert a.store.events == ["prepare", "begin_send", "capture", "refuse"]
+    assert a.store.exchange["state"] == "refused"
+    assert a.store.exchange["candidate_bytes"] is None
+    assert a.store.exchange["proof_bytes"] is None
+    assert (a.context.graph, a.s.versions, a.s.writes) == before
+
+
+@pytest.mark.parametrize("long_step", [False, True])
+def test_roof_continuity_split_refuses_before_proposal_return(graph, monkeypatch, long_step):
+    from test_w1_solve_split import roof_seam_candidate
+    value, candidate = roof_seam_candidate(graph, monkeypatch, long_step=long_step)
+    envelopes = candidate["proposals"]
+    children = [{"piece_index": i, "classification": "synthetic",
+        "request_sha256": envelope["request_sha256"], "response_sha256": envelope["response_sha256"],
+        "candidate_bytes": b"candidate", "candidate_sha256": solve._sha(b"candidate"),
+        "proof_bytes": b"proof", "proof_sha256": solve._sha(b"proof")} for i, envelope in enumerate(envelopes)]
+    response = solve._piece_manifest(children)
+    exchange = {"classification": "synthetic", "response_bytes": response,
+        "response_sha256": solve._sha(response), "solver_endpoint": cloud.SOLVER_URL, "solver_version": "1.0.0"}
+    context = SimpleNamespace(graph=value, organization_id=uuid4(), project_id=uuid4(),
+        drawing_id=uuid4(), parent_version_id=uuid4(), intake_sha256="c" * 64)
+    plan = {"split_binding": candidate["binding"],
+        "binding": {"frame_ref": value["frames"][0]["id"]}, "max_string_length": 3}
+    monkeypatch.setattr(solve, "_authority", lambda job: (None, None))
+    monkeypatch.setattr(solve, "_reservation", lambda *args: {})
+    monkeypatch.setattr(solve, "_piece_evidence", lambda job, context, plan, i, child:
+        (envelopes[i], child["candidate_bytes"], child["proof_bytes"]))
+    store = Store()
+    monkeypatch.setattr(solve, "_store", lambda: store)
+    before = deepcopy((value, candidate, children, exchange))
+    job = {"job_id": "split-job", "execution_context": {"tool_manifest_sha256": "d" * 64}}
+    if long_step:
+        with pytest.raises(GraphValidationError, match="DISCONTIGUOUS_SOLVE_STRING"):
+            solve._derive_split(job, context, plan, exchange, children=children)
+    else:
+        envelope, proof, summary = solve._derive_split(job, context, plan, exchange, children=children)
+        assert json.loads(envelope)["candidate"] == candidate
+        assert json.loads(proof)["candidate_sha256"] == solve._sha(envelope)
+        assert [row["panel_count"] for row in summary] == [3, 1]
+    assert (value, candidate, children, exchange) == before
+    assert store.events == [] and store.exchange is None

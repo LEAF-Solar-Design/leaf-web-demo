@@ -159,8 +159,10 @@ before minting, with HTTP 409 and string `detail`:
 > This identity requires authorized workspace provisioning. Contact your workspace administrator to complete provisioning, then sign in again.
 
 The namespace is `LEAF_TENANT_CLAIM_NS`, trailing-slash normalized by
-`server/auth.py:claim_ns()`. Presence alone triggers this refusal, including
-empty, null, malformed, unknown, and inactive values; the claim is never
+`server/auth.py:claim_ns()`. Any present value other than null or a blank string
+triggers this refusal, including malformed, unknown, and inactive values. A null
+or blank value means "no org" (the post-login Action stamps null on every solo
+user) and falls through to the self-provision gate. The claim is never
 resolved to select an organization or grant membership. An administrator must
 establish authorized durable membership separately before the member signs in
 again and retries access. Bootstrap does not invoke provisioning automatically,

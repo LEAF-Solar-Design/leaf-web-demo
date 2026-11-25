@@ -168,6 +168,7 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
                                   "y": float(panel["centre"][1])})
         groups.append({"block": frame["id"], "panels": handles})
     try:
+        parse_worker._validate_identities(matrices)
         centres = [(p["x"], p["y"]) for p in kernel_panels]
         try:
             row_angle = si.lattice_row_angle(centres)
@@ -222,8 +223,14 @@ def report_from_matrices(graph, matrices, *, alignment_tolerance, selection_orde
               "group_strings": len(result["strings"]), "bridge_strings": len(result["bridge_strings"]),
               "strings": len(strings), "assigned_panels": sum(len(s["panel_refs"]) for s in strings),
               "unassigned_panels": len(unassigned), "partial_strings": sum(s["partial"] for s in strings)}
-    return {"row_angle": row_angle, "counts": counts, "matches": matches,
+    output = {"row_angle": row_angle, "counts": counts, "matches": matches,
             "strings": strings, "unassigned_panel_refs": unassigned}
+    if "optimizer_measurement" in result:
+        measured = result["optimizer_measurement"]
+        output["optimizer_measurement"] = {"complete": measured["complete"], "optimizers": [
+            {**opt, "panel_refs": [ref_of.get(handle) for handle in opt["panel_handles"]]}
+            for opt in measured["optimizers"]]}
+    return output
 
 
 def _worker_argv():
@@ -231,7 +238,7 @@ def _worker_argv():
     return [sys.executable, "-B", os.path.abspath(parse_worker.__file__)]
 
 
-def parse_source(content):
+def parse_source(content, *, legacy=False):
     """The PDF's matrices, parsed in a child process under a hard wall-time deadline.
 
     Returns only after the child has exited and been reaped, on every path, so a caller holding a
@@ -247,7 +254,8 @@ def parse_source(content):
         source.write(content)
         source.seek(0)
         try:
-            child = subprocess.Popen(_worker_argv(), stdin=source, stdout=subprocess.PIPE,
+            argv = _worker_argv() + (["--legacy-matrices"] if legacy else [])
+            child = subprocess.Popen(argv, stdin=source, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
         except (OSError, ValueError):
             raise SolarEdgeReportError("REPORT_PARSE_UNAVAILABLE") from None
@@ -333,7 +341,7 @@ def build_solaredge_report(backend, tenant_id, drawing_id, request):
     if not _PARSE_SLOTS.acquire(blocking=False):
         raise SolarEdgeReportError("REPORT_BUSY")
     try:
-        matrices = parse_source(content)
+        matrices = parse_source(content, legacy=True)
     finally:
         _PARSE_SLOTS.release()
     core = report_from_matrices(context["graph"], matrices,

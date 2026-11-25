@@ -11,10 +11,78 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { catalogClusters, profileRibbonTabs } from '../lib/ribbonClusters.js'
 import { REASONS, reasonCode } from '../lib/actionRegistry.js'
+import { studioToolIcon, toolIcon } from '../lib/toolRecord.js'
 
 import DraftingRibbon, { RIBBON_HEIGHT_VAR, RibbonCluster, RibbonTool } from './DraftingRibbon.jsx'
 
 afterEach(cleanup)
+
+describe('decluttered tool groups', () => {
+  const studioRibbon = (clusters, surface = 'solar') => <div className="app" data-studio-shell="cockpit" data-surface={surface}><DraftingRibbon clusters={clusters} /></div>
+
+  it('preserves the shared toolbox default and declared icons', () => {
+    expect(toolIcon({ name: 'unknown' })).toBe('toolbox')
+    expect(toolIcon({ name: 'solar-panel', icon: 'line' })).toBe('line')
+    expect(studioToolIcon({ name: 'unknown' })).toBe('')
+  })
+
+  it('gives panel, zone, string, inverter and trench tools distinct real glyphs', () => {
+    const tools = ['solar-panel-grid', 'solar-zone', 'solar-string', 'solar-inverter', 'solar-trench'].map((name) => ({
+      id: name, label: name, icon: toolIcon({ name }),
+    }))
+    const { container } = render(studioRibbon([{ id: 'solar', label: 'Solar', tools }]))
+    const glyphs = Array.from(container.querySelectorAll('svg use'), (node) => node.getAttribute('href'))
+    expect(glyphs).toHaveLength(5)
+    expect(new Set(glyphs).size).toBe(5)
+  })
+  it('uses text for an icon absent from the existing sprite', () => {
+    render(<RibbonTool tool={{ id: 'custom', label: 'Inspect the roof', icon: 'not-in-the-sprite' }} />)
+    const button = screen.getByRole('button', { name: 'Inspect the roof' })
+    expect(button.textContent).toBe('Inspect the roof')
+    expect(button.dataset.textOnly).toBe('true')
+    expect(button.querySelector('.ci')).toBeNull()
+  })
+  it('renders an undeclared icon as text and uses each visible glyph once', () => {
+    const { container } = render(studioRibbon([{ id: 'draw', label: 'Draw', tools: [
+      { id: 'one', label: 'One', icon: 'line' },
+      { id: 'two', label: 'Two', icon: 'line' },
+      { id: 'three', label: 'Three' },
+    ] }]))
+    expect(container.querySelectorAll('svg use')).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Two' }).querySelector('.ci')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Three' }).textContent).toBe('Three')
+    expect(screen.getByRole('button', { name: 'Three' }).querySelector('.ci')).toBeNull()
+  })
+  it.each(['solar', 'cad'])('keeps disabled %s Studio tools and their visible reasons under More', (surface) => {
+    const { container } = render(studioRibbon([{ id: 'edit', label: 'Edit', tools: [
+      { id: 'paste', label: 'Paste', disabled: true, reason: 'Clipboard is empty' },
+      { id: 'write', label: 'Write', disabled: true, reason: 'Take the edit lock' },
+    ] }], surface))
+    const menu = container.querySelector('.ribbon-disabled-more')
+    expect(menu.open).toBe(false)
+    expect(menu.querySelector('button').disabled).toBe(true)
+    fireEvent.click(menu.querySelector('summary'))
+    expect(menu.open).toBe(true)
+    expect(screen.getByRole('button', { name: 'Paste (unavailable: Clipboard is empty)' })).toBeTruthy()
+    expect(screen.getByText('Clipboard is empty')).toBeVisible()
+    expect(screen.getByText('Take the edit lock')).toBeVisible()
+  })
+
+  it.each([null, 'project'])('keeps disabled tools in place and repeated icons outside compact Studio (%s)', (surface) => {
+    const clusters = [{ id: 'edit', label: 'Edit', tools: [
+      { id: 'one', label: 'One', icon: 'line' },
+      { id: 'two', label: 'Two', icon: 'line' },
+      { id: 'paste', label: 'Paste', disabled: true, reason: 'Clipboard is empty' },
+    ] }]
+    const { container } = render(surface ? studioRibbon(clusters, surface) : <DraftingRibbon clusters={clusters} />)
+    expect(container.querySelector('.ribbon-disabled-more')).toBeNull()
+    expect(container.querySelectorAll('svg use')).toHaveLength(2)
+    const paste = screen.getByRole('button', { name: 'Paste (unavailable: Clipboard is empty)' })
+    expect(paste.disabled).toBe(true)
+    expect(paste.title).toBe('Clipboard is empty')
+    expect(paste.parentElement.className).toBe('ribbon-cluster-tools')
+  })
+})
 
 const FAMS = [
   {

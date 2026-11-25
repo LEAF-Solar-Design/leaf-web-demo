@@ -134,13 +134,17 @@ def prepare_source(org_id, project_id, actor_id, *, revision):
         'project_id': project_id, 'revision': revision, 'document_sha256': digest,
         'archive_sha256': hashlib.sha256(raw).hexdigest(), 'byte_size': len(raw),
     }, org_id, project_id)
+    import store
     import write_loop
     try:
         backend = write_loop.upload_backend_for_tenant(org_id)
         archive_key, manifest_key = _keys(descriptor)
         backend.put_if_absent_or_verify(archive_key, raw)
         # Never remove an archive if manifest publication loses a conflict.
-        backend.put_if_absent_or_verify(manifest_key, _manifest(descriptor))
+        try:
+            backend.put_if_absent_or_verify(manifest_key, _manifest(descriptor))
+        except store.ImmutableConflict:
+            raise project_lifecycle.LifecycleConflict('Saved revision already has a different preview source.') from None
         _read_persisted(backend, descriptor)
     except _PRIVATE_ERRORS:
         raise

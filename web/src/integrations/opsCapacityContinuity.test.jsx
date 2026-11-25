@@ -45,7 +45,7 @@ function response(value) {
       controller.enqueue(new TextEncoder().encode(JSON.stringify(value))); controller.close()
     } }) }
 }
-function harness(initial) {
+function harness(initial, datasetMetadata = metadata) {
   let stored = initial
   let imported
   const authority = { subject: 'synthetic-subject', projectId }
@@ -58,13 +58,13 @@ function harness(initial) {
     if (url.pathname.endsWith('/scope')) return response({ tenantId: projectId, projectId: authority.projectId,
       platformUserId: projectId, bindingId: projectId, projectRole: 'owner',
       externalAuthority: 'auth0', externalSubject: authority.subject })
-    if (url.pathname.endsWith('/datasets')) return response({ records: [metadata], nextCursor: null })
+    if (url.pathname.endsWith('/datasets')) return response({ records: [datasetMetadata], nextCursor: null })
     if (url.pathname.endsWith('/dataset-imports')) {
       imported = JSON.parse(options.body)
       return response({ reference, revision: 1, rowCount: 6, status: 'complete' })
     }
     if (url.pathname.endsWith(`/datasets/${reference.id}/versions/1`)) {
-      return response({ ...metadata, fields: imported?.definition.fields || fields })
+      return response({ ...datasetMetadata, fields: imported?.definition.fields || fields })
     }
     if (url.pathname.endsWith('/elements') && options.method === 'GET') return response({ records: stored ? [stored] : [], nextCursor: null })
     if (url.pathname.endsWith('/elements') && options.method === 'POST') {
@@ -81,27 +81,31 @@ function harness(initial) {
     accountScope: 'synthetic-account', session: { ...snapshot, controller },
     client: createIntegrationsClient({ origin: 'https://fixture.invalid', fetchImpl }) } }
 }
+const pairTableName = 'Capacity view data: provider pairs'
+
 async function expectSixRecords() {
-  const main = await screen.findByRole('region', { name: 'Pair main' })
-  const second = screen.getByRole('region', { name: 'Pair second' })
-  const unpaired = screen.getByRole('region', { name: 'Unpaired accounts' })
-  for (const [region, indices] of [[main, [0, 1]], [second, [2, 3]], [unpaired, [5, 4]]]) {
-    const rows = within(region).getAllByRole('row').slice(1)
-    expect(rows).toHaveLength(2)
-    indices.forEach((index, i) => {
-      const [account, provider, key, pct] = records[index]
-      const cells = within(rows[i]).getAllByRole('cell')
-      expect(cells[0]).toHaveTextContent(account)
-      expect(cells[1]).toHaveTextContent(provider)
-      expect(cells[2].textContent).toBe(key)
-      expect(cells[3].textContent).toBe(`${pct}%`)
-      expect(cells[4].textContent).toBe(`Nov ${index + 2}, 2026, 12:00:00 UTC`)
-    })
-  }
-  expect(main.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(second.compareDocumentPosition(unpaired) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  expect(within(unpaired).getByRole('cell', { name: 'Fixture Kimi', exact: true }).closest('tr'))
-    .not.toHaveTextContent('Fixture unpaired Claude')
+  const table = within(await screen.findByRole('table', { name: pairTableName }))
+  const providers = ['Claude', 'Codex', 'Other']
+  const metrics = ['Account', 'Remaining', 'Reset']
+  expect(table.getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+    'Pair / account', ...providers.flatMap(provider => metrics.map(metric => `${provider} ${metric}`)),
+  ])
+  const expected = [
+    ['Pair main', [0, 1, null]],
+    ['Pair second', [2, 3, null]],
+    ['Unpaired Kimi', [null, null, 5]],
+    ['Unpaired Claude', [4, null, null]],
+  ]
+  const rows = table.getAllByRole('row').slice(1)
+  expect(rows).toHaveLength(expected.length)
+  expected.forEach(([label, slots], i) => {
+    const row = within(rows[i])
+    expect(row.getAllByRole('cell').map(cell => cell.textContent)).toEqual([
+      label, ...slots.flatMap(index => index === null ? metrics.map(() => 'Unavailable') : [
+        records[index][0], `${records[index][3]}%`, `Nov ${index + 2}, 2026, 12:00:00 UTC`,
+      ]),
+    ])
+  })
 }
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
@@ -133,7 +137,7 @@ it('saves, reopens and restores the six-record capacity view after an Ops profil
   fireEvent.click(await screen.findByRole('button', { name: 'Capacity view · revision 1' }))
   await expectSixRecords()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active={false} />)
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   reopened.rerender(<OpsWorkspaceGround {...h.props} active />)
   await expectSixRecords()
   expect(screen.getByText(/Recipe revision 1/)).toBeInTheDocument()
@@ -189,6 +193,33 @@ const existing = () => ({ revision: 1, element: { schema_version: 1, id: 'capaci
   props: { columns: ids, row_limit: 100, row_grouping: { kind: 'provider_pairs', pair_key_field: 'pair_key',
     provider_field: 'provider', providers: ['Claude', 'Codex'] } } } })
 
+it('downloads the selected material-backed capacity recipe and all six queried rows', async () => {
+  vi.stubGlobal('TextDecoder', TextDecoder)
+  vi.stubGlobal('TextEncoder', TextEncoder)
+  vi.stubGlobal('Blob', Blob)
+  const create = vi.fn(() => 'blob:capacity')
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = vi.fn() })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  const material = { kind: 'project_material', material_id: projectId, sha256: 'b'.repeat(64), byte_length: 1200 }
+  const h = harness(existing(), { ...metadata, material_lineage: material, lastAttempt: { outcome: 'success', row_count: 6 } })
+  try {
+    render(<OpsWorkspaceGround {...h.props} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Capacity view · revision 1' }))
+    await expectSixRecords()
+    const button = screen.getByRole('button', { name: 'Download view snapshot (JSON)' })
+    await waitFor(() => expect(button).toBeEnabled())
+    const before = h.calls.length
+    fireEvent.click(button)
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(h.calls.slice(before).map(call => [call.method, call.path.split('/').pop()])).toEqual([['GET', 'scope']])
+    expect(JSON.parse(await create.mock.calls[0][0].text())).toEqual({
+      schema: 'leaf.saved-dataset-view.v1', project_id: projectId, view: h.saved(),
+      dataset: { reference, revision: 1, material_lineage: material }, query_result: read,
+      display_preferences: { locale: 'en-US', timezone: 'UTC', hourFormat: '24h' },
+    })
+  } finally { click.mockRestore() }
+})
+
 it.each(['account', 'scope', 'removed', 'session', 'project', 'signout'])('does not restore a capacity view after %s changes while hidden', async (change) => {
   vi.stubGlobal('TextDecoder', TextDecoder)
   vi.stubGlobal('TextEncoder', TextEncoder)
@@ -206,7 +237,7 @@ it.each(['account', 'scope', 'removed', 'session', 'project', 'signout'])('does 
   mounted.rerender(<OpsWorkspaceGround {...h.props} projectId={h.authority.projectId}
     accountScope={change === 'account' ? 'other-account' : h.props.accountScope} active />)
   await screen.findByRole('option', { name: 'Synthetic capacity · version 1' })
-  expect(screen.queryByRole('region', { name: 'Pair main' })).toBeNull()
+  expect(screen.queryByRole('table', { name: pairTableName })).toBeNull()
   expect(h.calls.filter(call => call.path.endsWith('/query'))).toHaveLength(queries)
   // Dataset reads use POST /query. No save, action or other mutation occurred.
   expect(h.calls.filter(call => call.method !== 'GET').map(call => call.path))

@@ -1,6 +1,7 @@
 import {privatePreviewAsset} from "./projectBuild/privatePreviewAsset.js";
 import type {PrivatePreviewReader} from "./projectBuild/privatePreviewAsset.js";
 import type {PrivateBuildLifecycle} from "./projectBuild/privateBuildLifecycle.js";
+import type {DurablePrivateNextViews} from "./projectBuild/durablePrivateNextViews.js";
 /**
  * Harness HTTP server - a thin shell over AuthorLoop. Ports are INJECTED, so the
  * hermetic tests wire fakes and the operator-gated `startReal()` wires the real
@@ -77,12 +78,14 @@ import {
   PROJECT_REPOSITORY_SOURCE_BUNDLE_CONTRACT,
   ProjectRepositorySourceUnavailable,
 } from "./ports/index.js";
-import type { ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
+import type { AgentGrant, ConverseRunner, ConverseTurnInput, HarnessPorts, HarnessTurnEvent,
   InstantDrawingContext, InstantSessionAssignment, ProjectRepositoryAuthority,
   ProjectRepositoryInversePreparationRequest, TenantRepoProvider,
   ProjectRepositorySourceVerificationRequest } from "./ports/index.js";
 import { ALLOWED_MODELS, isAllowedModel } from "./ports/modelAllowlist.js";
 import { parseWireGrant } from "./ports/wireGrant.js";
+import { PlanToolName, TurnAnswers } from "./agent/buildPlan.js";
+import { BadMessageError } from "./agent/converseLoop.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 import {
   withAuthorStandardServicesAuthority,
@@ -135,6 +138,7 @@ function authorityHeader(req: IncomingMessage, name: string): string | undefined
 const CANONICAL_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHA40 = /^[a-f0-9]{40}$/;
+const MAX_STAGED_SOURCE_BYTES = 256 * 1024;
 
 function projectSourceRequest(
   req: IncomingMessage,
@@ -594,7 +598,7 @@ function validateImages(value: unknown): { ok: true; images: NonNullable<Convers
 
 /**
  * Minimal validation of ConverseTurnInput: the four required id fields, and
- * exactly one of (`text` and/or `images`) | `confirm` to drive the turn.
+ * one of a text/image message, a confirmation, or a structured answer card.
  * Deliberately does not validate deeper into `confirm.proposal` — that is the
  * runner's job. `messages`
  * defaults to [] when absent/malformed (the turn engine always sends it, but a
@@ -628,8 +632,12 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
   // writes the confirmation mirror before the loop ever sees the body: leaving
   // `text + confirm` to the loop turned a boundary 400 into a post-side-effect
   // 500. Refusing images-with-confirm but not text-with-confirm was the gap.
-  if (!hasText && !hasConfirm && !images?.length) {
-    return { ok: false, message: "one of text, images, or confirm is required" };
+  const hasAnswers = body.answers !== undefined;
+  if (hasAnswers && (body.text !== undefined || body.images !== undefined || body.confirm !== undefined)) {
+    return { ok: false, message: "answers must be the only input on a turn" };
+  }
+  if (!hasText && !hasConfirm && !images?.length && !hasAnswers) {
+    return { ok: false, message: "one of text, images, confirm, or answers is required" };
   }
   if (hasConfirm && (hasText || images?.length)) {
     return { ok: false, message: "a turn carries either text/images or confirm, not both" };
@@ -640,6 +648,11 @@ function validateConverseTurnInput(body: Record<string, unknown>): ConverseTurnV
     : [];
 
   const input: ConverseTurnInput = { tenant_id, session_id, turn_id, drawing_id, messages };
+  if (hasAnswers) {
+    const parsed = TurnAnswers.safeParse(body.answers);
+    if (!parsed.success) return { ok: false, message: "invalid answers" };
+    input.answers = parsed.data;
+  }
   if (body.context_packet !== undefined) {
     if (!isRecord(body.context_packet)) {
       return { ok: false, message: "context_packet must be an object of at most 16384 serialized chars" };
@@ -843,6 +856,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
   projectSourceAuthoring?: ProjectSourceAuthorDependencies;
   projectStaticPreviews?: PrivatePreviewReader;
   projectStaticBuilds?: Pick<PrivateBuildLifecycle,"submit"|"observe">;
+  projectStaticViews?: Pick<DurablePrivateNextViews,"observe"|"asset">;
   portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
@@ -1013,6 +1027,60 @@ export function createHarness(ports: HarnessPorts, opts?: {
           res.off("close", onClose);
         }
         return;
+      }
+
+      if (path === "/internal/author/staged-source") {
+        res.setHeader("cache-control", "private, no-store");
+        res.setHeader("x-content-type-options", "nosniff");
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        if (method !== "POST") return send(res, 405, { error: { code: "invalid_request" } });
+        let tenantId: string;
+        let changeSetId: string;
+        let stagedCommit: string;
+        let slug: string;
+        try {
+          if (requestUrl.search) throw new Error();
+          const body = await readJsonBody(req, 1024, true, true);
+          if (!isRecord(body) || Object.keys(body).sort().join(",") !==
+              "changeSetId,slug,stagedCommit,tenant_id" ||
+              typeof body.tenant_id !== "string" || !/^[a-z0-9][a-z0-9_-]{0,62}$/.test(body.tenant_id) ||
+              req.headers["x-tenant-id"] !== body.tenant_id ||
+              typeof body.changeSetId !== "string" || body.changeSetId.length !== 36 || !CANONICAL_UUID.test(body.changeSetId) ||
+              typeof body.stagedCommit !== "string" || body.stagedCommit.length !== 40 || !SHA40.test(body.stagedCommit) ||
+              typeof body.slug !== "string" || body.slug !== body.slug.trim() ||
+              !/^[a-z0-9][a-z0-9-]{0,63}$/.test(body.slug)) throw new Error();
+          tenantId = body.tenant_id;
+          changeSetId = body.changeSetId;
+          stagedCommit = body.stagedCommit;
+          slug = body.slug;
+        } catch (error) {
+          return send(res, error instanceof AuthorLoopError && error.status === 413 ? 413 : 400,
+            { error: { code: "invalid_request" } });
+        }
+        const provider = ports.tenantRepo;
+        if (typeof provider.readStagedToolSource !== "function") {
+          return send(res, 503, { error: { code: "stage_source_unavailable" } });
+        }
+        try {
+          const source = await provider.readStagedToolSource(tenantId, { changeSetId, stagedCommit, slug });
+          if (!source || !(source.bytes instanceof Uint8Array) || source.bytes.length > MAX_STAGED_SOURCE_BYTES ||
+              source.commit !== stagedCommit || typeof source.blob !== "string" || source.blob.length !== 40 || !SHA40.test(source.blob) ||
+              typeof source.sha256 !== "string" || source.sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(source.sha256) ||
+              createHash("sha256").update(source.bytes).digest("hex") !== source.sha256 ||
+              createHash("sha1").update(`blob ${source.bytes.length}\0`).update(source.bytes).digest("hex") !== source.blob) {
+            throw new Error();
+          }
+          res.writeHead(200, {
+            "Content-Type": "application/octet-stream", "Content-Length": source.bytes.length,
+            "X-Leaf-Source-Commit": source.commit, "X-Leaf-Source-Blob": source.blob,
+            "X-Leaf-Source-Sha256": source.sha256, "X-Leaf-Tool-Slug": slug,
+          });
+          res.end(source.bytes);
+          return;
+        } catch {
+          return send(res, 503, { error: { code: "stage_source_unavailable" } });
+        }
       }
 
       // F5 caller-auth gate: every non-health route requires the shared secret when the
@@ -1224,6 +1292,16 @@ export function createHarness(ports: HarnessPorts, opts?: {
         if (requiredAuth) return send(res, 401, requiredAuth);
         res.setHeader("cache-control", "no-store");
         if (!authoredExecutionEnabled() || !opts?.projectRepositoryEdits || !opts.projectSourceAuthoring) {
+          const attempt = req.headers["x-source-author-attempt"];
+          const digest = req.headers["x-source-author-wire-sha256"];
+          if (typeof attempt === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(attempt)
+              && typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest)) {
+            // Echo caller correlation only. This gate has not read the body.
+            // Capturing this disposition never authorizes another dispatch.
+            return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" },
+              disposition: { schema: "leaf.project-source-author-disposition.v1", attempt_id: attempt,
+                wire_sha256: digest, outcome: "not_started", stage: "author_dependency_gate" } });
+          }
           return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
         }
         const controller = new AbortController();
@@ -1331,7 +1409,8 @@ export function createHarness(ports: HarnessPorts, opts?: {
       if (method === "POST" && ["/internal/project-static-preview/build", "/internal/project-static-preview/status"].includes(path)) {
         const denied = harnessAuthDenial(req, { ...auth, enabled: true });
         if (denied) return send(res, 401, denied);
-        if (!opts?.projectStaticBuilds) return send(res, 503, {error:{code:"preview_unavailable"}});
+        const builds=opts?.projectStaticBuilds, views=opts?.projectStaticViews;
+        if (!builds && !(views && path.endsWith("/status"))) return send(res,503,{error:{code:"preview_unavailable"}});
         try {
           const b = await readJsonBody(req, 16 * 1024, true, false, true);
           const keys = "job_id,organization_id,project_id,receipt_digest,repo_key,source_commit,source_request_id,source_tree,tenant_id,version";
@@ -1347,7 +1426,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
           const witness = {jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
           if (path.endsWith("/build") && !authoredExecutionEnabled()) return send(res,503,{error:{code:"authored_execution_disabled"}});
           // A status request only observes the existing identity. Never build.
-          const result = path.endsWith("/build") ? await opts.projectStaticBuilds.submit(authority,witness) : await opts.projectStaticBuilds.observe(authority,witness);
+          const result = path.endsWith("/build") ? await builds!.submit(authority,witness) : await (views || builds!).observe(authority,witness);
           res.setHeader("Cache-Control","private, no-store");
           return send(res,200,result);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }
@@ -1356,22 +1435,29 @@ export function createHarness(ports: HarnessPorts, opts?: {
       if (method === "POST" && path === "/internal/project-static-preview/asset") {
         const denied = harnessAuthDenial(req, { ...auth, enabled: true });
         if (denied) return send(res, 401, denied);
-        if (!opts?.projectStaticPreviews) return send(res, 503, {error:{code:"preview_unavailable"}});
+        const views=opts?.projectStaticViews, legacy=opts?.projectStaticPreviews;
+        if (!views && !legacy) return send(res,503,{error:{code:"preview_unavailable"}});
         try {
-          const b = await readJsonBody(req, 16 * 1024, true, true);
-          const keys = "artifact_id,job_id,manifest_sha256,organization_id,path,project_id,repo_key,source_commit,source_tree,tenant_id";
+          const b = await readJsonBody(req, 16 * 1024, true, false, true);
+          const keys = "artifact_id,job_id,manifest_sha256,organization_id,path,project_id,receipt_digest,repo_key,source_commit,source_request_id,source_tree,tenant_id,version";
           if (!isRecord(b) || Object.keys(b).sort().join(",") !== keys) throw new Error();
-          for (const k of ["tenant_id","organization_id","project_id","repo_key","job_id"])
+          for (const k of ["tenant_id","organization_id","project_id","repo_key","job_id","source_request_id"])
             if (typeof b[k] !== "string" || !CANONICAL_UUID.test(b[k] as string)) throw new Error();
           if (typeof b.artifact_id !== "string" || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(b.artifact_id) ||
               authorityHeader(req,"x-tenant-id") !== b.tenant_id ||
+              !Number.isSafeInteger(b.version) || (b.version as number) < 1 ||
+              typeof b.receipt_digest !== "string" || !/^[0-9a-f]{64}$/.test(b.receipt_digest) ||
               typeof b.source_commit !== "string" || !SHA40.test(b.source_commit) ||
               typeof b.source_tree !== "string" || !SHA40.test(b.source_tree) ||
               typeof b.manifest_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(b.manifest_sha256) ||
               typeof b.path !== "string" || b.path.length > 2048) throw new Error();
-          const asset = await privatePreviewAsset(opts.projectStaticPreviews,
-            {tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string},
-            {jobId:b.job_id as string,artifactId:b.artifact_id as string,sourceCommit:b.source_commit,sourceTree:b.source_tree,manifestSha256:b.manifest_sha256,path:b.path});
+          const authority={tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string};
+          const request={jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
+          const witness={artifactId:b.artifact_id,manifestSha256:b.manifest_sha256,path:b.path};
+          // Once durable views are supplied, an absent receipt must not fall
+          // back to legacy process-local ready state.
+          const asset=views ? await views.asset(authority,request,witness) : await privatePreviewAsset(legacy!,authority,
+            {jobId:request.jobId,sourceCommit:request.sourceCommit,sourceTree:request.sourceTree,...witness});
           res.setHeader("Cache-Control","private, no-store");res.setHeader("X-Content-Type-Options","nosniff");
           return send(res,200,asset);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }
@@ -1577,6 +1663,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
           });
         }
         const body = await readJsonBody(req);
+        if (body.target !== undefined && body.target !== "studio" && body.target !== "branch") {
+          return send(res, 400, { error: { message: 'target must be "studio" or "branch"' } });
+        }
+        const toolName = PlanToolName.optional().safeParse(body.toolName);
+        if (!toolName.success) {
+          return send(res, 400, { error: { message: "toolName must be a lowercase kebab-case name of at most 64 characters" } });
+        }
+        const revisionBaseCommit = body.revisionBaseCommit;
+        if (revisionBaseCommit !== undefined &&
+            (typeof revisionBaseCommit !== "string" || !/^[0-9a-f]{40}$/.test(revisionBaseCommit))) {
+          return send(res, 400, { error: { message: "revisionBaseCommit must be a 40-hex commit" } });
+        }
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
         const authority = authorAuthorityForRequest(req, tenant);
@@ -1587,6 +1685,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
             platformRelease: requiredText(body, "platformRelease"),
             workspaceContractDigest: requiredText(body, "workspaceContractDigest"),
             idempotencyKey: requiredText(body, "idempotencyKey"),
+            ...(body.target === "branch" ? { target: "branch" as const } : {}),
+            ...(revisionBaseCommit === undefined ? {} : { revisionBaseCommit }),
+            ...(toolName.data === undefined ? {} : { toolName: toolName.data }),
             ...(body.targetToolName === undefined
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
@@ -1700,6 +1801,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
       console.error("[harness] request error:", redactTokens((err as Error).stack ?? String(err)));
       // Missing per-tenant grant -> a clean 401 with a machine-detectable marker the app
       // proxy maps to GRANT_REQUIRED (frontend prompts "sign in with Claude"). No token.
+      if (err instanceof BadMessageError) return send(res, 400, { error: { message: err.message } });
       if (err instanceof GrantRequiredError) {
         return send(res, 401, {
           grant_required: true,
@@ -1715,7 +1817,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
       }
       if (err instanceof AuthorLoopError) {
         return send(res, err.status, {
-          error: { message: err.message, diagnostics: err.diagnostics ?? [] },
+          error: { message: err.message, diagnostics: err.diagnostics ?? [],
+            ...(err.reason === undefined ? {} : { reason: err.reason }),
+            ...(err.compile === undefined ? {} : { compile: err.compile }) },
         });
       }
       // Class name only for the unclassified catch-all: an arbitrary error's
@@ -1840,6 +1944,7 @@ export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
   const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } = await import("./ports/impl/oauthGrantProvider.js");
+  const { TenantAnthropicGrantProvider } = await import("./ports/impl/tenantAnthropicGrant.js");
   const { grantKeyProviderFromEnv } = await import("./security/grantEnvelope/fromEnv.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
@@ -1848,6 +1953,11 @@ export async function startReal(port = 8130): Promise<Server> {
   const { HttpAppRunClient } = await import("./ports/impl/appRunClient.js");
   const { HttpGateClient } = await import("./ports/impl/gateClient.js");
   const { ConverseSdkRunner } = await import("./ports/impl/converseSdkRunner.js");
+  const { OpenAiConverseRunner, converseProviderFromEnv } = await import("./ports/impl/openaiConverseRunner.js");
+  const converseProvider = converseProviderFromEnv(process.env);
+  if (converseProvider.provider === "openai") {
+    console.log(`converse_provider=openai model=${converseProvider.model}`);
+  }
   const { HaikuIntentSynthesizer } = await import(
     "./ports/impl/haikuIntentSynthesizer.js"
   );
@@ -1877,9 +1987,10 @@ export async function startReal(port = 8130): Promise<Server> {
   const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
   console.log(`grant_store_backend=${grantBackend}`);
   const standardServicesResolver = standardServicesResolverFromEnv();
-  const oauth = new StandardServicesOAuthGrantProvider(
+  // Inert in production: no provider records or LEAF_TENANT_PROVIDER_HOSTS are provisioned there.
+  const oauth = new TenantAnthropicGrantProvider(new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
-  );
+  ), grantsDir, process.env);
   const sessionStore = appUrl && dispatchSecret ? createProbedSessionStore() : null;
   // GET /ready probes exactly the stores built above; nothing is constructed per request.
   // File and vault records share the grant directory, so both use its directory probe.
@@ -1887,21 +1998,39 @@ export async function startReal(port = 8130): Promise<Server> {
     session: sessionStore ? sessionStore.readiness : null,
     grants: { kind: grantBackend, probe: createFileStoreProbe(grantsDir) },
   });
+  // Per-tenant provider override (default off): a record beside the tenant's grant files routes
+  // only that tenant's turns to an allowlisted OpenAI-compatible server. See tenantProviderStore.ts.
+  const { allowedProviderHosts } = await import("./ports/impl/tenantProviderStore.js");
+  const { createTenantRunnerFor } = await import("./ports/impl/tenantRunnerFor.js");
+  console.log(`tenant_provider_hosts=${allowedProviderHosts(process.env).size}`);
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
         oauth,
         appRun: new HttpAppRunClient({ baseUrl: appUrl, dispatchSecret }),
         gate: new HttpGateClient({ appBaseUrl: appUrl, dispatchSecret }),
         store: sessionStore.store,
-        runnerFor: (grant) => new ConverseSdkRunner({
-          grant,
+        runnerFor: (grant) => converseProvider.provider === "openai"
+          ? new OpenAiConverseRunner({
+              grant, apiKey: converseProvider.apiKey, model: converseProvider.model,
+              ...(converseProvider.baseUrl ? { baseUrl: converseProvider.baseUrl } : {}),
+              ...(converseProvider.turnTimeoutS !== undefined ? { turnTimeoutS: converseProvider.turnTimeoutS } : {}),
+              ...(standardServicesResolver ? { standardServicesResolver } : {}),
+            })
+          : new ConverseSdkRunner({
+              grant,
+              ...(standardServicesResolver ? { standardServicesResolver } : {}),
+            }),
+        tenantRunnerFor: createTenantRunnerFor({
+          grantsDir, env: process.env,
           ...(standardServicesResolver ? { standardServicesResolver } : {}),
         }),
         ...(standardServicesResolver ? { standardServicesResolver } : {}),
         // Classify the turn's surface (drawing vs the product) with a small
         // fast model instead of matching vocabulary in the prompt. Advisory
         // and fail-open: see HaikuIntentSynthesizer.
-        intentFor: (grant) => new HaikuIntentSynthesizer({ grant }),
+        ...(converseProvider.provider === "anthropic" ? {
+          intentFor: (grant: AgentGrant) => new HaikuIntentSynthesizer({ grant }),
+        } : {}),
         instantExecutor,
       })
     : undefined;

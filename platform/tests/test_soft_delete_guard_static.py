@@ -97,10 +97,12 @@ def _statements():
         for path in sorted(root.rglob("*.py")):
             if "tests" in path.parts:
                 continue
+            if path.relative_to(_REPO).parts[:2] == ("server", "authored"):
+                continue
             module = path.relative_to(_REPO).as_posix()
             try:
                 tree = ast.parse(path.read_text(encoding="utf-8"))
-            except SyntaxError:  # pragma: no cover - not our source to fix
+            except (SyntaxError, FileNotFoundError):  # pragma: no cover - not our source to fix
                 continue
             scope = []
 
@@ -128,6 +130,27 @@ def _statements():
             Visitor().visit(tree)
     assert found, "expected to find SQL statements to scan"
     return found
+
+
+def test_statements_skip_generated_authored_tools_and_vanished_files(tmp_path, monkeypatch):
+    real = tmp_path / "platform" / "real.py"
+    authored = tmp_path / "server" / "authored" / "6caf3241e4ab01ce53eb2b07ed824d65" / "tool.py"
+    vanished = tmp_path / "platform" / "vanished.py"
+    for path in (real, authored, vanished):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('cursor.execute("SELECT 1")\n', encoding="utf-8")
+
+    monkeypatch.setitem(globals(), "_REPO", tmp_path)
+    monkeypatch.setitem(globals(), "_SCANNED_ROOTS", (tmp_path / "platform", tmp_path / "server"))
+    read_text = pathlib.Path.read_text
+
+    def read_text_with_vanished_file(path, *args, **kwargs):
+        if path == vanished:
+            raise FileNotFoundError(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text_with_vanished_file)
+    assert _statements() == [("platform/real.py", "<module>", "SELECT 1")]
 
 
 def unguarded(statements):

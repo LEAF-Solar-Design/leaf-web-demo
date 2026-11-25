@@ -10,6 +10,7 @@ import { useCallback, useRef, useState } from 'react'
 
 import { BACK_UNAVAILABLE, CockpitStatus, FootRegion, StatusToggles, ViewCluster, ViewerGrid, formatCoordinate, formatScale, gridLayout, gridStep, paintGrid, useViewNavigation, zoomViewer } from './DrawingCockpit.jsx'
 import { createViewHistory } from '../lib/viewHistory.js'
+import { VIEW_CONTROL_EVENT } from '../lib/viewControl.js'
 import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 
 afterEach(cleanup)
@@ -576,6 +577,45 @@ const backButton = () => screen.getByRole('button', { name: 'Back to the previou
 const upButton = () => screen.getByRole('button', { name: 'Up one level' })
 const liveText = () => screen.getByTestId('cockpit-view-live').textContent
 
+describe('assistant view requests', () => {
+  const move = detail => act(() => { window.dispatchEvent(new CustomEvent(VIEW_CONTROL_EVENT, { detail })) })
+
+  it('zooms around the current pose, frames the requested layer, and fits the drawing', async () => {
+    const viewer = fakeViewer()
+    const probe = { current: null }
+    const { unmount } = render(<NavHarness viewer={viewer} probe={probe} />)
+    move({ op: 'zoom_in' })
+    expect(viewer.setView).toHaveBeenLastCalledWith({ zoom: POSE_A.zoom * 1.25 })
+    move({ op: 'zoom_out' })
+    expect(viewer.setView).toHaveBeenLastCalledWith({ zoom: POSE_A.zoom * 0.8 })
+    move({ op: 'zoom_to_layer', layer: 'roo' })
+    expect(probe.current.size).toBe(1)
+    expect(viewer.frame).toHaveBeenCalledWith({ minX: 20, minY: 20, maxX: 30, maxY: 25 }, 0.8)
+    await flushFrame()
+    expect(liveText()).toBe('Showing layer Roof')
+    move({ op: 'fit' })
+    expect(viewer.setView).toHaveBeenLastCalledWith('home')
+    await flushFrame()
+    expect(liveText()).toBe('Showing the whole drawing')
+    unmount()
+    viewer.setView.mockClear()
+    move({ op: 'fit' })
+    expect(viewer.setView).not.toHaveBeenCalled()
+  })
+
+  it('announces a missing layer or a layer the viewer cannot frame', async () => {
+    const viewer = fakeViewer({ frameResult: false })
+    render(<NavHarness viewer={viewer} probe={{ current: null }} />)
+    move({ op: 'zoom_to_layer', layer: 'Missing' })
+    expect(viewer.frame).not.toHaveBeenCalled()
+    await flushFrame()
+    expect(liveText()).toBe('No layer named Missing in this drawing')
+    move({ op: 'zoom_to_layer', layer: 'Roof' })
+    await flushFrame()
+    expect(liveText()).toBe('That layer has nothing to show')
+  })
+})
+
 describe('ViewCluster Back and Up (S3)', () => {
   it('shows visible Back and Up labels, and an empty Back is aria-disabled but focusable', () => {
     const probe = { current: null }
@@ -862,7 +902,7 @@ describe('CockpitStatus', () => {
     const status = screen.getByTestId('cockpit-status')
     const [x, y] = status.querySelectorAll('.cockpit-coord b')
     expect(x.textContent).toBe('N/A')
-    expect(status.textContent).toContain('3 rendered paths · 1 layer')
+    expect(status.querySelector('.cockpit-count').textContent).toBe('1 layer')
     expect(status.textContent).toContain('sel A1')
 
     move(ground, 123.4, 50)
@@ -891,11 +931,9 @@ describe('CockpitStatus', () => {
     const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: shown,
       renderStats: { paths: 2, layers: 1, markerReferences: 1, omitted: 3 } }) } }
     render(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    const text = screen.getByTestId('cockpit-status').textContent
-    expect(text).toContain('2 rendered paths · 1 layer')
-    expect(text).toContain('1 block reference shown as markers')
-    expect(text).toContain('preview limited')
-    expect(text).not.toContain('0 rendered paths')
+    const count = screen.getByTestId('cockpit-status').querySelector('.cockpit-count')
+    expect(count.title).toBe('2 rendered paths · 1 layer · 1 block reference shown as markers')
+    expect(count.textContent).toBe('1 layer · preview limited')
   })
 
   it('waits for the matching lazy viewer scene and rejects stale counts', () => {
@@ -907,13 +945,26 @@ describe('CockpitStatus', () => {
     let scene = { ready: true, intake: { ...shown }, renderStats: stats }
     viewerRef.current = { getDrawingScene: () => scene }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    expect(screen.getByTestId('cockpit-status').textContent).not.toContain('2 rendered paths')
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
     scene = { ready: false, intake: shown, renderStats: stats }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
     expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
     scene = { ready: true, intake: shown, renderStats: stats }
     view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
-    expect(screen.getByTestId('cockpit-status').textContent).toContain('2 rendered paths · 1 layer')
+    expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').title).toBe('2 rendered paths · 1 layer')
+  })
+
+  // GAPS 47: after Save the owner's engine record is a new object while the
+  // canvas keeps its own intake; the scene is judged against the canvas one.
+  it('judges the scene against the canvas intake, not the owner record, after a save', () => {
+    const canvas = { polylines: [], layers: ['Panels'] }
+    const saved = { ...canvas }
+    const stats = { paths: 4, layers: 1, markerReferences: 0, omitted: 0 }
+    const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: canvas, renderStats: stats }) } }
+    const view = render(<CockpitStatus viewerRef={viewerRef} shown={saved} />)
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
+    view.rerender(<CockpitStatus viewerRef={viewerRef} shown={saved} canvasIntake={canvas} />)
+    expect(screen.getByTestId('cockpit-status').querySelector('.cockpit-count').textContent).toBe('1 layer')
   })
 
   it('reads "no selection" with nothing selected and holds "N/A" without a viewer', async () => {

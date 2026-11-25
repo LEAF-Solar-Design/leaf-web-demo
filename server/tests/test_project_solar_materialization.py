@@ -745,3 +745,178 @@ def test_physical_head_moved_during_writer_does_not_publish(prepared, monkeypatc
     assert len(calls) == 1
     assert layout.project.resolve_context(lane.tenant, lane.project, lane.parent.version_id,
         drawing_id=lane.drawing).binding.is_head
+
+
+@pytest.fixture
+def project_physical_terrain(monkeypatch):
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+    from routers import project_drawings, project_physical
+
+    binding = SimpleNamespace(organization_id=uuid4(), project_id=uuid4(), drawing_id=uuid4(),
+        input_version_id=uuid4(), head_version_id=uuid4(), is_head=False,
+        version=SimpleNamespace(seq=2, provenance={}))
+    verified = SimpleNamespace(binding=binding, intake={}, intake_sha256='a' * 64)
+    tenant = str(binding.organization_id)
+    calls = []
+
+    def resolve(actual_tenant, actual_project, actual_version, *, drawing_id, write):
+        assert (actual_tenant, actual_project, actual_version, drawing_id, write) == (
+            tenant, binding.project_id, binding.input_version_id, binding.drawing_id, False)
+        calls.append(verified)
+        return verified
+
+    monkeypatch.setattr(project_physical.policy, 'project_runs_enabled', lambda: True)
+    monkeypatch.setattr(project_drawings, 'resolve_demo_actor', lambda _: None)
+    monkeypatch.setattr(project_physical.project, 'resolve_context', resolve)
+    monkeypatch.setattr(project_physical.entitlements, 'resolve_tier', lambda _: 'free')
+    monkeypatch.setattr(project_physical.entitlements, 'resolve_roles', lambda _: ([], False))
+    monkeypatch.setattr(project_physical.entitlements, 'entitlements_for', lambda *_: {'run_read': True})
+    monkeypatch.setattr(layout.physical, 'load_physical_head',
+                        lambda *_a, **_k: pytest.fail('legacy head read'))
+    app = FastAPI()
+    app.middleware('http')(project_drawings.no_store_responses)
+    app.include_router(project_physical.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: tenant
+    path = (f'/api/projects/{binding.project_id}/drawings/{binding.drawing_id}'
+            f'/versions/{binding.input_version_id}/physical')
+    with TestClient(app) as http:
+        yield SimpleNamespace(http=http, path=path, verified=verified, calls=calls,
+                              route=project_physical, app=app)
+
+
+@pytest.mark.parametrize('historical', [False, True])
+def test_project_physical_terrain_empty_version_never_reads_legacy(project_physical_terrain, historical):
+    lane = project_physical_terrain
+    binding = lane.verified.binding
+    binding.is_head = not historical
+    if not historical:
+        binding.head_version_id = binding.input_version_id
+    response = lane.http.get(lane.path)
+    assert response.status_code == 200, response.text
+    assert response.headers['cache-control'] == 'no-store'
+    result = response.json()
+    assert result['schema'] == 'leaf.solar-project-physical-view.v1'
+    assert result['result'] == {'schema': 'leaf.solar-terrain-view-response.v1',
+                                'stored': False, 'head': None, 'terrain': None}
+    assert result['context'] == {
+        'organization_id': str(binding.organization_id), 'project_id': str(binding.project_id),
+        'drawing_id': str(binding.drawing_id), 'version_id': str(binding.input_version_id),
+        'head_version_id': str(binding.head_version_id), 'is_head': not historical,
+        'intake_sha256': lane.verified.intake_sha256}
+    assert lane.calls == [lane.verified]
+
+
+@pytest.mark.parametrize('header', ['X-Org-Id', 'X-Project-Id'])
+def test_project_physical_terrain_conflicting_headers_refuse_before_read(project_physical_terrain, header):
+    lane = project_physical_terrain
+    response = lane.http.get(lane.path, headers={header: str(uuid4())})
+    assert response.status_code == 404
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json()['error']['reason_code'] == 'SIP_R1_CONTEXT_NOT_FOUND'
+    assert lane.calls == []
+
+
+@pytest.mark.parametrize('reason,status', [('CONTEXT_NOT_FOUND', 404), ('PROJECT_FORBIDDEN', 403),
+                                         ('INTAKE_DIGEST_MISMATCH', 500)])
+def test_project_physical_terrain_context_refusal_is_payload_free(project_physical_terrain, monkeypatch,
+                                                               reason, status):
+    lane = project_physical_terrain
+    def refuse(*_a, **_k):
+        lane.route.project.refuse(reason)
+    monkeypatch.setattr(lane.route.project, 'resolve_context', refuse)
+    response = lane.http.get(lane.path)
+    assert response.status_code == status
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json()['error']['reason_code'] == 'SIP_R1_' + reason
+    assert response.json().get('result') is None
+
+
+@pytest.mark.parametrize('failure,status', [('flag', 409), ('entitlement', 403),
+                                          ('invalid_uuid', 422), ('unauthenticated', 401)])
+def test_project_physical_terrain_admission(project_physical_terrain, monkeypatch, failure, status):
+    from fastapi import HTTPException
+    import deps
+    lane = project_physical_terrain
+    path = lane.path
+    if failure == 'flag':
+        monkeypatch.setattr(lane.route.policy, 'project_runs_enabled', lambda: False)
+    elif failure == 'entitlement':
+        monkeypatch.setattr(lane.route.entitlements, 'entitlements_for', lambda *_: {'run_read': False})
+    elif failure == 'invalid_uuid':
+        path = path.replace(str(lane.verified.binding.input_version_id), 'invalid')
+    else:
+        def unauthenticated():
+            raise HTTPException(status_code=401, detail='Authentication required')
+        lane.app.dependency_overrides[deps.require_active_tenant] = unauthenticated
+    response = lane.http.get(path)
+    assert response.status_code == status
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json().get('result') is None
+    if failure != 'entitlement':
+        assert lane.calls == []
+
+
+@pytest.mark.parametrize('failure,status,reason', [
+    ('editor', 503, 'PROJECT_LAYOUT_SOURCE_UNAVAILABLE'),
+    ('terrain', 422, 'TERRAIN_GRID_INVALID'),
+    ('unexpected', 500, 'SIP_R1_INTERNAL'),
+])
+def test_project_physical_terrain_read_failure_is_payload_free(project_physical_terrain, monkeypatch,
+                                                            failure, status, reason):
+    lane = project_physical_terrain
+    def refuse(_):
+        if failure == 'editor':
+            raise editor.EditorError(reason, status, True)
+        if failure == 'terrain':
+            raise ps.PhysicalStateError(reason)
+        raise RuntimeError('private storage detail')
+    monkeypatch.setattr(lane.route.physical, 'terrain_view', refuse)
+    response = lane.http.get(lane.path)
+    assert response.status_code == status, response.text
+    assert response.headers['cache-control'] == 'no-store'
+    assert response.json()['error']['reason_code'] == reason
+    assert 'private storage detail' not in response.text
+    assert response.json().get('result') is None
+
+
+@pytest.mark.parametrize('change', ['valid', 'scope', 'document', 'parameters', 'bytes'])
+def test_project_physical_terrain_native_binding(project_physical_terrain, monkeypatch, change):
+    from test_project_drawing_editor import BytesStore
+    lane = project_physical_terrain
+    binding = lane.verified.binding
+    document, parameters, _ = layout._prepare_initial_layout(initial_body())
+    scope = {key: getattr(binding, key) for key in ('organization_id', 'project_id', 'drawing_id')}
+    if change == 'scope':
+        scope['drawing_id'] = uuid4()
+    raw = layout.native_layout.materialize_native_layout(scope, None, document, None, parameters=parameters)
+    backend = BytesStore()
+    backend.data['synthetic-version.dxf'] = raw if change != 'bytes' else raw + b'altered'
+    monkeypatch.setattr(editor, '_backend', lambda _: backend)
+    monkeypatch.setattr(editor, '_source', lambda _: ('synthetic-version.dxf', editor._sha(raw), None))
+    metadata = {'schema': layout.SCHEMA, 'document': ps.encode_document(document).decode(),
+                'parameters': deepcopy(parameters)}
+    if change == 'document':
+        metadata['document'] = '{}'
+    elif change == 'parameters':
+        metadata['parameters']['generation'] = {}
+    lane.verified.intake[layout.KEY] = metadata
+    before = deepcopy(backend.data)
+    response = lane.http.get(lane.path)
+    assert response.headers['cache-control'] == 'no-store'
+    assert backend.data == before
+    if change == 'valid':
+        assert response.status_code == 200, response.text
+        result = response.json()['result']
+        assert result['stored'] is True
+        assert result['head']['kind'] == 'canonical_version_intake'
+        assert result['head']['version_id'] == str(binding.input_version_id)
+        assert result['head']['state']['artifact_id'] == lane.verified.intake_sha256
+        assert result['head']['state']['content_sha256'] == editor._sha(ps.encode_document(document))
+        assert result['terrain']['drawing_id'] == str(binding.drawing_id)
+        assert result['terrain']['maturity'] == 'preview'
+    else:
+        assert response.status_code in (409, 503), response.text
+        assert response.json().get('result') is None

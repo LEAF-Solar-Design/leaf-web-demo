@@ -171,7 +171,8 @@ def internal_gate(req: GateRequest,
                              # The APP-owned session the client stored its
                              # approval policy against — req.session_id is the
                              # harness's private one (review round 1).
-                             policy_session_id=authority_session_id)
+                             policy_session_id=authority_session_id,
+                             authority_turn_id=authority_turn_id)
     return with_envelope_fields(result)
 
 
@@ -320,6 +321,13 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
             retryable=True, status_code=503,
         )
     if gate_status == "ok":
+        if gate_rec.get("action") == "propose_build_plan":
+            if (gate_rec["tenant_id"] != str(tenant)
+                    or gate_rec["session_id"] != approval["session_id"]):
+                return _not_found(confirmation_id)
+            if req.approved and not getattr(tenant, "subject", None):
+                return error_response(ErrorCode.BAD_PARAMS, "plan_approver_mismatch",
+                                      retryable=False, status_code=403)
         try:
             if req.approved:
                 ok, rec, reason = agent_gate.grant_approval(
@@ -364,6 +372,11 @@ def decide_approval(confirmation_id: str, req: ApprovalDecisionRequest,
                     ErrorCode.INTERNAL,
                     "approval decision not recorded (gate record raced away) — retry",
                     retryable=True, status_code=503,
+                )
+            else:
+                return error_response(
+                    ErrorCode.BAD_PARAMS, reason, retryable=False,
+                    status_code=403 if reason == "plan_approver_mismatch" else 409,
                 )
     # gate_status absent => a pre-spine sessions-wire-only confirmation_id —
     # record-only semantics, unchanged. corrupt => the gate chain will deny

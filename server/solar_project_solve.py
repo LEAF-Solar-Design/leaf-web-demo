@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from uuid import UUID
@@ -16,6 +17,8 @@ import solar_solve_results as kernel
 import solar_solve_request as requests
 import solar_tools
 from solar_design_graph import GraphValidationError
+
+logger = logging.getLogger(__name__)
 
 TOOL_NAME = cloud.TOOL_NAME
 COMMIT_TOOL = "solar-commit-solve"
@@ -150,6 +153,8 @@ def _derive(job, context, plan, exchange):
         "solver": {"endpoint": cloud.SOLVER_URL, "adapter_version": "1.0.0"},
         "proposal": response.model_dump(), "visited_path": response.original_visited_path(request)}
     candidate = kernel.complete_search(context.graph, plan["binding"], proposal)
+    # Apply the same pure acceptance checks used by split proposals before publication.
+    kernel.accept_candidate(context.graph, candidate, expected_rev=context.graph["rev"])
     scope = {"organization_id": str(context.organization_id), "project_id": str(context.project_id),
         "drawing_id": str(context.drawing_id), "input_version_id": str(context.parent_version_id),
         "parent_intake_sha256": context.intake_sha256, "job_id": str(job["job_id"]),
@@ -350,7 +355,7 @@ def _piece_manifest(exchanges):
         for exchange in exchanges]})
 
 
-def _derive_split(job, context, plan, exchange, *, conn=None):
+def _derive_split(job, context, plan, exchange, *, conn=None, children=None):
     store = _store()
     scope, _lease = _authority(job)
     reservation = _reservation(job, context, plan, exchange["classification"])
@@ -360,8 +365,11 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
         return [store.read_completed_piece_exchange(
             _piece_scope(scope, plan["split_binding"], index), conn=connection)
             for index in range(len(plan["split_binding"]["pieces"]))]
-    children = (read_children(conn) if conn is not None
-                else platform_link.platform_db().run_transaction(read_children))
+    if children is None:
+        children = (read_children(conn) if conn is not None
+                    else platform_link.platform_db().run_transaction(read_children))
+    if len(children) != len(plan["split_binding"]["pieces"]):
+        raise GraphValidationError("INVALID_SOLVE_BINDING")
     proposals = []
     for index, child in enumerate(children):
         receipt, candidate, proof = _piece_evidence(job, context, plan, index, child)
@@ -386,7 +394,7 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
         if not members.intersection(refs):
             continue
         if not 1 <= len(refs) <= plan["max_string_length"]:
-            raise GraphValidationError("INVALID_FINAL_GRID_ORDER")
+            raise GraphValidationError("INVALID_FINAL_GRID_ORDER", "split.string_length")
         summary.append({"panel_count": len(refs), "endpoints": [refs[0], refs[-1]]})
     if len(summary) > 4096:
         raise GraphValidationError("INVALID_SOLVE_PROPOSAL")
@@ -400,6 +408,89 @@ def _derive_split(job, context, plan, exchange, *, conn=None):
     proof = {"scope": scope_value, "proposal_proofs": candidate["proofs"],
              "candidate_sha256": _sha(cloud.canonical_bytes(envelope))}
     return cloud.canonical_bytes(envelope), cloud.canonical_bytes(proof), summary
+
+
+def readonly_assembly_attribution(tenant, observed_job, input_version_id):
+    """Revalidate cached children under current code, without changing the job."""
+    from deployment_identity import release_source_identity
+    identity = release_source_identity()
+    result = {"schema": "leaf.solar-assembly-attribution.v1",
+              "mode": "current-source-read-only-rederivation",
+              "historical_instruction_attributed": False,
+              "implementation_source_sha": identity["release_source_sha"],
+              "job_id": str(observed_job["job_id"]), "input_version_id": str(input_version_id),
+              "status": "unavailable", "reason": "evidence_unavailable"}
+    if identity["source_identity"] != "built":
+        return {**result, "reason": "implementation_source_unavailable"}
+    try:
+        if (observed_job.get("status") != "failed" or observed_job.get("tool_name") != TOOL_NAME
+                or str(observed_job.get("input_version_id")) != str(input_version_id)):
+            return {**result, "reason": "failed_parent_binding_required"}
+        verified = project.resolve_context(tenant, UUID(str(observed_job["project_id"])),
+            input_version_id, drawing_id=UUID(observed_job["execution_context"]["drawing_id"]))
+        context = graph.resolve_project_graph_context(verified)
+
+        def derive(conn):
+            job_id = UUID(str(observed_job["job_id"]))
+            job = graph._stored_job(job_id, conn)
+            jobs = platform_link._canonical_jobs_module()
+            org, proj, parent, stored_id, drawing, _actor = jobs._graph_ids(job)
+            if (job["status"] != "failed" or job["tool_name"] != TOOL_NAME
+                    or job["request_tenant_id"] != observed_job["tenant_id"]
+                    or (org, proj, parent, stored_id, drawing) != (
+                        context.organization_id, context.project_id, context.parent_version_id,
+                        job_id, context.drawing_id)
+                    or context.intake_sha256 != job["execution_context"]["parent_intake_sha256"]):
+                return {**result, "reason": "failed_parent_binding_required"}
+            jobs._graph_scope(job, conn)
+            plan = _plan(job, context)
+            if "split_binding" not in plan:
+                return {**result, "reason": "split_parent_required"}
+            scope = _store().ExchangeScope(org, proj, drawing, job_id)
+            count = len(plan["split_binding"]["pieces"])
+            parent_exchange, children = _store().read_assembly_inputs(scope, parent, count, conn=conn)
+            if any(parent_exchange[key] != value for key, value in
+                   _reservation(job, context, plan, parent_exchange["classification"]).items()):
+                return {**result, "reason": "evidence_binding_invalid"}
+            manifest = _piece_manifest(children)
+            if (parent_exchange["state"] == "completed"
+                    and (parent_exchange["response_bytes"] != manifest
+                         or parent_exchange["solver_endpoint"] != cloud.SOLVER_URL
+                         or parent_exchange["solver_version"] != "1.0.0")):
+                return {**result, "reason": "evidence_binding_invalid"}
+            projected = {**parent_exchange, "response_bytes": manifest, "response_sha256": _sha(manifest),
+                         "solver_endpoint": cloud.SOLVER_URL, "solver_version": "1.0.0"}
+            counts = {"completed_pieces": count, "total_pieces": count,
+                      "piece_order": [row["piece_index"] for row in children[:32]],
+                      "piece_order_truncated": count > 32}
+            try:
+                candidate, proof, _summary = _derive_split(
+                    job, context, plan, projected, conn=conn, children=children)
+            except GraphValidationError as exc:
+                if exc.code == "INVALID_FINAL_GRID_ORDER" and exc.path in {
+                    "split.restitch", "split.coverage", "split.string_length"
+                }:
+                    coverage = getattr(exc, "coverage_attribution", None)
+                    if exc.path == "split.coverage" and coverage is not None:
+                        counts["coverage"] = coverage
+                    return {**result, **counts, "status": "attributed", "reason": exc.code,
+                            "validation_stage": exc.path}
+                return {**result, "reason": "evidence_validation_failed"}
+            if (parent_exchange["state"] == "completed"
+                    and (candidate != parent_exchange["candidate_bytes"]
+                         or proof != parent_exchange["proof_bytes"])):
+                return {**result, "reason": "evidence_binding_invalid"}
+            return {**result, **counts, "status": "validated", "reason": "assembly_valid"}
+
+        return platform_link.platform_db().run_transaction(derive, max_attempts=1)
+    except project.ProjectContextError as exc:
+        reasons = {"SIP_W1C_EXCHANGE_NOT_FOUND": "completed_child_evidence_missing",
+                   "SIP_W1C_EXCHANGE_STATE_INVALID": "completed_child_evidence_incomplete",
+                   "SIP_W1C_EXCHANGE_INPUT_INVALID": "evidence_integrity_or_limit_refusal"}
+        return {**result, "reason": reasons.get(exc.reason_code, "evidence_binding_invalid")}
+    except Exception:
+        # This diagnostic never exposes arbitrary exception text or changes history.
+        return result
 
 
 def _prepare_split(job, context, plan, exchange, scope, lease, guard):
@@ -436,6 +527,15 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
     except Exception as exc:
         exc.solve_progress = {"status": "partial", "completed_pieces": len(children),
                               "total_pieces": len(children), "phase": "assembly"}
+        if isinstance(exc, GraphValidationError) and exc.code == "INVALID_FINAL_GRID_ORDER":
+            stage = exc.path if exc.path in {
+                "split.restitch", "split.coverage", "split.string_length"
+            } else "split.unknown"
+            piece_order = [child["piece_index"] for child in children[:32]]
+            exc.solve_progress.update(validation_stage=stage, piece_order=piece_order,
+                                      piece_order_truncated=len(children) > 32)
+            logger.warning("Split assembly refused job=%s stage=%s completed_pieces=%d piece_order=%s",
+                           job["job_id"], stage, len(children), piece_order)
         raise
     if guard.lost:
         return None
@@ -457,6 +557,8 @@ def _prepare_split(job, context, plan, exchange, scope, lease, guard):
 
 
 def prepare_job(job, guard):
+    import xbench_solver_fault
+    solver_fault = xbench_solver_fault.validate(job["execution_context"].get("xbench_solver_fault"))
     deadline = time.monotonic() + SOLVE_POLL_BUDGET_SECONDS
     from solar_project_jobs import _job_context
     store, db = _store(), platform_link.platform_db()
@@ -464,7 +566,9 @@ def prepare_job(job, guard):
     plan, (scope, lease) = _plan(job, context), _authority(job)
     if SOLVE_CLASSIFICATION not in ("live", "synthetic"):
         raise GraphValidationError("INVALID_SOLVE_CLASSIFICATION")
-    reservation = _reservation(job, context, plan, SOLVE_CLASSIFICATION)
+    if solver_fault is not None and "split_binding" in plan:
+        raise GraphValidationError("XBENCH_SOLVER_FAULT_SPLIT_UNSUPPORTED")
+    reservation = _reservation(job, context, plan, "synthetic" if solver_fault is not None else SOLVE_CLASSIFICATION)
     try:
         exchange = store.get_exchange(scope, lease)
     except store.ExchangeNotFound:
@@ -496,7 +600,7 @@ def prepare_job(job, guard):
             if grant is None:
                 grant = cloud.resolve_grant(reservation["grant_ref"], str(context.organization_id))
             options = {}
-            if resume.action == "send_ready" and SOLVE_ASYNC_PROTOCOL_ENABLED:
+            if resume.action == "send_ready" and SOLVE_ASYNC_PROTOCOL_ENABLED and solver_fault is None:
                 options = {"send_protocol": "async-idempotent-v1",
                            "send_principal_sha256": cloud.grant_principal_sha256(grant)}
                 async_custody = True
@@ -512,11 +616,14 @@ def prepare_job(job, guard):
                 if raw is None:
                     return None
             else:
-                raw = cloud.post_stringer(request, grant, preserve_uncertainty=True)
+                options = ({"_transport": xbench_solver_fault.Transport(solver_fault)}
+                           if solver_fault is not None else {})
+                raw = cloud.post_stringer(request, grant, preserve_uncertainty=True, **options)
         except cloud.CloudError as exc:
             if guard.lost:
                 return None
             if async_custody and exc.classification not in {
+                    "CLOUD_REQUEST_REJECTED",
                     "cloud_upstream_failure", "cloud_request_invalid",
                     "cloud_response_invalid", "cloud_tenant_unauthorized"}:
                 raise

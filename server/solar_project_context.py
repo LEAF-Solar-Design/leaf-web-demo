@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 from uuid import UUID
@@ -16,6 +17,26 @@ platform_link._ensure_platform_package()
 from leaf_platform.project_graph_store import (
     CheckoutLease, CheckoutState, ProjectContextError, VersionBinding, refuse,
 )
+
+_LOG = logging.getLogger(__name__)
+
+
+def _log_intake_unavailable(key, error=None):
+    # Never log exception text, object references, response bodies or tracebacks.
+    status = None
+    if error is not None:
+        try:
+            status = getattr(error, "status_code", None)
+            if status is None:
+                status = getattr(error, "code", None)
+        except Exception:
+            pass
+    if type(status) is not int or not 100 <= status <= 599:
+        status = None
+    _LOG.warning(
+        "solar_project_intake_unavailable exception_type=%s http_status=%s intake_key_sha256=%s",
+        type(error).__name__ if error is not None else "NonBytesReturn",
+        status, hashlib.sha256(key.encode("utf-8")).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -204,10 +225,12 @@ def _load_intake(org_id, key, expected_digest):
     try:
         raw = write_loop.upload_backend_for_tenant(str(org_id)).get(key)
         if not isinstance(raw, bytes):
+            _log_intake_unavailable(key)
             refuse("INTAKE_UNAVAILABLE")
     except ProjectContextError:
         raise
-    except Exception:
+    except Exception as error:
+        _log_intake_unavailable(key, error)
         refuse("INTAKE_UNAVAILABLE")
     digest = hashlib.sha256(raw).hexdigest()
     if digest != expected_digest:

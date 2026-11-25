@@ -318,15 +318,23 @@ function validateWriteContract(proposal: ToolSourceProposal, diagnostics: string
   }
 }
 
+export function assertApprovedToolName(name: string, toolName?: string): void {
+  if (toolName !== undefined && name !== toolName) {
+    throw withFailureCategory(new Error(`V-name: tool name must be ${toolName}`), "validation_failed");
+  }
+}
+
 export function submitToolProposal(
   repoDir: string,
   proposal: ToolSourceProposal,
   now = new Date(),
   previous?: ToolSourceReceipt,
+  toolName?: string,
 ): ToolSubmissionResult {
   const candidateJson = JSON.stringify(proposal);
   if (candidateJson === undefined) throw new Error(REVISION_ERROR);
   proposal = JSON.parse(candidateJson) as ToolSourceProposal;
+  assertApprovedToolName(proposal.name, toolName);
   const diagnostics: string[] = [];
   if (!KEBAB.test(proposal.name) || proposal.name.length > 64) {
     diagnostics.push("name must be 1-64 lowercase kebab-case characters");

@@ -9,6 +9,7 @@ Run:  cd server && python -m pytest tests/test_nl_router.py -q
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,10 +23,22 @@ from nl_router import LANE_BUILD, LANE_RUN, LANE_SOLVE, classify  # noqa: E402
 
 # The live catalog the endpoint matches against (registry + write seed + authored).
 CATALOG = deps.all_tools()
+AUTHORING_ASKS = json.loads(
+    (Path(__file__).parent / "fixtures/nl_router/authoring_asks.json").read_text(encoding="utf-8")
+)
 
 
 def _c(text):
     return classify(text, CATALOG)
+
+
+@pytest.mark.parametrize("lane,text", [
+    (lane, text) for lane in (LANE_BUILD, LANE_RUN) for text in AUTHORING_ASKS[lane]
+])
+def test_authoring_and_count_requests(lane, text):
+    result = _c(text)
+    assert result["lane"] == lane
+    assert result["tool"] == ("count-modules" if lane == LANE_RUN else None)
 
 
 # --------------------------------------------------------------------------- #
@@ -303,3 +316,41 @@ def test_endpoint_missing_text_is_enveloped_validation_error(client):
     assert resp.status_code == 422
     body = resp.json()
     assert body["error"]["error_code"] == "BAD_PARAMS"   # RequestValidationError -> enveloped
+
+
+
+@pytest.mark.parametrize("prompt,block,layers,expected", [
+    ("Count just the panels on each roof layer and leave out the roof outlines.",
+     "PV_MODULE", ["Roof North", "Roof North", "Roof South", "Ground"], {"Roof North": 2, "Roof South": 1}),
+    ("Tally only solar panels by layer.", "Solar Panel",
+     ["Array West", "Array West", "Array East"], {"Array West": 2, "Array East": 1}),
+    ("How many modules are in each rooftop layer, excluding outlines?", "Module",
+     ["Rooftop 1", "Rooftop 2", "Rooftop 2"], {"Rooftop 1": 1, "Rooftop 2": 2}),
+])
+def test_filtered_layer_prompt_counts_physical_panel_handles(prompt, block, layers, expected):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("tested_count_modules", SERVER_DIR / "builtins" / "count_modules.py")
+    counter = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(counter)
+    route = _c(prompt)
+    assert (route["lane"], route["tool"]) == ("run", "count-modules")
+    rows = [{"name": block, "layer": layer, "handle": format(i + 16, "X")} for i, layer in enumerate(layers)]
+    outlines = [{"name": "Roof Outline", "layer": layer, "handle": format(i + 64, "X")} for i, layer in enumerate(layers)]
+    result, overlay = counter.run({"inserts": rows + outlines}, route["params"])
+    assert result["counts"] == expected and result["count"] == sum(expected.values())
+    assert set(overlay["highlight_handles"]) == {r["handle"] for r in rows if r["layer"] in expected}
+    ambiguous = {"name": "*U1", "layer": layers[0], "handle": "F0"}
+    result, overlay = counter.run({"inserts": rows + outlines + [ambiguous]}, route["params"])
+    assert result["selection_required"] and result["count"] is None and overlay is None
+
+
+@pytest.mark.parametrize("prompt", [
+    "Compare GroupA against GroupB in percentage points by layer",
+    "Show percentage-point change by layer between the GroupA blocks and the GroupB blocks.",
+    "Show changes in percentage points per layer from GroupA to GroupB.",
+])
+def test_share_change_preserves_operand_direction(prompt):
+    result = _c(prompt)
+    assert result["tool"] == "count-modules"
+    assert result["params"]["compare_selections"] == {
+        "by": "block", "before": ["GroupA"], "after": ["GroupB"]}

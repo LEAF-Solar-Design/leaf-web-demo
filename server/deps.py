@@ -950,10 +950,13 @@ def resolve_active_platform_tenant_id(subject: Optional[str]) -> str:
 
 
 def require_matching_platform_tenant_claim(
-    claims: Dict[str, Any], platform_tenant_id: str,
+    claims: Dict[str, Any], platform_tenant_id: str, subject: Optional[str] = None,
 ) -> None:
     """Fail closed when a signed tenant hint disagrees with current authority."""
-    if claims.get("tenant_id") != str(platform_tenant_id):
+    # The binding comes from the verified subject, so its sub fallback reaches only its own binding.
+    if claims.get("tenant_id") != str(platform_tenant_id) and not (
+        isinstance(subject, str) and subject and claims.get("tenant_id") == subject
+    ):
         from fastapi import HTTPException  # noqa: PLC0415
         raise HTTPException(
             status_code=409,
@@ -1362,9 +1365,11 @@ def require_tenant(
     claims = auth.extract_tenant_claims(payload)           # -> 403 if tenant claim absent
     subject = payload.get("sub") if isinstance(payload.get("sub"), str) else None
     platform_tenant_id, platform_tier = resolve_active_platform_tenant_authority(subject)
-    require_matching_platform_tenant_claim(claims, platform_tenant_id)
-    platform_tier = admin_elevated_tier(claims.get("tier"), subject, platform_tier)
-    ws = tenancy.get_store().resolve_workspace(platform_tenant_id)
+    investor = require_investor_authority(subject, platform_tenant_id, platform_tier)
+    require_matching_platform_tenant_claim(claims, platform_tenant_id, subject)
+    if not investor:
+        platform_tier = admin_elevated_tier(claims.get("tier"), subject, platform_tier)
+    ws = None if investor else tenancy.get_store().resolve_workspace(platform_tenant_id)
     # Role overlay identity (§11.5): the VERIFIED roles claim, normalized
     # fail-closed (unreadable -> no roles), plus the same server-owned
     # allowlist membership the admin tier elevation uses as its second factor.
@@ -1388,9 +1393,18 @@ def require_tenant(
         workspace=ws.workspace_dir if ws is not None else None,
         subject=subject,
         authority_resolved=True,
-        roles=role_names,
-        elevated=elevated,
+        roles=() if investor else role_names,
+        elevated=False if investor else elevated,
     )
+
+
+def require_investor_authority(subject, platform_tenant_id, platform_tier) -> bool:
+    import investor_demo
+    if not isinstance(subject, str) or not subject.startswith(investor_demo.SUBJECT_PREFIX):
+        return False
+    if platform_tenant_id != str(investor_demo.ORG_ID) or platform_tier != investor_demo.TIER:
+        raise HTTPException(403, "investor demo workspace mismatch")
+    return True
 
 
 def require_demo_boundary(request: Request) -> None:

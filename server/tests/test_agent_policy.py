@@ -39,6 +39,15 @@ from agent_policy import PolicyError  # noqa: E402
 SHIPPED = SERVER_DIR / "agent_policy.json"
 
 
+def test_standalone_drawing_edit_policy_matches_defaults(tmp_path):
+    actions = agent_policy.load_policy(SHIPPED).actions
+    edit = actions["run_drawing_edit_tool"]
+    assert edit == agent_policy.load_policy(tmp_path / "missing.json").actions["run_drawing_edit_tool"]
+    assert (edit.policy, edit.required_capability, edit.tenant_tightenable) == ("auto", "run_write", True)
+    assert edit.dispatch == {"kind": "app_api", "routes": ["POST /api/run"]}
+    assert edit.args_schema == actions["run_write_tool"].args_schema
+
+
 def test_photo_inspection_closed_read_only_contract():
     from jsonschema import Draft7Validator
     action = agent_policy.load_policy(SHIPPED).actions["inspect_project_photo"]
@@ -173,7 +182,7 @@ def test_shipped_catalog_loads_with_v1_shape():
     pol = agent_policy.load_policy(SHIPPED)
     assert set(pol.actions) == {
         "request_confirmation", "read_platform_state", "run_read_tool",
-        "run_write_tool", "run_solve_tool", "submit_live_solve", "undo_drawing_version",
+        "run_write_tool", "run_drawing_edit_tool", "run_solve_tool", "submit_live_solve", "undo_drawing_version",
         "author_tool", "request_publication", "register_tool", "customize_platform",
         "propose_overlay", "propose_project_page", "propose_project_photo_assignments", "inspect_project_photo", "finish_project", "read_integration_data", "save_integration_element",
     }

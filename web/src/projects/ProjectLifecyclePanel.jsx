@@ -151,8 +151,8 @@ export default function ProjectLifecyclePanel({
   // Delete is the one action whose own receipt this panel cannot display: the
   // project is gone, so the panel goes with it. The receipt id is handed to the
   // parent instead, which is where it stays visible after the unmount.
-  const removeProject = useCallback(async () => {
-    const result = remember(await actions.remove())
+  const removeProject = useCallback(async (confirmName) => {
+    const result = remember(await actions.deleteArchived(confirmName))
     onProjectDeleted?.(projectId, result?.receipt?.receipt_id || null)
     return result
   }, [actions, onProjectDeleted, projectId, remember])
@@ -244,11 +244,15 @@ export default function ProjectLifecyclePanel({
 
           <ReceiptPanel receipts={receipts} />
 
-          {/* No undo props on purpose: platform/project_lifecycle.py's reset and
-              delete mint no restore token, so both must render as terminal. */}
           <DangerZone
+            key={projectId}
             projectName={name}
+            projectStatus={lifecycle.project?.status}
+            archivedAt={lifecycle.project?.archived_at}
+            restoreUntil={lifecycle.project?.restore_until}
             onReset={async () => remember(await actions.reset())}
+            onArchive={async () => remember(await actions.archive())}
+            onRestore={async () => remember(await actions.restore())}
             onDelete={removeProject}
           />
         </>

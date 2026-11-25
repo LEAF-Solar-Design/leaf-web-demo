@@ -6,6 +6,7 @@ import json
 import os
 import time
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -33,6 +34,8 @@ def synthetic(monkeypatch, tmp_path):
         state.paths.append((binary, args))
         recheck()
         out = scratch / 'output'
+        if name == 'sandbox':
+            return
         if name == 'probe':
             (out / 'probe.stdout').write_bytes(json.dumps(state.probe).encode())
             (out / 'probe.stderr').write_bytes(state.stderr)
@@ -65,7 +68,8 @@ def test_exact_pixels_timestamps_full_decode_and_private_cleanup(synthetic):
     assert manifest['original']['sha256'] == synthetic.material['sha256']
     assert manifest['transcripts'][0]['material_id'] == 'text'
     assert not synthetic.scratch.exists()
-    probe, decode = synthetic.paths
+    sandbox, probe, decode = synthetic.paths
+    assert sandbox == ('/usr/bin/ffprobe', ['-version'])
     assert '-count_frames' in probe[1]
     assert '-enable_drefs' in decode[1] and decode[1][decode[1].index('-enable_drefs') + 1] == '0'
     assert decode[1][decode[1].index('-protocol_whitelist') + 1] == 'file'
@@ -150,6 +154,10 @@ def test_running_child_has_resource_namespace_bounds_and_is_reaped_on_cancel(mon
     out = tmp_path / 'output'
     out.mkdir()
     calls = []
+    library_mounts = ['--dir', '/etc/alternatives', '--symlink',
+                      '/usr/lib/x86_64-linux-gnu/blas/libblas.so.3',
+                      '/etc/alternatives/libblas.so.3-x86_64-linux-gnu']
+    monkeypatch.setattr(video, '_library_symlinks', lambda: library_mounts)
     child = SimpleNamespace(pid=123456, returncode=None, poll=lambda: None,
                             wait=lambda **kwargs: calls.append(('wait', kwargs)))
     def popen(argv, **kwargs):
@@ -172,6 +180,8 @@ def test_running_child_has_resource_namespace_bounds_and_is_reaped_on_cancel(mon
     assert '--cpu=30' in argv and '--nofile=64' in argv and '--nproc=32' in argv
     assert '--unshare-all' in argv and '--cap-drop' in argv and '--clearenv' in argv
     assert '--ro-bind' in argv and '--die-with-parent' in argv
+    start = argv.index('/etc/alternatives') - 1
+    assert argv[start:start + len(library_mounts)] == library_mounts
     assert kwargs['shell'] is False and kwargs['start_new_session'] is True
     assert kwargs['env'] == {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'}
     assert calls[-1][0] == 'wait'
@@ -288,3 +298,131 @@ def test_diagnostic_preserves_closed_stderr_shape_without_content(raw, state, pr
     assert diagnostic['reason'] == ('unknown' if raw is None else 'process_failed')
     assert set(diagnostic) == {'operation', 'returncode', 'reason', 'stderr_state', 'stderr_prefix'}
     assert 'PRIVATE' not in str(diagnostic)
+
+
+def test_sandbox_self_check_uses_supplied_executable_and_shared_budget(monkeypatch, tmp_path):
+    calls = []
+    recheck = lambda: None
+    monkeypatch.setattr(video, '_run', lambda *args: calls.append(args))
+    video._require_sandbox(tmp_path, 123, recheck)
+    assert calls == [(tmp_path, '/usr/bin/ffprobe', ['-version'], 'sandbox', 123, recheck)]
+    producer = Path(__file__).resolve().parents[2] / 'deploy/Dockerfile.app'
+    assert 'test -x /usr/bin/ffprobe' in producer.read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('video_incomplete', 'video_unavailable'),
+    ('video_timeout', 'video_timeout'),
+    ('video_cleanup_failed', 'video_cleanup_failed'),
+    ('video_unavailable', 'video_unavailable'),
+])
+def test_sandbox_self_check_preserves_safe_diagnostic_and_failure_precedence(monkeypatch, code, expected):
+    error = video.VideoError(code)
+    error.decoder_diagnostic = dict(operation='sandbox', returncode=1, reason='process_failed',
+                                   stderr_state='nonempty', stderr_prefix='bwrap')
+    def failure(*args):
+        raise error
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError) as caught:
+        video._require_sandbox(None, 123, lambda: None)
+    assert caught.value.code == expected
+    assert caught.value.decoder_diagnostic is error.decoder_diagnostic
+    if code != 'video_incomplete':
+        assert caught.value is error
+
+
+def test_sandbox_self_check_preserves_authority_failure(monkeypatch):
+    error = PermissionError('revoked')
+    def failure(*args):
+        raise error
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(PermissionError) as caught:
+        video._require_sandbox(None, 123, lambda: None)
+    assert caught.value is error
+
+
+def test_sandbox_failure_never_starts_media_probe_and_cleans(synthetic, monkeypatch):
+    calls = []
+    def failure(scratch, binary, args, name, deadline, recheck):
+        calls.append((binary, args, name))
+        raise video.VideoError('video_incomplete')
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError, match='^video_unavailable$'):
+        synthetic.call()
+    assert calls == [('/usr/bin/ffprobe', ['-version'], 'sandbox')]
+    assert not synthetic.scratch.exists()
+
+
+def test_media_probe_failure_after_sandbox_stays_incomplete(synthetic, monkeypatch):
+    names = []
+    def failure(scratch, binary, args, name, deadline, recheck):
+        names.append(name)
+        if name == 'probe':
+            raise video.VideoError('video_incomplete')
+    monkeypatch.setattr(video, '_run', failure)
+    with pytest.raises(video.VideoError, match='^video_incomplete$'):
+        synthetic.call()
+    assert names == ['sandbox', 'probe']
+    assert not synthetic.scratch.exists()
+
+
+def test_sandbox_diagnostic_operation_is_closed():
+    result = video._process_diagnostic('sandbox', 1, io.BytesIO(b'bwrap: PRIVATE'))
+    assert result['operation'] == 'sandbox'
+    assert 'PRIVATE' not in str(result)
+
+
+@pytest.fixture
+def library_paths(monkeypatch):
+    links = {}
+    targets = {}
+    monkeypatch.setattr(Path, 'is_symlink', lambda path: path in links)
+    monkeypatch.setattr(Path, 'exists', lambda path: False)
+    monkeypatch.setattr(Path, 'readlink', lambda path: links[path])
+    monkeypatch.setattr(Path, 'resolve', lambda path, **kwargs: targets[path])
+    monkeypatch.setattr(Path, 'is_file', lambda path: True)
+    return links, targets
+
+
+@pytest.mark.parametrize('libraries', [('libblas',), ('liblapack',), ('libblas', 'liblapack')])
+def test_only_supported_library_links_are_recreated(library_paths, libraries):
+    links, targets = library_paths
+    expected = ['--dir', '/etc/alternatives']
+    for library, directory in (('libblas', 'blas'), ('liblapack', 'lapack')):
+        if library not in libraries:
+            continue
+        link = Path(f'/etc/alternatives/{library}.so.3-x86_64-linux-gnu')
+        target = Path(f'/usr/lib/x86_64-linux-gnu/{directory}/{library}.so.3')
+        links[link] = target
+        targets[target] = target.with_name(library + '.so.3.12.1')
+        expected.extend(['--symlink', str(target), str(link)])
+    assert video._library_symlinks() == expected
+
+
+def test_direct_library_runtime_adds_no_etc_exposure(library_paths):
+    assert video._library_symlinks() == []
+
+
+@pytest.mark.parametrize('mode', ['unexpected-link', 'escape', 'missing', 'cycle', 'directory', 'regular-entry'])
+def test_invalid_library_dependency_fails_closed(library_paths, monkeypatch, mode):
+    links, targets = library_paths
+    link = Path('/etc/alternatives/libblas.so.3-x86_64-linux-gnu')
+    target = Path('/usr/lib/x86_64-linux-gnu/blas/libblas.so.3')
+    links[link] = target
+    targets[target] = target.with_name('libblas.so.3.12.1')
+    if mode == 'unexpected-link':
+        links[link] = Path('/etc/private-library')
+    elif mode == 'escape':
+        targets[target] = Path('/outside/libblas.so.3')
+    elif mode in ('missing', 'cycle'):
+        error = FileNotFoundError() if mode == 'missing' else RuntimeError('cycle')
+        def failure(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(Path, 'resolve', failure)
+    elif mode == 'directory':
+        monkeypatch.setattr(Path, 'is_file', lambda path: False)
+    else:
+        links.clear()
+        monkeypatch.setattr(Path, 'exists', lambda path: path == link)
+    with pytest.raises(video.VideoError, match='^video_unavailable$'):
+        video._library_symlinks()

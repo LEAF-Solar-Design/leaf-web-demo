@@ -23,6 +23,7 @@ import { zoomViewer } from '../site/DrawingCockpit.jsx'
 import { deriveIosState } from '../ios/IosSurface.jsx'
 import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 import { RIBBON_TABS, profileRibbonTabData } from './ribbonTabs.data.js'
+import { catalogToolDisclaimer } from '../site/studioAvailability.js'
 import { DEFERRED_REASONS, REASONS, forCluster, ribbonTool } from './actionRegistry.js'
 import { DEFAULT_TOOL_ICON, isWriteTool, toolIcon, toolMcpSource, toolPlacementSize, toolPlacementTab } from './toolRecord.js'
 import { solarFormKeys, solarView } from '../solar/solarView.js'
@@ -160,6 +161,19 @@ export const SOLAR_REFUSAL_REASONS = Object.freeze({
   capability_not_ready: 'This solar tool is not ready for this drawing',
   unlisted: 'The server refused this solar tool',
 })
+
+export function routeErrorText(code) {
+  if (typeof code !== 'string' || !code.length) return 'The request could not be routed.'
+  if (code.length > 2000) return code
+  const parts = code.split('; ')
+  if (!parts.some((part) => Object.hasOwn(SOLAR_REFUSAL_REASONS, part))) return code
+  return parts.map((part) => {
+    if (part === 'drawing_context_required') {
+      return 'Leaf does not know which drawing to use. Open a saved drawing, or save this one as a version first, then ask again.'
+    }
+    return Object.hasOwn(SOLAR_REFUSAL_REASONS, part) ? SOLAR_REFUSAL_REASONS[part] + '.' : part
+  }).join(' ')
+}
 
 export function solarRailReason(availability, options) {
   if (options?.openTypedForm === true) return ''
@@ -703,7 +717,12 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       // nothing until a later slice — so it is unconditionally unrunnable,
       // ahead of every transient gate below.
       const mcpSource = toolMcpSource(tool)
-      const reason = mcpSource
+      // Availability manifest: a tool the staging walk proved cannot run says
+      // so here, ahead of every transient gate (site/studioAvailability.js).
+      const notYet = catalogToolDisclaimer(tool.name)
+      const reason = notYet
+        ? notYet
+        : mcpSource
         ? REASONS.mcpToolNotWired
         : running
           ? REASONS.running

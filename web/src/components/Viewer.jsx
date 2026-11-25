@@ -1,5 +1,6 @@
+import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
 import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { vertexZ, vertexSegments } from './viewerVertexZ.js'
@@ -9,7 +10,7 @@ import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
-import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
+import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
 import * as THREE from 'three'
@@ -30,6 +31,18 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
 const CLICK_MOVE_PX = 5      // pointer travel under this = click (not a pan/drag)
 const CLICK_MAX_MS = 500
+
+function observationVisible(object) {
+  for (let ancestor = object; ancestor; ancestor = ancestor.parent) if (!ancestor.visible) return false
+  const materials = Array.isArray(object.material) ? object.material : [object.material]
+  return materials.some(material => material && material.visible !== false && material.opacity > 0)
+}
+
+function observationPrimitiveCount(object) {
+  const geometry = object.geometry
+  const count = geometry?.index?.count ?? geometry?.attributes.position?.count ?? 0
+  return Math.floor(count / (object.isLineSegments ? 2 : 3))
+}
 
 export function recolorLayerGroups(layerGroups, colorForLayer) {
   if (!(layerGroups instanceof Map) || typeof colorForLayer !== 'function') return 0
@@ -210,7 +223,7 @@ const Viewer = forwardRef(function Viewer(
     selectedHandle, onSelectEntity, pendingEdit,
     marqueeGate, onMarqueeSelect,
     background, controlsEnabled = true, rotateEnabled = false,
-    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, onSceneReady, solarOverlay = null,
+    panelSculpture = false, stringRoutes, onGlError, safeRect = null, drawingKey = null, engineObservationBinding = null, onSceneReady, solarOverlay = null,
     onIntakeOverride,
   },
   ref,
@@ -306,6 +319,8 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  const observationBindingRef = useRef(null)
+  observationBindingRef.current = { binding: engineObservationBinding, parentDrawingKey: drawingKey }
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
 
   // Bumped at the end of each scene build so the dynamic-overlay effects
@@ -556,7 +571,8 @@ const Viewer = forwardRef(function Viewer(
       }
       return groups.get(layer)
     }
-    const hs = dataSpan * 0.02 // base half-size of the glyph
+    // A small marker (0.5% of the span): 88 roof circuit-tag dots at 2% covered a whole array as translucent tiles.
+    const hs = dataSpan * 0.005 // base half-size of the glyph
     let nInserts = 0
     const definitions = blockDefinitions(activeIntake)
     for (const ins of inserts) {
@@ -572,9 +588,8 @@ const Viewer = forwardRef(function Viewer(
       const mesh = new THREE.Mesh(geom, mat)
       mesh.position.set(ins.pt[0] - origin.x, ins.pt[1] - origin.y, 2)
       mesh.rotation.z = THREE.MathUtils.degToRad(ins.rot || 0)
-      const sx = ins.scale?.[0] ?? 1
-      const sy = ins.scale?.[1] ?? 1
-      mesh.scale.set(sx || 1, sy || 1, 1)
+      const [sx, sy] = insertGlyphScale(ins.scale)
+      mesh.scale.set(sx, sy, 1)
       mesh.userData = { kind: 'insert', handle: ins.handle }
       // outline square + a tick toward local +X so rotation reads visually
       const o = hs
@@ -590,12 +605,13 @@ const Viewer = forwardRef(function Viewer(
       entityLayerGroup(insertLayerGroups, ins.layer).add(mesh)
       pickables.push(mesh)
       nInserts++
-      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx || 1, sy || 1], hs })
+      addPickDescriptor(pickIndex, ins.handle, { kind: 'insert', layer: ins.layer, pt: ins.pt, rot: ins.rot || 0, scale: [sx, sy], hs })
     }
 
     // --- 3DFACEs: filled triangle-pair surfaces -----------------------------
     const faceColor = new THREE.Color(tokens.face)
     const faceLayerGroups = new Map()
+    const faceBorders = []
     let nFaces = 0
     for (const f of faces3d) {
       const ring = [f.p1, f.p2, f.p3, f.p4].filter(Boolean)
@@ -623,7 +639,9 @@ const Viewer = forwardRef(function Viewer(
       const bg = new THREE.BufferGeometry()
       bg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(bpos, origin), 3))
       const bm = new THREE.LineBasicMaterial({ color: faceColor, transparent: true, opacity: 0.9 })
-      faceGroup.add(new THREE.LineSegments(bg, bm))
+      const border = new THREE.LineSegments(bg, bm)
+      faceGroup.add(border)
+      faceBorders.push({ object: border, handle: f.handle })
       addPickDescriptor(pickIndex, f.handle, { kind: 'face', layer: f.layer, pts: ring })
     }
 
@@ -642,6 +660,96 @@ const Viewer = forwardRef(function Viewer(
     // W4f-5: the object-snap marker (a small square at the snapped point),
     // its own group so the rubber band and the marker clear independently.
     const snapGroup = new THREE.Group(); root.add(snapGroup)
+
+    // Count only built buffers using their renderer/picker attribution. Glyphs
+    // are marker references, never drawing triangles or segments.
+    const observationEntries = []
+    for (const object of pickables) {
+      const counts = new Map()
+      const { kind, triHandles, lineHandles, handle } = object.userData
+      const count = observationPrimitiveCount(object)
+      for (let i = 0; i < (kind === 'insert' ? Math.min(count, 1) : count); i++) {
+        const h = kind === 'polyfill' ? triHandles[i] : kind === 'blocklines' ? lineHandles[i] : handle
+        if (h != null) counts.set(h, (counts.get(h) || 0) + 1)
+      }
+      const visibleObjects = [object]
+      if (kind === 'insert') object.traverse(child => {
+        if (child !== object && observationPrimitiveCount(child)) visibleObjects.push(child)
+      })
+      observationEntries.push({ object, visibleObjects, counts, field: kind === 'insert' ? 'markerCount'
+        : object.isLineSegments ? 'geometrySegments' : 'geometryTriangles' })
+    }
+    for (const { object, handle } of faceBorders) if (handle != null) {
+      observationEntries.push({ object, counts: new Map([[handle, observationPrimitiveCount(object)]]), field: 'geometrySegments' })
+    }
+    const observation = { alive: true, rendered: false, serial: 0, generation: 0,
+      pending: null, timer: null, history: [], committed: { version: 0, handles: [], entries: [], ms: null } }
+    const observationCurrent = () => observation.alive && stateRef.current?.scene === scene
+      && desiredSceneRef.current?.intake === activeIntake && desiredSceneRef.current?.drawingKey === sceneDrawingKey
+    function invalidateObservation() {
+      observation.generation++
+      observation.pending = null
+      if (observation.timer !== null) clearTimeout(observation.timer)
+      observation.timer = null
+    }
+    let observationInput = null
+    function observePointerDown(e) {
+      invalidateObservation()
+      observationInput = { start_ms: performance.now(), event_timestamp: e.timeStamp,
+        trusted: e.isTrusted, pointerId: e.pointerId }
+    }
+    function armObservation(handles, kind, additive, e) {
+      if (!observationInput || observationInput.pointerId !== e.pointerId || !observationCurrent()) return null
+      const pending = { ...observationInput, requested_handles: [...new Set(handles)], kind, additive,
+        generation: observation.generation, version: observation.committed.version, handler_finished_ms: null }
+      observation.pending = pending
+      return pending
+    }
+    function finishObservation(pending) {
+      if (pending && observation.pending === pending) pending.handler_finished_ms = performance.now()
+    }
+    function selectionProof(pending) {
+      const committed = observation.committed
+      if (committed.version <= pending.version || pending.handler_finished_ms === null) return null
+      const actual = new Set(committed.handles)
+      if ((!pending.additive && actual.size !== pending.requested_handles.length)
+        || pending.requested_handles.some(handle => !actual.has(handle))) return null
+      const counts = new Map()
+      for (const entry of committed.entries) if (observationVisible(entry.object)) {
+        counts.set(entry.handle, (counts.get(entry.handle) || 0) + entry.count)
+      }
+      if (pending.requested_handles.some(handle => !(counts.get(handle) > 0))) return null
+      return { selected_handles: [...committed.handles], highlight_geometry_count: [...counts.values()].reduce((a, b) => a + b, 0),
+        highlight_committed_ms: committed.ms }
+    }
+    function observeRender() {
+      if (!observationCurrent()) return
+      observation.rendered = true
+      const pending = observation.pending
+      if (!pending || observation.timer !== null) return
+      if (document.visibilityState !== 'visible') { invalidateObservation(); return }
+      const proof = selectionProof(pending)
+      if (!proof) return
+      const version = observation.committed.version
+      const render_ms = performance.now()
+      // A task following rAF offers the browser a paint opportunity. This is
+      // an observation of scheduling and submitted geometry, not GPU readback.
+      observation.timer = setTimeout(() => {
+        observation.timer = null
+        if (!observationCurrent() || document.visibilityState !== 'visible'
+          || observation.pending !== pending || observation.generation !== pending.generation
+          || observation.committed.version !== version || !selectionProof(pending)) {
+          if (observation.pending === pending) invalidateObservation()
+          return
+        }
+        observation.history.push({ serial: ++observation.serial, kind: pending.kind, additive: pending.additive,
+          start_ms: pending.start_ms, event_timestamp: pending.event_timestamp, trusted: pending.trusted,
+          pointerId: pending.pointerId, handler_finished_ms: pending.handler_finished_ms, ...proof,
+          render_ms, after_frame_ms: performance.now(), requested_handles: [...pending.requested_handles] })
+        if (observation.history.length > 64) observation.history.shift()
+        observation.pending = null
+      }, 0)
+    }
 
     // rendered-count assertion (acceptance: rendered == intake lengths)
     // eslint-disable-next-line no-console
@@ -780,7 +888,11 @@ const Viewer = forwardRef(function Viewer(
         handle = stackedPick.pick(stackedPickOrder(hits), e.clientX, e.clientY, performance.now())
       }
       const cb = onSelectRef.current
-      if (cb) cb(handle, { additive })
+      if (cb) {
+        const pending = armObservation(handle == null ? [] : [handle], 'click', additive, e)
+        cb(handle, { additive })
+        finishObservation(pending)
+      }
     }
     function onPointerCancel(e) {
       if (down && down.pointerId === e.pointerId) down = null
@@ -796,6 +908,7 @@ const Viewer = forwardRef(function Viewer(
       candidate = null
     }
     function clearMarquee() {
+      invalidateObservation()
       endCandidate()
       down = null
       if (!marquee) return
@@ -883,14 +996,17 @@ const Viewer = forwardRef(function Viewer(
       }
       const mode = marqueeMode(start, end)
       const bounds = dom.getBoundingClientRect()
-      const rect = worldRect(unprojectClientToPlane(camera, bounds, start.x, start.y),
-        unprojectClientToPlane(camera, bounds, end.x, end.y))
+      const mapping = marqueeMapping(camera, bounds, start, end,
+        pl => bridge ? null : displayZ(pl) + 0.05)
       clearMarquee()
       const callbacks = marqueeRef.current
-      if (!rect || !callbacks.gate?.()) return
-      const handles = marqueeHandles(polylines, rect, mode,
-        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false)
-      callbacks.select?.(handles, { additive: e.shiftKey || e.ctrlKey || e.metaKey, mode })
+      if (!mapping || !callbacks.gate?.()) return
+      const handles = marqueeHandles(polylines, mapping.rect, mode,
+        (pl) => !callbacks.visibleLayers || callbacks.visibleLayers[pl.layer] !== false, mapping.project)
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey
+      const pending = armObservation(handles, 'marquee', additive, e)
+      callbacks.select?.(handles, e.altKey ? { additive, mode, subtract: true } : { additive, mode })
+      finishObservation(pending)
     }
     function cancelMarquee(e) {
       if (foreignPointer(e)) {
@@ -912,6 +1028,10 @@ const Viewer = forwardRef(function Viewer(
     }
     clearMarqueeRef.current = clearMarquee
     mount.addEventListener('pointerdown', startMarquee, true)
+    mount.addEventListener('pointerdown', observePointerDown, true)
+    mount.addEventListener('pointercancel', invalidateObservation, true)
+    window.addEventListener('pointercancel', invalidateObservation, true)
+    document.addEventListener('visibilitychange', invalidateObservation)
     mount.addEventListener('pointermove', moveMarquee, true)
     mount.addEventListener('pointerup', finishMarquee, true)
     mount.addEventListener('pointercancel', cancelMarquee, true)
@@ -931,6 +1051,7 @@ const Viewer = forwardRef(function Viewer(
       const sa = stateRef.current && stateRef.current.stringAnim
       if (sa) sa.tick()
       renderer.render(scene, camera)
+      observeRender()
     }
     animate()
 
@@ -967,8 +1088,35 @@ const Viewer = forwardRef(function Viewer(
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture, bridge,
       solarGroup, solarLayer: null,
+      observation,
     }
     stateRef.current = sceneState
+    const observationAPI = Object.freeze({
+      snapshot() {
+        if (!observationCurrent() || !observation.rendered) return null
+        const rows = new Map()
+        for (const entry of observationEntries) {
+          const visible = (entry.visibleObjects || [entry.object]).some(observationVisible)
+          for (const [handle, count] of entry.counts) {
+            if (!count) continue
+            if (!rows.has(handle)) rows.set(handle, { handle, geometryTriangles: 0, geometrySegments: 0, markerCount: 0 })
+            if (visible) rows.get(handle)[entry.field] += count
+          }
+        }
+        return { drawingKey: observationDrawingKey(sceneDrawingKey, activeIntake,
+          observationBindingRef.current.binding, observationBindingRef.current.parentDrawingKey), handles: [...rows.values()],
+          omitted: { blocks: blocks.truncated, activeIntake: activeIntake.truncated || 0 },
+          selections: observation.history.map(record => ({ ...record,
+            selected_handles: [...record.selected_handles], requested_handles: [...record.requested_handles] })) }
+      },
+      project(wx, wy) {
+        if (!observationCurrent() || !observation.rendered || !Number.isFinite(wx) || !Number.isFinite(wy)) return null
+        const v = new THREE.Vector3(wx, wy, 0).project(camera)
+        const rect = renderer.domElement.getBoundingClientRect()
+        return { x: rect.left + (v.x * 0.5 + 0.5) * rect.width, y: rect.top + (-v.y * 0.5 + 0.5) * rect.height }
+      },
+    })
+    mount.__leafViewerObservation = observationAPI
     if (focusMarkerRef.current?.drawingKey === sceneDrawingKey) setFocusMarker(focusMarkerRef.current.bounds)
     else focusMarkerRef.current = null
     publishCamera()
@@ -1025,6 +1173,13 @@ const Viewer = forwardRef(function Viewer(
     setBuildTick((t) => t + 1)
 
     return () => {
+      observation.alive = false
+      invalidateObservation()
+      if (mount.__leafViewerObservation === observationAPI) delete mount.__leafViewerObservation
+      mount.removeEventListener('pointerdown', observePointerDown, true)
+      mount.removeEventListener('pointercancel', invalidateObservation, true)
+      window.removeEventListener('pointercancel', invalidateObservation, true)
+      document.removeEventListener('visibilitychange', invalidateObservation)
       channel().cancelPending()
       viewCarryRef.current = captureCameraCarry(camera, controls.target, {
         key: carryKey, fitted: fittedRef.current,
@@ -1208,10 +1363,17 @@ const Viewer = forwardRef(function Viewer(
     // across centred on the snapped point, or nothing. Called when the snap CHANGES (the
     // picker remembers the last one), so it disposes what it replaces and
     // allocates nothing when clearing an empty group.
-    setHighlight: (ids) => {
-      setGroupHighlight(Array.from(ids || [], (id) => {
+    setHighlight: (ids, { nativeHandles = false, additive = false, subtract = false } = {}) => {
+      const handles = Array.from(ids || [], (id) => {
+        if (nativeHandles) return String(id)
         try { return BigInt(id).toString(16).toUpperCase() } catch { return String(id) }
-      }))
+      })
+      if (subtract) {
+        const removed = new Set(handles)
+        setGroupHighlight(current => current.filter(handle => !removed.has(handle)))
+      } else {
+        setGroupHighlight(current => additive ? [...new Set([...current, ...handles])] : handles)
+      }
     },
     // B1b: the glyph is the snap kind's own (snapMarkerSegments), so an
     // unknown kind or a bad point or size draws nothing.
@@ -1415,13 +1577,22 @@ const Viewer = forwardRef(function Viewer(
     const s = stateRef.current
     if (!s) return
     const g = s.selectionGroup
+    for (const child of g.children) {
+      child.geometry.dispose()
+      child.material.dispose()
+    }
     g.clear()
+    const committed = { version: s.observation.committed.version + 1,
+      handles: [...new Set([selectedHandle, ...groupHighlight].filter(Boolean))], entries: [], ms: performance.now() }
+    s.observation.committed = committed
     if (!selectedHandle && !groupHighlight.length) return
     const col = s.tokens.select
     const z = 5
 
     for (const handle of new Set([selectedHandle, ...groupHighlight].filter(Boolean))) {
+    const firstChild = g.children.length
     for (const d of s.pickIndex.get(handle) || []) {
+    if (visibleLayers?.[d.layer] === false) continue
     if (d.kind === 'poly' || d.kind === 'face') {
       const pts = d.pts
       const fillPos = [], linePos = []
@@ -1462,8 +1633,12 @@ const Viewer = forwardRef(function Viewer(
       g.add(lMesh)
     }
     }
+    for (const object of g.children.slice(firstChild)) {
+      const count = observationPrimitiveCount(object)
+      if (count) committed.entries.push({ object, handle, count })
     }
-  }, [selectedHandle, groupHighlight, buildTick])
+    }
+  }, [selectedHandle, groupHighlight, visibleLayers, buildTick])
 
   // --- markers (result-driven) ---------------------------------------------
   useEffect(() => {

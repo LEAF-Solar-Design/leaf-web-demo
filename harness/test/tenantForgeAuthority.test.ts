@@ -121,6 +121,62 @@ describe("trusted tenant Forge composition", () => {
     await expect(capture.options!.locate("local-a")).rejects.toThrow("refused");
     expect(() => create({ ...f.env, LEAF_TENANT_REPOSITORY_AUTHORITY: "other" })).toThrow("refused");
   });
+  const withDefault = (f: ReturnType<typeof fixture>, extra: Record<string, unknown>) => {
+    const doc = JSON.parse(readFileSync(f.map, "utf8")) as Record<string, unknown>;
+    writeFileSync(f.map, JSON.stringify({ ...doc, ...extra }));
+  };
+  it("without a default, unlisted tenants still refuse", async () => {
+    const f = fixture(); const local = vi.fn(async (tenant: string) => "/local/" + tenant);
+    const config = create(f.env, local)!;
+    await expect(config.locator.repoRef("selfserve-1")).rejects.toThrow("refused");
+    expect(() => config.isRemoteTenant("selfserve-1")).toThrow("refused");
+    expect(local).not.toHaveBeenCalled();
+  });
+  it("default local gives unlisted tenants a local repo and never credentials or a remote", async () => {
+    const f = fixture(); withDefault(f, { default: { mode: "local" } });
+    const local = vi.fn(async (tenant: string) => "/local/" + tenant);
+    const config = create(f.env, local)!;
+    expect(await config.locator.repoRef("selfserve-1")).toBe("/local/selfserve-1");
+    expect(config.isRemoteTenant("selfserve-1")).toBe(false);
+    expect(await capture.options!.credentials("selfserve-1", f.remoteUrl)).toBeNull();
+    await expect(capture.options!.locate("selfserve-1")).rejects.toThrow("refused");
+  });
+  it("default local leaves listed forge and local tenants exactly as listed", async () => {
+    const f = fixture(); withDefault(f, { default: { mode: "local" } });
+    const local = vi.fn(async (tenant: string) => "/local/" + tenant);
+    const config = create(f.env, local)!;
+    expect(config.isRemoteTenant("tenant-a")).toBe(true);
+    expect(await config.locator.repoRef("tenant-a")).toBe(f.remoteUrl);
+    expect(await capture.options!.locate("tenant-a")).toBe(f.remoteUrl);
+    expect(local).not.toHaveBeenCalled();
+    writeFileSync(f.credential, JSON.stringify({ tenantId: "tenant-a", remoteUrl: f.remoteUrl, username: "oauth2", token: "fixture_one" }));
+    expect((await capture.options!.credentials("tenant-a", f.remoteUrl))?.token).toBe("fixture_one");
+    expect(await capture.options!.credentials("selfserve-1", f.remoteUrl)).toBeNull();
+    expect(config.isRemoteTenant("local-a")).toBe(false);
+  });
+  it.each([
+    ["forge default", { default: { mode: "forge" } }],
+    ["forge default with remote", { default: { mode: "forge", remoteUrl: "https://forge.leafdesign.ai/team/x.git", credential_ref: "x.json" } }],
+    ["extra default key", { default: { mode: "local", remoteUrl: "https://forge.leafdesign.ai/team/x.git" } }],
+    ["string default", { default: "local" }],
+    ["null default", { default: null }],
+    ["array default", { default: [{ mode: "local" }] }],
+    ["extra document key", { default: { mode: "local" }, other: true }],
+  ])("rejects a bad default shape: %s", (_label, extra) => {
+    const f = fixture(); withDefault(f, extra);
+    expect(() => create(f.env)).toThrow("refused");
+  });
+  it("default local still refuses invalid tenant ids", async () => {
+    const f = fixture(); withDefault(f, { default: { mode: "local" } });
+    const local = vi.fn(async (tenant: string) => "/local/" + tenant);
+    const config = create(f.env, local)!;
+    for (const bad of ["../tenant-a", "", ".hidden", "a/b", "a\b", "x".repeat(201), "-lead"]) {
+      await expect(config.locator.repoRef(bad)).rejects.toThrow("refused");
+      expect(() => config.isRemoteTenant(bad)).toThrow("refused");
+      await expect(capture.options!.credentials(bad, f.remoteUrl)).rejects.toThrow("refused");
+    }
+    expect(local).not.toHaveBeenCalled();
+  });
   it("bounds config and credential reads and refuses oversized credentials", async () => {
     const f = fixture(); const reads: Array<[string, number]> = [];
     createTenantForgeConfigurationFromEnv(f.env, undefined, (path, limit) => {

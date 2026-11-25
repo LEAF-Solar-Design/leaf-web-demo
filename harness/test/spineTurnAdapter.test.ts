@@ -114,13 +114,14 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
   it("keeps write head and approval pins when the private read marker is present", async () => {
     const { adapter, appRun, gate } = makeAdapter();
     appRun.drawingHead = 7;
+    gate.approvalRequired.add("run_drawing_edit_tool");
     gate.nextConfirmationId = "project-write-confirmation";
     const events = await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" }), {
       projectExecution: "canonical-read",
     }));
     expect(appRun.methodLog).toContain("getDrawingState");
     expect(appRun.submitCalls).toHaveLength(0);
-    expect(gate.checks.find(c => c.action === "run_write_tool")?.args).toMatchObject({
+    expect(gate.checks.find(c => c.action === "run_drawing_edit_tool")?.args).toMatchObject({
       drawing_version: 7, expected_drawing_head: 7,
     });
     expect(events.some(e => e.type === "proposed_run")).toBe(true);
@@ -300,6 +301,7 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
   it("write turn: proposed_run with the APP-minted id, mirror row persisted, no dispatch", async () => {
     const { adapter, appRun, gate, store } = makeAdapter();
     gate.nextConfirmationId = "app-cid-1";
+    gate.approvalRequired.add("run_drawing_edit_tool");
 
     const events = await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
 
@@ -321,6 +323,7 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
   it("approved confirm resume: dispatches exactly once, wire-only events", async () => {
     const { adapter, appRun, gate } = makeAdapter();
     gate.nextConfirmationId = "app-cid-2";
+    gate.approvalRequired.add("run_drawing_edit_tool");
     await drain(adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
     gate.grant("app-cid-2");
 
@@ -348,6 +351,7 @@ describe("SpineTurnAdapter — wire vocabulary and gate discipline", () => {
   it("store loss between propose and confirm: reseed keeps the turn streaming; the gate denies the foreign-session redemption fail-safe", async () => {
     const shared = makeAdapter();
     shared.gate.nextConfirmationId = "app-cid-3";
+    shared.gate.approvalRequired.add("run_drawing_edit_tool");
     await drain(shared.adapter.runTurn(turnInput({ text: "RUN:add-panel" })));
     shared.gate.grant("app-cid-3");
 

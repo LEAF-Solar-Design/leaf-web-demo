@@ -15,6 +15,7 @@ from uuid import UUID
 
 VIDEO_MAX_BYTES = 64 * 1024 * 1024
 TEXT_MAX_BYTES = 8 * 1024 * 1024
+MATERIAL_JSON_MAX_DEPTH = 128
 CORPUS_MAX_BYTES = 64 * 1024 * 1024
 CORPUS_EXPANDED_MAX_BYTES = 2 * 1024 ** 3
 CORPUS_LINE_MAX_BYTES = 1024 * 1024
@@ -28,6 +29,19 @@ class InvalidReference(ValueError):
 
 class ReferenceStoreUnavailable(RuntimeError):
     pass
+
+
+def unique_json_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
+    return result
+
+
+def check_json_depth(raw):
+    from json_resource_limits import within_depth_budget
+    if not within_depth_budget(raw, MATERIAL_JSON_MAX_DEPTH):
+        raise InvalidReference('Material JSON exceeds its nesting depth limit.')
 
 
 def upload_policy(name, content_type):
@@ -235,6 +249,8 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
     elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
+        if media_type == 'application/json':
+            check_json_depth(raw)
         try:
             text = raw.decode('utf-8-sig')
             if any(unicodedata.category(c) == 'Cc' and c not in '\t\r\n' for c in text):
@@ -242,14 +258,9 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
             if media_type == 'application/json':
                 def invalid_constant(value):
                     raise ValueError('non-finite JSON')
-                def unique_object(pairs):
-                    result = {}
-                    for key, value in pairs:
-                        if key in result:
-                            raise ValueError('duplicate JSON key')
-                        result[key] = value
-                    return result
-                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_object)
+                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+        except InvalidReference:
+            raise
         except (UnicodeError, ValueError, RecursionError):
             raise InvalidReference('Reference must contain valid UTF-8 text or strict JSON.') from None
     return {'name': name, 'media_type': media_type, 'byte_size': len(raw),

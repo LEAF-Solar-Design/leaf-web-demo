@@ -1,0 +1,26 @@
+{
+  "_source": "build[0] is the real leaf-morph film ask, copied verbatim from leaf-research/studio-branch-tool-authoring-2026-11/LEAF-MORPH-BEAT.md section 4 (Nov 20 2026); it routed run count-modules 0.97 on origin/main 97a23177",
+  "build": [
+    "Write a new Branch C# tool; this is a brand-new tool, not a revision. Rearrange this roof into the Leaf Automation logo: move every solar panel (the Module block references on layer _CE MODULES; Branch panel groups also list them in the LEAF-PANELGROUP Xrecord's PanelHandlesList) so together they form the logo, each panel travelling along a counter-clockwise spiral around the array's centre, twisting more the farther out it starts. The logo is six pointed-oval leaves in a unit circle: leaf A centre (-0.34, -0.25), long axis 165 degrees, length 1.14, width 0.28; leaf B centre (-0.56, 0.34), long axis 46 degrees, length 1.25, width 0.28; copy A and B rotated 120 and 240 degrees about the centre. Fill each leaf with panel-sized slots on a grid along its long axis with no overlaps, scale the logo just big enough to hold every panel, and rotate it by the panels' own rotation so it reads upright. Keep each panel's block and size: only move and rotate it with TransformBy. Draw a thin spiral trail for every sixth panel on a new layer LEAF-MORPH-TRAILS, set the panel layer colour to RGB 40, 214, 111, and return the number of panels moved. Call the new tool leaf-morph.",
+    "make a tool that spirals the panels into the Leaf Automation logo",
+    "write a Branch tool that counts the panels in each group",
+    "build me an AutoCAD command that labels every panel with its string number",
+    "create a command that moves all panels 2 inches north",
+    "make a Branch command to recolor panels by row",
+    "I need a tool that returns the number of panels moved after shifting them",
+    "write a tool to count modules on layer _CE MODULES and draw a table",
+    "add a new tool that renumbers panel groups",
+    "can you write an AutoCAD tool that exports panel coordinates",
+    "new Branch tool: swirl the array and report how many panels moved"
+  ],
+  "run": [
+    "count modules on layer _CE MODULES",
+    "how many panels are in each group",
+    "count the panels",
+    "which layer has the most modules?",
+    "make a tool: count modules",
+    "add a tool: count modules",
+    "code a tool: count modules",
+    "write us a tool: count modules"
+  ]
+}

@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { canOpenSolarSettingsForm } from '../solar/solarSettingsWire.js'
-import { SOLAR_REFUSAL_REASONS, solarRailReason } from './ribbonClusters.js'
+import { SOLAR_REFUSAL_REASONS, routeErrorText, solarRailReason } from './ribbonClusters.js'
 import { solarRefusalEnvelope, solarRunRefusal } from './ribbonClusters.js'
 import conversionDeclaration from '../../../server/solar_tools/solar_trackers_to_panel_groups.json'
 
@@ -39,6 +39,35 @@ import {
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
+
+describe('routeErrorText', () => {
+  const drawingMessage = 'Leaf does not know which drawing to use. Open a saved drawing, or save this one as a version first, then ask again.'
+
+  it.each([undefined, null, 0, ''])('uses a generic routing message for %s', (value) => {
+    expect(routeErrorText(value)).toBe('The request could not be routed.')
+  })
+
+  it('renders each solar refusal as a sentence and gives drawing-specific recovery steps', () => {
+    for (const [code, reason] of Object.entries(SOLAR_REFUSAL_REASONS)) {
+      expect(routeErrorText(code)).toBe(code === 'drawing_context_required' ? drawingMessage : reason + '.')
+    }
+  })
+
+  it('renders joined refusals in order', () => {
+    expect(routeErrorText('drawing_context_required; capability_not_ready')).toBe(
+      drawingMessage + ' ' + SOLAR_REFUSAL_REASONS.capability_not_ready + '.')
+  })
+
+  it.each(['Could not reach the server; try again.', 'unknown_code', 'toString'])('preserves %s', (message) => {
+    expect(routeErrorText(message)).toBe(message)
+  })
+
+  it('only processes messages up to 2000 characters', () => {
+    const limit = 'drawing_context_required; '.padEnd(2000, 'x')
+    expect(routeErrorText(limit)).toBe(drawingMessage + ' ' + limit.split('; ')[1])
+    expect(routeErrorText(limit + 'x')).toBe(limit + 'x')
+  })
+})
 
 describe('humanizeToolName', () => {
   it.each([
@@ -1571,7 +1600,7 @@ describe('solar refusal copy', () => {
     }
     return [...codes].sort()
   }
-  function hookCodes(declarations, readSource) {
+  function hookCodes(declarations, readSource, registry = declarations, trail = []) {
     const codes = new Set()
     const missingDynamic = []
     const empty = []
@@ -1583,10 +1612,28 @@ describe('solar refusal copy', () => {
         badPath.push(builtin)
         continue
       }
+      if (trail.includes(builtin)) {
+        badPath.push(builtin)
+        continue
+      }
       const source = readSource(builtin)
       const found = new Set()
       for (const match of source.matchAll(/"input_reason":\s*"([a-z][a-z0-9_]{0,63})"/g)) found.add(match[1])
-      if (source.includes('.lower()')) {
+      // A registered hook may reuse another registered builtin's readiness.
+      // Follow that literal dependency instead of inventing codes for the wrapper.
+      for (const match of source.matchAll(/return\s+solar_local_graph\._load_builtin\([\x22\x27]([a-z0-9-]+)[\x22\x27]\)\.input_readiness\(graph\)/g)) {
+        const target = registry.find((row) => row.name === match[1] && row.readiness?.kind === 'hook')
+        if (!target) {
+          missingDynamic.push(builtin)
+          continue
+        }
+        const inherited = hookCodes([target], readSource, registry, [...trail, builtin])
+        for (const code of inherited.codes) found.add(code)
+        missingDynamic.push(...inherited.missingDynamic)
+        empty.push(...inherited.empty)
+        badPath.push(...inherited.badPath)
+      }
+      if (source.includes('.code.lower()')) {
         if (Object.hasOwn(DYNAMIC_HOOK_CODES, builtin)) {
           for (const code of DYNAMIC_HOOK_CODES[builtin]) found.add(code)
         } else {
@@ -1886,11 +1933,52 @@ describe('solar refusal copy', () => {
     expect(unmapped.codes).toEqual(['solar_future_code'])
     expect(uncovered(unmapped.codes)).toEqual(['solar_future_code'])
     expect(withSource('error.code.lower()').missingDynamic).toEqual(['builtins/solar_probe.py'])
+    const literalHook = withSource('installation.lower(); return {"input_reason": "capability_not_ready"}')
+    expect(literalHook.missingDynamic).toEqual([])
+    expect(literalHook.codes).toEqual(['capability_not_ready'])
     expect(hookCodes([{ readiness: { kind: 'hook' }, builtin: 'server/x.py' }], () => '').badPath)
       .toEqual(['server/x.py'])
     const silent = withSource('return {"input_ready": True}')
     expect(silent.empty).toEqual(['builtins/solar_probe.py'])
     expect(silent.codes).toEqual([])
+  })
+
+  it('RC11B delegated readiness retains source coverage through registered chains', () => {
+    const rows = ['first', 'second', 'third'].map((name) => ({
+      name: `solar-${name}`, builtin: `builtins/solar_${name}.py`, readiness: { kind: 'hook' },
+    }))
+    const sources = {
+      [rows[0].builtin]: 'return solar_local_graph._load_builtin("solar-second").input_readiness(graph)',
+      [rows[1].builtin]: "return solar_local_graph._load_builtin('solar-third').input_readiness(graph)",
+      [rows[2].builtin]: 'return {"input_reason": "rooftop_required"}',
+    }
+    const read = (path) => sources[path]
+    expect(hookCodes(rows, read)).toEqual({
+      codes: ['rooftop_required'], missingDynamic: [], empty: [], badPath: [],
+    })
+    sources[rows[2].builtin] = 'return {"input_reason": "future_unmapped_reason"}'
+    expect(uncovered(hookCodes(rows, read).codes)).toEqual(['future_unmapped_reason'])
+    sources[rows[2].builtin] = 'return {"input_ready": True}'
+    expect(hookCodes(rows, read).empty).toContain(rows[2].builtin)
+  })
+
+  it('RC11C missing, non-hook and cyclic readiness delegates still refuse coverage', () => {
+    const rows = ['first', 'second'].map((name) => ({
+      name: `solar-${name}`, builtin: `builtins/solar_${name}.py`, readiness: { kind: 'hook' },
+    }))
+    const sources = {
+      [rows[0].builtin]: 'return solar_local_graph._load_builtin("solar-second").input_readiness(graph)',
+      [rows[1].builtin]: 'return solar_local_graph._load_builtin("solar-first").input_readiness(graph)',
+    }
+    const cyclic = hookCodes(rows, (path) => sources[path])
+    expect(cyclic.badPath).toContain(rows[0].builtin)
+    expect(cyclic.codes).toEqual([])
+    const missing = hookCodes([rows[0]], (path) => sources[path])
+    expect(missing.missingDynamic).toEqual([rows[0].builtin])
+    expect(missing.empty).toEqual([rows[0].builtin])
+    const nonHook = hookCodes([rows[0], { ...rows[1], readiness: { kind: 'facets', facets: [] } }],
+      (path) => sources[path])
+    expect(nonHook.missingDynamic).toEqual([rows[0].builtin])
   })
 
   it('RC12 the dynamic hook table is pinned to the server source', () => {
