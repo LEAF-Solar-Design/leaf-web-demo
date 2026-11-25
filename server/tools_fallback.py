@@ -121,11 +121,10 @@ def _boundaries_touch(edges, other_edges):
     return False
 
 
-def _net_panel_area(polys):
+def _net_panel_areas(rings):
     from dxf_spatial_clips import _polygon
     from solar_ground_analysis import is_inside_polygon
 
-    rings = [p for p in polys if p.get("space", "model") != "paper"]
     if sum(len(p.get("pts", [])) for p in rings) > 2048:
         raise AreaMeasurementInputError("Net area supports at most 2048 boundary vertices per selection.")
 
@@ -161,22 +160,50 @@ def _net_panel_area(polys):
             depths[i] += int(is_inside_polygon(other, x, y))
             depths[j] += int(is_inside_polygon(outline, u, v))
 
-    holes = sum(depth % 2 for depth in depths)
-    area = math.fsum(record[2] * (-1 if depth % 2 else 1) for record, depth in zip(boundaries, depths))
-    return area, len(boundaries) - holes, holes
+    return [record[2] * (-1 if depth % 2 else 1) for record, depth in zip(boundaries, depths)]
 
 
 def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
     layer = params.get("layer", DEFAULT_LAYER)
-    polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer and p.get("closed")]
+    net = params.get("area_mode") == "net"
+    report = params.get("include_contributors") is True
+    polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
+    if report:
+        if len(polys) > 2048:
+            raise AreaMeasurementInputError("Area reporting supports at most 2048 polylines per layer.")
+        handles = [p.get("handle") for p in polys]
+        if any(not isinstance(h, str) or not h.strip() or len(h) > 64 for h in handles) or (
+            len({h.upper() for h in handles}) != len(handles)
+        ):
+            raise AreaMeasurementInputError("Area reporting requires distinct intake polyline handles.")
+
+    eligible = []
+    excluded = []
+    for poly in polys:
+        reason = None
+        if not poly.get("closed"):
+            reason = "open"
+        elif net and poly.get("space") == "paper":
+            reason = "paper_space"
+        if reason is None:
+            eligible.append(poly)
+        elif report:
+            excluded.append({"handle": poly["handle"], "reason": reason})
+
     details = {}
-    if params.get("area_mode") == "net":
-        total, count, holes = _net_panel_area(polys)
+    if net:
+        areas = _net_panel_areas(eligible)
+        holes = sum(area < 0 for area in areas)
+        total = math.fsum(areas)
+        count = len(areas) - holes
         details.update(area_mode="net", hole_count=holes)
     else:
-        total = sum(_shoelace_area(p.get("pts", [])) for p in polys)
-        count = len(polys)
+        areas = [_shoelace_area(p.get("pts", [])) for p in eligible]
+        total = sum(areas)
+        count = len(areas)
+
     units = params.get("output_units", "drawing")
+    area_factor = 1.0
     if units == "ft2":
         code = intake.get("insunits")
         if intake.get("insunits_error") or type(code) is not int or code not in _DXF_AREA_SOURCE_UNITS:
@@ -190,6 +217,15 @@ def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> 
             "source_unit": source_unit,
             "area_factor": area_factor,
         }
+
+    if report:
+        if not all(math.isfinite(amount * area_factor) for amount in areas):
+            raise AreaMeasurementInputError("Area reporting requires finite contributor areas.")
+        details.update(
+            contributors=[{"handle": poly["handle"], "signed_area": amount * area_factor}
+                          for poly, amount in zip(eligible, areas)],
+            excluded=excluded,
+        )
 
     return (
         {
@@ -311,6 +347,7 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
                 "layer": {"type": "string", "default": DEFAULT_LAYER},
                 "output_units": {"type": "string", "enum": ["drawing", "ft2"], "default": "drawing"},
                 "area_mode": {"type": "string", "enum": ["gross", "net"], "default": "gross"},
+                "include_contributors": {"type": "boolean"},
             },
             "required": [],
         },

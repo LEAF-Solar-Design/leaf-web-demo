@@ -116,7 +116,8 @@
         "properties": {
           "layer": { "type": "string", "default": "Panels" },
           "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" },
-          "area_mode": { "type": "string", "enum": ["gross", "net"], "default": "gross" }
+          "area_mode": { "type": "string", "enum": ["gross", "net"], "default": "gross" },
+          "include_contributors": { "type": "boolean", "description": "Report each polyline handle and signed area in the requested unit, plus handles excluded from the total." }
         },
         "required": []
       },
@@ -129,6 +130,8 @@
           "unit_conversion": { "type": "object" },
           "area_mode": { "enum": ["net"] },
           "hole_count": { "type": "integer" },
+          "contributors": { "type": "array", "items": { "type": "object" } },
+          "excluded": { "type": "array", "items": { "type": "object" } },
           "area_sqft": { "type": "number" },
           "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
           "units_assumption": { "type": "string" }

@@ -801,22 +801,24 @@ def _panel_ring(x, y, size):
     return [(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
 
 
-def _run_panel_area_rings(rings, *, net):
+def _run_panel_area_rings(rings, *, net, unit=2, scale=1, open_index=None, contributors=False):
     from dxf_intake import parse_dxf_bytes
     from tool_loader import run_tool_dynamic
 
-    pairs = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, 2), (0, "ENDSEC"),
+    pairs = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, unit), (0, "ENDSEC"),
              (0, "SECTION"), (2, "ENTITIES")]
     for handle, ring in enumerate(rings, 16):
-        pairs.extend([(0, "LWPOLYLINE"), (5, f"{handle:X}"), (8, "Roof"), (90, len(ring)), (70, 1)])
+        pairs.extend([(0, "LWPOLYLINE"), (5, f"{handle:X}"), (8, "Roof"), (90, len(ring)), (70, int(handle - 16 != open_index))])
         for x, y in ring:
-            pairs.extend([(10, x), (20, y)])
+            pairs.extend([(10, x * scale), (20, y * scale)])
     pairs.extend([(0, "ENDSEC"), (0, "EOF")])
     intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode("ascii"))
     tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
     params = {"layer": "Roof", "output_units": "ft2"}
     if net:
         params["area_mode"] = "net"
+    if contributors:
+        params["include_contributors"] = True
     return run_tool_dynamic(tool, intake, params, aps_live=False)
 
 
@@ -856,3 +858,22 @@ def test_panel_area_net_keeps_nearby_disjoint_regions_separate():
     result = _run_panel_area_rings(rings, net=True)["result"]
     assert result["total_area"] == 104
     assert result["count"] == 2 and result["hole_count"] == 0
+
+
+@pytest.mark.parametrize("unit,scale,net,rings,expected,open_index", [
+    (2, 1, False, [_panel_ring(0, 0, 3), _panel_ring(5, 0, 2)], [("10", 9), ("11", 4)], None),
+    (1, 12, True, [_panel_ring(0, 0, 10), _panel_ring(1, 1, 2)], [("10", 100), ("11", -4)], None),
+    (4, 304.8, False, [_panel_ring(0, 0, 2), _panel_ring(9, 9, 8)], [("10", 4)], 1),
+])
+def test_panel_area_reports_contributors_and_exclusions(unit, scale, net, rings, expected, open_index):
+    response = _run_panel_area_rings(rings, net=net, unit=unit, scale=scale,
+                                     open_index=open_index, contributors=True)
+    assert response["ok"], response
+    result = response["result"]
+    assert [row["handle"] for row in result["contributors"]] == [handle for handle, _ in expected]
+    assert [row["signed_area"] for row in result["contributors"]] == pytest.approx([area for _, area in expected])
+    assert result["excluded"] == ([] if open_index is None else [{"handle": "11", "reason": "open"}])
+    assert result["total_area"] == sum(area for _, area in expected)
+    assert result["units"] == "ft2" and result["unit_conversion"]["source_code"] == unit
+    default = _run_panel_area_rings(rings, net=net, unit=unit, scale=scale, open_index=open_index)["result"]
+    assert "contributors" not in default and "excluded" not in default
