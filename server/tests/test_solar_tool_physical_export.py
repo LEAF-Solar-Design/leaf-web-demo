@@ -1302,6 +1302,42 @@ def test_estimate_applies_minimum_after_quoted_basis():
     assert result["priced_subtotal"] == "74.95"
 
 
+@pytest.mark.parametrize("quantity,billed,amount", [
+    ("29.9", "30", "18.00"),
+    ("30", "30", "18.00"),
+    ("30.1", "40", "20.00"),
+    ("0.1", "10", "18.00"),
+    ("0", "0", "18.00"),
+])
+def test_estimate_billing_increment_before_basis_and_minimum(quantity, billed, amount):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs((quantity,), ("50",))
+    inputs[1]["rates"][0].update(
+        increment="10", increment_semantics="ceil_quantity_before_pricing",
+        price_basis="100", basis_unit="ea", minimum_amount="18.00",
+        minimum_semantics="per_line_floor_after_rounding")
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    line, = material["lines"]
+    assert line["quantity"] == quantity
+    assert line["billed_quantity"] == billed
+    assert line["amount"] == material["priced_subtotal"] == amount
+
+
+def test_estimate_billing_increment_keeps_fractional_quantity_exact():
+    inputs = estimate_inputs(("72",), ("0.31",))
+    inputs[1]["rates"][0].update(increment="145/6", increment_semantics="ceil_quantity_before_pricing")
+    line, = estimate_price(inputs)["lines"]
+    assert (line["quantity"], line["billed_quantity"], line["amount"]) == ("72", "145/2", "22.48")
+
+
+@pytest.mark.parametrize("increment", [None, "0", "-2", "0/1", "1/0", "nan", "1000000000001"])
+def test_estimate_refuses_invalid_billing_increment(increment):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(increment=increment, increment_semantics="ceil_quantity_before_pricing")
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
 def test_estimate_bounds_and_long_exact_decimals():
     inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
                              ("1000000000000", "0.12345678901234567890123456789012345678"))
