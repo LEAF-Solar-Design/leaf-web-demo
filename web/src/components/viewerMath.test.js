@@ -140,6 +140,14 @@ describe('pickLineThreshold', () => {
 })
 
 describe('ndcFromClient', () => {
+  it.each([25, 40, 60])('preserves mirrored boundaries at offset %i', offset => {
+    const rect = { left: 10, top: 20, width: 200, height: 200 }
+    for (const sign of [-1, 1]) {
+      const displacement = sign * offset
+      expect(ndcFromClient(rect, 110 + displacement, 120 + displacement))
+        .toEqual({ x: displacement / 100, y: -displacement / 100 })
+    }
+  })
   it('maps the rect corners and center to NDC space', () => {
     expect(ndcFromClient(RECT, 10, 20)).toEqual({ x: -1, y: 1 })
     expect(ndcFromClient(RECT, 810, 620)).toEqual({ x: 1, y: -1 })

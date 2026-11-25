@@ -689,7 +689,74 @@ class SolarEdgeParse:
                 if text not in labels:
                     labels.append(text)
 
+    def _measured_membership(self):
+        """Resolve edge-aligned pairs without borrowing legacy nearest-panel guesses."""
+        radius = max((max(p.x2 - p.x1, p.y2 - p.y1)
+                      for p in self.panels), default=0)
+        memberships = {}
+        claims = {}
+        rejected = set()
+        for opt in self.optimizers:
+            nearby = self._find_panels_near(opt.cx, opt.cy, radius)
+            pairs = []
+            for i, a in enumerate(nearby):
+                for b in nearby[i + 1:]:
+                    self.spend(1)
+                    aw, ah = a.x2 - a.x1, a.y2 - a.y1
+                    bw, bh = b.x2 - b.x1, b.y2 - b.y1
+                    tx, ty = min(aw, bw) * 0.05, min(ah, bh) * 0.05
+                    if (min(tx, ty) <= 0 or abs(aw - bw) > 2 * tx
+                            or abs(ah - bh) > 2 * ty):
+                        continue
+                    if (abs((a.cx + b.cx) / 2 - opt.cx) > tx
+                            or abs((a.cy + b.cy) / 2 - opt.cy) > ty):
+                        continue
+                    left, right = sorted((a, b), key=lambda p: p.cx)
+                    top, bottom = sorted((a, b), key=lambda p: p.cy)
+                    horizontal = (0 <= right.x1 - left.x2 <= 2 * tx
+                                  and abs(a.y1 - b.y1) <= ty
+                                  and abs(a.y2 - b.y2) <= ty)
+                    vertical = (0 <= bottom.y1 - top.y2 <= 2 * ty
+                                and abs(a.x1 - b.x1) <= tx
+                                and abs(a.x2 - b.x2) <= tx)
+                    if horizontal or vertical:
+                        pairs.append({a.id, b.id})
+            members = set(opt.measured_panels)
+            if pairs:
+                members.update(pid for pair in pairs for pid in pair)
+                if len(pairs) != 1 or members != pairs[0]:
+                    rejected.add(opt.id)
+            elif members != set(opt.panel_ids):
+                rejected.add(opt.id)
+            memberships[opt.id] = members
+            for pid in members:
+                claims.setdefault(pid, set()).add(opt.id)
+        for owners in claims.values():
+            if len(owners) > 1:
+                rejected.update(owners)
+        return {oid: sorted(members) if oid not in rejected else []
+                for oid, members in memberships.items()}
+
     def identity_matrices(self, base_name="solaredge"):
+        # Both sequencing and emitted cells must consume the same physical membership.
+        # Restore legacy state even if matrix generation exhausts the work budget.
+        memberships = self._measured_membership()
+        saved = [(o, o.panel_ids, o.label) for o in self.optimizers]
+        sequences = [(p, p.seq) for p in self.panels]
+        cache = self._sequence_cache
+        self._sequence_cache = {}
+        try:
+            for opt in self.optimizers:
+                opt.panel_ids = memberships[opt.id]
+            return self._identity_matrices(base_name)
+        finally:
+            for opt, panel_ids, label in saved:
+                opt.panel_ids, opt.label = panel_ids, label
+            for panel, seq in sequences:
+                panel.seq = seq
+            self._sequence_cache = cache
+
+    def _identity_matrices(self, base_name="solaredge"):
         """Explicit markers in JSON cell coordinates; legacy GenerateMatrixJsons is unchanged.
 
         The local marker ID is independent of its optional printed vendor number. Only the
@@ -702,6 +769,15 @@ class SolarEdgeParse:
                 self._assign_row_column_coordinates(grid)
             for panel in grid:
                 panel.seq = 0
+        cell_owners = {}
+        for index, grid in enumerate(self.final_grids):
+            for panel in grid:
+                cell_owners.setdefault((index, panel.row, panel.col), []).append(panel.id)
+        invalid = {pid for ids in cell_owners.values() if len(ids) > 1 for pid in ids}
+        present = {pid for ids in cell_owners.values() for pid in ids}
+        for opt in self.optimizers:
+            if any(pid in invalid or pid not in present for pid in opt.panel_ids):
+                opt.panel_ids = []
         self._sequence_cache.clear()
         matrices = self.generate_matrix_jsons(base_name)
         by_panel = {}
@@ -720,7 +796,7 @@ class SolarEdgeParse:
         for opt in self.optimizers:
             positions = [by_panel[pid] for pid in opt.panel_ids if pid in by_panel]
             indexes = {pos[0] for pos in positions}
-            if (set(opt.panel_ids) != opt.measured_panels or len(positions) != len(opt.panel_ids)
+            if (len(positions) != len(opt.panel_ids)
                     or any(pos in ambiguous for pos in positions)):
                 positions = []
             if not indexes and matrices:

@@ -585,3 +585,28 @@ def test_sip_r3e_downstream_chain(monkeypatch):
     assert g["frames"][0]["module_power_watts"] == json.loads(w.exchange["response_bytes"])["pmp"] == 400.0
     assert g["strings"][0]["wire_gauge"] == "10 AWG"
     assert (len(w.s.versions), len(w.proofs), len(w.exchanges)) == (10, 9, 1)
+
+
+@pytest.mark.parametrize(("first_size", "second_size"), [
+    ((77.0, 38.5), (82.0, 38.5)),
+    ((77.0, 38.5), (77.0, 42.0)),
+    ((82.0, 42.0), (77.0, 38.5)),
+], ids=["width-changes", "height-changes", "both-change-larger-first"])
+def test_discovery_preserves_measured_panel_sizes(monkeypatch, first_size, second_size):
+    intake = source()
+    x = 0.0
+    expected = {}
+    for index, outline in enumerate(intake["polylines"]):
+        width, height = first_size if index < 5 else second_size
+        outline["pts"] = [[x, 0], [x+width, 0], [x+width, height], [x, height]]
+        expected.setdefault((width, height), set()).add(outline["handle"])
+        x += width
+    monkeypatch.setitem(globals(), "source", lambda: deepcopy(intake))
+    w, ctx = world(monkeypatch, manual=True)
+    saved = commit(w, ctx, TOOL, {"expected_rev": ctx.graph["rev"], "discover": {
+        "BranchMaxOffset": 3, "AlignmentTolerance": 0.5, "InstallationDesign": "Roof"}})
+    handles = {panel["id"]: panel["provenance"]["source_handle"] for panel in saved.graph["panels"]}
+    actual = {(frame["module_width_along_row"], frame["module_height_across_row"]):
+              {handles[ref] for ref in frame["panel_refs"]} for frame in saved.graph["frames"]}
+    assert len(saved.graph["frames"]) == len(expected)
+    assert actual == expected
