@@ -1,11 +1,14 @@
 /** Protected, offline-constructible composition. Provisioning, caller auth,
  * durable admission and authenticated preview HTTP routes remain host-owned.
  */
-import { GenericNextProducer } from "./genericNextBuild.js";
-import type { NextBuildScope } from "./genericNextBuild.js";
+import { GenericNextProducer, nextRequestDigest } from "./genericNextBuild.js";
+import type { NextBuildScope, PrivateStaticArtifacts } from "./genericNextBuild.js";
 import { ExecutorManagedNextRuntime } from "./managedNextRuntime.js";
 import type { StaticNextJobExecutor } from "./managedNextRuntime.js";
 import { DiskPrivateStaticArtifacts } from "./privateStaticArtifactStore.js";
+import { DurablePrivateNextViews } from "./durablePrivateNextViews.js";
+import { loadPrivateStaticView } from "./staticNextCustody.js";
+import type { StaticNextObjectStore } from "./codebuildStaticNextExecutor.js";
 
 export function createManagedStaticNextProducer(options: {
   repository: ConstructorParameters<typeof GenericNextProducer>[0]["repository"];
@@ -19,4 +22,28 @@ export function createManagedStaticNextProducer(options: {
     artifacts: new DiskPrivateStaticArtifacts({ root: options.artifactRoot,
       bindingId: options.artifactBindingId, isCurrent: options.isCurrent }),
     isCurrent: options.isCurrent });
+}
+
+/** Compose readback only; the protected caller supplies current candidate access. */
+export function createManagedStaticNextViews(options: {
+  artifacts: PrivateStaticArtifacts;
+  custodyStore: StaticNextObjectStore;
+  resolveStaticNextBundle(executionId: string): Promise<string | null>;
+  loadCandidate: ConstructorParameters<typeof DurablePrivateNextViews>[0]["loadCandidate"];
+  now(): Date;
+}): DurablePrivateNextViews {
+  return new DurablePrivateNextViews({
+    artifacts: options.artifacts,
+    loadCandidate: options.loadCandidate,
+    catalog: {
+      async load(authority, request) {
+        const { jobId, sourceCommit, sourceTree } = request;
+        const executionId = nextRequestDigest({ ...authority, jobId, sourceCommit, sourceTree });
+        const bundleSha256 = await options.resolveStaticNextBundle(executionId);
+        if (!bundleSha256) return null;
+        return loadPrivateStaticView({ store: options.custodyStore, artifacts: options.artifacts,
+          authority, request, bundleSha256, now: options.now });
+      },
+    },
+  });
 }
