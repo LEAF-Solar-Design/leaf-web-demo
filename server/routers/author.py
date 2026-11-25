@@ -534,6 +534,8 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "The approved request was not executed."
     ),
     "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
+    "stage_grant_exhausted": "This build was tried twice and could not be finished. Ask for it again.",
+    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
     "stage_grant_refused": "Your access changed while this request waited. It was not started.",
     "stage_grant_withdrawn": "This build was withdrawn before it started.",
 }
@@ -1057,31 +1059,19 @@ def recover_stage(
 
 @router.post("/api/author/stages/{change_set_id}/withdraw")
 def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
-    import customization_stage_grants
-
-    if customization_stage_grants.ttl_s() is None:
-        return _customization_error(CustomizationServiceError("customization_stage_disabled", 404))
-    denied = _customization_gate(5, tenant)
-    if denied is not None:
-        return denied
     try:
         if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", change_set_id):
             raise CustomizationServiceError("invalid_recovery_request", 422)
         binding = customization_service._binding(tenant)
-        if binding.role not in {"owner", "editor"}:
-            raise CustomizationServiceError("tenant_role_denied", 403)
-        roles, elevated = entitlements.resolve_roles(tenant)
-        if not entitlements.entitlements_for(entitlements.resolve_tier(tenant), roles, elevated).get("build", False):
-            raise CustomizationServiceError("builder_entitlement_missing", 403)
         service = CustomizationService.configured()
         change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
         if change.author_subject != binding.subject:
             return _customization_error(CustomizationServiceError("change_set_not_found", 404))
-        withdrawn = service.store.withdraw_stage(
+        result = service.store.withdraw_stage(
             tenant_id=str(tenant), change_set_id=change_set_id,
             author_subject=binding.subject, now_ms=int(time.time() * 1000),
         )
-        return {"contract": "leaf.customization-stage-withdraw.v1", "withdrawn": withdrawn}
+        return {"contract": "leaf.customization-stage-withdraw.v1", **result}
     except ChangeSetNotFoundError:
         return _customization_error(CustomizationServiceError("change_set_not_found", 404))
     except CustomizationServiceError as exc:

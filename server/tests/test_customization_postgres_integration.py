@@ -396,15 +396,54 @@ def test_postgres_stage_grant_withdraw_loses_to_claim(store):
         )
     claimed = store.claim_stage(owner=key)
     assert claimed.change_set_id == change.change_set_id
-    assert not store.withdraw_stage(
+    assert store.withdraw_stage(
         tenant_id=change.tenant_id, change_set_id=change.change_set_id,
         author_subject=change.author_subject, now_ms=now_ms,
+    ) == {"withdrawn": False, "revoked": True}
+    grant = store.get_stage_grant(change.tenant_id, change.change_set_id)
+    assert grant["revoked_ms"] == now_ms and grant["revoked_reason"] == "withdrawn"
+    assert store.get_change_set(tenant_id=change.tenant_id, change_set_id=change.change_set_id) == claimed
+    assert not store.consume_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, attempt=claimed.stage_attempt, binding_digest=DIGEST, now_ms=now_ms,
     )
-    assert store.get_stage_grant(change.tenant_id, change.change_set_id)["revoked_ms"] is None
     store.fail_stage_claim(
         tenant_id=change.tenant_id, change_set_id=change.change_set_id,
         owner=key, reason_code="test_complete", retryable=False,
     )
+
+
+def test_postgres_turn_terminal_events_are_turn_and_tenant_bound(store, monkeypatch):
+    from uuid import uuid4
+
+    import customization_stage_grants as grants
+    import session_store
+
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "postgres")
+    tenant = f"grant-turn:{uuid4()}"
+    session = session_store.get_or_create_session(tenant, f"drawing:{uuid4()}")
+    session_id = session["session_id"]
+    try:
+        for turn_id, reason in (("clean", "end_turn"), ("interrupted", "interrupted")):
+            session_store.append_event(session_id, turn_id, "turn_started", {})
+            session_store.append_event(session_id, turn_id, "text_delta", {"text": "working"})
+            session_store.append_event(session_id, turn_id, "turn_complete", {"stop_reason": reason})
+        session_store.append_event(session_id, "interrupted", "error", {"code": "stopped"})
+        assert session_store.turn_terminal_events(session_id, "clean", tenant) == [
+            {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+        ]
+        assert session_store.turn_terminal_events(session_id, "interrupted", tenant) == [
+            {"type": "turn_complete", "data": {"stop_reason": "interrupted"}},
+            {"type": "error", "data": {"code": "stopped"}},
+        ]
+        assert grants.turn_ended_cleanly(session_id, "clean", tenant)
+        assert not grants.turn_ended_cleanly(session_id, "interrupted", tenant)
+        assert session_store.turn_terminal_events(session_id, "clean", tenant + "-other") == []
+        assert session_store.turn_terminal_events(session_id, "interrupted", tenant + "-other") == []
+        assert session_store.turn_terminal_events(session_id, "missing", tenant) == []
+    finally:
+        with platform_db().transaction() as conn:
+            conn.execute("DELETE FROM app_sessions WHERE session_id = %s", (session_id,))
 
 
 def stage(store, change, prefix: str):

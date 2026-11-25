@@ -13,6 +13,7 @@ import re
 import time
 
 import build_plan
+import customization_flags
 import deps
 import entitlements
 import platform_link
@@ -68,6 +69,8 @@ def live_check(service, change) -> str | None:
             backedge=True, authority_resolved=True,
         )
         if not enabled(5, change.tenant_id):
+            return None
+        if customization_flags.plan_mode_enabled(change.tenant_id) and change.plan_digest is None:
             return None
         binding = _binding(identity)
         build = entitlements.entitlements_for(tier, [], False).get("build", False)
@@ -135,18 +138,24 @@ def admit(service, change, owner) -> None:
         if row is None:
             code = "stage_authority_invalid"
         elif any(row[field] != getattr(change, field) for field in (
-            "change_set_id", "tenant_id", "author_subject",
             "authority_session_id", "authority_turn_id",
+        )):
+            code = "stage_authority_invalid"
+        elif any(row[field] != getattr(change, field) for field in (
+            "change_set_id", "tenant_id", "author_subject",
         )):
             pass
         elif row["revoked_ms"] is not None:
             code = "stage_grant_withdrawn"
         elif row["expires_ms"] <= int(time.time() * 1000):
             code = "stage_grant_expired"
-        elif (change.tool_target == "branch"
-              and row["binding_digest"] == binding_digest(change)
-              and turn_ended_cleanly(change.authority_session_id, change.authority_turn_id, change.tenant_id)
-              and live_check(service, change) == row["tier"]
+        elif row["dispatches"] >= 2:
+            code = "stage_grant_exhausted"
+        elif change.tool_target != "branch" or row["binding_digest"] != binding_digest(change):
+            pass
+        elif not turn_ended_cleanly(change.authority_session_id, change.authority_turn_id, change.tenant_id):
+            code = "stage_grant_turn_open"
+        elif (live_check(service, change) == row["tier"]
               and service.store.consume_stage_grant(
                   tenant_id=change.tenant_id, change_set_id=change.change_set_id,
                   owner=owner, attempt=change.stage_attempt,

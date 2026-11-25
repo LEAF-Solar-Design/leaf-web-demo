@@ -138,7 +138,7 @@ def run_once(
                 change_set_id=change.change_set_id,
                 owner=owner,
                 reason_code=exc.code,
-                retryable=exc.status_code >= 500 or exc.code == "stage_grant_expired",
+                retryable=exc.status_code >= 500 or exc.code in {"stage_grant_expired", "stage_grant_exhausted"},
                 reason_message=reason_message,
             )
         return True

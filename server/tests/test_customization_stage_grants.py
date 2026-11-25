@@ -75,11 +75,12 @@ def lane(tmp_path, monkeypatch):
     session_store._conn.close()
 
 
-def queue(lane, *, key="request-a", target="branch", **extra):
+def queue(lane, *, key="request-a", target="branch", target_tool_name=None, **extra):
     change, _ = lane.store.reserve_stage(
         tenant_id=TENANT, idempotency_key=key, base_commit=BASE,
         desired_platform_release="release-a", workspace_contract_digest=WORKSPACE,
-        author_subject=SUBJECT, change_kind="create", target_tool_name=None,
+        author_subject=SUBJECT, change_kind="revise" if target_tool_name else "create",
+        target_tool_name=target_tool_name,
         request_description=DESCRIPTION,
         request_fingerprint=service_module._stage_request_fingerprint(DESCRIPTION, target),
         tool_target=target, authority_session_id=lane.session_id,
@@ -173,6 +174,43 @@ def test_T4_live_rollout_off_refuses_issue_and_dispatch(lane, monkeypatch):
     refuse(lane, change)
 
 
+@pytest.mark.parametrize("has_plan", [False, True])
+def test_live_plan_mode_requires_a_plan_at_issue_and_dispatch(lane, monkeypatch, has_plan):
+    plan = {
+        "schema": "leaf.build-plan.v1", "target": "branch", "change_kind": "create",
+        "tool_name": "count-lines", "title": "Count lines", "summary": "Count lines.",
+        "behavior": ["Count each line once."], "inputs": [], "output": "Count",
+        "capabilities": ["drawing.read"], "undo": "", "assumptions": [],
+        "acceptance": [], "answers": {},
+    }
+    metadata = {"plan_json": json.dumps(plan), "plan_digest": build_plan.plan_digest(plan)} if has_plan else {}
+    change = queue(lane, **metadata)
+    assert grants.issue(lane.service, change)
+    clean(lane)
+    change = lane.store.claim_stage(owner="worker-a")
+    checked = Mock(return_value=True)
+    monkeypatch.setattr(grants.customization_flags, "plan_mode_enabled", checked)
+    assert grants.live_check(lane.service, change) == ("hosted_pro" if has_plan else None)
+    checked.assert_called_with(TENANT)
+    fresh = queue(lane, key="plan-required", **metadata)
+    assert grants.issue(lane.service, fresh) is has_plan
+    assert (lane.store.get_stage_grant(TENANT, fresh.change_set_id) is not None) is has_plan
+    if has_plan:
+        grants.admit(lane.service, change, "worker-a")
+    else:
+        refuse(lane, change)
+    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == int(has_plan)
+
+
+def test_live_plan_mode_failure_refuses_issue_and_dispatch(lane, monkeypatch):
+    change = issued_claim(lane)
+    monkeypatch.setattr(grants.customization_flags, "plan_mode_enabled", Mock(side_effect=RuntimeError("unavailable")))
+    assert grants.live_check(lane.service, change) is None
+    assert not grants.issue(lane.service, change)
+    refuse(lane, change)
+    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 0
+
+
 @pytest.mark.parametrize("field", grants._BINDING_FIELDS)
 def test_T5_every_binding_field_is_authenticated(lane, field):
     change = issued_claim(lane)
@@ -183,8 +221,10 @@ def test_T5_every_binding_field_is_authenticated(lane, field):
         assert grants.binding_digest(mutated) != grants.binding_digest(change)
     except ValueError:
         pass
-    refuse(lane, mutated, "stage_authority_invalid" if field in {"tenant_id", "change_set_id"}
-           else "stage_grant_refused")
+    code = "stage_authority_invalid" if field in {
+        "tenant_id", "change_set_id", "authority_session_id", "authority_turn_id",
+    } else "stage_grant_refused"
+    refuse(lane, mutated, code)
 
 
 def test_T5_description_and_plan_bytes_are_revalidated(lane):
@@ -224,6 +264,15 @@ def test_T7_other_subject_and_grant_identity_fields_refuse(lane):
 def test_T7_no_api_model_accepts_a_grant_id():
     for model in (author_router.AuthorRequest, author_router.StageRequest, author_router.StageRecoveryRequest):
         assert not any("grant" in name for name in model.model_fields)
+    for route in author_router.router.routes:
+        assert "grant" not in route.path.lower()
+        pending = [route.dependant]
+        while pending:
+            dependency = pending.pop()
+            for parameter in (*dependency.path_params, *dependency.header_params):
+                assert "grant" not in parameter.name.lower()
+                assert "grant" not in parameter.alias.lower()
+            pending.extend(dependency.dependencies)
 
 
 def test_T8_two_distinct_attempts_survive_restart_but_replay_and_third_refuse(lane):
@@ -244,7 +293,7 @@ def test_T8_two_distinct_attempts_survive_restart_but_replay_and_third_refuse(la
         reason_code="retry", delay_seconds=0,
     )
     third = restarted.claim_stage(owner="worker-c")
-    refuse(lane, third, owner="worker-c")
+    refuse(lane, third, "stage_grant_exhausted", owner="worker-c")
     assert restarted.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 2
 
 
@@ -282,16 +331,30 @@ def test_T9_expiry_is_fixed_at_issue_even_after_setting_increases(lane, monkeypa
     ([("turn_complete", {"stop_reason": "timeout"})], False),
 ])
 def test_T10_all_terminal_records_are_checked(lane, records, expected):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
     for kind, data in records:
         session_store.append_event(lane.session_id, lane.turn_id, kind, data)
     assert grants.turn_ended_cleanly(lane.session_id, lane.turn_id, TENANT) is expected
     assert not grants.turn_ended_cleanly(lane.session_id, lane.turn_id, "tenant-b")
+    change = lane.store.claim_stage(owner="worker-a")
+    if expected:
+        grants.admit(lane.service, change, "worker-a")
+    else:
+        refuse(lane, change, "stage_grant_turn_open")
 
 
 @pytest.mark.parametrize("stage_authority", [True, False, "true", 1])
 def test_T10_timeout_requires_explicit_stage_authority(lane, stage_authority):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
     clean(lane, reason="timeout", stage_authority=stage_authority)
     assert grants.turn_ended_cleanly(lane.session_id, lane.turn_id, TENANT) is (stage_authority is True)
+    change = lane.store.claim_stage(owner="worker-a")
+    if stage_authority is True:
+        grants.admit(lane.service, change, "worker-a")
+    else:
+        refuse(lane, change, "stage_grant_turn_open")
 
 
 def test_T10_unreadable_terminal_record_fails_closed(lane, monkeypatch):
@@ -307,38 +370,77 @@ def test_T10_unreadable_terminal_record_fails_closed(lane, monkeypatch):
 def test_withdraw_before_claim_fails_change_and_revokes_grant(lane):
     change = queue(lane)
     assert grants.issue(lane.service, change)
-    assert not lane.store.withdraw_stage(
+    assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject="auth0|other", now_ms=int(time.time() * 1000),
-    )
+    ) == {"withdrawn": False, "revoked": False}
     assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject=SUBJECT, now_ms=int(time.time() * 1000),
-    )
+    ) == {"withdrawn": True, "revoked": True}
     failed = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
     assert failed.state is ChangeState.FAILED
     assert failed.stage_error_code == "stage_grant_withdrawn"
     assert not failed.stage_error_retryable
     assert lane.store.claim_stage(owner="late-worker") is None
     refuse(lane, change, "stage_grant_withdrawn")
-    assert not lane.store.withdraw_stage(
+    assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject=SUBJECT, now_ms=int(time.time() * 1000),
-    )
+    ) == {"withdrawn": False, "revoked": False}
     events = lane.store.audit_events(tenant_id=TENANT, change_set_id=change.change_set_id)
     withdrawn = [event for event in events if event.reason_code == "stage_grant_withdrawn"]
     assert len(withdrawn) == 1
     assert (withdrawn[0].prior_state, withdrawn[0].next_state) == (ChangeState.STAGING, ChangeState.FAILED)
 
 
-def test_withdraw_loses_to_live_claim_and_other_author(lane):
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_withdraw_revokes_under_live_claim_but_refuses_other_author(lane, monkeypatch, dispatched):
     change = issued_claim(lane)
-    for subject in (SUBJECT, "auth0|other"):
-        assert not lane.store.withdraw_stage(
+    if dispatched:
+        grants.admit(lane.service, change, "worker-a")
+    for subject, revoked in (("auth0|other", False), (SUBJECT, True)):
+        assert lane.store.withdraw_stage(
             tenant_id=TENANT, change_set_id=change.change_set_id,
             author_subject=subject, now_ms=int(time.time() * 1000),
+        ) == {"withdrawn": False, "revoked": revoked}
+    row = lane.store.get_stage_grant(TENANT, change.change_set_id)
+    assert row["revoked_ms"] is not None and row["revoked_reason"] == "withdrawn"
+    assert lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id) == change
+    assert not lane.store.consume_stage_grant(
+        tenant_id=TENANT, change_set_id=change.change_set_id, owner="worker-a",
+        attempt=change.stage_attempt, binding_digest=row["binding_digest"],
+        now_ms=int(time.time() * 1000),
+    )
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_grant_withdrawn"):
+        lane.service.dispatch_stage(change)
+    post.assert_not_called()
+    events = lane.store.audit_events(tenant_id=TENANT, change_set_id=change.change_set_id)
+    withdrawn = [event for event in events if event.reason_code == "stage_grant_withdrawn"]
+    assert len(withdrawn) == 1
+    assert withdrawn[0].prior_state is withdrawn[0].next_state is ChangeState.STAGING
+
+
+@pytest.mark.parametrize("lease", ["expired", "released"])
+def test_withdraw_after_unused_claim_only_revokes(lane, lease):
+    change = issued_claim(lane)
+    if lease == "expired":
+        with lane.store._transaction() as conn:
+            conn.execute("UPDATE customization_change_sets SET stage_lease_expires_at = 0")
+    else:
+        lane.store.defer_stage_claim(
+            tenant_id=TENANT, change_set_id=change.change_set_id, owner="worker-a",
+            reason_code="retry", delay_seconds=0,
         )
-    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["revoked_ms"] is None
+    before = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
+    assert lane.store.withdraw_stage(
+        tenant_id=TENANT, change_set_id=change.change_set_id, author_subject=SUBJECT,
+        now_ms=int(time.time() * 1000),
+    ) == {"withdrawn": False, "revoked": True}
+    assert lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id) == before
+    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 0
 
 
 def test_T12_issue_only_after_charge_and_never_on_replay(lane, monkeypatch):
@@ -466,6 +568,68 @@ def test_granted_path_sends_only_services_selector_and_harness_secret(lane, monk
     assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 1
 
 
+@pytest.mark.parametrize("failure", ["url", "revision"])
+def test_local_dispatch_checks_fail_before_grant_admission(lane, monkeypatch, failure):
+    change = issued_claim(lane)
+    change = replace(change, target_tool_name="count-lines")
+    admit = Mock(side_effect=AssertionError("local checks must precede admission"))
+    post = Mock()
+    revision = Mock(side_effect=CustomizationServiceError("revision_base_unavailable", 503))
+    monkeypatch.setattr(grants, "admit", admit)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(lane.service, "_branch_revision_base", revision)
+    if failure == "url":
+        monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "")
+    code = "customization_harness_unavailable" if failure == "url" else "revision_base_unavailable"
+    with pytest.raises(CustomizationServiceError, match=code):
+        lane.service.dispatch_stage(change)
+    assert revision.call_count == int(failure == "revision")
+    admit.assert_not_called()
+    post.assert_not_called()
+    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 0
+
+
+@pytest.mark.parametrize("case", ["off", "unbound", "subject", "tenant"])
+def test_non_grant_authority_error_still_precedes_local_dispatch_checks(lane, monkeypatch, case):
+    change = issued_claim(lane)
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "")
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: "auth0|other" if case == "subject" else None)
+    if case == "off":
+        monkeypatch.delenv("LEAF_STAGE_GRANT_TTL_S")
+    admit = Mock()
+    post = Mock()
+    monkeypatch.setattr(grants, "admit", admit)
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_authority_invalid"):
+        CustomizationService._harness_stage(
+            None if case == "unbound" else lane.service,
+            "tenant-b" if case == "tenant" else TENANT, DESCRIPTION, change,
+        )
+    admit.assert_not_called()
+    post.assert_not_called()
+
+
+def test_revision_base_is_resolved_before_consuming_grant(lane, monkeypatch):
+    change = queue(lane, target_tool_name="count-lines")
+    assert grants.issue(lane.service, change)
+    clean(lane)
+    change = lane.store.claim_stage(owner="worker-a")
+
+    def revision(*args):
+        assert args == (TENANT, BASE, "count-lines")
+        assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 0
+        return (None, BASE)
+
+    def post(*args, **kwargs):
+        assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 1
+        assert kwargs["json"]["revisionBaseCommit"] == BASE
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {})
+
+    monkeypatch.setattr(lane.service, "_branch_revision_base", revision)
+    monkeypatch.setattr(requests, "post", post)
+    lane.service.dispatch_stage(change)
+
+
 @pytest.mark.parametrize("subject,tenant", [("auth0|other", TENANT), (None, "tenant-b")])
 def test_mismatched_active_subject_or_tenant_never_uses_grant(lane, monkeypatch, subject, tenant):
     change = issued_claim(lane)
@@ -475,20 +639,29 @@ def test_mismatched_active_subject_or_tenant_never_uses_grant(lane, monkeypatch,
         lane.service._harness_stage(tenant, DESCRIPTION, change)
 
 
-@pytest.mark.parametrize("expired", [True, False])
-def test_refused_build_fails_before_http_and_only_expired_is_retryable(lane, monkeypatch, expired):
+@pytest.mark.parametrize("code,retryable", [
+    ("stage_grant_expired", True), ("stage_grant_exhausted", True),
+    ("stage_grant_turn_open", False), ("stage_grant_refused", False),
+])
+def test_refused_build_fails_before_http_with_expected_retryability(lane, monkeypatch, code, retryable):
     change = queue(lane)
     assert grants.issue(lane.service, change)
-    if expired:
+    if code == "stage_grant_expired":
         with lane.store._transaction() as conn:
             conn.execute("UPDATE customization_stage_grants SET issued_ms = 1, expires_ms = 2")
+    elif code == "stage_grant_exhausted":
+        with lane.store._transaction() as conn:
+            conn.execute("UPDATE customization_stage_grants SET dispatches = 2")
+    elif code == "stage_grant_refused":
+        clean(lane)
+        monkeypatch.setattr(grants, "live_check", lambda *_: None)
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
     assert worker.run_once("worker-a", service=lane.service)
     failed = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
     assert failed.state is ChangeState.FAILED
-    assert failed.stage_error_code == ("stage_grant_expired" if expired else "stage_grant_refused")
-    assert failed.stage_error_retryable is expired
+    assert failed.stage_error_code == code
+    assert failed.stage_error_retryable is retryable
     post.assert_not_called()
 
 
@@ -505,10 +678,13 @@ def test_dispatch_store_failures_refuse_before_http(lane, monkeypatch, method):
 
 @pytest.mark.parametrize("failure,code", [
     ("identity", "stage_grant_refused"),
+    ("authority_session_id", "stage_authority_invalid"),
+    ("authority_turn_id", "stage_authority_invalid"),
     ("revoked", "stage_grant_withdrawn"),
     ("expired", "stage_grant_expired"),
+    ("exhausted", "stage_grant_exhausted"),
     ("digest", "stage_grant_refused"),
-    ("turn", "stage_grant_refused"),
+    ("turn", "stage_grant_turn_open"),
     ("live", "stage_grant_refused"),
 ])
 def test_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, failure, code):
@@ -516,6 +692,10 @@ def test_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, failur
     row = lane.store.get_stage_grant(TENANT, change.change_set_id)
     if failure == "identity":
         row["author_subject"] = "auth0|other"
+    if failure in {"authority_session_id", "authority_turn_id"}:
+        row[failure] = "other"
+    if failure == "exhausted":
+        row["dispatches"] = 2
     if failure in {"identity", "revoked"}:
         row["revoked_ms"] = 1
     if failure in {"identity", "revoked", "expired"}:
@@ -560,17 +740,26 @@ def test_expired_lease_cannot_consume_and_refusals_do_not_log_private_fields(lan
     assert row["binding_digest"] not in caplog.text
 
 
-def test_dispatched_grant_cannot_be_withdrawn_after_lease_release(lane):
+def test_dispatched_grant_cannot_be_withdrawn_after_lease_release(lane, monkeypatch):
     change = issued_claim(lane)
     grants.admit(lane.service, change, "worker-a")
     lane.store.defer_stage_claim(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         owner="worker-a", reason_code="retry", delay_seconds=0,
     )
-    assert not lane.store.withdraw_stage(
+    assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject=SUBJECT, now_ms=int(time.time() * 1000),
-    )
+    ) == {"withdrawn": False, "revoked": True}
+    row = lane.store.get_stage_grant(TENANT, change.change_set_id)
+    assert row["revoked_ms"] is not None and row["revoked_reason"] == "withdrawn"
+    second = lane.store.claim_stage(owner="worker-b")
+    assert second.stage_attempt == 2
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_grant_withdrawn"):
+        lane.service.dispatch_stage(second)
+    post.assert_not_called()
 
 
 def test_issue_store_failure_leaves_enqueue_successful_and_logs_only_type(lane, monkeypatch, caplog):
@@ -580,14 +769,31 @@ def test_issue_store_failure_leaves_enqueue_successful_and_logs_only_type(lane, 
     assert "private detail" not in caplog.text
 
 
-@pytest.mark.parametrize("case,status,withdrawn", [
-    ("success", 200, True), ("claimed", 200, False), ("other_author", 404, None),
-    ("other_tenant", 404, None), ("off", 404, None), ("missing", 404, None),
-    ("rollout_off", 404, None), ("viewer", 403, None), ("entitlement_lost", 403, None),
+@pytest.mark.parametrize("code,message", [
+    ("stage_grant_exhausted", "This build was tried twice and could not be finished. Ask for it again."),
+    ("stage_grant_turn_open", "The conversation that asked for this build was stopped, so it was not started. Ask for it again."),
 ])
-def test_withdraw_route_is_gated_and_author_bound(lane, monkeypatch, case, status, withdrawn):
+def test_grant_refusals_have_actionable_route_messages(code, message):
+    response = author_router._customization_error(CustomizationServiceError(code, 409))
+    assert response.status_code == 409
+    body = json.loads(response.body)
+    assert body["reason_code"] == code
+    assert body["error"]["message"] == message
+
+
+@pytest.mark.parametrize("case,status,withdrawn,revoked", [
+    ("success", 200, True, True), ("claimed", 200, False, True),
+    ("other_author", 404, None, None), ("other_tenant", 404, None, None),
+    ("off", 200, True, True), ("missing", 404, None, None),
+    ("rollout_off", 200, True, True), ("viewer", 200, True, True),
+    ("entitlement_lost", 200, True, True), ("no_grant", 200, False, False),
+    ("auth_off", 503, None, None), ("no_subject", 403, None, None),
+    ("invalid_tenant", 403, None, None), ("invalid_id", 422, None, None),
+])
+def test_withdraw_route_is_authenticated_and_author_bound(lane, monkeypatch, case, status, withdrawn, revoked):
     change = queue(lane)
-    assert grants.issue(lane.service, change)
+    if case != "no_grant":
+        assert grants.issue(lane.service, change)
     tenant = lane.tenant
     if case == "claimed":
         lane.store.claim_stage(owner="worker-a")
@@ -609,14 +815,26 @@ def test_withdraw_route_is_gated_and_author_bound(lane, monkeypatch, case, statu
         }))
     elif case == "entitlement_lost":
         tenant = deps.TenantContext(TENANT, tier="restricted", subject=SUBJECT)
+    elif case == "auth_off":
+        monkeypatch.setattr(deps, "auth_live", lambda: False)
+    elif case == "no_subject":
+        tenant = deps.TenantContext(TENANT, tier="hosted_pro")
+    elif case == "invalid_tenant":
+        tenant = deps.TenantContext("../invalid", tier="hosted_pro", subject=SUBJECT)
     monkeypatch.setattr(author_router, "customization_enabled", lambda *_: case != "rollout_off")
     monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
     app = FastAPI()
     app.include_router(author_router.router)
     app.dependency_overrides[deps.require_tenant] = lambda: tenant
     change_id = "00000000-0000-4000-8000-000000000000" if case == "missing" else change.change_set_id
+    if case == "invalid_id":
+        change_id = "invalid"
     with TestClient(app) as client:
         response = client.post(f"/api/author/stages/{change_id}/withdraw")
     assert response.status_code == status
     if status == 200:
-        assert response.json() == {"contract": "leaf.customization-stage-withdraw.v1", "withdrawn": withdrawn}
+        assert response.json() == {
+            "contract": "leaf.customization-stage-withdraw.v1", "withdrawn": withdrawn, "revoked": revoked,
+        }
+    if status != 200:
+        assert lane.store.get_stage_grant(TENANT, change.change_set_id)["revoked_ms"] is None

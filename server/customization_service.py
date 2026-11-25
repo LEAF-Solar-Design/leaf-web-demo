@@ -2123,7 +2123,6 @@ class CustomizationService:
             import customization_stage_grants
             if (tenant_id == change.tenant_id and not active_subject and self is not None
                     and customization_stage_grants.ttl_s() is not None):
-                customization_stage_grants.admit(self, change, change.stage_lease_owner)
                 without_services = True
             else:
                 raise CustomizationServiceError("stage_authority_invalid", 409)
@@ -2133,6 +2132,8 @@ class CustomizationService:
         revision_base = None
         if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
             revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
+        if without_services:
+            customization_stage_grants.admit(self, change, change.stage_lease_owner)
         try:
             import requests
             response = requests.post(

@@ -747,21 +747,34 @@ class SQLiteCustomizationStore(CustomizationRepository):
 
     def withdraw_stage(
         self, *, tenant_id: str, change_set_id: str, author_subject: str, now_ms: int,
-    ) -> bool:
+    ) -> dict[str, bool]:
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
-            if (row.state is not ChangeState.STAGING or row.author_subject != author_subject
-                    or (row.stage_lease_owner and row.stage_lease_expires_at is not None
-                        and row.stage_lease_expires_at > now_ms)):
-                return False
+            if row.state is not ChangeState.STAGING or row.author_subject != author_subject:
+                return {"withdrawn": False, "revoked": False}
+            grant = conn.execute(
+                "SELECT dispatches FROM customization_stage_grants "
+                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ? "
+                "AND revoked_ms IS NULL",
+                (tenant_id, change_set_id, author_subject),
+            ).fetchone()
+            if grant is None:
+                return {"withdrawn": False, "revoked": False}
             result = conn.execute(
                 "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = 'withdrawn' "
                 "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ? "
-                "AND revoked_ms IS NULL AND dispatches = 0",
+                "AND revoked_ms IS NULL",
                 (now_ms, tenant_id, change_set_id, author_subject),
             )
             if result.rowcount != 1:
-                return False
+                return {"withdrawn": False, "revoked": False}
+            if (row.stage_attempt != 0 or grant["dispatches"] != 0
+                    or (row.stage_lease_owner and row.stage_lease_expires_at is not None
+                        and row.stage_lease_expires_at > now_ms)):
+                self._append_audit(conn, row, row.state, row.state,
+                                   f"stage-grant-withdrawn:{change_set_id}:{row.stage_attempt}",
+                                   "stage_grant_withdrawn")
+                return {"withdrawn": False, "revoked": True}
             self._transition_row(
                 conn, row, ChangeState.FAILED, row.version,
                 f"stage-grant-withdrawn:{change_set_id}:{row.stage_attempt}",
@@ -775,7 +788,7 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "WHERE tenant_id = ? AND change_set_id = ?",
                 (False, tenant_id, change_set_id),
             )
-            return True
+            return {"withdrawn": True, "revoked": True}
 
     def claim_stage(
         self, *, owner: str, lease_seconds: float = 30.0
