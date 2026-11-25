@@ -84,19 +84,24 @@ def compares_ports(prompt):
     return bool(re.search(r"\b(?:cables?|wires?|conduits?|equipment)\b", prompt)
                 and re.search(r"\b(?:paths?|routes?|runs?|detours?)\b", prompt)
                 and re.search(r"\bports?\b", prompt)
-                and (prefers_fewer_bends(prompt) or re.search(r"\b(?:equivalent|shortest)\b", prompt)))
+                and (prefers_fewer_bends(prompt)
+                     or re.search(r"\b(?:equivalent|shortest|best (?:physical )?ports)\b", prompt)))
 
 
 def equipment_ports(description):
-    """Read named travel headings with optional points in drawing units."""
-    sections = {}
+    """Read port lists by saved cable handle, or as one unqualified group."""
+    groups = {}
     for clause in re.split(r"[;\n]|\.(?=\s|$)", description):
-        match = re.fullmatch(r"\s*(departure|arrival) ports\s*:\s*(.+?)\s*", clause, re.I)
+        match = re.fullmatch(
+            r"\s*(?:(?:cable|wire|conduit)\s+([0-9a-f]{1,16})\s+)?"
+            r"(departure|arrival) ports\s*:\s*(.+?)\s*", clause, re.I)
         if not match:
             continue
-        side, entries = match.groups()
+        handle, side, entries = match.groups()
+        handle = handle.upper() if handle is not None else None
+        sections = groups.setdefault(handle, {})
         side = side.lower()
-        if side in sections:
+        if side in sections or len(groups) > 16:
             return {}
         options = {}
         for entry in re.split(r"\s*,(?![^()]*\))\s*|\s+or\s+", entries, flags=re.I):
@@ -111,10 +116,15 @@ def equipment_ports(description):
             point = (x, y) if x is not None else None
             options[name.casefold()] = (name, _HEADINGS[heading.lower()], point)
         sections[side] = tuple(options.values())
-    if sections.keys() != {"departure", "arrival"}:
+    if None in groups and len(groups) > 1:
         return {}
-    located = {point is not None for options in sections.values() for _, _, point in options}
-    return sections if len(located) == 1 else {}
+    for sections in groups.values():
+        if sections.keys() != {"departure", "arrival"}:
+            return {}
+        located = {point is not None for options in sections.values() for _, _, point in options}
+        if len(located) != 1:
+            return {}
+    return groups
 
 
 def matches(description):
@@ -437,34 +447,51 @@ def run(intake, params):
                 return ({"status": "needs_aisle_centerlines",
                          "message": "Swept-clearance routing requires an aisle network drawn as open centerlines."},
                         empty_overlay)
-        ports = __EQUIPMENT_PORTS__
-        headings = __EQUIPMENT_HEADINGS__ if ports is None else None
-        if ports == {}:
+        port_groups = __EQUIPMENT_PORTS__
+        headings = __EQUIPMENT_HEADINGS__ if port_groups is None else None
+        if port_groups == {}:
             return ({"status": "needs_equipment_ports",
-                     "message": "List headings under Departure ports and Arrival ports. For distinct locations, give every port as name east at (x, y) in drawing units."},
+                     "message": "Give both Departure ports and Arrival ports. Use name east at (x, y) for locations in drawing units. For separate cables, prefix both lists with Cable and its drawing handle."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         if headings is not None and None in headings:
             return ({"status": "needs_equipment_headings",
                      "message": "Specify the cable travel heading at departure and arrival."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         departure, arrival = headings or (None, None)
-        located = bool(ports and ports["departure"][0][2] is not None)
-        if located and len(cables) != 1:
+        common_ports = (port_groups or {}).get(None)
+        scoped = bool(port_groups and common_ports is None)
+        if scoped:
+            unknown = sorted(set(port_groups) - set(cables))
+            if unknown:
+                return ({"status": "unknown_cable_port_handles", "handles": unknown,
+                         "message": "Use handles of saved model-space cable routes."},
+                        {"highlight_handles": [], "markers": [], "polylines": []})
+            cables = {handle: edges for handle, edges in cables.items() if handle in port_groups}
+        if common_ports and common_ports["departure"][0][2] is not None and len(cables) != 1:
             return ({"status": "needs_single_cable_route",
-                     "message": "Draw one cable route to bind these departure and arrival port lists."},
+                     "message": "Prefix each list with Cable and its drawing handle when the drawing contains multiple cables."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
-        if located:
+        located_ports = {}
+        for handle, ports in (port_groups or {}).items():
+            if ports["departure"][0][2] is None:
+                continue
             bound_ports = {side: ports_by_point(options, None) for side, options in ports.items()}
             if bound_ports["departure"].keys() & bound_ports["arrival"].keys():
                 return ({"status": "needs_distinct_equipment_port_locations",
+                         "handle": handle,
                          "message": "Use separate locations for departure and arrival ports."},
                         {"highlight_handles": [], "markers": [], "polylines": []})
+            located_ports[handle] = bound_ports
             endpoints.update(point for options in bound_ports.values() for point in options)
         graph = build_graph(arrays, aisles, centerlines, endpoints, radius)
         findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
-        legal, violations = {}, {}
+        legal, violations, located_choices = {}, {}, {}
         for handle, edges in cables.items():
+            group = handle if scoped else None
+            ports = (port_groups or {}).get(group)
+            bound_ports = located_ports.get(group)
+            located = bound_ports is not None
             crossed = [name for name, outline in zip(obstacle_ids, arrays)
                        if any(enters_array(a, b, [outline]) for a, b in edges)]
             if crossed:
@@ -490,6 +517,7 @@ def run(intake, params):
             if radius is not None:
                 legal[handle] = route
             if located:
+                located_choices[handle] = route
                 continue
             drawn = math.fsum(math.dist(a, b) for a, b in edges)
             best = route["length"]
@@ -511,17 +539,22 @@ def run(intake, params):
             report["equal_length_fewer_bends"] = tied
         if headings is not None:
             report["equipment_travel_headings"] = {"departure": list(departure), "arrival": list(arrival)}
-        if ports:
+        if port_groups:
             report["port_choices"] = choices
         if radius is not None:
             report["shortest_legal_routes"] = legal
             report["clearance_violations"] = violations
             report["swept_half_width"] = float(radius)
-        alternatives = {**findings, **tied}
-        if located:
+        alternatives = {**findings, **tied, **located_choices}
+        markers = []
+        if scoped:
             alternatives.update(choices)
+            for handle, route in choices.items():
+                names = route["ports"]
+                markers.append({"pt": route["points"][0],
+                                "label": f"{handle}: {names['departure']} to {names['arrival']}"})
         alternatives.update({handle: legal[handle] for handle in violations if handle in legal})
-        return (report, {"highlight_handles": list(alternatives), "markers": [],
+        return (report, {"highlight_handles": list(alternatives), "markers": markers,
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
     endpoints = {h: (cables[h][0][0], cables[h][-1][1]) for h in crossings}

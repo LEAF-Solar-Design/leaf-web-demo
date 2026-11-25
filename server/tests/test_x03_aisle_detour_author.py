@@ -264,6 +264,45 @@ def test_equipment_ports_at_distinct_locations(ask, aisles, expected_points, nam
     assert report["avoidable_detours"] == {}
 
 
+@pytest.mark.parametrize("ask, expected", [
+    ("Pick the best physical ports for each of my two cables and label both chosen routes. "
+     "Cable B1 departure ports: Left east at (0,0), Upper east at (0,4); "
+     "Cable B2 arrival ports: Right east at (12,0); Cable B1 arrival ports: Right east at (8,0); "
+     "Cable B2 departure ports: Left east at (4,0).",
+     {"B1": ("Left", "Right", 0, 0, 8), "B2": ("Left", "Right", 4, 0, 12)}),
+    ("Choose ports for the shortest wire paths. Wire b2 arrival ports: Stop=east at (12,4); "
+     "Wire b1 arrival ports: End=east at (12,0); Wire b2 departure ports: Start=east at (4,4); "
+     "Wire b1 departure ports: Off east at (4,1) or Start east at (4,0).",
+     {"B1": ("Start", "End", 4, 0, 12), "B2": ("Start", "Stop", 4, 4, 12)}),
+    ("Find the fewest conduit elbows among shortest routes with equipment ports. "
+     "Conduit B2 departure ports: A east, Wrong north; Conduit B1 arrival ports: D east at (8,4); "
+     "Conduit B2 arrival ports: B east; Conduit B1 departure ports: C east at (0,4).",
+     {"B1": ("C", "D", 0, 4, 8), "B2": ("A", "B", 0, 4, 12)}),
+])
+def test_equipment_ports_bind_to_each_saved_cable(ask, expected):
+    rows = [
+        entity("Aisle", "C1", [(0, 0), (12, 0)]),
+        entity("Aisle", "C2", [(0, 4), (12, 4)]),
+        entity("Cable", "B2", [(0, 4), (12, 4)]),
+        entity("Cable", "B1", [(0, 0), (12, 0)]),
+    ]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Aisle", "Cable"], polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    assert report["port_choices"].keys() == expected.keys()
+    assert report["unavailable"] == {}
+    for handle, (departure, arrival, start, y, end) in expected.items():
+        route = report["port_choices"][handle]
+        assert route["ports"] == {"departure": departure, "arrival": arrival}
+        assert (route["length"], route["bends"]) == (end - start, 0)
+        assert route["points"][0] == [start, y]
+        assert route["points"][-1] == [end, y]
+        assert all(point[1] == y for point in route["points"])
+        assert {"pt": [start, y], "label": f"{handle}: {departure} to {arrival}"} in overlay["markers"]
+
+
 @pytest.mark.parametrize("description,cables,status", [
     ("Choose equipment ports in different physical locations for the shortest legal route and fewest elbows.",
      1, "needs_equipment_ports"),
@@ -273,6 +312,10 @@ def test_equipment_ports_at_distinct_locations(ask, aisles, expected_points, nam
      2, "needs_single_cable_route"),
     ("Choose the shortest cable route. Departure ports: A east at (0,0); Arrival ports: B east at (0,0).",
      1, "needs_distinct_equipment_port_locations"),
+    ("Choose the shortest cable route. Cable F1 departure ports: A east; Cable F1 arrival ports: B east.",
+     2, "unknown_cable_port_handles"),
+    ("Choose the shortest cable route. Cable B1 departure ports: A east; Arrival ports: B east.",
+     2, "needs_equipment_ports"),
 ])
 def test_equipment_port_locations_require_unambiguous_inputs(description, cables, status):
     rows = [entity("Cable", f"B{i:X}", [(0, i), (8, i)]) for i in range(cables)]
