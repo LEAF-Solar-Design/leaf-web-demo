@@ -402,6 +402,43 @@ def test_assignment_report_read_adapter_pins_version_and_preserves_store(graph, 
 
 
 @pytest.mark.parametrize(
+    ("case", "capacity", "unassigned"),
+    [("A", [(4, 2, 2)], 0), ("P", [(4, 1, 3)], 1), ("CB", [(3, 0, 3), (4, 0, 4)], 6)],
+)
+def test_assignment_report_reads_saved_state_without_preview(graph, tmp_path, monkeypatch, case, capacity, unassigned):
+    g = variant(graph, case)
+    if case in ("A", "P"):
+        _declined_total(g)
+    g = validate_graph(g)
+    backend, _ = seed(tmp_path, monkeypatch, g)
+    before = store.load_manifest(backend, TENANT, "solar")
+    params = {"mode": "saved", "expected_rev": g["rev"]}
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, "solar-assignment-report", params,
+        drawing_id="solar", source_version=1, job_id="saved-assignment-report")
+    report = result["output"]
+    assert report["status"] == "saved" and report["committed"] is False
+    assert "candidate_assignments" not in report
+    assert report["electrical_suitability"] == {
+        "status": "unknown", "reason": "mppt_voltage_current_limits_not_verified"}
+    saved = report["saved_state"]
+    assert len(saved["unassigned_string_refs"]) == unassigned
+    assert len(saved["assignments"]) == len(g["strings"]) - unassigned
+    assert [(c["total_dc_inputs"], c["occupied_inputs"], c["spare_inputs"])
+            for c in saved["collector_capacity"]] == capacity
+    assert result["source_version"] == 1 and result["graph_sha256"] == sha(g)
+    assert result["drawing_changed"] is False
+    assert store.load_manifest(backend, TENANT, "solar") == before
+    assert head_graph(backend) == g
+    if case == "A":
+        assert solar_local_read._load_builtin("solar-assignment-report").input_readiness(g)["input_ready"]
+        with pytest.raises(GraphValidationError, match="NO_UNASSIGNED_STRINGS"):
+            assignment_report(g)
+        with pytest.raises(GraphValidationError, match="STALE_GRAPH_REVISION"):
+            assignment_report(g, mode="saved", expected_rev=g["rev"] + 1)
+
+
+@pytest.mark.parametrize(
     ("case", "expected_capacity"),
     [("U", [(4, 0, 4)]), ("P", [(4, 1, 3)]), ("CB", [(3, 0, 3), (4, 0, 4)])],
 )
