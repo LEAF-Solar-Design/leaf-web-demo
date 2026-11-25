@@ -56,9 +56,10 @@ import time
 import uuid
 import zlib
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import requests
 
@@ -188,6 +189,129 @@ def global_daily_cap() -> int:
         return int(os.environ.get("LEAF_GUEST_UPLOADS_PER_DAY", "100"))
     except ValueError:
         return 100
+
+
+def _account_daily_cap(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if 0 <= value <= 1_000_000 else default
+
+
+def account_workspace_daily_cap() -> int:
+    return _account_daily_cap("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", 20)
+
+
+def account_global_daily_cap() -> int:
+    return _account_daily_cap("LEAF_ACCOUNT_UPLOADS_PER_DAY", 500)
+
+
+def account_quota_day(now=None) -> str:
+    instant = now if now is not None else datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc).strftime("%Y-%m-%d")
+
+
+def account_quota_resets_at(day: str) -> str:
+    midnight = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return (midnight + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+
+
+@dataclass(frozen=True)
+class AccountUploadCharge:
+    accepted: bool
+    scope: Optional[Literal["workspace", "global"]]
+    limit: Optional[int]
+    day: str
+    resets_at: str
+    workspace_id: str
+
+
+_ACCOUNT_QUOTA_LOCK = threading.Lock()
+_ACCOUNT_QUOTA_STATE: Dict[str, Dict[str, int]] = {}
+
+
+def reset_account_quota_state() -> None:
+    with _ACCOUNT_QUOTA_LOCK:
+        _ACCOUNT_QUOTA_STATE.clear()
+
+
+def check_and_count_account_upload(workspace_id: str) -> AccountUploadCharge:
+    day = account_quota_day()
+    workspace_id = str(workspace_id)
+    workspace_cap = account_workspace_daily_cap()
+    global_cap = account_global_daily_cap()
+    scope = None
+    if upload_store_mode() == "postgres":
+        db, _counter_type = _load_platform_counters()
+        counter = _postgres_counter()
+
+        def consume(conn):
+            workspace_result = counter.consume_in_transaction(
+                conn, namespace="account_upload_workspace",
+                key=f"{day}:{workspace_id}", limit=workspace_cap)
+            if not workspace_result.accepted:
+                raise _GuestCapExceeded("workspace")
+            global_result = counter.consume_in_transaction(
+                conn, namespace="account_upload_global", key=day,
+                limit=global_cap)
+            if not global_result.accepted:
+                raise _GuestCapExceeded("global")
+            _cleanup_old_postgres_counters(conn)
+
+        try:
+            db.run_transaction(consume, isolation="serializable", max_attempts=3)
+        except _GuestCapExceeded as exc:
+            scope = exc.scope
+    else:
+        with _ACCOUNT_QUOTA_LOCK:
+            state = _ACCOUNT_QUOTA_STATE.setdefault(day, {})
+            workspace_key = f"workspace:{workspace_id}"
+            if state.get(workspace_key, 0) >= workspace_cap:
+                scope = "workspace"
+            elif state.get("global", 0) >= global_cap:
+                scope = "global"
+            else:
+                state[workspace_key] = state.get(workspace_key, 0) + 1
+                state["global"] = state.get("global", 0) + 1
+    return AccountUploadCharge(
+        accepted=scope is None, scope=scope,
+        limit=workspace_cap if scope == "workspace" else None,
+        day=day, resets_at=account_quota_resets_at(day),
+        workspace_id=workspace_id)
+
+
+def refund_account_upload(charge: AccountUploadCharge) -> None:
+    if not charge.accepted:
+        return
+    try:
+        if upload_store_mode() == "postgres":
+            db, _counter_type = _load_platform_counters()
+
+            def refund(conn):
+                for namespace, key in (
+                    ("account_upload_workspace", f"{charge.day}:{charge.workspace_id}"),
+                    ("account_upload_global", charge.day),
+                ):
+                    conn.execute(
+                        """
+                        UPDATE guest_upload_counters
+                        SET value = GREATEST(value - 1, 0), updated_at = NOW()
+                        WHERE namespace = %(namespace)s AND counter_key = %(key)s
+                        """,
+                        {"namespace": namespace, "key": key})
+
+            db.run_transaction(refund, isolation="serializable", max_attempts=3)
+        else:
+            with _ACCOUNT_QUOTA_LOCK:
+                state = _ACCOUNT_QUOTA_STATE.get(charge.day)
+                if state is not None:
+                    for key in (f"workspace:{charge.workspace_id}", "global"):
+                        state[key] = max(0, state.get(key, 0) - 1)
+    except Exception:  # Fail closed: a failed refund leaves the slot consumed.
+        LOGGER.warning("account upload quota refund failed")
 
 
 def policy_view() -> Dict[str, Any]:

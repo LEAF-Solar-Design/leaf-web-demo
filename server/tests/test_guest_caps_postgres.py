@@ -261,3 +261,97 @@ def test_two_writers_share_global_limit(monkeypatch):
                 "global rejection must roll back the losing per-IP charge")
     finally:
         _clear_test_day(db, day)
+
+
+@pytest.mark.parametrize("refused", [None, "workspace", "global"])
+def test_account_counter_transaction_contract(monkeypatch, refused):
+    class Database(_FakeDatabase):
+        def run_transaction(self, operation, **kwargs):
+            self.options = kwargs
+            return super().run_transaction(operation, **kwargs)
+
+    class Counter:
+        def __init__(self):
+            self.calls = []
+
+        def consume_in_transaction(self, conn, *, namespace, key, limit):
+            self.calls.append((namespace, key, limit))
+            scope = "workspace" if namespace == "account_upload_workspace" else "global"
+            return SimpleNamespace(accepted=scope != refused)
+
+    database, counter, cleanups = Database(), Counter(), []
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(guest_uploads, "_load_platform_counters", lambda: (database, object))
+    monkeypatch.setattr(guest_uploads, "_postgres_counter", lambda: counter)
+    monkeypatch.setattr(guest_uploads, "account_quota_day", lambda: "2026-11-25")
+    monkeypatch.setattr(guest_uploads, "_cleanup_old_postgres_counters", cleanups.append)
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "7")
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_DAY", "99")
+    monkeypatch.delenv("LEAF_GUEST_SECRET", raising=False)
+    monkeypatch.delenv("LEAF_GUEST_CAP_HMAC_SECRET", raising=False)
+
+    charge = guest_uploads.check_and_count_account_upload("verified-workspace")
+    expected = [("account_upload_workspace", "2026-11-25:verified-workspace", 7)]
+    if refused != "workspace":
+        expected.append(("account_upload_global", "2026-11-25", 99))
+    assert counter.calls == expected
+    assert database.options == {"isolation": "serializable", "max_attempts": 3}
+    assert database.rolled_back is (refused is not None)
+    assert len(cleanups) == (1 if refused is None else 0)
+    assert charge.accepted is (refused is None)
+    assert charge.scope == refused
+    assert charge.limit == (7 if refused == "workspace" else None)
+
+
+def test_account_postgres_cleanup_needs_no_guest_secret(monkeypatch):
+    database = _RecordingDatabase()
+    counter = _FakeCounter(None)
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(guest_uploads, "_load_platform_counters", lambda: (database, object))
+    monkeypatch.setattr(guest_uploads, "_postgres_counter", lambda: counter)
+    monkeypatch.delenv("LEAF_GUEST_SECRET", raising=False)
+    monkeypatch.delenv("LEAF_GUEST_CAP_HMAC_SECRET", raising=False)
+    charge = guest_uploads.check_and_count_account_upload("workspace")
+    assert charge.accepted
+    assert database.connection.calls[0][0].startswith("DELETE FROM guest_upload_counters")
+
+
+def test_account_postgres_refund_uses_receipt_day_and_one_transaction(monkeypatch):
+    class Database(_RecordingDatabase):
+        def run_transaction(self, operation, **kwargs):
+            self.options = kwargs
+            return super().run_transaction(operation, **kwargs)
+
+    database = Database()
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(guest_uploads, "_load_platform_counters", lambda: (database, object))
+    monkeypatch.setattr(guest_uploads, "account_quota_day", lambda: "2026-11-26")
+    charge = guest_uploads.AccountUploadCharge(
+        True, None, None, "2026-11-25", "2026-11-26T00:00:00Z", "workspace")
+    guest_uploads.refund_account_upload(charge)
+    assert database.options == {"isolation": "serializable", "max_attempts": 3}
+    assert [params for _, params in database.connection.calls] == [
+        {"namespace": "account_upload_workspace", "key": "2026-11-25:workspace"},
+        {"namespace": "account_upload_global", "key": "2026-11-25"},
+    ]
+    assert all("GREATEST(value - 1, 0)" in query for query, _ in database.connection.calls)
+
+
+def test_account_postgres_failure_never_falls_back_and_refund_is_safe(monkeypatch, caplog):
+    class Database:
+        @staticmethod
+        def run_transaction(operation, **kwargs):
+            raise RuntimeError("private-workspace-id database failure")
+
+    guest_uploads.reset_account_quota_state()
+    monkeypatch.setattr(guest_uploads, "upload_store_mode", lambda: "postgres")
+    monkeypatch.setattr(guest_uploads, "_load_platform_counters", lambda: (Database, object))
+    monkeypatch.setattr(guest_uploads, "_postgres_counter", lambda: _FakeCounter(None))
+    with pytest.raises(RuntimeError):
+        guest_uploads.check_and_count_account_upload("private-workspace-id")
+    assert guest_uploads._ACCOUNT_QUOTA_STATE == {}
+    charge = guest_uploads.AccountUploadCharge(
+        True, None, None, "2026-11-25", "2026-11-26T00:00:00Z", "private-workspace-id")
+    guest_uploads.refund_account_upload(charge)
+    assert "account upload quota refund failed" in caplog.text
+    assert "private-workspace-id" not in caplog.text
