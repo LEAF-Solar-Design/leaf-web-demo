@@ -107,7 +107,7 @@ def test_crop_and_thaw_composition(ask, raw, expected):
 
 @pytest.mark.parametrize("tags,expected", [
     (((340, "FF"),), "missing or ambiguous"),
-    (((51, 0.5),), "untwisted orthographic"),
+    (((16, 1),), "orthographic top view"),
 ])
 def test_crop_evidence_refused_without_changing_layer_count(tags, expected):
     raw = crop_drawing(6, tags)
@@ -118,3 +118,49 @@ def test_crop_evidence_refused_without_changing_layer_count(tags, expected):
     _, layer_only, _ = tools_fallback.author_tool(ASKS[0])
     status, payload = invoke(layer_only, raw)
     assert status == "ok" and payload[0]["total"] == 3, payload
+
+
+def with_module_footprint(raw, half_width):
+    placeholder = b"0\nPOINT\n10\n0\n20\n0\n"
+    assert raw.count(placeholder) == 1
+    outline = [(0, "LWPOLYLINE"), (5, "D1"), (8, "0"), (90, 4), (70, 1)]
+    outline.extend(pair for x, y in ((-half_width, -.25), (half_width, -.25),
+                                     (half_width, .25), (-half_width, .25))
+                   for pair in ((10, x), (20, y)))
+    return raw.replace(placeholder, "".join(f"{c}\n{v}\n" for c, v in outline).encode())
+
+
+@pytest.mark.parametrize("ask,twist,boundary,half_width,expected", [
+    (
+        "Count only thawed panels whose complete footprints fit the crop of a twisted viewport.",
+        90, ((-1, 1), (1, 1), (1, 3), (-1, 3)), .25, ["C1[0,0]/B1[0,1]"],
+    ),
+    (
+        "Which PV modules on unfrozen layers are wholly inside the viewport A1 clipping boundary?",
+        -90, ((-1, -4), (1, -4), (1, -2.5), (-1, -2.5)), .25, ["C2[0,0]"],
+    ),
+    (
+        "List panel placements on thawed layers whose footprints are entirely inside viewport A1's crop.",
+        180, ((-5, -1), (3, -1), (3, 1), (.5, 1), (.5, 0), (.25, 0), (.25, 1), (-5, 1)),
+        2, ["C1[0,0]/B1[0,1]", "C2[0,0]"],
+    ),
+])
+def test_complete_footprints_in_twisted_viewports(ask, twist, boundary, half_width, expected):
+    # Positive 90 degrees maps x to +y. Negative 90 maps x to -y.
+    # At 180 degrees the first module spans the notch even though all four
+    # corners remain inside. The second module stays on the negative-x side
+    # and the service module touches the left boundary without crossing it.
+    raw = with_module_footprint(crop_drawing(3, ((51, twist),), boundary), half_width)
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, raw, {"viewport_handle": "A1"})
+    assert status == "ok", payload
+    assert payload[0]["visible_paths"] == expected
+    assert payload[0]["total"] == len(expected)
+    assert "complete thawed panel footprints" in payload[0]["scope"]
+
+
+def test_footprint_request_rejects_missing_outline():
+    _, source, _ = tools_fallback.author_tool(
+        "Count thawed panels whose complete footprints fit in the viewport A1 crop.")
+    status, payload = invoke(source, crop_drawing(3, ((51, 45),)))
+    assert status == "tool_error" and "missing complete panel footprint" in str(payload).lower()

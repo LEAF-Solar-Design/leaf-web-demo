@@ -24,17 +24,17 @@ def _crop(fields, boundaries):
     flags = int(fields.get(90, 0))
     direction = tuple(float(fields.get(code, default))
                       for code, default in ((16, 0), (26, 0), (36, 1)))
+    twist = math.radians(float(fields.get(51, 0)))
     if (flags & 7 or direction[:2] != (0, 0) or not math.isfinite(direction[2])
-            or direction[2] <= 0 or float(fields.get(51, 0)) != 0):
-        raise ValueError("Viewport crop requires an untwisted orthographic top view.")
+            or direction[2] <= 0 or not math.isfinite(twist)):
+        raise ValueError("Viewport crop requires a finite orthographic top view.")
     cx, cy, width, height, view_height = (float(fields[code]) for code in (10, 20, 40, 41, 45))
     pan_x, pan_y, target_x, target_y = (float(fields.get(code, 0)) for code in (12, 22, 17, 27))
     if (not all(map(math.isfinite, (cx, cy, width, height, view_height, pan_x, pan_y, target_x, target_y)))
             or min(width, height, view_height) <= 0):
         raise ValueError("Invalid viewport dimensions or model view center.")
     scale = height / view_height
-    offset = (cx - (pan_x + target_x) * scale, cy - (pan_y + target_y) * scale)
-    if not math.isfinite(scale) or scale <= 0 or not all(map(math.isfinite, offset)):
+    if not math.isfinite(scale) or scale <= 0:
         raise ValueError("Viewport projection exceeds the numeric range.")
     clip_handle = fields.get(340, "").upper()
     if clip_handle or flags & 65536:
@@ -50,7 +50,11 @@ def _crop(fields, boundaries):
     else:
         polygon = [(cx + x * width / 2, cy + y * height / 2)
                    for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
-    return {"points": polygon, "inverted": False, "scale": scale, "offset": offset}
+    if not all(math.isfinite(value) for point in polygon for value in point):
+        raise ValueError("Viewport crop exceeds the numeric range.")
+    return {"points": polygon, "inverted": False, "scale": scale,
+            "paper_center": (cx, cy), "view_center": (pan_x, pan_y),
+            "target": (target_x, target_y), "twist": twist}
 
 
 def attach_viewports(pairs, out):
@@ -107,8 +111,65 @@ def attach_viewports(pairs, out):
 
 def build_body(description):
     crop = bool(re.search(r"\b(?:crops?|cropped|clip(?:ped|ping)?|boundar(?:y|ies))\b", description, re.I))
-    return CLIP_SOURCE + INSTANCE_SOURCE + _BODY.replace(
-        "__HANDLE__", repr(viewport_handle(description))).replace("__CROP__", repr(crop))
+    footprint = crop and bool(re.search(r"\b(?:footprints?|fully|entirely|wholly|completely)\b",
+                                       description, re.I))
+    return CLIP_SOURCE + INSTANCE_SOURCE + _GEOMETRY + _BODY.replace(
+        "__HANDLE__", repr(viewport_handle(description))).replace(
+        "__CROP__", repr(crop)).replace("__FOOTPRINT__", repr(footprint))
+
+
+_GEOMETRY = """
+def cross(a, b):
+    return a[0] * b[1] - a[1] * b[0]
+
+
+def project_to_paper(crop, point):
+    # WCS to DCS is the inverse of the viewport's negative view twist about
+    # its WCS target. DCS-to-paper then pans and scales around the view center.
+    x, y = (value - target for value, target in zip(point, crop["target"]))
+    angle = crop["twist"]
+    cosine, sine = math.cos(angle), math.sin(angle)
+    dcs = (cosine * x - sine * y, sine * x + cosine * y)
+    paper = tuple(center + (value - pan) * crop["scale"]
+                  for center, value, pan in zip(crop["paper_center"], dcs, crop["view_center"]))
+    if not all(map(math.isfinite, paper)):
+        raise ValueError("Viewport placement exceeds the numeric range.")
+    return paper
+
+
+def crop_contains_footprint(crop, footprint, budget):
+    boundary = crop["points"]
+    budget[0] -= 2 * len(boundary) * len(footprint)
+    if budget[0] < 0:
+        raise ValueError("Viewport footprint containment exceeds the work limit.")
+    if not all(clip_accepts(crop, point) for point in footprint):
+        return False
+
+    # In a concave crop, endpoints can both be inside while an edge crosses
+    # a notch. Split each footprint edge at crop crossings and sample each span.
+    boundary_edges = list(zip(boundary, boundary[1:] + boundary[:1]))
+    for start, end in zip(footprint, footprint[1:] + footprint[:1]):
+        edge = (end[0] - start[0], end[1] - start[1])
+        cuts = {0.0, 1.0}
+        for first, last in boundary_edges:
+            other = (last[0] - first[0], last[1] - first[1])
+            denominator = cross(edge, other)
+            if denominator:
+                delta = (first[0] - start[0], first[1] - start[1])
+                t, u = cross(delta, other) / denominator, cross(delta, edge) / denominator
+                if 0 < t < 1 and 0 <= u <= 1:
+                    cuts.add(t)
+        cuts = sorted(cuts)
+        budget[0] -= (len(cuts) - 1) * len(boundary)
+        if budget[0] < 0:
+            raise ValueError("Viewport footprint containment exceeds the work limit.")
+        for low, high in zip(cuts, cuts[1:]):
+            midpoint = (low + high) / 2
+            point = tuple(origin + midpoint * delta for origin, delta in zip(start, edge))
+            if not clip_accepts(crop, point):
+                return False
+    return True
+"""
 
 
 _BODY = """
@@ -138,18 +199,24 @@ def run(intake, params):
         crop = view.get("crop")
         if not crop:
             raise ValueError(view.get("crop_error", "Missing viewport crop evidence."))
+        budget = [2000000]
         def placement_filter(chain):
             frame = identity_frame()
-            for ref, block, row, col in chain[:-1]:
+            for ref, block, row, col in chain:
                 frame = insert_frame(frame, ref, block.get("base", (0, 0, 0)), row, col)
-            ref, _, row, col = chain[-1]
-            x, y, _ = insert_frame(frame, ref, (0, 0, 0), row, col)[0]
-            px = x * crop["scale"] + crop["offset"][0]
-            py = y * crop["scale"] + crop["offset"][1]
-            if not math.isfinite(px) or not math.isfinite(py):
-                raise ValueError("Viewport placement exceeds the numeric range.")
-            return clip_accepts(crop, (px, py))
-        scope = "thawed panel placement anchors inside the viewport crop"
+            if __FOOTPRINT__:
+                outline = intake.get("panel_footprints", {}).get(ref["name"].casefold(), {})
+                if not outline.get("points") or not block.get("complete") or block.get("nested_inserts"):
+                    raise ValueError(outline.get("error", "Missing complete panel footprint."))
+                if not cross(frame[1], frame[2]):
+                    raise ValueError("Panel footprint projects to a degenerate area.")
+                footprint = [project_to_paper(crop, transform_point(frame, (*point, 0)))
+                             for point in outline["points"]]
+                return crop_contains_footprint(crop, footprint, budget)
+            anchor = transform_point(frame, block.get("base", (0, 0, 0)))
+            return clip_accepts(crop, project_to_paper(crop, anchor))
+        scope = ("complete thawed panel footprints inside the viewport crop" if __FOOTPRINT__
+                 else "thawed panel placement anchors inside the viewport crop")
     result = visible_instances(intake, evidence, hidden, set(layers.values()), placement_filter)
     return {**result, "viewport_handle": selected, "scope": scope}, None
 """
