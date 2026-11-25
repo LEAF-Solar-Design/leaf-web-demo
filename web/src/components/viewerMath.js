@@ -79,8 +79,8 @@ function rectUsable(rect) {
 export function ndcFromClient(rect, clientX, clientY) {
   if (!rectUsable(rect)) return null
   return {
-    x: ((clientX - rect.left) / rect.width) * 2 - 1,
-    y: -(((clientY - rect.top) / rect.height) * 2 - 1),
+    x: (clientX - rect.left - rect.width / 2) / (rect.width / 2),
+    y: (rect.height / 2 - (clientY - rect.top)) / (rect.height / 2),
   }
 }
 
