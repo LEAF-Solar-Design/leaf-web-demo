@@ -100,6 +100,46 @@ def test_corridor_clearance_partitions_by_obstacle(ask, route, obstacles, expect
     assert len(overlay["markers"]) == len(boundaries)
 
 
+@pytest.mark.parametrize("ask, outline, keepout, expected", [
+    ("Find the shortest tray path inside the closed aisle. Tray width 1 m and side clearance .25 m.",
+     [(-6, -.75), (6, -.75), (6, 3), (-6, 3)],
+     [(-1, .75), (1, .75), (1, 2), (-1, 2)], 10),
+    ("Find the shortest route through this closed aisle for the cable tray. "
+     "Use tray width 100 cm and side clearance 25 cm.",
+     [(-6, -3), (6, -3), (6, 2), (2, 2), (2, 1), (-2, 1), (-2, 2), (-6, 2)],
+     None, 10),
+    ("Show the minimum-length tray route in the closed aisle. Tray width 1 m and side clearance .25 m.",
+     [(-6, -3), (6, -3), (6, 2), (2, 2), (2, -1), (-2, -1), (-2, 2), (-6, 2)],
+     None, None),
+    ("Show the shortest legal tray route inside the closed aisle. "
+     "Tray width 1 m and side clearance .25 m.",
+     [(-6, -2), (6, -2), (6, 3), (-6, 3)],
+     [(-1, .5), (1, .5), (1, 2), (-1, 2)], None),
+], ids=["exact-contact", "concave-aisle", "boundary-crossing", "keepout-clearance"])
+def test_certifies_straight_closed_aisle_route(ask, outline, keepout, expected):
+    rows = [entity("Closed Aisle", "C1", outline, closed=True),
+            entity("Cable", "B1", [START, (0, -.125), END])]
+    if keepout:
+        rows.append(entity("Roof Keepout", "A1", keepout, closed=True))
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({row["layer"] for row in rows}), polylines=rows))
+    raw = raw.replace(b"9\n$HANDSEED\n", b"9\n$INSUNITS\n70\n6\n9\n$HANDSEED\n", 1)
+    spec, source, _ = tools_fallback.author_tool(ask)
+    assert spec["engine_op"] == "aisle_detour"
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    if expected is None:
+        assert report["shortest_legal_routes"] == {}
+        assert report["unavailable"] == {"B1": "closed_aisle_detour_unresolved"}
+        assert overlay["polylines"] == []
+    else:
+        assert report["unavailable"] == {}
+        route = report["shortest_legal_routes"]["B1"]
+        assert route["length"] == expected
+        assert route["points"] == [list(START), list(END)]
+        assert overlay["polylines"] == [{"pts": route["points"]}]
+
+
 def simple_paths(edges, start, end):
     # Exhaust every simple path in the independently enumerated legal graph.
     pending = [([start], 0.0)]

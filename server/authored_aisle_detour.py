@@ -287,6 +287,14 @@ def point_segment_distance_squared(point, a, b):
     return (px - t*dx)**2 + (py - t*dy)**2
 
 
+def separated_from_edges(a, b, edges, radius_squared):
+    # Once the segments are disjoint, a nearest pair includes an endpoint.
+    return all(min(point_segment_distance_squared(a, p, q),
+                   point_segment_distance_squared(b, p, q),
+                   point_segment_distance_squared(p, a, b),
+                   point_segment_distance_squared(q, a, b)) >= radius_squared for p, q in edges)
+
+
 def violates_clearance(a, b, arrays, radius):
     x0, y0, x1, y1 = bounds((a, b))
     extent = (x0-radius, y0-radius, x1+radius, y1+radius)
@@ -300,11 +308,7 @@ def violates_clearance(a, b, arrays, radius):
         split_at_edges(a, difference(b, a), edges, cuts)
         if cuts:
             return True
-        # For disjoint segments a nearest pair includes a segment endpoint.
-        if any(min(point_segment_distance_squared(a, p, q),
-                   point_segment_distance_squared(b, p, q),
-                   point_segment_distance_squared(p, a, b),
-                   point_segment_distance_squared(q, a, b)) < limit for p, q in edges):
+        if not separated_from_edges(a, b, edges, limit):
             return True
     return False
 
@@ -313,6 +317,20 @@ def inside_drawn_aisles(a, b, aisles):
     hit = nearby(a, b, aisles)
     return bool(hit) and all(any(location(p, edges) >= 0 for box, edges in hit)
                              for p in intervals(a, b, hit))
+
+
+def certified_straight_aisle_route(a, b, aisles, arrays, radius):
+    # Containment within any one footprint certifies the whole swept segment.
+    # A route that needs a detour or crosses an internal footprint seam needs
+    # an offset-domain solver.
+    for box, edges in nearby(a, b, aisles):
+        if location(a, edges) != 1 or location(b, edges) != 1:
+            continue
+        cuts = set()
+        split_at_edges(a, difference(b, a), edges, cuts)
+        if not cuts and separated_from_edges(a, b, edges, radius**2):
+            return not violates_clearance(a, b, arrays, radius)
+    return False
 
 
 def add_edge(graph, a, b):
@@ -664,6 +682,7 @@ def run(intake, params):
     if __COMPARE_LENGTHS__:
         dimensions = __TRAY_DIMENSIONS__
         radius = None
+        closed_aisle = False
         if dimensions is not None:
             empty_overlay = {"highlight_handles": [], "markers": [], "polylines": []}
             if not dimensions:
@@ -678,7 +697,8 @@ def run(intake, params):
             radius = (width/2 + side) / Fraction(unit)
             if __CORRIDOR_CHECK__:
                 return corridor_clearance(cables, arrays, obstacle_ids, radius)
-            if not centerlines or aisles:
+            closed_aisle = bool(aisles and not centerlines and __EQUIPMENT_PORTS__ is None)
+            if not closed_aisle and (not centerlines or aisles):
                 return ({"status": "needs_aisle_centerlines",
                          "message": "Swept-clearance routing requires an aisle network drawn as open centerlines."},
                         empty_overlay)
@@ -723,7 +743,7 @@ def run(intake, params):
             return ({"status": "needs_two_located_port_groups",
                      "message": "Give located departure and arrival ports for each of two saved cable handles."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
-        graph = build_graph(arrays, aisles, centerlines, endpoints, radius)
+        graph = {} if closed_aisle else build_graph(arrays, aisles, centerlines, endpoints, radius)
         if __JOINT_PORTS__:
             return joint_port_report(graph, located_ports, __SHAREABLE_PORTS__)
         findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
@@ -749,6 +769,12 @@ def run(intake, params):
             if ports and not located:
                 bound_ports = {"departure": ports_by_point(ports["departure"], start),
                                "arrival": ports_by_point(ports["arrival"], end)}
+            if closed_aisle:
+                if not certified_straight_aisle_route(start, end, aisles, arrays, radius):
+                    unavailable[handle] = "closed_aisle_detour_unresolved"
+                    continue
+                graph = {}
+                add_edge(graph, start, end)
             route = shortest(graph, start, end, departure, arrival, bound_ports if ports else None)
             if route["status"] != "found":
                 unavailable[handle] = route["status"]
@@ -795,6 +821,8 @@ def run(intake, params):
                 markers.append({"pt": route["points"][0],
                                 "label": f"{handle}: {names['departure']} to {names['arrival']}"})
         alternatives.update({handle: legal[handle] for handle in violations if handle in legal})
+        if closed_aisle:
+            alternatives.update(legal)
         return (report, {"highlight_handles": list(alternatives), "markers": markers,
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
