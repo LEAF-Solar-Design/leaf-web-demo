@@ -43,10 +43,12 @@ def _centroid(pts: List[List[float]]) -> Tuple[float, float]:
     return (sx / len(pts), sy / len(pts))
 
 
-def _all_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+def _model_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     for key in ("polylines", "inserts", "faces3d"):
         for ent in intake.get(key) or []:
+            if ent.get("space") == "paper":
+                continue
             layer = ent.get("layer", "0")
             counts[layer] = counts.get(layer, 0) + 1
     return counts
@@ -69,7 +71,7 @@ def _bounds(polylines: List[Dict[str, Any]]) -> Tuple[float, float, float, float
 # --------------------------------------------------------------------------- #
 def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None] | dict:
     layer = params.get("layer")
-    counts = _all_entities_by_layer(intake)
+    counts = _model_entities_by_layer(intake)
     if layer:
         layers = intake.get("layers") or []
         if layer not in counts and not any(
