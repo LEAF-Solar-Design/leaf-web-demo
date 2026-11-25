@@ -134,6 +134,73 @@ describe('project corpus evaluation flow', () => {
     return client
   }
 
+  it.each([
+    [1, project, 200],
+    [3, project, 200],
+    [2, '22222222-3333-4444-8555-666666666666', 200],
+    [1, project, 422],
+    [0, '', 200],
+  ])('waits for saved scope hydration before Runs discovery (%i corpus blocks, project %s, status %i)', async (count, savedProject, status) => {
+    const response = options()
+    let graph = emptyGraph()
+    for (let i = 0; i < count; i += 1) graph = addBlock(graph, response.manifest)
+    if (!count) {
+      graph = addBlock(graph, registry['constant@1.0.0'])
+      graph.blocks[0].settings = { value: 7 }
+    }
+    for (const block of count ? graph.blocks : []) block.settings = { project_id: savedProject,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const json = (body, code = 200) => ({ ok: code < 400, status: code, json: async () => body })
+    let releaseGraph, releaseManifest, revisionRequested = false
+    const graphReply = new Promise(resolve => { releaseGraph = resolve })
+    const manifestReply = new Promise(resolve => { releaseManifest = resolve })
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => {
+      if (url.endsWith('/head')) return json({ revision: 4 })
+      if (url.endsWith('/revisions/4')) { revisionRequested = true; return graphReply }
+      return json({})
+    }) })
+    client.setDocId('scope-hydration')
+    const discoveries = []
+    const fetchImpl = vi.fn(async url => {
+      const parsed = new URL(url, window.location.origin)
+      if (parsed.pathname.endsWith('/corpus-options')) return manifestReply
+      if (parsed.pathname.endsWith('/runs')) {
+        discoveries.push(Object.fromEntries(parsed.searchParams))
+        return json(status === 200 ? { runs: [] } : { detail: 'lab_run_project_mismatch' }, status)
+      }
+      return json({})
+    })
+    vi.stubGlobal('fetch', fetchImpl)
+    const previousToken = localStorage.getItem('leaf.jwt')
+    localStorage.setItem('leaf.jwt', `e30.${btoa(JSON.stringify({ sub: 'scope-hydration-owner' }))}.test`)
+    let view
+    try {
+      view = render(<GraphView client={client} />)
+      await waitFor(() => expect(client.state.headLoaded).toBe(true))
+      expect(discoveries).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: 'Open', exact: true }))
+      await waitFor(() => expect(revisionRequested).toBe(true))
+      expect(discoveries).toEqual([])
+      await act(async () => { releaseGraph(json({ revision: 4, graph })) })
+      if (count) {
+        await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('/corpus-options'))).toBe(true))
+        expect(discoveries).toEqual([])
+        await act(async () => { releaseManifest(json(response)) })
+      }
+      await waitFor(() => expect(discoveries.length).toBeGreaterThan(0))
+      expect(discoveries.every(query => query.doc_id === 'scope-hydration' && query.project_id === savedProject)).toBe(true)
+      if (status === 422) expect(await screen.findByText('Previous runs could not be checked. Recover before starting another run.')).toBeVisible()
+      else expect(await screen.findByRole('button', { name: 'Run saved revision r4' })).toBeEnabled()
+      expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
+      expect(client.state.restoredGraph).toEqual(graph)
+    } finally {
+      view?.unmount()
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
   it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open loads %i pinned blocks with delayed reveal %s', async (blockCount, delayedReveal) => {
     const response = options()
     response.manifest.settings_schema.properties.parameters = {

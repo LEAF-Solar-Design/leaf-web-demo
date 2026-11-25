@@ -328,6 +328,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   }, [restored.key, hidden])
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
   const [recoveredRun, setRecoveredRun] = useState(null)
+  // A loaded head does not mean Open has loaded its graph. The default canvas
+  // can still be ready while the saved revision (and its project) is in flight.
+  const runScopeGraph = client.state.lastSaved?.graph || restored.graph || initialDocument
+  const runScopeReady = Boolean(runScopeGraph) && restored.key === client.state.restoredKey
   const graphProject = live.draft?.document.blocks.map(block => block.settings?.project_id || block.settings?.drawing?.project_id).find(Boolean) || ''
   const projectId = route?.params?.project_id || graphProject
   const activeProject = useRef(projectId)
@@ -453,6 +457,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     streams.current.add(stream)
   }
   async function recoverRuns() {
+    if (!runScopeReady) return false
     if (!receiptScope) return true
     if (discovery.current?.key === recoveryKey) return discovery.current.promise
     const scope = currentRunScope(), docId = client.currentDocId()
@@ -509,11 +514,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     return ok
   }
   useEffect(() => {
-    if (onRun || hidden || !live.ready || !client.state.headLoaded || client.state.head == null || explicitlySignedOut.current) return
+    if (onRun || hidden || !live.ready || !runScopeReady || !client.state.headLoaded || client.state.head == null || explicitlySignedOut.current) return
     void recoverRuns()
-  }, [recoveryKey, hidden, live.ready, client.state.headLoaded, onRun])
+  }, [recoveryKey, hidden, live.ready, runScopeReady, client.state.headLoaded, onRun])
   async function runSaved() {
-    if (explicitlySignedOut.current || submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
+    if (explicitlySignedOut.current || submissionPending.current || !runScopeReady || !client.state.headLoaded || client.state.head == null || !live.ready) return
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
