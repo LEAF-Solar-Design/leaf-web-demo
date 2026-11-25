@@ -123,15 +123,25 @@ class ProjectArtifactSink:
         if write_loop.drawing_mutations_refusal() is not None:
             _fail("ARTIFACT_WRITES_DRAINED")
         backend = self.backend if self.backend is not None else _backend(self.binding["organization_id"])
+        blob_key = _key(self.binding, prepared.meta["content_sha256"], blob=True)
         try:
-            backend.put_if_absent_or_verify(
-                _key(self.binding, prepared.meta["content_sha256"], blob=True), prepared.content)
+            backend.put_if_absent_or_verify(blob_key, prepared.content)
             backend.put_if_absent_or_verify(
                 _key(self.binding, prepared.meta["artifact_id"]), prepared.meta_bytes)
         except standalone.store.ImmutableConflict:
             _fail("ARTIFACT_CONFLICT")
         except Exception:
             _fail("ARTIFACT_STORE_UNAVAILABLE")
+        # A metadata repair can reuse a blob shared by several artifact records.
+        # Verify its bytes after metadata publication before acknowledging success.
+        try:
+            published = backend.get(blob_key)
+        except KeyError:
+            _fail("ARTIFACT_CORRUPT")
+        except Exception:
+            _fail("ARTIFACT_STORE_UNAVAILABLE")
+        if type(published) is not bytes or published != prepared.content:
+            _fail("ARTIFACT_CORRUPT")
         return prepared.ref
 
 
