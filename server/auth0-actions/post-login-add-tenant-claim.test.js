@@ -151,3 +151,39 @@ assert.deepEqual(action.deriveRoles(event({})), []);
     console.log('post-login tenant claim tests passed');
   });
 }
+
+// Handler omits org_id unless the user has a non-empty organization id.
+(async () => {
+  async function recordedClaims(loginEvent) {
+    const calls = [];
+    const api = {
+      accessToken: {
+        setCustomClaim: (name, value) => { calls.push([name, value]); },
+      },
+    };
+    await action.onExecutePostLogin(loginEvent, api);
+    return calls;
+  }
+
+  const soloClaims = [
+    [action.CLAIM_NS + 'tenant_id', 'auth0|test'],
+    [action.CLAIM_NS + 'tier', 'hosted_starter'],
+    [action.CLAIM_NS + 'roles', []],
+  ];
+  assert.deepEqual(await recordedClaims(event({})), soloClaims);
+  assert.deepEqual(await recordedClaims(event({
+    leaf: { organization_id: 'org-x' },
+  })), [
+    [action.CLAIM_NS + 'tenant_id', 'org-x'],
+    [action.CLAIM_NS + 'org_id', 'org-x'],
+    [action.CLAIM_NS + 'tier', 'hosted_starter'],
+    [action.CLAIM_NS + 'roles', []],
+  ]);
+  assert.deepEqual(await recordedClaims(event({
+    leaf: { organization_id: '' },
+  })), soloClaims);
+  assert.deepEqual(await recordedClaims({ user: {} }), []);
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
