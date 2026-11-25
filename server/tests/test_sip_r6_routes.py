@@ -562,3 +562,45 @@ def test_sip_r6f_float_before_service(http, monkeypatch):
     assert calls == []
     assert post(http).status_code == 200
     assert calls == [True]
+
+@pytest.mark.parametrize("requested,expected", [
+    ("bytes=2-8", slice(2, 9)),
+    ("bytes=3-", slice(3, None)),
+    ("bytes=-5", slice(-5, None)),
+])
+def test_project_artifact_byte_range(http, requested, expected):
+    saved = files.save(http.s)
+    path = file_path(http, saved.meta["artifact_id"])
+    etag = '"' + saved.meta["content_sha256"] + '"'
+    response = http.client.get(path, headers={"Range": requested, "If-None-Match": '"other"'})
+    start, stop, _ = expected.indices(len(saved.content))
+    assert response.status_code == 206
+    assert response.content == saved.content[expected]
+    assert response.headers["content-range"] == f"bytes {start}-{stop - 1}/{len(saved.content)}"
+    assert response.headers["content-length"] == str(stop - start)
+    assert response.headers["etag"] == etag
+    assert response.headers["accept-ranges"] == "bytes"
+    cached = http.client.get(path, headers={"Range": requested, "If-None-Match": etag})
+    assert cached.status_code == 304 and not cached.content
+    full = http.client.get(path, headers={"Range": requested, "If-Range": '"old"'})
+    assert full.status_code == 200 and full.content == saved.content
+
+
+def test_project_artifact_range_limits(http):
+    saved = files.save(http.s)
+    path = file_path(http, saved.meta["artifact_id"])
+    size = len(saved.content)
+    for requested in (f"bytes={size}-", "bytes=-0"):
+        response = http.client.get(path, headers={"Range": requested})
+        assert response.status_code == 416 and not response.content
+        assert response.headers["content-range"] == f"bytes */{size}"
+    for requested in ("bytes=0-999999", "bytes=-999999"):
+        response = http.client.get(path, headers={"Range": requested})
+        assert response.status_code == 206 and response.content == saved.content
+    for requested in ("bytes=7-1", "items=0-1", "bytes=0-1,3-4"):
+        response = http.client.get(path, headers={"Range": requested})
+        assert response.status_code == 200 and response.content == saved.content
+    http.principal["member"] = False
+    denied = http.client.get(path, headers={"Range": "bytes=0-1", "If-None-Match": "*"})
+    refusal(denied, "SIP_R1_PROJECT_FORBIDDEN", 403)
+    assert "content-range" not in denied.headers and "etag" not in denied.headers
