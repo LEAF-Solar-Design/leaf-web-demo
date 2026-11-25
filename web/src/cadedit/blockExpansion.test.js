@@ -55,6 +55,17 @@ describe('server block projection', () => {
     expect(input).toEqual(before)
   })
 
+  it('projects a read-only classic 3D polyline and preserves its outer handle and closure', () => {
+    const input = nestedFixture({ z: 6, scale: [2, 1, 3] })
+    input.blocks.Rail.complete = false
+    input.blocks.Rail.children = [{ kind: 'OTHER', type: 'POLYLINE',
+      outline: { layer: 'Detail', closed: true, pts: [[0, 0, 1], [2, 1, 2], [0, 1, 4]] } }]
+    const view = projectServerBlocks(input)
+    expect(view.incompleteInserts).toBe(0)
+    expect(view.polylines).toMatchObject([{ handle: 'A10', sourceHandle: 'A10', layer: 'Detail',
+      closed: true, pts: [[103, 204, 9], [107, 205, 12], [103, 205, 18]] }])
+  })
+
   it('projects shared block definitions per placement and excludes invisible references', () => {
     const input = nestedFixture({})
     const frame = input.blocks.Frame

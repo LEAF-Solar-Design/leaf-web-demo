@@ -768,12 +768,34 @@ def _parse_block_child(pairs, i, kind):
                      rot=round(_float(groups.get(50, "0")), 6),
                      text=" ".join(value.split())[:_TEXT_MAX_CHARS])
     else:
-        if kind == "POLYLINE":
-            _, end = _parse_polyline(pairs, i)
         child = {"kind": "OTHER", "type": kind, "layer": ""}
+        if kind == "POLYLINE":
+            entity, parsed_end = _parse_polyline(pairs, i)
+            flags = _int(groups.get(70, "0"))
+            if flags & 8 and not flags & ~(1 | 8 | 128):
+                outline = _block_3d_outline(pairs, end, parsed_end, entity)
+                if outline is not None:
+                    child["outline"] = outline
+            end = parsed_end
     if "nrm" in child and not any(child["nrm"]):
         raise ValueError("block child normal must not be the zero vector")
     return child, end
+
+
+def _block_3d_outline(pairs, start, end, entity):
+    # The top-level parser is permissive. A block outline must contain
+    # ordinary 3D vertices with complete finite coordinates and a SEQEND.
+    vertex_count = 0
+    while start < end and pairs[start] == (0, "VERTEX"):
+        vertex, start = _entity_groups(pairs, start + 1)
+        if _int(vertex.get(70, "32")) != 32:
+            return None
+        if any(axis not in vertex or not math.isfinite(float(vertex[axis])) for axis in (10, 20, 30)):
+            return None
+        vertex_count += 1
+    if start >= end or pairs[start] != (0, "SEQEND") or vertex_count < 2:
+        return None
+    return {"layer": entity["layer"], "closed": entity["closed"], "pts": entity["pts"]}
 
 
 def _explicit_elevation(pairs, end, kind, groups):

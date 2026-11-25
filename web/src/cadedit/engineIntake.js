@@ -571,6 +571,12 @@ function serverBlockChild(child) {
     return entityToPolyline(child)
   }
   const kind = child.kind
+  if (kind === 'OTHER' && child.type === 'POLYLINE') {
+    const outline = child.outline
+    if (!Array.isArray(outline?.pts) || outline.pts.length < 2 || outline.pts.length > MAX_POINTS
+      || !outline.pts.every(serverPoint)) return null
+    return entityToPolyline({ type: 'POLYLINE', vertices: outline.pts, layer: outline.layer, closed: outline.closed === true })
+  }
   if (!['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'].includes(kind)) return null
   let vertices
   if (kind === 'LINE' || kind === 'LWPOLYLINE') {
@@ -635,7 +641,9 @@ export function projectServerBlocks(intake) {
     const nestedRows = rows.slice(0, BLOCK_CHILD_CAP).filter((row) => row?.kind === 'OTHER' && row.type === 'INSERT')
     const nestedCaptured = nested.length > 0 && nested.length === nestedRows.length
       && source.count === rows.length && source.nested_inserts_incomplete !== true
-    let complete = (source.complete === true || nestedCaptured) && rows.length <= BLOCK_CHILD_CAP
+    const outlineCaptured = rows.slice(0, BLOCK_CHILD_CAP).some((row) =>
+      row?.kind === 'OTHER' && row.type === 'POLYLINE' && row.outline != null)
+    let complete = (source.complete === true || nestedCaptured || outlineCaptured) && rows.length <= BLOCK_CHILD_CAP
       && source.nested_inserts_incomplete !== true
     if (source.count !== undefined && source.count !== rows.length) complete = false
     if (nested.length && !nestedCaptured) complete = false

@@ -682,3 +682,25 @@ def test_invisible_nested_insert_keeps_definition_and_handle():
     hidden, shown = intake["blocks"]["Frame"]["nested_inserts"]
     assert (hidden["handle"], hidden["name"], hidden["invisible"]) == ("1A", "Rail", True)
     assert shown["handle"] == "1B" and "invisible" not in shown
+
+
+@pytest.mark.parametrize(("flags", "suffix", "outline"), [
+    (8, [0, "SEQEND"], {"layer": "Detail", "closed": False, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (9, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (137, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (73, [0, "SEQEND"], None),
+    (9, [], None),
+])
+def test_block_classic_3d_polyline_has_read_only_outline(flags, suffix, outline):
+    pairs = [
+        0, "SECTION", 2, "BLOCKS", 0, "BLOCK", 2, "Frame",
+        0, "POLYLINE", 8, "Detail", 70, flags, 210, 0, 220, 1, 230, 0,
+        0, "VERTEX", 70, 32, 10, 1, 20, 2, 30, 3,
+        0, "VERTEX", 70, 32, 10, 4, 20, 5, 30, 7,
+        *suffix, 0, "ENDBLK", 0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    block = intake["blocks"]["Frame"]
+    assert block["complete"] is False
+    assert block["children"][0]["kind"] == "OTHER"
+    assert block["children"][0].get("outline") == outline
