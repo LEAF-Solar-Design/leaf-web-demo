@@ -890,13 +890,19 @@ export async function listProjects(orgId) {
   return data.projects || []
 }
 
-// POST /api/projects {name} -> {project}. X-Org-Id scoped.
-export async function createProject(name, orgId) {
+// POST /api/projects {name} -> {project, created}. X-Org-Id scoped.
+// Retries remain idempotent unless the caller explicitly requires a new project.
+export async function createProject(name, orgId, { requireCreated = false } = {}) {
   const data = await http('/api/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId) },
     body: JSON.stringify({ name }),
   })
+  if (requireCreated && data.created === false) {
+    throw Object.assign(new Error('A project with this name already exists. Choose a different name, or open the existing project from the project list.'), {
+      code: 'project_name_collision',
+    })
+  }
   return data.project
 }
 

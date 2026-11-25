@@ -1,6 +1,103 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createWorkspaceController, WORKSPACE_ORG_KEY } from './createWorkspaceController.js'
 import { serviceSession, authorityStorage } from '../../lib/serviceAuthSession.js'
+import { createProject as apiCreateProject } from '../../api.js'
+import { createProjectFromDrawing } from '../../workspace/createProjectFromDrawing.js'
+
+describe('fresh project creation', () => {
+  const project = { project_id: 'p1', name: 'Maple' }
+  const response = (created) => new Response(JSON.stringify({ project, created }), { status: 200 })
+
+  it.each([
+    ['exact duplicate', 'Maple', [project]],
+    ['normalized spelling', '  MAPLE  ', [project]],
+    ['server replay absent from the list', 'Maple', []],
+  ])('rejects %s before opening, importing, persisting or reporting success', async (_case, name, projects) => {
+    const onProjectCreated = vi.fn()
+    const onWorkspaceOpened = vi.fn()
+    const { controller, services, storage } = setup({
+      callbacks: { onProjectCreated, onWorkspaceOpened }, formatError: () => 'Generic error.',
+    })
+    services.listProjects.mockResolvedValue(projects)
+    await controller.loadProjects()
+    await controller.openProject('current')
+    services.openProject.mockClear()
+    onWorkspaceOpened.mockClear()
+    storage.setItem.mockClear()
+    const before = controller.getSnapshot()
+    const importUpload = vi.fn()
+    services.createProject.mockImplementation(apiCreateProject)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(false)))
+    try {
+      expect(await createProjectFromDrawing({ name,
+        source: { drawingId: 'u-0123456789', version: 1, name: 'site.dwg' }, importUpload,
+        createProject: (draft) => controller.createProject(draft, { requireCreated: true }),
+      })).toBeNull()
+      expect(services.createProject).toHaveBeenCalledWith(name.trim(), 'stored-org', { requireCreated: true })
+      expect(controller.getSnapshot()).toMatchObject({ openProjectId: before.openProjectId,
+        workspace: before.workspace, projects, projectBusy: false,
+        projectDraftError: expect.stringMatching(/Choose a different name.*open the existing project/),
+      })
+      expect(services.openProject).not.toHaveBeenCalled()
+      expect(importUpload).not.toHaveBeenCalled()
+      expect(storage.setItem).not.toHaveBeenCalled()
+      expect(onProjectCreated).not.toHaveBeenCalled()
+      expect(onWorkspaceOpened).not.toHaveBeenCalled()
+    } finally { controller.dispose(); vi.unstubAllGlobals() }
+  })
+
+  it.each([true, false])('opens and reports success for an allowed create (created:%s)', async (created) => {
+    const onProjectCreated = vi.fn()
+    const { controller, services } = setup({ callbacks: { onProjectCreated } })
+    services.createProject.mockImplementation(apiCreateProject)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(created)))
+    try {
+      expect(await controller.createProject('Maple', { requireCreated: created })).toEqual(project)
+      expect(services.openProject).toHaveBeenCalledWith('p1', 'stored-org')
+      expect(onProjectCreated).toHaveBeenCalledWith(project)
+    } finally { controller.dispose(); vi.unstubAllGlobals() }
+  })
+
+  it('opens only the winner when concurrent fresh creates receive the same server project', async () => {
+    const first = setup()
+    const second = setup()
+    const winner = deferred()
+    const replay = deferred()
+    first.services.createProject.mockImplementation(apiCreateProject)
+    second.services.createProject.mockImplementation(apiCreateProject)
+    vi.stubGlobal('fetch', vi.fn().mockReturnValueOnce(winner.promise).mockReturnValueOnce(replay.promise))
+    try {
+      const creating = first.controller.createProject('Maple', { requireCreated: true })
+      const colliding = second.controller.createProject('Maple', { requireCreated: true })
+      expect(second.controller.getSnapshot().projects).toEqual([])
+      winner.resolve(response(true))
+      replay.resolve(response(false))
+      expect(await creating).toEqual(project)
+      expect(await colliding).toBeNull()
+      expect(first.services.openProject).toHaveBeenCalledTimes(1)
+      expect(second.services.openProject).not.toHaveBeenCalled()
+      expect(second.controller.getSnapshot()).toMatchObject({ projects: [], openProjectId: null,
+        projectBusy: false, projectDraftError: expect.stringContaining('Choose a different name'),
+      })
+    } finally { first.controller.dispose(); second.controller.dispose(); vi.unstubAllGlobals() }
+  })
+
+  it.each([true, false])('ignores a stale fresh-create result after an org change (created:%s)', async (created) => {
+    const { controller, services } = setup()
+    const pending = deferred()
+    services.createProject.mockImplementation(apiCreateProject)
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pending.promise))
+    try {
+      const creating = controller.createProject('Maple', { requireCreated: true })
+      controller.adoptOrgId('new-org')
+      const before = controller.getSnapshot()
+      pending.resolve(response(created))
+      expect(await creating).toBeNull()
+      expect(controller.getSnapshot()).toBe(before)
+      expect(services.openProject).not.toHaveBeenCalled()
+    } finally { controller.dispose(); vi.unstubAllGlobals() }
+  })
+})
 
 it('resolves default storage at operation time and fences a service open that finishes after human selection', async () => {
   const service = serviceSession()

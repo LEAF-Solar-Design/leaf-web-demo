@@ -1233,8 +1233,9 @@ export default function ToolCast({
   const createWorkspaceProject = useCallback(async (name) => {
     if (!sessionReady) return
     if (name == null || !name.trim()) return
-    const project = await workspace.createProject(name)
+    const project = await workspace.createProject(name, { requireCreated: true })
     if (project) setLeftView('workspace')
+    return project
   }, [sessionReady, workspace])
 
   // A deleted project cannot be rehydrated: drop the open workspace and leave
@@ -1687,6 +1688,7 @@ export default function ToolCast({
       loading={workspace.projectsLoading}
       orgBusy={workspace.orgBusy}
       projectBusy={workspace.projectBusy}
+      projectDraftError={workspace.projectDraftError}
       onCreateOrg={createWorkspaceOrg}
       onCreateProject={createWorkspaceProject}
       onOpenProject={openWorkspaceProject}
