@@ -12,7 +12,7 @@ import socket
 import subprocess
 import time
 from types import MappingProxyType
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from benches.x08_oracle import _modules, choose_window
 from xbench_core import read_health
@@ -212,7 +212,10 @@ def navigate(page, name, version_id, *, expected_drawing_key):
     _optional_button(page, 'Continue workspace')
     page.get_by_role('button', name='Project', exact=True).click(timeout=20000)
     page.get_by_label('Canonical drawing version').select_option(version_id, timeout=30000)
-    _optional_button(page, 'Preview v1 in the drawing')
+    version_row = page.locator(f'li[data-element-id="version:{UUID(version_id)}"]')
+    preview = version_row.get_by_role('button', name=re.compile(r'^Preview v\d+ in the drawing$'))
+    if preview.is_visible():
+        preview.click(timeout=20000)
     _optional_button(page, 'Return to drawing')
     canvas = page.locator('.viewer-canvas canvas').first
     canvas.wait_for(state='visible', timeout=60000)
@@ -447,8 +450,20 @@ def frame_native_modules(runtime, *, max_steps=160):
     raise ValueError('Native framing did not converge')
 
 
+def _retained_binding(options):
+    """Read the all-or-none retained_* --opt values before acquiring a session."""
+    if not any(key.startswith('retained_') for key in options):
+        return None
+    fields = ('org_id', 'project_id', 'drawing_id', 'version_id', 'intake_sha256')
+    binding = {field: options['retained_' + field] for field in fields}
+    if (any(str(UUID(binding[field])) != binding[field] for field in fields[:-1])
+            or not re.fullmatch('[0-9a-f]{64}', binding['intake_sha256'])):
+        raise ValueError('Invalid retained drawing binding')
+    return binding
+
+
 def make_live_runtime(ctx):
-    """Acquire exactly one owned session and disposable project, in that order."""
+    """Open the pinned retained version or acquire an owned disposable project."""
     from xbench_session import STAGING_ORIGIN, signed_in, api
     from xbench_studio import StudioClient, disposable_project
 
@@ -456,6 +471,7 @@ def make_live_runtime(ctx):
     try:
         if ctx.base != STAGING_ORIGIN:
             raise ValueError('Staging required')
+        retained = _retained_binding(getattr(ctx, 'options', {}))
         permitted_path(ctx.out_dir)
         oracle = load_native_oracle(ctx.manifest)
         page, info = stack.enter_context(signed_in(
@@ -470,11 +486,27 @@ def make_live_runtime(ctx):
                             headers.get('content-type', '').lower() else body)
 
         client = StudioClient(transport)
-        name = 'xbench-x08-' + uuid4().hex
-        project = stack.enter_context(disposable_project(client, name))
-        drawing = client.upload_drawing('x08.dwg', oracle['fixture_content'])
-        client.wait_upload(drawing, timeout_s=300)
-        adopted = client.adopt_drawing(project['project_id'], drawing, 'x08', version=1)
+        if retained:
+            project = client.project(retained['project_id'])
+            if any(project.get(key) != retained[key] for key in ('org_id', 'project_id')):
+                raise ValueError('Retained project mismatch')
+            name = project['name']
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError('Retained project name unavailable')
+            context = client.drawing_context(retained['project_id'], retained['version_id'],
+                                             retained['drawing_id'])['context']
+            expected = dict(organization_id=retained['org_id'], project_id=retained['project_id'],
+                            drawing_id=retained['drawing_id'], input_version_id=retained['version_id'],
+                            intake_sha256=retained['intake_sha256'])
+            if any(context.get(key) != value for key, value in expected.items()):
+                raise ValueError('Retained version mismatch')
+            adopted = retained
+        else:
+            name = 'xbench-x08-' + uuid4().hex
+            project = stack.enter_context(disposable_project(client, name))
+            drawing = client.upload_drawing('x08.dwg', oracle['fixture_content'])
+            client.wait_upload(drawing, timeout_s=300)
+            adopted = client.adopt_drawing(project['project_id'], drawing, 'x08', version=1)
         expected_drawing_key = 'project:' + ':'.join([
             project['org_id'], project['project_id'], adopted['drawing_id'], adopted['version_id']])
         canvas = navigate(page, name, adopted['version_id'],
