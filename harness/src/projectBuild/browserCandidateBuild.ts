@@ -23,6 +23,8 @@ export interface PublishedBrowserCandidate extends BrowserCandidateWitness {
   readonly authority: ProjectRepositoryAuthority;
 }
 export interface BrowserCandidateBuildRequest extends BrowserCandidateWitness { readonly jobId: string }
+export type BrowserCandidateLoader = (authority: ProjectRepositoryAuthority, sourceRequestId: string,
+  request: BrowserCandidateBuildRequest) => Promise<PublishedBrowserCandidate | null>;
 export interface BrowserCandidatePreview {
   readonly schema: "leaf.browser-candidate-preview.v1";
   readonly candidate: BrowserCandidateWitness;
@@ -68,13 +70,13 @@ export class BrowserCandidateBuildAdapter {
   private readonly jobs = new Map<string, { witness: string; result: Promise<BrowserCandidatePreview> }>();
   constructor(private readonly deps: {
     producer: Pick<GenericNextProducer, "build" | "status">;
-    loadCandidate(authority: ProjectRepositoryAuthority, sourceRequestId: string): Promise<PublishedBrowserCandidate | null>;
+    loadCandidate: BrowserCandidateLoader;
     custody?: BrowserStaticCustody;
   }) {}
 
-  private async current(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness): Promise<void> {
+  private async current(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness, jobId: string): Promise<void> {
     let row: PublishedBrowserCandidate | null;
-    try { row = await this.deps.loadCandidate(a, w.sourceRequestId); }
+    try { row = await this.deps.loadCandidate(a, w.sourceRequestId, Object.freeze({ ...w, jobId })); }
     catch { throw new NextBuildError("candidate_unavailable"); }
     if (!row || row.schema !== "leaf.browser-project-source.v1" || row.state !== "published" ||
         authorityKey(authorityCopy(row.authority)) !== authorityKey(a) || witnessKey(witnessCopy(row)) !== witnessKey(w)) conflict();
@@ -87,7 +89,7 @@ export class BrowserCandidateBuildAdapter {
     if (!uuid(jobId)) conflict();
     const key = authorityKey(a) + jobId;
     const identity = witnessKey(w);
-    await this.current(a, w);
+    await this.current(a, w, jobId);
     const prior = this.jobs.get(key);
     if (prior) {
       if (prior.witness !== identity) throw new NextBuildError("job_conflict");
@@ -105,7 +107,7 @@ export class BrowserCandidateBuildAdapter {
     const value = await (custody ? producer.build(a, request, {
       witness: witnessKey(w),
       publish: async (artifacts, { result, stop }) => {
-        await this.current(a, w);
+        await this.current(a, w, jobId);
         return publishStaticNextCustody({ ...custody, artifacts, authority: a, request: { ...w, jobId },
           result, providerBuildId: result.providerBuildId, stop });
       },
@@ -113,7 +115,7 @@ export class BrowserCandidateBuildAdapter {
     // Copy before another await so a mutable producer response cannot relabel
     // the terminal projection. Asset bytes remain behind the producer's read.
     const preview = this.previewCopy(a, request, value);
-    await this.current(a, w);
+    await this.current(a, w, jobId);
     const status = this.deps.producer.status(a, jobId);
     if (!status || Object.keys(status).sort().join(",") !== "cleanup,ready" ||
         status.ready !== true || status.cleanup !== "confirmed") throw new NextBuildError("preview_unavailable");
