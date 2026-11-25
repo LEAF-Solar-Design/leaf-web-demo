@@ -29,7 +29,7 @@ _EMAIL = re.compile(r'[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-
 _ACTION_HTTPS = re.compile(r'https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?'
                            r'(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?')
 MAX_DOCUMENT_BYTES = 8192
-PACKAGE_VERSIONS = {"next": "16.4.3", "react": "18.3.1", "react-dom": "18.3.1"}
+PACKAGE_VERSIONS = {"next": "16.4.6", "react": "18.3.1", "react-dom": "18.3.1"}
 
 # Shared visual contract. The Studio preview uses these same classes and values.
 PAGE_CSS = """.project-page {
