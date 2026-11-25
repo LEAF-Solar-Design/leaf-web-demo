@@ -18,6 +18,8 @@ export interface StaticNextJobInput extends StaticNextJobIdentity {
   readonly plan: typeof NEXT_PLAN;
 }
 export interface StaticNextJobResult {
+  /** Host-observed provider job identity, when supplied by the transport. */
+  readonly providerBuildId?: string;
   readonly protocol: "leaf.static-next.v1";
   readonly executionId: string;
   readonly bindingId: string;

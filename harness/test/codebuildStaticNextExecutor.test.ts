@@ -102,7 +102,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
   it("writes the exact wire serialization and decodes two files", async () => {
     const f = fixture();
     const value = input();
-    f.receipt(value);
+    f.receipt(value, { providerBuildId: "untrusted-output-id" });
     const result = await f.executor.run(value);
     expect(f.executor.isolation).toBe("filesystem-and-network");
     expect(f.objects.get(`in/${value.executionId}.json`)).toEqual(Buffer.from(JSON.stringify({
@@ -115,12 +115,26 @@ describe("CodeBuild static Next executor over injected ports", () => {
       executionId: value.executionId, buildId: "build-new", bundleSha256: value.bundleSha256,
       admittedAt: "1970-01-01T00:00:00.000Z",
     });
-    expect(result).toEqual({ protocol: value.protocol, executionId: value.executionId,
+    expect(result).toEqual({ providerBuildId: "build-new", protocol: value.protocol, executionId: value.executionId,
       bindingId: value.bindingId, toolchainSha256: value.toolchainSha256,
       bundleSha256: value.bundleSha256, exitCode: 0,
       files: exported.map(file => ({ ...file, body: Buffer.from(file.body, "base64") })),
     });
     expect(result.files.every(file => Buffer.isBuffer(file.body))).toBe(true);
+  });
+
+  it.each([
+    ["/series.json", "application/json", "[1,2]"],
+    ["/captions.vtt", "text/vtt", "WEBVTT"],
+    ["/schedule.csv", "text/csv", "box,input"],
+  ])("binds the exported %s to the observed provider job", async (path, contentType, text) => {
+    const f = fixture();
+    const value = input();
+    const file = { path, contentType, body: Buffer.from(text).toString("base64") };
+    f.receipt(value, { files: [exported[0], file], providerBuildId: "untrusted-output-id" });
+    const result = await f.executor.run(value);
+    expect(result.providerBuildId).toBe("build-new");
+    expect(result.files[1]).toEqual({ path, contentType, body: Buffer.from(text) });
   });
 
   it("reuses a persisted build across executor instances and rejects different admitted bytes", async () => {
@@ -158,7 +172,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
     const f = fixture();
     f.mapping();
     f.receipt();
-    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0 });
+    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0, providerBuildId: "build-existing" });
     await expect(f.executor.stop(input())).resolves.toMatchObject({ confirmed: true });
     expect(f.provider.start).not.toHaveBeenCalled();
     expect(f.provider.state.mock.calls).toEqual([["build-existing"], ["build-existing"]]);
@@ -316,7 +330,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
       if (key.startsWith("map/")) { f.mapping("build-winner"); return "exists"; }
       return put(key, bytes);
     });
-    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0 });
+    await expect(f.executor.run(input())).resolves.toMatchObject({ exitCode: 0, providerBuildId: "build-winner" });
     expect(f.provider.stop).toHaveBeenCalledExactlyOnceWith("build-new");
     expect(f.provider.state).toHaveBeenCalledExactlyOnceWith("build-winner");
   });
