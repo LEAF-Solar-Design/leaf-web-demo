@@ -1,6 +1,7 @@
 """Exact-cent TEST RATES material; no persistence or takeoff computation."""
 import copy
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -138,10 +139,13 @@ def price_takeoff(summary, rate_card, *, source_binding):
     if len(rate_card["rates"]) > 128:
         _fail("ESTIMATE_LIMIT_EXCEEDED")
     rates = {}
+    required_rate_fields = {"line_id", "unit", "rate"}
+    minimum_fields = {"minimum_amount", "minimum_semantics"}
+    basis_fields = {"price_basis", "basis_unit"}
+    allowed_terms = (set(), minimum_fields, basis_fields, minimum_fields | basis_fields)
     for rate in rate_card["rates"]:
-        if (type(rate) is not dict or set(rate) not in (
-                {"line_id", "unit", "rate"},
-                {"line_id", "unit", "rate", "minimum_amount", "minimum_semantics"})
+        if (type(rate) is not dict or not required_rate_fields <= rate.keys()
+                or set(rate) - required_rate_fields not in allowed_terms
                 or not _text(rate["line_id"], 96) or rate["line_id"] not in inventory
                 or rate["line_id"] in rates or not _text(rate["unit"], 120)
                 or _decimal(rate["rate"]) is None):
@@ -151,6 +155,9 @@ def price_takeoff(summary, rate_card, *, source_binding):
                     or re.fullmatch(r"[0-9]+(?:\.[0-9]{1,2}0*)?", rate["minimum_amount"]) is None
                     or rate["minimum_semantics"] != "per_line_floor_after_rounding"):
                 _fail("ESTIMATE_RATE_CARD_INVALID")
+        if "price_basis" in rate and (
+                not _decimal(rate["price_basis"]) or rate["basis_unit"] != rate["unit"]):
+            _fail("ESTIMATE_RATE_CARD_INVALID")
         rates[rate["line_id"]] = rate
     takeoff = copy.deepcopy(summary)
     takeoff["lines"].sort(key=lambda row: row["line_id"])
@@ -178,7 +185,13 @@ def price_takeoff(summary, rate_card, *, source_binding):
                 reason = None
             amount = None
             if reason is None:
-                amount = (quantity * _decimal(rate["rate"])).quantize(Decimal("0.01"))
+                charge = quantity * _decimal(rate["rate"])
+                if "price_basis" in rate:
+                    # Round the exact quotient directly to cents, including half-cent ties.
+                    charge_cents = Fraction(charge) * 100 / Fraction(_decimal(rate["price_basis"]))
+                    amount = Decimal(round(charge_cents)).scaleb(-2)
+                else:
+                    amount = charge.quantize(Decimal("0.01"))
                 if "minimum_amount" in rate:
                     amount = max(amount, _decimal(rate["minimum_amount"]))
                 cents += int(amount * 100)

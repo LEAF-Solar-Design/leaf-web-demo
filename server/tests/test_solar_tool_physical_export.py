@@ -1260,6 +1260,48 @@ def test_estimate_legacy_material_bytes_without_minimum_fields():
     assert encode_estimate(decode_estimate(legacy_bytes)) == legacy_bytes
 
 
+@pytest.mark.parametrize("quantity,rate,basis,expected", [
+    ("120", "0.25", "1", "30.00"),
+    ("120", "250.00", "1000", "30.00"),
+    ("72", "0.25", "1000", "0.02"),
+    ("1", "1", "200", "0.00"),
+    ("3", "1", "200", "0.02"),
+])
+def test_estimate_quoted_price_basis(quantity, rate, basis, expected):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs((quantity,), (rate,))
+    inputs[1]["rates"][0].update(price_basis=basis, basis_unit="ea")
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert material["priced_subtotal"] == material["lines"][0]["amount"] == expected
+    assert material["lines"][0]["quantity"] == quantity
+    assert material["rate_card"] == inputs[1]
+
+
+@pytest.mark.parametrize("terms", [
+    {"price_basis": "0", "basis_unit": "ea"},
+    {"price_basis": "-1", "basis_unit": "ea"},
+    {"price_basis": None, "basis_unit": "ea"},
+    {"price_basis": "1000", "basis_unit": "m"},
+    {"price_basis": "1000"},
+    {"basis_unit": "ea"},
+])
+def test_estimate_rejects_invalid_quoted_basis(terms):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(terms)
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
+def test_estimate_applies_minimum_after_quoted_basis():
+    inputs = estimate_inputs(("72", "120", "192"), ("173.50",) * 3)
+    for rate in inputs[1]["rates"]:
+        rate.update(price_basis="1000", basis_unit="ea", minimum_amount="20.82",
+                    minimum_semantics="per_line_floor_after_rounding")
+    result = estimate_price(inputs)
+    assert [line["amount"] for line in result["lines"]] == ["20.82", "20.82", "33.31"]
+    assert result["priced_subtotal"] == "74.95"
+
+
 def test_estimate_bounds_and_long_exact_decimals():
     inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
                              ("1000000000000", "0.12345678901234567890123456789012345678"))
