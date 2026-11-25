@@ -201,7 +201,7 @@ describe('project corpus evaluation flow', () => {
     }
   })
 
-  it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open loads %i pinned blocks with delayed reveal %s', async (blockCount, delayedReveal) => {
+  it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open waits for %i pinned blocks with a second reveal %s', async (blockCount, revealAgain) => {
     const response = options()
     response.manifest.settings_schema.properties.parameters = {
       type: 'object', additionalProperties: false,
@@ -219,19 +219,30 @@ describe('project corpus evaluation flow', () => {
     const fetchImpl = vi.fn(async url => {
       const result = { ok: true, status: 200,
         json: async () => String(url).includes('/corpus-options') ? response : { runs: [] } }
-      return delayedReveal && String(url).includes('/corpus-options')
+      return String(url).includes('/corpus-options')
         ? new Promise(resolve => pending.push(() => resolve(result))) : result
     })
     vi.stubGlobal('fetch', fetchImpl)
     const view = render(<GraphView client={client} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
-    if (delayedReveal) {
-      await waitFor(() => expect(pending).toHaveLength(1))
+    await waitFor(() => expect(pending).toHaveLength(1))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    const expectLoading = () => {
+      expect(readiness.getByRole('status')).toHaveTextContent('Loading saved corpus controls')
+      expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+      expect(readiness.queryByText(/unknown block/i)).not.toBeInTheDocument()
+      expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+    }
+    expectLoading()
+    if (revealAgain) {
       view.rerender(<GraphView client={client} hidden />)
       view.rerender(<GraphView client={client} />)
       await waitFor(() => expect(pending).toHaveLength(2))
-      await act(async () => { pending.forEach(resolve => resolve()) })
+      await act(async () => { pending[0]() })
+      expectLoading()
     }
+    await act(async () => { pending.at(-1)() })
+    await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
     fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
     const field = await screen.findByLabelText('Evaluation policy overrides (optional)')
     expect(field).toHaveValue('')
@@ -334,7 +345,10 @@ describe('project corpus evaluation flow', () => {
     render(<GraphView client={client} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
     const retry = await screen.findByRole('button', { name: 'Retry corpus controls' })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     expect(screen.getAllByRole('alert').some(node => node.textContent.includes('Saved corpus controls are unavailable.'))).toBe(true)
+    expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
     expect(attempts).toBe(1)
     fireEvent.click(retry)
     fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
