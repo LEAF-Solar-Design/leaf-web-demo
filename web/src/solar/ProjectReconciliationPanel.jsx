@@ -261,10 +261,10 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
         <th scope="row">{row.metric}</th><td style={{ overflowWrap: 'anywhere' }}>{row.studio || 'Unavailable'}</td>
         <td style={{ verticalAlign: 'top' }}><input id={`${inputId}-${index}`} aria-label={`${row.metric} engineering report/BOM`} inputMode={index === 4 ? 'decimal' : 'numeric'}
           aria-describedby={`${inputId}-${index}-help${index === 4 ? ` ${inputId}-dc-optional` : ''}`}
-          disabled={!live || busy || pending} value={drafts[index]} maxLength={37} style={{ width: '12ch' }}
+          disabled={!live || busy} value={drafts[index]} maxLength={37} style={{ width: '12ch' }}
           aria-invalid={drafts[index] !== '' && parseReconciliationNumber(drafts[index], index !== 4) === null}
           onChange={(event) => {
-            if (!current() || busy || pending) return
+            if (!current() || busy) return
             const values = [...drafts]
             values[index] = event.target.value
             scope.edits = (scope.edits || 0) + 1
