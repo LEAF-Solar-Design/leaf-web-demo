@@ -574,6 +574,36 @@ def test_strict_layer_share_threshold_and_contributing_handles(counts, threshold
     assert overlay == {"highlight_handles": expected}
 
 
+@pytest.mark.parametrize("prompt, counts, minimum, share, expected", [
+    ("Count modules and highlight only layers with a physical count of at least 5 and a share above 25%.",
+     (5, 4, 3), 5, 25, ["East"]),
+    ("Highlight module layers with more than 40% of all modules and at least 4 modules.",
+     (7, 4, 1), 4, 40, ["East"]),
+    ("Show module layers that have at least 3 modules and account for more than 50% of all modules.",
+     (4, 3, 1), 3, 50, []),
+])
+def test_highlight_intersection_of_layer_count_and_share(prompt, counts, minimum, share, expected):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"] == {
+        "group_by": "layer", "panel_scope": "all_layers",
+        "layer_count_at_least": minimum, "layer_share_above": share,
+    }
+    ledger = dict(zip(("East", "West", "North"), counts))
+    handles = {"East": "A1", "West": "B1", "North": "C1"}
+    drawing = {"inserts": [
+        {"name": "Panel", "handle": handles[layer], "layer": layer, "rows": count}
+        for layer, count in ledger.items()
+    ]}
+    result, overlay = module.run(drawing, route["params"])
+    assert result["counts"] == ledger
+    assert result["count"] == sum(counts)
+    assert overlay == {"highlight_handles": [handles[layer] for layer in expected]}
+
+
 @pytest.mark.parametrize("prompt,expected", [
     ("Which roof layer has the most panels?", ["Roof A", "Roof C"]),
     ("Which roof layers are tied for the largest module count?", ["Roof A", "Roof C"]),

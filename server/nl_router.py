@@ -330,6 +330,8 @@ def _extract_params(tool: Dict[str, Any], text: str) -> Dict[str, Any]:
     for key, spec in props.items():
         if key in params or not isinstance(spec, dict):
             continue
+        if tool.get("name") == "count-modules" and key == "layer_count_at_least":
+            continue
         if spec.get("type") in ("number", "integer") and remaining:
             val = remaining.pop(0)
             params[key] = float(val) if "." in val else int(val)
@@ -504,6 +506,41 @@ def _share_params(text):
     return params
 
 
+_LAYER_COUNT_THRESHOLD = re.compile(
+    r"\b(?:(?:physical\s+)?(?:module\s+|panel\s+)?count\s+of\s+at\s+least\s+(?P<count>\d{1,9})(?=\s|$)"
+    r"|(?:at\s+least|no\s+fewer\s+than)\s+(?P<modules>\d{1,9})\s+(?:physical\s+)?(?:modules?|panels?)\b)",
+    re.I,
+)
+_LAYER_SHARE_THRESHOLD = re.compile(
+    r"\b(?:more\s+than|greater\s+than|above|over|exceeds?)\s+(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)",
+    re.I,
+)
+
+
+def _layer_threshold_params(text):
+    if not re.search(r"\blayers?\b", text, re.I):
+        return None
+    count = _LAYER_COUNT_THRESHOLD.search(text)
+    share = next((
+        match for match in _LAYER_SHARE_THRESHOLD.finditer(text)
+        if re.search(r"\b(?:share|fraction)\s*(?:of\s+)?$", text[:match.start()], re.I)
+        or re.match(
+            r"\s+of\s+(?:(?:all|the|total|selected|physical)\s+)*(?:modules?|panels?|selection|total)\b",
+            text[match.end():], re.I,
+        )
+    ), None)
+    if not count or not share:
+        return None
+    first, second = sorted((count, share), key=lambda match: match.start())
+    conjunction = text[first.end():second.start()]
+    if not re.search(r"\band\b", conjunction, re.I) or re.search(r"\bor\b", conjunction, re.I):
+        return None
+    scope = "roof_layers" if re.search(r"\broof(?:top)?\s+layers?\b", text, re.I) else "all_layers"
+    return {"group_by": "layer", "panel_scope": scope,
+            "layer_count_at_least": int(count["count"] or count["modules"]),
+            "layer_share_above": float(share[1])}
+
+
 _LAYER_LEADERS = re.compile(
     r"(?:which|what)\s+(?P<roof>roof(?:top)?\s+)?layers?\s+"
     r"(?:(?:has|have|holds?|contains?)\s+(?:the\s+)?most\s+(?:solar\s+)?(?:modules?|panels?)"
@@ -640,6 +677,10 @@ def _decide(
         return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
                               confidence=0.95, rationale="Compute each selected layer's share of the physical panel count.")
 
+    thresholds = _layer_threshold_params(text)
+    if thresholds and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=thresholds,
+                              confidence=0.95, rationale="Highlight layers meeting the count and share thresholds.")
 
     ranking_params = _layer_ranking_params(text)
     if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):

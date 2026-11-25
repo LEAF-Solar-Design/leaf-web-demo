@@ -352,6 +352,13 @@ def _run(intake, params, *, allow_absent_in_window=False):
         or params.get("group_by") != "layer"
     ):
         raise InputValidationError("Choose a layer share threshold from 0 to 100 and group by layer.")
+    count_threshold = params.get("layer_count_at_least")
+    if "layer_count_at_least" in params and (
+        type(count_threshold) is not int
+        or count_threshold < 0
+        or params.get("group_by") != "layer"
+    ):
+        raise InputValidationError("Choose a nonnegative integer layer count threshold and group by layer.")
     highlight_ranked = params.get("highlight_ranked_layers", False)
     if type(highlight_ranked) is not bool or (highlight_ranked and top is None):
         raise InputValidationError("Ranked-layer highlights require a top layer ranking.")
@@ -488,6 +495,11 @@ def _run(intake, params, *, allow_absent_in_window=False):
     if share_threshold is not None and selected_sets:
         qualifying_layers = {row["layer"] for row in breakdown["layers_above_share"]}
         highlighted_sets = [group for group in highlighted_sets if group["layer"] in qualifying_layers]
+    if count_threshold is not None and selected_sets:
+        highlighted_sets = [
+            group for group in highlighted_sets
+            if breakdown["counts"][group["layer"]] >= count_threshold
+        ]
 
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
