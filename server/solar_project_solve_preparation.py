@@ -17,7 +17,8 @@ def prepare_solve(intake, frame_ref, *, is_head):
         if graph is None:
             return {**base, "reason": "GRAPH_REQUIRED"}
         choices = [{"id": frame["id"], "name": frame["name"],
-                    "panel_count": len(frame["panel_refs"])} for frame in graph["frames"]]
+                    "panel_count": (frame["ground_slots"]["count"] if "ground_slots" in frame
+                                    else len(frame["panel_refs"]))} for frame in graph["frames"]]
         result = {**base, "available": True, "graph_revision": graph["rev"],
                   "graph_sha256": intake["solar_design_graph_sha256"], "frames": choices}
         if frame_ref is None:

@@ -25,6 +25,7 @@ from solar_design_graph import (
     GraphValidationError, deserialize_graph, serialize_graph, validate_graph,
 )
 from test_w1_design_graph import entity, graph  # noqa: F401
+from test_solar_ground_graph_codec import b18, ground_graph  # noqa: F401
 
 
 def test_project_solve_preparation_is_derived_and_read_only(graph):
@@ -54,6 +55,69 @@ def test_project_solve_preparation_refuses_stale_corrupt_and_missing_frame(graph
     assert prepare_solve(intake, "missing", is_head=True)["reason"] == "MISSING_FRAME"
     choices = prepare_solve(intake, None, is_head=True)
     assert choices["available"] and "request" not in choices
+
+
+@pytest.mark.parametrize("selected", [0, 1])
+def test_project_solve_preparation_compact_ground_matches_expansion(graph, b18, monkeypatch, selected):
+    import solar_ground_graph_codec as codec
+    from solar_project_solve_preparation import prepare_solve
+
+    compact = validate_graph(ground_graph(graph, b18, 2))
+    expanded = validate_graph(codec.expand_graph(compact))
+    intake = {"solar_design_graph": compact, "solar_design_graph_sha256": solve.digest(compact)}
+    before = copy.deepcopy(intake)
+    frame = compact["frames"][selected]
+    reference = prepare_solve(
+        {"solar_design_graph": expanded, "solar_design_graph_sha256": solve.digest(expanded)},
+        frame["id"], is_head=True)
+    assert reference["available"] is True
+
+    # The shared accessor decodes just this group, not the other site's slots.
+    decoded = []
+    decode = codec.decode_slots
+
+    def record_decode(block):
+        decoded.append(block)
+        return decode(block)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(codec, "decode_slots", record_decode)
+        matrix, geometry = solve._frame_geometry(compact, frame)
+    assert len(decoded) == 1 and decoded[0] is frame["ground_slots"]
+    assert len(matrix) == 1 and len(matrix[0]) == len(geometry) == 294
+
+    def never_expand(*args, **kwargs):
+        pytest.fail("Solve preparation must not expand the site")
+
+    monkeypatch.setattr(codec, "expand_graph", never_expand)
+    choices = prepare_solve(intake, None, is_head=True)
+    assert choices["available"] is True and "request" not in choices
+    assert choices["frames"] == reference["frames"]
+    assert [choice["panel_count"] for choice in choices["frames"]] == [294, 294]
+    result = prepare_solve(intake, frame["id"], is_head=True)
+    assert result["available"] is True
+    assert result["request"] == reference["request"]
+    assert result["graph_sha256"] == intake["solar_design_graph_sha256"]
+    assert result["graph_revision"] == compact["rev"]
+    wires = result["request"]["grid"]["Rows"][0]["Panels"]
+    assert [wire["Id"] for wire in wires] == matrix[0]
+    assert [(wire["X"], wire["Y"], wire["Angle"]) for wire in wires] == [
+        geometry[ref] for ref in matrix[0]]
+    binding_args = dict(expected_rev=compact["rev"], frame_ref=frame["id"],
+                        tenant_id="fixture-tenant", job_id="preparation-job",
+                        request_model=solve_request.FrameStringerRequest)
+    binding = solve.bind_request(compact, result["request"], **binding_args)
+    assert binding["graph_sha256"] == intake["solar_design_graph_sha256"]
+    for field in ("X", "Y", "Angle"):
+        tampered = copy.deepcopy(result["request"])
+        tampered["grid"]["Rows"][0]["Panels"][0][field] += 1.0
+        with pytest.raises(GraphValidationError, match="SOLVE_GRID_MISMATCH"):
+            solve.bind_request(compact, tampered, **binding_args)
+    assert prepare_solve(intake, None, is_head=False)["reason"] == "STALE_VERSION"
+    bad = dict(intake, solar_design_graph_sha256="0" * 64)
+    assert prepare_solve(bad, frame["id"], is_head=True)["reason"] == "GRAPH_DIGEST_MISMATCH"
+    assert prepare_solve(intake, "missing", is_head=True)["reason"] == "MISSING_FRAME"
+    assert intake == before
 
 
 FIXTURES = SERVER / "tests/fixtures"

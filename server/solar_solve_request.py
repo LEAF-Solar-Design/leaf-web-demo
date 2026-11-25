@@ -11,7 +11,7 @@ from leaf_cloud_client import PieceMatrixJson, ProposalParams, StringerRequest
 from solar_design_graph import GraphValidationError
 from solar_grid_restitch import escalate, failed_group_indices
 from solar_grid_split import needs_splitting, split_group
-from solar_solve_results import _frame_pieces, _frame_request
+from solar_solve_results import _frame_geometry, _frame_pieces, _frame_request
 
 
 class FrameStringerRequest(StringerRequest):
@@ -46,19 +46,18 @@ def build_stringer_request(graph: dict, frame_ref: str, *,
     frame = next((frame for frame in graph["frames"] if frame["id"] == frame_ref), None)
     if frame is None:
         raise GraphValidationError("MISSING_FRAME")
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    matrix, geometry = _frame_geometry(graph, frame)
     rows, count = [], 0
-    for row in frame["matrix"]:
+    for row in matrix:
         cells = []
-        for cell in row:
-            ref = cell["panel_ref"]
+        for ref in row:
             wire = {"Code": 0, "Id": "", "Seq": 0, "InverterId": -1,
                     "StringInputNumber": 0, "X": 0.0, "Y": 0.0, "Angle": 0.0}
             if ref is not None:
-                if ref not in panels:
+                if ref not in geometry:
                     raise GraphValidationError("SOLVE_GRID_MISMATCH")
-                panel = panels[ref]
-                wire.update(Code=1, Id=ref, **_panel_geometry(panel))
+                wire.update(Code=1, Id=ref, **{
+                    key: value or 0.0 for key, value in zip(("X", "Y", "Angle"), geometry[ref])})
                 count += 1
             cells.append(wire)
         rows.append({"Panels": cells})
