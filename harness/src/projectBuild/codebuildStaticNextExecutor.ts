@@ -177,7 +177,8 @@ export function createCodeBuildStaticNextExecutor(options: CodeBuildStaticNextEx
             if (terminal(current)) {
               const output = await store.get(`out/${input.executionId}.json`);
               if (output === null) fail("build_failed");
-              return receipt(output!, input, current);
+              // Only the provider job we actually polled can attest this identity.
+              return { ...receipt(output!, input, current), providerBuildId: buildId };
             }
             await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
           }
