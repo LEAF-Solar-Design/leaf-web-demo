@@ -57,6 +57,49 @@ def test_corridor_clearance_marks_only_failing_portions(ask, route, obstacles, e
         assert span["stations"] == pytest.approx([start + offset, end + offset])
 
 
+@pytest.mark.parametrize("ask, route, obstacles, expected", [
+    ("Mark how the violating obstacle set changes along a bent cable corridor and show the start and end "
+     "station for each change. Corridor width is 1 m and side clearance is 0 m.",
+     [(0, 0), (8, 0), (8, 6)],
+     [[(2, -1), (5, -1), (5, 1), (2, 1)], [(4, -1), (8, -1), (8, 3), (4, 3)]],
+     [([1], [1.5, 3.5], ["A1"]), ([1], [3.5, 5.5], ["A1", "A2"]), ([1, 2], [5.5, 11.5], ["A2"])]),
+    ("Report wire corridor clearance per keepout with a 1 m corridor and 0 m side clearance.",
+     [(0, -.25), (1, -.5), (2, -.25)],
+     [[(0, 0), (2, 0), (2, 2), (0, 2)]],
+     [([1], [0, math.sqrt(17)/4], ["A1"]), ([2], [math.sqrt(17)/4, math.sqrt(17)/2], ["A1"])]),
+    ("Show which panels are within clearance along the conduit corridor. Corridor width is 50 cm and "
+     "side clearance is 0 cm.",
+     [(0, 0), (10, 0)],
+     [[(2, -1), (3, -1), (3, 1), (2, 1)], [(5, -1), (6, -1), (6, 1), (5, 1)],
+      [(7, .25), (9, .25), (9, 1), (7, 1)]],
+     [([1], [1.75, 3.25], ["A1"]), ([1], [4.75, 6.25], ["A2"])]),
+], ids=["overlap-through-bend", "exact-contact-at-bend", "separate-conflicts"])
+def test_corridor_clearance_partitions_by_obstacle(ask, route, obstacles, expected):
+    rows = [entity("Roof Keepout", f"A{i:X}", polygon, closed=True)
+            for i, polygon in enumerate(obstacles, 1)]
+    rows.append(entity("Cable", "B1", route))
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Roof Keepout", "Cable"], polylines=rows))
+    raw = raw.replace(b"9\n$HANDSEED\n", b"9\n$INSUNITS\n70\n6\n9\n$HANDSEED\n", 1)
+    spec, source, _ = tools_fallback.author_tool(ask)
+    assert spec["engine_op"] == "aisle_detour"
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    assert "violating_intervals" in report, report
+    intervals = report["violating_intervals"]["B1"]
+    assert len(intervals) == len(expected)
+    for interval, (segments, stations, obstacles) in zip(intervals, expected):
+        assert interval["source_segments"] == segments
+        assert interval["stations"] == pytest.approx(stations)
+        assert interval["obstacles"] == obstacles
+        if len(segments) > 1:
+            assert interval["points"][1] == list(route[segments[0]])
+    assert overlay["polylines"] == [{"pts": interval["points"]} for interval in intervals]
+    assert overlay["highlight_handles"] == []
+    boundaries = {station for _, stations, _ in expected for station in stations}
+    assert len(overlay["markers"]) == len(boundaries)
+
+
 def simple_paths(edges, start, end):
     # Exhaust every simple path in the independently enumerated legal graph.
     pending = [([start], 0.0)]

@@ -38,7 +38,14 @@ def requests_corridor_check(prompt):
 
 def requests_clearance_spans(prompt):
     return bool(re.search(r"\b(?:parts?|portions?|subsegments?|spans?|intervals?)\b", prompt)
-                or re.search(r"\b(?:start\w*|begin\w*|entr(?:y|ies))\b.*\b(?:end\w*|exit\w*)\b", prompt))
+                or re.search(r"\b(?:start\w*|begin\w*|entr(?:y|ies))\b.*\b(?:end\w*|exit\w*)\b", prompt)
+                or requests_clearance_causes(prompt))
+
+
+def requests_clearance_causes(prompt):
+    return bool(re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|causes?) set\b", prompt)
+                or re.search(r"\b(?:per|by) (?:obstacles?|keepouts?|arrays?|panels?|causes?)\b", prompt)
+                or re.search(r"\bwhich (?:obstacles?|keepouts?|arrays?|panels?)\b.*\b(?:station|along)\b", prompt))
 
 
 def clearance_dimensions(prompt):
@@ -186,6 +193,7 @@ def build_body(description):
     body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
     body = body.replace("__CORRIDOR_CHECK__", str(corridor_check))
     body = body.replace("__CLEARANCE_SPANS__", str(corridor_check and requests_clearance_spans(prompt)))
+    body = body.replace("__CLEARANCE_CAUSES__", str(corridor_check and requests_clearance_causes(prompt)))
     compare = dimensions is not None or fewer_bends or compares_lengths(prompt)
     return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(compare))
 
@@ -541,13 +549,63 @@ def clearance_intervals(a, b, outline, radius):
         yield max(0, lo, lateral_lo), min(1, hi, lateral_hi)
 
 
+def obstacle_intervals(spans):
+    events = {}
+    for lo, hi, name in spans:
+        events.setdefault(lo, ([], []))[0].append(name)
+        events.setdefault(hi, ([], []))[1].append(name)
+    intervals, active = [], {}
+    cuts = sorted(events)
+    for lo, hi in zip(cuts, cuts[1:]):
+        starts, ends = events[lo]
+        for name in ends:
+            active[name] -= 1
+            if active[name] == 0:
+                del active[name]
+        continuous = set(active)
+        for name in starts:
+            active[name] = active.get(name, 0) + 1
+        causes = sorted(active)
+        if not causes:
+            continue
+        if intervals and intervals[-1][1] == lo and active.keys() == continuous and intervals[-1][2] == causes:
+            intervals[-1] = (intervals[-1][0], hi, causes)
+        else:
+            intervals.append((lo, hi, causes))
+    return intervals
+
+
+def append_cause_intervals(track, spans, hits, edge, radius, index, stations):
+    a, b = edge
+    distance, length = stations
+    axis = difference(b, a)
+    for lo, hi, causes in obstacle_intervals(spans):
+        points = [[float(x), float(y)] for x, y in (at(a, axis, lo), at(a, axis, hi))]
+        start, finish = distance + length*float(lo), distance + length*float(hi)
+        previous = track[-1] if track else None
+        if (previous and lo == 0 and previous["source_segments"][-1] == index-1
+                and previous["stations"][1] == start and previous["obstacles"] == causes
+                and all(location(a, edges) >= 0 or any(
+                    point_segment_distance_squared(a, p, q) < radius**2 for p, q in edges)
+                        for name, (_, edges) in hits if name in causes)):
+            previous["points"].append(points[1])
+            previous["source_segments"].append(index)
+            previous["stations"][1] = finish
+        else:
+            track.append({"source_segments": [index], "points": points, "stations": [start, finish],
+                          "obstacles": causes})
+
+
 def corridor_clearance(cables, arrays, obstacle_ids, radius):
     violations, segments, overlays, markers = {}, {}, [], []
     for handle, edges in cables.items():
         hit_handles = set()
+        track = []
         distance = 0.0
         for index, (a, b) in enumerate(edges, 1):
             length = math.dist(a, b)
+            start_station = distance
+            distance += length
             hits = [(name, outline) for name, outline in zip(obstacle_ids, arrays)
                     if violates_clearance(a, b, [outline], radius)]
             names = [name for name, _ in hits]
@@ -557,6 +615,9 @@ def corridor_clearance(cables, arrays, obstacle_ids, radius):
                 for name, outline in hits:
                     spans.extend((lo, hi, name) for lo, hi in clearance_intervals(a, b, outline, radius)
                                  if lo < hi)
+                if __CLEARANCE_CAUSES__:
+                    append_cause_intervals(track, spans, hits, (a, b), radius, index, (start_station, length))
+                    continue
                 merged = []
                 for lo, hi, name in sorted(spans):
                     if merged and lo < merged[-1][1]:
@@ -567,7 +628,7 @@ def corridor_clearance(cables, arrays, obstacle_ids, radius):
                 for lo, hi, causes in merged:
                     points = [[float(x), float(y)] for x, y in
                               (at(a, difference(b, a), lo), at(a, difference(b, a), hi))]
-                    stations = [distance + length*float(t) for t in (lo, hi)]
+                    stations = [start_station + length*float(t) for t in (lo, hi)]
                     segments.setdefault(handle, []).append(
                         {"source_segment": index, "points": points, "stations": stations,
                          "obstacles": sorted(causes)})
@@ -578,10 +639,21 @@ def corridor_clearance(cables, arrays, obstacle_ids, radius):
                 points = [[float(x), float(y)] for x, y in (a, b)]
                 segments.setdefault(handle, []).append({"points": points, "obstacles": names})
                 overlays.append({"pts": points})
-            distance += length
         if hit_handles:
             violations[handle] = sorted(hit_handles)
-    return ({"clearance_violations": violations, "violating_segments": segments,
+        if track:
+            segments[handle] = track
+            transitions = {}
+            for interval in track:
+                points = interval["points"]
+                overlays.append({"pts": points})
+                names = ", ".join(interval["obstacles"])
+                for point, station, edge in zip((points[0], points[-1]), interval["stations"], ("start", "end")):
+                    transitions.setdefault((tuple(point), station), []).append(f"{edge} {names}")
+            markers.extend({"pt": list(point), "label": f"{handle} {station:.6g}: {' / '.join(changes)}"}
+                           for (point, station), changes in transitions.items())
+    interval_key = "violating_intervals" if __CLEARANCE_CAUSES__ else "violating_segments"
+    return ({"clearance_violations": violations, interval_key: segments,
              "swept_half_width": float(radius), "units": "drawing_units"},
             {"highlight_handles": [] if __CLEARANCE_SPANS__ else list(violations),
              "markers": markers, "polylines": overlays})
