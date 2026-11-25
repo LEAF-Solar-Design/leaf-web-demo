@@ -89,8 +89,11 @@ def test_inline_scanner_preserves_literal_paths_and_refuses_unterminated_control
     assert from_pairs([(0, "MTEXT"), (1, r"\f" * 10000)])["dependencies"] == []
 
 
-@pytest.mark.parametrize("font", ["Synthetic Panel Sans", "\u5c4b\u6839 Sans", "  Literal Family  "])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+@pytest.mark.parametrize("font", [
+    "Synthetic Panel Sans", "\u5c4b\u6839 Sans", "  Literal Family  ",
+    "Panel\vSans", "Detail\fBold", "Roof\u2028Notes",
+])
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
 def test_normal_reader_keeps_literal_inline_font_chunks(font, newline):
     text = "{\\f" + font + "|b0|i0;Caption}"
     for boundary in range(1, len(text)):
