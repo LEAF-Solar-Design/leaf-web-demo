@@ -201,6 +201,9 @@ def run_once(db, store, decode, config) -> str:
         guard.close()
 
 
+_DECODER_SCHEMA = 'leaf_platform'  # Migration 0114 schema; the decoder role's search_path is pg_catalog only.
+
+
 class DecoderDB:
     """Fresh autocommit connection per call, including the heartbeat thread."""
     def __init__(self, dsn):
@@ -211,11 +214,13 @@ class DecoderDB:
         from psycopg.rows import dict_row
         from psycopg.types.json import Jsonb
         with psycopg.connect(self.dsn, autocommit=True, connect_timeout=5,
-                             options='-c statement_timeout=5000', row_factory=dict_row) as conn:
+                             row_factory=dict_row) as conn:
             with conn.cursor() as cur:
+                # RDS Proxy rejects startup options, so the 5 s statement timeout is set per session.
+                cur.execute('SET statement_timeout = 5000')
                 params = tuple(Jsonb(value) if isinstance(value, dict) else value for value in args)
                 # Function names are internal constants, never request content.
-                cur.execute(f'SELECT * FROM {function}({", ".join(["%s"] * len(params))})', params)
+                cur.execute(f'SELECT * FROM {_DECODER_SCHEMA}.{function}({", ".join(["%s"] * len(params))})', params)
                 value = cur.fetchone()
                 return value if row or value is None else next(iter(value.values()))
 
