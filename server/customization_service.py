@@ -2126,6 +2126,15 @@ class CustomizationService:
                 without_services = True
             else:
                 raise CustomizationServiceError("stage_authority_invalid", 409)
+        import customization_stage_grants
+        if (self is not None and change.tool_target == "branch"
+                and customization_stage_grants.ttl_s() is not None):
+            try:
+                grant = self.store.get_stage_grant(tenant_id, change.change_set_id)
+            except Exception as exc:
+                raise CustomizationServiceError("stage_grant_refused", 409) from exc
+            if grant is not None and grant["revoked_ms"] is not None:
+                raise CustomizationServiceError("stage_grant_withdrawn", 409)
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)

@@ -387,7 +387,7 @@ def test_withdraw_before_claim_fails_change_and_revokes_grant(lane):
     assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject=SUBJECT, now_ms=int(time.time() * 1000),
-    ) == {"withdrawn": False, "revoked": False}
+    ) == {"withdrawn": False, "revoked": True}
     events = lane.store.audit_events(tenant_id=TENANT, change_set_id=change.change_set_id)
     withdrawn = [event for event in events if event.reason_code == "stage_grant_withdrawn"]
     assert len(withdrawn) == 1
@@ -414,6 +414,7 @@ def test_withdraw_revokes_under_live_claim_but_refuses_other_author(lane, monkey
     )
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: SUBJECT)
     with pytest.raises(CustomizationServiceError, match="stage_grant_withdrawn"):
         lane.service.dispatch_stage(change)
     post.assert_not_called()
@@ -424,7 +425,7 @@ def test_withdraw_revokes_under_live_claim_but_refuses_other_author(lane, monkey
 
 
 @pytest.mark.parametrize("lease", ["expired", "released"])
-def test_withdraw_after_unused_claim_only_revokes(lane, lease):
+def test_withdraw_after_unused_claim_only_revokes(lane, monkeypatch, lease):
     change = issued_claim(lane)
     if lease == "expired":
         with lane.store._transaction() as conn:
@@ -441,6 +442,18 @@ def test_withdraw_after_unused_claim_only_revokes(lane, lease):
     ) == {"withdrawn": False, "revoked": True}
     assert lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id) == before
     assert lane.store.get_stage_grant(TENANT, change.change_set_id)["dispatches"] == 0
+    assert lane.store.withdraw_stage(
+        tenant_id=TENANT, change_set_id=change.change_set_id, author_subject=SUBJECT,
+        now_ms=int(time.time() * 1000),
+    ) == {"withdrawn": False, "revoked": True}
+    second = lane.store.claim_stage(owner="worker-b")
+    assert second.stage_attempt == 2
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: SUBJECT)
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_grant_withdrawn"):
+        lane.service.dispatch_stage(second)
+    post.assert_not_called()
 
 
 def test_T12_issue_only_after_charge_and_never_on_replay(lane, monkeypatch):
@@ -546,10 +559,12 @@ def test_setting_off_never_calls_any_grant_store_method(lane, monkeypatch):
         method.assert_not_called()
 
 
-def test_active_turn_keeps_authority_headers_and_never_consumes(lane, monkeypatch):
-    change = issued_claim(lane)
+@pytest.mark.parametrize("has_grant", [False, True])
+def test_active_turn_keeps_authority_headers_and_never_consumes(lane, monkeypatch, has_grant):
+    change = issued_claim(lane) if has_grant else queue(lane)
     monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: SUBJECT)
-    monkeypatch.setattr(lane.store, "consume_stage_grant", Mock(side_effect=AssertionError("active")))
+    consume = Mock(side_effect=AssertionError("active"))
+    monkeypatch.setattr(lane.store, "consume_stage_grant", consume)
     post = Mock(return_value=SimpleNamespace(raise_for_status=lambda: None, json=lambda: {}))
     monkeypatch.setattr(requests, "post", post)
     lane.service.dispatch_stage(change)
@@ -557,6 +572,7 @@ def test_active_turn_keeps_authority_headers_and_never_consumes(lane, monkeypatc
         "X-Harness-Secret": "test-secret", "X-Authority-Session-Id": lane.session_id,
         "X-Authority-Turn-Id": lane.turn_id,
     }
+    consume.assert_not_called()
 
 
 def test_granted_path_sends_only_services_selector_and_harness_secret(lane, monkeypatch):
@@ -635,13 +651,17 @@ def test_mismatched_active_subject_or_tenant_never_uses_grant(lane, monkeypatch,
     change = issued_claim(lane)
     monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: subject)
     monkeypatch.setattr(grants, "admit", Mock(side_effect=AssertionError("must not admit")))
+    read = Mock(side_effect=RuntimeError("must not read"))
+    monkeypatch.setattr(lane.store, "get_stage_grant", read)
     with pytest.raises(CustomizationServiceError, match="stage_authority_invalid"):
         lane.service._harness_stage(tenant, DESCRIPTION, change)
+    read.assert_not_called()
 
 
 @pytest.mark.parametrize("code,retryable", [
     ("stage_grant_expired", True), ("stage_grant_exhausted", True),
     ("stage_grant_turn_open", False), ("stage_grant_refused", False),
+    ("stage_grant_unavailable", True),
 ])
 def test_refused_build_fails_before_http_with_expected_retryability(lane, monkeypatch, code, retryable):
     change = queue(lane)
@@ -655,6 +675,9 @@ def test_refused_build_fails_before_http_with_expected_retryability(lane, monkey
     elif code == "stage_grant_refused":
         clean(lane)
         monkeypatch.setattr(grants, "live_check", lambda *_: None)
+    elif code == "stage_grant_unavailable":
+        clean(lane)
+        monkeypatch.setattr(lane.store, "consume_stage_grant", Mock(side_effect=RuntimeError("store down")))
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
     assert worker.run_once("worker-a", service=lane.service)
@@ -671,9 +694,30 @@ def test_dispatch_store_failures_refuse_before_http(lane, monkeypatch, method):
     monkeypatch.setattr(lane.store, method, Mock(side_effect=RuntimeError("private database detail")))
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
-    with pytest.raises(CustomizationServiceError, match="stage_grant_refused"):
+    code = "stage_grant_refused" if method == "get_stage_grant" else "stage_grant_unavailable"
+    with pytest.raises(CustomizationServiceError, match=code):
         lane.service.dispatch_stage(change)
     post.assert_not_called()
+
+
+def test_active_dispatch_grant_read_error_refuses_before_http(lane, monkeypatch):
+    change = issued_claim(lane)
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: SUBJECT)
+    read = Mock(side_effect=RuntimeError("private database detail"))
+    monkeypatch.setattr(lane.store, "get_stage_grant", read)
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_grant_refused"):
+        lane.service.dispatch_stage(change)
+    read.assert_called_once_with(TENANT, change.change_set_id)
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("method", ["get_stage_grant", "consume_stage_grant"])
+def test_admit_store_errors_are_unavailable(lane, monkeypatch, method):
+    change = issued_claim(lane)
+    monkeypatch.setattr(lane.store, method, Mock(side_effect=RuntimeError("private detail")))
+    refuse(lane, change, "stage_grant_unavailable")
 
 
 @pytest.mark.parametrize("failure,code", [
@@ -687,7 +731,7 @@ def test_dispatch_store_failures_refuse_before_http(lane, monkeypatch, method):
     ("turn", "stage_grant_turn_open"),
     ("live", "stage_grant_refused"),
 ])
-def test_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, failure, code):
+def test_admit_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, failure, code):
     change = issued_claim(lane)
     row = lane.store.get_stage_grant(TENANT, change.change_set_id)
     if failure == "identity":
@@ -714,7 +758,7 @@ def test_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, failur
     if failure == "live":
         terminal.return_value = True
     with pytest.raises(CustomizationServiceError) as caught:
-        lane.service.dispatch_stage(change)
+        grants.admit(lane.service, change, "worker-a")
     assert (caught.value.code, caught.value.status_code) == (code, 409)
     assert terminal.call_count == (1 if failure in {"turn", "live"} else 0)
     assert live.call_count == (1 if failure == "live" else 0)
@@ -772,6 +816,7 @@ def test_issue_store_failure_leaves_enqueue_successful_and_logs_only_type(lane, 
 @pytest.mark.parametrize("code,message", [
     ("stage_grant_exhausted", "This build was tried twice and could not be finished. Ask for it again."),
     ("stage_grant_turn_open", "The conversation that asked for this build was stopped, so it was not started. Ask for it again."),
+    ("stage_grant_unavailable", "This build could not be checked and was not started. Ask for it again."),
 ])
 def test_grant_refusals_have_actionable_route_messages(code, message):
     response = author_router._customization_error(CustomizationServiceError(code, 409))
@@ -792,6 +837,8 @@ def test_grant_refusals_have_actionable_route_messages(code, message):
 ])
 def test_withdraw_route_is_authenticated_and_author_bound(lane, monkeypatch, case, status, withdrawn, revoked):
     change = queue(lane)
+    finish = Mock()
+    monkeypatch.setattr(service_module, "finish_stage_authority_for_change", finish)
     if case != "no_grant":
         assert grants.issue(lane.service, change)
     tenant = lane.tenant
@@ -838,3 +885,34 @@ def test_withdraw_route_is_authenticated_and_author_bound(lane, monkeypatch, cas
         }
     if status != 200:
         assert lane.store.get_stage_grant(TENANT, change.change_set_id)["revoked_ms"] is None
+    if withdrawn:
+        finish.assert_called_once_with(lane.store.get_change_set(
+            tenant_id=TENANT, change_set_id=change.change_set_id,
+        ))
+        assert finish.call_args.args[0].state is ChangeState.FAILED
+    else:
+        finish.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["read", "finish"])
+def test_withdraw_cleanup_failure_preserves_success(lane, monkeypatch, failure):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+    original_read = lane.store.get_change_set
+    read = Mock(side_effect=[change, RuntimeError("cleanup read failed")])
+    finish = Mock(side_effect=RuntimeError("cleanup failed"))
+    monkeypatch.setattr(service_module, "finish_stage_authority_for_change", finish)
+    if failure == "read":
+        monkeypatch.setattr(lane.store, "get_change_set", read)
+    response = author_router.withdraw_stage(change.change_set_id, tenant=lane.tenant)
+    assert response == {
+        "contract": "leaf.customization-stage-withdraw.v1", "withdrawn": True, "revoked": True,
+    }
+    failed = original_read(tenant_id=TENANT, change_set_id=change.change_set_id)
+    assert failed.state is ChangeState.FAILED
+    if failure == "read":
+        assert read.call_count == 2
+        finish.assert_not_called()
+    else:
+        finish.assert_called_once_with(failed)

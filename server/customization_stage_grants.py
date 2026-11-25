@@ -134,7 +134,10 @@ def admit(service, change, owner) -> None:
 
     code = "stage_grant_refused"
     try:
-        row = service.store.get_stage_grant(change.tenant_id, change.change_set_id)
+        try:
+            row = service.store.get_stage_grant(change.tenant_id, change.change_set_id)
+        except Exception as exc:
+            raise CustomizationServiceError("stage_grant_unavailable", 409) from exc
         if row is None:
             code = "stage_authority_invalid"
         elif any(row[field] != getattr(change, field) for field in (
@@ -155,13 +158,19 @@ def admit(service, change, owner) -> None:
             pass
         elif not turn_ended_cleanly(change.authority_session_id, change.authority_turn_id, change.tenant_id):
             code = "stage_grant_turn_open"
-        elif (live_check(service, change) == row["tier"]
-              and service.store.consume_stage_grant(
-                  tenant_id=change.tenant_id, change_set_id=change.change_set_id,
-                  owner=owner, attempt=change.stage_attempt,
-                  binding_digest=row["binding_digest"], now_ms=int(time.time() * 1000),
-              )):
-            return
+        elif live_check(service, change) == row["tier"]:
+            try:
+                consumed = service.store.consume_stage_grant(
+                    tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+                    owner=owner, attempt=change.stage_attempt,
+                    binding_digest=row["binding_digest"], now_ms=int(time.time() * 1000),
+                )
+            except Exception as exc:
+                raise CustomizationServiceError("stage_grant_unavailable", 409) from exc
+            if consumed:
+                return
+    except CustomizationServiceError:
+        raise
     except Exception:
         code = "stage_grant_refused"
     _LOG.warning("stage_grant_refusal change_set=%s code=%s", change.change_set_id, code)

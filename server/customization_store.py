@@ -750,15 +750,18 @@ class SQLiteCustomizationStore(CustomizationRepository):
     ) -> dict[str, bool]:
         with self._transaction() as conn:
             row = self._find_change_set(conn, tenant_id, change_set_id)
-            if row.state is not ChangeState.STAGING or row.author_subject != author_subject:
+            if row.author_subject != author_subject:
                 return {"withdrawn": False, "revoked": False}
             grant = conn.execute(
-                "SELECT dispatches FROM customization_stage_grants "
-                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ? "
-                "AND revoked_ms IS NULL",
+                "SELECT dispatches, revoked_ms FROM customization_stage_grants "
+                "WHERE tenant_id = ? AND change_set_id = ? AND author_subject = ?",
                 (tenant_id, change_set_id, author_subject),
             ).fetchone()
             if grant is None:
+                return {"withdrawn": False, "revoked": False}
+            if grant["revoked_ms"] is not None:
+                return {"withdrawn": False, "revoked": True}
+            if row.state is not ChangeState.STAGING:
                 return {"withdrawn": False, "revoked": False}
             result = conn.execute(
                 "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = 'withdrawn' "

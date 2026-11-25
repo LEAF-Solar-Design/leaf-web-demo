@@ -537,6 +537,7 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
     "stage_grant_exhausted": "This build was tried twice and could not be finished. Ask for it again.",
     "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
     "stage_grant_refused": "Your access changed while this request waited. It was not started.",
+    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
     "stage_grant_withdrawn": "This build was withdrawn before it started.",
 }
 
@@ -1071,6 +1072,12 @@ def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> D
             tenant_id=str(tenant), change_set_id=change_set_id,
             author_subject=binding.subject, now_ms=int(time.time() * 1000),
         )
+        if result["withdrawn"]:
+            try:
+                change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+                customization_service.finish_stage_authority_for_change(change)
+            except Exception:
+                pass
         return {"contract": "leaf.customization-stage-withdraw.v1", **result}
     except ChangeSetNotFoundError:
         return _customization_error(CustomizationServiceError("change_set_not_found", 404))
