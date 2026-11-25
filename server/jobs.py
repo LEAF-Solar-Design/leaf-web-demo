@@ -2250,6 +2250,9 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
     envelope = err_envelope(err["error_code"], err["message"], err["retryable"],
                             tool=record.get("tool"),
                             timing_ms=record.get("elapsed_ms") or 0)
+    action = err.get("next_action")
+    if err["error_code"] == ErrorCode.BAD_PARAMS and isinstance(action, str) and action.strip():
+        envelope["error"]["next_action"] = action
     import re
     reason_code = err.get("reason_code")
     if isinstance(reason_code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code):
