@@ -3,7 +3,7 @@ import branchApiAllowlist from "../registry/api-allowlist.json" with { type: "js
 import type { AgentGrant, AuthorTelemetry, ReadonlyFsTenantRepoTool } from "../ports/index.js";
 import {
   buildScrubbedEnv, resolveAuthorEffort, resolveAuthorModel,
-  resolveAuthorTimeoutMs, runAuthorQueryWithDeadline, type AuthorSdkQuery,
+  resolveAuthorTimeoutMs, type AuthorSdkQuery,
 } from "../ports/impl/agentSdkRunner.js";
 import { grantSecrets, redactSecrets } from "../redact.js";
 import { carriedFailureCategory, safeErrorMessage, withFailureCategory } from "./captureGuards.js";
@@ -22,7 +22,8 @@ The harness sets entry=main.csx, provenance.author=agent and review.status=unrev
 Use a 3..64 character lower-case kebab name, X.Y.Z version without leading zeros,
 a 1..500 character description, object params JSON Schema and returns JSON Schema.
 hosts={min_release:2018..2030,min_host_api:integer>=1}; timeout_ms=1..600000;
-idempotent is boolean. Manifest numbers must be integers. Maximum 64 total files
+idempotent is boolean. Every number anywhere in the manifest must be a whole number (V15): defaults, minimum, maximum, multipleOf, enum and examples inside params and returns too. A fractional default such as 2.5 is refused. Leave it out of params and write it in main_csx: Ctx.Args.Value<double?>("x") ?? 2.5.
+Maximum 64 total files
 (tool.json and main.csx count) and 4 MiB total, with tool.json at most 256 KiB.
 Only drawing.read and drawing.write capabilities are allowed. No files.* or net.http.
 No #r directives, BOM or bidi controls. #load must be a whole line naming an
@@ -41,6 +42,8 @@ Use drawing.write for modifications. Disk and network APIs are unavailable.
 
 Allowlist traps. These are refused by the scan even where the entity type is allowed (an unlisted
 enum or return type refuses the expression):
+- Fractional numbers in params or returns (V15): keep the schema type number without a default and put the fractional default in main_csx.
+- ColorMethod.ByAciIndex does not exist: use Color.FromColorIndex(ColorMethod.ByAci, n) or Color.FromRgb(r, g, b).
 - Hatch patterns and loops (HatchPatternType, HatchLoopTypes): for fills use Solid (3 or 4 corners,
   Z order) or a Polyline with ConstantWidth.
 - LineWeight on entities or layers: use Polyline ConstantWidth or vertex widths, and Color.
@@ -102,7 +105,7 @@ using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
 }
 return new { added = 1 };
 
-Worked example area-marks (drawing.read and drawing.write; visible color, Solid, Polyline, MText, AlignedDimension, BlockReference; idempotent=false):
+Worked example area-marks (drawing.read and drawing.write; per cell outline Polyline plus Solid, MText number, total, AlignedDimension, BlockReference; idempotent=false). Keep the outline when you fill: a fill alone does not draw the shape.
 main_csx:
 using System.Collections.Generic;
 using Autodesk.AutoCAD.Colors;
@@ -111,6 +114,7 @@ using Autodesk.AutoCAD.Geometry;
 using Newtonsoft.Json.Linq;
 double limit = Ctx.Args.Value<double?>("area_limit") ?? 5000.0;
 int marked = 0, blocks = 0;
+double left = double.MaxValue, top = double.MinValue, big = 0;
 using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
   var layers = (LayerTable)tr.GetObject(Ctx.Db.LayerTableId, OpenMode.ForRead);
   if (!layers.Has("AREA-MARKS")) {
@@ -148,20 +152,27 @@ using (var tr = Ctx.Db.TransactionManager.StartTransaction()) {
     var mid = new Point3d((lo.X + hi.X) / 2, (lo.Y + hi.Y) / 2, 0);
     double size = System.Math.Max(System.Math.Min(hi.X - lo.X, hi.Y - lo.Y) / 10, 0.01);
     var color = pl.Area < limit ? Color.FromRgb(230, 40, 40) : Color.FromRgb(40, 180, 80);
+    // Outline first: a fill alone does not draw the shape.
     var outline = new Polyline();
     for (int i = 0; i < pl.NumberOfVertices; i++)
-      outline.AddVertexAt(i, pl.GetPoint2dAt(i), pl.GetBulgeAt(i), size / 4, size / 4);
+      outline.AddVertexAt(i, pl.GetPoint2dAt(i), pl.GetBulgeAt(i), size / 10, size / 10);
     outline.Closed = true;
-    Add(outline, color);
-    // Solid corner order is Z-shaped: lower left, lower right, upper left, upper right.
-    Add(new Solid(new Point3d(mid.X - size, mid.Y - size, 0), new Point3d(mid.X + size, mid.Y - size, 0),
-      new Point3d(mid.X - size, mid.Y + size, 0), new Point3d(mid.X + size, mid.Y + size, 0)), color);
-    Add(new MText { Location = new Point3d(mid.X - size, mid.Y - 2 * size, 0), TextHeight = size,
-      Contents = pl.Area.ToString("F0") }, color);
+    Add(outline, Color.FromRgb(20, 20, 20));
+    // Solid corner order is Z-shaped: p0, p1, p3, p2. Fill only true four-corner cells.
+    if (pl.NumberOfVertices == 4)
+      Add(new Solid(pl.GetPoint3dAt(0), pl.GetPoint3dAt(1), pl.GetPoint3dAt(3), pl.GetPoint3dAt(2)), color);
+    Add(new MText { Location = new Point3d(mid.X - size, mid.Y + size, 0), TextHeight = size * 2,
+      Contents = (marked + 1).ToString() }, Color.FromRgb(20, 20, 20));
     Add(new AlignedDimension { XLine1Point = lo, XLine2Point = new Point3d(hi.X, lo.Y, 0),
       DimLinePoint = new Point3d(mid.X, lo.Y - 2 * size, 0), Dimtxt = size, Dimasz = size }, color);
+    left = System.Math.Min(left, lo.X);
+    top = System.Math.Max(top, hi.Y);
+    big = System.Math.Max(big, size * 4);
     marked++;
   }
+  if (marked > 0)
+    Add(new MText { Location = new Point3d(left, top + 2 * big, 0), TextHeight = big,
+      Contents = "TOTAL " + marked }, Color.FromRgb(255, 200, 0));
   tr.Commit();
 }
 return new { marked, blocks };
@@ -194,7 +205,7 @@ export interface BranchAuthorInput {
   fsTenantRepo: ReadonlyFsTenantRepoTool;
   submitBranchToolProposal(proposal: unknown): BranchSubmissionResult | Promise<BranchSubmissionResult>;
 }
-export interface BranchAuthorResult { preview: string; telemetry?: AuthorTelemetry }
+export interface BranchAuthorResult { preview: string; telemetry?: AuthorTelemetry & { usage_incomplete?: true } }
 export type BranchAuthorRunner = (input: BranchAuthorInput) => Promise<BranchAuthorResult>;
 
 type ToolReply = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
@@ -205,9 +216,11 @@ export interface BranchAuthorSdk {
 }
 
 /** Branch-only SDK adapter. Studio continues through its existing AgentRunner. */
+export const BRANCH_ACCEPTED_GRACE_MS = 5_000;
+
 export async function runBranchTargetSession(
   input: BranchAuthorInput,
-  options: { sdkImport?: () => Promise<BranchAuthorSdk> } = {},
+  options: { sdkImport?: () => Promise<BranchAuthorSdk>; acceptedGraceMs?: number; timeoutMs?: number } = {},
 ): Promise<BranchAuthorResult> {
   try {
     // Keep the SDK's heavy declaration graph out of the harness build.
@@ -218,6 +231,10 @@ export async function runBranchTargetSession(
       ...(isError ? { isError: true } : {}),
     });
     let submitted = false;
+    let sessionClosed = false;
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    let finishGrace!: () => void;
+    const grace = new Promise<void>(resolve => { finishGrace = resolve; });
     let lastRefusal: string | undefined;
     let lastRefusalRule: string | undefined;
     let lastCompile: BranchCompileFeedback | undefined;
@@ -247,9 +264,13 @@ export async function runBranchTargetSession(
         submitCalls++;
         try {
           if (submitted) return reply("V16: only one successful package submission is allowed", true);
+          if (sessionClosed) return reply("V16: submission is closed", true);
           const result = await input.submitBranchToolProposal(proposal);
+          if (sessionClosed) return reply("V16: submission is closed", true);
           submitted = true;
-          return reply({ status: "VALID", manifest: result.manifest, files: result.files, package_digest: result.package_digest });
+          graceTimer = setTimeout(finishGrace, options.acceptedGraceMs ?? BRANCH_ACCEPTED_GRACE_MS);
+          return reply({ status: "VALID", manifest: result.manifest, files: result.files, package_digest: result.package_digest,
+            ...(result.source_decoded !== undefined ? { source_decoded: result.source_decoded } : {}) });
         } catch (error) {
           lastRefusal = safeErrorMessage(error);
           lastCompile = error instanceof BranchCompileRefusal ? error.compile : undefined;
@@ -271,6 +292,8 @@ export async function runBranchTargetSession(
         effort: resolveAuthorEffort(undefined),
         maxTurns: 24, settingSources: [], permissionMode: "default", tools: [],
         abortController: abort, mcpServers: { branch_author: server }, allowedTools: allowed,
+        hooks: { PostToolUse: [{ matcher: "mcp__branch_author__submitBranchToolProposal",
+          hooks: [async () => submitted ? { continue: false, stopReason: "branch package accepted" } : {}] }] },
         canUseTool: async (name: string, args: Record<string, unknown>) => allowed.includes(name)
           ? { behavior: "allow", updatedInput: args }
           : { behavior: "deny", message: "Only branch package submission and read-only repository inspection are permitted." },
@@ -282,8 +305,20 @@ export async function runBranchTargetSession(
     let outputTokens = 0;
     let costTokens = 0;
     const models = new Set<string>();
-    await runAuthorQueryWithDeadline(query, abort, resolveAuthorTimeoutMs(undefined), async () => {
+    const messages = new Map<string | symbol, { input: number; output: number }>();
+    let finishResult!: () => void;
+    const resultSeen = new Promise<void>(resolve => { finishResult = resolve; });
+    const timeoutMs = options.timeoutMs ?? resolveAuthorTimeoutMs(undefined);
+    let wallTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      wallTimer = setTimeout(() => {
+        sessionClosed = true;
+        reject(new Error(`Agent SDK author session exceeded the ${Math.round(timeoutMs / 1000)}s wall-clock limit.`));
+      }, timeoutMs);
+    });
+    const drain = async () => {
       for await (const raw of query) {
+        if (sessionClosed) break;
         const msg = raw as Record<string, unknown>;
         if (msg.type === "rate_limit_event") {
           const info = msg.rate_limit_info as { status?: string; resetsAt?: number } | undefined;
@@ -296,6 +331,10 @@ export async function runBranchTargetSession(
           turns += 1;
           const message = (msg.message ?? {}) as Record<string, unknown>;
           const usage = (message.usage ?? {}) as Record<string, number>;
+          const id = typeof message.id === "string" ? message.id : typeof msg.id === "string" ? msg.id : Symbol();
+          const previous = messages.get(id);
+          messages.set(id, { input: Math.max(previous?.input ?? 0, usage.input_tokens ?? 0),
+            output: Math.max(previous?.output ?? 0, usage.output_tokens ?? 0) });
           inputTokens += usage.input_tokens ?? 0;
           outputTokens += usage.output_tokens ?? 0;
           costTokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
@@ -306,11 +345,24 @@ export async function runBranchTargetSession(
           if (msg.error === "rate_limit") throw withFailureCategory(new Error("Agent SDK rate limited (retry horizon unknown)"), "rate_limited");
           if (turns > 24 || costTokens > 500_000) throw withFailureCategory(new Error("Agent SDK branch author spend cap exceeded"), "quota_exhausted");
         }
-        if (msg.type === "result") result = msg;
+        if (msg.type === "result") { result = msg; finishResult(); break; }
       }
-    });
+    };
+    try {
+      // Race the drain itself: an SDK iterator or its return() may never settle.
+      // Promise.race attaches rejection handlers even after another arm wins.
+      await Promise.race([drain(), deadline, grace, resultSeen]);
+    } catch (error) {
+      if (!submitted) throw error;
+    } finally {
+      sessionClosed = true;
+      clearTimeout(wallTimer);
+      clearTimeout(graceTimer);
+      try { query.close(); } catch { /* Cleanup cannot replace an accepted package. */ }
+      abort.abort();
+    }
     const final = result as Record<string, unknown> | null;
-    if (!final || final.is_error || final.subtype !== "success") {
+    if (!submitted && (!final || final.is_error || final.subtype !== "success")) {
       throw new BranchAuthorFailure("branch author session did not finish successfully", {
         code: "branch_author_unsuccessful", turns,
       });
@@ -325,14 +377,19 @@ export async function runBranchTargetSession(
         code: "branch_author_no_submission", turns, submit_calls: submitCalls,
       });
     }
-    const usage = (final.usage ?? {}) as Record<string, number>;
+    const usage = (final?.usage ?? {}) as Record<string, number>;
+    const fallback = [...messages.values()].reduce((sum, message) => ({
+      input: sum.input + message.input, output: sum.output + message.output,
+    }), { input: 0, output: 0 });
     return {
       preview: "Branch C# package authored; awaiting server validation and review.",
       telemetry: {
-        turns: typeof final.num_turns === "number" ? final.num_turns : turns,
-        input_tokens: usage.input_tokens ?? inputTokens, output_tokens: usage.output_tokens ?? outputTokens,
+        turns: final ? typeof final.num_turns === "number" ? final.num_turns : turns : messages.size,
+        input_tokens: usage.input_tokens ?? (final ? inputTokens : fallback.input),
+        output_tokens: usage.output_tokens ?? (final ? outputTokens : fallback.output),
         models: [...models],
-        ...(typeof final.total_cost_usd === "number" ? { total_cost_usd: final.total_cost_usd } : {}),
+        ...(typeof final?.total_cost_usd === "number" ? { total_cost_usd: final.total_cost_usd } : {}),
+        ...(!final ? { usage_incomplete: true as const } : {}),
       },
     };
   } catch (error) {

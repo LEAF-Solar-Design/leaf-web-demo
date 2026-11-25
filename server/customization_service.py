@@ -193,13 +193,24 @@ def _valid_compile_attempts(attempts: Any) -> bool:
         return False
     previous = 0
     for attempt in attempts:
-        if not isinstance(attempt, dict) or attempt.keys() != {"n", "decision", "errors", "diagnostics"}:
+        if not isinstance(attempt, dict) or attempt.keys() not in (
+                {"n", "decision", "errors", "diagnostics"},
+                {"n", "decision", "errors", "diagnostics", "source_decoded"}):
             return False
         if (not integer(attempt["n"], previous + 1, 8)
                 or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
                 or not integer(attempt["errors"], 0, 10000)):
             return False
         previous = attempt["n"]
+        if "source_decoded" in attempt:
+            decoded = attempt["source_decoded"]
+            if (attempt["decision"] != "accept" or not isinstance(decoded, dict)
+                    or decoded.keys() != {"entities", "original_sha256", "compiled_sha256"}
+                    or not integer(decoded["entities"], 1, 10000)
+                    or any(not isinstance(decoded[key], str) or not re.fullmatch(r"[0-9a-f]{64}", decoded[key])
+                           for key in ("original_sha256", "compiled_sha256"))
+                    or decoded["original_sha256"] == decoded["compiled_sha256"]):
+                return False
         diagnostics = attempt["diagnostics"]
         if not isinstance(diagnostics, list) or len(diagnostics) > 10:
             return False

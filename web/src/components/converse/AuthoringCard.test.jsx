@@ -444,4 +444,15 @@ it('disables withdrawal while the request is pending', async () => {
   expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
   await act(async () => finishWithdraw({ withdrawn: false, revoked: false }))
   expect(screen.getByText('This build can no longer be withdrawn.')).toBeVisible()
+
+it('discloses the number of HTML escapes Studio decoded in an accepted source', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: undefined,
+    compile: { attempts: [{ n: 1, decision: 'accept', errors: 0, diagnostics: [],
+      source_decoded: { entities: 2, original_sha256: 'a'.repeat(64), compiled_sha256: 'b'.repeat(64) } }] } })
+  await mount()
+  openDeployDetails()
+  // The attempt list and the deploy details both disclose it.
+  const labels = screen.getAllByText('Attempt 1: passed, Studio decoded HTML escapes in the source (2)')
+  expect(labels.map(label => label.tagName)).toEqual(['LI', 'DD'])
+  for (const label of labels) expect(label).toBeVisible()
 })
