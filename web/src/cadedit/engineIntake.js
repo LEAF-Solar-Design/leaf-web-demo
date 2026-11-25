@@ -607,39 +607,92 @@ export function projectServerBlocks(intake) {
   const cache = new Map()
   const polylines = [], inserts = []
   let points = 0, sampledPoints = 0, truncated = 0
+  let nestedVisits = 0, nestedPoints = 0
+  const nestedDepthLimit = 8
+  const polylineChild = (pl) => ({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+  const normalizeReference = (source) => {
+    const positioned = Array.isArray(source.pt)
+    const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
+      && (source.z === undefined || finite(source.z)) ? [source.x, source.y, source.z ?? 0] : null)
+    if (!ip) return null
+    const rotation = source.rot ?? 0
+    return { ...source, ip, pt: ip, sourceHandle: String(source.handle ?? ''),
+      layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
+      scale: source.scale ?? [1, 1, 1], normal: source.nrm ?? [0, 0, 1],
+      rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN,
+      columnSpacing: source.columnSpacing ?? source.column_spacing,
+      rowSpacing: source.rowSpacing ?? source.row_spacing }
+  }
+
+  // Cache direct samples only. An expanded definition depends on its current
+  // ancestors and remaining budget, so a shared child must be visited per path.
   const normalizedDefinition = (name) => {
     if (cache.has(name)) return cache.get(name)
     const source = definitions.get(name)
     if (!source) { cache.set(name, null); return null }
     const children = [], rows = Array.isArray(source.children) ? source.children : []
-    let complete = source.complete === true && rows.length <= BLOCK_CHILD_CAP
+    const nested = Array.isArray(source.nested_inserts) ? source.nested_inserts : []
+    const nestedRows = rows.slice(0, BLOCK_CHILD_CAP).filter((row) => row?.kind === 'OTHER' && row.type === 'INSERT')
+    const nestedCaptured = nested.length > 0 && nested.length === nestedRows.length
+      && source.count === rows.length && source.nested_inserts_incomplete !== true
+    let complete = (source.complete === true || nestedCaptured) && rows.length <= BLOCK_CHILD_CAP
+      && source.nested_inserts_incomplete !== true
     if (source.count !== undefined && source.count !== rows.length) complete = false
+    if (nested.length && !nestedCaptured) complete = false
     for (const child of rows.slice(0, BLOCK_CHILD_CAP)) {
+      if (child?.kind === 'OTHER' && child.type === 'INSERT' && nested.length) continue
       if (sampledPoints >= MAX_POINTS) { complete = false; truncated++; break }
       const pl = serverBlockChild(child)
       if (!pl) { complete = false; continue }
       if (sampledPoints + pl.pts.length > MAX_POINTS) { complete = false; truncated++; continue }
       sampledPoints += pl.pts.length
-      children.push({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+      children.push(polylineChild(pl))
     }
-    const result = { base: serverPoint(source.base), baseUnknown: source.baseUnknown, complete, children }
+    const result = { base: serverPoint(source.base), baseUnknown: source.baseUnknown, complete, children, nested }
     cache.set(name, result)
     return result
   }
+
+  const expandDefinition = (name, ancestors) => {
+    if (ancestors.has(name) || ancestors.size > nestedDepthLimit) return null
+    const direct = normalizedDefinition(name)
+    if (!direct?.nested.length) return direct
+    ancestors.add(name)
+    const children = [...direct.children]
+    let complete = direct.complete
+    for (const source of direct.nested.slice(0, BLOCK_CHILD_CAP)) {
+      if (nestedVisits >= MAX_POINTS || nestedPoints >= MAX_POINTS || children.length >= BLOCK_CHILD_CAP) {
+        complete = false
+        truncated++
+        break
+      }
+      nestedVisits++
+      if (source?.invisible === true) continue
+      const reference = source && normalizeReference(source)
+      const definition = reference && expandDefinition(String(reference.name).toUpperCase(), ancestors)
+      if (!definition) { complete = false; continue }
+      const expanded = expandBlockReference(reference, definition, { pointLimit: MAX_POINTS - nestedPoints })
+      if (!expanded.complete) complete = false
+      truncated += expanded.truncated ?? 0
+      for (const pl of expanded.polylines) {
+        nestedPoints += pl.pts.length
+        if (children.length >= BLOCK_CHILD_CAP) { complete = false; truncated++; continue }
+        children.push(polylineChild(pl))
+      }
+    }
+    ancestors.delete(name)
+    return { ...direct, complete: complete && direct.nested.length <= BLOCK_CHILD_CAP, children }
+  }
+
   for (let i = 0; i < Math.min(modelInserts.length, MAX_POINTS); i++) {
     const source = modelInserts[i]
-    if (!source || typeof source !== 'object') continue
-    const positioned = Array.isArray(source.pt)
-    const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
-      && (source.z === undefined || finite(source.z)) ? [source.x, source.y, source.z ?? 0] : null)
-    if (!ip) continue
-    const rotation = source.rot ?? 0
-    const normal = source.nrm ?? [0, 0, 1]
-    const row = { ...source, ip, pt: ip, sourceHandle: String(source.handle ?? ''),
-      layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
-      scale: source.scale ?? [1, 1, 1], normal,
-      rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN }
-    const definition = normalizedDefinition(String(source.name).toUpperCase())
+    if (!source || typeof source !== 'object' || source.invisible === true) continue
+    const row = normalizeReference(source)
+    if (!row) continue
+    const ip = row.ip
+    const name = String(source.name).toUpperCase()
+    const direct = normalizedDefinition(name)
+    const definition = direct?.nested.length ? expandDefinition(name, new Set()) : direct
     const expanded = definition ? expandBlockReference(row, definition, { pointLimit: MAX_POINTS - points })
       : { polylines: [], complete: false }
     for (const pl of expanded.polylines) { polylines.push(pl); points += pl.pts.length }

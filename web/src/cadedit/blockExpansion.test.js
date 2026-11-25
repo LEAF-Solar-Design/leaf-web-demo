@@ -24,6 +24,55 @@ const serverSource = () => ({
 })
 
 describe('server block projection', () => {
+  const nestedRow = { kind: 'OTHER', type: 'INSERT' }
+  function nestedFixture(reference, top = {}) {
+    return {
+      blocks: {
+        Frame: { base: [0, 0, 0], count: 1, complete: false,
+          children: [nestedRow], nested_inserts: [{ name: 'Rail', x: 3, y: 4, ...reference }] },
+        Rail: { base: [0, 0, 0], count: 1, complete: true,
+          children: [{ kind: 'LINE', layer: '0', pts: [[0, 0, 0], [2, 1, 0]] }] },
+      },
+      inserts: [{ name: 'Frame', handle: 'A10', layer: 'Equipment', x: 100, y: 200, ...top }],
+    }
+  }
+
+  it.each([
+    ['translation', {}, {}, [[103, 204, 0], [105, 205, 0]]],
+    ['mirror and two rotations', { scale: [-2, 1, 1], rot: Math.PI / 2 },
+      { scale: [2, 3, 1], rot: Math.PI / 2 }, [[88, 206, 0], [100, 204, 0]]],
+    ['elevation and nonuniform scale', { z: 3, scale: [3, 2, 1], layer: 'Detail' },
+      { z: 7, scale: [1, 2, 2] }, [[103, 208, 13], [109, 212, 13]]],
+  ])('projects nested %s through the outer selectable instance', (_, nested, top, expected) => {
+    const input = nestedFixture(nested, top)
+    const before = structuredClone(input)
+    const view = projectServerBlocks(input)
+    expect(view).toMatchObject({ incompleteInserts: 0, truncated: 0 })
+    expect(view.polylines).toHaveLength(1)
+    const [polyline] = view.polylines
+    expect(polyline).toMatchObject({ handle: 'A10', sourceHandle: 'A10', layer: nested.layer ?? 'Equipment' })
+    polyline.pts.forEach((point, i) => point.forEach((value, j) => expect(value).toBeCloseTo(expected[i][j], 10)))
+    expect(input).toEqual(before)
+  })
+
+  it('projects shared block definitions per placement and excludes invisible references', () => {
+    const input = nestedFixture({})
+    const frame = input.blocks.Frame
+    frame.children.push(nestedRow, nestedRow)
+    frame.count = 3
+    frame.nested_inserts.push({ name: 'Rail', x: 8, y: 4 }, { name: 'Rail', x: 0, y: 0, invisible: true })
+    input.inserts.push({ ...input.inserts[0], handle: 'A11', invisible: true })
+    const view = projectServerBlocks(input)
+    expect(view.inserts.map((row) => row.handle)).toEqual(['A10'])
+    expect(view.polylines.map((row) => row.pts[0])).toEqual([[103, 204, 0], [108, 204, 0]])
+    expect(view.incompleteInserts).toBe(0)
+  })
+
+  it.each(['Frame', 'Missing'])('reports an incomplete nested %s reference', (name) => {
+    const view = projectServerBlocks(nestedFixture({ name }))
+    expect(view).toMatchObject({ polylines: [], incompleteInserts: 1 })
+  })
+
   it('projects a complete server-only block, preserving its world geometry, owner and source', () => {
     const source = serverSource(), before = structuredClone(source)
     const view = projectServerBlocks(source)
