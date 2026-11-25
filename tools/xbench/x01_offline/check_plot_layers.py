@@ -7,20 +7,26 @@ Usage (from the repository root)::
     python tools/xbench/x01_offline/check_plot_layers.py --self-test
 
 This is not a full DXF reader, a bench grade, or a readiness check. Only ASCII
-code/value records, LAYER tables, ordinary BLOCK/INSERT trees and modelspace
+code/value records, LAYER tables, BLOCK/INSERT trees (including arrays) and modelspace
 ENTITIES are supported. No geometry transforms, viewport overrides, external
 references, attributes, or rendering are evaluated. Unsupported modelspace
 entity types are unreadable. Bounds also apply to expanded occurrences.
 Occurrence paths are arrays of INSERT handles followed by the leaf handle;
+array handles use HANDLE[row=0,col=0] tokens in row-major order. Spacing groups
+44/45 affect geometry only and are not applied by this layer checker.
 inspected_occurrences counts classified module/tag leaves, including repeats.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import re
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 
 SCHEMA = "leaf.xbench.x01.offline-layers.v1"
@@ -28,6 +34,7 @@ MAX_BYTES = 1_048_576
 MAX_PAIRS = 50_000
 MAX_RECORDS = 20_000
 MAX_OCCURRENCES = 100_000
+MAX_ARRAY_CELLS = 10_000
 MAX_DEPTH = 64
 GEOMETRY = frozenset({"LINE", "LWPOLYLINE", "POLYLINE", "VERTEX", "POINT",
                       "CIRCLE", "ARC", "ELLIPSE", "SPLINE", "SOLID", "TRACE",
@@ -194,12 +201,16 @@ def parse(data):
     return layers, blocks, sections["ENTITIES"]
 
 
-def check_bytes(data, module_layers=None, tag_layers=None):
+def check_bytes(data, module_layers=None, tag_layers=None, *, required_roles=()):
+    required_roles = tuple(required_roles)
+    if any(role not in ("module", "tag") for role in required_roles):
+        raise ValueError("invalid required role: expected module or tag")
     modules = {name.casefold() for name in (module_layers if module_layers is not None else ["MODULES"])}
     tags = {name.casefold() for name in (tag_layers if tag_layers is not None else ["TAGS"])}
     diagnostics = []
     inspected = 0
     visited = 0
+    role_counts = {"module": 0, "tag": 0}
     try:
         layers, blocks, entities = parse(data)
 
@@ -236,42 +247,70 @@ def check_bytes(data, module_layers=None, tag_layers=None):
                 if hidden:
                     reasons += ("entity_hidden",)
                 if kind == "INSERT":
+                    columns = int(field(record, 70, "1"))
+                    rows = int(field(record, 71, "1"))
+                    if columns <= 0 or rows <= 0:
+                        raise Unreadable("invalid_array_count", **context)
+                    # Division guards the product before expansion, including
+                    # enormous integer inputs and arrays of empty blocks.
+                    if columns > MAX_ARRAY_CELLS or rows > MAX_ARRAY_CELLS // columns:
+                        raise Unreadable("array_cell_limit", **context)
+                    is_array = rows > 1 or columns > 1
+                    if is_array:
+                        context["path"] = path + (f"{handle}[row=0,col=0]",)
                     name = field(record, 2, required=True).casefold()
                     if name not in blocks:
                         raise Unreadable("missing_block", block=name, **context)
                     if name in active:
                         raise Unreadable("cyclic_block", block=name, **context)
-                    # Array INSERTs require separate occurrence identifiers; refuse them.
-                    if int(field(record, 70, "1")) != 1 or int(field(record, 71, "1")) != 1:
-                        raise Unreadable("unsupported_array_insert", **context)
-                    walk(blocks[name], effective, occurrence, active + (name,), reasons)
+                    for row in range(rows):
+                        for column in range(columns):
+                            cell_path = (path + (f"{handle}[row={row},col={column}]",)
+                                         if is_array else occurrence)
+                            # The first cell was charged on record entry; each
+                            # additional cell is an INSERT occurrence as well.
+                            if row or column:
+                                visited += 1
+                                if visited > MAX_OCCURRENCES:
+                                    raise Unreadable("occurrence_limit", handle=handle,
+                                                     path=cell_path, layer=effective)
+                            walk(blocks[name], effective, cell_path, active + (name,), reasons)
                 elif role is not None:
                     inspected += 1
+                    role_counts[role] += 1
                     for reason in dict.fromkeys(reasons):
                         diagnostics.append(diagnostic(reason, **context))
                 elif kind not in GEOMETRY | TEXT | {"SEQEND"}:
                     raise Unreadable("unsupported_entity", entity_type=kind, **context)
 
         walk(entities)
-        if inspected == 0:
+        for role in dict.fromkeys(required_roles):
+            if role_counts[role] == 0:
+                diagnostics.append(diagnostic("required_role_absent", role=role))
+        if inspected == 0 and not required_roles:
             raise Unreadable("no_classified_entities")
     except Unreadable as error:
         diagnostics.append(error.diagnostic)
         verdict = "UNREADABLE"
     else:
-        verdict = "FAIL" if diagnostics else "PASS"
+        verdict = ("UNREADABLE" if any(d["reason"] == "required_role_absent"
+                                       for d in diagnostics)
+                   else "FAIL" if diagnostics else "PASS")
     return dict(schema=SCHEMA, verdict=verdict,
                 inspected_occurrences=inspected, diagnostics=diagnostics)
 
 
-def check_file(path, module_layers=None, tag_layers=None):
+def check_file(path, module_layers=None, tag_layers=None, *, required_roles=()):
+    required_roles = tuple(required_roles)
+    if any(role not in ("module", "tag") for role in required_roles):
+        raise ValueError("invalid required role: expected module or tag")
     try:
         with open(path, "rb") as source:
             data = source.read(MAX_BYTES + 1)
     except OSError as error:
         return dict(schema=SCHEMA, verdict="UNREADABLE", inspected_occurrences=0,
                     diagnostics=[diagnostic("source_unavailable", detail=str(error))])
-    return check_bytes(data, module_layers, tag_layers)
+    return check_bytes(data, module_layers, tag_layers, required_roles=required_roles)
 
 
 def fixture(layers=(), entities=(), blocks=()):
@@ -299,6 +338,61 @@ def entity(handle="A", layer="MODULES", kind="LINE", extra=()):
 
 
 class SelfTests(unittest.TestCase):
+    def test_required_roles_and_default_compatibility(self):
+        for present, absent, kind, layer in (("module", "tag", "LINE", "MODULES"),
+                                             ("tag", "module", "TEXT", "TAGS")):
+            data = fixture(entities=[entity("M1" if present == "module" else "T1", layer, kind)])
+            default = check_bytes(data)
+            self.assertEqual(default, dict(schema=SCHEMA, verdict="PASS",
+                                          inspected_occurrences=1, diagnostics=[]))
+            self.assertEqual(check_bytes(data, required_roles=()), default)
+            self.assertEqual(check_bytes(data, required_roles=[present]), default)
+            self.assert_issue(check_bytes(data, required_roles=[absent]),
+                              "UNREADABLE", None, [], None, absent, "required_role_absent")
+        for kind in ("TEXT", "MTEXT"):
+            data = fixture(entities=[entity("M1"), entity("T1", "TAGS", kind, [(67, 1)])])
+            self.assert_issue(check_bytes(data, required_roles=["tag"]),
+                              "UNREADABLE", None, [], None, "tag", "required_role_absent")
+        for function, source in ((check_bytes, b""), (check_file, "unused")):
+            with self.assertRaisesRegex(ValueError, "invalid required role"):
+                function(source, required_roles=["typo"])
+
+    def test_required_nested_tags(self):
+        for kind in ("TEXT", "MTEXT"):
+            for child_layer in ("0", "TAGS"):
+                blocks = [("INNER", [entity("T1", child_layer, kind)]),
+                          ("OUTER", [entity("I2", "0", "INSERT", [(2, "INNER")])])]
+                for hidden in (False, True):
+                    data = fixture(entities=[entity("I1", "TAGS", "INSERT",
+                        [(2, "OUTER")] + ([(60, 1)] if hidden else []))], blocks=blocks)
+                    result = check_bytes(data, required_roles=["tag"])
+                    if hidden:
+                        self.assert_issue(result, "FAIL", "T1", ["I1", "I2", "T1"],
+                                          "TAGS", "tag", "entity_hidden")
+                    else:
+                        self.assertEqual(result["verdict"], "PASS")
+
+    def test_required_roles_cli_and_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "synthetic.dxf"
+            path.write_bytes(fixture(entities=[entity("M1")]))
+            self.assertEqual(check_file(path)["verdict"], "PASS")
+            for roles, expected, code in (([], "PASS", 0),
+                                          (["module"], "PASS", 0),
+                                          (["module", "tag"], "UNREADABLE", 4)):
+                argv = [str(path)]
+                for role in roles:
+                    argv.extend(["--require-role", role])
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(main(argv), code)
+                self.assertEqual(json.loads(output.getvalue()),
+                                 check_file(path, required_roles=roles))
+                self.assertEqual(json.loads(output.getvalue())["verdict"], expected)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                main([str(path), "--require-role", "wrong"])
+            self.assertEqual(caught.exception.code, 2)
+
     def assert_issue(self, result, verdict, handle, path, layer, role, reason):
         self.assertEqual(result["verdict"], verdict)
         self.assertEqual(result["diagnostics"], [
@@ -405,6 +499,7 @@ def main(argv=None):
     parser.add_argument("input", nargs="?")
     parser.add_argument("--module-layer", action="append")
     parser.add_argument("--tag-layer", action="append")
+    parser.add_argument("--require-role", action="append", choices=("module", "tag"), default=[])
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args(argv)
     if args.self_test:
@@ -414,7 +509,8 @@ def main(argv=None):
         result = dict(schema=SCHEMA, verdict="UNREADABLE", inspected_occurrences=0,
                       diagnostics=[diagnostic("missing_source")])
     else:
-        result = check_file(args.input, args.module_layer, args.tag_layer)
+        result = check_file(args.input, args.module_layer, args.tag_layer,
+                            required_roles=args.require_role)
     print(json.dumps(result, sort_keys=True))
     return {"PASS": 0, "FAIL": 1, "UNREADABLE": 4}[result["verdict"]]
 
