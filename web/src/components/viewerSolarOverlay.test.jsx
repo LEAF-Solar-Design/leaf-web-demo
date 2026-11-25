@@ -50,8 +50,8 @@ vi.mock('../solar/solarGraphOverlayLayer.js', async (importOriginal) => {
   const actual = await importOriginal()
   return {
     ...actual,
-    buildSolarGraphOverlayLayer: (polylines) => {
-      const layer = actual.buildSolarGraphOverlayLayer(polylines)
+    buildSolarGraphOverlayLayer: (polylines, origin) => {
+      const layer = actual.buildSolarGraphOverlayLayer(polylines, origin)
       gl.layers.push(layer)
       return layer
     },

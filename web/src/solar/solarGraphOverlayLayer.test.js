@@ -201,6 +201,13 @@ describe('unmounted Solar graph overlay layer', () => {
     layer.dispose()
   })
 
+  it.each([[0, 0], [19, -32], [1e9, -1e9]])('rebases origin (%s, %s) before Float32 conversion', (x, y) => {
+    const polylines = freeze([{ color: green, pts: [[x + 0.25, y + 0.5], [x - 0.5, y + 0.75]] }])
+    const layer = buildSolarGraphOverlayLayer(polylines, { x, y })
+    expect(vertices(layer.group.children[0])).toEqual([[0.25, 0.5], [-0.5, 0.75]])
+    layer.dispose()
+  })
+
   it('writes interleaved colour batches to exact size without connecting separate strings', () => {
     const layer = buildSolarGraphOverlayLayer([
       { color: green, pts: [[0, 0], [1, 0]] },

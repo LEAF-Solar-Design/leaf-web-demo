@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 
 // Unattached, disposable rendering resources for already projected geometry.
-export function buildSolarGraphOverlayLayer(polylines) {
+export function buildSolarGraphOverlayLayer(polylines, { x = 0, y = 0 } = {}) {
   const group = new THREE.Group()
   const batches = new Map()
   const resources = []
@@ -21,11 +21,11 @@ export function buildSolarGraphOverlayLayer(polylines) {
     for (let index = 1; index < pts.length; index += 1) {
       const a = pts[index - 1]
       const b = pts[index]
-      positions[offset++] = a[0]
-      positions[offset++] = a[1]
+      positions[offset++] = a[0] - x
+      positions[offset++] = a[1] - y
       positions[offset++] = 1.5
-      positions[offset++] = b[0]
-      positions[offset++] = b[1]
+      positions[offset++] = b[0] - x
+      positions[offset++] = b[1] - y
       positions[offset++] = 1.5
     }
     batch.offset = offset
