@@ -190,3 +190,36 @@ def test_equipment_heading_request_without_directions_asks_for_input(ask):
     state, output = invoke(source, raw)
     assert state == "ok", output
     assert output[0]["status"] == "needs_equipment_headings"
+
+@pytest.mark.parametrize("ask,saved_side,expected_ports", [
+    ("Compare equivalent cable routes by equipment ports. Departure ports: N1 north, E1 east; Arrival ports: E2 east, S2 south.",
+     "east", {"departure": "N1", "arrival": "E2"}),
+    ("Find the fewest conduit elbows among shortest routes using equipment ports. Arrival ports: N3=north or S3=south; Departure ports: N4=north or E4=east.",
+     "north", {"departure": "E4", "arrival": "N3"}),
+    ("Choose ports for the shortest wire paths. Departure ports: North-7 north, East-8 east; Arrival ports: E-9 east, W-9 west.",
+     "east", {"departure": "North-7", "arrival": "E-9"}),
+])
+def test_named_equipment_port_options(ask, saved_side, expected_ports):
+    start, end = (0, 0), (8, 4)
+    north = [start, (0, 4), end]
+    east = [start, (8, 0), end]
+    saved, preferred = (east, north) if saved_side == "east" else (north, east)
+    rows = [entity("Aisle", "A1", north), entity("Aisle", "A2", east),
+            entity("Cable", "B1", saved)]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Aisle", "Cable"], polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, _ = output
+    route = report["port_choices"]["B1"]
+    assert route["points"] == [list(point) for point in preferred]
+    assert (route["length"], route["bends"], route["ports"]) == (12, 1, expected_ports)
+
+
+def test_named_equipment_ports_require_both_ends():
+    _, source, _ = tools_fallback.author_tool(
+        "Use equipment ports on the shortest cable route. Departure ports: A north, B east.")
+    raw = intake_dxf.intake_to_dxf({"layers": ["Cable"], "polylines": []})
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    assert output[0]["status"] == "needs_equipment_ports"
