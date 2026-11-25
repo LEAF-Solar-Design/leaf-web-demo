@@ -256,6 +256,11 @@ export default function Gallery({page,category}){
  };
  useEffect(()=>{setSelectedId(null);trigger.current=null;},[category.slug]);
  useEffect(()=>{
+  const opened=trigger.current;
+  if(opened){
+   const position=currentImages.current.findIndex(image=>image.material_id===opened.materialId);
+   if(position>=0)opened.index=position;
+  }
   if(selectedId&&!selected)close();
  },[category.images,selectedId,selected]);
  useEffect(()=>{
@@ -285,7 +290,7 @@ export default function Gallery({page,category}){
    window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
  },[Boolean(selected)]);
  useEffect(()=>{if(selectedId)closeButton.current?.focus();},[selectedId,selected?.preview_sha256]);
- const open=(image,button)=>{trigger.current={button,index:visibleImages.indexOf(image)};setSelectedId(image.material_id);};
+ const open=(image,button)=>{trigger.current={button,materialId:image.material_id,index:visibleImages.indexOf(image)};setSelectedId(image.material_id);};
  return <>{!visibleImages.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div ref={grid} className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{visibleImages.map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph {...recovery(image)} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={photoVersion(selected)} {...recovery(selected)} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
 }
 ''',

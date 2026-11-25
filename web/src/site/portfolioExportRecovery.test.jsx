@@ -264,6 +264,19 @@ describe('actual exported portfolio image failure recovery', () => {
 
 
 describe('current material selection after document edits', () => {
+  it('uses the last visible opener position after a reorder and removal', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Third photo')
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second, third]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    view.rerender(gallery([second, first, third]))
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    view.rerender(gallery([second, third]))
+    expect(screen.getByRole('dialog', { name: third.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + third.alt }))
+  })
+
   it('focuses the visible photo at the removed opener position after navigation', () => {
     const third = photo('33333333-3333-4333-8333-333333333333', 'Third photo')
     const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
