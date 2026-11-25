@@ -9,8 +9,18 @@ def compares_lengths(prompt):
                 and re.search(r"\b(?:detours?|routes?|paths?|runs?|length)\b", prompt))
 
 
+def prefers_fewer_bends(prompt):
+    return bool(re.search(r"\b(?:bends?|turns?)\b", prompt)
+                and re.search(r"\b(?:fewest|fewer|remove|minimi[sz]e|least|reduce)\b", prompt)
+                and re.search(r"\b(?:same length|equal(?: length)?|ties?|shortest)\b", prompt))
+
+
 def matches(description):
     prompt = description.casefold()
+    if (prefers_fewer_bends(prompt)
+            and re.search(r"\b(?:cables?|wires?|conduits?|aisles?)\b", prompt)
+            and re.search(r"\b(?:paths?|routes?|runs?|detours?)\b", prompt)):
+        return True
     if (compares_lengths(prompt) and re.search(r"\b(?:cables?|wires?|wiring|conduits?)\b", prompt)
             and re.search(r"\b(?:aisles?|obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt)):
         return True
@@ -23,7 +33,10 @@ def matches(description):
 
 
 def build_body(description):
-    return PLANAR_GEOMETRY_BODY + _BODY.replace("__COMPARE_LENGTHS__", str(compares_lengths(description.casefold())))
+    prompt = description.casefold()
+    fewer_bends = prefers_fewer_bends(prompt)
+    body = _BODY.replace("__FEWER_BENDS__", str(fewer_bends))
+    return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(fewer_bends or compares_lengths(prompt)))
 
 
 _BODY = r"""
@@ -147,26 +160,46 @@ def build_graph(arrays, aisles, centerlines, endpoints):
     return graph
 
 
+def direction(a, b):
+    dx, dy = difference(b, a)
+    scale = abs(dx) or abs(dy)
+    return dx / scale, dy / scale
+
+
+def bend_count(edges):
+    directions = [direction(a, b) for a, b in edges]
+    return sum(left != right for left, right in zip(directions, directions[1:]))
+
+
 def shortest(graph, start, end):
-    distances = {start: 0.0}
+    initial = (start, (0, 0))
+    costs = {initial: (0.0, 0)}
     previous = {}
-    queue = [(0.0, start)]
+    queue = [(0.0, 0, initial)]
     while queue:
-        length, node = heappop(queue)
-        if length != distances[node]:
+        length, bends, state = heappop(queue)
+        if (length, bends) != costs[state]:
             continue
+        node, incoming = state
         if node == end:
-            path = [end]
-            while path[-1] != start:
-                path.append(previous[path[-1]])
-            return {"status": "found", "length": length,
-                    "points": [[float(x), float(y)] for x, y in reversed(path)]}
+            path = [node]
+            while state != initial:
+                state = previous[state]
+                path.append(state[0])
+            result = {"status": "found", "length": length,
+                      "points": [[float(x), float(y)] for x, y in reversed(path)]}
+            if __FEWER_BENDS__:
+                result["bends"] = bends
+            return result
         for neighbor, weight in graph.get(node, {}).items():
-            candidate = length + weight
-            if candidate < distances.get(neighbor, math.inf):
-                distances[neighbor] = candidate
-                previous[neighbor] = node
-                heappush(queue, (candidate, neighbor))
+            heading = direction(node, neighbor) if __FEWER_BENDS__ else (0, 0)
+            next_state = neighbor, heading
+            turn = incoming != (0, 0) and incoming != heading
+            candidate = length + weight, bends + turn
+            if candidate < costs.get(next_state, (math.inf, 0)):
+                costs[next_state] = candidate
+                previous[next_state] = state
+                heappush(queue, (*candidate, next_state))
     return {"status": "no_legal_detour"}
 
 
@@ -175,7 +208,7 @@ def run(intake, params):
     if __COMPARE_LENGTHS__:
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
         graph = build_graph(arrays, aisles, centerlines, endpoints)
-        findings, unavailable, crossings = {}, {}, {}
+        findings, unavailable, crossings, tied = {}, {}, {}, {}
         for handle, edges in cables.items():
             crossed = [name for name, outline in zip(obstacle_ids, arrays)
                        if any(enters_array(a, b, [outline]) for a, b in edges)]
@@ -193,10 +226,18 @@ def run(intake, params):
             best = route["length"]
             if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
                 findings[handle] = dict(route, drawn_length=drawn, saving=drawn-best)
-        return ({"avoidable_detours": findings, "crossed_obstacles": crossings,
-                 "unavailable": unavailable, "units": "drawing_units"},
-                {"highlight_handles": list(findings), "markers": [],
-                 "polylines": [{"pts": row["points"]} for row in findings.values()]})
+            if __FEWER_BENDS__ and math.isclose(best, drawn, rel_tol=1e-12):
+                drawn_bends = bend_count(edges)
+                if route["bends"] < drawn_bends:
+                    tied[handle] = dict(route, drawn_bends=drawn_bends,
+                                        bends_saved=drawn_bends-route["bends"])
+        report = {"avoidable_detours": findings, "crossed_obstacles": crossings,
+                  "unavailable": unavailable, "units": "drawing_units"}
+        if __FEWER_BENDS__:
+            report["equal_length_fewer_bends"] = tied
+        alternatives = {**findings, **tied}
+        return (report, {"highlight_handles": list(alternatives), "markers": [],
+                         "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
     endpoints = {h: (cables[h][0][0], cables[h][-1][1]) for h in crossings}
     if any(start == end for start, end in endpoints.values()):

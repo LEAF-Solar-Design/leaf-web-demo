@@ -119,3 +119,37 @@ def test_avoidable_legal_detour(ask):
     assert report["crossed_obstacles"] == {"B4": ["A1"]}
     assert report["unavailable"] == {"B3": "no_legal_detour"}
     assert overlay["highlight_handles"] == ["B1"]
+
+@pytest.mark.parametrize("ask", [
+    "If two permitted cable paths have the same length, show which bends I can remove.",
+    "Find the shortest aisle paths for my conduit runs and minimize turns among ties.",
+    "For equal length wire routes, show where I can reduce bends.",
+])
+def test_equal_length_prefers_fewer_bends(ask):
+    simple = [START, (-5, 2), (0, 2), (5, 2), END]
+    bent = [START, (-4, 0), (-4, -1), (1, -1), (1, -2), (5, -2), END]
+    rows = [entity("Aisle", "C1", simple), entity("Aisle", "C2", bent),
+            entity("Cable", "B1", bent), entity("Wire", "B2", [(30, 0), (32, 0)])]
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({e["layer"] for e in rows}), polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    route = report["equal_length_fewer_bends"]["B1"]
+    assert route["points"] == [list(p) for p in simple]
+    assert route["length"] == 14
+    assert (route["bends"], route["drawn_bends"], route["bends_saved"]) == (2, 5, 3)
+    assert report["avoidable_detours"] == {}
+    assert report["unavailable"] == {"B2": "no_legal_detour"}
+    assert overlay["highlight_handles"] == ["B1"]
+
+    # Moving the two-bend route farther away makes the more winding route win.
+    rows[0] = entity("Aisle", "C1", [START, (-5, 3), (5, 3), END])
+    rows[2] = entity("Cable", "B1", [START, (-5, 3), (5, 3), END])
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({e["layer"] for e in rows}), polylines=rows))
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, _ = output
+    assert report["equal_length_fewer_bends"] == {}
+    assert report["avoidable_detours"]["B1"]["points"] == [list(p) for p in bent]
+    assert report["avoidable_detours"]["B1"]["saving"] == 2
