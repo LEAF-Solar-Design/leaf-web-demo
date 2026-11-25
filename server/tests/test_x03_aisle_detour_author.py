@@ -15,6 +15,48 @@ ASKS = (
 )
 
 
+@pytest.mark.parametrize("ask, route, obstacles, expected", [
+    ("Show just the part of each cable segment whose corridor falls below clearance, and mark where "
+     "the clearance starts and ends along the route. Corridor width is 1 m and side clearance is .25 m.",
+     [(-2, 0), (10, 0)],
+     [[(2, .5), (4, .5), (4, 1.5), (2, 1.5)]],
+     [(1, 2-math.sqrt(5)/4, 4+math.sqrt(5)/4, 2, ["A1"])]),
+    ("Mark wire corridor clearance intervals next to keepouts with a 1 m corridor and 0 m side clearance.",
+     [(-2, -2), (-2, 0), (12, 0)],
+     [[(2, -1), (4, -1), (4, 1), (2, 1)],
+      [(4.25, -1), (6, -1), (6, 1), (4.25, 1)],
+      [(8, .5), (9, .5), (9, 1.5), (8, 1.5)]],
+     [(2, 1.5, 6.5, 4, ["A1", "A2"])]),
+    ("Mark the conduit corridor subsegments that encroach on the roof obstacle. Use a 100 cm corridor "
+     "and 0 cm side clearance.",
+     [(-3, 0), (13, 0)],
+     [[(0, -2), (10, -2), (10, 2), (8, 2), (8, -1), (2, -1), (2, 2), (0, 2)]],
+     [(1, -.5, 2.5, 3, ["A1"]), (1, 7.5, 10.5, 3, ["A1"])]),
+])
+def test_corridor_clearance_marks_only_failing_portions(ask, route, obstacles, expected):
+    rows = [entity("Roof Keepout", f"A{i:X}", polygon, closed=True)
+            for i, polygon in enumerate(obstacles, 1)]
+    rows.append(entity("Cable", "B1", route))
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Roof Keepout", "Cable"], polylines=rows))
+    raw = raw.replace(b"9\n$HANDSEED\n", b"9\n$INSUNITS\n70\n6\n9\n$HANDSEED\n", 1)
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    assert overlay["highlight_handles"] == []
+    assert "violating_segments" in report, report
+    spans = report["violating_segments"]["B1"]
+    assert len(spans) == len(expected)
+    assert len(overlay["markers"]) == 2 * len(expected)
+    assert overlay["polylines"] == [{"pts": span["points"]} for span in spans]
+    assert report["clearance_violations"] == {"B1": sorted({h for *_, handles in expected for h in handles})}
+    for span, (index, start, end, offset, handles) in zip(spans, expected):
+        assert (span["source_segment"], span["obstacles"]) == (index, handles)
+        assert span["points"][0] == pytest.approx([start, 0])
+        assert span["points"][1] == pytest.approx([end, 0])
+        assert span["stations"] == pytest.approx([start + offset, end + offset])
+
+
 def simple_paths(edges, start, end):
     # Exhaust every simple path in the independently enumerated legal graph.
     pending = [([start], 0.0)]

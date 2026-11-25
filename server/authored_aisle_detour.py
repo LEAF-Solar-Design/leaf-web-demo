@@ -30,9 +30,15 @@ def requests_clearance(prompt):
 def requests_corridor_check(prompt):
     return bool(re.search(r"\b(?:cables?|wires?|wiring|conduits?)\b", prompt)
                 and re.search(r"\bcorridors?\b", prompt)
-                and re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt)
+                and (requests_clearance_spans(prompt)
+                     or re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt))
                 and re.search(r"\b(?:clearance|separation|too close|encroach\w*)\b", prompt)
-                and not re.search(r"\b(?:vertical|above|below)\b", prompt))
+                and not re.search(r"\b(?:vertical|elevation|above|below(?!\s+(?:(?:the|required|minimum)\s+)*clearance\b))\b", prompt))
+
+
+def requests_clearance_spans(prompt):
+    return bool(re.search(r"\b(?:parts?|portions?|subsegments?|spans?|intervals?)\b", prompt)
+                or re.search(r"\b(?:start\w*|begin\w*|entr(?:y|ies))\b.*\b(?:end\w*|exit\w*)\b", prompt))
 
 
 def clearance_dimensions(prompt):
@@ -162,6 +168,7 @@ def build_body(description):
     body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
     body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
     body = body.replace("__CORRIDOR_CHECK__", str(corridor_check))
+    body = body.replace("__CLEARANCE_SPANS__", str(corridor_check and requests_clearance_spans(prompt)))
     compare = dimensions is not None or fewer_bends or compares_lengths(prompt)
     return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(compare))
 
@@ -405,23 +412,98 @@ def shortest(graph, start, end, departure=None, arrival=None, ports=None):
     return result
 
 
+def dot(u, v):
+    return u[0]*v[0] + u[1]*v[1]
+
+
+def parameter_band(value, slope, low, high):
+    if slope:
+        return tuple(sorted(((low-value)/slope, (high-value)/slope)))
+    return (0, 1) if low <= value <= high else (0, 0)
+
+
+def clearance_intervals(a, b, outline, radius):
+    # The buffered polygon is its interior plus the capsules of its edges.
+    _, edges = outline
+    axis = difference(b, a)
+    scale = dot(axis, axis)
+    limit = radius**2
+    cuts = {Fraction(0), Fraction(1)}
+    split_at_edges(a, axis, edges, cuts)
+    ordered = sorted(cuts)
+    for lo, hi in zip(ordered, ordered[1:]):
+        if location(at(a, axis, (lo + hi)/2), edges) >= 0:
+            yield float(lo), float(hi)
+
+    # Endpoint disks and edge strips cover each capsule. Fraction arithmetic
+    # distinguishes tangency from penetration before any square root.
+    for p in {point for edge in edges for point in edge}:
+        offset = difference(a, p)
+        centre = -dot(offset, axis)/scale
+        gap = (limit - dot(offset, offset) + centre**2*scale)/scale
+        if gap > 0:
+            spread = math.sqrt(gap)
+            yield max(0, float(centre)-spread), min(1, float(centre)+spread)
+    for p, q in edges:
+        edge = difference(q, p)
+        offset = difference(a, p)
+        size = dot(edge, edge)
+        side, slope = cross(edge, offset), cross(edge, axis)
+        if not slope and side**2 >= limit*size:
+            continue
+        lo, hi = parameter_band(dot(edge, offset), dot(edge, axis), Fraction(0), size)
+        lateral_lo, lateral_hi = 0, 1
+        if slope:
+            centre = -side/slope
+            spread = math.sqrt(limit*size/slope**2)
+            lateral_lo, lateral_hi = float(centre)-spread, float(centre)+spread
+        yield max(0, lo, lateral_lo), min(1, hi, lateral_hi)
+
+
 def corridor_clearance(cables, arrays, obstacle_ids, radius):
-    violations, segments, overlays = {}, {}, []
+    violations, segments, overlays, markers = {}, {}, [], []
     for handle, edges in cables.items():
         hit_handles = set()
-        for a, b in edges:
-            hits = [name for name, outline in zip(obstacle_ids, arrays)
+        distance = 0.0
+        for index, (a, b) in enumerate(edges, 1):
+            length = math.dist(a, b)
+            hits = [(name, outline) for name, outline in zip(obstacle_ids, arrays)
                     if violates_clearance(a, b, [outline], radius)]
-            if hits:
+            names = [name for name, _ in hits]
+            hit_handles.update(names)
+            if __CLEARANCE_SPANS__:
+                spans = []
+                for name, outline in hits:
+                    spans.extend((lo, hi, name) for lo, hi in clearance_intervals(a, b, outline, radius)
+                                 if lo < hi)
+                merged = []
+                for lo, hi, name in sorted(spans):
+                    if merged and lo < merged[-1][1]:
+                        start, end, causes = merged[-1]
+                        merged[-1] = (start, max(end, hi), causes | {name})
+                    else:
+                        merged.append((lo, hi, {name}))
+                for lo, hi, causes in merged:
+                    points = [[float(x), float(y)] for x, y in
+                              (at(a, difference(b, a), lo), at(a, difference(b, a), hi))]
+                    stations = [distance + length*float(t) for t in (lo, hi)]
+                    segments.setdefault(handle, []).append(
+                        {"source_segment": index, "points": points, "stations": stations,
+                         "obstacles": sorted(causes)})
+                    overlays.append({"pts": points})
+                    markers.extend({"pt": point, "label": f"{handle} clearance {edge} {station:.6g}"}
+                                   for point, station, edge in zip(points, stations, ("start", "end")))
+            elif hits:
                 points = [[float(x), float(y)] for x, y in (a, b)]
-                segments.setdefault(handle, []).append({"points": points, "obstacles": hits})
+                segments.setdefault(handle, []).append({"points": points, "obstacles": names})
                 overlays.append({"pts": points})
-                hit_handles.update(hits)
+            distance += length
         if hit_handles:
             violations[handle] = sorted(hit_handles)
     return ({"clearance_violations": violations, "violating_segments": segments,
              "swept_half_width": float(radius), "units": "drawing_units"},
-            {"highlight_handles": list(violations), "markers": [], "polylines": overlays})
+            {"highlight_handles": [] if __CLEARANCE_SPANS__ else list(violations),
+             "markers": markers, "polylines": overlays})
 
 
 def run(intake, params):
