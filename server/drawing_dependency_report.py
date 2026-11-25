@@ -34,6 +34,7 @@ def from_pairs(pairs, *, literal_text=None):
     owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"},
               "IMAGEDEF": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
+              "PLOTSETTINGS": {"OBJECTS"},
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
     inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
@@ -93,6 +94,9 @@ def from_pairs(pairs, *, literal_text=None):
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
+        elif kind == "PLOTSETTINGS":
+            add("plot_device", groups.get(2), "reported")
+            add("plot_style", groups.get(7), "reported")
         elif kind in ("PDFDEFINITION", "DWFDEFINITION", "DGNDEFINITION"):
             add("underlay", groups.get(1) or groups.get(2) or groups.get(5), "underlay omitted")
         elif kind in ("ACAD_PROXY_ENTITY", "ACAD_PROXY_OBJECT", "PROXY_ENTITY", "PROXY_OBJECT"):
