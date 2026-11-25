@@ -193,6 +193,48 @@ export function portfolioTextChanges(saved, proposed) {
   } catch { return proposalInvalid() }
 }
 
+const BROWSER_TEXT = ['label', 'headline', 'description', 'status']
+
+export function pageProposalChanges(saved, proposed) {
+  if (saved.schema === 'leaf.portfolio.v1') return portfolioTextChanges(saved, proposed)
+  validatePageDocument(proposed)
+  const changes = []
+  const changed = (label, before, after) => {
+    if (before !== after) changes.push({ label, before, after })
+  }
+  for (const key of BROWSER_TEXT) changed(key, saved[key], proposed[key])
+  const before = pageActions(saved), after = pageActions(proposed)
+  for (let index = 0; index < Math.max(before.length, after.length); index++) {
+    for (const [key, name] of [['label', 'label'], ['href', 'destination']]) {
+      changed(`Contact link ${index + 1} ${name}`, before[index]?.[key] ?? '', after[index]?.[key] ?? '')
+    }
+  }
+  return changes
+}
+
+function validateBrowserProposal(saved, proposed, edits) {
+  const copy = { ...saved }
+  const original = pageActions(saved)
+  const slots = Array.from({ length: MAX_PAGE_ACTIONS }, (_, index) => ({ label: '', href: '', ...original[index] }))
+  const targets = BROWSER_TEXT.map(key => [copy, key])
+  for (const slot of slots) targets.push([slot, 'label'], [slot, 'href'])
+  for (const { id, value } of edits) {
+    const index = targets.findIndex((_, index) => id === `f${String(index + 1).padStart(4, '0')}`)
+    if (index < 0) proposalInvalid()
+    const [target, key] = targets[index]
+    target[key] = value
+  }
+  const actions = slots.filter(action => action.label || action.href)
+  if (canonical(actions) !== canonical(original)) {
+    delete copy.action
+    delete copy.actions
+    if (actions.length === 1) copy.action = actions[0]
+    else if (actions.length) copy.actions = actions
+  }
+  validatePageDocument(copy)
+  if (canonical(copy) !== canonical(proposed)) proposalInvalid()
+}
+
 async function readProposal(response, signal) {
   const max = 1024 * 1024
   let reader
@@ -235,7 +277,7 @@ export function validateProjectPageProposal(projectId, saved, value) {
   let document
   try {
     if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
-    document = validatePortfolioDocument(saved.document)
+    document = validatePageDocument(saved.document)
   } catch { return proposalInvalid() }
   const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
   if (!closed(value, 'source proposed_document proposed_digest edits model usage')
@@ -253,6 +295,10 @@ export function validateProjectPageProposal(projectId, saved, value) {
   const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
   for (const [key, count] of Object.entries(value.usage)) {
     if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
+  }
+  if (document.schema !== 'leaf.portfolio.v1') {
+    validateBrowserProposal(document, value.proposed_document, value.edits)
+    return value
   }
   const changes = portfolioTextChanges(document, value.proposed_document)
   const values = value.edits.map(edit => edit.value)
@@ -321,10 +367,10 @@ export async function proposeProjectPage(projectId, saved, instruction, { signal
   const path = pagePath(projectId)
   if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
     || typeof instruction !== 'string' || !instruction.trim() || Array.from(instruction).length > 4000) {
-    throw new Error('Save the portfolio and enter a text change of 1 to 4000 characters.')
+    throw new Error('Save the page and enter a text change of 1 to 4000 characters.')
   }
   let document
-  try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }
+  try { document = validatePageDocument(saved.document) } catch { return proposalInvalid() }
   const snapshot = { revision: saved.revision, digest: saved.digest, document }
   const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
   return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',

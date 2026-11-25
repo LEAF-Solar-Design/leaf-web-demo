@@ -675,7 +675,9 @@ def test_first_page_proposal_catalog_document_and_review_only(client, fresh, mon
         {'id': f'f{index:04d}', 'value': '', 'max_length': limit, 'role': role}
         for index, (limit, role) in enumerate([
             (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
-            (60, 'contact button label'), (2048, 'contact link')], 1)]
+            (60, 'contact button label'), (2048, 'contact link'),
+            (60, 'contact button 2 label'), (2048, 'contact link 2'),
+            (60, 'contact button 3 label'), (2048, 'contact link 3')], 1)]
     assert project_web_page.read(fresh['org'], fresh['project'], fresh['actor']) is None
     assert failure_records(caplog) == []
     applied = client.put(fresh['url'], headers=fresh['auth'], json={
@@ -770,11 +772,64 @@ def test_first_page_service_without_database(monkeypatch):
         {'id': f'f{index:04d}', 'value': '', 'max_length': limit, 'role': role}
         for index, (limit, role) in enumerate([
             (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
-            (60, 'contact button label'), (2048, 'contact link')], 1)]
+            (60, 'contact button label'), (2048, 'contact link'),
+            (60, 'contact button 2 label'), (2048, 'contact link 2'),
+            (60, 'contact button 3 label'), (2048, 'contact link 3')], 1)]
     assert proposal['source'] == {'project_id': str(project), 'revision': 0, 'digest': '0' * 64}
     assert proposal['proposed_document']['action'] == {
         'label': 'Get updates', 'href': 'mailto:hello@example.com'}
     assert proposal['proposed_digest'] == document_digest(proposal['proposed_document'])
+
+
+@pytest.mark.parametrize('kind,instruction', [
+    ('ordered', 'List wholesale, weddings, and general questions in that order.'),
+    ('add', 'Keep the email and add a Book a tasting link.'),
+    ('remove', 'Remove the catering link and keep the general inquiries link.'),
+])
+def test_browser_proposal_uses_ordered_contact_slots(monkeypatch, kind, instruction):
+    org, project, actor = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    general = {'label': 'General inquiries', 'href': 'mailto:hello@example.test'}
+    catering = {'label': 'Catering', 'href': 'mailto:catering@example.test'}
+    booking = {'label': 'Book a tasting', 'href': 'https://example.test/book'}
+    wholesale = {'label': 'Wholesale', 'href': 'mailto:wholesale@example.test'}
+    weddings = {'label': 'Weddings', 'href': 'mailto:weddings@example.test'}
+    document = {'label': 'Bakery', 'headline': 'Contact', 'description': '', 'status': '',
+                'theme': 'cream', 'alignment': 'center'}
+    if kind == 'ordered':
+        initial = None
+        values = ['Bakery', 'Contact', '', '', wholesale['label'], wholesale['href'],
+                  weddings['label'], weddings['href'], general['label'], general['href']]
+        expected = {**document, 'actions': [wholesale, weddings, general]}
+        edits = [{'id': f'f{index:04d}', 'value': value} for index, value in enumerate(values, 1)]
+    elif kind == 'add':
+        initial = {**document, 'action': general}
+        expected = {**document, 'actions': [general, booking]}
+        edits = [{'id': 'f0007', 'value': booking['label']}, {'id': 'f0008', 'value': booking['href']}]
+    else:
+        initial = {**document, 'actions': [catering, general]}
+        expected = {**document, 'action': general}
+        edits = [{'id': 'f0005', 'value': ''}, {'id': 'f0006', 'value': ''}]
+
+    revision, digest = (0, proposals.NO_PAGE_DIGEST) if initial is None else (7, document_digest(initial))
+    saved = None if initial is None else {'revision': revision, 'digest': digest, 'document': initial}
+    before = copy.deepcopy(saved)
+    reads, roles = [], []
+    monkeypatch.setattr(proposals.project_web_page, 'read', lambda *args: reads.append(args) or saved)
+    monkeypatch.setattr(proposals.lifecycle, 'require_project_role', lambda *args, **kwargs: roles.append((args, kwargs)))
+
+    def transport(payload):
+        assert payload['instruction'] == instruction
+        assert payload['fields'][4]['value'] == ('' if initial is None else (general if kind == 'add' else catering)['label'])
+        assert payload['fields'][8]['role'] == 'contact button 3 label'
+        return encoded(result(payload, edits))
+
+    monkeypatch.setattr(proposals, '_transport', transport)
+    proposal = proposals.propose(org, project, actor, expected_revision=revision, expected_digest=digest, instruction=instruction)
+    assert proposal['proposed_document'] == expected
+    assert proposal['proposed_digest'] == document_digest(expected)
+    assert saved == before
+    assert reads == [(org, project, actor)] * 2
+    assert roles == [((org, project, actor), {'write': True})] * 2
 
 
 def test_first_page_service_existing_page_conflicts(monkeypatch):

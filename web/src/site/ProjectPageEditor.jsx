@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, pageProposalChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
 import { MAX_PAGE_ACTIONS, pageActions } from './projectPageClient.js'
 import { isValidPageAction } from './projectPageClient.js'
 import { getStoredOrgId } from '../api.js'
@@ -326,8 +326,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         void open()
         return
       }
-      if (proposalBlocked || !draft || draft.schema !== 'leaf.portfolio.v1' || proposal) { finish(false); return }
+      if (proposalBlocked || !draft || proposal) { finish(false); return }
       if (incomingProposal.result?.schema === PHOTO_PROPOSAL_SCHEMA) {
+        if (draft.schema !== 'leaf.portfolio.v1') { finish(false); return }
         const snapshot = sourceSnapshot.current
         const provenance = incomingProposal.provenance
         const scope = readActiveScope()
@@ -351,21 +352,20 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       }
       const value = validateProjectPageProposal(projectId, saved, incomingProposal.result)
       const document = JSON.parse(JSON.stringify(value.proposed_document))
-      const changes = portfolioTextChanges(saved.document, document)
+      const changes = pageProposalChanges(saved.document, document)
       if (!changes.length) setNotice('No text changes proposed.')
       else setProposal({ snapshot: { ...sourceSnapshot.current, isCurrent: incomingProposal.isCurrent }, document, changes })
       finish(true)
     } catch { finish(false) }
   }, [incomingProposal, saved, draft, busy, enabled, dirty, validation, error, native]) // existing fenced operations own loading
   const generateProposal = () => {
-    if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000
-      || draft?.schema !== 'leaf.portfolio.v1') return
+    if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000) return
     const snapshot = sourceSnapshot.current
     void perform('proposing', async (signal, current) => {
       setProposal(null)
       const result = await proposeProjectPage(projectId, snapshot.saved, instruction, { signal })
       if (!current() || sourceSnapshot.current.saved !== snapshot.saved || sourceSnapshot.current.draft !== snapshot.draft) return
-      const changes = portfolioTextChanges(snapshot.saved.document, result.proposed_document)
+      const changes = pageProposalChanges(snapshot.saved.document, result.proposed_document)
       if (!changes.length) { setNotice('No text changes proposed.'); return }
       setProposal({ snapshot, document: result.proposed_document, changes })
     })
@@ -380,7 +380,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     if (!live.current || !proposal || proposalBlocked || operation.current || (nativeSession.current?.active || nativePreparation.current) || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
-    if (!proposal.photo) portfolioTextChanges(saved.document, document)
+    if (!proposal.photo) pageProposalChanges(saved.document, document)
     changePortfolio(cloneDocument(document, sourceSnapshot.current.draft), { coalesceKey: null })
     setNotice('Review the draft, then Save page.')
   }
@@ -529,9 +529,11 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
         <p role="status" aria-live="polite">{state}</p>
       </div>
-      {draft.schema === 'leaf.portfolio.v1' && <section className="project-page-editor__proposal" aria-label="Ask for a text change">
+      <section className="project-page-editor__proposal" aria-label="Ask for a text change">
         <h3>Ask for a text change</h3>
-        <p className="project-page-editor__note">Propose text-only edits to a saved portfolio. Photos, layout and structure stay the same. Review before using any changes.</p>
+        <p className="project-page-editor__note">{draft.schema === 'leaf.portfolio.v1'
+          ? 'Propose text-only edits to a saved portfolio. Photos, layout and structure stay the same. Review before using any changes.'
+          : 'Propose changes to the text or contact links on this saved page. Review the proposal before using it.'}</p>
         <label htmlFor={`${id}-instruction`}><span>What should change?</span>
           <textarea id={`${id}-instruction`} rows={3} maxLength={4000} value={instruction} disabled={!enabled || Boolean(busy)} onChange={event => setInstruction(event.target.value)} />
         </label>
@@ -557,7 +559,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           </div>
         </section>}
         {proposalNotice && <p role="status">{notice}</p>}
-      </section>}
+      </section>
       {validation && <div className="project-page-editor__validation">
         <p className="project-page-editor__error" role="alert">{validation}</p>
         {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => setReviewRequest(value => value + 1)}>Show all fields to review errors</button>}
