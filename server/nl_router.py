@@ -656,13 +656,27 @@ def _decide(
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Find the minimum-size layer sets that reach the module coverage target.")
 
-    if (re.search(r"\brank(?:s|ing)?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
+    if (re.search(r"\b(?:re)?rank(?:s|ing)?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
             and re.search(r"\b(?:module|panel)s?\b", text, re.I)
             and re.search(r"\b(?:windows?|regions?)\b", text, re.I)):
         windows = re.findall(rf"{_PAIR}\s+to\s+{_PAIR}", text, re.I)
         if len(windows) >= 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
             options = {"group_by": "layer", "panel_scope": "all_layers",
                        "rank_windows": [[float(value) for value in bounds] for bounds in windows]}
+            tier_words = "one two three four five six seven eight nine ten".split()
+            tier_amount = rf"[0-9]{{1,9}}|{'|'.join(tier_words)}"
+            exclusion = re.search(
+                r"\b(?:exclude|drop|omit)\s+(?:the\s+)?"
+                rf"(?:({tier_amount})\s+(?:highest|top)|(?:highest|top)\s+({tier_amount}))"
+                r"\s+(?:distinct\s+)?(?:physical\s+)?"
+                r"(?:(?:module|panel)\s+)?count\s+tiers?\b",
+                text, re.I,
+            )
+            if exclusion:
+                amount = (exclusion[1] or exclusion[2]).lower()
+                options["exclude_highest_count_tiers"] = (
+                    int(amount) if amount.isdecimal() else tier_words.index(amount) + 1
+                )
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Compare physical module counts by layer across the drawing windows.")
 

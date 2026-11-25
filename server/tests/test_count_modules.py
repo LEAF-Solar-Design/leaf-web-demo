@@ -748,6 +748,64 @@ def test_window_rank_series_routes_and_reports_strict_trends(template, rows, exp
     assert pair["window_ranks"] == {layer: places[:2] for layer, places in expected_ranks.items()}
 
 
+@pytest.mark.parametrize("prompt,counts,excluded,expected", [
+    ("For each roof window {}, exclude the two highest distinct physical module count tiers "
+     "and rerank the surviving layers.",
+     [(5, 4, 4, 2, 1), (3, 1, 6, 6, 3)], 2,
+     {"B": [None, 1], "D": [1, None], "E": [2, None]}),
+    ("Compare module count ranks by layer in windows {}. Drop the top 1 count tier in each window.",
+     [(8, 6, 6, 4, 0), (2, 7, 7, 3, 3)], 1,
+     {"A": [None, 3], "B": [1, None], "C": [1, None], "D": [3, 1], "E": [None, 1]}),
+    ("Rank panel layers across windows {}. Omit three highest distinct panel count tiers.",
+     [(4, 3, 2, 0, 0), (5, 4, 3, 2, 2), (1, 2, 3, 4, 5)], 3,
+     {"A": [None, None, 2], "B": [None, None, 1], "D": [None, 1, None], "E": [None, 1, None]}),
+])
+def test_exclude_highest_count_tiers_per_window_from_dxf(prompt, counts, excluded, expected):
+    from io import StringIO
+
+    import ezdxf
+
+    import deps
+    import nl_router
+    from dxf_intake import parse_dxf_bytes
+
+    layers = "ABCDE"
+    windows = [[20 * index, 0, 20 * index + 18, 18] for index in range(len(counts))]
+    drawing = ezdxf.new()
+    drawing.blocks.new("Panel").add_lwpolyline(
+        [(0, 0), (1, 0), (1, 1), (0, 1)], close=True,
+    )
+    for layer in layers:
+        drawing.layers.new(layer)
+    for (left, _, _, _), window_counts in zip(windows, counts):
+        for row, (layer, count) in enumerate(zip(layers, window_counts)):
+            for column in range(count):
+                drawing.modelspace().add_blockref(
+                    "Panel", (left + 2 * column + 1, 2 * row + 1), dxfattribs={"layer": layer},
+                )
+    stream = StringIO()
+    drawing.write(stream)
+    intake = parse_dxf_bytes(stream.getvalue().encode())
+    query = prompt.format(", ".join(f"({x1},{y1}) to ({x2},{y2})" for x1, y1, x2, y2 in windows))
+    route = nl_router.classify(query, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["rank_windows"] == windows
+    assert route["params"]["exclude_highest_count_tiers"] == excluded
+    result, _ = module.run(intake, route["params"])
+    assert result["window_ranks"] == expected
+    assert result["count"] == sum(map(sum, counts))
+
+
+@pytest.mark.parametrize("params", [
+    {"exclude_highest_count_tiers": 2},
+    {"rank_windows": [[0, 0, 2, 2], [3, 3, 5, 5]], "exclude_highest_count_tiers": 0},
+    {"rank_windows": [[0, 0, 2, 2], [3, 3, 5, 5]], "exclude_highest_count_tiers": True},
+])
+def test_highest_count_tier_exclusion_requires_valid_window_request(params):
+    with pytest.raises(ValueError, match="positive number of count tiers"):
+        module.run({}, params)
+
+
 def test_empty_selection_has_no_percentage_point_delta():
     d = {"inserts": [{"layer": "W", "name": "Module", "handle": "A"}]}
     r, _ = module.run(d, {"compare_selections": {"by": "block", "before": [], "after": ["Module"]}})

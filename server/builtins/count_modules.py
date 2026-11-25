@@ -300,6 +300,11 @@ def _compare_selections(intake, spec):
 
 def run(intake, params):
     params = params or {}
+    excluded_tiers = params.get("exclude_highest_count_tiers")
+    if excluded_tiers is not None and (
+        type(excluded_tiers) is not int or excluded_tiers < 1 or params.get("rank_windows") is None
+    ):
+        raise InputValidationError("Choose a positive number of count tiers to exclude from each rank window.")
     if params.get("compare_selections") is not None:
         if any(v is not None for k, v in params.items() if k != "compare_selections"):
             raise InputValidationError("Use the two comparison selections on their own.")
@@ -322,6 +327,9 @@ def run(intake, params):
         scoped, _ = _run(intake, {"region": bounds, "set_ids": ids, "group_by": "layer"},
                          allow_absent_in_window=True)
         counts = scoped.get("counts", {})
+        if excluded_tiers is not None:
+            excluded_counts = set(sorted(set(counts.values()), reverse=True)[:excluded_tiers])
+            counts = {layer: count for layer, count in counts.items() if count not in excluded_counts}
         rank_by_layer = {}
         previous = None
         for index, (layer, count) in enumerate(sorted(counts.items(), key=lambda item: -item[1]), 1):
