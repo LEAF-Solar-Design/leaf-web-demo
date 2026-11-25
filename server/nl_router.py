@@ -532,6 +532,15 @@ def _layer_ranking_params(text):
     return {"group_by": "layer", "panel_scope": scope, "top_layers": limit}
 
 
+_LAYER_COMPARISON = re.compile(
+    r"""(?:\bcounts?\b[^"'\r\n]{0,40}\blayers?\b\s*(?:for\s+)?"""
+    r"""|\bcompare\s+(?:exact\s+)?(?:saved\s+)?layer\s+counts?\s+(?:for\s+)?"""
+    r"""|\bcount\s+(?:the\s+)?entities\s+on\s+)"""
+    r"""(["'])([^"'\r\n]+)\1\s+(?:and|versus|vs\.?)\s+(["'])([^"'\r\n]+)\3""",
+    re.I,
+)
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -616,6 +625,16 @@ def _decide(
                        "rank_windows": [[float(value) for value in bounds] for bounds in windows]}
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Compare physical module counts by layer in two drawing windows.")
+
+    layer_comparison = _LAYER_COMPARISON.search(text)
+    if (layer_comparison and re.search(r"\b(?:merg(?:e|ed|ing)|combined)\b", text, re.I)
+            and any(doc.tool.get("name") == "compare-layer-counts" for doc in docs)):
+        first, second = layer_comparison[2], layer_comparison[4]
+        if first != second:
+            return Classification(
+                lane=LANE_RUN, tool="compare-layer-counts", params={"layers": [first, second]},
+                confidence=0.95, rationale="Compare the two exact saved layer names.",
+            )
 
     comparison = _share_change_params(text)
     if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):

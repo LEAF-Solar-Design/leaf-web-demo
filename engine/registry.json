@@ -87,6 +87,24 @@
       "provenance": {"author": "user", "created": "2026-11-15T00:00:00Z"}
     },
     {
+      "name": "compare-layer-counts",
+      "version": "1.0.0",
+      "description": "Compare captured drawing entity counts for two exact saved layer names.",
+      "kind": "script",
+      "entry": "builtins/compare_layer_counts.py",
+      "local_only": true,
+      "params": {
+        "type": "object",
+        "properties": {
+          "layers": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        },
+        "required": ["layers"],
+        "additionalProperties": false
+      },
+      "returns": {"type": "object"},
+      "capabilities": ["drawing.read"]
+    },
+    {
       "name": "count-by-layer",
       "version": "1.0.0",
       "description": "Counts every model-space entity per layer.",
