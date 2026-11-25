@@ -542,6 +542,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_spatial_clearance
     import authored_beam_openings
     import authored_beam_lengths
+    import authored_layer_subtotals
     import authored_route_crossings
 
     verb, engine_op = _detect_op(description)
@@ -645,6 +646,13 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None:
+        family = authored_layer_subtotals.requested_family(description)
+        if family:
+            verb, engine_op = "count", "layer_family_subtotals"
+            drawing_body = authored_layer_subtotals.build_body(family)
+            summary = f"counts supported drawing entities on each layer matching {family}"
 
     relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
     if drawing_body is not None:
