@@ -262,7 +262,8 @@ def check_and_count_account_upload(workspace_id: str) -> AccountUploadCharge:
             _cleanup_old_postgres_counters(conn)
 
         try:
-            db.run_transaction(consume, isolation="serializable", max_attempts=3)
+            # Atomic counter updates need only READ COMMITTED to avoid global-row serialization failures.
+            db.run_transaction(consume, isolation="read committed", max_attempts=5)
         except _GuestCapExceeded as exc:
             scope = exc.scope
     else:
@@ -303,7 +304,7 @@ def refund_account_upload(charge: AccountUploadCharge) -> None:
                         """,
                         {"namespace": namespace, "key": key})
 
-            db.run_transaction(refund, isolation="serializable", max_attempts=3)
+            db.run_transaction(refund, isolation="read committed", max_attempts=5)
         else:
             with _ACCOUNT_QUOTA_LOCK:
                 state = _ACCOUNT_QUOTA_STATE.get(charge.day)

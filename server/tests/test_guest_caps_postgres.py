@@ -295,7 +295,7 @@ def test_account_counter_transaction_contract(monkeypatch, refused):
     if refused != "workspace":
         expected.append(("account_upload_global", "2026-11-25", 99))
     assert counter.calls == expected
-    assert database.options == {"isolation": "serializable", "max_attempts": 3}
+    assert database.options == {"isolation": "read committed", "max_attempts": 5}
     assert database.rolled_back is (refused is not None)
     assert len(cleanups) == (1 if refused is None else 0)
     assert charge.accepted is (refused is None)
@@ -329,7 +329,7 @@ def test_account_postgres_refund_uses_receipt_day_and_one_transaction(monkeypatc
     charge = guest_uploads.AccountUploadCharge(
         True, None, None, "2026-11-25", "2026-11-26T00:00:00Z", "workspace")
     guest_uploads.refund_account_upload(charge)
-    assert database.options == {"isolation": "serializable", "max_attempts": 3}
+    assert database.options == {"isolation": "read committed", "max_attempts": 5}
     assert [params for _, params in database.connection.calls] == [
         {"namespace": "account_upload_workspace", "key": "2026-11-25:workspace"},
         {"namespace": "account_upload_global", "key": "2026-11-25"},
