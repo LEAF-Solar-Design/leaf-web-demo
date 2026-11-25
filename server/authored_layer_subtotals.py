@@ -18,7 +18,7 @@ _COMPARISON = re.compile(
     r"(?:show(?: me)?|list|give me|compare) (?:separate )?"
     r"(?P<family>[\w-]+(?:, [\w-]+){0,2},? and [\w-]+) (?:layer )?subtotals"
     r"(?:,? and (?:flag|show|list) (?:any )?(?:overlapping layers|"
-    r"layers? (?:whose names? )?(?:that )?match(?:es)? (?:both|all)))?[.!]?",
+    r"layers? (?:whose names? )?(?:that )?match(?:es)? (?P<both>both)))?[.!]?",
     re.IGNORECASE,
 )
 
@@ -28,11 +28,14 @@ def requested_family(description):
     match = (_SUBTOTAL.fullmatch(request) or _COUNT.fullmatch(request)
              or _COMPARISON.fullmatch(request))
     if match:
-        return match["family"].casefold()
+        family = match["family"].casefold()
+        if match.groupdict().get("both") and "," in family:
+            return None
+        return family
 
 
 def build_body(family):
-    families = tuple(dict.fromkeys(re.split(r", |,? and ", family)))
+    families = tuple(dict.fromkeys(re.split(r",? and |, ", family)))
     return _BODY.replace("__FAMILIES__", repr(families))
 
 

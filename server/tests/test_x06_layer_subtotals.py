@@ -60,3 +60,19 @@ def test_compare_layer_families(ask, first, second):
         "overlapping_layers": [overlap],
         "total": 4,
     }
+
+
+
+def test_three_family_oxford_comma_comparison():
+    ask = "Compare joist, beam, and duct layer subtotals and show overlapping layers."
+    tool, source, _ = tools_fallback.author_tool(ask)
+    assert tool["engine_op"] == "layer_family_subtotals"
+    intake = {"polylines": [{"layer": "A_JOIST_BEAM"}, {"layer": "B_DUCT"}]}
+    status, payload = tool_loader._run_source_in_sandbox(source, "layer_subtotals.py", intake, {})
+    assert status == "ok", payload
+    result, _ = payload
+    assert result["table"]["columns"] == ["Layer", "joist", "beam", "duct", "Overlap"]
+    assert result["table"]["rows"] == [["A_JOIST_BEAM", 1, 1, "", "Yes"],
+                                      ["B_DUCT", "", "", 1, ""]]
+    assert result["overlapping_layers"] == ["A_JOIST_BEAM"]
+    assert result["total"] == 2
