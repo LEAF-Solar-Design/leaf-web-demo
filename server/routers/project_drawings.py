@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -585,12 +585,37 @@ async def project_solaredge_report_route(project_id: str, drawing_id: str, input
         input_version_id, x_org_id, x_project_id, report=True)
 
 
+def _single_byte_range(value: str, size: int) -> Optional[tuple[int, int]]:
+    """Return a half-open slice. Empty slices are unsatisfiable. Ignore malformed ranges."""
+    match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", value.strip(), re.IGNORECASE)
+    if not match or not any(match.groups()):
+        return None
+    first, last = match.groups()
+    # Compare normalized decimal strings before conversion. HTTP positions may exceed int limits.
+    def decimal_key(digits):
+        normalized = digits.lstrip("0") or "0"
+        return len(normalized), normalized
+
+    def bounded(digits):
+        return size if decimal_key(digits) >= decimal_key(str(size)) else int(decimal_key(digits)[1])
+
+    if not first:
+        return size - bounded(last), size
+    if last and decimal_key(last) < decimal_key(first):
+        return None
+    start = bounded(first)
+    stop = min(size, bounded(last) + 1) if last else size
+    return start, stop
+
+
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}")
 def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, current: str = "false",
                          tenant=Depends(deps.require_active_tenant),
                          x_org_id: Optional[str] = Header(default=None),
                          x_project_id: Optional[str] = Header(default=None),
-                         if_none_match: Optional[str] = Header(default=None)):
+                         if_none_match: Optional[str] = Header(default=None),
+                         byte_range: Annotated[Optional[str], Header(alias="Range")] = None,
+                         if_range: Annotated[Optional[str], Header()] = None):
     def operation():
         if not output_policy.project_runs_enabled():
             raise GraphValidationError("project_execution_disabled")
@@ -601,11 +626,22 @@ def solar_artifact_route(project_id: str, drawing_id: str, artifact_id: str, cur
             tenant, proj, drawing, artifact_id, current=current == "true")
         etag = '"' + meta["content_sha256"] + '"'
         headers = {**_NO_STORE, "ETag": etag, "X-Leaf-Artifact-Id": meta["artifact_id"],
-            "X-Content-Type-Options": "nosniff",
+            "X-Content-Type-Options": "nosniff", "Accept-Ranges": "bytes",
             "Content-Disposition": 'attachment; filename="' + meta["filename"] + '"'}
         if if_none_match is not None and any(value.strip() in (etag, "W/" + etag, "*")
                                             for value in if_none_match.split(",")):
             return Response(content=b"", status_code=304, headers=headers)
+        if byte_range and (if_range is None or if_range.strip() == etag):
+            size = len(content)
+            interval = _single_byte_range(byte_range, size)
+            if interval is not None:
+                start, stop = interval
+                if start == stop:
+                    headers["Content-Range"] = f"bytes */{size}"
+                    return Response(status_code=416, headers=headers)
+                headers["Content-Range"] = f"bytes {start}-{stop - 1}/{size}"
+                return Response(content=content[start:stop], status_code=206,
+                                media_type=meta["media_type"], headers=headers)
         return Response(content=content, media_type=meta["media_type"], headers=headers)
     return _output_dispatch(operation)
 
