@@ -6,6 +6,11 @@ import { readActiveScope } from '../auth/activeScope.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
+export const MAX_PAGE_ACTIONS = 3
+
+export function pageActions(document) {
+  return document.actions ?? (document.action ? [document.action] : [])
+}
 
 // Match the closed action grammar in platform/web_page_template.py. In
 // particular, mailto is one address, with no recipient list or headers.
@@ -27,7 +32,7 @@ export function isValidPageAction(action) {
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).filter(key => key !== 'action' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => key !== 'action' && key !== 'actions' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
   validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
@@ -41,7 +46,14 @@ export function validatePageDocument(document) {
   if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
     throw new Error('Choose one of the available page layouts.')
   }
-  if (Object.hasOwn(document, 'action') && !isValidPageAction(document.action)) {
+  if (Object.hasOwn(document, 'actions')) {
+    const actions = document.actions
+    if (Object.hasOwn(document, 'action') || !Array.isArray(actions) || !actions.length || actions.length > MAX_PAGE_ACTIONS) {
+      throw new Error('Use one to three contact links.')
+    }
+  }
+  if ((Object.hasOwn(document, 'action') && !isValidPageAction(document.action))
+    || pageActions(document).some(action => !isValidPageAction(action))) {
     throw new Error('Enter a plain contact label and a valid HTTPS link or mailto address.')
   }
   if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')

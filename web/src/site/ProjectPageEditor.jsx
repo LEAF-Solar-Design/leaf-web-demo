@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal, PHOTO_PROPOSAL_SCHEMA, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { MAX_PAGE_ACTIONS, pageActions } from './projectPageClient.js'
 import { isValidPageAction } from './projectPageClient.js'
 import { getStoredOrgId } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
@@ -32,11 +33,11 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
-      {typeof document.action?.label === 'string' && document.action.label && <p className="project-page__action">
-        {isValidPageAction(document.action)
-          ? <a href={document.action.href} target={document.action.href.startsWith('https:') ? '_blank' : undefined} rel={document.action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{document.action.label}</a>
-          : document.action.label}
-      </p>}
+      {pageActions(document).map((action, index) => typeof action?.label === 'string' && action.label && <p key={index} className="project-page__action">
+        {isValidPageAction(action)
+          ? <a href={action.href} target={action.href.startsWith('https:') ? '_blank' : undefined} rel={action.href.startsWith('https:') ? 'noopener noreferrer' : undefined}>{action.label}</a>
+          : action.label}
+      </p>)}
     </div>
   </main>
 }
@@ -272,12 +273,21 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     document[field] = value
     changePortfolio(document, { coalesceKey: field })
   }
-  const changeAction = (field, value) => {
+  const changeActions = (update, coalesceKey) => {
     const document = cloneDocument(sourceSnapshot.current.draft)
-    const action = { label: '', href: '', ...document.action, [field]: value }
-    if (action.label || action.href) document.action = action
-    else delete document.action
-    changePortfolio(document, { coalesceKey: `action.${field}` })
+    const actions = update(pageActions(document))
+    delete document.action
+    delete document.actions
+    if (actions.length > 1) document.actions = actions
+    else if (actions[0]?.label || actions[0]?.href) document.action = actions[0]
+    changePortfolio(document, { coalesceKey })
+  }
+  const changeAction = (index, field, value) => {
+    changeActions(actions => {
+      const next = [...actions]
+      next[index] = { label: '', href: '', ...actions[index], [field]: value }
+      return next
+    }, `actions.${index}.${field}`)
   }
   const travel = direction => {
     if (!live.current || !enabled || operation.current) return
@@ -561,11 +571,18 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
             : <input id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} onChange={event => change(field, event.target.value)} />}
         </label>)}
-          <label><span>Contact link label</span><input value={draft.action?.label ?? ''} maxLength={120}
-            onChange={event => changeAction('label', event.target.value)} /></label>
-          <label><span>Contact link URL</span><input value={draft.action?.href ?? ''} maxLength={2048}
-            onChange={event => changeAction('href', event.target.value)} /></label>
-          <p className="project-page-editor__note">Optional. Use an HTTPS link or mailto address. Clear both fields to remove the link.</p>
+          {(pageActions(draft).length ? pageActions(draft) : [{}]).map((action, index) => <fieldset key={index}>
+            <legend>Contact link {index + 1}</legend>
+            <label><span>Contact link label</span><input value={action.label ?? ''} maxLength={120}
+              onChange={event => changeAction(index, 'label', event.target.value)} /></label>
+            <label><span>Contact link URL</span><input value={action.href ?? ''} maxLength={2048}
+              onChange={event => changeAction(index, 'href', event.target.value)} /></label>
+            {pageActions(draft).length > 1 && <button type="button" aria-label={`Remove contact link ${index + 1}`}
+              onClick={() => changeActions(actions => actions.filter((_, item) => item !== index))}>Remove</button>}
+          </fieldset>)}
+          {pageActions(draft).length > 0 && pageActions(draft).length < MAX_PAGE_ACTIONS && <button type="button"
+            onClick={() => changeActions(actions => [...actions, { label: '', href: '' }])}>Add contact link</button>}
+          <p className="project-page-editor__note">Use an HTTPS link or mailto address. Clear both fields to remove the only link.</p>
         <label htmlFor={`${id}-theme`}><span>Theme</span><select id={`${id}-theme`} value={draft.theme} onChange={event => change('theme', event.target.value)}>
           <option value="cream">Cream</option><option value="light">Light</option><option value="dark">Dark</option>
         </select></label>
