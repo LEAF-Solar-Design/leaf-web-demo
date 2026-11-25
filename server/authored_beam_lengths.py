@@ -297,7 +297,10 @@ def __ENTRY_POINT__(intake, params):
                     raise ValueError("Unresolved transformed beam endpoint.")
                 members[key]["ends"] = ends
 
+    spatial_loops = set(intake.get("beam_polyline3d_handles", []))
     for path in distinct_entities(intake.get("polylines", [])):
+        if path["closed"] and path.get("handle") in spatial_loops:
+            path = dict(path, polyline3d=True)
         measure(path, identity, "0", (), 1)
 
     for path in distinct_entities(intake.get("beam_ellipses", [])):
@@ -373,7 +376,13 @@ def __ENTRY_POINT__(intake, params):
 
     if any("unresolved block reference" in message for message in intake.get("parseErrors", [])):
         raise ValueError("Unresolved block reference in beam measurement.")
+    placements = intake.get("beam_insert_placements", {})
     for insert in distinct_entities(intake.get("inserts", [])):
+        readings = placements.get(insert.get("handle"), [])
+        if readings:
+            if any(reading != readings[0] for reading in readings[1:]):
+                raise ValueError("Conflicting full-precision beam placement.")
+            insert = dict(insert, measurement_placement=readings[0])
         visit(insert, identity, "0", (), (), 1)
     result = {"lengths_by_layer": totals, "units": __OUTPUT_UNIT__,
               "length_relative_tolerance": LENGTH_RELATIVE_TOLERANCE}

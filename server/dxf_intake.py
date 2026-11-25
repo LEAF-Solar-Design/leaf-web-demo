@@ -119,6 +119,7 @@ def parse_dxf_bytes(
     # set_lineweight target's actual DXF groups the same way either source.
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
+    beam_polyline3d_handles = []
     objects = {}
     elevation_evidence = []
     model_records = {}
@@ -285,6 +286,8 @@ def parse_dxf_bytes(
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
+            if entity.pop("polyline3d", False) and entity["closed"] and len(entity["pts"]) >= 2:
+                beam_polyline3d_handles.append(entity["handle"])
             continue
         if section == "ENTITIES" and code == 0 and value == "LINE":
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
@@ -350,6 +353,7 @@ def parse_dxf_bytes(
 
     block_names = {name.casefold(): name for name in blocks}
     resolved_inserts = []
+    beam_insert_placements = {}
     for entity in inserts:
         block_name = block_names.get(entity["name"].casefold())
         if block_name is None:
@@ -357,10 +361,17 @@ def parse_dxf_bytes(
                 f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
         else:
             entity["name"] = block_name
+            placement = entity.pop("measurement_placement", None)
+            if placement is not None:
+                beam_insert_placements.setdefault(entity["handle"], []).append(placement)
             resolved_inserts.append(entity)
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if beam_polyline3d_handles:
+        out["beam_polyline3d_handles"] = beam_polyline3d_handles
+    if beam_insert_placements:
+        out["beam_insert_placements"] = beam_insert_placements
     if beam_ellipses:
         out["beam_ellipses"] = beam_ellipses
     if splines:
