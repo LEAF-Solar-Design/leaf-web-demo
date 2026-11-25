@@ -27,15 +27,23 @@ def requests_clearance(prompt):
                 and re.search(r"\b(?:routes?|paths?|runs?|detours?)\b", prompt))
 
 
-def tray_dimensions(prompt):
+def requests_corridor_check(prompt):
+    return bool(re.search(r"\b(?:cables?|wires?|wiring|conduits?)\b", prompt)
+                and re.search(r"\bcorridors?\b", prompt)
+                and re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt)
+                and re.search(r"\b(?:clearance|separation|too close|encroach\w*)\b", prompt)
+                and not re.search(r"\b(?:vertical|above|below)\b", prompt))
+
+
+def clearance_dimensions(prompt):
     def measure(patterns):
         values = {Fraction(value) * _LENGTHS[unit]
                   for pattern in patterns for value, unit in re.findall(pattern, prompt)}
         return values.pop() if len(values) == 1 else None
 
-    width = measure((rf"\b(?:tray\s+)?width\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
+    width = measure((rf"\b(?:(?:tray|corridor)\s+)?width\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
                      rf"(?<![\d.]){_LENGTH}(?:\s+|-)wide\b",
-                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)trays?\b"))
+                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)(?:trays?|corridors?)\b"))
     side = measure((rf"\b(?:side\s+)?clearance\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
                     rf"(?<![\d.]){_LENGTH}(?:\s+of)?\s+(?:side\s+)?clearance\b"))
     if width is None or width <= 0 or side is None or side < 0:
@@ -111,7 +119,7 @@ def equipment_ports(description):
 
 def matches(description):
     prompt = description.casefold()
-    if requests_clearance(prompt):
+    if requests_clearance(prompt) or requests_corridor_check(prompt):
         return True
     if compares_ports(prompt):
         return True
@@ -132,7 +140,9 @@ def matches(description):
 
 def build_body(description):
     prompt = description.casefold()
-    dimensions = tray_dimensions(prompt) if requests_clearance(prompt) else None
+    tray_route = requests_clearance(prompt)
+    corridor_check = not tray_route and requests_corridor_check(prompt)
+    dimensions = clearance_dimensions(prompt) if tray_route or corridor_check else None
     ports = equipment_ports(description) if compares_ports(prompt) else None
     fewer_bends = ports is not None or prefers_fewer_bends(prompt)
     headings = equipment_headings(prompt)
@@ -141,6 +151,7 @@ def build_body(description):
     body = body.replace("__EQUIPMENT_PORTS__", repr(ports))
     body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
     body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
+    body = body.replace("__CORRIDOR_CHECK__", str(corridor_check))
     compare = dimensions is not None or fewer_bends or compares_lengths(prompt)
     return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(compare))
 
@@ -161,6 +172,8 @@ def read_geometry(intake):
             continue
         words = set(re.findall(r"[a-z0-9]+", entity.get("layer", "").casefold()))
         if words & {"aisle", "aisles"}:
+            if __CORRIDOR_CHECK__:
+                continue
             role = "aisle"
         elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"} or (
                 __TRAY_DIMENSIONS__ is not None and words & {"tray", "trays"}):
@@ -175,7 +188,7 @@ def read_geometry(intake):
         closed = entity.get("closed", False)
         if any(entity.get("bulges", [])):
             raise ValueError(f"Detours require straight segments on {handle}.")
-        points = [(Fraction(p[0]), Fraction(p[1])) for p in entity["pts"]]
+        points = [(Fraction(str(p[0])), Fraction(str(p[1]))) for p in entity["pts"]]
         if closed and len(points) > 1 and points[0] == points[-1]:
             points.pop()
         if len(points) < (3 if closed else 2):
@@ -191,6 +204,8 @@ def read_geometry(intake):
             collection = arrays if role == "array" else aisles
             collection.append((bounds(points), edges))
             if role == "array":
+                if __CORRIDOR_CHECK__ and not handle:
+                    raise ValueError("Corridor clearance requires obstacle drawing handles.")
                 obstacle_ids.append(handle)
         elif role == "aisle":
             centerlines.extend(edges)
@@ -380,6 +395,25 @@ def shortest(graph, start, end, departure=None, arrival=None, ports=None):
     return result
 
 
+def corridor_clearance(cables, arrays, obstacle_ids, radius):
+    violations, segments, overlays = {}, {}, []
+    for handle, edges in cables.items():
+        hit_handles = set()
+        for a, b in edges:
+            hits = [name for name, outline in zip(obstacle_ids, arrays)
+                    if violates_clearance(a, b, [outline], radius)]
+            if hits:
+                points = [[float(x), float(y)] for x, y in (a, b)]
+                segments.setdefault(handle, []).append({"points": points, "obstacles": hits})
+                overlays.append({"pts": points})
+                hit_handles.update(hits)
+        if hit_handles:
+            violations[handle] = sorted(hit_handles)
+    return ({"clearance_violations": violations, "violating_segments": segments,
+             "swept_half_width": float(radius), "units": "drawing_units"},
+            {"highlight_handles": list(violations), "markers": [], "polylines": overlays})
+
+
 def run(intake, params):
     arrays, aisles, centerlines, cables, obstacle_ids = read_geometry(intake)
     if __COMPARE_LENGTHS__:
@@ -388,18 +422,21 @@ def run(intake, params):
         if dimensions is not None:
             empty_overlay = {"highlight_handles": [], "markers": [], "polylines": []}
             if not dimensions:
-                return ({"status": "needs_tray_clearance",
-                         "message": "Specify one positive tray width and one nonnegative side clearance, each with a unit."},
+                name = "corridor" if __CORRIDOR_CHECK__ else "tray"
+                return ({"status": f"needs_{name}_clearance",
+                         "message": f"Specify one positive {name} width and one nonnegative side clearance, each with a unit."},
                         empty_overlay)
             unit = METRES_PER_UNIT.get(intake.get("insunits"))
             if unit is None:
                 return ({"status": "needs_drawing_units", "message": "Declare drawing insertion units."}, empty_overlay)
+            width, side = map(Fraction, dimensions)
+            radius = (width/2 + side) / Fraction(unit)
+            if __CORRIDOR_CHECK__:
+                return corridor_clearance(cables, arrays, obstacle_ids, radius)
             if not centerlines or aisles:
                 return ({"status": "needs_aisle_centerlines",
                          "message": "Swept-clearance routing requires an aisle network drawn as open centerlines."},
                         empty_overlay)
-            width, side = map(Fraction, dimensions)
-            radius = (width/2 + side) / Fraction(unit)
         ports = __EQUIPMENT_PORTS__
         headings = __EQUIPMENT_HEADINGS__ if ports is None else None
         if ports == {}:

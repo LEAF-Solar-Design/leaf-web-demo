@@ -242,10 +242,10 @@ def test_named_equipment_ports_require_both_ends():
     ),
     (
         "Choose ports for the shortest wire paths. "
-        "Departure ports: Off east at (-3.5,1.25), On=east at (-3.5,-.25); "
-        "Arrival ports: Stop=east at (+4.5,-.25), OffEnd east at (4.5,1.25).",
-        [[(-5, -.25), (6, -.25)]],
-        [(-3.5, -.25), (4.5, -.25)], ("On", "Stop"),
+        "Departure ports: Off east at (-3.5,1.25), On=east at (-3.5,-.1); "
+        "Arrival ports: Stop=east at (+4.5,-.1), OffEnd east at (4.5,1.25).",
+        [[(-5, -.1), (6, -.1)]],
+        [(-3.5, -.1), (4.5, -.1)], ("On", "Stop"),
     ),
 ])
 def test_equipment_ports_at_distinct_locations(ask, aisles, expected_points, names):
@@ -278,6 +278,47 @@ def test_equipment_port_locations_require_unambiguous_inputs(description, cables
     rows = [entity("Cable", f"B{i:X}", [(0, i), (8, i)]) for i in range(cables)]
     raw = intake_dxf.intake_to_dxf(dict(layers=["Cable"], polylines=rows))
     _, source, _ = tools_fallback.author_tool(description)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    assert output[0]["status"] == status
+
+
+@pytest.mark.parametrize("ask, units, scale, side", [
+    ("Show where the outside edge of my cable corridor comes too close to a roof obstacle. "
+     "Corridor width is 1 m and side clearance is .25 m.", 6, 1, 1),
+    ("Check wire corridor clearance next to keepouts using a 1000 mm corridor and 25 cm clearance.",
+     4, 1000, 1),
+    ("Mark conduit corridors that encroach on panel footprints. Specify a 12 in wide corridor "
+     "with clearance of 3 in per side.", 1, 12, -1),
+])
+def test_corridor_edge_clearance_without_an_aisle(ask, units, scale, side):
+    obstacle = [(0, 0), (4 * scale, 0), (4 * scale, -2 * scale * side), (0, -2 * scale * side)]
+    rows = [entity("Roof Keepout", "A1", obstacle, True)]
+    for index, distance in enumerate((.5, .75, 1), start=1):
+        y = distance * scale * side
+        rows.append(entity("Cable", f"B{index}", [(-5 * scale, y), (-scale, y), (5 * scale, y)]))
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Roof Keepout", "Cable"], polylines=rows))
+    raw = raw.replace(b"9\n$HANDSEED\n", f"9\n$INSUNITS\n70\n{units}\n9\n$HANDSEED\n".encode(), 1)
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, overlay = output
+    edge = [[-scale, .5 * scale * side], [5 * scale, .5 * scale * side]]
+    assert report["swept_half_width"] == .75 * scale
+    assert report["clearance_violations"] == {"B1": ["A1"]}
+    assert report["violating_segments"] == {"B1": [{"points": edge, "obstacles": ["A1"]}]}
+    assert overlay["highlight_handles"] == ["B1"]
+    assert overlay["polylines"] == [{"pts": edge}]
+
+
+@pytest.mark.parametrize("suffix, status", [
+    ("", "needs_corridor_clearance"),
+    (" Corridor width is 1 m and side clearance is .25 m.", "needs_drawing_units"),
+])
+def test_corridor_clearance_requests_required_inputs(suffix, status):
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Cable"], polylines=[]))
+    _, source, _ = tools_fallback.author_tool(
+        "Show where the outside edge of my cable corridor comes too close to a roof obstacle." + suffix)
     state, output = invoke(source, raw)
     assert state == "ok", output
     assert output[0]["status"] == status
