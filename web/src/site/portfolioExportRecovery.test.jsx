@@ -172,6 +172,36 @@ describe('exported viewer background exclusion', () => {
 })
 
 describe('actual exported portfolio image failure recovery', () => {
+  for (const retryFrom of ['grid', 'viewer']) {
+    it(`shares retry attempts from the ${retryFrom} without changing an adjacent image`, () => {
+      const view = render(<Gallery page={{}} category={{ slug: 'work', images: [first, second] }} />)
+      const [tile, adjacent] = view.container.querySelectorAll('figure')
+      const opener = within(tile).getByRole('button', { name: 'View ' + first.alt })
+      fireEvent.click(opener)
+      const dialog = within(screen.getByRole('dialog'))
+      fireEvent.error(tile.querySelector('img'))
+      fireEvent.error(dialog.getByRole('img'))
+      if (retryFrom === 'grid') {
+        fireEvent.keyDown(window, { key: 'Escape' })
+        fireEvent.click(within(tile).getByRole('button', { name: 'Retry photo' }))
+        expect(document.activeElement).toBe(opener)
+        fireEvent.click(opener)
+      } else {
+        fireEvent.click(dialog.getByRole('button', { name: 'Retry photo' }))
+      }
+      const currentDialog = within(screen.getByRole('dialog'))
+      for (const image of [tile.querySelector('img'), currentDialog.getByRole('img')]) {
+        expect(image.getAttribute('src')).toBe(`/images/${first.material_id}.jpg?retry=1`)
+        fireEvent.load(image)
+      }
+      expect(adjacent.querySelector('img').getAttribute('src')).toBe(`/images/${second.material_id}.jpg`)
+      expect(document.activeElement).toBe(currentDialog.getByRole('button', { name: 'Close image' }))
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(document.activeElement).toBe(opener)
+      expect(within(tile).queryByRole('button', { name: 'Retry photo' })).toBeNull()
+    })
+  }
+
   it('detects an image that failed before hydration attached its error handler', () => {
     vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true)
     vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(0)

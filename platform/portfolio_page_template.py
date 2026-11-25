@@ -219,22 +219,29 @@ export default function Resume(){return <><h1 style={textStyle(page.textStyles?.
         'app/Gallery.jsx': b'''"use client";
 import {useEffect,useRef,useState} from 'react';
 import {photoStyle,photoSpanStyle,textStyle,galleryStyle} from './design';
-function Photograph({image,page,onOpen,onRetryFocus}){
- const [failed,setFailed]=useState(false),[loading,setLoading]=useState(true),[attempt,setAttempt]=useState(0);
- const current=useRef(0),opener=useRef(null),element=useRef(null);
- useEffect(()=>{const image=element.current;if(current.current===attempt&&image?.complete){setLoading(false);if(!image.naturalWidth)setFailed(true);}},[attempt]);
- const retry=()=>{current.current+=1;setAttempt(current.current);setFailed(false);setLoading(true);if(onRetryFocus)onRetryFocus();else opener.current?.focus();};
+const photoVersion=image=>JSON.stringify([image.material_id,image.preview_sha256||'']);
+function Photograph({image,page,attempt,onRetry,onOpen,onRetryFocus}){
+ const [result,setResult]=useState(null),opener=useRef(null),element=useRef(null);
+ const failed=result?.attempt===attempt&&result.failed;
+ const settle=(node,failed)=>{if(node===element.current)setResult({attempt,failed});};
+ useEffect(()=>{const node=element.current;if(node?.complete)settle(node,!node.naturalWidth);},[attempt]);
+ const retry=()=>{onRetry();if(onRetryFocus)onRetryFocus();else opener.current?.focus();};
  const style=photoStyle(image.display,page.appearance);
  const picture=failed
   ? <span role="img" aria-label={'Photograph unavailable: '+image.alt} style={{...style,display:'grid',placeItems:'center',minHeight:'12rem',boxSizing:'border-box',border:'1px solid currentColor'}}>Photograph unavailable</span>
-  : <img ref={element} key={attempt} loading={onOpen?'lazy':undefined} src={'/images/'+image.material_id+'.jpg'+(attempt?'?retry='+attempt:'')} alt={image.alt} aria-busy={loading}
-     onLoad={()=>{if(current.current===attempt)setLoading(false);}}
-     onError={()=>{if(current.current===attempt){setLoading(false);setFailed(true);}}} style={style}/>;
+  : <img ref={element} key={attempt} loading={onOpen?'lazy':undefined} src={'/images/'+image.material_id+'.jpg'+(attempt?'?retry='+attempt:'')} alt={image.alt} aria-busy={result?.attempt!==attempt}
+     onLoad={event=>settle(event.currentTarget,false)}
+     onError={event=>settle(event.currentTarget,true)} style={style}/>;
  return <>{onOpen?<button ref={opener} style={{width:'100%'}} aria-label={'View '+image.alt} onClick={e=>onOpen(image,e.currentTarget)}>{picture}<span style={textStyle(image.captionStyle)}>{image.title}</span></button>:picture}
   {failed&&<div role="status"><p>The photo could not load. Check your connection and try again.</p><button style={{marginTop:'0.5rem',textDecoration:'underline'}} onClick={retry}>Retry photo</button></div>}</>;
 }
 export default function Gallery({page,category}){
  const [selectedId,setSelectedId]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{}),emptyStatus=useRef(null);
+ const [attempts,setAttempts]=useState({});
+ const recovery=image=>{
+  const version=photoVersion(image);
+  return {attempt:attempts[version]||0,onRetry:()=>setAttempts(previous=>({...previous,[version]:(previous[version]||0)+1}))};
+ };
  const selected=category.images.find(image=>image.material_id===selectedId&&!image.display?.hidden)||null;
  const currentImages=useRef(category.images);currentImages.current=category.images;
  const close=()=>{restoreBackground.current();setSelectedId(null);trigger.current?.focus();};
@@ -274,7 +281,7 @@ export default function Gallery({page,category}){
  },[Boolean(selected)]);
  useEffect(()=>{if(selectedId)closeButton.current?.focus();},[selectedId,selected?.preview_sha256]);
  const open=(image,button)=>{trigger.current=button;setSelectedId(image.material_id);};
- return <>{!category.images.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph key={image.material_id+':'+(image.preview_sha256||'')} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={selected.material_id+':'+(selected.preview_sha256||'')} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
+ return <>{!category.images.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph key={photoVersion(image)} {...recovery(image)} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={photoVersion(selected)} {...recovery(selected)} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
 }
 ''',
     }
