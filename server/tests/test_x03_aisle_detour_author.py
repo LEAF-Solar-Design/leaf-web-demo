@@ -153,3 +153,40 @@ def test_equal_length_prefers_fewer_bends(ask):
     assert report["equal_length_fewer_bends"] == {}
     assert report["avoidable_detours"]["B1"]["points"] == [list(p) for p in bent]
     assert report["avoidable_detours"]["B1"]["saving"] == 2
+
+@pytest.mark.parametrize("ask,departure,arrival", [
+    ("Find the fewest cable elbows on equal paths with a north-facing departure and east-facing arrival at equipment.",
+     (0, 1), (1, 0)),
+    ("Compare equal-length cable routes with fewer bends when departure faces east and arrival faces north.",
+     (1, 0), (0, 1)),
+    ("Show the fewest turns among shortest conduit routes. Depart heading north and arrive heading east.",
+     (0, 1), (1, 0)),
+])
+def test_equipment_heading_turns(ask, departure, arrival):
+    start, end = (0, 0), (8, 4)
+    north_first = [start, (0, 4), end]
+    east_first = [start, (8, 0), end]
+    preferred, saved = (north_first, east_first) if departure == (0, 1) else (east_first, north_first)
+    rows = [entity("Aisle", "A1", north_first), entity("Aisle", "A2", east_first),
+            entity("Cable", "B1", saved)]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Aisle", "Cable"], polylines=rows))
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    report, _ = output
+    route = report["equal_length_fewer_bends"]["B1"]
+    assert route["points"] == [list(point) for point in preferred]
+    assert (route["length"], route["drawn_bends"], route["bends"], route["bends_saved"]) == (12, 3, 1, 2)
+    assert report["equipment_travel_headings"] == {"departure": list(departure), "arrival": list(arrival)}
+
+
+@pytest.mark.parametrize("ask", [
+    "When two routes have the same total cable length, which one uses fewer elbows after accounting for bends at equipment entries?",
+    "Find the fewest cable bends among equal routes. Departure faces east and arrival faces north, but arrival faces west.",
+])
+def test_equipment_heading_request_without_directions_asks_for_input(ask):
+    _, source, _ = tools_fallback.author_tool(ask)
+    raw = intake_dxf.intake_to_dxf({"layers": ["Cable"], "polylines": []})
+    state, output = invoke(source, raw)
+    assert state == "ok", output
+    assert output[0]["status"] == "needs_equipment_headings"

@@ -10,9 +10,27 @@ def compares_lengths(prompt):
 
 
 def prefers_fewer_bends(prompt):
-    return bool(re.search(r"\b(?:bends?|turns?)\b", prompt)
+    return bool(re.search(r"\b(?:bends?|turns?|elbows?)\b", prompt)
                 and re.search(r"\b(?:fewest|fewer|remove|minimi[sz]e|least|reduce)\b", prompt)
-                and re.search(r"\b(?:same length|equal(?: length)?|ties?|shortest)\b", prompt))
+                and re.search(r"\b(?:same(?: total)?(?: cable)? length|equal(?: length)?|ties?|shortest)\b", prompt))
+
+
+_HEADINGS = {
+    "north": (0, 1), "northeast": (1, 1), "east": (1, 0),
+    "southeast": (1, -1), "south": (0, -1), "southwest": (-1, -1),
+    "west": (-1, 0), "northwest": (-1, 1),
+}
+_COMPASS = "(?:" + "|".join(_HEADINGS) + ")"
+
+
+def equipment_headings(prompt):
+    def heading(terms):
+        directions = set(re.findall(rf"\b({_COMPASS})[- ]facing (?:{terms})\b", prompt))
+        directions.update(re.findall(
+            rf"\b(?:{terms})(?: faces?| heading| towards?| to the)? ({_COMPASS})\b", prompt))
+        return _HEADINGS[directions.pop()] if len(directions) == 1 else None
+
+    return heading("departure|depart|leave"), heading("arrival|arrive|enter")
 
 
 def matches(description):
@@ -35,7 +53,10 @@ def matches(description):
 def build_body(description):
     prompt = description.casefold()
     fewer_bends = prefers_fewer_bends(prompt)
+    headings = equipment_headings(prompt)
+    equipment = fewer_bends and (any(headings) or bool(re.search(r"\bequipment\b", prompt)))
     body = _BODY.replace("__FEWER_BENDS__", str(fewer_bends))
+    body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
     return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(fewer_bends or compares_lengths(prompt)))
 
 
@@ -166,13 +187,17 @@ def direction(a, b):
     return dx / scale, dy / scale
 
 
-def bend_count(edges):
+def bend_count(edges, departure, arrival):
     directions = [direction(a, b) for a, b in edges]
+    if departure is not None:
+        directions.insert(0, departure)
+    if arrival is not None:
+        directions.append(arrival)
     return sum(left != right for left, right in zip(directions, directions[1:]))
 
 
-def shortest(graph, start, end):
-    initial = (start, (0, 0))
+def shortest(graph, start, end, departure=None, arrival=None):
+    initial = (start, departure or (0, 0))
     costs = {initial: (0.0, 0)}
     previous = {}
     queue = [(0.0, 0, initial)]
@@ -195,7 +220,8 @@ def shortest(graph, start, end):
             heading = direction(node, neighbor) if __FEWER_BENDS__ else (0, 0)
             next_state = neighbor, heading
             turn = incoming != (0, 0) and incoming != heading
-            candidate = length + weight, bends + turn
+            entry_turn = neighbor == end and arrival is not None and heading != arrival
+            candidate = length + weight, bends + turn + entry_turn
             if candidate < costs.get(next_state, (math.inf, 0)):
                 costs[next_state] = candidate
                 previous[next_state] = state
@@ -206,6 +232,12 @@ def shortest(graph, start, end):
 def run(intake, params):
     arrays, aisles, centerlines, cables, obstacle_ids = read_geometry(intake)
     if __COMPARE_LENGTHS__:
+        headings = __EQUIPMENT_HEADINGS__
+        if headings is not None and None in headings:
+            return ({"status": "needs_equipment_headings",
+                     "message": "Specify the cable travel heading at departure and arrival."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
+        departure, arrival = headings or (None, None)
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
         graph = build_graph(arrays, aisles, centerlines, endpoints)
         findings, unavailable, crossings, tied = {}, {}, {}, {}
@@ -218,7 +250,7 @@ def run(intake, params):
             if start == end:
                 unavailable[handle] = "closed_route"
                 continue
-            route = shortest(graph, start, end)
+            route = shortest(graph, start, end, departure, arrival)
             if route["status"] != "found":
                 unavailable[handle] = route["status"]
                 continue
@@ -226,8 +258,8 @@ def run(intake, params):
             best = route["length"]
             if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
                 findings[handle] = dict(route, drawn_length=drawn, saving=drawn-best)
-            if __FEWER_BENDS__ and math.isclose(best, drawn, rel_tol=1e-12):
-                drawn_bends = bend_count(edges)
+            elif __FEWER_BENDS__ and math.isclose(best, drawn, rel_tol=1e-12):
+                drawn_bends = bend_count(edges, departure, arrival)
                 if route["bends"] < drawn_bends:
                     tied[handle] = dict(route, drawn_bends=drawn_bends,
                                         bends_saved=drawn_bends-route["bends"])
@@ -235,6 +267,8 @@ def run(intake, params):
                   "unavailable": unavailable, "units": "drawing_units"}
         if __FEWER_BENDS__:
             report["equal_length_fewer_bends"] = tied
+        if headings is not None:
+            report["equipment_travel_headings"] = {"departure": list(departure), "arrival": list(arrival)}
         alternatives = {**findings, **tied}
         return (report, {"highlight_handles": list(alternatives), "markers": [],
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
