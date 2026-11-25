@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import JobRail from '../components/JobRail.jsx'
+import ResultJsonDownload from '../components/ResultJsonDownload.jsx'
 import ReceiptPanel, { deepRedact } from '../projects/ReceiptPanel.jsx'
 import ShipReceipts from '../ios/ShipReceipts.jsx'
 import ProjectMaterialIntake from './ProjectMaterialIntake.jsx'
@@ -167,6 +168,9 @@ function pretty(value) {
 function JobDetail({ job }) {
   const proposal = job.tool_name === 'solar-solve-proposal' && job.status === 'complete' &&
     job.result?.schema === 'leaf.solar-solve-proposal.v1' && !job.output_version_id
+  const reportContext = job.result?.project_context
+  const hasBoundResult = job.status === 'complete' && job.input_version_id &&
+    (reportContext == null || reportContext.input_version_id === job.input_version_id)
   return (
     <section className="ground-job-detail" aria-label="Job detail">
       <h3>{job.tool_name || job.kind || 'Job detail'}</h3>
@@ -179,6 +183,7 @@ function JobDetail({ job }) {
         <dt>Output version</dt><dd>{proposal ? 'Proposal ready for review; not published' : job.output_version_id || 'Not recorded'}</dd>
       </dl>
       <pre>{pretty(job.result)}</pre>
+      {hasBoundResult && <ResultJsonDownload result={job.result} />}
     </section>
   )
 }

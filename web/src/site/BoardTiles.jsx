@@ -90,7 +90,12 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
               <ul>
                 {jobs.map((job) => (
                   <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
-                    {action('job', job.job_id, actions?.onOpenJob, job, <><strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}</>)}
+                    {action('job', job.job_id, actions?.onOpenJob, job, <>
+                      <strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}
+                      {job.input_version_id
+                        ? <> · Input version <code>{job.input_version_id}</code></>
+                        : job.result?.ok && ' · Input version not recorded'}
+                    </>)}
                   </li>
                 ))}
               </ul>

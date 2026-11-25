@@ -18,6 +18,22 @@ const props = {
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
 
+it('labels reports with the saved input version and opens the selected job', () => {
+  const actions = makeActions()
+  const historical = { ...job, job_id: 'earlier-report', input_version_id: 'earlier-drawing-version' }
+  const latest = { ...job, job_id: 'later-report', input_version_id: 'later-drawing-version' }
+  const unbound = { ...job, job_id: 'unbound-report', result: { ok: true, result: { layers: [] } } }
+  const workspace = { ...props.workspace, jobs: [job, historical, latest, unbound] }
+  render(<BoardTiles {...props} workspace={workspace} actions={actions} />)
+
+  expect(screen.getByRole('button', { name: 'Measure · succeeded' })).toBeVisible()
+  expect(screen.getByRole('button', { name: /Input version not recorded/ })).toBeVisible()
+  const historicalButton = screen.getByRole('button', { name: /Input version earlier-drawing-version/ })
+  expect(screen.getByRole('button', { name: /Input version later-drawing-version/ })).toBeVisible()
+  fireEvent.click(historicalButton)
+  expect(actions.onOpenJob).toHaveBeenCalledExactlyOnceWith(historical)
+})
+
 it('F64 opens tools from an empty project through SurfaceGrounds without a tool argument', () => {
   const actions = makeActions()
   const workspace = { ...props.workspace, built_tools: [] }
