@@ -9,6 +9,12 @@
 // controls target, and calls controls.update() after a mutation.
 import * as THREE from 'three'
 
+// A view-relative insert glyph keeps only the mirror sign of each drawing scale component.
+export function insertGlyphScale(scale) {
+  const [x, y] = Array.isArray(scale) ? scale : []
+  return [x, y].map(value => Number.isFinite(value) && value < 0 ? -1 : 1)
+}
+
 export function nextFitState(state, event) {
   switch (event) {
     case 'fit': return { fitted: true, interacting: state.interacting }

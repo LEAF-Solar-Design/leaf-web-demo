@@ -271,3 +271,40 @@ def test_malformed_bodies_keep_fastapis_own_error_for_each_case(client, label, k
     assert "'body'" in body["error"]["message"], label
     # The rejected value is never echoed back (envelopes.py keeps loc/msg/type).
     assert "input" not in body["error"]["message"], label
+
+
+def test_answers_reach_the_harness_as_structured_data(client, monkeypatch):
+    session_id = _session(client)
+    captured = {}
+
+    class Response:
+        status_code = 200
+
+    def post(*args, **kwargs):
+        captured.update(json.loads(kwargs["data"]))
+        return Response()
+
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.test")
+    monkeypatch.setattr(turn_runner.requests, "post", post)
+    monkeypatch.setattr(turn_runner, "_spawn_relay", lambda *args, **kwargs: None)
+    answers = {"question_id": "card-1", "answers": {"q1": {"labels": ["Lines"]}, "q2": {"other": "é"}}}
+    response = _post(client, session_id, {"answers": answers})
+    assert response.status_code == 202, response.text
+    assert captured["answers"] == answers
+    assert not {"text", "images", "confirm"}.intersection(captured)
+
+
+@pytest.mark.parametrize("extra", [{"text": "hi"}, {"images": [_image()]}, {"confirm": {}}, {"queue": True}])
+def test_answers_are_exclusive(client, extra):
+    card = {"question_id": "card", "answers": {"q1": {"other": "ok"}}}
+    assert _post(client, _session(client), {"answers": card, **extra}).status_code == 400
+
+
+@pytest.mark.parametrize("values", [
+    {}, {"q5": {"other": "x"}}, {"q1": {"labels": []}}, {"q1": {"labels": ["x"] * 5}},
+    {"q1": {"labels": ["x" * 61]}}, {"q1": {"labels": [23]}}, {"q1": {"other": ""}},
+    {"q1": {"other": "x" * 501}}, {"q1": {"labels": ["x"], "other": "y"}},
+])
+def test_invalid_card_answers_are_refused_before_dispatch(client, values):
+    card = {"question_id": "card", "answers": values}
+    assert _post(client, _session(client), {"answers": card}).status_code == 400

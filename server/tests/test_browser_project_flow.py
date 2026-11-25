@@ -108,6 +108,94 @@ def execute(body=BODY, action='request'):
     return flow.mutate('tenant', PROJECT, 'session', 'turn', action, EDIT, copy.deepcopy(body))
 
 
+def dependency_capture_lane(lane, monkeypatch, change=None):
+    import native_project_authoring as native
+    sid, tid = str(uuid.uuid4()), str(uuid.uuid4())
+    body = dict(BODY, material_refs=[dict(material_id=LEASE, sha256='a' * 64)])
+    lane.active = tid
+    lane.events[0]['turn_id'] = tid
+    lane.hint = flow._hint('create', EDIT, body, source_profile=flow.NATIVE_PROFILE)
+    lane.events[0]['data']['classifier_hint'] = copy.deepcopy(lane.hint)
+    monkeypatch.setattr(flow.authoring, 'validate_native_materials', lambda *a, **kw: None)
+    def refuse(tenant, project, request, **kwargs):
+        lane.author_calls += 1
+        error = flow.authoring.AuthorDependencyRefusal(dict(
+            schema='leaf.project-source-author-disposition.v1', outcome='not_started', stage='author_dependency_gate',
+            attempt_id=str(uuid.uuid4()), wire_sha256='9' * 64), request=request,
+            binding=dict(BOUND, actor_binding_id=ACTOR, expected_base_commit='1' * 40),
+            provenance=flow.authoring._VERIFIED_DEPENDENCY_REFUSAL)
+        if change == 'request':
+            error.request['requirements'] = 'Foreign requirements'
+        elif change == 'material':
+            error.request['material_refs'][0]['sha256'] = '0' * 64
+        elif change == 'repository':
+            error.binding['repo_key'] = str(uuid.uuid4())
+        elif change == 'actor':
+            error.binding['actor_binding_id'] = str(uuid.uuid4())
+        elif change == 'provenance':
+            error.provenance = None
+        elif change == 'revoked':
+            lane.allowed = False
+        elif change == 'marker':
+            lane.events[1]['data']['payload_digest'] = '0' * 64
+        elif change == 'extra':
+            error.disposition['extra'] = 'private detail'
+        raise error
+    monkeypatch.setattr(native, 'author', refuse)
+    def run(turn=tid):
+        return flow.mutate('tenant', PROJECT, sid, turn, 'request', EDIT, copy.deepcopy(body), source_profile=flow.NATIVE_PROFILE)
+    return run, sid, tid
+
+
+def test_native_dependency_disposition_captures_original_marker_without_replay_permission(lane, monkeypatch):
+    run, sid, tid = dependency_capture_lane(lane, monkeypatch)
+    with pytest.raises(flow.FlowError) as caught:
+        run()
+    assert caught.value.status == 503
+    events = [event for event in lane.events if event['type'] == 'native_source_author_disposition']
+    assert len(events) == 1
+    marker = lane.events[1]
+    data = events[0]['data']
+    assert data['authority_session_id'] == sid and data['authority_turn_id'] == tid
+    assert data['marker_seq'] == marker['seq'] and data['marker_digest'] == marker['data']['payload_digest']
+    assert data['source_request_id'] == EDIT and data['source_profile'] == flow.NATIVE_PROFILE
+    assert data['repo_key'] == REPO and data['actor_binding_id'] == ACTOR
+    assert data['outcome'] == 'not_started' and data['stage'] == 'author_dependency_gate'
+    assert set(data) == {'schema', 'attempt_id', 'wire_sha256', 'outcome', 'stage', 'tenant_id',
+        'organization_id', 'project_id', 'repo_key', 'actor_binding_id', 'expected_base_commit',
+        'source_request_id', 'source_profile', 'authority_session_id', 'authority_turn_id', 'marker_seq', 'marker_digest'}
+    assert 'requirements' not in data and 'material_refs' not in data
+    assert lane.finished == [tid] and lane.author_calls == 1 and not lane.rows
+    lane.active = tid
+    with pytest.raises(flow.FlowError) as duplicate:
+        run()
+    assert duplicate.value.status == 409 and lane.author_calls == 1
+    later = str(uuid.uuid4())
+    lane.active = later
+    lane.append(sid, later, 'turn_started', copy.deepcopy(lane.events[0]['data']))
+    with pytest.raises(flow.FlowError) as retry:
+        run(later)
+    assert retry.value.status == 409 and lane.author_calls == 1
+
+
+@pytest.mark.parametrize('change', ['request', 'material', 'repository', 'actor', 'provenance', 'revoked', 'marker', 'extra', 'cas'])
+def test_dependency_capture_requires_fresh_original_authority_and_server_cas(lane, monkeypatch, change):
+    run, _, _ = dependency_capture_lane(lane, monkeypatch, change)
+    if change == 'cas':
+        append = flow.session_store.append_event
+        def fail(sid, tid, kind, data, **kwargs):
+            if kind == 'native_source_author_disposition':
+                assert kwargs.get('expected_seq') == len(lane.events) + 1
+                raise RuntimeError('synthetic sequence race')
+            return append(sid, tid, kind, data, **kwargs)
+        monkeypatch.setattr(flow.session_store, 'append_event', fail)
+    with pytest.raises(flow.FlowError):
+        run()
+    assert not any(event['type'] == 'native_source_author_disposition' for event in lane.events)
+    assert lane.author_calls == 1 and not lane.rows
+    assert any(event['type'] == 'browser_source_dispatch' for event in lane.events)
+
+
 @pytest.mark.parametrize('operation', ['create', 'edit'])
 def test_native_edit_consumer_web_stage_replay_and_membership_parity(lane, monkeypatch, operation):
     body = dict(BODY, source_operation=operation)

@@ -1,6 +1,7 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash, webcrypto } from 'node:crypto'
 import { getArloReviews, saveArloReview } from '../api.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import ResultPanel from './ResultPanel.jsx'
@@ -17,11 +18,25 @@ function envelope(jobContext=context) {
 }
 const row = (decision='accept', job=context.job_id, note='') => ({operation_id:'review-'+decision,payload:{jobId:job,resultHash:'a'.repeat(64),proposalId:'proposal-a',decision,note},created_at:'2026-09-06T19:00:00Z'})
 beforeEach(() => {
+  vi.stubGlobal('crypto', webcrypto)
   getArloReviews.mockResolvedValue({job_id:context.job_id,result_sha256:'a'.repeat(64),reviews:[]})
   saveArloReview.mockImplementation(async (_ctx,body) => ({review:row(body.decision,context.job_id,body.note)}))
 })
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const panel = result => <ResultPanel running={false} result={result} tool={{name:'arlo-design'}} />
+function canonicalProps(result) {
+  const canonicalJson = { solver_input: JSON.stringify(result.solver_input), solver_result: JSON.stringify(result.solver_result) }
+  result.input_sha256 = createHash('sha256').update(canonicalJson.solver_input).digest('hex')
+  result.result_sha256 = createHash('sha256').update(canonicalJson.solver_result).digest('hex')
+  getArloReviews.mockResolvedValue({ job_id: context.job_id, result_sha256: result.result_sha256, reviews: [] })
+  return { envelope: result, canonicalJson }
+}
+async function renderStored(result) {
+  const props = canonicalProps(result)
+  const view = render(<ArloProposalReview {...props} context={context} currentProject={currentProject} />)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Export result' })).toBeEnabled())
+  return { ...view, canonicalJson: props.canonicalJson }
+}
 function captureDownload() {
   const createObjectURL = vi.fn(() => 'blob:arlo-result'), revokeObjectURL = vi.fn()
   vi.stubGlobal('URL', class extends URL {
@@ -80,8 +95,9 @@ describe('ARLO review in the existing workspace result panel', () => {
   ])('refuses unrenderable routes/quantities but keeps raw export: %j', async patch => {
     const captured = captureDownload(), stored = structuredClone(envelope())
     Object.assign(stored.result.solver_result.proposals[0], patch)
+    canonicalProps(stored.result)
     const raw = JSON.stringify(stored.result)
-    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    await renderStored(stored.result)
     expect(screen.getByRole('alert').textContent).toContain('routes or quantities could not be displayed')
     expect(screen.getByText('Feeder design incomplete')).toBeTruthy()
     expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
@@ -98,8 +114,9 @@ describe('ARLO review in the existing workspace result panel', () => {
   it.each([null, 7, [], {}, { proposal_id: ' ' }, { ...proposal }])('refuses a malformed or duplicate member without losing stored bytes: %j', async member => {
     const stored = envelope()
     stored.result.solver_result.proposals = [proposal, member]
+    canonicalProps(stored.result)
     const original = JSON.stringify(stored.result)
-    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    await renderStored(stored.result)
     expect(screen.getByRole('alert').textContent).toContain('proposal identity is missing or duplicated')
     expect(screen.getByText('Feeder design incomplete')).toBeTruthy()
     expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
@@ -119,7 +136,8 @@ describe('ARLO review in the existing workspace result panel', () => {
       contract: 'arlo_design_result_v1', request_hash: 'b'.repeat(64), production_valid: false,
       diagnostics: { limitations: ['Support host capacity has not been checked.', 'Catalog fitting offsets require verification.'] },
     })
-    render(view === 'initial' ? panel(stored) : <ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    if (view === 'initial') render(panel(stored))
+    else await renderStored(stored.result)
     const limitations = screen.getByRole('region', { name: 'Limitations' })
     expect(limitations).toHaveTextContent('Solver diagnostics limitations')
     for (const limitation of stored.result.solver_result.diagnostics.limitations) {
@@ -147,7 +165,7 @@ describe('ARLO review in the existing workspace result panel', () => {
 
   it('inspects every stored proposal field and downloads exactly the full JSON preview', async () => {
     const captured = captureDownload(), stored = detailedEnvelope()
-    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    await renderStored(stored.result)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Accept proposal' })).toBeEnabled())
     expect(screen.getByText('Production valid:')).toHaveTextContent('Production valid: false')
     const limitations = screen.getByRole('region', { name: 'Limitations' })
@@ -187,6 +205,60 @@ describe('ARLO review in the existing workspace result panel', () => {
     expect(saveArloReview).not.toHaveBeenCalled()
   })
 
+  it.each([1, 3])('disposes all pending URLs and timers on unmount after %i exports', async count => {
+    try {
+      const captured = captureDownload()
+      const urls = Array.from({ length: count }, (_, index) => `blob:arlo-result-${index}`)
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = await renderStored(envelope().result)
+      vi.useFakeTimers()
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      for (let index = 0; index < count; index++) fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(count)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(count)
+      expect(document.querySelector('a[download]')).toBeNull()
+
+      unmount()
+      expect(vi.getTimerCount()).toBe(0)
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
+  it('revokes completed exports while mounted without revoking them again on unmount', async () => {
+    try {
+      const captured = captureDownload()
+      const urls = ['blob:arlo-result-first', 'blob:arlo-result-second']
+      for (const url of urls) captured.createObjectURL.mockReturnValueOnce(url)
+      const { unmount } = await renderStored(envelope().result)
+      vi.useFakeTimers()
+      const download = screen.getByRole('button', { name: 'Export result' })
+      expect(download).toBeEnabled()
+      fireEvent.click(download)
+      fireEvent.click(download)
+      expect(captured.createObjectURL).toHaveBeenCalledTimes(2)
+      expect(captured.revokeObjectURL).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(2)
+
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+      unmount()
+      act(() => vi.runOnlyPendingTimers())
+      expect(captured.revokeObjectURL.mock.calls).toEqual(urls.map(url => [url]))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
   it('disables export with a visible reason when the stored result is absent', () => {
     const captured = captureDownload()
     render(<ArloProposalReview context={context} />)
@@ -217,9 +289,9 @@ describe('ARLO review in the existing workspace result panel', () => {
 
   it.each(['projectId', 'orgId'])('refuses export after the current %s changes while the stored result and job context remain', async key => {
     const captured = captureDownload(), stored = detailedEnvelope()
-    const { rerender } = render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    const { rerender, canonicalJson } = await renderStored(stored.result)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Export result' })).toBeEnabled())
-    rerender(<ArloProposalReview envelope={stored.result} context={context} currentProject={{ ...currentProject, [key]: '66666666-6666-4666-8666-666666666666' }} />)
+    rerender(<ArloProposalReview envelope={stored.result} canonicalJson={canonicalJson} context={context} currentProject={{ ...currentProject, [key]: '66666666-6666-4666-8666-666666666666' }} />)
     expect(screen.getByRole('button', { name: 'Export result' })).toBeDisabled()
     expect(screen.getByText(/Export unavailable: this stored result does not match the current project job/)).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
@@ -231,7 +303,7 @@ describe('ARLO review in the existing workspace result panel', () => {
     const captured = captureDownload(), stored = detailedEnvelope()
     stored.result.solver_result.status = status
     stored.result.solver_result.proposals = []
-    render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    await renderStored(stored.result)
     expect(screen.getByText('Feeder design incomplete')).toBeVisible()
     expect(screen.queryByLabelText('Feeder proposal')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Accept proposal' })).toBeNull()
@@ -255,9 +327,9 @@ describe('ARLO review in the existing workspace result panel', () => {
 
   it('refuses export when a stored result is carried into another project', async () => {
     const captured = captureDownload(), stored = detailedEnvelope()
-    const { rerender } = render(<ArloProposalReview envelope={stored.result} context={context} currentProject={currentProject} />)
+    const { rerender, canonicalJson } = await renderStored(stored.result)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Export result' })).toBeEnabled())
-    rerender(<ArloProposalReview envelope={stored.result} context={{ ...context, project_id: '66666666-6666-4666-8666-666666666666' }} currentProject={currentProject} />)
+    rerender(<ArloProposalReview envelope={stored.result} canonicalJson={canonicalJson} context={{ ...context, project_id: '66666666-6666-4666-8666-666666666666' }} currentProject={currentProject} />)
     expect(screen.getByRole('button', { name: 'Export result' })).toBeDisabled()
     expect(screen.getByText(/Export unavailable: this stored result does not match the current project job/)).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
@@ -278,7 +350,7 @@ describe('ARLO review in the existing workspace result panel', () => {
   it('cleans up the Blob URL and reports a failed download', async () => {
     const captured = captureDownload()
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => { throw new Error('Download blocked') })
-    render(<ArloProposalReview envelope={envelope().result} context={context} currentProject={currentProject} />)
+    await renderStored(envelope().result)
     fireEvent.click(screen.getByRole('button', { name: 'Export result' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Result export failed. Download blocked')
     expect(document.querySelector('a[download]')).toBeNull()

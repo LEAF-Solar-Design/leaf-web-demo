@@ -673,6 +673,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     expect((opts.mcpServers as AnyRec).spine).toBeDefined();
     expect(mock.servers[0]!.name).toBe("spine");
     expect(mock.tools.map((t) => t.name).sort()).toEqual([...SPINE_TOOL_NAMES].sort());
+    expect(mock.tools.filter(t => t.name === "propose_plan")).toHaveLength(1);
   });
 
   it.each(["claude-haiku-5-5", "claude-haiku-4-5"])("model precedence: input.model %s > constructor model", async (model) => {

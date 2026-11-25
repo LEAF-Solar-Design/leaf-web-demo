@@ -1,0 +1,104 @@
+{
+  "name": "label-writer",
+  "version": "1.0.0",
+  "description": "Add a text label at the drawing origin.",
+  "params": {
+    "type": "object",
+    "properties": {
+      "label": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "label"
+    ],
+    "additionalProperties": false
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "added": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "added"
+    ]
+  },
+  "capabilities": [
+    "drawing.read",
+    "drawing.write"
+  ],
+  "hosts": {
+    "min_release": 2023,
+    "min_host_api": 1
+  },
+  "timeout_ms": 30000,
+  "idempotent": false,
+  "main_csx": "using Autodesk.AutoCAD.DatabaseServices;\nusing Autodesk.AutoCAD.Geometry;\nusing Newtonsoft.Json.Linq;\nCtx.Cancel.ThrowIfCancellationRequested();\nusing (var tr = Ctx.Db.TransactionManager.StartTransaction()) {\n    var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);\n    var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);\n    var text = new DBText();\n    text.Position = Point3d.Origin;\n    text.Height = 12;\n    text.TextString = Ctx.Args.Value<string>(\"label\") ?? \"PV\";\n    ms.AppendEntity(text);\n    tr.AddNewlyCreatedDBObject(text, true);\n    tr.Commit();\n}\nreturn new { added = 1 };\n",
+  "lib": {
+    "helper-0.csx": "// recorded helper\n",
+    "helper-1.csx": "// recorded helper\n",
+    "helper-2.csx": "// recorded helper\n",
+    "helper-3.csx": "// recorded helper\n",
+    "helper-4.csx": "// recorded helper\n",
+    "helper-5.csx": "// recorded helper\n",
+    "helper-6.csx": "// recorded helper\n",
+    "helper-7.csx": "// recorded helper\n",
+    "helper-8.csx": "// recorded helper\n",
+    "helper-9.csx": "// recorded helper\n",
+    "helper-10.csx": "// recorded helper\n",
+    "helper-11.csx": "// recorded helper\n",
+    "helper-12.csx": "// recorded helper\n",
+    "helper-13.csx": "// recorded helper\n",
+    "helper-14.csx": "// recorded helper\n",
+    "helper-15.csx": "// recorded helper\n",
+    "helper-16.csx": "// recorded helper\n",
+    "helper-17.csx": "// recorded helper\n",
+    "helper-18.csx": "// recorded helper\n",
+    "helper-19.csx": "// recorded helper\n",
+    "helper-20.csx": "// recorded helper\n",
+    "helper-21.csx": "// recorded helper\n",
+    "helper-22.csx": "// recorded helper\n",
+    "helper-23.csx": "// recorded helper\n",
+    "helper-24.csx": "// recorded helper\n",
+    "helper-25.csx": "// recorded helper\n",
+    "helper-26.csx": "// recorded helper\n",
+    "helper-27.csx": "// recorded helper\n",
+    "helper-28.csx": "// recorded helper\n",
+    "helper-29.csx": "// recorded helper\n",
+    "helper-30.csx": "// recorded helper\n",
+    "helper-31.csx": "// recorded helper\n",
+    "helper-32.csx": "// recorded helper\n",
+    "helper-33.csx": "// recorded helper\n",
+    "helper-34.csx": "// recorded helper\n",
+    "helper-35.csx": "// recorded helper\n",
+    "helper-36.csx": "// recorded helper\n",
+    "helper-37.csx": "// recorded helper\n",
+    "helper-38.csx": "// recorded helper\n",
+    "helper-39.csx": "// recorded helper\n",
+    "helper-40.csx": "// recorded helper\n",
+    "helper-41.csx": "// recorded helper\n",
+    "helper-42.csx": "// recorded helper\n",
+    "helper-43.csx": "// recorded helper\n",
+    "helper-44.csx": "// recorded helper\n",
+    "helper-45.csx": "// recorded helper\n",
+    "helper-46.csx": "// recorded helper\n",
+    "helper-47.csx": "// recorded helper\n",
+    "helper-48.csx": "// recorded helper\n",
+    "helper-49.csx": "// recorded helper\n",
+    "helper-50.csx": "// recorded helper\n",
+    "helper-51.csx": "// recorded helper\n",
+    "helper-52.csx": "// recorded helper\n",
+    "helper-53.csx": "// recorded helper\n",
+    "helper-54.csx": "// recorded helper\n",
+    "helper-55.csx": "// recorded helper\n",
+    "helper-56.csx": "// recorded helper\n",
+    "helper-57.csx": "// recorded helper\n",
+    "helper-58.csx": "// recorded helper\n",
+    "helper-59.csx": "// recorded helper\n",
+    "helper-60.csx": "// recorded helper\n",
+    "helper-61.csx": "// recorded helper\n",
+    "helper-62.csx": "// recorded helper\n"
+  }
+}

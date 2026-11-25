@@ -40,6 +40,7 @@ _FAILURES = {
     "SIP_R1_INTAKE_DIGEST_MISMATCH": (500, False), "SIP_R1_INTAKE_INVALID": (500, False),
     "SIP_R1_INTAKE_UNAVAILABLE": (503, True), "SIP_R1_STORE_UNAVAILABLE": (503, True),
     "SIP_R1_CHECKOUT_PARAMS_INVALID": (400, False), "SIP_R1_CHECKOUT_CONFLICT": (409, True),
+    "SIP_R1_PROJECT_ARCHIVED": (409, False),
     "SIP_R1_CHECKOUT_REQUIRED": (409, False), "SIP_R1_CHECKOUT_EXPIRED": (409, False),
     "SIP_R1_CHECKOUT_DENIED": (403, False), "SIP_R1_CHECKOUT_STALE": (409, False),
     "SIP_R1_CHECKOUT_UNAVAILABLE": (503, True), "SIP_R1_FENCE_EXHAUSTED": (409, False),
@@ -276,6 +277,25 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
     except (platform_link.CanonicalEntitlementDenied, EntitlementDenied) as exc:
         return _response(exc.response)
     except GraphValidationError as exc:
+        # Import lazily because the producer also uses this admission module.
+        from solar_project_solaredge import SolarEdgeGridRefusal
+        if isinstance(exc, SolarEdgeGridRefusal):
+            # Revalidate the typed diagnostic before it crosses the response boundary.
+            try:
+                diagnostic = SolarEdgeGridRefusal(exc.code, exc.frame_ref, exc.candidate_ids, exc.action)
+            except (GraphValidationError, AttributeError):
+                return _refusal("REPORT_INVALID", message="Canonical Solar request was refused.")
+            unmatched = diagnostic.code == "SOLAREDGE_GRID_UNMATCHED"
+            response = _refusal(diagnostic.code,
+                message=("The panel group has no matching SolarEdge grid." if unmatched
+                         else "The panel group matches multiple SolarEdge grids."))
+            response["content"]["error"].update(
+                frame_ref=diagnostic.frame_ref,
+                candidate_ids=diagnostic.candidate_ids,
+                action=diagnostic.action,
+                next_action=("Redraw the panel group, then rebuild the report." if unmatched
+                             else "Select one candidate grid for the panel group."))
+            return response
         panel_filter = None
         if exc.code == "NO_PANELS_RECOGNISED":
             try:

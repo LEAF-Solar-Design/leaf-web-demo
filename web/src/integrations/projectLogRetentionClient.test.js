@@ -33,6 +33,7 @@ const client = createProjectLogRetentionMethods(request, invalid)
 let signal
 beforeEach(() => { request.mockReset(); signal = new AbortController().signal })
 const cases = [
+  { name: 'retentionGetPreparedTable', args: () => [table, { signal }], path: 'tables/' + table, result: { tableId: table, revision: 1 } },
   { name: 'retentionPrepare', args: () => [prepare, { signal }], path: 'prepare', body: prepare, result: { tableId: table, revision: 1 } },
   { name: 'retentionRegisterDefinition', args: () => [{ id: 'logs', version: 1, title: 'Logs', settings }, { signal }], path: 'definitions', body: { id: 'logs', version: 1, title: 'Logs', settings }, result: def },
   { name: 'retentionGetDefinition', args: () => ['logs', 1, { signal }], path: 'definitions/logs/versions/1', result: def },

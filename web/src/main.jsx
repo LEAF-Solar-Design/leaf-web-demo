@@ -8,6 +8,8 @@ import './telemetry.js'
 import React from 'react'
 import { useEffect, useState } from 'react'
 import { bootstrapServiceAuth } from './auth.js'
+import { bootstrapInvestorLink } from './investorDemo.js'
+import { takeInvestorLink } from './lib/investorLinkCapture.js'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './standard/leaf-standard.css'
 import './styles.css'
@@ -17,8 +19,11 @@ import { getSession, getSurfaceConfig, submitSurfaceConfig } from './api.js'
 import { canonicalizeDemoEntry } from './site/authBoot.js'
 
 if (typeof window !== 'undefined') canonicalizeDemoEntry()
+const link = typeof window !== 'undefined' ? takeInvestorLink() : undefined
 
-const siteRootPromise = bootstrapServiceAuth().then(() => import('./site/SiteRoot.jsx'))
+const siteRootPromise = bootstrapServiceAuth()
+  .then(() => bootstrapInvestorLink({ link, apiBase: import.meta.env?.VITE_API_BASE ?? '' }))
+  .then(() => import('./site/SiteRoot.jsx'))
   .then(module => ({ Component: module.default }))
   .catch(error => ({ error }))
 

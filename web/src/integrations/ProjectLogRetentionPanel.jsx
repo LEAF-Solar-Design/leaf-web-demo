@@ -1,13 +1,22 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react'
 import './ProjectLogRetentionPanel.css'
 
-const initialForm = () => ({ slug: '', version: '1', title: '', batchSize: '5000', maxBatches: '200',
+const initialForm = () => ({ preparedRef: '', slug: '', version: '1', title: '', batchSize: '5000', maxBatches: '200',
   table: '', clock: '', scheduleSlug: '', scheduleVersion: '1', dueDate: '', execution: '',
   id: 'id', source: 'source', level: 'level', timestamp: 'timestamp' })
 const failed = () => new Error('Retention action unavailable')
 const number = value => { const n = Number(value); if (!value.trim() || !Number.isSafeInteger(n)) throw failed(); return n }
 const refKey = dataset => JSON.stringify([dataset.reference, dataset.revision])
 const cell = value => typeof value === 'string' ? value : JSON.stringify(value)
+function normalizeRetentionClock(input) {
+  const value = input.trim()
+  const epoch = /^-?\d+$/.test(value)
+  const time = epoch ? Number(value) : Date.parse(value)
+  const date = new Date(time)
+  if (!Number.isSafeInteger(time) || !Number.isFinite(date.getTime())) return null
+  const iso = date.toISOString()
+  return iso.length === 24 && (epoch || iso === value) ? iso : null
+}
 
 export function ProjectLogRetentionPanel(props) {
   const binding = [props.client, props.projectId, props.signal]
@@ -35,6 +44,11 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
   const [historyPending, setHistoryPending] = useState(false), [historyFailed, setHistoryFailed] = useState(false)
   const historyAvailable = typeof client?.retentionHistory === 'function'
   const dataset = datasets.find(value => refKey(value) === selected)
+  const [schema, setSchema] = useState(null)
+  useLayoutEffect(() => {
+    setSchema(null)
+    return () => scope.current?.reads.get('schema')?.abort()
+  }, [dataset])
   const current = ctx => ctx && scope.current === ctx && !ctx.controller.signal.aborted && !signal?.aborted
   const clearReviews = () => { setReview(null); setRestoreReview(null) }
   const clearRun = () => {
@@ -100,6 +114,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
     finally { ctx.controller.signal.removeEventListener('abort', abort); if (ctx.reads.get(key) === controller) ctx.reads.delete(key) }
   }
   function edit(key, value) {
+    if (key === 'preparedRef') { setPrepared(null); setSchedule(null); clearRun() }
     setForm(previous => ({ ...previous, [key]: value })); clearReviews(); setExported(null)
     if (['slug', 'version', 'title', 'batchSize', 'maxBatches'].includes(key)) { setDefinition(null); setSchedule(null); clearRun() }
     if (['table', 'clock', 'id', 'source', 'level', 'timestamp'].includes(key)) { setPrepared(null); setSchedule(null); clearRun() }
@@ -255,15 +270,42 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
       })}>More datasets</button></div>
       <label htmlFor={`${prefix}-dataset`}>Imported dataset<select id={`${prefix}-dataset`} value={selected} onChange={event => { setSelected(event.target.value); setPrepared(null); setSchedule(null); clearRun() }}>
         <option value="">Choose imported records</option>{datasets.map(value => <option key={refKey(value)} value={refKey(value)} disabled={!value.material_context || !!value.derivation}>{value.title || value.reference.id}</option>)}</select></label>
+      <button type="button" disabled={!dataset} onClick={() => read('schema', async (ctx, requestSignal) => {
+        setSchema(null)
+        const result = await invoke(ctx, 'getDataset', [dataset.reference], requestSignal, { revision: dataset.revision })
+        if (!current(ctx) || requestSignal.aborted) return
+        setSchema({ fields: result.fields.map(field => ({ id: field.id, kind: field.type.kind })) })
+      })}>Inspect schema</button>
+      {schema && dataset && <section aria-label="Imported dataset schema">
+        <p>{dataset.reference.id}, version {dataset.reference.version}, revision {dataset.revision}</p>
+        <p>Digest: <code>{dataset.reference.digest}</code></p>
+        <dl>{schema.fields.map(field => <div key={field.id}><dt>{field.id}</dt><dd>{field.kind}</dd></div>)}</dl>
+      </section>}
       <div className="retention-grid">{input('table', 'Logical table ID')}{input('clock', 'Retention clock (UTC milliseconds)')}
         {['id', 'source', 'level', 'timestamp'].map(key => <label key={key} htmlFor={`${prefix}-${key}`}>{({ id: 'Record ID field', source: 'Source field', level: 'Level field', timestamp: 'Timestamp field' })[key]}
           <input id={`${prefix}-${key}`} list={`${prefix}-fields`} value={form[key]} onChange={event => edit(key, event.target.value)} /></label>)}
       </div><datalist id={`${prefix}-fields`}>{(dataset?.fields ?? []).map(field => <option key={field.id} value={field.id}>{field.label}</option>)}</datalist>
       <button type="button" disabled={!dataset?.material_context || !!dataset?.derivation} onClick={() => action(async ctx => {
+        ctx.reads.get('prepared')?.abort()
+        const retentionClock = normalizeRetentionClock(form.clock)
+        if (!retentionClock) {
+          setError('Enter the retention clock as whole epoch milliseconds or a UTC timestamp such as 2031-01-01T00:00:00.000Z (year 0000 through 9999).')
+          return
+        }
         const value = await invoke(ctx, 'retentionPrepare', [{ datasetRef: dataset.reference, expectedDatasetRevision: dataset.revision,
-          tableId: form.table.trim(), fields: { id: form.id, source: form.source, level: form.level, timestamp: form.timestamp }, retentionClock: form.clock.trim() }])
+          tableId: form.table.trim(), fields: { id: form.id, source: form.source, level: form.level, timestamp: form.timestamp }, retentionClock }])
         setPrepared(value); setSchedule(null); clearRun(); setNotice('Original records prepared from the selected imported revision.')
-      })}>Prepare records</button>{prepared && <p>Prepared table: {prepared.tableId}.</p>}
+      })}>Prepare records</button>
+      {input('preparedRef', 'Prepared table reference')}
+      <button type="button" disabled={!form.preparedRef.trim()} onClick={() => {
+        setPrepared(null); setSchedule(null); clearRun()
+        read('prepared', async (ctx, requestSignal) => {
+          const found = await invoke(ctx, 'retentionGetPreparedTable', [form.preparedRef.trim()], requestSignal)
+          if (current(ctx) && !requestSignal.aborted) setPrepared(found)
+        })
+      }}>Open prepared table</button>
+      {prepared && <p>Prepared table: {prepared.tableId}.</p>}
+      {prepared?.revision && <p>Prepared table revision: {prepared.revision}.</p>}
     </fieldset>
     <fieldset disabled={disabled}><legend>Internal schedule and occurrence</legend><div className="retention-grid">{input('scheduleSlug', 'Schedule slug')}{input('scheduleVersion', 'Schedule version', 'number')}{input('dueDate', 'Occurrence due date', 'date')}</div>
       <div className="retention-actions"><button type="button" disabled={typeof client?.retentionGetSchedule !== 'function'} onClick={openSchedule}>Open internal schedule</button>

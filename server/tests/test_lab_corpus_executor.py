@@ -18,6 +18,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import lab_corpus_executor as corpus
+import lab_corpus_failures as failures
+
+
+SECCOMP_REFRESH_ATTEMPTS = 3
+SECCOMP_REFRESH_BACKOFF_S = (2, 8)
 
 
 def job_private_pg16(directory, environment):
@@ -409,13 +414,23 @@ def ephemeral_seccomp_toolchain(directory, env, compiler):
                        '-o', 'Dir::Cache=' + str(cache),
                        '-o', 'Dir::Cache::archives=' + str(cache / 'archives')]
         print('L03_EPHEMERAL_SUPPLY metadata=private-refresh')
-        try:
-            refreshed = subprocess.run(['apt-get', *apt_options, 'update'], cwd=directory,
-                                      env=env, capture_output=True, text=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh') from None
-        if refreshed.returncode != 0:
-            raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh')
+        for attempt in range(1, SECCOMP_REFRESH_ATTEMPTS + 1):
+            if attempt > 1:
+                time.sleep(SECCOMP_REFRESH_BACKOFF_S[attempt - 2])
+                shutil.rmtree(lists / 'partial')
+                (lists / 'partial').mkdir()
+                print('L03_EPHEMERAL_SUPPLY metadata=retry attempt=' + str(attempt))
+            try:
+                refreshed = subprocess.run(['apt-get', *apt_options, 'update'], cwd=directory,
+                                          env=env, capture_output=True, text=True, timeout=120)
+            except subprocess.TimeoutExpired:
+                if attempt == SECCOMP_REFRESH_ATTEMPTS:
+                    raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh') from None
+                continue
+            if refreshed.returncode == 0:
+                break
+            if attempt == SECCOMP_REFRESH_ATTEMPTS:
+                raise AssertionError('Ephemeral canonical seccomp supply unavailable: metadata_refresh')
         candidates = {name: candidate_for(name) for name in names}
     expected = {}
     for name in names:
@@ -458,8 +473,10 @@ def ephemeral_seccomp_commands(monkeypatch):
     def install(*, missing_host=(), missing_private=(), absent_candidate='(none)', refresh_failure=None):
         payloads = {name: (name + ' fake archive').encode()
                     for name in ('libseccomp-dev', 'libseccomp2')}
+        refresh_calls = 0
 
         def run(argv, **kwargs):
+            nonlocal refresh_calls
             calls.append((list(argv), kwargs))
             args = [argv[0]]
             options = {}
@@ -480,10 +497,20 @@ def ephemeral_seccomp_commands(monkeypatch):
                 version = absent_candidate if args[2] in missing else ('2.6.0' if options else '2.5.0')
                 stdout = '  Candidate: ' + version + '\n'
             elif args == ['apt-get', 'update']:
-                if refresh_failure == 'timeout':
+                refresh_calls += 1
+                failure = refresh_failure
+                if isinstance(failure, tuple):
+                    failure, count = failure
+                    if refresh_calls > count:
+                        failure = None
+                partial = Path(options['Dir::State::lists']) / 'partial'
+                assert list(partial.iterdir()) == []
+                if failure:
+                    (partial / 'unfinished-download').write_text('partial metadata')
+                if failure == 'timeout':
                     raise subprocess.TimeoutExpired(argv, kwargs['timeout'],
                                                     output='private apt diagnostic', stderr='private apt diagnostic')
-                if refresh_failure == 'exit':
+                if failure == 'exit':
                     return subprocess.CompletedProcess(argv, 100, 'private apt diagnostic', 'private apt diagnostic')
             elif args[:2] == ['apt-cache', 'show']:
                 name, version = args[2].split('=', 1)
@@ -575,23 +602,54 @@ def test_ephemeral_seccomp_candidate_still_missing(tmp_path, ephemeral_seccomp_c
     assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
 
 
-def test_ephemeral_seccomp_refresh_failure(tmp_path, ephemeral_seccomp_commands):
+@pytest.mark.parametrize('failure', ['exit', 'timeout'])
+def test_ephemeral_seccomp_refresh_recovers_after_transient_failure(
+        tmp_path, ephemeral_seccomp_commands, monkeypatch, capsys, failure):
+    sleeps = []
+    monkeypatch.setattr(time, 'sleep', sleeps.append)
+    calls = ephemeral_seccomp_commands(missing_host=('libseccomp-dev',), refresh_failure=(failure, 1))
+    env = {'PATH': '/fake/bin', 'HOME': str(tmp_path)}
+    result = ephemeral_seccomp_toolchain(tmp_path, env, 'fake-cc')
+    updates = [(argv, kwargs) for argv, kwargs in calls if argv[0] == 'apt-get' and 'update' in argv]
+    assert len(updates) == 2
+    assert updates[0] == updates[1]
+    assert updates[0][1] == dict(cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert sleeps == [2]
+    assert result == dict(env, CPATH=str(tmp_path / 'toolchain/usr/include'),
+                          LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'),
+                          LD_LIBRARY_PATH=str(tmp_path / 'toolchain/usr/lib/x86_64-linux-gnu'))
+    assert env == {'PATH': '/fake/bin', 'HOME': str(tmp_path)}
+    output = capsys.readouterr().out
+    assert output.count('L03_EPHEMERAL_SUPPLY metadata=private-refresh\n') == 1
+    assert output.count('L03_EPHEMERAL_SUPPLY metadata=retry attempt=2\n') == 1
+    assert output.count('L03_EPHEMERAL_SUPPLY metadata=retry') == 1
+    assert output.count('L03_EPHEMERAL_SUPPLY package=') == 2
+    assert 'private apt diagnostic' not in output
+
+
+def test_ephemeral_seccomp_refresh_failure(tmp_path, ephemeral_seccomp_commands, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, 'sleep', sleeps.append)
     calls = ephemeral_seccomp_commands(missing_host=('libseccomp-dev',), refresh_failure='exit')
     with pytest.raises(AssertionError) as error:
         ephemeral_seccomp_toolchain(tmp_path, {}, 'fake-cc')
     assert str(error.value) == 'Ephemeral canonical seccomp supply unavailable: metadata_refresh'
     assert 'private apt diagnostic' not in str(error.value)
-    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
+    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 3
+    assert sleeps == [2, 8]
     assert calls[-1][0][-1] == 'update'
 
 
-def test_ephemeral_seccomp_refresh_timeout(tmp_path, ephemeral_seccomp_commands):
+def test_ephemeral_seccomp_refresh_timeout(tmp_path, ephemeral_seccomp_commands, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(time, 'sleep', sleeps.append)
     calls = ephemeral_seccomp_commands(missing_host=('libseccomp-dev',), refresh_failure='timeout')
     with pytest.raises(AssertionError) as error:
         ephemeral_seccomp_toolchain(tmp_path, {}, 'fake-cc')
     assert str(error.value) == 'Ephemeral canonical seccomp supply unavailable: metadata_refresh'
     assert 'private apt diagnostic' not in str(error.value)
-    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 1
+    assert sum(argv[0] == 'apt-get' and 'update' in argv for argv, _ in calls) == 3
+    assert sleeps == [2, 8]
     assert calls[-1][1]['timeout'] == 120
     assert calls[-1][0][-1] == 'update'
 
@@ -807,3 +865,54 @@ def test_kernel_cage_real_cli_and_network_refusal(installed, tmp_path, monkeypat
     probe = subprocess.run(command, capture_output=True, timeout=5,
         env={'PATH': '/usr/bin:/bin', 'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '1'})
     assert probe.returncode == 0, 'Kernel cage did not refuse socket creation.'
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('Pinned corpus evaluator did not produce a bounded result.', 'bounded_result_absent'),
+    ('Corpus result identity mismatch.', 'result_identity'),
+    ('Corpus attempt lost its lease or execution budget.', 'lease_or_budget'),
+    ('Corpus kernel network isolation is unavailable.', 'kernel_isolation_unavailable'),
+])
+def test_failure_reason_is_fixed_and_survives_child_cleanup(message, reason):
+    error = ValueError(message)
+    assert failures.failure_reason(error) == reason
+    stopped = corpus.CorpusStopped(str(error))
+    assert failures.failure_reason(stopped) == reason
+    assert message == str(stopped)
+
+
+def test_failure_reason_does_not_expose_exception_text():
+    private = 'synthetic-private-path-or-token'
+    assert failures.failure_reason(ValueError(private)) == 'unclassified'
+    stopped = corpus.CorpusStopped(private)
+    assert private not in failures.failure_reason(stopped)
+    assert failures.failure_reason(stopped) == 'unclassified'
+
+
+@pytest.mark.parametrize('child_stopped', [False, True])
+def test_corpus_job_persists_sanitized_failure_category(monkeypatch, child_stopped):
+    import jobs
+    from types import SimpleNamespace
+    observed = []
+    reaped = []
+    row = {'status': 'running', 'attempt': 1,
+           'lease': {'owner': 'owned-worker', 'expires_at': time.time() + 600}}
+    monkeypatch.setattr(jobs, 'get_job', lambda job_id: row)
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace(durable_context=lambda job_id: {'execution': {}}))
+    monkeypatch.setattr(corpus, 'record_context', lambda *args: {})
+    failure = ValueError('Corpus result identity mismatch.')
+    if child_stopped:
+        failure = corpus.CorpusStopped(str(failure))
+    def failed(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(corpus, 'run', failed)
+    monkeypatch.setattr(jobs, '_ack_corpus_reap', lambda *args: reaped.append(args))
+    monkeypatch.setattr(jobs, 'complete_callback', lambda *args, **kwargs: observed.append((args, kwargs)))
+    jobs._run_lab_corpus('owned-job', _worker_id='owned-worker', _attempt=1)
+    assert len(observed) == 1
+    args, kwargs = observed[0]
+    assert args == ('owned-job', 'failed')
+    assert kwargs['error']['error_code'] == 'INTERNAL'
+    assert kwargs['error']['corpus_failure'] == 'result_identity'
+    assert kwargs['error']['retryable'] is False
+    assert bool(reaped) is child_stopped

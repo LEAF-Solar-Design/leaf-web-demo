@@ -6,12 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
+import { readActiveScope } from '../auth/activeScope.js'
 import { cloneDocument, resetDesign, selectionIdentity, setOverride } from './portfolioEdits.js'
 import { appearanceStyle, containerStyle, navigationOrder, photoStyle, photoSpanStyle, textStyle } from './pageDesign.js'
 import ElementInspector, { designElements } from './ElementInspector.jsx'
 
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: () => () => {}, subscribeTokenStored: () => () => {} }))
-vi.mock('../auth/activeScope.js', () => ({ readActiveScope: () => null, subscribeActiveScope: () => () => {} }))
+vi.mock('../auth/activeScope.js', () => ({ readActiveScope: vi.fn(() => null), subscribeActiveScope: () => () => {} }))
 vi.mock('../projects/api.js', () => ({ listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
@@ -35,9 +36,107 @@ const importFixture = () => {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  readActiveScope.mockReturnValue(null)
   listProjectPhotos.mockResolvedValue({ materials: photos })
 })
 afterEach(cleanup)
+
+describe('empty gallery lifecycle', () => {
+  it('accepts new and mixed empty galleries in saved and import documents', async () => {
+    const fresh = emptyPortfolio(), mixed = fixture()
+    mixed.categories.push({ slug: 'seasonal', title: 'Seasonal', description: 'Coming later', hero: 0, images: [] })
+    for (const value of [fresh, mixed]) {
+      expect(validatePortfolioDocument(JSON.parse(JSON.stringify(value)))).toEqual(value)
+      const importing = JSON.parse(JSON.stringify(value))
+      importing.schema = 'leaf.portfolio.import.v1'
+      importing.categories.forEach(category => { category.images = category.images.map(image => ({ source_sha256: image.sha256, title: image.title, alt: image.alt })) })
+      expect(validatePortfolioDocument(importing, true)).toEqual(importing)
+      for (const hero of [true, false, -1, 1, '0', null]) {
+        const invalid = JSON.parse(JSON.stringify(importing))
+        invalid.categories.at(-1).hero = hero
+        expect(() => validatePortfolioDocument(invalid, true)).toThrow()
+      }
+      const raw = JSON.stringify(importing)
+      expect(await importPortfolio({ name: 'portfolio.json', size: raw.length, text: async () => raw }, PROJECT)).toEqual(value)
+    }
+  })
+
+  it.each([0, 1, 94, 200])('keeps strict hero and photo boundaries with %i photos', count => {
+    const value = emptyPortfolio()
+    value.categories[0].images = Array.from({ length: count }, (_, i) => ({ ...fixture().categories[0].images[0], material_id: `00000000-0000-0000-0000-${i.toString(16).padStart(12, '0')}` }))
+    expect(validatePortfolioDocument(value)).toEqual(value)
+    if (count) expect(validatePortfolioDocument({ ...value, categories: [{ ...value.categories[0], hero: count - 1 }] }).categories[0].hero).toBe(count - 1)
+    for (const hero of [true, false, -1, 0.5, '0', null, Math.max(1, count)]) {
+      expect(() => validatePortfolioDocument({ ...value, categories: [{ ...value.categories[0], hero }] })).toThrow()
+    }
+    if (count) {
+      const category = value.categories[0], image = category.images[0]
+      expect(() => validatePortfolioDocument({ ...value, categories: [{ ...category, images: [...category.images, image] }] })).toThrow()
+      expect(() => validatePortfolioDocument({ ...value, categories: [{ ...category, images: [{ ...image, sha256: 'A'.repeat(64) }] }] })).toThrow()
+      expect(() => validatePortfolioDocument({ ...value, categories: [{ ...category, images: [{ ...image, preview_sha256: 'b'.repeat(63) }] }] })).toThrow()
+      expect(() => validatePortfolioDocument({ ...value, categories: [category, { ...category, slug: 'other', images: [{ ...image, sha256: 'c'.repeat(64) }] }] })).toThrow()
+      if (count === 200) {
+        const extra = { ...image, material_id: 'ffffffff-ffff-ffff-ffff-ffffffffffff' }
+        expect(() => validatePortfolioDocument({ ...value, categories: [category, { ...category, slug: 'extra', images: [extra] }] })).toThrow()
+        expect(validatePortfolioDocument({ ...value, categories: [category, { ...category, slug: 'seasonal', images: [] }] }).categories).toHaveLength(2)
+      }
+    }
+  })
+
+  it('retains category and aggregate limits for empty galleries', () => {
+    const value = emptyPortfolio(), category = value.categories[0]
+    value.categories = Array.from({ length: 12 }, (_, i) => ({ ...category, slug: `gallery-${i}` }))
+    expect(validatePortfolioDocument(value)).toEqual(value)
+    expect(() => validatePortfolioDocument({ ...value, categories: [] })).toThrow()
+    expect(() => validatePortfolioDocument({ ...value, categories: [...value.categories, { ...category, slug: 'extra' }] })).toThrow()
+    expect(() => validatePortfolioDocument({ ...value, categories: [category, category] })).toThrow()
+    value.resume = Array.from({ length: 8 }, () => ({ heading: 'Experience', entries: Array.from({ length: 20 }, () => ({ title: '', subtitle: '', dates: '', description: '🍰'.repeat(2400) })) }))
+    expect(() => validatePortfolioDocument(value)).toThrow(/512 KiB/)
+  })
+
+  it('shows an empty status in inline preview and retires a removed photo viewer', () => {
+    const value = fixture(), empty = fixture()
+    empty.categories[0].images = []; empty.categories[0].hero = 0
+    const view = render(<PortfolioPreview document={value} projectId={PROJECT} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Cakes', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'View Cake photograph' }))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    view.rerender(<PortfolioPreview document={validatePortfolioDocument(empty)} projectId={PROJECT} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.getByRole('status').textContent).toBe('No photos in this gallery yet.')
+    expect(document.activeElement).toBe(screen.getByRole('status'))
+    view.rerender(<PortfolioPreview document={empty} projectId={PROJECT} onInlineChange={() => {}} />)
+    expect(screen.getByLabelText('Gallery title').value).toBe('Cakes')
+    expect(screen.getByRole('status').textContent).toBe('No photos in this gallery yet.')
+    expect(screen.queryByRole('button', { name: /View .*photograph/ })).toBeNull()
+  })
+
+  it('removes the final photo, saves/reopens and adds its first photo with hero zero', async () => {
+    readActiveScope.mockReturnValue('portfolio-test-scope')
+    readProjectPhotoPreview.mockRejectedValue(new Error('No preview in this fixture'))
+    const original = fixture()
+    original.categories[0].images = [original.categories[0].images[0]]; original.categories[0].hero = 0
+    let latest = original
+    function Studio({ initial }) {
+      const [value, change] = useState(initial)
+      return <PortfolioEditor document={value} projectId={PROJECT} onChange={next => { latest = next; change(next) }} />
+    }
+    const view = render(<Studio initial={original} />)
+    fireEvent.click(screen.getByText('Cakes · 1 photo'))
+    fireEvent.click(screen.getByText('Photo 1: Cake'))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove image 1' }))
+    expect(latest.categories[0]).toMatchObject({ hero: 0, images: [] })
+    const reopened = validatePortfolioDocument(JSON.parse(JSON.stringify(latest)))
+    view.unmount()
+    render(<Studio initial={reopened} />)
+    expect(screen.getByRole('combobox', { name: 'Hero image' }).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Load project photos' }))
+    await screen.findByRole('option', { name: 'Cake' })
+    fireEvent.change(screen.getByRole('combobox', { name: 'Add project photo to Cakes' }), { target: { value: photos[0].material_id } })
+    expect(validatePortfolioDocument(latest).categories[0]).toMatchObject({ hero: 0, images: [{ material_id: photos[0].material_id }] })
+    expect(screen.getByRole('combobox', { name: 'Hero image' }).disabled).toBe(false)
+  })
+})
 
 describe('ENV1 contextual editing and projections', () => {
   it.each([
@@ -283,5 +382,30 @@ describe('persisted portfolio photo layout', () => {
       expect(actual.categories[0].images).toEqual(expected.categories[0].images)
     }
     expect(listProjectPhotos).toHaveBeenCalledTimes(3)
+  })
+})
+
+
+describe('editor viewer current material reconciliation', () => {
+  it('updates selected metadata across reorder and closes when that material is hidden', () => {
+    const original = fixture()
+    const view = render(<PortfolioPreview document={original} projectId={PROJECT} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Cakes', exact: true }))
+    fireEvent.click(screen.getByRole('button', { name: 'View Cake photograph' }))
+    const dialog = screen.getByRole('dialog'), close = within(dialog).getByRole('button', { name: 'Close image' })
+    close.focus()
+    const edited = fixture(), image = edited.categories[0].images[0]
+    image.title = 'Updated cake caption'; image.alt = 'Updated cake portrait'
+    edited.categories[0].images.reverse()
+    edited.categories.push({ slug: 'seasonal', title: 'Seasonal', description: '', hero: 0, images: [] })
+    edited.categories.reverse()
+    view.rerender(<PortfolioPreview document={edited} projectId={PROJECT} />)
+    expect(screen.getByRole('dialog', { name: image.alt })).toBe(dialog)
+    expect(within(dialog).getByText(image.title)).toBeTruthy()
+    expect(document.activeElement).toBe(close)
+    const hidden = cloneDocument(edited)
+    hidden.categories[1].images.find(item => item.material_id === image.material_id).display = { hidden: true }
+    view.rerender(<PortfolioPreview document={hidden} projectId={PROJECT} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

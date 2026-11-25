@@ -96,6 +96,7 @@ import {
 } from './productSurfaces.js'
 import { useSurfaceContract } from './useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
+import { isAccountUploadDrawingId } from '../workspace/createProjectFromDrawing.js'
 import {
   iosShipLaunchAffordance,
 } from './iosShipReadiness.js'
@@ -910,6 +911,7 @@ export default function ToolCast({
     orgId: workspace.orgId,
     projectsUnavailable: workspace.projectsError,
     mock: transportMock,
+    drawingAttachable: activeDrawingId ? isAccountUploadDrawingId(activeDrawingId) : true,
   }), [workspace.openProjectId, workspace.orgId, workspace.projectsError, currentProjectName, activeDrawingId, transportMock])
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId,
@@ -1214,12 +1216,19 @@ export default function ToolCast({
   const createWorkspaceOrg = useCallback(async (name) => {
     if ((!sessionReady && !workspaceBootstrapRequired) || name == null) return
     const org = await workspace.createOrg(name)
+    if (org) {
+      // The unbound reads before this org existed left a 403 grant state
+      // ("access restricted") and a network banner behind; clear and re-read.
+      setSessionError(null)
+      setError(null)
+      platform.actions.refreshAll()
+    }
     if (org && workspaceBootstrapRequired) {
       setWorkspaceBootstrapRequired(false)
       setSessionRetry((current) => current + 1)
     }
     return org
-  }, [sessionReady, workspace, workspaceBootstrapRequired])
+  }, [sessionReady, workspace, workspaceBootstrapRequired, platform.actions])
 
   const createWorkspaceProject = useCallback(async (name) => {
     if (!sessionReady) return

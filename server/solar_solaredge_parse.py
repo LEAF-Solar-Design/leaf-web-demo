@@ -225,7 +225,7 @@ class Panel:
 
 
 class Optimizer:
-    __slots__ = ("id", "cx", "cy", "color", "panel_ids", "label")
+    __slots__ = ("id", "cx", "cy", "color", "panel_ids", "measured_panels", "label", "vendor_labels", "string_labels")
 
     def __init__(self, oid, cx, cy, color):
         self.id = oid
@@ -233,7 +233,10 @@ class Optimizer:
         self.cy = cy
         self.color = color
         self.panel_ids = []
+        self.measured_panels = set()
         self.label = ""
+        self.vendor_labels = []
+        self.string_labels = []
 
 
 class StringInfo:
@@ -322,6 +325,7 @@ class SolarEdgeParse:
         self.optimizers = self._extract_optimizers()
         self._build_electrical_hits()
         self.panel_grids = self._group_panels_into_grids()
+        self._angle_curves = None
         self.final_grids = self._merge_electrically_connected_grids()
         self.has_position_keywords = self._detect_position_keywords()
         self._sequence_cache = {}
@@ -546,19 +550,28 @@ class SolarEdgeParse:
                 opt1 = find_opt_at(line[0], line[1])
                 opt2 = find_opt_at(line[2], line[3])
                 if opt1 is not None and opt2 is None:
-                    panel = self._find_panel_at(line[2], line[3])
+                    candidates = self._find_panels_near(line[2], line[3], 15)
+                    panel = candidates[0] if candidates else None
+                    if len(candidates) == 1:
+                        opt1.measured_panels.add(panel.id)
                     if panel is not None:
                         line_panels.setdefault(opt1.id, {})[panel.id] = None
                         has_line.add(opt1.id)
                 elif opt2 is not None and opt1 is None:
-                    panel = self._find_panel_at(line[0], line[1])
+                    candidates = self._find_panels_near(line[0], line[1], 15)
+                    panel = candidates[0] if candidates else None
+                    if len(candidates) == 1:
+                        opt2.measured_panels.add(panel.id)
                     if panel is not None:
                         line_panels.setdefault(opt2.id, {})[panel.id] = None
                         has_line.add(opt2.id)
 
         assigned = set()
         for opt in optimizers:
-            primary = self._find_panel_at(opt.cx, opt.cy, 12)
+            candidates = self._find_panels_near(opt.cx, opt.cy, 12)
+            primary = candidates[0] if candidates else None
+            if len(candidates) == 1:
+                opt.measured_panels.add(primary.id)
             if primary is not None and primary.id not in assigned:
                 opt.panel_ids.append(primary.id)
                 assigned.add(primary.id)
@@ -659,13 +672,65 @@ class SolarEdgeParse:
             candidates.sort(key=lambda o: o.id)
             nearest = None
             min_dist = math.inf
+            tied = False
             for opt in candidates:
                 dist = _POW(x - opt.cx, 2) + _POW(y - opt.cy, 2)
                 if dist < min_dist and dist < 900:
                     min_dist = dist
                     nearest = opt
+                    tied = False
+                elif dist == min_dist:
+                    tied = True
             if nearest is not None and not nearest.label:
                 nearest.label = text
+            if nearest is not None and not tied:
+                labels = nearest.vendor_labels if _OPT_ID_LABEL.fullmatch(text) else nearest.string_labels
+                self.spend(len(labels))
+                if text not in labels:
+                    labels.append(text)
+
+    def identity_matrices(self, base_name="solaredge"):
+        """Explicit markers in JSON cell coordinates; legacy GenerateMatrixJsons is unchanged.
+
+        The local marker ID is independent of its optional printed vendor number. Only the
+        dotted label seeds string tracing on this path, even when a numeric label came first.
+        """
+        for opt in self.optimizers:
+            opt.label = opt.string_labels[0] if len(opt.string_labels) == 1 else ""
+        for grid in self.final_grids:
+            if any(panel.row < 0 or panel.col < 0 for panel in grid):
+                self._assign_row_column_coordinates(grid)
+            for panel in grid:
+                panel.seq = 0
+        self._sequence_cache.clear()
+        matrices = self.generate_matrix_jsons(base_name)
+        by_panel = {}
+        occupied = set()
+        ambiguous = set()
+        for index, grid in enumerate(self.final_grids):
+            nr = max(p.row for p in grid) + 1
+            nc = max(p.col for p in grid) + 1
+            matrices[index]["Optimizers"] = []
+            for panel in grid:
+                position = (index, nr - 1 - panel.row, nc - 1 - panel.col)
+                by_panel[panel.id] = position
+                if position in occupied:
+                    ambiguous.add(position)
+                occupied.add(position)
+        for opt in self.optimizers:
+            positions = [by_panel[pid] for pid in opt.panel_ids if pid in by_panel]
+            indexes = {pos[0] for pos in positions}
+            if (set(opt.panel_ids) != opt.measured_panels or len(positions) != len(opt.panel_ids)
+                    or any(pos in ambiguous for pos in positions)):
+                positions = []
+            if not indexes and matrices:
+                indexes = {0}  # Keep unassociated markers visible as incomplete evidence.
+            for index in sorted(indexes):
+                matrices[index]["Optimizers"].append({
+                    "id": f"pdf-optimizer-{opt.id}",
+                    "vendor_label": opt.vendor_labels[0] if len(opt.vendor_labels) == 1 else None,
+                    "cells": [[r, c] for i, r, c in positions if i == index]})
+        return matrices
 
     # ---- grids (:1491)
     def _group_panels_into_grids(self):
@@ -807,7 +872,6 @@ class SolarEdgeParse:
             panel.grid_id = root
         result = list(merged.values())
         _dotnet_sort(result, lambda a, b: _cmp(len(b), len(a)))
-        self._angle_curves = None
         for idx, grid in enumerate(result):
             for panel in grid:
                 panel.grid_id = idx

@@ -113,6 +113,7 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
     const runner = new FakeConverseRunner();
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();
+    gate.approvalRequired.add("run_drawing_edit_tool");
     const store = new FakeSessionStore();
     const loop = new ConverseLoop({ runner, appRun, gate, store });
 
@@ -210,14 +211,14 @@ describe("invariant v2 — dynamic: submitRun is the only side-effecting surface
       const before = trace.slice(0, i);
       const lastGate = before.reverse().find((e) => e.startsWith("gate:"));
       expect(lastGate).toBe(
-        entry === "submit:count-by-layer" ? "gate:run_read_tool" : "gate:run_write_tool",
+        entry === "submit:count-by-layer" ? "gate:run_read_tool" : "gate:run_drawing_edit_tool",
       );
     }
     // ...and every tool execution (3 here) was gate-checked exactly once.
     expect(gate.checks.map((c) => c.action)).toEqual([
       "run_read_tool",
-      "run_write_tool",
-      "run_write_tool",
+      "run_drawing_edit_tool",
+      "run_drawing_edit_tool",
     ]);
   });
 });

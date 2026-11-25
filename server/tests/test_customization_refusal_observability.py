@@ -22,6 +22,7 @@ import pytest
 import customization_service
 from customization_service import CustomizationServiceError, _bare_repo, _ensure_bare_repo
 from routers import author as author_router
+from test_customization_branch_target import _change, _request, lane
 
 
 def _status_token(detail: str) -> str | None:
@@ -184,6 +185,45 @@ def test_detail_never_reaches_the_response_body():
 
 
 SENTINEL = "dbname=leaf password=hunter2-should-never-be-logged"
+
+
+@pytest.mark.parametrize(("reason", "expected"), [
+    ({"code": "branch_author_no_submission", "turns": 3, "submit_calls": 0},
+     "The Branch author session ended without submitting a package (turns=3, submit attempts=0)."),
+    ({"code": "branch_author_package_refused", "rule": "V17", "turns": 4, "submit_calls": 2},
+     "The Branch author's last package submission was refused by rule V17 (turns=4, submit attempts=2)."),
+    ({"code": "branch_author_unsuccessful", "turns": 10000},
+     "The Branch author session did not finish successfully (turns=10000)."),
+    ({"code": "branch_revision_target_missing"}, "The Branch tool to revise has no published version to start from."),
+    ({"code": "unknown"}, None),
+    ({"code": "branch_revision_target_missing", "details": SENTINEL}, None),
+    ({"code": "branch_author_unsuccessful", "turns": True}, None),
+    ({"code": "branch_author_unsuccessful", "turns": -1}, None),
+    ({"code": "branch_author_no_submission", "turns": 0, "submit_calls": 10001}, None),
+    ({"code": "branch_author_package_refused", "turns": 0, "submit_calls": 1, "rule": "X1"}, None),
+])
+def test_branch_harness_reason_ignores_free_text(reason, expected):
+    response = SimpleNamespace(json=lambda: {"error": {"message": SENTINEL, "reason": reason}})
+    assert customization_service.CustomizationService._harness_job_failure(response) == (True, expected)
+
+
+def test_branch_session_reason_reaches_worker_status(lane, monkeypatch):
+    import customization_stage_worker
+    from test_customization_async_stage import _HarnessErrorResponse
+
+    job = lane.service.enqueue_stage(**_request(lane))
+    response = _HarnessErrorResponse(422, {"error": {
+        "message": "anything", "diagnostics": [],
+        "reason": {"code": "branch_author_no_submission", "turns": 3, "submit_calls": 0},
+    }})
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: response)
+    assert customization_stage_worker.run_once("branch-worker", service=lane.service)
+    change = _change(lane, job)
+    expected = "The Branch author session ended without submitting a package (turns=3, submit attempts=0)."
+    assert change.stage_error_message == expected
+    status = lane.service.stage_status(tenant=lane.tenant, change_set_id=change.change_set_id)
+    assert status["status"] == "failed"
+    assert status["error"]["message"] == expected
 
 
 TENANT = "77777777-7777-4777-8777-777777777777"

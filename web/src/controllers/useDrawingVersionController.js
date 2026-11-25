@@ -6,7 +6,9 @@ const alwaysCurrent = () => true
 
 function visibleLayerMap(intake) {
   const visible = {}
-  for (const layer of intake?.layers || []) visible[layer] = true
+  // GAPS 51: the drawing's own frozen or off layers start hidden.
+  const hidden = new Set(Array.isArray(intake?.hidden_layers) ? intake.hidden_layers : [])
+  for (const layer of intake?.layers || []) visible[layer] = !hidden.has(layer)
   return visible
 }
 

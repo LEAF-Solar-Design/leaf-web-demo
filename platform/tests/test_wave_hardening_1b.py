@@ -228,7 +228,35 @@ def _forbid_bootstrap_mints(monkeypatch):
     return calls, events
 
 
-@pytest.mark.parametrize("claim_kind", ["active", "unknown", "inactive", "malformed", "empty", "null"])
+@pytest.mark.parametrize("claim_kind", ["empty", "blank", "null"])
+@pytest.mark.parametrize("namespace", [NS, "https://custom.example/claims/"])
+def test_null_or_blank_org_claim_self_provisions_one_owned_org(
+    client, make_org, live_auth, monkeypatch, claim_kind, namespace,
+):
+    # Operator 2026-11-23 ("Yes, open self-serve"): the post-login Action stamps
+    # org_id=null on every solo user, so null or blank means "no org", not a handoff.
+    subject = "auth0|self-serve-" + str(uuid.uuid4())
+    name = "Self serve " + str(uuid.uuid4())
+    value = {"empty": "", "blank": "  ", "null": None}[claim_kind]
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", namespace.rstrip("/"))
+    headers = _bearer(value, subject=subject, claim_namespace=namespace)
+    first = client.post("/api/orgs", json={"name": name}, headers=headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["created"] is True
+    org_id = first.json()["org"]["org_id"]
+    again = client.post("/api/orgs", json={"name": name}, headers=headers)
+    assert again.status_code == 200, again.text
+    assert again.json()["created"] is False
+    assert again.json()["org"]["org_id"] == org_id
+    binding = platform_store.resolve_active_identity_binding("auth0", subject)
+    assert binding is not None and str(binding.platform_tenant_id) == org_id
+    with platform_db.cursor() as cur:
+        cur.execute("SELECT role FROM identity_bindings WHERE binding_id = %(id)s",
+                    {"id": binding.binding_id})
+        assert cur.fetchone()["role"] == "owner"
+
+
+@pytest.mark.parametrize("claim_kind", ["active", "unknown", "inactive", "malformed"])
 @pytest.mark.parametrize("namespace", [NS, "https://custom.example/claims/"])
 def test_claim_only_bootstrap_refuses_before_minting(
     client, make_org, live_auth, monkeypatch, claim_kind, namespace,
@@ -241,8 +269,7 @@ def test_claim_only_bootstrap_refuses_before_minting(
             cur.execute("UPDATE orgs SET status = 'offboarding' WHERE org_id = %(id)s",
                         {"id": claimed.org_id})
     value = {"active": str(claimed.org_id), "unknown": str(uuid.uuid4()),
-             "inactive": str(claimed.org_id), "malformed": {"org_id": "bad"},
-             "empty": "", "null": None}[claim_kind]
+             "inactive": str(claimed.org_id), "malformed": {"org_id": "bad"}}[claim_kind]
     # The configured namespace is deliberately missing its slash.
     monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", namespace.rstrip("/"))
     headers = _bearer(value, subject=subject, claim_namespace=namespace)

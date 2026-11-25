@@ -54,6 +54,71 @@ describe('pull', () => {
     expect(await pull({ ...deps, cursor: null })).toEqual({ cursor: null, applied: [], reason: 'publish_first' })
     expect(deps.api.getDrawingVersions).not.toHaveBeenCalled()
   })
+  it('refuses a later grammar-3 plan before applying any version on a grammar-2 host', async () => {
+    const deps = dependencies()
+    deps.bridge.state = { ready: { capabilities: { planGrammarMax: 2 } } }
+    deps.api.getDrawingVersionPlan.mockImplementation(async (_, version) => ({
+      plan_text: `plan ${version}`, plan_grammar: version === 3 ? 3 : 2, result_sha256: resultDigest(version),
+    }))
+    expect(await pull({ ...deps, cursor: 1 })).toEqual({
+      cursor: 1, applied: [], reason: 'plugin_grammar_too_old', neededGrammar: 3, hostGrammar: 2,
+    })
+    expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(3)
+    expect(deps.bridge.applyPlan).not.toHaveBeenCalled()
+  })
+  it('applies all pending plans on a grammar-3 host after fetching them all', async () => {
+    const deps = dependencies()
+    deps.bridge.state = { ready: { capabilities: { planGrammarMax: 3 } } }
+    deps.api.getDrawingVersionPlan.mockImplementation(async (_, version) => ({
+      plan_text: `LEAF_MUTATION_PLAN|3\nplan ${version}`, result_sha256: resultDigest(version),
+    }))
+    deps.bridge.applyPlan.mockImplementation(async () => {
+      expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(3)
+      return { status: 'applied' }
+    })
+    expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 4, applied: [2, 3, 4], reason: null })
+    expect(deps.bridge.applyPlan.mock.calls.map(([args]) => args.resultVersion)).toEqual([2, 3, 4])
+  })
+  it.each([2, 3])('defaults absent capabilities to grammar 2 for a grammar-%s plan', async (grammar) => {
+    const deps = dependencies(2)
+    deps.api.getDrawingVersionPlan.mockResolvedValue({ plan_grammar: grammar, result_sha256: resultDigest(2) })
+    const result = await pull({ ...deps, cursor: 1 })
+    if (grammar === 2) {
+      expect(result).toEqual({ cursor: 2, applied: [2], reason: null })
+      expect(deps.bridge.applyPlan).toHaveBeenCalledTimes(1)
+    } else {
+      expect(result).toEqual({ cursor: 1, applied: [], reason: 'plugin_grammar_too_old', neededGrammar: 3, hostGrammar: 2 })
+      expect(deps.bridge.applyPlan).not.toHaveBeenCalled()
+    }
+  })
+  it.each([[2, 3], [3, 1]])('prefers plan_grammar %s over header grammar %s', async (field, header) => {
+    const deps = dependencies(2)
+    deps.api.getDrawingVersionPlan.mockResolvedValue({
+      plan_grammar: field, plan_text: `LEAF_MUTATION_PLAN|${header}\n`, result_sha256: resultDigest(2),
+    })
+    const result = await pull({ ...deps, cursor: 1 })
+    expect(result.reason).toBe(field === 3 ? 'plugin_grammar_too_old' : null)
+    expect(deps.bridge.applyPlan).toHaveBeenCalledTimes(field === 3 ? 0 : 1)
+  })
+  it.each([undefined, null, 0, 4, 2.5, '2'])('uses the first-line header for invalid or absent plan_grammar %s', async (plan_grammar) => {
+    const deps = dependencies(2)
+    deps.api.getDrawingVersionPlan.mockResolvedValue({
+      plan_grammar, plan_text: 'LEAF_MUTATION_PLAN|3\r\nplan', result_sha256: resultDigest(2),
+    })
+    expect(await pull({ ...deps, cursor: 1 })).toEqual({
+      cursor: 1, applied: [], reason: 'plugin_grammar_too_old', neededGrammar: 3, hostGrammar: 2,
+    })
+    expect(deps.bridge.applyPlan).not.toHaveBeenCalled()
+  })
+  it('applies two good versions before returning the missing-plan gap', async () => {
+    const deps = dependencies(5)
+    deps.api.getDrawingVersionPlan.mockResolvedValueOnce({ plan_text: 'plan 2', result_sha256: resultDigest(2) })
+      .mockResolvedValueOnce({ plan_text: 'plan 3', result_sha256: resultDigest(3) })
+      .mockRejectedValueOnce(Object.assign(new Error('missing'), { status: 404 }))
+    expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 3, applied: [2, 3], reason: 'no_plan' })
+    expect(deps.bridge.applyPlan.mock.calls.map(([args]) => args.resultVersion)).toEqual([2, 3])
+    expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(3)
+  })
   it('stops at a missing plan and retains progress', async () => {
     const deps = dependencies()
     deps.api.getDrawingVersionPlan.mockResolvedValueOnce({ plan_text: 'plan', plan_sha256: 'sha', result_sha256: resultDigest(2) })
@@ -78,7 +143,8 @@ describe('pull', () => {
     const deps = dependencies()
     deps.bridge.applyPlan.mockResolvedValueOnce({ status: 'stale', reason: 'sync_cursor_mismatch' })
     expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 1, applied: [], reason: 'sync_cursor_mismatch' })
-    expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(1)
+    expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(3)
+    expect(deps.bridge.applyPlan).toHaveBeenCalledTimes(1)
   })
   it('caps one pull at fifty versions', async () => {
     const deps = dependencies(100)
@@ -111,8 +177,9 @@ describe('publish', () => {
       expect(deps.api.releaseCheckout).toHaveBeenCalledWith(drawingStoreId, 'capability')
       return { status: 'applied' }
     })
-    expect(await publish({ ...deps, cursor })).toEqual({ cursor: 5 })
-    expect(deps.api.saveEditedDrawingVersion).toHaveBeenCalledWith(drawingStoreId, new Uint8Array([1, 2]), 4, 'digest', 'capability')
+    expect(await publish({ ...deps, cursor, fileName: 'roof-site.dwg' })).toEqual({ cursor: 5 })
+    expect(deps.api.saveEditedDrawingVersion).toHaveBeenCalledWith(drawingStoreId, new Uint8Array([1, 2]), 4, 'digest', 'capability',
+      { origin: 'autocad', fileName: 'roof-site.dwg' })
     expect(deps.bridge.syncCursor).toHaveBeenCalledWith({ drawingStoreId, version: 5, exportSha256: 'digest' })
   })
   it('leaves the cursor unchanged if native cursor update is stale', async () => {

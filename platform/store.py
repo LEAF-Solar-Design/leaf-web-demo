@@ -867,6 +867,8 @@ def append_history_operation(org_id: uuid.UUID, project_id: uuid.UUID, operation
     digest = canonical_hash("history-operation", digest_input)
     with connection() as conn:
         with conn.cursor() as cur:
+            from .project_lifecycle import require_project_writable
+            require_project_writable(org_id, project_id, cur=cur)
             cur.execute(
                 "INSERT INTO history_operations (operation_id, org_id, project_id, operation_type, "
                 "payload, idempotency_key, hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
@@ -952,6 +954,8 @@ def append_solve_record(org_id: uuid.UUID, project_id: uuid.UUID, payload: Dict[
     digest = canonical_hash("solve-record", payload)
     with connection() as conn:
         with conn.cursor() as cur:
+            from .project_lifecycle import require_project_writable
+            require_project_writable(org_id, project_id, cur=cur)
             cur.execute(
                 "INSERT INTO solve_records (solve_id, org_id, project_id, payload, idempotency_key, "
                 "hash_algorithm, hash_canonicalization, hash_domain, hash_value) "
@@ -1218,6 +1222,11 @@ def import_ready_account_upload(
 
     def operation(conn):
         with conn.cursor() as cur:
+            from .project_lifecycle import LifecycleConflict, require_project_writable
+            try:
+                require_project_writable(org_id, project_id, cur=cur)
+            except LifecycleConflict as exc:
+                raise DrawingImportConflict(str(exc)) from None
             # The project row is the serialization point for concurrent imports.
             # Authority is server-owned and cannot be selected by request data.
             cur.execute(
@@ -1415,6 +1424,8 @@ def create_job(org_id: uuid.UUID, project_id: uuid.UUID, kind: str, *,
                spine_ref: Optional[str] = None,
                input_version_id: Optional[uuid.UUID] = None) -> Job:
     with cursor() as cur:
+        from .project_lifecycle import require_project_writable
+        require_project_writable(org_id, project_id, cur=cur)
         cur.execute(
             "INSERT INTO jobs "
             "(job_id, project_id, org_id, kind, tool_name, params, spine_ref, input_version_id) "
@@ -1437,6 +1448,8 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
                       source_ref: Optional[str] = None,
                       provenance: Optional[Dict[str, Any]] = None) -> BuiltTool:
     with cursor() as cur:
+        from .project_lifecycle import require_project_writable
+        require_project_writable(org_id, project_id, cur=cur)
         cur.execute(
             "INSERT INTO built_tools "
             "(tool_id, project_id, org_id, name, version, manifest, source_ref, provenance) "
@@ -1458,16 +1471,24 @@ def create_built_tool(org_id: uuid.UUID, project_id: uuid.UUID, name: str,
 # reads — EVERY function below binds `WHERE org_id = %(org_id)s`
 # --------------------------------------------------------------------------- #
 
-def list_projects(org_id: uuid.UUID) -> List[Project]:
+def list_projects(org_id: uuid.UUID, *, archived: bool = False) -> List[Project] | List[Dict[str, Any]]:
     with cursor() as cur:
         cur.execute(
             "SELECT project_id, org_id, name, status, created_at, updated_at, "
-            "deleted_at, purge_requested_at, purge_completed_at "
+            "deleted_at, purge_requested_at, purge_completed_at, archived_at, "
+            "archived_at + INTERVAL '30 days' AS restore_until "
             "FROM projects WHERE org_id = %(org_id)s AND deleted_at IS NULL "
+            "AND status = %(status)s "
             "ORDER BY created_at DESC",
-            {"org_id": org_id},
+            {"org_id": org_id, "status": "archived" if archived else "active"},
         )
-        return [Project.from_row(r) for r in cur.fetchall()]
+        rows = cur.fetchall()
+        if archived:
+            return [dict(Project.from_row(r).to_dict(),
+                         archived_at=r["archived_at"].isoformat() if r["archived_at"] else None,
+                         restore_until=r["restore_until"].isoformat() if r["restore_until"] else None)
+                    for r in rows]
+        return [Project.from_row(r) for r in rows]
 
 
 def get_org(org_id: uuid.UUID) -> Optional[Org]:

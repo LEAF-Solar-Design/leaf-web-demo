@@ -31,13 +31,15 @@ import entitlements
 import project_drawing_editor as drawing_editor
 import solar_project_context as project
 import write_loop
+from solar_design_graph import GraphValidationError
 
 SCHEMA = "leaf.project-drawing-write.v1"
 _SERVER = Path(__file__).resolve().parent
 _BUILTINS = (_SERVER / "builtins").resolve()
 # Builtins whose run(intake, params) only DECLARES removed/added entities.
 # Listing a name here is the only way a write tool gains a project producer.
-PRODUCERS = {"delete-marked-panel": "builtins/delete_marked_panel.py"}
+PRODUCERS = {"delete-marked-panel": "builtins/delete_marked_panel.py",
+             "solar-string-tags": "builtins/solar_string_tags.py"}
 _NAMESPACE = UUID("0c01d7a1-5f1e-4b6e-9a51-6f0c3b8e3c1d")
 MAX_PARAMS_BYTES = 16 * 1024
 MAX_IDEMPOTENCY_KEY = 128
@@ -330,27 +332,48 @@ def commit(tenant, project_id, drawing_id, parent_id, tool, params, *,
     org_id, _actor = project._access(tenant, project_id, write=True)
     request_id = request_id_for(org_id, project_id, drawing_id, idempotency_key)
     parent = project.resolve_context(tenant, project_id, parent_id, drawing_id=drawing_id, write=True)
+    annotation = tool["name"] == "solar-string-tags"
     try:
         result, overlay = _builtin(entry).run(deepcopy(parent.intake), deepcopy(params))
-        mutations = result["mutations"]
-        removed = [str(handle) for handle in mutations.get("removed") or []]
+        if not annotation:
+            mutations = result["mutations"]
+            removed = [str(handle) for handle in mutations.get("removed") or []]
     except ProducerRefused:
         raise
+    except GraphValidationError as exc:
+        if annotation:
+            raise ProducerRefused(exc.code, 422) from None
+        raise ProducerRefused("PROJECT_WRITE_MUTATION_INVALID", 422) from None
     except Exception:
         raise ProducerRefused("PROJECT_WRITE_MUTATION_INVALID", 422) from None
-    if not removed or not set(removed) <= _handles(parent.intake):
+    if not annotation and (not removed or not set(removed) <= _handles(parent.intake)):
         raise ProducerRefused("PROJECT_WRITE_TARGET_NOT_FOUND", 422)
     # Mutate the version's ACTUAL source DXF; never regenerate it from the intake subset.
     source, source_sha256 = drawing_editor.read_dxf(tenant, project_id, drawing_id, parent_id)
-    output = splice_source(source, parent.intake, mutations)
+    restored = {}
+    if annotation:
+        import project_string_tag_write as tags
+        try:
+            output, metadata = tags.splice_tags(source, parent.intake, result["string_tag_plan"])
+            # Bind the normalized confirmation too: even optional params whose
+            # values match defaults must conflict when changed under one key.
+            metadata["params_sha256"] = hashlib.sha256(params_json.encode("utf-8")).hexdigest()
+            restored["_restored_intake"] = tags.annotation_intake(output, parent.intake, metadata, drawing_id)
+        except GraphValidationError as exc:
+            raise ProducerRefused(exc.code, 422) from None
+    else:
+        output = splice_source(source, parent.intake, mutations)
     receipt = drawing_editor.save_dxf(tenant, project_id, drawing_id, parent_id, output,
-                                      request_id=request_id, capability=capability)
+                                      request_id=request_id, capability=capability, **restored)
     producer = {
         "schema": SCHEMA, "tool": tool["name"], "tool_version": tool.get("version"),
         "entry": entry, "catalog_digest": catalog_digest,
         "params_sha256": hashlib.sha256(params_json.encode("utf-8")).hexdigest(),
         "input_version_id": str(parent_id), "input_intake_sha256": parent.intake_sha256,
         "input_source_sha256": source_sha256, "request_id": str(request_id),
-        "source_mutation": "splice",
+        "source_mutation": "string-tag-splice" if annotation else "splice",
     }
+    if annotation:
+        producer.update(output_source_sha256=receipt["source_sha256"],
+                        output_intake_sha256=receipt["intake_sha256"])
     return {"result": result, "overlay": overlay, "receipt": receipt, "producer": producer}

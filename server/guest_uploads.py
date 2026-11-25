@@ -73,6 +73,11 @@ LOGGER = logging.getLogger(__name__)
 
 ACCEPTED_EXTENSIONS = (".dwg", ".dxf")
 
+# Parsing a converted drawing materializes text, DXF pairs and intake together.
+# Serialize worker threads per app process before reading source bytes or taking
+# the mutation guard. Reentrant synchronous retry callers keep their behavior.
+_EXTRACTION_LOCK = threading.RLock()
+
 
 # --------------------------------------------------------------------------- #
 # config — env with defaults, read at CALL time (test/subprocess overridable)
@@ -1307,7 +1312,7 @@ def _verify_staged_source(
 
 
 def run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
-    with write_loop.upload_mutation_refusal_guard() as refusal:
+    with _EXTRACTION_LOCK, write_loop.upload_mutation_refusal_guard() as refusal:
         if refusal is not None:
             write_loop.log_mutation_refused(
                 LOGGER, refusal, surface="guest_uploads.run_extraction")
@@ -1368,6 +1373,9 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
         marker = read_marker(backend, tenant_id, drawing_id)
         if marker is None:
             return  # purged mid-flight; nothing to report against
+
+    if marker.get("status") != "extracting":
+        return  # A queued attempt may have become terminal while waiting.
 
     try:
         source_path = _verify_staged_source(

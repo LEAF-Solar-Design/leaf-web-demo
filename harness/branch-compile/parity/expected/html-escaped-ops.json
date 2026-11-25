@@ -1,0 +1,20 @@
+{
+  "exit_code": 1,
+  "stdout": {
+    "schema": "leaf.tool-check.v1",
+    "ok": false,
+    "decision": "compile_failed",
+    "diagnostics": [
+      "main.csx(11,20): CS1026: ) expected",
+      "main.csx(11,40): CS1002: ; expected",
+      "main.csx(11,40): CS7017: Member definition, statement, or end-of-file expected",
+      "main.csx(11,17): CS0103: The name 'amp' does not exist in the current context",
+      "main.csx(11,22): CS0103: The name 'amp' does not exist in the current context",
+      "main.csx(11,21): CS0201: Only assignment, call, increment, decrement, await, and new object expressions can be used as a statement"
+    ],
+    "package_digest": "201f46cf5e75ff95ffd591ff34923f51b4b05ffffa4057bbc7fc30384590d0c2",
+    "allowlist_sha256": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
+    "framework": "<framework>"
+  },
+  "source": "Windows tools/tool-check (net8.0-windows) at Branch2025 59c81299, LeafAcadRefSource=nuget, 2026-11-20"
+}

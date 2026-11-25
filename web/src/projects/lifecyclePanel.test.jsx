@@ -23,6 +23,8 @@ import { useEffect, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
+  archiveProject: vi.fn(),
+  restoreProject: vi.fn(),
   createBlankProject: vi.fn(),
   cloneProject: vi.fn(),
   deleteProject: vi.fn(),
@@ -39,7 +41,7 @@ vi.mock('./api.js', () => ({
 
 vi.mock('./flag.js', () => ({ ENV_LIFECYCLE_UI: true }))
 
-import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, listOrgInvitations, resetProject, revokeMember, setIdentityDisplayName } from './api.js'
+import { archiveProject, restoreProject, cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, listOrgInvitations, resetProject, revokeMember, setIdentityDisplayName } from './api.js'
 import { renderHook } from '@testing-library/react'
 import useProjectLifecycle from './useProjectLifecycle.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
@@ -253,8 +255,7 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     expect(screen.getByRole('button', { name: /^clone project$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /^export project$/i })).toBeTruthy()
 
-    // Reset and delete are TERMINAL on this platform (no restore token is
-    // minted), so no undo may be offered.
+    // Reset is terminal; archive is restorable and has no fake undo button.
     expect(screen.queryByText(/undo/i)).toBeNull()
   })
 
@@ -394,20 +395,25 @@ describe('w4h-b4 lifecycle results and scoped identities', () => {
     expect(screen.getByText('Receipt: export-receipt')).toBeTruthy()
   })
 
-  it.each(['Reset', 'Delete'])('retains the %s receipt when its confirmation closes', async (action) => {
-    getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+  it.each(['Reset', 'Delete'])('retains the %s receipt when its confirmation closes (deletion requires an archived project)', async (action) => {
+    getProjectLifecycle.mockResolvedValue(action === 'Reset' ? SNAPSHOT : {
+      ...SNAPSHOT, project: { ...SNAPSHOT.project, status: 'archived' },
+    })
     const operation = action === 'Reset' ? resetProject : deleteProject
     operation.mockResolvedValue({ receipt: { receipt_id: 'danger-receipt', action: `project_${action.toLowerCase()}`, created_at: '2026-09-17T00:00:00Z' } })
     const onProjectDeleted = vi.fn()
     render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} onProjectDeleted={onProjectDeleted} />)
     await screen.findByTestId('membership-panel')
-    fireEvent.click(screen.getByRole('button', { name: action }))
+    fireEvent.click(screen.getByRole('button', { name: action === 'Delete' ? 'Delete permanently' : action }))
     fireEvent.change(screen.getByLabelText(`Type the project name to confirm ${action.toLowerCase()}`), { target: { value: 'Rooftop Array' } })
-    fireEvent.click(screen.getByRole('button', { name: action }))
+    fireEvent.click(screen.getByRole('button', { name: action === 'Delete' ? 'Delete permanently' : action }))
     const timeline = screen.getByRole('region', { name: 'Project timeline' })
     await within(timeline).findByText('Receipt: danger-receipt')
     expect(screen.queryByLabelText(`Type the project name to confirm ${action.toLowerCase()}`)).toBeNull()
-    if (action === 'Delete') expect(onProjectDeleted).toHaveBeenCalledWith(PROJECT_ID, 'danger-receipt')
+    if (action === 'Delete') {
+      expect(deleteProject).toHaveBeenCalledWith(PROJECT_ID, { confirmName: 'Rooftop Array' })
+      expect(onProjectDeleted).toHaveBeenCalledWith(PROJECT_ID, 'danger-receipt')
+    }
   })
 
   it('exposes drawing files from the lifecycle read without adapting their contents', async () => {
@@ -503,11 +509,11 @@ function LifecycleBoard({ counts, onProjectDeleted, surface = 'board', initialPa
   </>
 }
 
-describe('board Settings lifecycle seating', () => {
+describe('board Settings lifecycle seating with archived-project permanent deletion', () => {
   beforeEach(() => {
     for (const transport of [getProjectLifecycle, getOrgIdentities, cloneProject, exportProject,
       deleteProject, inviteMember, revokeMember, resetProject, setIdentityDisplayName]) transport.mockReset()
-    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
+    getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, status: 'archived', org_id: 'org-a' } })
     getOrgIdentities.mockResolvedValue({ identities: [{ binding_id: 'binding-new', label: 'New member' }] })
   })
   afterEach(() => vi.unstubAllGlobals())
@@ -527,7 +533,7 @@ describe('board Settings lifecycle seating', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
   }
   function openDeleteDraft(value = 'partial project name') {
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
     const input = screen.getByLabelText('Type the project name to confirm delete')
     fireEvent.change(input, { target: { value } })
     return input
@@ -536,7 +542,7 @@ describe('board Settings lifecycle seating', () => {
     expect(getProjectLifecycle).not.toHaveBeenCalled()
     expect(getOrgIdentities).not.toHaveBeenCalled()
     expect(screen.queryByTestId('projects-surface')).toBeNull()
-    for (const name of ['Clone project', 'Export project', 'Delete', 'Reset']) {
+    for (const name of ['Clone project', 'Export project', 'Delete permanently', 'Reset']) {
       expect(screen.queryByRole('button', { name })).toBeNull()
     }
   }
@@ -547,7 +553,7 @@ describe('board Settings lifecycle seating', () => {
     expect(screen.getByTestId('projects-surface').closest('[data-pane="settings"]')).toBeTruthy()
     expect(screen.getByRole('region', { name: 'Membership' })).toBeTruthy()
     expect(screen.getByRole('region', { name: 'Project timeline' })).toBeTruthy()
-    for (const name of ['Clone project', 'Export project', 'Reset', 'Delete']) {
+    for (const name of ['Clone project', 'Export project', 'Reset', 'Delete permanently']) {
       expect(screen.getByRole('button', { name })).not.toBeDisabled()
     }
     expect(screen.queryByText('Settings is not mounted on this surface.')).toBeNull()
@@ -568,7 +574,7 @@ describe('board Settings lifecycle seating', () => {
     await screen.findByRole('option', { name: 'New member' })
     expect(screen.getByRole('button', { name: 'Clone project' })).not.toBeDisabled()
     expect(screen.getByRole('button', { name: 'Export project' })).not.toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Delete' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).not.toBeDisabled()
   })
 
   it('BI03-04 Flag off leaves lifecycle unmounted and silent', () => {
@@ -652,7 +658,7 @@ describe('board Settings lifecycle seating', () => {
     let resolveA
     getProjectLifecycle.mockImplementation((id) => id === PROJECT_ID
       ? new Promise((resolve) => { resolveA = resolve })
-      : Promise.resolve({ ...SNAPSHOT, project: { project_id: 'B', name: 'Project B', org_id: 'org-b' }, receipts: [] }))
+      : Promise.resolve({ ...SNAPSHOT, project: { project_id: 'B', name: 'Project B', status: 'archived', org_id: 'org-b' }, receipts: [] }))
     inviteMember.mockResolvedValue({})
     fireEvent.change(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member'), { target: { value: 'editor' } })
     await waitFor(() => expect(resolveA).toBeTypeOf('function'))
@@ -667,7 +673,7 @@ describe('board Settings lifecycle seating', () => {
     expect(screen.queryByRole('option', { name: 'New member' })).toBeNull()
     await act(async () => { resolveA({ ...SNAPSHOT, project: { ...SNAPSHOT.project, name: 'Late A' } }) })
     expect(screen.queryByText('Late A')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
     expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('')
     expect(screen.getByText('Project B', { selector: 'strong' })).toBeTruthy()
   })
@@ -785,7 +791,7 @@ describe('board Settings lifecycle seating', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:settings-export')
   })
 
-  it('BI03-15 Failed or cancelled deletion leaves the project open', async () => {
+  it('BI03-15 Failed or cancelled permanent deletion of an archived project leaves the project open', async () => {
     const view = mountBoard()
     await openSettings()
     const panel = screen.getByTestId('projects-surface')
@@ -795,10 +801,10 @@ describe('board Settings lifecycle seating', () => {
     expect(view.deleted).not.toHaveBeenCalled()
     deleteProject.mockRejectedValue(new Error('Deletion rejected by server'))
     openDeleteDraft('Rooftop Array')
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Delete permanently' }))
     await screen.findByText('Deletion rejected by server')
     expect(deleteProject).toHaveBeenCalledTimes(1)
-    expect(deleteProject).toHaveBeenCalledWith(PROJECT_ID)
+    expect(deleteProject).toHaveBeenCalledWith(PROJECT_ID, { confirmName: 'Rooftop Array' })
     expect(view.deleted).not.toHaveBeenCalled()
     expect(screen.getByTestId('projects-surface')).toBe(panel)
     expect(screen.getByLabelText('Type the project name to confirm delete').value).toBe('Rooftop Array')
@@ -868,5 +874,97 @@ describe('project rename in the lifecycle panel', () => {
     expect(form().queryByRole('status')).toBeNull()
     expect(screen.getByTestId('project-current-name').textContent).toBe('Other Project')
     expect(form().getByLabelText('New project name').value).toBe('')
+  })
+})
+
+describe('project archive and restore lifecycle integration', () => {
+  it('archives an active project, refetches the archived dates, and restores it', async () => {
+    getProjectLifecycle.mockReset().mockResolvedValue(SNAPSHOT)
+    const archived = { ...SNAPSHOT, project: { ...SNAPSHOT.project, status: 'archived',
+      archived_at: '2026-10-01T00:00:00Z', restore_until: '2026-10-31T00:00:00Z' } }
+    archiveProject.mockReset().mockImplementation(async () => {
+      getProjectLifecycle.mockResolvedValue(archived)
+      return { receipt: { receipt_id: 'archived-receipt', action: 'project_archived' } }
+    })
+    restoreProject.mockReset().mockImplementation(async () => {
+      getProjectLifecycle.mockResolvedValue(SNAPSHOT)
+      return { receipt: { receipt_id: 'restored-receipt', action: 'project_restored' } }
+    })
+    const onProjectDeleted = vi.fn()
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} onProjectDeleted={onProjectDeleted} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Archive project' }))
+    expect(screen.queryByRole('textbox', { name: /confirm archive/i })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Archive project' }))
+    await screen.findByText('Archived on 2026-10-01T00:00:00Z · restorable until 2026-10-31T00:00:00Z')
+    expect(archiveProject).toHaveBeenCalledTimes(1)
+    expect(archiveProject).toHaveBeenCalledWith(PROJECT_ID)
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('region', { name: 'Project timeline' })).toHaveTextContent('archived-receipt')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }))
+    await screen.findByRole('button', { name: 'Archive project' })
+    expect(restoreProject).toHaveBeenCalledTimes(1)
+    expect(restoreProject).toHaveBeenCalledWith(PROJECT_ID)
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(3)
+    expect(screen.getByRole('region', { name: 'Project timeline' })).toHaveTextContent('restored-receipt')
+    expect(onProjectDeleted).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['archive', 409, 'A checkout or job is active.'],
+    ['restore', 409, 'The restore window has expired.'],
+    ['delete', 422, 'The project name does not match.'],
+  ])('passes the %s error through without retrying or refetching', async (kind, status, detail) => {
+    getProjectLifecycle.mockReset().mockResolvedValue({
+      ...SNAPSHOT, project: { ...SNAPSHOT.project, status: kind === 'archive' ? 'active' : 'archived' },
+    })
+    const operation = { archive: archiveProject, restore: restoreProject, delete: deleteProject }[kind]
+    operation.mockReset().mockRejectedValue({ status, body: { detail } })
+    const onProjectDeleted = vi.fn()
+    render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} onProjectDeleted={onProjectDeleted} />)
+    const label = { archive: 'Archive project', restore: 'Restore', delete: 'Delete permanently' }[kind]
+    fireEvent.click(await screen.findByRole('button', { name: label }))
+    if (kind === 'delete') {
+      fireEvent.change(screen.getByLabelText('Type the project name to confirm delete'), { target: { value: 'Rooftop Array' } })
+    }
+    if (kind !== 'restore') fireEvent.click(screen.getByRole('button', { name: label }))
+    await screen.findByText(detail)
+    expect(operation).toHaveBeenCalledTimes(1)
+    expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
+    expect(onProjectDeleted).not.toHaveBeenCalled()
+  })
+
+  it('sends the exact confirm_name and idempotency key on permanent deletion', async () => {
+    const actual = await vi.importActual('./api.js')
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200,
+      json: async () => ({ receipt: { receipt_id: 'deleted' } }) })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      await actual.deleteProject(PROJECT_ID, { confirmName: ' Roof ' }, 'delete-key')
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const [url, init] = fetch.mock.calls[0]
+      expect(url).toMatch(new RegExp('/api/projects/' + PROJECT_ID + '$'))
+      expect(init.method).toBe('DELETE')
+      expect(init.headers['Idempotency-Key']).toBe('delete-key')
+      expect(init.headers['Content-Type']).toBe('application/json')
+      expect(JSON.parse(init.body)).toEqual({ confirm_name: ' Roof ' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it.each(['archive', 'restore'])('posts %s with its supplied idempotency key', async (kind) => {
+    const actual = await vi.importActual('./api.js')
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      await actual[kind === 'archive' ? 'archiveProject' : 'restoreProject'](PROJECT_ID, kind + '-key')
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const [url, init] = fetch.mock.calls[0]
+      expect(url).toMatch(new RegExp('/api/projects/' + PROJECT_ID + '/' + kind + '$'))
+      expect(init.method).toBe('POST')
+      expect(init.headers['Idempotency-Key']).toBe(kind + '-key')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

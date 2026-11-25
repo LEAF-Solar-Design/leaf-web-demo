@@ -14,6 +14,7 @@ import json
 import re
 import unicodedata
 import uuid
+from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import Any, Dict, Optional
 
@@ -26,6 +27,19 @@ from .models import new_uuid
 PROJECT_ROLES = frozenset({"owner", "editor", "reviewer", "read_only"})
 WRITE_ROLES = frozenset({"owner", "editor"})
 MAX_FILE_BYTES = 1_048_576
+PROJECT_DELETE_CHILD_TABLES = (
+    "project_files", "project_materials", "project_reference_materials",
+    "project_web_page_revisions", "project_drawing_checkouts", "built_tools",
+)
+# Retained in full, including receipt payloads and their artifact references.
+PROJECT_DELETE_RETAINED_AUDIT_COLUMNS = (
+    ("project_lifecycle_receipts", "*"),
+    ("project_lifecycle_receipts", "result_json"),
+    ("drawing_versions", "oss_object"),
+    ("drawing_versions", "intake_ref"),
+    ("drawing_versions", "provenance"),
+    ("project_sizing_exchanges", "*"),
+)
 _RECEIPT_SECRET_KEYS = frozenset({
     "authorization", "password", "secret", "token", "api_key", "apikey",
     "access_token", "refresh_token", "oauth_token", "client_secret", "private_key",
@@ -141,17 +155,18 @@ def _actor_tenant_role(
 
 def _project_row(
     cur: Any, org_id: uuid.UUID, project_id: uuid.UUID, *, lock: bool = True,
+    include_deleted: bool = False,
 ) -> Dict[str, Any]:
     lock_clause = "FOR UPDATE" if lock else ""
-    # THE gate for every lifecycle operation (clone, export, reset, delete, file
-    # writes), so its liveness predicate has to cover BOTH soft-delete writers.
-    # `status <> 'deleted'` alone matched a project that store.soft_delete_project
-    # had hidden (it sets deleted_at and leaves status 'active'), which made an
-    # invisible project fully mutable through this path. live_projects is that
-    # predicate, named once.
+    # Ordinary reads use the authoritative live view. Only archive/restore/delete
+    # need the base-table timestamps and tombstones for transitions and replay.
     cur.execute(
-        "SELECT project_id, org_id, name, status, created_at, updated_at "
-        "FROM live_projects WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        ("SELECT project_id, org_id, name, status, created_at, updated_at, archived_at, deleted_at "
+         "FROM projects " if include_deleted else
+         "SELECT project_id, org_id, name, status, created_at, updated_at "
+         "FROM live_projects ")
+        + "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
+        + ("AND (deleted_at IS NULL OR status='deleted') " if include_deleted else "")
         + lock_clause,
         {"org_id": org_id, "project_id": project_id},
     )
@@ -159,6 +174,23 @@ def _project_row(
     if row is None:
         raise LifecycleUnavailable("project not found")
     return row
+
+
+def _project_is_archived(cur: Any, org_id: uuid.UUID, project_id: uuid.UUID) -> bool:
+    return _project_row(cur, org_id, project_id)["status"] == "archived"
+
+
+def require_project_writable(
+    org_id: uuid.UUID, project_id: uuid.UUID, *, cur: Any = None,
+) -> None:
+    """Shared archived-write gate, also usable inside the writer's transaction."""
+    if cur is None:
+        def operation(conn):
+            with conn.cursor() as project_cursor:
+                require_project_writable(org_id, project_id, cur=project_cursor)
+        return run_transaction(operation, isolation="serializable")
+    if _project_is_archived(cur, org_id, project_id):
+        raise LifecycleConflict("project is archived")
 
 
 def _project_membership_role(
@@ -182,11 +214,20 @@ def _project_membership_role(
 def _require_project_role(
     cur: Any, org_id: uuid.UUID, project_id: uuid.UUID,
     actor_binding_id: uuid.UUID, *, write: bool, lock: bool = True,
+    allow_archived: bool = False,
+    project: Optional[Dict[str, Any]] = None,
 ) -> str:
     # Tenant identity proves who the actor is. It never grants authority over
     # every project in that tenant. Named-project access comes only from the
     # active project membership so revocation takes effect on the next request.
     _actor_tenant_role(cur, org_id, actor_binding_id, lock=lock)
+    if write and not allow_archived:
+        # Request-boundary callers already locked and read this project; reuse
+        # that state rather than issuing a second project lookup.
+        archived = (project.get("status") == "archived" if project is not None
+                    else _project_is_archived(cur, org_id, project_id))
+        if archived:
+            raise LifecycleConflict("project is archived")
     member_role = _project_membership_role(
         cur, org_id, project_id, actor_binding_id,
     )
@@ -224,10 +265,10 @@ def require_project_role(
             cur.execute(
                 f"SET LOCAL statement_timeout = {int(_PROJECT_ROLE_STATEMENT_TIMEOUT_MS)}"
             )
-            _project_row(cur, org_id, project_id, lock=False)
+            project = _project_row(cur, org_id, project_id, lock=write)
             return _require_project_role(
                 cur, org_id, project_id, actor_binding_id,
-                write=write, lock=False,
+                write=write, lock=False, project=project,
             )
 
     return run_transaction(operation, isolation="repeatable read")
@@ -285,6 +326,13 @@ def _receipt_replay(
     )
     row = cur.fetchone()
     if row is None:
+        # Existing receipts and export/clone source receipts are reads. New
+        # mutations must pass the archived gate under the project lock.
+        if project_id is not None and action not in {
+            "project_archived", "project_restored", "project_deleted",
+            "project_exported", "project_cloned",
+        }:
+            require_project_writable(org_id, project_id, cur=cur)
         return None
     if row["input_digest"] != input_digest:
         raise LifecycleConflict("idempotency key is already bound to another request")
@@ -610,7 +658,7 @@ def invite_project_member(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             actor_role = _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "member_invited", idempotency_key,
@@ -684,7 +732,7 @@ def revoke_project_member(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             actor_role = _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "member_revoked", idempotency_key,
@@ -730,30 +778,77 @@ def revoke_project_member(
     return run_transaction(operation, isolation="serializable")
 
 
+def get_project_file_by_path(
+    org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
+    path: str,
+) -> Dict[str, Any]:
+    path = _validate_path(path)
+
+    def operation(conn: Any) -> Dict[str, Any]:
+        with conn.cursor() as cur:
+            _project_row(cur, org_id, project_id, lock=False)
+            role = _require_project_role(
+                cur, org_id, project_id, actor_binding_id, write=False, lock=False,
+            )
+            cur.execute(
+                "SELECT file_id, path, media_type, content, content_sha256, revision, updated_at "
+                "FROM project_files WHERE org_id = %(org_id)s "
+                "AND project_id = %(project_id)s AND path = %(path)s",
+                {"org_id": org_id, "project_id": project_id, "path": path},
+            )
+            row = cur.fetchone()
+            return {
+                "organization_id": str(org_id),
+                "project_id": str(project_id),
+                "can_write": role in WRITE_ROLES,
+                "file": _file_dict(row, include_content=True) if row else None,
+            }
+
+    return run_transaction(
+        operation, isolation="serializable", read_only=True, deferrable=True,
+    )
+
+
 def put_project_file(
     org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
     path: str, media_type: str, content: str, idempotency_key: str,
+    expected_revision: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if expected_revision is not None and (
+        type(expected_revision) is not int or not 0 <= expected_revision <= 2147483646
+    ):
+        raise ValueError("expected_revision must be an integer from 0 to 2147483646 or null")
     path = _validate_path(path)
     media_type = _validate_media_type(media_type)
     content = _validate_content(content)
     idempotency_key = _validate_idempotency_key(idempotency_key)
     content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    input_digest = _canonical_digest(
-        {"path": path, "media_type": media_type, "content_sha256": content_sha256},
-    )
+    digest_input = {"path": path, "media_type": media_type, "content_sha256": content_sha256}
+    if expected_revision is not None:
+        digest_input["expected_revision"] = expected_revision
+    input_digest = _canonical_digest(digest_input)
 
     def operation(conn: Any) -> Dict[str, Any]:
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "file_put", idempotency_key, input_digest,
             )
             if replay is not None:
                 return replay
+            if expected_revision is not None:
+                cur.execute(
+                    "SELECT revision FROM project_files WHERE org_id = %(org_id)s "
+                    "AND project_id = %(project_id)s AND path = %(path)s",
+                    {"org_id": org_id, "project_id": project_id, "path": path},
+                )
+                existing = cur.fetchone()
+                revision = int(existing["revision"]) if existing else 0
+                if revision != expected_revision:
+                    raise LifecycleConflict("project_file_revision_conflict")
             cur.execute(
                 "INSERT INTO project_files "
                 "(file_id, org_id, project_id, path, media_type, content, "
@@ -796,7 +891,7 @@ def delete_project_file(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "file_deleted", idempotency_key,
@@ -996,7 +1091,7 @@ def rename_project(
         with conn.cursor() as cur:
             project = _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_renamed", idempotency_key,
@@ -1048,7 +1143,7 @@ def reset_project(
         with conn.cursor() as cur:
             _project_row(cur, org_id, project_id)
             _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
+                cur, org_id, project_id, actor_binding_id, write=True, allow_archived=True,
             )
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_reset", idempotency_key,
@@ -1076,27 +1171,208 @@ def reset_project(
     return run_transaction(operation, isolation="serializable")
 
 
+def _require_archive_owner(cur, org_id, project_id, actor_binding_id, *, include_revoked=False):
+    tenant_role = _actor_tenant_role(cur, org_id, actor_binding_id)
+    if tenant_role == "admin":
+        return
+    member_role = _project_membership_role(cur, org_id, project_id, actor_binding_id)
+    if member_role == "owner":
+        return
+    if include_revoked:
+        # Delete replay may inspect a lifecycle tombstone as well as live rows;
+        # only an owner revoked at that exact deletion can authorize it.
+        cur.execute(
+            "SELECT 1 FROM project_member_bindings m JOIN projects p "
+            "ON p.org_id=m.org_id AND p.project_id=m.project_id "
+            "WHERE m.org_id=%s AND m.project_id=%s AND m.binding_id=%s "
+            "AND (p.deleted_at IS NULL OR p.status='deleted') "
+            "AND m.role='owner' AND m.status='revoked' AND m.revoked_at=p.deleted_at",
+            (org_id, project_id, actor_binding_id),
+        )
+        if cur.fetchone() is not None:
+            return
+    raise LifecycleForbidden("project owner required")
+
+
+def archive_project(org_id, project_id, actor_binding_id, *, idempotency_key):
+    return _archive_transition(org_id, project_id, actor_binding_id,
+                               idempotency_key=idempotency_key, restore=False)
+
+
+def restore_project(org_id, project_id, actor_binding_id, *, idempotency_key):
+    return _archive_transition(org_id, project_id, actor_binding_id,
+                               idempotency_key=idempotency_key, restore=True)
+
+
+def _archive_transition(org_id, project_id, actor_binding_id, *, idempotency_key, restore):
+    idempotency_key = _validate_idempotency_key(idempotency_key)
+    action = "project_restored" if restore else "project_archived"
+    input_digest = _canonical_digest({"project_id": str(project_id)})
+
+    def operation(conn):
+        with conn.cursor() as cur:
+            project = _project_row(cur, org_id, project_id, include_deleted=True)
+            _require_archive_owner(cur, org_id, project_id, actor_binding_id,
+                                   include_revoked=project["status"] == "deleted")
+            replay = _receipt_replay(cur, org_id, project_id, action, idempotency_key, input_digest)
+            if replay is not None:
+                return replay
+            if project["status"] == "deleted" or project["deleted_at"] is not None:
+                # Deleted tombstones stay visible only to these state transitions.
+                raise LifecycleConflict("project is deleted")
+            args = {"org_id": org_id, "project_id": project_id}
+            if restore:
+                if project["status"] != "archived":
+                    raise LifecycleConflict("project is not archived")
+                cur.execute("SELECT NOW() AS observed_at")
+                if (project["archived_at"] is None or
+                        cur.fetchone()["observed_at"] > project["archived_at"] + timedelta(days=30)):
+                    raise LifecycleConflict("restore window expired")
+                if _active_project_name_taken(cur, org_id, project["name"]):
+                    raise LifecycleConflict("an active project already uses this name")
+                cur.execute(
+                    "UPDATE projects SET status='active', archived_at=NULL, updated_at=NOW() "
+                    "WHERE org_id=%(org_id)s AND project_id=%(project_id)s", args)
+                result = {"project_id": str(project_id), "status": "active", "archived_at": None,
+                          "restore_until": None}
+            else:
+                if project["status"] != "active":
+                    raise LifecycleConflict("project is already archived")
+                cur.execute(
+                    "SELECT EXISTS (SELECT 1 FROM project_drawing_checkouts "
+                    "WHERE org_id=%(org_id)s AND project_id=%(project_id)s "
+                    "AND holder IS NOT NULL AND expires_at > NOW()) AS checkout, "
+                    "EXISTS (SELECT 1 FROM jobs WHERE org_id=%(org_id)s "
+                    "AND project_id=%(project_id)s AND status IN ('queued','running')) "
+                    "OR EXISTS (SELECT 1 FROM async_jobs WHERE tenant_id=%(org_id)s::text "
+                    "AND project_id=%(project_id)s::text AND status IN ('submitted','running')) AS job",
+                    args)
+                blockers = cur.fetchone()
+                names = [name for name in ("checkout", "job") if blockers[name]]
+                if names:
+                    raise LifecycleConflict("archive blocked by active " + ", ".join(names))
+                cur.execute(
+                    "UPDATE projects SET status='archived', archived_at=NOW(), updated_at=NOW() "
+                    "WHERE org_id=%(org_id)s AND project_id=%(project_id)s RETURNING archived_at", args)
+                archived_at = cur.fetchone()["archived_at"]
+                result = {"project_id": str(project_id), "status": "archived",
+                          "archived_at": archived_at.isoformat(),
+                          "restore_until": (archived_at + timedelta(days=30)).isoformat()}
+            return _write_receipt(cur, org_id, project_id, actor_binding_id, action,
+                                  idempotency_key, input_digest, result)
+    return run_transaction(operation, isolation="serializable")
+
+
+def _queue_project_artifacts(cur, org_id, project_id):
+    """Queue proven project publication objects, never account uploads or materials.
+
+    Imported sources belong to the account store, not the importing project.
+    Material objects are content addressed and remain owned by that shared store.
+    Publication provenance pins the SHA of each immutable project object.
+    """
+    # Only drawing publications have proven DB inventory; uninventoried objects are never deleted.
+    cur.execute("SELECT oss_object, intake_ref, provenance FROM drawing_versions "
+                "WHERE org_id=%s AND project_id=%s", (org_id, project_id))
+    candidates = set()
+    prefix = f"tenants/{org_id}/projects/{project_id}/"
+    for row in cur.fetchall():
+        proof = row["provenance"] or {}
+        for field, column in (("source", "oss_object"), ("intake", "intake_ref")):
+            identity = proof.get(field)
+            if not isinstance(identity, dict):
+                continue
+            key, digest = identity.get("ref"), identity.get("sha256")
+            if (isinstance(key, str) and key.startswith(prefix) and key == row[column]
+                    and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)):
+                candidates.add((key, digest))
+    queued = 0
+    for key, digest in sorted(candidates):
+        # Search all orgs, including tombstones: a foreign reference must never
+        # become deletion authority merely because its project is hidden.
+        cur.execute("SELECT 1 FROM drawing_versions WHERE project_id<>%s "
+                    "AND (oss_object=%s OR intake_ref=%s OR provenance::text LIKE %s) LIMIT 1",
+                    (project_id, key, key, "%" + key + "%"))
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO project_artifact_sweep (project_id, object_key, object_version_or_sha256) "
+                "VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", (project_id, key, digest))
+            queued += cur.rowcount
+    return queued
+
+
+def _delete_project_content(cur, org_id, project_id):
+    # Explicit allowlist from migrations 0001, 0038, 0073, 0092, 0093, 0096.
+    # No table discovery, CASCADE, ledger trigger bypass, shared blob deletion,
+    # or deletion of audit-parent rows. Historical drawing identities and jobs
+    # may be retained by immutable audit FKs and are not blindly cascaded.
+    for table in PROJECT_DELETE_CHILD_TABLES:
+        cur.execute(f"DELETE FROM {table} WHERE org_id=%s AND project_id=%s", (org_id, project_id))
+
+
+def sweep_project_artifacts(project_id, delete_object, *, store=None):
+    """Sweep exact queued identities. Failed callbacks remain retryable.
+
+    ``store`` is a transaction runner seam for a fake store in pure tests. A
+    row lock serializes concurrent sweepers; no broad key/prefix delete exists.
+    """
+    def operation(conn):
+        with conn.cursor() as cur:
+            # Keep the live-row guard, opting in explicitly to lifecycle
+            # tombstones: only status='deleted' may authorize a sweep below.
+            cur.execute("SELECT status FROM projects WHERE project_id=%s "
+                        "AND (deleted_at IS NULL OR status='deleted') FOR UPDATE", (project_id,))
+            project = cur.fetchone()
+            if project is None or project["status"] != "deleted":
+                return 0
+            cur.execute("SELECT object_key, object_version_or_sha256 FROM project_artifact_sweep "
+                        "WHERE project_id=%s AND swept_at IS NULL ORDER BY object_key FOR UPDATE",
+                        (project_id,))
+            count = 0
+            for row in cur.fetchall():
+                key, identity = row["object_key"], row["object_version_or_sha256"]
+                try:
+                    delete_object(key, identity)
+                except Exception:
+                    continue
+                cur.execute("UPDATE project_artifact_sweep SET swept_at=NOW() WHERE project_id=%s "
+                            "AND object_key=%s AND object_version_or_sha256=%s AND swept_at IS NULL",
+                            (project_id, key, identity))
+                count += 1
+            return count
+    runner = run_transaction if store is None else store.run_transaction
+    # External calls must not be automatically retried with a transaction.
+    return runner(operation, isolation="read committed", max_attempts=1)
+
+
 def delete_project(
     org_id: uuid.UUID, project_id: uuid.UUID, actor_binding_id: uuid.UUID, *,
-    idempotency_key: str,
+    idempotency_key: str, confirm_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     idempotency_key = _validate_idempotency_key(idempotency_key)
-    input_digest = _canonical_digest({"project_id": str(project_id)})
+    input_digest = _canonical_digest({"project_id": str(project_id), "confirm_name": confirm_name})
 
     def operation(conn: Any) -> Dict[str, Any]:
         with conn.cursor() as cur:
-            _actor_tenant_role(cur, org_id, actor_binding_id)
+            project = _project_row(cur, org_id, project_id, include_deleted=True)
+            _require_archive_owner(cur, org_id, project_id, actor_binding_id,
+                                   include_revoked=project["status"] == "deleted")
             replay = _receipt_replay(
                 cur, org_id, project_id, "project_deleted", idempotency_key,
                 input_digest,
             )
             if replay is not None:
                 return replay
-            _project_row(cur, org_id, project_id)
-            _require_project_role(
-                cur, org_id, project_id, actor_binding_id, write=True,
-            )
-            result = {"project_id": str(project_id), "status": "deleted"}
+            if project["status"] != "archived" or project["deleted_at"] is not None:
+                # PA2 will replace the web DangerZone's old active-project DELETE
+                # with Archive, then Delete with a typed name. No legacy bypass.
+                raise LifecycleConflict("archive the project before deleting it")
+            if not isinstance(confirm_name, str) or confirm_name != project["name"]:
+                raise ValueError("confirm_name must exactly match the current project name")
+            artifacts_queued = _queue_project_artifacts(cur, org_id, project_id)
+            _delete_project_content(cur, org_id, project_id)
+            result = {"project_id": str(project_id), "status": "deleted",
+                      "artifacts_queued": artifacts_queued,
+                      "artifact_inventory": "drawing_publications_only"}
             response = _write_receipt(
                 cur, org_id, project_id, actor_binding_id, "project_deleted",
                 idempotency_key, input_digest, result,

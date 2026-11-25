@@ -4,6 +4,7 @@ import { fetchLabTools } from './toolNodes.js'
 import { addBlock, pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
+import { serviceScope, serviceState } from '../../lib/serviceAuthSession.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { evidenceFor } from '../code/hostEvidence.js'
@@ -30,6 +31,7 @@ const corpusOptionLabel = (item, items) => items.filter(other => other.name === 
   ? `${item.name} (SHA-256 ${item.sha256.slice(0, 12)}, ID ${item.material_id})` : item.name
 // Display partition only. The server verifies authority on every request.
 function runAccount() {
+  if (serviceState().mode) return serviceScope()
   try {
     const token = authHeaders().Authorization?.split(' ')[1]
     const payload = token?.split('.')[1]
@@ -229,6 +231,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [corpusMaterial, setCorpusMaterial] = useState('')
   const [corpusSuite, setCorpusSuite] = useState('')
   const [corpusMessage, setCorpusMessage] = useState('')
+  const [corpusLoading, setCorpusLoading] = useState(false)
   const corpusRequest = useRef(0)
   const toolsRequest = useRef(null)
   const toolsActive = useRef(true)
@@ -260,24 +263,29 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const submissionIntent = useRef(null)
   const logoutGeneration = useRef(0)
   const explicitlySignedOut = useRef(false)
-  const loadCorpusOptions = async (project = '') => {
+  const loadCorpusOptions = async (project = '', { manifestOnly = false } = {}) => {
     const request = ++corpusRequest.current
     const generation = logoutGeneration.current
     const requestAuthority = authHeaders().Authorization
     setCorpusOptions(previous => previous ? { ...previous, materials: [] } : null)
+    setCorpusLoading(true)
     setCorpusMessage('Loading project reference files…')
     try {
-      const response = await fetchWithBudget(fetch, `${config.apiBase}/api/lab/runs/corpus-options${project ? `?project_id=${encodeURIComponent(project)}` : ''}`,
+      const query = new URLSearchParams(project ? { project_id: project } : {})
+      if (manifestOnly) query.set('manifest_only', 'true')
+      const response = await fetchWithBudget(fetch, `${config.apiBase}/api/lab/runs/corpus-options${query.size ? `?${query}` : ''}`,
         { headers: authHeaders(), cache: 'no-store' })
       if (!response.ok) throw new Error('Corpus evaluation is unavailable for this project.')
       const options = await response.json()
       if (request !== corpusRequest.current || generation !== logoutGeneration.current
           || explicitlySignedOut.current || authHeaders().Authorization !== requestAuthority) return
       setCorpusOptions(options)
+      setCorpusLoading(false)
       setCorpusMessage(options.limited ? 'Showing the first available projects.' : '')
     } catch (error) {
       if (request === corpusRequest.current && generation === logoutGeneration.current) {
         setCorpusOptions(null); setCorpusMessage(error.message)
+        setCorpusLoading(false)
       }
     }
   }
@@ -312,7 +320,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       setCorpusProject(block.settings.project_id)
       setCorpusMaterial(block.settings.corpus.material_id)
       setCorpusSuite(block.settings.suite.material_id)
-      void loadCorpusOptions(block.settings.project_id)
+      void loadCorpusOptions(block.settings.project_id, { manifestOnly: !corpusPanel })
     } else if (corpusPanel && !hidden) {
       void loadCorpusOptions(corpusProject)
     }
@@ -320,6 +328,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   }, [restored.key, hidden])
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
   const [recoveredRun, setRecoveredRun] = useState(null)
+  // A loaded head does not mean Open has loaded its graph. The default canvas
+  // can still be ready while the saved revision (and its project) is in flight.
+  const runScopeGraph = client.state.lastSaved?.graph || restored.graph || initialDocument
+  const runScopeReady = Boolean(runScopeGraph) && restored.key === client.state.restoredKey
   const graphProject = live.draft?.document.blocks.map(block => block.settings?.project_id || block.settings?.drawing?.project_id).find(Boolean) || ''
   const projectId = route?.params?.project_id || graphProject
   const activeProject = useRef(projectId)
@@ -445,6 +457,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     streams.current.add(stream)
   }
   async function recoverRuns() {
+    if (!runScopeReady) return false
     if (!receiptScope) return true
     if (discovery.current?.key === recoveryKey) return discovery.current.promise
     const scope = currentRunScope(), docId = client.currentDocId()
@@ -501,11 +514,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     return ok
   }
   useEffect(() => {
-    if (onRun || hidden || !live.ready || !client.state.headLoaded || client.state.head == null || explicitlySignedOut.current) return
+    if (onRun || hidden || !live.ready || !runScopeReady || !client.state.headLoaded || client.state.head == null || explicitlySignedOut.current) return
     void recoverRuns()
-  }, [recoveryKey, hidden, live.ready, client.state.headLoaded, onRun])
+  }, [recoveryKey, hidden, live.ready, runScopeReady, client.state.headLoaded, onRun])
   async function runSaved() {
-    if (explicitlySignedOut.current || submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
+    if (explicitlySignedOut.current || submissionPending.current || !runScopeReady || !client.state.headLoaded || client.state.head == null || !live.ready) return
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
@@ -643,6 +656,12 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       {opened ? <>
         <section className="lab-graph-status" aria-label="Graph readiness">
           <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
+          {!corpusOptions?.manifest && (restored.graph || initialDocument)?.blocks?.some(block => block.registry.id === 'corpus-evaluator') &&
+            <div role={corpusLoading ? 'status' : 'alert'}>
+              <p>{corpusLoading ? 'Loading saved corpus controls…' : `Saved corpus controls are unavailable. ${corpusMessage}`}</p>
+              {!corpusLoading && corpusProject && <button type="button"
+                onClick={() => { void loadCorpusOptions(corpusProject, { manifestOnly: true }) }}>Retry corpus controls</button>}
+            </div>}
           {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
           <button type="button" disabled={!validDocument || (!onRun && (explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}

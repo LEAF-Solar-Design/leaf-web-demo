@@ -19,7 +19,8 @@ const changes = [
   { op: 'replace', path: '/pipes', before: [], after: second.pipes },
 ]
 const copy = value => JSON.parse(JSON.stringify(value))
-const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => copy(data) })
+const response = (data, status = 200) => ({ ok: status < 400, status,
+  json: async () => copy(data), text: async () => JSON.stringify(data) })
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex')
 function exportFixture() {
   const identity = { tenant_id: 'test-tenant', doc_id: 'strategy', revision: 1, parent_revision: null,
@@ -903,4 +904,204 @@ describe('Strategy revision ledger', () => {
     expect(screen.getByText('replace /unknown')).toBeVisible()
     expect(screen.queryByText(/DO-NOT-RENDER/)).not.toBeInTheDocument()
   })
+})
+
+
+describe('bounded nested History setting evidence', () => {
+  const show = (before, after, extra = {}) => render(<LabDiffView beforeGraph={first} afterGraph={first} changes={[
+    { op: before === undefined ? 'add' : after === undefined ? 'remove' : 'replace',
+      path: '/blocks/0/settings/parameters', before, after, ...extra },
+  ]} />)
+  const rows = () => within(screen.getByRole('list', { name: 'Revision changes' })).getAllByRole('listitem').map(row => row.textContent)
+
+  it.each([
+    [undefined, { seed: 1730 }, 'unset -> 1730'],
+    [{ seed: 1730 }, undefined, '1730 -> unset'],
+    [{ seed: 8 }, { seed: 9 }, '8 -> 9'],
+  ])('shows exact nested integer values for additions, removals and changes', (before, after, value) => {
+    show(before, after)
+    expect(rows()).toEqual([`Changed setting parameters.seed on field-1: ${value}`])
+  })
+
+  it('orders nested keys deterministically, distinguishes omitted/null, and shows booleans', () => {
+    show({ z: { enabled: false }, nullable: null }, { z: { enabled: true }, a: null })
+    expect(rows()).toEqual([
+      'Changed setting parameters.a on field-1: unset -> null',
+      'Changed setting parameters.nullable on field-1: null -> unset',
+      'Changed setting parameters.z.enabled on field-1: false -> true',
+    ])
+  })
+
+  it('renders hostile values and ambiguous keys as inert text without requests or links', () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const hostile = '<img src=x onerror="alert(1)"><script>location.href="https://evil.invalid"</script>'
+    const view = show(undefined, { 'seed.value': hostile, literal: 'null' })
+    expect(rows()).toContain(`Changed setting parameters["seed.value"] on field-1: unset -> ${hostile}`)
+    expect(rows()).toContain('Changed setting parameters.literal on field-1: unset -> "null"')
+    expect(view.container.querySelector('img,script,a')).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+
+  it('bounds array children, string values and depth with explicit incomplete evidence', () => {
+    show(undefined, { array: Array.from({ length: 10000 }, (_, i) => i),
+      deep: { a: { b: { c: { d: { e: { f: { seed: 91 } } } } } } }, text: 'x'.repeat(10000) })
+    const text = rows().join('\n')
+    expect(text).toContain('parameters.array[0] on field-1: unset -> 0')
+    expect(text).not.toContain('parameters.array[32]')
+    expect(text).not.toContain('seed on field-1')
+    expect(text).not.toContain('x'.repeat(161))
+    expect(text).toContain('[truncated]')
+    expect(text).toContain('Setting changes truncated; some paths or values are not shown.')
+    expect(rows().length).toBeLessThanOrEqual(65)
+    expect(text.length).toBeLessThan(30000)
+  })
+
+  it('shares its row budget across changed blocks and preserves empty/type changes', () => {
+    const before = { ...first, blocks: Array.from({ length: 10 }, (_, i) => ({ ...first.blocks[0], id: `block-${i}`, settings: {} })) }
+    const after = { ...before, blocks: before.blocks.map(block => ({ ...block, settings: { p: Array.from({ length: 20 }, (_, i) => i) } })) }
+    const view = render(<LabDiffView changes={[{ op: 'replace', path: '/blocks', before: before.blocks, after: after.blocks }]} />)
+    expect(rows()).toHaveLength(65)
+    expect(rows().at(-1)).toMatch(/^Setting changes truncated/)
+    view.rerender(<LabDiffView beforeGraph={first} afterGraph={first} changes={[
+      { op: 'replace', path: '/blocks/0/settings/parameters', before: { empty: {}, arr: [] }, after: { empty: {}, arr: null, added: {} } },
+    ]} />)
+    expect(rows()).toContain('Changed setting parameters.added on field-1: unset -> {}')
+    expect(rows()).toContain('Changed setting parameters.arr on field-1: [] -> null')
+    expect(rows().some(row => row.includes('parameters.empty'))).toBe(false)
+  })
+})
+
+describe('original export response text', () => {
+  it.each(['numeric tokens', 'larger multilingual report'])('preserves producer text for %s', async variant => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    producer.result.candidates[1].score = -0
+    if (variant === 'larger multilingual report') {
+      producer.result.reasons = ['策略 🌱, 15 分钟, 250 mV, توقيت UTC. '.repeat(2000)]
+    }
+    const producerText = canonicalJSON(producer.result)
+      .replace('"score":2', '"score":2e0')
+      .replace('"score":0', '"score":-0.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = '\n  ' + canonicalJSON(bundle)
+      .replace(canonicalJSON(producer.result), producerText) + '\n'
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: async () => serverText })
+
+    const exported = await client.exportBundle('strategy', 1, { preserveText: true })
+
+    expect(exported.ok).toBe(true)
+    expect(new TextEncoder().encode(exported.text)).toEqual(new TextEncoder().encode(serverText))
+    expect(verifyLabBundle(JSON.parse(exported.text))).toEqual(bundle)
+    expect(exported.text).toContain(producerText)
+    expect(createHash('sha256').update(producerText + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(fetchImpl.mock.calls[0][1].method).toBe('GET')
+  })
+
+  it('retains the current export when the previous document response finishes last', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const older = deferred()
+    const newer = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => older.promise })
+    const oldExport = client.exportBundle('strategy', 1, { preserveText: true })
+    client.setDocId('other')
+    const otherBundle = copy(bundle)
+    otherBundle.parts.identity.doc_id = 'other'
+    otherBundle.parts.evaluations[0].run.doc_id = 'other'
+    otherBundle.manifest.parts.identity = hash(otherBundle.parts.identity)
+    otherBundle.manifest.parts.evaluations = hash(otherBundle.parts.evaluations)
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => newer.promise })
+    const newExport = client.exportBundle('other', 1, { preserveText: true })
+    const newerText = JSON.stringify(otherBundle)
+    newer.resolve(newerText)
+    const currentResult = await newExport
+    expect(currentResult).toMatchObject({ ok: true, text: newerText })
+
+    older.resolve(JSON.stringify(bundle))
+    const staleResult = await oldExport
+
+    expect(staleResult.ok).toBe(false)
+    expect(staleResult).not.toHaveProperty('text')
+    expect(currentResult.text).toBe(newerText)
+    expect(currentResult.bundle.parts.identity.doc_id).toBe('other')
+    expect(client.state.openedBundle).toBeNull()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  })
+
+  it('downloads the verified response bytes with the producer numeric spelling intact', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const producer = bundle.parts.evaluations[0].complete_results['job-1']
+    const producerText = canonicalJSON(producer.result).replace('"score":2', '"score":2.0')
+    producer.result_sha256 = createHash('sha256').update(producerText + '\n').digest('hex')
+    bundle.manifest.parts.evaluations = hash(bundle.parts.evaluations)
+    const serverText = canonicalJSON(bundle).replace('"score":2', '"score":2.0')
+    const parsedDecoy = vi.fn(async () => ({ schema: 'different-response' }))
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    let downloaded
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL(blob) { downloaded = blob; return 'blob:raw-export' }
+      static revokeObjectURL() {}
+    })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Export revision'), { target: { value: '1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Exported r1.')
+    const downloadedText = await blobText(downloaded)
+    expect(downloadedText).toBe(serverText)
+    const jobOffset = downloadedText.indexOf('"job-1":')
+    const resultOffset = downloadedText.indexOf('"result":', jobOffset) + '"result":'.length
+    const digestOffset = downloadedText.indexOf(',"result_sha256":', resultOffset)
+    const downloadedResult = downloadedText.slice(resultOffset, digestOffset)
+    expect(createHash('sha256').update(downloadedResult + '\n').digest('hex')).toBe(producer.result_sha256)
+    expect(verifyLabBundle(JSON.parse(downloadedText))).toEqual(bundle)
+    expect(parsedDecoy).not.toHaveBeenCalled()
+  })
+
+  it('rejects tampered response text even when a separate JSON reader would return a valid bundle', async () => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const serverText = canonicalJSON(bundle).replace('"field":"price"', '"field":"tampered"')
+    const parsedDecoy = vi.fn(async () => bundle)
+    const originalFetch = fetchImpl.getMockImplementation()
+    fetchImpl.mockImplementation(async (url, init) => url.endsWith('/export')
+      ? { ok: true, status: 200, text: async () => serverText, json: parsedDecoy }
+      : originalFetch(url, init))
+    const createObjectURL = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL() {}
+    })
+    render(<HistoryView client={client} />)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Export', exact: true })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Export', exact: true }))
+    await screen.findByText('Export failed: Bundle integrity check failed. No graph was opened.')
+    expect(createObjectURL).not.toHaveBeenCalled()
+    expect(parsedDecoy).not.toHaveBeenCalled()
+    expect(client.state.restoredGraph).toBeNull()
+  })
+
+  it.each(['document', 'account'])('refuses retained response text after a %s change', async change => {
+    const { bundle, client, fetchImpl } = exportFixture()
+    const body = deferred()
+    fetchImpl.mockResolvedValueOnce({ ok: true, status: 200, text: () => body.promise })
+    const exporting = client.exportBundle('strategy', 1, { preserveText: true })
+    const tenant = config.tenant
+    try {
+      if (change === 'document') client.setDocId('other')
+      else config.tenant = 'another-tenant'
+      body.resolve(JSON.stringify(bundle))
+      const result = await exporting
+      expect(result).toMatchObject({ ok: false })
+      expect(result).not.toHaveProperty('text')
+      expect(client.state.openedBundle).toBeNull()
+    } finally { config.tenant = tenant }
+  })
+
 })

@@ -415,6 +415,7 @@
 .lp-headline-accent { color: var(--leaf-accent); font-weight: 500; }
 .lp-sub { font: 400 var(--leaf-size-body)/1.6 'Inter Tight', sans-serif; color: var(--leaf-ink-muted); max-width: 470px; }
 .lp-cta-row { display: flex; gap: 14px; align-items: center; }
+.lp-account-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
 .lp-cta {
   display: inline-flex; align-items: center; border: 0; border-radius: var(--leaf-radius-card);
   background: var(--leaf-accent); color: #04140a;
@@ -491,6 +492,10 @@
   .lp-tab:hover { color: var(--leaf-ink-muted); }
 }
 .lp-tab.active { color: var(--leaf-ink); background: var(--leaf-line); }
+/* Availability manifest: a sheet tab that is not yet available stays visible
+   and focusable, reads as off, and its sentence sits beside the tabs. */
+.lp-tab[aria-disabled="true"] { opacity: 0.55; cursor: not-allowed; }
+.lp-index-note { font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); white-space: nowrap; }
 .lp-index-meta { margin-left: auto; font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); }
 .lp-mono { font: 400 var(--leaf-size-caption) ui-monospace, monospace; }
 
@@ -1463,8 +1468,11 @@
   background: color-mix(in srgb, var(--leaf-ground) 84%, transparent); backdrop-filter: blur(8px);
   border-bottom: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
-/* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6) while open */
-.studio-shell header.top:has(.claude-pop) { z-index: calc(var(--leaf-layer-base) + 7); }
+/* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6), the
+   start chooser's scrim (.workspace-environment, z-index 12) and the Studio activity panel
+   (#project-workspace-activity, z-index 14) while open; all share the fixed shell's stacking
+   context. Rehearsal issue 23: the panel opened dimmed under the scrim and half under the panel. */
+.studio-shell header.top:has(.claude-pop) { z-index: var(--leaf-layer-popover); }
 /* on phones the header popover is position: fixed; a backdrop-filter here would make header.top its
    containing block and its overflow: hidden would clip the sheet, so cancel it while one is open */
 @media (max-width: 599px) {
@@ -2010,9 +2018,13 @@
   .lp-sheetno, .lp-index-meta, .lp-brandsub { display: none; }
   .lp-index { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none; }
   .lp-index .lp-tab { white-space: nowrap; }
+  /* The phone row scrolls sideways, so the sentence leads it instead of trailing off screen,
+     and it takes exactly the first screen of the row and wraps, so no word is cut at the edge. */
+  .lp-index .lp-index-note { order: -1; flex: 0 0 calc(100vw - 40px); box-sizing: border-box; white-space: normal; line-height: 1.3; }
   .lp-stats { flex-wrap: wrap; gap: 16px; }
   .stage-loading { left: 16px; bottom: 96px; }
   .lp-stmt .lp-cta-row button { min-height: 44px; box-sizing: border-box; }
+  .lp-stmt .lp-account-row button { min-height: 44px; box-sizing: border-box; }
   .lp-stmt form input, .lp-stmt form button { min-height: 44px; box-sizing: border-box; }
   .lp-index .lp-tab { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
   .tc-product-tabs button { min-height: 44px; box-sizing: border-box; }

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { authHeaders, noteUnauthorized } from '../api.js'
+import { isInvestorToken } from '../investorDemo.js'
 import { serviceRequestAuthority, rememberServiceResponse } from '../lib/serviceAuthSession.js'
 import { createProjectLogRetentionMethods } from './projectLogRetentionClient.js'
 import { DatasetDerivationCapabilitiesV1, DatasetDerivationRequestV1, DatasetDerivationResultV1,
@@ -419,6 +420,10 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     const auth = authHeaders()
     if (service ? !authority.identity || auth.Authorization !== `LeafServiceSession ${authority.selector}`
       : !/^Bearer \S+(?![\s\S])/.test(auth.Authorization || '')) throw new IntegrationError(401, 'Sign in to view integrations.')
+    // Check the bearer we will actually send. Another tab can replace leaf.jwt.
+    if (!service && isInvestorToken(auth.Authorization.slice('Bearer '.length))) {
+      throw new IntegrationError(403, 'Integrations are unavailable in the view-only demo.')
+    }
     try {
       const response = await fetchImpl(`${service ? '' : destination}/api/v1/projects/${projectId}${path}`, {
         method, signal, credentials: service ? 'same-origin' : 'omit', redirect: 'error', cache: 'no-store',

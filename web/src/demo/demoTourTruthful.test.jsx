@@ -15,6 +15,7 @@ import useAuthorStageController from '../controllers/useAuthorStageController.js
 import { humanizeError } from '../errorHumanize.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
 import { runMock } from '../mock/mockEngine.js'
+import * as mockVersions from '../mock/mockVersions.js'
 import {
   confirmRunIntent, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, prepareCatalogRunParams, stageRunIntent,
@@ -109,9 +110,9 @@ function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish =
     const authorStage = useAuthorStageController({ mock: true, stageAuthorTool })
     const dismissRoute = () => setRoute(null)
     const scope = {
-      mock: true, tourOn: true, tools, prompt, authorSeed, authorSignal, tourStepRef,
+      mock: true, mockVersions, tourOn: true, tools, prompt, authorSeed, authorSignal, tourStepRef,
       cannedSeq, setTourLanded, tourLanded, tourDispatchRef, tourVersionStartRef,
-      drawingState: drawing.drawingState,
+      drawingState: drawing.drawingState, result: jobs.result,
       runIntentStateRef, runIntentSessionRef, runIntentSeqRef, catalogRunContextRef,
       confirmEmitRef, dismissRoute, track, TOUR_STEPS, authorStage,
       confirmRunIntent, createCatalogToolSnapshot, dismissRunIntent, stageRunIntent,
@@ -146,7 +147,7 @@ function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish =
     for (const name of ['onDispatch', 'onRequestCatalogRun', 'onRun', 'onConfirmCatalogRun',
       'onAuthor', 'onTourAuthorSettled', 'onCannedPrompt']) scope[name] = callback(name, scope)
     current = { scope, jobs, route, drawing }
-    const tourProps = props(tourElement, ['onCannedPrompt', 'landed', 'busy'], scope)
+    const tourProps = props(tourElement, ['onCannedPrompt', 'landed', 'busy', 'result'], scope)
     const authorProps = props(authorElement, ['onAuthor', 'onStageSettled', 'seed', 'seedSignal',
       'seedAutoSubmit', 'stageActivity'], scope)
     return <>
@@ -199,12 +200,17 @@ describe('tour run beats wait for the confirmed result', () => {
     expect(h.current().scope.runIntentStateRef.current.consumedIds).toHaveLength(1)
     expect(next()).toBeDisabled()
     expect(screen.queryByText('Passed')).not.toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Result computed live' })).not.toBeInTheDocument()
     const envelope = runMock(tool, params, drawing)
     await act(async () => { pending.resolve(envelope); await pending.promise })
     expect(next()).toBeEnabled()
     expect(screen.getByText('Passed')).toBeInTheDocument()
     expect(h.current().jobs.result).toEqual(envelope)
     expect(document.querySelector('.result-card table')).toBeInTheDocument()
+    // The answer itself is on the tour card, read from the engine's envelope.
+    const readout = screen.getByRole('group', { name: 'Result computed live' })
+    expect(readout).toHaveTextContent(id === 'count' ? /Total entities\s*1/
+      : id === 'edge' ? /Panels within 60 in of the edge\s*1 of 1/ : /Total panel area\s*1\.4 sq ft/)
   })
 
   it('unlocks with the visible error when the run rejects', async () => {
@@ -331,6 +337,17 @@ describe('the version beat waits for a newer seated head', () => {
     expect(screen.getByText('Passed')).toBeInTheDocument()
     expect(next()).toBeEnabled()
     expect(h.current().drawing.shown.polylines).toHaveLength(0)
+  })
+
+  it('unlocks when the demo opened the drawing with no version head (the live sample rooftop)', async () => {
+    mockVersions.reset()
+    const h = mountBeat('version', { initialHead: null })
+    expect(h.current().drawing.drawingState.head).toBe(null)
+    await finishTyping('version')
+    expect(h.current().scope.tourVersionStartRef.current).toEqual(expect.objectContaining({ drawingId: 'demo', head: 1 }))
+    expect(next()).toBeDisabled()
+    act(() => { h.current().drawing.actions.seatVersion({ drawing_id: 'demo', version: 2, head: 2, intake }) })
+    expect(next()).toBeEnabled()
   })
 
   it.each([

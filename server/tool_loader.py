@@ -48,6 +48,7 @@ PLATFORM_PACKAGE_REGISTRY = SERVER_DIR.parent / "engine" / "registry.json"
 # authored tools resolve by their own `entry` file and NEVER through this map,
 # so a newly authored tool needs no entry here (that is the whole point).
 BUILTIN_OPS: Dict[str, str] = {
+    "count_modules": "count_modules.py",
     "count_by_layer": "count_by_layer.py",
     "measure_area_by_layer": "measure_area_by_layer.py",
     "measure_panel_area": "measure_area_by_layer.py",
@@ -1390,6 +1391,10 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         try:
             ret = mod.run(intake, params)
         except Exception as exc:  # noqa: BLE001
+            # Only a platform-owned reader may declare a user-facing validation error.
+            if trusted_read_builtin and isinstance(exc, getattr(mod, "InputValidationError", ())):
+                return err_envelope(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                    tool=name, version=version, timing_ms=_ms())
             return err_envelope(ErrorCode.INTERNAL,
                                 f"tool {name!r} raised {type(exc).__name__}: {exc}",
                                 retryable=False, tool=name, version=version, timing_ms=_ms())

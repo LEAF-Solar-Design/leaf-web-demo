@@ -21,7 +21,7 @@ _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _GRANT_RE = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _REFUSALS = frozenset({
     "cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
-    "cloud_upstream_failure", "cloud_response_invalid",
+    "cloud_upstream_failure", "cloud_response_invalid", "CLOUD_REQUEST_REJECTED",
 })
 _TERMINAL = frozenset({"completed", "refused", "outcome_unknown"})
 
@@ -575,6 +575,50 @@ def read_completed_piece_exchange(scope: PieceExchangeScope, *, conn) -> dict:
                         ("candidate", MAX_CANDIDATE_BYTES), ("proof", MAX_PROOF_BYTES)):
         _validate_bytes(exchange[name + "_bytes"], exchange[name + "_sha256"], bound)
     return exchange
+
+
+def read_assembly_inputs(scope: ExchangeScope, input_version_id: UUID, piece_count: int, *, conn):
+    """Bounded lease-free evidence read for failed-parent attribution only."""
+    if (type(scope) is not ExchangeScope or not isinstance(input_version_id, UUID)
+            or type(piece_count) is not int or not 1 <= piece_count <= 64):
+        raise ExchangeInputError()
+    args = _parameters(scope, JobAttempt("offline-reader", 1))
+    sizes = "+".join("COALESCE(octet_length(" + name + "_bytes),0)"
+                     for name in ("request", "response", "candidate", "proof"))
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS count, COALESCE(sum(byte_count),0) AS bytes FROM ("
+                    "SELECT " + sizes + " AS byte_count FROM project_solve_exchanges e WHERE " + SCOPE_SQL +
+                    " UNION ALL SELECT " + sizes + " FROM project_solve_piece_exchanges e WHERE " +
+                    SCOPE_SQL + ") bounded", args)
+        bounds = cur.fetchone()
+        # Reuse the graph service's 16 MiB input envelope, before loading blobs.
+        if bounds["count"] < piece_count + 1:
+            raise ExchangeNotFound()
+        if bounds["count"] != piece_count + 1 or bounds["bytes"] > 16 * MAX_RESPONSE_BYTES:
+            raise ExchangeInputError()
+        cur.execute("SELECT e.* FROM project_solve_exchanges e WHERE " + SCOPE_SQL, args)
+        parent = _exchange(cur.fetchone())
+        cur.execute("SELECT e.* FROM project_solve_piece_exchanges e WHERE " + SCOPE_SQL +
+                    " ORDER BY e.piece_index LIMIT 65", args)
+        children = [_exchange(row) for row in cur.fetchall()]
+    if (parent is None or parent["state"] not in {"prepared", "completed"}
+            or any(type(row["piece_index"]) is not int for row in children)
+            or [row["piece_index"] for row in children] != list(range(piece_count))):
+        raise ExchangeStateError()
+    for row in [parent, *children]:
+        if (any(row[name] != getattr(scope, name) for name in ("org_id", "project_id", "drawing_id", "job_id"))
+                or row["input_version_id"] != input_version_id
+                or row is not parent and row["state"] != "completed"):
+            raise ExchangeInputError()
+        for name, bound in (("request", MAX_REQUEST_BYTES), ("response", MAX_RESPONSE_BYTES),
+                            ("candidate", MAX_CANDIDATE_BYTES), ("proof", MAX_PROOF_BYTES)):
+            raw, stamp = row[name + "_bytes"], row[name + "_sha256"]
+            if row is parent and parent["state"] == "prepared" and name != "request":
+                if raw is not None or stamp is not None:
+                    raise ExchangeInputError()
+            else:
+                _validate_bytes(raw, stamp, bound)
+    return parent, children
 
 
 def complete_split_manifest(scope: ExchangeScope, lease: JobAttempt, *,

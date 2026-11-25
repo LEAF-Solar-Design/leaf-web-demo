@@ -7,7 +7,12 @@ graph mutation.
 from solar_solve_results import accept_candidate, accept_split_candidate
 
 
-def commit_solve(graph, params, *, candidate):
+def commit_solve(graph, params, *, candidate, plugin_parity=False):
+    """Internal callers may preserve Branch order for faithful plugin replay.
+
+    The public run entry point and JSON parameters keep strict Studio continuity.
+    All revision, identity, final-grid and coverage checks apply in either mode.
+    """
     from solar_design_graph import GraphValidationError, _bounded_json
     from solar_sizing_client import checked_graph
 
@@ -18,8 +23,10 @@ def commit_solve(graph, params, *, candidate):
     if params.get("cancel", False):
         return checked_graph(graph, params.get("expected_rev"))
     if type(candidate) is dict and "proposals" in candidate:
-        return accept_split_candidate(graph, candidate, expected_rev=params.get("expected_rev"))
-    return accept_candidate(graph, candidate, expected_rev=params.get("expected_rev"))
+        return accept_split_candidate(graph, candidate, expected_rev=params.get("expected_rev"),
+                                      plugin_parity=plugin_parity)
+    return accept_candidate(graph, candidate, expected_rev=params.get("expected_rev"),
+                            plugin_parity=plugin_parity)
 
 
 def run(intake, params, *, candidate=None):

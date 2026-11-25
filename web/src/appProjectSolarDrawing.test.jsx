@@ -1,3 +1,4 @@
+import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
 import { scaleTimeout } from './testTimeScale.js'
 import React, { createRef, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -13,6 +14,7 @@ import useDrawingVersionController from './controllers/useDrawingVersionControll
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import * as engineContext from './cadedit/EngineSessionProvider.jsx'
 import Viewer from './components/Viewer.jsx'
+import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
 
 // Same mounted-Viewer seam as components/viewerSolarOverlay.test.jsx: retain the real
 // imperative state, geometry and effects, replacing only browser graphics facilities.
@@ -115,11 +117,11 @@ function environment(intake = graphIntake(), scene, binding = B) {
     viewerRef: { current: { getDrawingScene: () => scene ?? { intake, drawingKey: keyOf(binding), ready: true } } },
     activeIntake: legacy, shown: legacy, intake: legacy, standaloneVisibleLayers: {}, setStandaloneVisibleLayers: vi.fn(),
     consoleDrawingKey: 'console:legacy', drawingLoad: { drawingId: 'legacy' }, REQUESTED_DRAWING_ID: 'legacy',
-    useMemo, projectSolarDrawingView, buildDrawingObjectIndex }
+    useMemo, projectSolarDrawingView, buildDrawingObjectIndex, withHiddenLayerDefaults }
 }
 function projection(env) {
   const scope = { ...env }
-  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'visibleLayers', 'setVisibleLayers'])
+  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)
   return scope
 }
@@ -160,6 +162,40 @@ it('R13G2A-02 project Viewer props exclude standalone overlays and ghosts', () =
   expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(false)
   evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], {})
   expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+})
+
+it.each([false, true])('project marquee commits native handles with additive=%s', additive => {
+  const scope = projection(environment())
+  const highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope, { workspaceCardRef: { current: { dataset: {} } } })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['10', 'CA'], { additive })
+  expect(highlight).toHaveBeenCalledWith(['10', 'CA'], { nativeHandles: true, additive })
+  expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+  if (additive) expect(env.setSelectedHandle).not.toHaveBeenCalled()
+  else expect(env.setSelectedHandle).toHaveBeenCalledWith(null)
+})
+
+it('standalone marquee still delegates to the drawing selection owner', () => {
+  const env = viewerEnv(projection(environment()), {
+    projectMode: false, workspaceCardRef: { current: { dataset: {} } },
+  })
+  const viewer = element('Viewer')
+  expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(true)
+  evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], { additive: true })
+  expect(env.canvasMarqueeRef.current).toHaveBeenCalledWith(['CA'], { additive: true })
+  expect(env.setSelectedHandle).not.toHaveBeenCalled()
+})
+
+it('a plain project click replaces the previous marquee highlight', () => {
+  const scope = projection(environment()), highlight = vi.fn()
+  scope.viewerRef.current.setHighlight = highlight
+  const env = viewerEnv(scope)
+  evaluate(prop(element('Viewer'), 'onSelectEntity'), env)('CA', { additive: false })
+  expect(highlight).toHaveBeenCalledWith([], { nativeHandles: true })
+  expect(env.setSelectedHandle).toHaveBeenCalledWith('CA')
 })
 
 it('R13G2A-03 engine presentation cannot overwrite the project drawing', async () => {
@@ -248,7 +284,7 @@ async function layerHarness(projectMode) {
     const runtime = useAppProjectSolarRuntime(props)
     const [standalone, setStandalone] = useState({ Panels: true })
     const env = { projectMode: props.projectMode, projectSolarRuntime: runtime, standaloneVisibleLayers: standalone,
-      setStandaloneVisibleLayers: setStandalone, useCallback }
+      setStandaloneVisibleLayers: setStandalone, useCallback, projectHiddenLayers: undefined, withHiddenLayerDefaults }
     env.setVisibleLayers = evaluate(decl('setVisibleLayers').init, env)
     const toggle = evaluate(decl('toggleLayer').init, env)
     return { runtime, standalone, toggle }
@@ -467,4 +503,24 @@ it('R13G2A-13 project drawing status uses the retained publication retry', async
     }
     view.unmount()
   }
+})
+
+it('X08 production observer binding follows only the exact clean committed project engine', () => {
+  const version = U(9), drawingKey = `project:org:project:drawing:${version}`
+  const env = { useMemo, projectEngineObservationBinding, projectMode: true,
+    projectEditorEngine: { scopeKey: 'current' }, projectEditorKey: 'current',
+    projectEngineIntake: { source: 'engine', documentId: 'project.dxf' },
+    engineDocument: { documentId: 'project.dxf', documentOrigin: 'head', committedVersion: version },
+    engineDirty: false, canonicalVersionId: version, projectDrawing: { drawingKey } }
+  const hook = renderHook(() => evaluate(decl('engineObservationBinding').init, env))
+  expect(hook.result.current).toEqual({ documentId: 'project.dxf', drawingKey })
+  expect(evaluate(prop(element('Viewer'), 'engineObservationBinding'), { engineObservationBinding: hook.result.current }))
+    .toBe(hook.result.current)
+  env.engineDirty = true
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
+  env.engineDirty = false
+  env.canonicalVersionId = U(8)
+  hook.rerender()
+  expect(hook.result.current).toBeNull()
 })

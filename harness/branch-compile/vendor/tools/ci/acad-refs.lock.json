@@ -1,0 +1,403 @@
+{
+  "hashAlgorithm": "SHA256",
+  "hashScope": "NuGet package archive (.nupkg)",
+  "source": "https://api.nuget.org/v3/index.json",
+  "years": {
+    "2018": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "22.0.0",
+        "sha256": "b858c3e99ec796fa8147496d0dc1d13f61a7340279aec171753e9ca900a190c1",
+        "path": "lib/net46/AcCoreMgd.dll",
+        "dllSha256": "992d402416660ec66cefd5661e001091984a399a995ece97b886c68c023a25b3"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "22.0.0",
+        "sha256": "fa1252a798b0f681e25271ad7cbc582ff940295475788999de82f8ce151647a8",
+        "path": "lib/net46/AcDbMgd.dll",
+        "dllSha256": "84df8a7c65a82c61a5e85e93af32bea62069a8a671c75c7a81679dccb840ac51"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "22.0.0",
+        "sha256": "e8f7896f7099da64e32c59aea35b7c61923849edc59b7d26f9c99a707a463da6",
+        "path": "lib/net46/AcMgd.dll",
+        "dllSha256": "9ac4df1f61d0a2ab2c95bdd06585d8b6faccf6eec3fedf385000bb6eec40cddd"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "22.0.0",
+        "sha256": "e8f7896f7099da64e32c59aea35b7c61923849edc59b7d26f9c99a707a463da6",
+        "path": "lib/net46/AcCui.dll",
+        "dllSha256": "2462883c3b7f940325f913786ba88c36505809cd65c2fe12b39ac4888ab638ca"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "22.0.0",
+        "sha256": "e8f7896f7099da64e32c59aea35b7c61923849edc59b7d26f9c99a707a463da6",
+        "path": "lib/net46/AdWindows.dll",
+        "dllSha256": "8dcb04204b6cea4206f1ad53a1d802951c9c1d7a92126d0cae48639eec037e5a"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "22.0.0",
+        "sha256": "fa1252a798b0f681e25271ad7cbc582ff940295475788999de82f8ce151647a8",
+        "path": "lib/net46/acdbmgdbrep.dll",
+        "dllSha256": "aa84d5c745ca6e02f7635307deed2c9ff852474aa0dc72bc948fde8d4d5a9e86"
+      }
+    },
+    "2019": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "23.0.0",
+        "sha256": "4c0c9e50f7206171d71c96cf919854253a55b4b8f6c10c01320bd7d29b340b33",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "6884f51b2040b1462d20bfb238414abeebc155423974561e0b66b38829f6016c"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "23.0.0",
+        "sha256": "71e344db2896851d167780c461c86ae97fe4efa84c0e30031dab06f111bc4af8",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "477c68fc5fc5ce175e1e9400247d83e97113332d5d198b2ab497e46e21c24250"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "23.0.0",
+        "sha256": "af3704e6dc6c077260c75f70ce73bea1eb4b52cd18dede905247f35c1ebad225",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "3c98b3af7d8bd82924a39c23e15daa4f7872e7602169ab3361ec887745d94d30"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "23.0.0",
+        "sha256": "af3704e6dc6c077260c75f70ce73bea1eb4b52cd18dede905247f35c1ebad225",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "d394888a17021bc0b771183c740a83919211da86f9b111e441ce8a7da8546090"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "23.0.0",
+        "sha256": "af3704e6dc6c077260c75f70ce73bea1eb4b52cd18dede905247f35c1ebad225",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "aaeb4164e70ee8e753bfa7492c6dea9da3876dc2cb1ce4d2e02cdb99e2d4f58a"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "23.0.0",
+        "sha256": "71e344db2896851d167780c461c86ae97fe4efa84c0e30031dab06f111bc4af8",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "f3dd5be11b7834fc109dc048f82579b186a8c1cf095a526a75bd565bbd04340f"
+      }
+    },
+    "2020": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "23.1.0",
+        "sha256": "a74a9f80df20f7ee8867929bb9545e748153c0f662446cc971d453e2a1265d49",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "d1de39a2a4214c42613aa400bc659e205bd2e59a472ee2b1180f6dca45ff1b71"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "23.1.0",
+        "sha256": "30a86db2ee583f510c2fc6cda7abe2b226a834a8d7495d629fddac978bd34c75",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "fb6b7384709ddbb612ff933952a27fea6b1f57ddb4221e041bd55e25cbc00857"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "23.1.0",
+        "sha256": "6076f685e69b6922b3b9cdefd28122d9d60fcab5cbd83c19fb628c6dd5c3c936",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "acd3fbecf0f6c0712430e236a546344b2bd2a11da53b6f643c77942c75897a5f"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "23.1.0",
+        "sha256": "6076f685e69b6922b3b9cdefd28122d9d60fcab5cbd83c19fb628c6dd5c3c936",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "370c7df6ed829be59e1fa60be8c9e9e8706657777913ea6bda7b1059cf2ed278"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "23.1.0",
+        "sha256": "6076f685e69b6922b3b9cdefd28122d9d60fcab5cbd83c19fb628c6dd5c3c936",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "a5374b3d69ac945bcb5a2ed243dfb34e321a16799223bd1247fe9cb67a276ed0"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "23.1.0",
+        "sha256": "30a86db2ee583f510c2fc6cda7abe2b226a834a8d7495d629fddac978bd34c75",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "ee85aa86a575168afab3122d383c34639f73d6ab36f3409003c656ecd145a4fc"
+      }
+    },
+    "2021": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "24.0.0",
+        "sha256": "b9d5eb6fdb3bb61d03d99be52af85108f65171439bd91098716618c52703e526",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "68bbe136dc66c936adac9648465d79d746c0093141b6a1d41b0d10ee44a8ac65"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "24.0.0",
+        "sha256": "0853021823c038f88cd0055910150ffa951bf4e5ada810f8469c08e8bff66408",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "e6a6058e89b4af5d2eb1373e641254529fe57460594b46f02297219af3c7c527"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "24.0.0",
+        "sha256": "8470e433ba8e0aa9f7baa7b1c1317e64efb6542c6ca3d8f58c1699a8d3dea07d",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "9e33a7a91030f36ca340859f48e25c0f5fa396e5f173d717abfbd898186a9901"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "24.0.0",
+        "sha256": "8470e433ba8e0aa9f7baa7b1c1317e64efb6542c6ca3d8f58c1699a8d3dea07d",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "dda942feb7c4488dd9c06909185c12f871b92da5bbdabb6988dc30dcd7547bd5"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "24.0.0",
+        "sha256": "8470e433ba8e0aa9f7baa7b1c1317e64efb6542c6ca3d8f58c1699a8d3dea07d",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "e0447a70cf3a7a81cf9bbee965c6fc2a7b5c27b375e63cc243a6db358d8df14e"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "24.0.0",
+        "sha256": "0853021823c038f88cd0055910150ffa951bf4e5ada810f8469c08e8bff66408",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "745ca126c49640cd75fb2114cf3a649785bb1c5043866e9fb3d201967022a429"
+      }
+    },
+    "2022": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "24.1.51000",
+        "sha256": "59fe3263d3b768a8df16f81e6fc8d55c36d142fb1f0e79decbb9d99acfead9be",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "54aa0f64f3641717fb28d8be0f79b3522fc9a87c0b64b2f3ef70d8df7f0ca7b9"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "24.1.51000",
+        "sha256": "ff297275494b4f197f9a6423adf638f3d1bb42f80f3a5776720872033a58200d",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "1113ff4563fbd1cdbee298ff00d5453e4425d9e775d0d52d999f22db2b9ccd87"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "24.1.51000",
+        "sha256": "e33e0691eef277450b65173810d3e8cc72f284fe1db168e292d6591e0bf59943",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "f3a045a79e511d8c6ef774008b0d5cdd5064cd8ad891f098ae449767d37cd720"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "24.1.51000",
+        "sha256": "e33e0691eef277450b65173810d3e8cc72f284fe1db168e292d6591e0bf59943",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "7caf0fba9b21d4643d9d3784a2b563b4599f8d766c205c376237067fa93cc8cc"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "24.1.51000",
+        "sha256": "e33e0691eef277450b65173810d3e8cc72f284fe1db168e292d6591e0bf59943",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "f4b55342580a62edbefa8c24f771e64feaf400b141d926da05bf7bd0412c2282"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "24.1.51000",
+        "sha256": "ff297275494b4f197f9a6423adf638f3d1bb42f80f3a5776720872033a58200d",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "6322fbba7578c8f0dcb142cac8c9be78fb3739253623511e2b1ea4eef6b3bb76"
+      }
+    },
+    "2023": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "24.2.0",
+        "sha256": "2ab2ca2b820d9f8c7f4a8dbc7c79bc52fc5e17ee74a97b7b4770649be6311c18",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "d3faf7ce1bca36976410fafbbfcd743f3fd4ee7e778d58ba1d752d5c444a4bb2"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "24.2.0",
+        "sha256": "1c39285b024ddfd119d7dd2d06531f936fefef630361f6202669470e882e267f",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "8646a67989c76b6f98e3525632ea2288fcbcc3af6a4cb66c99a3f9771faffaa4"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "24.2.0",
+        "sha256": "105802778034efef7568cccf7cc59d4e28f3985921ceee0364ec07d8b0d4d903",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "ad7f44eccf672180bfe998df4df2e6e67a9f6269e7f1dee7e74ad51d59ae6094"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "24.2.0",
+        "sha256": "105802778034efef7568cccf7cc59d4e28f3985921ceee0364ec07d8b0d4d903",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "cf3a55f0d12790bff791cb26b128799ba196f805398a2e45ee9cc10378314e8b"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "24.2.0",
+        "sha256": "105802778034efef7568cccf7cc59d4e28f3985921ceee0364ec07d8b0d4d903",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "6dbe919fe7b10beae2f7d1307527fe4d5b3a98a903d56f20ead3bcbce615b8a9"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "24.2.0",
+        "sha256": "1c39285b024ddfd119d7dd2d06531f936fefef630361f6202669470e882e267f",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "19abf6dc235cd1a90b1ffe39df93a86f99fd705c8bc4635fa1c775a515e26ea7"
+      }
+    },
+    "2024": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "24.3.0",
+        "sha256": "969cc6bc8c808efa47a9fe6565aaede62c5fcb410949c8088119d1c6b0419d68",
+        "path": "lib/net47/AcCoreMgd.dll",
+        "dllSha256": "64a2ce7c0f55f7120ed1e8458751c64bd14f27e9de8a2fcb82c1b8947999cb46"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "24.3.0",
+        "sha256": "79bc5844e9cd1b5baedd472554264658f21f84dcf93c7f800abd847547c45326",
+        "path": "lib/net47/AcDbMgd.dll",
+        "dllSha256": "b32b646161af05e4f86b76549685eea49d7636b3032f850c1ae154fe810d0a5d"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "24.3.0",
+        "sha256": "7b7731aa026fd176851eefa249125420d58bba53ccec181307f1c8b4d56965c4",
+        "path": "lib/net47/AcMgd.dll",
+        "dllSha256": "ed12eaec8e4a919d7a54dba4ad23fc9e0c23bf159414bfb86e02d748afa45ce6"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "24.3.0",
+        "sha256": "7b7731aa026fd176851eefa249125420d58bba53ccec181307f1c8b4d56965c4",
+        "path": "lib/net47/AcCui.dll",
+        "dllSha256": "63b6b9ce104c4a49ce1b3e40540a75362433b84a01d65d9a9ecaafc2b5ee030c"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "24.3.0",
+        "sha256": "7b7731aa026fd176851eefa249125420d58bba53ccec181307f1c8b4d56965c4",
+        "path": "lib/net47/AdWindows.dll",
+        "dllSha256": "fc115b3d4b99b8b129297bb0db44eb90df972821e9611f1a81e5520a0e67a17f"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "24.3.0",
+        "sha256": "79bc5844e9cd1b5baedd472554264658f21f84dcf93c7f800abd847547c45326",
+        "path": "lib/net47/acdbmgdbrep.dll",
+        "dllSha256": "7147dd745d1a1b5a970ce17c0deee7baebb95ea949dcefd82c6975ece84e9c81"
+      }
+    },
+    "2025": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "25.0.0",
+        "sha256": "167a3b003d30230197cc150911080815bd5299e8e28fa411c64498e8e830ea53",
+        "path": "lib/net8.0/AcCoreMgd.dll",
+        "dllSha256": "9bcc52bf57b12728f2c6601d50cc3234a62f3068f7a304b5aa43c2b6c82b414f"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "25.0.0",
+        "sha256": "06779a73f5da2eed6a98c063ea13cde4eb07056b088772fca91c93ecdc770283",
+        "path": "lib/net8.0/AcDbMgd.dll",
+        "dllSha256": "d81824ecf10aaea953bdb87823f546a7b773871e36376d0a61d4a36731741300"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "25.0.1",
+        "sha256": "b629f09e10bb7f414460e1ad47e4efa6d24d2815d00def388a64b10570ccd4c1",
+        "path": "lib/net8.0/AcMgd.dll",
+        "dllSha256": "b85b1f0d01ec1f085a2ff8261bcebdfcaab4a4347c9ae95d935f2dff3e93846e"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "25.0.1",
+        "sha256": "b629f09e10bb7f414460e1ad47e4efa6d24d2815d00def388a64b10570ccd4c1",
+        "path": "lib/net8.0/AcCui.dll",
+        "dllSha256": "4ca247d78481d8b2a8892d9ea2060a034edcfc678312c2d8e6203f9df1ffe04e"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "25.0.1",
+        "sha256": "b629f09e10bb7f414460e1ad47e4efa6d24d2815d00def388a64b10570ccd4c1",
+        "path": "lib/net8.0/AdWindows.dll",
+        "dllSha256": "39da62ca5a340ef38bbd2e6f99cea7b9dd70f3784e6e803efc327150396555f9"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "25.0.0",
+        "sha256": "06779a73f5da2eed6a98c063ea13cde4eb07056b088772fca91c93ecdc770283",
+        "path": "lib/net8.0/acdbmgdbrep.dll",
+        "dllSha256": "71d21f4342d30b0d8e15dabbfc39b16e4eb3be840f16e528dc376cfae80f83c0"
+      }
+    },
+    "2026": {
+      "accoremgd": {
+        "package": "autocad.net.core",
+        "version": "25.1.0",
+        "sha256": "b9a016b7fad4de3e9f63835b16b4272b73909e26e0aa2565c91026c0af8afd9e",
+        "path": "lib/net8.0/AcCoreMgd.dll",
+        "dllSha256": "a7c0b9c3c123ffbbf047b84fc0f936124ae5fe3a1b4e7fb66ae7fbdebd96c12d"
+      },
+      "acdbmgd": {
+        "package": "autocad.net.model",
+        "version": "25.1.0",
+        "sha256": "fd52d86faa61ef91ccbf8fb8c3e327fc86f031e0d71da905fdf8b2e2acaee597",
+        "path": "lib/net8.0/AcDbMgd.dll",
+        "dllSha256": "4f4cfb1cb3b1d074408ec229a801ea6786a21c808259e9f47ab76ad23301f7b1"
+      },
+      "acmgd": {
+        "package": "autocad.net",
+        "version": "25.1.0",
+        "sha256": "8c3b799ff10e349dee37b504867c094839da9964d150da53eb4638af011f1662",
+        "path": "lib/net8.0/AcMgd.dll",
+        "dllSha256": "6d9f52c524f6be4d8443f091dc482e53d4b72d51be2048f208d4dd539d540804"
+      },
+      "AcCui": {
+        "package": "autocad.net",
+        "version": "25.1.0",
+        "sha256": "8c3b799ff10e349dee37b504867c094839da9964d150da53eb4638af011f1662",
+        "path": "lib/net8.0/AcCui.dll",
+        "dllSha256": "f83ed42251f6447c58d1e3fd4658d77881cb6c9d092901cb9d4cc8a5ce0fbb9c"
+      },
+      "AdWindows": {
+        "package": "autocad.net",
+        "version": "25.1.0",
+        "sha256": "8c3b799ff10e349dee37b504867c094839da9964d150da53eb4638af011f1662",
+        "path": "lib/net8.0/AdWindows.dll",
+        "dllSha256": "e76168c430896a5915220efc8a4dbe90e85d4a230cb8e1ae87f6b7666bc06b8e"
+      },
+      "acdbmgdbrep": {
+        "package": "autocad.net.model",
+        "version": "25.1.0",
+        "sha256": "fd52d86faa61ef91ccbf8fb8c3e327fc86f031e0d71da905fdf8b2e2acaee597",
+        "path": "lib/net8.0/acdbmgdbrep.dll",
+        "dllSha256": "57891abc7c26e2dc5fa9f468287f78c396666a2f705e469e2be1dd59e568aaad"
+      }
+    }
+  }
+}

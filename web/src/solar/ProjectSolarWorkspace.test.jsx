@@ -7,9 +7,125 @@ import SolarFlowRail from './SolarFlowRail.jsx'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { PROJECT_SOLAR_WORKSPACE_LABELS, PROJECT_SOLAR_WORKSPACE_REASONS, projectSolarWorkspaceReason } from './ProjectSolarReadPanel.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import ProjectGroundEstimatePanel, { estimateLineCents } from './ProjectGroundEstimatePanel.jsx'
+
+// Discovery reads and status rendering have dedicated component tests.
+vi.mock('./DrawingRoleProposal.jsx', () => ({
+  default: () => <section data-testid="drawing-role-proposal" />,
+}))
 
 afterEach(cleanup)
 afterEach(() => vi.restoreAllMocks())
+
+const takeoffLine = (line_id, quantity, changes = {}) => ({ line_id, description: line_id,
+  unit: 'ea', quantity, status: 'computed', priceable: true, ...changes })
+
+function takeoffResult(lines) {
+  const outcome = readResult('solar-takeoff')
+  outcome.data.result.output = { summary: { schema: 'leaf.solar-takeoff.v1', lines } }
+  return outcome
+}
+
+it('prices TEST decimals with half-even cents and refuses missing or nonpriceable values', () => {
+  expect(estimateLineCents(takeoffLine('a', '1'), '0.005')).toBe(0n)
+  expect(estimateLineCents(takeoffLine('a', '1'), '0.015')).toBe(2n)
+  expect(estimateLineCents(takeoffLine('a', '3'), '0.335')).toBe(100n)
+  expect(estimateLineCents(takeoffLine('a', '9007199254.741'), '1000000')).toBe(900719925474100000n)
+  for (const rate of ['', '-1', '1e2', 'NaN', '1000000000001', '1'.repeat(41)]) {
+    expect(estimateLineCents(takeoffLine('a', '1'), rate)).toBeNull()
+  }
+  expect(estimateLineCents(takeoffLine('a', null), '1')).toBeNull()
+  expect(estimateLineCents(takeoffLine('a', '1', { status: 'not-computed' }), '1')).toBeNull()
+  expect(estimateLineCents(takeoffLine('a', '1', { priceable: false }), '1')).toBeNull()
+})
+
+it('counts missing rates separately from unavailable quantities in a partial estimate', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([
+    takeoffLine('zero', '0'), takeoffLine('missing', null), takeoffLine('invalid', '-1'),
+    takeoffLine('excluded', '1', { priceable: false }), takeoffLine('later', '1', { status: 'not-computed' }),
+  ]))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  const input = await screen.findByLabelText('TEST rate USD zero')
+  const breakdown = () => screen.getByLabelText('Unpriced line breakdown')
+  expect(breakdown()).toHaveTextContent('Missing rates: 1')
+  expect(breakdown()).toHaveTextContent('Unavailable quantities: 2')
+  fireEvent.change(input, { target: { value: 'invalid' } })
+  expect(breakdown()).toHaveTextContent('Missing rates: 0')
+  expect(breakdown()).toHaveTextContent('Invalid rates: 1')
+  fireEvent.change(input, { target: { value: '0' } })
+  expect(breakdown()).toHaveTextContent('Invalid rates: 0')
+  expect(screen.getByText('Priced subtotal (preview): $0.00')).toBeTruthy()
+})
+
+it('mounts the takeoff inspection host and edits preview rates without worker submission', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([
+    takeoffLine('one', '1'), takeoffLine('two', '1'), takeoffLine('missing', null),
+    takeoffLine('later', '1', { status: 'not-computed' }), takeoffLine('net', '1', { priceable: false }),
+  ]))
+  h.mount()
+  h.inspect()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD one')
+  expect(screen.getAllByText('Unpriced')).toHaveLength(5)
+  fireEvent.change(screen.getByLabelText('TEST rate USD one'), { target: { value: '0.005' } })
+  fireEvent.change(screen.getByLabelText('TEST rate USD two'), { target: { value: '0.015' } })
+  fireEvent.change(screen.getByLabelText('TEST rate USD missing'), { target: { value: '100' } })
+  expect(screen.getByText('Priced subtotal (preview): $0.02')).toBeTruthy()
+  expect(screen.getAllByText('Unpriced')).toHaveLength(3)
+  fireEvent.change(screen.getByLabelText('TEST rate card version'), { target: { value: 'TEST-2' } })
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-2')
+  fireEvent.change(screen.getByLabelText('TEST rate USD one'), { target: { value: '' } })
+  expect(screen.getAllByText('Unpriced')).toHaveLength(4)
+  expect(h.client.readSolar).toHaveBeenCalledWith(expect.objectContaining({ tool: 'solar-takeoff', catalogDigest: D, current: true }))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['version', 'authority', 'catalog'])('retires a pending takeoff on %s change and rejects late output', async (change) => {
+  const h = fixture('solar-takeoff'), pending = deferred()
+  h.client.readSolar.mockReturnValue(pending.promise)
+  const props = { tool: h.row, solarBinding: B, authorityKey: 'epoch-1', projectClient: h.client,
+    projectCatalog: h.catalog, isCurrent: () => h.current }
+  const view = render(<ProjectGroundEstimatePanel {...props} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  const signal = h.client.readSolar.mock.calls[0][0].signal
+  if (change === 'version') h.snapshot = { ...h.snapshot, binding: { ...B, input_version_id: JOB } }
+  if (change === 'authority') h.snapshot = { ...h.snapshot, authorityKey: 'epoch-2' }
+  if (change === 'catalog') h.epoch += 1
+  act(() => h.emit())
+  expect(signal.aborted).toBe(true)
+  await act(async () => pending.resolve(takeoffResult([takeoffLine('late', '1')])))
+  expect(screen.queryByLabelText('TEST rate USD late')).toBeNull()
+  view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
+
+it('hides presented takeoff quantities when the catalog receipt changes', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult([takeoffLine('old', '1')]))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD old')
+  h.catalogCurrent = false
+  act(() => h.emit())
+  expect(screen.queryByLabelText('TEST rate USD old')).toBeNull()
+})
+
+it('refuses oversized takeoff output and leaves invalid quantities unpriced', async () => {
+  const h = fixture('solar-takeoff')
+  h.client.readSolar.mockResolvedValue(takeoffResult(Array.from({ length: 129 }, (_, index) => takeoffLine(`line${index}`, '1'))))
+  h.mount({ openTool: h.row })
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByText('The project quantity read was refused.')
+  expect(screen.getByRole('region', { name: 'Ground estimate preview' }).querySelector('table')).toBeNull()
+  h.client.readSolar.mockResolvedValue(takeoffResult([takeoffLine('invalid', '-1'), takeoffLine('long', '1'.repeat(41))]))
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD invalid')
+  fireEvent.change(screen.getByLabelText('TEST rate USD invalid'), { target: { value: '1' } })
+  expect(screen.getAllByText('Unpriced')).toHaveLength(2)
+})
 
 const B = {
   kind: 'project',
@@ -124,6 +240,253 @@ function fixture(name = STEP[0], { code = null, realGraph = false, rows = null }
   return h
 }
 const last = (values) => values[values.length - 1]
+
+function savedEstimateFixture() {
+  const lines = [takeoffLine('panels', '2.000'), takeoffLine('missing', null), takeoffLine('no-rate', '3')]
+    .map((line) => ({ ...line, category: 'equipment', reason: null, source: {} }))
+  const rate_card = { schema: 'leaf.solar-estimate-rate-card.v1', label: 'TEST RATES', currency: 'USD',
+    version: 'TEST-saved', rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] }
+  return { schema: 'leaf.solar-estimate.v1', label: 'TEST RATES', currency: 'USD', rate_version: rate_card.version,
+    complete: false, priced_subtotal: '2.01', unpriced_count: 2, content_sha256: 'a'.repeat(64),
+    takeoff_sha256: 'b'.repeat(64), rate_card_sha256: 'c'.repeat(64), source_binding: {
+      organization_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id,
+      input_version_id: B.input_version_id, graph_sha256: 'd'.repeat(64), intake_sha256: 'e'.repeat(64) },
+    takeoff: { schema: 'leaf.solar-takeoff.v1', complete: false, source: { project_id: B.project_id,
+      drawing_id: B.drawing_id, graph_sha256: 'd'.repeat(64), drawing_version: 1 }, lines }, rate_card,
+    lines: lines.map((line, index) => ({ ...line, rate: index === 0 ? '1.005' : null,
+      amount: index === 0 ? '2.01' : null, pricing_reason: index === 0 ? null : index === 1 ? 'QUANTITY_MISSING' : 'RATE_MISSING' })) }
+}
+function estimateControlsFixture() {
+  const h = fixture('solar-takeoff'), estimate = savedEstimateFixture()
+  const publication = { organization_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id,
+    parent_version_id: B.input_version_id, request_id: JOB, drawing_version: {
+      version_id: JOB, org_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id } }
+  h.saved = { schema: 'leaf.project-estimate.v1', saved: true, organization_id: B.organization_id,
+    project_id: B.project_id, drawing_id: B.drawing_id, input_version_id: B.input_version_id,
+    content_sha256: estimate.content_sha256, estimate }
+  h.snapshot = { ...h.snapshot, ownsCheckout: true }
+  h.key.mockReturnValue(JOB)
+  h.published = vi.fn(async () => true)
+  h.client.readEstimate = vi.fn(async () => ({ ok: true, data: { result: { ...h.saved, saved: false } } }))
+  h.client.saveEstimate = vi.fn(async () => ({ ok: true, data: { result: {
+    schema: 'leaf.project-estimate.v1', saved: true, estimate, content_sha256: estimate.content_sha256, publication } } }))
+  h.client.acquireCheckout = vi.fn(async () => { h.snapshot = { ...h.snapshot, ownsCheckout: true }; h.emit(); return { ok: true } })
+  h.client.exportEstimate = vi.fn(async () => ({ ok: true, data: { bytes: new TextEncoder().encode(JSON.stringify(estimate)) } }))
+  h.client.readSolar.mockResolvedValue(takeoffResult(estimate.takeoff.lines))
+  h.mountEstimate = () => h.mount({ openTool: h.row, onEstimatePublished: h.published })
+  h.draft = async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+    await screen.findByLabelText('TEST rate USD panels')
+    fireEvent.change(screen.getByLabelText('TEST rate USD panels'), { target: { value: '1.005' } })
+  }
+  return h
+}
+
+it('saves through the validated callback boundary, reopens all saved quantities and exports exact Blob bytes', async () => {
+  const h = estimateControlsFixture(), blobs = []
+  const oldCreate = URL.createObjectURL, oldRevoke = URL.revokeObjectURL
+  URL.createObjectURL = vi.fn((blob) => { blobs.push(blob); return 'blob:estimate' })
+  URL.revokeObjectURL = vi.fn()
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  try {
+    h.mountEstimate(); await h.draft()
+    fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+    await waitFor(() => expect(h.published).toHaveBeenCalledTimes(1))
+    expect(h.client.saveEstimate.mock.calls[0][0]).toMatchObject({ requestId: JOB, catalogDigest: D,
+      rateCard: { rates: [{ line_id: 'panels', unit: 'ea', rate: '1.005' }] } })
+    expect(h.published.mock.calls[0][1]).toEqual(B)
+    expect(h.published.mock.calls[0][2]()).toBe(true)
+    h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen saved estimate' }))
+    await screen.findByText('Saved estimate reopened.')
+      expect(screen.getByLabelText('Unpriced line breakdown')).toHaveTextContent('Missing rates: 1')
+      expect(screen.getByLabelText('Unpriced line breakdown')).toHaveTextContent('Unavailable quantities: 1')
+    expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-saved')
+    expect(screen.getByText('2.000')).toBeTruthy()
+    expect(screen.getAllByText('Unpriced')).toHaveLength(2)
+    expect(screen.getByText(/Saved subtotal: 2.01 USD/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Export saved estimate' }))
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    const exported = await new Promise((resolve) => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blobs[0])
+    })
+    expect(exported).toBe(JSON.stringify(h.saved.estimate))
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:estimate')
+    fireEvent.change(screen.getByLabelText('TEST rate USD panels'), { target: { value: '7' } })
+    expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(true)
+  } finally { URL.createObjectURL = oldCreate; URL.revokeObjectURL = oldRevoke }
+})
+
+it('offers checkout for save while allowing a reader to reopen and export', async () => {
+  const h = estimateControlsFixture()
+  h.snapshot = { ...h.snapshot, ownsCheckout: false }
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText('Check out drawing before saving an estimate.')
+  expect(h.client.saveEstimate).not.toHaveBeenCalled()
+  h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+  fireEvent.click(screen.getByRole('button', { name: 'Reopen saved estimate' }))
+  await screen.findByText('Saved estimate reopened.')
+  expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Check out drawing' }))
+  await waitFor(() => expect(h.client.acquireCheckout).toHaveBeenCalledTimes(1))
+})
+
+it.each(['refused', 'ambiguous'])('keeps drafts after a %s save and reuses the original ambiguous nonce', async (kind) => {
+  const h = estimateControlsFixture()
+  h.client.saveEstimate.mockResolvedValueOnce({ ok: false, status: kind === 'refused' ? 409 : null,
+    reason: kind === 'refused' ? 'ESTIMATE_SOURCE_CHANGED' : 'SIP_R7_TIMEOUT' })
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText(kind === 'refused' ? 'Estimate save was refused. Your rates are retained.' :
+    'Save outcome unknown. Retry Save estimate with the unchanged card.')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('1.005')
+  expect(screen.getByLabelText('TEST rate USD panels').disabled).toBe(kind === 'ambiguous')
+  if (kind === 'ambiguous') {
+    const first = h.client.saveEstimate.mock.calls[0][0]
+    fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+    await waitFor(() => expect(h.published).toHaveBeenCalledTimes(1))
+    expect(h.key).toHaveBeenCalledTimes(1)
+    expect(h.client.saveEstimate.mock.calls[1][0]).toMatchObject({ requestId: first.requestId, rateCard: first.rateCard })
+  }
+})
+
+it('retains a known saved receipt if publication seating fails', async () => {
+  const h = estimateControlsFixture()
+  h.published.mockRejectedValue(new Error('hydrate failed'))
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  await screen.findByText(new RegExp(`Estimate saved as version ${JOB}.*selection was not changed`))
+  expect(screen.getByText(/Saved content hash:/)).toBeTruthy()
+})
+
+it('aborts late save and export on lost scope and cleans up listeners on unmount', async () => {
+  const h = estimateControlsFixture(), pending = deferred()
+  h.client.saveEstimate.mockReturnValue(pending.promise)
+  h.mountEstimate(); await h.draft()
+  fireEvent.click(screen.getByRole('button', { name: 'Save estimate' }))
+  const signal = h.client.saveEstimate.mock.calls[0][0].signal
+  h.current = false
+  act(() => h.emit())
+  expect(signal.aborted).toBe(true)
+  await act(async () => pending.resolve({ ok: true, data: { result: h.saved } }))
+  expect(h.published).not.toHaveBeenCalled()
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  h.view.unmount()
+  expect(h.listeners.size).toBe(0)
+})
+
+it('preserves same-source drafts while refreshing quantity proof and clears drafts for a new version', async () => {
+  const h = estimateControlsFixture()
+  const props = { tool: h.row, solarBinding: B, authorityKey: 'epoch-1', projectClient: h.client,
+    projectCatalog: h.catalog, isCurrent: () => h.current, newProjectIntentKey: h.key }
+  const view = render(<ProjectGroundEstimatePanel {...props} />)
+  await h.draft()
+  fireEvent.change(screen.getByLabelText('TEST rate card version'), { target: { value: 'draft-version' } })
+  h.epoch += 1
+  act(() => h.emit())
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD panels')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('1.005')
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('draft-version')
+  const next = { ...B, input_version_id: JOB }
+  h.snapshot = { ...h.snapshot, binding: next }
+  h.catalog = { ...h.catalog, binding: next }
+  const outcome = takeoffResult(savedEstimateFixture().takeoff.lines)
+  outcome.data.result.input_version_id = JOB
+  h.client.readSolar.mockResolvedValue(outcome)
+  view.rerender(<ProjectGroundEstimatePanel {...props} solarBinding={next} projectCatalog={h.catalog} />)
+  expect(screen.queryByLabelText('TEST rate USD panels')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Read project quantities' }))
+  await screen.findByLabelText('TEST rate USD panels')
+  expect(screen.getByLabelText('TEST rate USD panels').value).toBe('')
+  expect(screen.getByLabelText('TEST rate card version').value).toBe('TEST-1')
+})
+
+it('aborts a pending export on unmount before creating any download', async () => {
+  const h = estimateControlsFixture(), pending = deferred()
+  h.client.readEstimate.mockResolvedValue({ ok: true, data: { result: h.saved } })
+  h.client.exportEstimate.mockReturnValue(pending.promise)
+  h.mountEstimate()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Export saved estimate' }).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Export saved estimate' }))
+  const options = h.client.exportEstimate.mock.calls[0][0]
+  h.view.unmount()
+  expect(options.signal.aborted).toBe(true)
+  expect(options.isCurrent()).toBe(false)
+  await act(async () => pending.resolve({ ok: true, data: { bytes: new Uint8Array([123, 125]) } }))
+  expect(h.listeners.size).toBe(0)
+})
+
+it('hosts engineering reconciliation in the admitted project scope and removes it when stale', async () => {
+  const h = fixture()
+  h.mount()
+  expect(screen.getByRole('region', { name: 'Engineering reconciliation' })).toBeTruthy()
+  expect(h.client.readContext).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Read saved design' }))
+  await screen.findByText(/Saved design unavailable/)
+  expect(h.client.readContext).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) })
+  h.current = false
+  act(() => h.emit())
+  expect(screen.queryByRole('region', { name: 'Engineering reconciliation' })).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 focuses recovery once when an active editor is removed by lost authority', async () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  await waitFor(() => expect(document.activeElement).toBe(recovery))
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 preserves focus outside the editor when authority expires', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  render(<button>Other workspace control</button>)
+  const other = screen.getByRole('button', { name: 'Other workspace control' })
+  other.focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).toBe(other)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 leaves other Solar editor focus behavior unchanged', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-string-add')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  h.current = false
+  h.update()
+  expect(document.activeElement).not.toBe(screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it('S02 does not focus a different drawing recovery notice after a context switch', () => {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true)
+  const h = fixture('solar-panel-groups')
+  h.mount({ openTool: h.row })
+  screen.getByLabelText('Fixture draft').focus()
+  const next = { ...B, drawing_id: '66666666-6666-4666-8666-666666666666' }
+  h.snapshot = { ...h.snapshot, binding: next }
+  h.current = false
+  h.update({ solarBinding: next })
+  const recovery = screen.getByText(PROJECT_SOLAR_WORKSPACE_REASONS.scope_stale)
+  expect(document.activeElement).not.toBe(recovery)
+  expect(h.submit).not.toHaveBeenCalled()
+})
 
 function solveDraftFixture() {
   const h = fixture('solar-solve-proposal')
@@ -678,6 +1041,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-31 sizing dispatches to the manual-global R9 project host', () => {
     const h = fixture('solar-size-strings')
     h.mount()
+    expect(screen.getByTestId('drawing-role-proposal')).toBeInTheDocument()
     h.open()
     stepContract(h)
     expect(h.props.onOpenTool).toHaveBeenCalledWith(h.row)
@@ -1387,7 +1751,7 @@ describe('Project Solar workspace composition', () => {
   it('R13E-44 composition owns no Viewer or runtime and all new copy uses the frozen maps', () => {
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarWorkspace.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectSolarPreparedSolveForm.jsx'])
+    expect(imports).toEqual(['react', './solarDrawingBinding.js', './SolarSettingsForm.jsx', './solarSettingsWire.js', './ProjectSolarReadPanel.jsx', './ProjectSolveReview.jsx', './ProjectSolarEdgePanel.jsx', './ProjectGroundEstimatePanel.jsx', './ProjectSolarPreparedSolveForm.jsx', './DrawingRoleProposal.jsx', './X07ProjectProfileReview.jsx', './ProjectReconciliationPanel.jsx'])
     const reviewSource = readFileSync(`${process.cwd()}/src/solar/ProjectSolveReview.jsx`, 'utf8')
     const reviewImports = [...reviewSource.matchAll(new RegExp("from ['\"]([^'\"]+)['\"]", 'g'))].map((match) => match[1])
     for (const dependency of reviewImports) {
@@ -1411,7 +1775,7 @@ describe('Project Solar workspace composition', () => {
       noHost()
       h.view.unmount()
     }
-    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(24)
+    expect(Object.keys(PROJECT_SOLAR_WORKSPACE_REASONS)).toHaveLength(25)
     expect(projectSolarWorkspaceReason('not_a_reason')).toBeNull()
   })
 
@@ -1443,5 +1807,40 @@ it('production cloud Solve opens the saved-group preparation form', async () => 
   expect(screen.queryByLabelText('Frame')).toBeNull()
   expect(screen.queryByLabelText('Request')).toBeNull()
   await waitFor(() => expect(h.client.readContext).toHaveBeenCalledWith(expect.objectContaining({ prepareSolve: true })))
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['solar-panel-groups', 'solar-solaredge-accept'])('explains revoked write access for %s without submitting', (name) => {
+  const h = fixture(name)
+  h.mount({ openTool: h.row })
+  const guidance = 'You do not have write access for this Solar step. Ask a project owner to review your access before trying again.'
+  expect(screen.queryByText(guidance)).toBeNull()
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false,
+    refusal_reasons: ['ENTITLEMENT_REQUIRED'] } }
+  h.rows = [denied]
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: h.rows }] } })
+  expect(screen.getByText(guidance).getAttribute('role')).toBe('status')
+  expect(h.submit).not.toHaveBeenCalled()
+  const restored = { ...h.row, availability: { ...h.row.availability } }
+  h.update({ projectCatalog: { ...h.catalog, families: [{ capabilities: [restored] }] } })
+  expect(screen.queryByText(guidance)).toBeNull()
+  expect(h.submit).not.toHaveBeenCalled()
+})
+
+it.each(['project_request_required', 'SIP_R4_WORKER_UNAVAILABLE', 'capability_not_ready'])(
+  'does not describe %s as a write permission denial', (reason) => {
+    const h = fixture('solar-panel-groups')
+    const row = { ...h.row, availability: { ...h.row.availability, entitled: false,
+      entitlement_reason: null, runnable: false, refusal_reasons: [reason] } }
+    h.mount({ openTool: row, projectCatalog: { ...h.catalog, families: [{ capabilities: [row] }] } })
+    expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
+    expect(h.submit).not.toHaveBeenCalled()
+  })
+
+it('does not describe denied read permission as lost write access', () => {
+  const h = fixture('solar-string-data')
+  const denied = { ...h.row, availability: { ...h.row.availability, entitled: false, runnable: false } }
+  h.mount({ openTool: h.row, projectCatalog: { ...h.catalog, families: [{ capabilities: [denied] }] } })
+  expect(screen.queryByText(/You do not have write access for this Solar step/)).toBeNull()
   expect(h.submit).not.toHaveBeenCalled()
 })

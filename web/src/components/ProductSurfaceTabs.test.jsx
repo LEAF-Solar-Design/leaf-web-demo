@@ -11,11 +11,39 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from './ProductSurfaceTabs.jsx'
 import ContinuityStore from '../site/ContinuityStore.jsx'
 import SurfaceFrame from '../site/SurfaceFrame.jsx'
-import { DEFAULT_PRODUCT_SURFACE, PRODUCT_SURFACES, productSurfaceFromSearch, productSurfaceStates, setLabSurfaceStatus, surfaceRailState } from '../site/productSurfaces.js'
+import { DEFAULT_PRODUCT_SURFACE, PRODUCT_SURFACES, productSurfaceFromSearch, productSurfaceStates, setLabSurfaceStatus, setEstimatorSurfaceStatus, surfaceRailState } from '../site/productSurfaces.js'
 import * as labSurfaceStatus from '../lab/useLabSurfaceStatus.js'
+import * as estimatorSurfaceStatus from '../estimator/useEstimatorSurfaceStatus.js'
+import * as surfaceOverlay from '../site/useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 
 afterEach(cleanup)
+
+it('ignores Estimator overlays and cannot grant its rail or expose it on the stage', () => {
+  const originalUrl = window.location.href
+  window.history.replaceState({}, '', '/app')
+  const probe = vi.spyOn(estimatorSurfaceStatus, 'useEstimatorSurfaceStatus').mockReturnValue(null)
+  const overlay = vi.spyOn(surfaceOverlay, 'useSurfaceConfigOverlay').mockReturnValue({ estimator: { chrome: { tab: true, rail: null } } })
+  setEstimatorSurfaceStatus(null)
+  try {
+    const { rerender } = render(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.queryByRole('tab', { name: 'Estimator' })).toBeNull()
+    setEstimatorSurfaceStatus({ state: 'on', bindings: [{ project_id: 'bound' }] })
+    rerender(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.getByRole('tab', { name: 'Estimator' })).toBeVisible()
+    overlay.mockReturnValue({ estimator: { chrome: { tab: false } } })
+    rerender(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.getByRole('tab', { name: 'Estimator' })).toBeVisible()
+    overlay.mockReturnValue({ estimator: { chrome: { tab: true } } })
+    window.history.replaceState({}, '', '/try')
+    rerender(<ProductSurfaceTabs activeSurface="cad" states={states} onSelect={() => {}} />)
+    expect(screen.queryByRole('tab', { name: 'Estimator' })).toBeNull()
+    expect(productSurfaceFromSearch('?surface=estimator')).toBe(DEFAULT_PRODUCT_SURFACE)
+  } finally {
+    probe.mockRestore(); overlay.mockRestore(); setEstimatorSurfaceStatus(null)
+    window.history.replaceState({}, '', originalUrl)
+  }
+})
 
 it('hides the tabs only for a framed Lab embed route', () => {
   const originalUrl = window.location.href

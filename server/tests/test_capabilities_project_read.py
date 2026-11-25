@@ -3,6 +3,12 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+import pytest
+from envelopes import ok_envelope
+from test_project_scoped_read_tool import (
+    D1, D2, lane as project_read_lane, memory, install_tool_body, request, tool_override,
+)
+
 import entitlements
 from routers import jobs as jobs_router
 import test_sip_r5_routes as routes
@@ -92,7 +98,14 @@ def test_solar_rows_keep_their_project_policy(lane):
         "input_version_id": str(lane.s.parent.version_id)}, headers=routes.headers(lane)))
     after = _project_states(lane)
     for name, state in before.items():
-        assert "project_read" not in state
+        if name == "solar-takeoff":  # X10 #3262 deliberately exposes project_read for solar-takeoff.
+            assert isinstance(state.get("project_read"), bool)
+        elif name == "solar-assignment-report":
+            assert state["project_read"] is True
+            assert state["entitled"] is False and state["runnable"] is False
+            assert state["refusal_reasons"] == ["entitlement_required"]
+        else:
+            assert "project_read" not in state
         assert after[name] == state
 
 
@@ -101,3 +114,27 @@ def test_catalog_read_writes_nothing(lane):
     _project_states(lane)
     assert (lane.s.blobs, lane.s.versions, lane.s.fingerprints, lane.s.writes) == before
     assert not lane.records
+
+
+@pytest.mark.parametrize("name,field,value", [
+    ("layer-bounds", "exact_match", False),
+    ("count-symbols", "block_name", "PV"),
+    ("inspect-curves", "limit", 3),
+])
+def test_bound_selector_stays_out_of_closed_read_inputs(monkeypatch, project_read_lane, name, field, value):
+    tool = tool_override(monkeypatch, name=name, params={
+        "type": "object", "properties": {field: {}}, "additionalProperties": False,
+    })
+    seen = []
+    def read(intake, params):
+        seen.append(dict(params))
+        return ok_envelope(name, "1.0.0", {"count": 1}, None, 1)
+    install_tool_body(monkeypatch, read)
+    supplied = {field: value, "drawing_id": str(D1)}
+    result = request(project_read_lane, tool=tool, params=supplied)
+    assert result.status_code == 200, result.text
+    assert seen == [{field: value}]
+    assert result.json()["project_context"]["drawing_id"] == str(D1)
+    assert request(project_read_lane, tool=tool, params={**supplied, "extra": 1}).status_code == 400
+    assert request(project_read_lane, tool=tool, params={**supplied, "drawing_id": str(D2)}).status_code != 200
+    assert len(seen) == 1

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
+import { studioFeatureNote } from '../site/studioAvailability.js'
 
 // LCERR: the browser's own words for "nothing answered on this port" (Chromium, Firefox, Safari). Unreachable already
 // says AutoCAD was not found, so these add nothing. Other failures use the shared error copy.
@@ -24,15 +25,16 @@ export default function LocalCadConnect({ status = 'stopped', drawing, summary, 
   const label = status === 'connected' ? `Connected to AutoCAD · ${drawing ?? ''}`
     : status === 'connecting' ? 'AutoCAD: connecting'
       : status === 'waiting' ? 'AutoCAD: waiting for a drawing'
-        : status === 'stopped' ? 'AutoCAD: not connected'
+        : status === 'stopped' ? ''
           : denied ? "Allow this site to reach apps on this computer in your browser's site settings"
             : 'AutoCAD: not found on this computer'
   return <div className="local-cad-connect" style={{ display: 'inline-flex', order: 3, alignItems: 'center', gap: 6, minWidth: 0, maxWidth: 400, flexShrink: 1, whiteSpace: 'nowrap' }}>
     <button type="button" className="chip-act" data-testid="local-cad-connect"
       style={{ flexShrink: 0 }}
-      onClick={connect ? onConnect : onDisconnect}>{connect ? 'Connect AutoCAD' : 'Disconnect'}</button>
+      title={connect ? studioFeatureNote('cad.connect-autocad') || undefined : undefined}
+      onClick={connect ? onConnect : onDisconnect}>{connect ? 'AutoCAD live view' : 'Disconnect'}</button>
     <span aria-live="polite" style={{ fontSize: 'var(--leaf-size-caption)', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
-      <span data-testid="local-cad-status">{label}</span>
+      <span data-testid="local-cad-status" title={connect ? 'AutoCAD: not connected' : undefined}>{label}</span>
       {error && !(status === 'unreachable' && UNREACHED.test(error)) && <span>{`. The last update failed: ${humanizeError(error)}`}</span>}
       {(textPending || (error && /text|font|glyph|label/i.test(error))) && <span> · labels unavailable</span>}
       <span data-testid="local-cad-summary" style={{ marginLeft: summary || truncated ? 6 : 0 }}>{summary ?? ''}{truncated ? ' (showing the first 200,000 points)' : ''}</span>

@@ -1,0 +1,40 @@
+{
+  "name": "label-writer",
+  "version": "1.0.0",
+  "description": "Add a text label at the drawing origin.",
+  "params": {
+    "type": "object",
+    "properties": {
+      "label": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "label"
+    ],
+    "additionalProperties": false
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "added": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "added"
+    ]
+  },
+  "capabilities": [
+    "drawing.read",
+    "net.http:https://example.invalid"
+  ],
+  "hosts": {
+    "min_release": 2023,
+    "min_host_api": 1
+  },
+  "timeout_ms": 30000,
+  "idempotent": false,
+  "main_csx": "using Autodesk.AutoCAD.DatabaseServices;\nusing Autodesk.AutoCAD.Geometry;\nusing Newtonsoft.Json.Linq;\nCtx.Cancel.ThrowIfCancellationRequested();\nusing (var tr = Ctx.Db.TransactionManager.StartTransaction()) {\n    var bt = (BlockTable)tr.GetObject(Ctx.Db.BlockTableId, OpenMode.ForRead);\n    var ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);\n    var text = new DBText();\n    text.Position = Point3d.Origin;\n    text.Height = 12;\n    text.TextString = Ctx.Args.Value<string>(\"label\") ?? \"PV\";\n    ms.AppendEntity(text);\n    tr.AddNewlyCreatedDBObject(text, true);\n    tr.Commit();\n}\nreturn new { added = 1 };\n",
+  "lib": {}
+}

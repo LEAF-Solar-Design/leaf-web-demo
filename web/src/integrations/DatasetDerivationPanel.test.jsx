@@ -61,6 +61,119 @@ it('builds explicit observation windows, partitions and quotient reasons without
     computed: [{ as: 'days', numerator: 'open_count', denominator: 'row_count', multiplier: 7, reason_as: 'days_reason' }] })
 })
 
+const domainCases = [
+  ['owner_handle', 'declared_owner', 'Owner activity'],
+  ['asset_code', 'catalog_code', 'Equipment totals'],
+  ['member_key', 'roster_key', 'Membership counts'],
+]
+async function fillDomain(props, sourceField, scopeField, outputTitle) {
+  const source = { ...dataset, fields: [...fields, field(sourceField, 'identifier')] }
+  const scopeDataset = { ...dataset, reference: { ...reference, id: 'declared_scope' }, title: 'Declared scope',
+    fields: [field(scopeField, 'identifier'), field('alternate_key', 'identifier'), field('scope_text', 'text'), field('rank', 'count')] }
+  props.datasets = [source, scopeDataset]
+  const view = render(<DatasetDerivationPanel {...props} />)
+  await fill()
+  change('Output title', outputTitle)
+  fireEvent.click(within(screen.getByRole('group', { name: 'Group fields' })).getByLabelText(sourceField))
+  fireEvent.click(within(screen.getByRole('group', { name: 'Group fields' })).getByLabelText('repo'))
+  change('Ordered scope dataset', JSON.stringify([scopeDataset.reference.id, scopeDataset.reference.version, scopeDataset.reference.digest]))
+  change(`Scope field for ${sourceField}`, scopeField)
+  change('Scope field for repo', 'scope_text')
+  change('Scope order field', 'rank')
+  return { view, source, scopeDataset, caseLabel: `Ignore ASCII letter case for ${sourceField} matched to ${scopeField} (preserves original spelling)` }
+}
+async function submitDomain(props, calls) {
+  fireEvent.click(screen.getByRole('button', { name: 'Create derived dataset' }))
+  await waitFor(() => expect(props.onCreated).toHaveBeenCalledTimes(calls))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Create derived dataset' })).toBeEnabled())
+  return props.client.createDatasetDerivation.mock.calls[calls - 1][1]
+}
+
+it.each(domainCases)('opts in only the selected identifier mapping for %s and %s (%s)', async (sourceField, scopeField, outputTitle) => {
+  const { props } = setup()
+  const { caseLabel } = await fillDomain(props, sourceField, scopeField, outputTitle)
+  const originalDatasets = JSON.parse(JSON.stringify(props.datasets))
+  expect(screen.getByLabelText(caseLabel)).not.toBeChecked()
+  expect(screen.getAllByRole('checkbox', { name: /Ignore ASCII letter case/ })).toHaveLength(1)
+  const exact = await submitDomain(props, 1)
+  expect(exact.plan.domain).toEqual({ keys: [
+    { group_field: sourceField, domain_field: scopeField }, { group_field: 'repo', domain_field: 'scope_text' },
+  ], order_field: 'rank' })
+  fireEvent.click(screen.getByLabelText(caseLabel))
+  const optedIn = await submitDomain(props, 2)
+  expect(optedIn).toEqual({ ...exact, plan: { ...exact.plan, domain: { ...exact.plan.domain, keys: [
+    { group_field: sourceField, domain_field: scopeField, comparison: 'ascii_case_insensitive' },
+    { group_field: 'repo', domain_field: 'scope_text' },
+  ] } } })
+  expect(optedIn.output.title).toBe(outputTitle)
+  expect(props.datasets).toEqual(originalDatasets)
+  expect(screen.getByText('Only the declared scope tuples are included. Zero counts require complete admitted inputs.')).toBeInTheDocument()
+  fireEvent.click(screen.getByLabelText(caseLabel))
+  expect(await submitDomain(props, 3)).toEqual(exact)
+})
+
+it('keeps identifier-to-text and text-to-identifier mappings exact', async () => {
+  const { props } = setup()
+  const { caseLabel } = await fillDomain(props, 'asset_key', 'scope_key', 'Exact mixed types')
+  fireEvent.click(screen.getByLabelText(caseLabel))
+  change('Scope field for asset_key', 'scope_text')
+  change('Scope field for repo', 'scope_key')
+  expect(screen.queryByRole('checkbox', { name: /Ignore ASCII letter case/ })).not.toBeInTheDocument()
+  expect((await submitDomain(props, 1)).plan.domain.keys).toEqual([
+    { group_field: 'asset_key', domain_field: 'scope_text' }, { group_field: 'repo', domain_field: 'scope_key' },
+  ])
+  change('Scope field for asset_key', 'scope_key')
+  expect(screen.getByLabelText(caseLabel)).not.toBeChecked()
+})
+
+it('keeps comparison choices independent across eligible mappings', async () => {
+  const { props } = setup()
+  const { caseLabel } = await fillDomain(props, 'account_key', 'scope_key', 'Independent mappings')
+  fireEvent.click(within(screen.getByRole('group', { name: 'Group fields' })).getByLabelText('identity'))
+  change('Scope field for identity', 'alternate_key')
+  fireEvent.click(screen.getByLabelText(caseLabel))
+  const otherLabel = 'Ignore ASCII letter case for identity matched to alternate_key (preserves original spelling)'
+  expect(screen.getByLabelText(otherLabel)).not.toBeChecked()
+  expect((await submitDomain(props, 1)).plan.domain.keys).toEqual([
+    { group_field: 'account_key', domain_field: 'scope_key', comparison: 'ascii_case_insensitive' },
+    { group_field: 'repo', domain_field: 'scope_text' }, { group_field: 'identity', domain_field: 'alternate_key' },
+  ])
+  fireEvent.click(screen.getByLabelText(otherLabel))
+  change('Scope field for identity', 'scope_key'); change('Scope field for identity', 'alternate_key')
+  expect(screen.getByLabelText(otherLabel)).not.toBeChecked()
+  expect(screen.getByLabelText(caseLabel)).toBeChecked()
+})
+
+it.each(['mapping', 'grouping', 'source', 'domain', 'operation', 'metadata'])('clears opted-in comparison after a %s change', async changeKind => {
+  const { props } = setup()
+  const { view, source, scopeDataset, caseLabel } = await fillDomain(props, 'device_key', 'scope_key', 'Device counts')
+  fireEvent.click(screen.getByLabelText(caseLabel))
+  const toggleGroup = () => fireEvent.click(within(screen.getByRole('group', { name: 'Group fields' })).getByLabelText('device_key'))
+  if (changeKind === 'mapping') {
+    change('Scope field for device_key', 'alternate_key'); change('Scope field for device_key', 'scope_key')
+  } else if (changeKind === 'grouping') {
+    toggleGroup(); toggleGroup()
+  } else if (changeKind === 'source') {
+    change('Source dataset', ''); change('Source dataset', JSON.stringify([reference.id, reference.version, reference.digest]))
+    toggleGroup(); change('Scope field for device_key', 'scope_key'); change('Window ID', 'all')
+    fireEvent.click(within(screen.getByRole('group', { name: 'Count distinct identities by' })).getByLabelText('identity'))
+  } else if (changeKind === 'domain') {
+    change('Ordered scope dataset', '')
+    change('Ordered scope dataset', JSON.stringify([scopeDataset.reference.id, scopeDataset.reference.version, scopeDataset.reference.digest]))
+    change('Scope field for device_key', 'scope_key'); change('Scope field for repo', 'scope_text')
+  } else if (changeKind === 'operation') {
+    change('Operation', 'window_count'); change('Operation', 'group_count')
+    fireEvent.click(within(screen.getByRole('group', { name: 'Count distinct identities by' })).getByLabelText('identity'))
+  } else {
+    const changedScope = { ...scopeDataset, fields: scopeDataset.fields.map(item => item.id === 'scope_key' ? field('scope_key', 'text') : item) }
+    view.rerender(<DatasetDerivationPanel {...props} datasets={[source, changedScope]} />)
+    expect(screen.queryByLabelText(caseLabel)).not.toBeInTheDocument()
+    view.rerender(<DatasetDerivationPanel {...props} />)
+  }
+  expect(screen.getByLabelText(caseLabel)).not.toBeChecked()
+  expect((await submitDomain(props, 1)).plan.domain.keys.every(key => !('comparison' in key))).toBe(true)
+})
+
 it('validates strict window names and nonmissing count identities before a write', async () => {
   const { props } = setup(); render(<DatasetDerivationPanel {...props} />); await fill()
   change('Window ID', 'invalid/id')

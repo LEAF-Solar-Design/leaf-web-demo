@@ -1,0 +1,33 @@
+{
+  "name": "write-without-capability",
+  "version": "1.0.0",
+  "description": "This refusal fixture exercises write without capability handling.",
+  "entry": "main.csx",
+  "family": "panel-checks",
+  "params": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "returns": {
+    "type": "object"
+  },
+  "capabilities": [
+    "drawing.read"
+  ],
+  "hosts": {
+    "min_release": 2023,
+    "min_host_api": 1
+  },
+  "timeout_ms": 30000,
+  "idempotent": false,
+  "provenance": {
+    "author": "agent",
+    "session": "branch-scripthost-20261029-s12",
+    "created": "2026-10-29T00:00:00Z",
+    "modified": "2026-10-29T00:00:00Z"
+  },
+  "review": {
+    "status": "reviewed"
+  }
+}

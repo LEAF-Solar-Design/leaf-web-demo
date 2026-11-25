@@ -219,3 +219,75 @@ def test_lookup_failure_preserves_name_in_text_rule(probe, monkeypatch, capsys):
     assert probe.run({}, lambda: status) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"]["unexplained"] == []
+
+
+# Production activation svbp-1ceb459b-1123 (2026-11-24) refused on this exact shape: 0104 creates
+# project_solve_piece_exchanges with LIKE project_solve_exchanges INCLUDING ..., so none of the
+# 19 columns schema_status reports missing is named in the migration text.
+PIECE_TABLE = "project_solve_piece_exchanges"
+PIECE_PENDING = ["0104_project_solve_piece_exchanges.sql"]
+PIECE_COLUMNS = sorted([
+    "candidate_bytes", "candidate_sha256", "classification", "created_at", "frame_id", "grant_ref",
+    "parent_intake_sha256", "phase", "proof_bytes", "proof_sha256", "request_bytes", "request_sha256",
+    "response_bytes", "response_sha256", "sender_attempt", "sender_worker", "solver_endpoint",
+    "solver_version", "updated_at",
+])
+PIECE_DEFECTS = [f"{PIECE_TABLE}.{column}" for column in PIECE_COLUMNS]
+
+
+def piece_status(extra=None):
+    missing = {PIECE_TABLE: list(PIECE_COLUMNS)}
+    missing.update(extra or {})
+    return {"ok": False, "missing_migrations": list(PIECE_PENDING),
+            "migration_hash_drift": [], "missing": missing}
+
+
+def test_like_table_columns_explained_when_relation_absent(probe):
+    assert (MIGRATIONS / PIECE_PENDING[0]).read_text(encoding="utf-8").count("LIKE project_solve_exchanges")
+    assert probe._unexplained_defects(
+        piece_status(), PIECE_PENDING, absent_tables={PIECE_TABLE}) == []
+
+
+def test_like_table_columns_flagged_when_relation_exists(probe):
+    # CREATE TABLE IF NOT EXISTS would not add columns to an existing table.
+    assert probe._unexplained_defects(
+        piece_status(), PIECE_PENDING, absent_tables=set()) == PIECE_DEFECTS
+    assert probe._unexplained_defects(piece_status(), PIECE_PENDING) == PIECE_DEFECTS
+
+
+def test_genuinely_unexplained_column_still_flagged(probe):
+    status = piece_status({"projects": ["not_created_by_any_pending_migration"]})
+    assert probe._unexplained_defects(
+        status, PIECE_PENDING, absent_tables={PIECE_TABLE, "projects"}) == [
+            "projects.not_created_by_any_pending_migration"]
+
+
+def test_absent_table_without_pending_creation_flagged(probe):
+    assert probe._unexplained_defects(
+        piece_status(), ["0101_service_browser_sessions.sql"],
+        absent_tables={PIECE_TABLE}) == PIECE_DEFECTS
+
+
+def test_table_absence_lookup_is_one_batch_and_fails_closed(probe, monkeypatch):
+    db, cursor = fake_database(monkeypatch, absent={PIECE_TABLE})
+    assert probe._missing_table_absence(piece_status()) == {PIECE_TABLE}
+    cursor.execute.assert_called_once_with(
+        "SELECT name FROM unnest(%(names)s::text[]) AS name "
+        "WHERE to_regclass(quote_ident(current_schema()) || '.' || "
+        "quote_ident(name)) IS NULL", {"names": [PIECE_TABLE]})
+    cursor.execute.side_effect = RuntimeError("private-lookup-details")
+    assert probe._missing_table_absence(piece_status()) == set()
+    db.get_pool.reset_mock()
+    assert probe._missing_table_absence({"missing": {}}) == set()
+    db.get_pool.assert_not_called()
+
+
+@pytest.mark.parametrize("absent,expected", [({PIECE_TABLE}, 0), (set(), 10)],
+                         ids=["relation-absent", "relation-present"])
+def test_run_exact_0104_production_case(probe, monkeypatch, capsys, absent, expected):
+    monkeypatch.setattr(probe, "_CHECKS", ())
+    fake_database(monkeypatch, catalog={}, absent=absent)
+    assert probe.run({}, piece_status) == expected
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert result["schema"]["pending"] == PIECE_PENDING
+    assert result["schema"]["unexplained"] == ([] if expected == 0 else PIECE_DEFECTS)

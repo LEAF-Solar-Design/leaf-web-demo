@@ -3289,26 +3289,69 @@
           "maxLength": 128
         },
         "lineage": {
-          "type": "object",
-          "properties": {
-            "connection_id": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 128,
-              "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "connection_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\\s\\S])"
+                },
+                "operation_ref": {
+                  "$ref": "#/$defs/IntegrationRefV1"
+                },
+                "transform_ref": {
+                  "$ref": "#/$defs/IntegrationRefV1"
+                }
+              },
+              "required": [
+                "connection_id",
+                "operation_ref"
+              ],
+              "additionalProperties": false
             },
-            "operation_ref": {
-              "$ref": "#/$defs/IntegrationRefV1"
-            },
-            "transform_ref": {
-              "$ref": "#/$defs/IntegrationRefV1"
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "project_material"
+                },
+                "material_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                },
+                "connection_id": {
+                  "not": {}
+                },
+                "operation_ref": {
+                  "not": {}
+                },
+                "transform_ref": {
+                  "not": {}
+                }
+              },
+              "required": [
+                "kind",
+                "material_id",
+                "sha256",
+                "byte_length"
+              ],
+              "additionalProperties": false
             }
-          },
-          "required": [
-            "connection_id",
-            "operation_ref"
-          ],
-          "additionalProperties": false
+          ]
         },
         "retention_days": {
           "type": "integer",
@@ -3891,6 +3934,31 @@
             }
           ]
         },
+        "query_coverage": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "complete_materialization"
+            },
+            "matching_rows": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": [
+            "kind",
+            "matching_rows",
+            "offset"
+          ],
+          "additionalProperties": false
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -4001,6 +4069,49 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 1000
+                },
+                "row_grouping": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "provider_pairs"
+                    },
+                    "pair_key_field": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                    },
+                    "provider_field": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?![\\s\\S])"
+                    },
+                    "providers": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 120
+                        },
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 120
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "pair_key_field",
+                    "provider_field",
+                    "providers"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [

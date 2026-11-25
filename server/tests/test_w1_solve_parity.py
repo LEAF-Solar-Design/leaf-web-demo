@@ -113,7 +113,7 @@ def test_studio_solve_reproduces_plugin_strings(graph, monkeypatch, group):
     case = rooftop_case(graph, group, monkeypatch)
     graph, _, _ = case
     result = commit.commit_solve(graph, {"expected_rev": graph["rev"]},
-                                 candidate=candidate(case))
+                                 candidate=candidate(case), plugin_parity=True)
     reopened = deserialize_graph(serialize_graph(result))
     handles = {p["id"]: p["provenance"]["source_handle"] for p in reopened["panels"]}
     actual = [[handles[ref] for ref in string["ordered_panel_refs"]]
@@ -180,5 +180,5 @@ def test_final_grid_order_fails_closed(graph, monkeypatch, defect):
     before = copy.deepcopy(graph)
     proposal = candidate(case)
     with pytest.raises(GraphValidationError, match="^INVALID_FINAL_GRID_ORDER: "):
-        commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=proposal)
+        commit.commit_solve(graph, {"expected_rev": graph["rev"]}, candidate=proposal, plugin_parity=True)
     assert graph == before

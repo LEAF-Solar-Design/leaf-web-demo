@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import './resultObjectLinks.css'
+import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
-import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
+import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
@@ -28,6 +29,7 @@ function errParts(e) {
 }
 
 function isRetryable(e) {
+  if (requiresReconciliation(e) || compactRefusal(e)) return false
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
@@ -404,6 +406,9 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
 // The calm quota/entitlement variants keep the broker's own sentence — a
 // budget/plan boundary is not a failure to re-phrase.
 function ErrorLine({ err, onRetry, retry, quota, toolName }) {
+  const refusal = compactRefusal(err)
+  if (refusal) return <div className="inline-error" role="alert" data-error-code={refusal.code}>{refusal.text}</div>
+  if (requiresReconciliation(err)) return <div className="inline-error" role="alert">{err}</div>
   const { message, code, nextAction, actor } = errParts(err)
   return (
     <div className={`inline-error ${quota ? 'quota' : ''}`} role="alert">
@@ -496,7 +501,7 @@ export function versionLabel(version) {
   return `drawing version${seq === null ? '' : ` ${seq}`}${id === null ? '' : ` (${id})`}`
 }
 
-export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density,
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density, onSelectModuleSet,
   solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save, stale = false }) {
   const [announcement, setAnnouncement] = useState('')
   const announcementFrame = useRef(null)
@@ -512,6 +517,11 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // not a failure to alarm about — render it in the amber calm posture (matching
   // QuotaCard), never red 'Failed'. Only this error_code softens; all others stay red.
   const isQuota = !!(result && !result.ok && result.error && result.error.error_code === 'quota_exceeded')
+  const placementReceipt = result?.result?.graph_commit
+  const deterministicPlacement = result?.ok === true && result.tool === 'solar-add-all-inverters' &&
+    placementReceipt?.tool === result.tool && placementReceipt.engine === 'deterministic_fallback' &&
+    placementReceipt.producing_attempt?.job_id === result.job_id
+
   // The coarse DAILY run-count limit (HTTP 429) rides in with the same quota
   // error_code but a distinct `quota_kind` — label it honestly ("Daily limit")
   // rather than "Spend cap". Still calm amber.
@@ -525,7 +535,8 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
   // is visible. Skipped while typing in a field and while a run is in flight;
   // the condition mirrors the `retry` props on the two ErrorLine sites below.
   const canRetryKey = !running && !!onRetry &&
-    (!!error || !!(result && result.error && !isEnt && isRetryable(result.error)))
+    !requiresReconciliation(error) && !requiresReconciliation(result?.error) &&
+    ((!!error && !compactRefusal(error)) || !!(result && result.error && !isEnt && isRetryable(result.error)))
   useEffect(() => {
     if (!canRetryKey) return undefined
     const onKey = (e) => {
@@ -567,11 +578,15 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
               {result.ok ? 'Passed' : (isDailyQuota ? 'Daily limit' : (isQuota ? 'Spend cap' : (isEnt ? 'Plan' : 'Failed')))}
             </span>
             <span className="result-tool">{result.tool} <span className="dim">{versionLabel(result.version)}</span></span>
+            {deterministicPlacement && <span className="degraded">Deterministic fallback</span>}
             {result.degraded_mode && (
               <span className="degraded">local fallback</span>
             )}
           </div>
 
+          {deterministicPlacement && <ResultJsonDownload result={result} />}
+          {result.ok && result.tool === 'count-modules' && <ModuleSetPicker key={result.job_id || JSON.stringify(result.result?.sets)}
+            data={result.result} drawingKey={result.origin?.drawingKey} running={running} onSelect={onSelectModuleSet} />}
           {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
             projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} navigation={navigation} stale={stale} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}

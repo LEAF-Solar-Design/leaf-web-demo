@@ -213,14 +213,14 @@ it('places the signed-out Solar CAD control after + inside the actual toolbar an
   expect(text(declaration('localCadEligible').node.init)).toBe('!!studioGround && drafting && !projectMode')
   expect(text(declaration('projectMode').node.init)).toBe('!mock && !!openProjectId')
   render(<Harness />)
-  expect(screen.getByRole('button', { name: 'Connect AutoCAD' }).closest('.viewer-toolbar')).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'AutoCAD live view' }).closest('.viewer-toolbar')).toBeTruthy()
   expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
 })
 
 it.each([true, false])('Connect leaves the canvas alone; Disconnect restores prior drawing=%s', async hasPrior => {
   render(<Harness initialIntake={hasPrior ? prior : null} />)
   const transport = transports.at(-1)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   expect(apply).not.toHaveBeenCalled()
   expect(observed.drawing.shown).toBe(hasPrior ? prior : null)
   act(() => transport.update(bridgeIntake))
@@ -239,11 +239,11 @@ it.each([true, false])('Connect leaves the canvas alone; Disconnect restores pri
 
 it('restores on transport stop but a superseding drawing load discards the snapshot', () => {
   render(<Harness initialIntake={prior} />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   act(() => transports.at(-1).stop())
   expect(observed.drawing.shown).toBe(prior)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   const next = { ...prior, dwg: 'upload.dxf' }
   act(() => {
@@ -257,7 +257,7 @@ it('restores on transport stop but a superseding drawing load discards the snaps
 
 it('a cloud version wins without losing its newly seated version state', () => {
   render(<Harness initialIntake={prior} />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   const next = { ...prior, dwg: 'cloud.dwg' }
   const version = { drawing_id: 'cloud', version: 8, head: 8, latest: 9 }
@@ -280,7 +280,7 @@ it('Disconnect restores the historical preview, history panel, failures and laye
     observed.drawing.actions.markRefreshFailure({ drawing_id: 'prior', message: 'refresh failed' })
   })
   const before = observed.drawing.captureSnapshot()
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   expect(screen.queryByText('Version 1')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
@@ -291,7 +291,7 @@ it('Disconnect restores the historical preview, history panel, failures and laye
 
 it('Disconnect after a failed load restores its error and Retry UI', () => {
   render(<Harness initialError="Network unavailable" />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   expect(screen.queryByRole('alert')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
@@ -304,7 +304,7 @@ it('restores an engine view over its original base, so closing the engine reveal
   const engineIntake = { source: 'engine', dwg: 'engine.dxf', documentId: 'engine.dxf', layers: ['Engine'] }
   render(<Harness initialIntake={prior} initialActiveIntake={engineIntake} />)
   const navigation = observed.viewHistoryRef.current
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   expect(observed.activeIntake).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
@@ -317,7 +317,7 @@ it('restores an engine view over its original base, so closing the engine reveal
 
 it('bridge loss restores the prior drawing while polling continues; recovery takes a fresh snapshot', () => {
   render(<Harness initialIntake={prior} />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   const transport = transports.at(-1)
   act(() => transport.update({ ...bridgeIntake, truncated: true }))
   expect(observed.bridge.localCadStatus.truncated).toBe(true)
@@ -336,7 +336,7 @@ it('bridge loss restores the prior drawing while polling continues; recovery tak
 
 it('keeps a hidden layer hidden across two revisions and resets visibility for an epoch replacement', () => {
   render(<Harness initialIntake={prior} />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   const transport = transports.at(-1)
   act(() => transport.update(bridgeIntake))
   act(() => observed.drawing.actions.setVisibleLayers({ Live: false }))
@@ -352,7 +352,7 @@ it('disables engine save, edit, undo and redo while AutoCAD is seated and restor
   for (const name of ['Engine edit', 'Engine undo', 'Engine redo', 'Engine save']) {
     expect(screen.getByRole('button', { name }).disabled).toBe(false)
   }
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   act(() => transports.at(-1).update(bridgeIntake))
   for (const name of ['Engine edit', 'Engine undo', 'Engine redo', 'Engine save']) {
     const button = screen.getByRole('button', { name })
@@ -404,7 +404,7 @@ it.each([false, true])('an initial load completing after Connect (remembered=%s)
   if (remembered) localStorage.setItem('leaf.localCad.connect', '1')
   render(<Harness />)
   if (remembered) await act(async () => {})
-  else fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  else fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   const transport = transports.at(-1)
   const initialGeneration = observed.requestedDrawingIdRef.loadGeneration ?? 0
   act(() => transport.update(bridgeIntake))
@@ -440,7 +440,7 @@ it('honors a remembered choice only on eligible surfaces and starts once under S
 
 it('reconnects after leaving a drafting surface while preserving the Connect choice', async () => {
   const view = render(<Harness />)
-  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  fireEvent.click(screen.getByRole('button', { name: 'AutoCAD live view' }))
   const transport = transports.at(-1)
   view.rerender(<Harness drafting={false} />)
   expect(transport.snapshot().running).toBe(false)

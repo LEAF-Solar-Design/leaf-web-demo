@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -115,6 +116,45 @@ class RegistrationTests(unittest.TestCase):
         self.assertFalse(registrar.available)
         self.assertTrue(registrar._stop.is_set())
         self.assertFalse(registrar._thread.is_alive())
+
+    def test_inflight_heartbeat_cannot_restore_availability_after_close(self) -> None:
+        entered = threading.Event()
+        resume = threading.Event()
+        armed = threading.Event()
+
+        class DeferredTransport(RecordingTransport):
+            def post(self, route, body):
+                super().post(route, body)
+                if armed.is_set() and route == "/v1/hosts/heartbeat":
+                    entered.set()
+                    if not resume.wait(10):
+                        raise RegistrationError("test heartbeat was not released")
+
+        registrar = HostRegistrar(self.config(), transport=DeferredTransport())
+        errors = []
+
+        def heartbeat():
+            try:
+                registrar.heartbeat_once()
+            except Exception as exc:
+                errors.append(exc)
+
+        registrar.start()
+        armed.set()
+        worker = threading.Thread(target=heartbeat)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            registrar.close()
+            resume.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertFalse(registrar.available)
+        finally:
+            resume.set()
+            worker.join(5)
+            registrar.close()
 
     def test_invalid_configuration_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "HTTPS"):

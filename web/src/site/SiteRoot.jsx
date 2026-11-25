@@ -31,6 +31,7 @@ import { activeCastForScene, sceneAllowsMarketingEject, sceneForPath } from './r
 import { StudioGroundContext } from './studioGround.js'
 import StageScene from './StageScene.jsx'
 import { enterWorkspace } from './LandingCast.jsx'
+import { APP_ONLY_HOSTS, MARKETING_ORIGIN } from './appHosts.js'
 import ContinuityStore from './ContinuityStore.jsx'
 import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerProvider.jsx'
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
@@ -60,13 +61,6 @@ const isEditable = (el) =>
 // App hosts expose the guest-first cover locally. Only the sheets hub
 // redirects to the indexable marketing site (contract/FRONT-DOOR.md).
 // Callback and legacy deep-link boot decisions remain in authBoot.js.
-const APP_ONLY_HOSTS = new Set([
-  'leaf-platform-web.vercel.app',
-  'app.leafdesign.ai',
-  'platform.leafdesign.ai',
-  'platform-staging.leafdesign.ai',
-])
-const MARKETING_ORIGIN = 'https://www.leafautomation.ai'
 // Accepted destinations match SheetsPage's SHEET_CODES without eagerly
 // importing the lazy sheets component and its rendering dependencies.
 const SHEET_TARGETS = new Set(['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201', 's-501'])

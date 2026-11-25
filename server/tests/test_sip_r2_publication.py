@@ -146,6 +146,45 @@ def test_sip_r2_exact_byte_digest_failures(publication):
     refused("SIP_R1_INTAKE_UNAVAILABLE", lambda: service._read_intake(s.binding))
 
 
+@pytest.mark.parametrize("attribute,status,expected", [
+    ("status_code", 503, 503), ("code", 404, 404),
+    ("status_code", "private-status", None), ("status_code", True, None),
+    ("status_code", 900, None), (None, None, None),
+])
+def test_sip_r2_intake_failure_diagnostic_is_sanitized(
+        publication, monkeypatch, caplog, attribute, status, expected):
+    s = publication
+    error = OSError("private exception payload https://private.invalid/?token=private-token")
+    if attribute is not None:
+        setattr(error, attribute, status)
+
+    def failed_backend(_tenant):
+        raise error
+
+    monkeypatch.setattr(service.write_loop, "upload_backend_for_tenant", failed_backend)
+    with caplog.at_level("WARNING", logger=service.__name__):
+        refused("SIP_R1_INTAKE_UNAVAILABLE", lambda: service._read_intake(s.binding))
+    records = [record for record in caplog.records if record.name == service.__name__]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "solar_project_intake_unavailable exception_type=OSError "
+        f"http_status={expected} intake_key_sha256="
+        + sha256(s.version.intake_ref.encode("utf-8")).hexdigest())
+    assert records[0].exc_info is None
+    assert s.version.intake_ref not in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_sip_r2_non_bytes_intake_is_logged_without_value(publication, caplog):
+    s = publication
+    s.blobs[s.version.intake_ref] = "private non-bytes payload"
+    with caplog.at_level("WARNING", logger=service.__name__):
+        refused("SIP_R1_INTAKE_UNAVAILABLE", lambda: service._read_intake(s.binding))
+    assert "exception_type=NonBytesReturn http_status=None" in caplog.text
+    assert "private" not in caplog.text
+    assert s.version.intake_ref not in caplog.text
+
+
 def test_sip_r2_strict_json_rejection(publication):
     s = publication
     for raw in (b'[]', b'{"x":1,"x":2}', b'{"x":NaN}', b'{"x":Infinity}',

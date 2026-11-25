@@ -32,9 +32,12 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.routing import iter_route_contexts
+from starlette.routing import Match
 
 import dependency_health
 import demo_sessions
+import investor_demo
 import deps
 import conversations as conversation_crud
 import ios_ship_provider as ios_ship_provider_client
@@ -69,6 +72,7 @@ from routers import (
     ios_ship_provider as ios_ship_provider_router,
     ios_surface,
     lab_router,
+    estimator_surface,
     jobs as jobs_router,
     mcp_gateway,
     integration_tools,
@@ -83,6 +87,7 @@ from routers import (
     sessions,
     skills,
     site,
+    investor_demo as investor_exchange,
     telemetry,
     templates as templates_router,
     tenant,
@@ -115,6 +120,18 @@ class DemoSessionBoundaryMiddleware:
         return matches[0] if len(matches) == 1 else None
 
     async def __call__(self, scope, receive, send):
+        if scope.get("type") in {"http", "websocket"}:
+            refusal = _investor_route_boundary(scope, self.router)
+            if refusal is not None:
+                if scope["type"] == "websocket":
+                    return await send({"type": "websocket.close", "code": 1008})
+                return await refusal(scope, receive, send)
+        # The exchange rejects all credential legs in their original form,
+        # before either credential middleware can consume or replace one.
+        if (scope.get("type") == "http" and scope.get("method") == "POST"
+                and scope.get("path") == investor_exchange.PATH
+                and any(k.lower() in investor_exchange.CREDENTIALS for k, _ in scope["headers"])):
+            return await investor_exchange.credential_refusal()(scope, receive, send)
         if scope.get("type") in {"http", "websocket"} and any(
                 key.lower() == b"x-demo-session"
                 for key, _ in scope.get("headers", [])):
@@ -161,7 +178,40 @@ def _cors_origins() -> list[str]:
     return ["*"] if not deps.auth_live() else []
 
 
+def _investor_route_boundary(scope, router):
+    if os.environ.get("LEAF_INVESTOR_DEMO_ENABLED") != "1" or not deps.auth_live():
+        return None
+    headers = scope.get("headers", ())
+    authorizations = [value.decode("latin-1") for name, value in headers
+                      if name.lower() == b"authorization"]
+    for authorization in authorizations:
+        parts = authorization.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            header, peek = investor_demo.peek_unverified(parts[1].strip())
+            if investor_demo.is_investor_token(header, peek):
+                break
+    else:
+        return None
+
+    # Match the first full route before CORS, credential translation or body
+    # parsing can answer. The verifier independently checks the dispatched route.
+    detail = "investor demo sessions cannot use this route"
+    if scope["type"] == "http" and scope["method"] == "GET":
+        template = next((route.path for route in iter_route_contexts(router.routes)
+                         if route.matches(scope)[0] == Match.FULL), None)
+        if ("GET", template) in investor_demo.ROUTE_ALLOWLIST:
+            if len(authorizations) == 1 and not any(
+                    name.lower() == b"x-dispatch-secret" for name, _ in headers):
+                return None
+            detail = "ambiguous investor demo credentials"
+    from envelopes import ErrorCode, error_response
+    response = error_response(ErrorCode.FORBIDDEN, detail, retryable=False, status_code=403)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 app = FastAPI(title="Leaf Web Demo — Lane D backend", version="1.0.0")
+app.add_middleware(investor_demo.RequestContextMiddleware)
 
 _customization_worker_stop: threading.Event | None = None
 _customization_worker_thread: threading.Thread | None = None
@@ -169,6 +219,14 @@ _campaign_release_worker_stop: threading.Event | None = None
 _campaign_release_worker_thread: threading.Thread | None = None
 _campaign_release_worker_lock = threading.Lock()
 _ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = None
+
+
+@app.on_event("startup")
+def initialize_investor_demo() -> None:
+    try:
+        investor_demo.provision_at_startup()
+    except Exception:
+        pass
 
 
 @app.on_event("startup")
@@ -411,6 +469,11 @@ app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoint
 from routers import project_drawings  # noqa: E402
 app.middleware("http")(project_drawings.no_store_responses)
 app.include_router(project_drawings.router)
+from routers import x07_profiles  # noqa: E402
+app.middleware("http")(x07_profiles.no_store_responses)
+app.include_router(x07_profiles.router)
+from routers import project_physical  # noqa: E402
+app.include_router(project_physical.router)
 app.include_router(solar_terrain.router)  # Head-bound Ground terrain preview operations
 app.include_router(solar_tracker_rows.router)
 app.include_router(solar_modules.router)
@@ -427,12 +490,14 @@ app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (s
 app.include_router(devices.router)  # Device bridge: tenant management and signed outbound agent polling
 app.include_router(device_relay.router)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
+app.include_router(investor_exchange.router)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)
 app.include_router(templates_router.router)  # Wave C solar template beta, fail-closed behind LEAF_SOLAR_TEMPLATE_BETA_ENABLED
 app.include_router(overlay.router)  # T1 runtime overlay: propose a preview, decide it, read the resolved tokens
 app.include_router(ios_ship.router)  # Wave D one-shot iOS: readiness, one reviewed idempotent launch, status, receipt
 app.include_router(lab_router.router)  # SEL-003: Lab surface behind LEAF_LAB_SURFACE_ENABLED
+app.include_router(estimator_surface.router)
 app.include_router(campaigns.router)
 app.include_router(campaign_conversation.router)
 app.include_router(campaign_mcp.router)

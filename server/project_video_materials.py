@@ -101,9 +101,33 @@ def _process_diagnostic(name, returncode, stderr):
             reason = 'process_failed'
     except OSError:
         pass
-    return dict(operation=name if name in {'probe', 'decode'} else 'unknown',
+    return dict(operation=name if name in {'sandbox', 'probe', 'decode'} else 'unknown',
                 returncode=returncode if type(returncode) is int and -255 <= returncode <= 255 else None,
                 reason=reason, stderr_state=stderr_state, stderr_prefix=stderr_prefix)
+
+
+def _library_symlinks():
+    """Recreate only the supported Debian numerical-library alternatives."""
+    mounts = []
+    for library, directory in (('libblas', 'blas'), ('liblapack', 'lapack')):
+        link = Path(f'/etc/alternatives/{library}.so.3-x86_64-linux-gnu')
+        target = Path(f'/usr/lib/x86_64-linux-gnu/{directory}/{library}.so.3')
+        try:
+            if not link.is_symlink():
+                if link.exists():
+                    raise VideoError('video_unavailable')
+                continue
+            if link.readlink() != target:
+                raise VideoError('video_unavailable')
+            resolved = target.resolve(strict=True)
+            if not resolved.is_relative_to('/usr') or not resolved.is_file():
+                raise VideoError('video_unavailable')
+        except (OSError, RuntimeError):
+            raise VideoError('video_unavailable') from None
+        mounts.extend(['--symlink', str(target), str(link)])
+    if mounts:
+        return ['--dir', '/etc/alternatives', *mounts]
+    return []
 
 
 def _run(scratch, binary, args, name, deadline, recheck):
@@ -114,6 +138,7 @@ def _run(scratch, binary, args, name, deadline, recheck):
         TOOLS[1], '--unshare-all', '--die-with-parent', '--cap-drop', 'ALL',
         '--ro-bind', '/usr', '/usr', '--symlink', 'usr/lib', '/lib',
         '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev',
+        *_library_symlinks(),
         '--dir', '/tmp', '--ro-bind', str(scratch / 'original.mov'), '/input.mov',
         '--bind', str(output), '/output', '--chdir', '/output',
         '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'LC_ALL', 'C',
@@ -151,6 +176,18 @@ def _run(scratch, binary, args, name, deadline, recheck):
                     raise VideoError('video_cleanup_failed') from None
                 if failure is not None:
                     failure.decoder_diagnostic = _process_diagnostic(name, proc.returncode, stderr)
+
+
+def _require_sandbox(scratch, deadline, recheck):
+    """Check the identical cage with an image-supplied fixed no-media command."""
+    try:
+        _run(scratch, TOOLS[2], ['-version'], 'sandbox', deadline, recheck)
+    except VideoError as exc:
+        if exc.code != 'video_incomplete':
+            raise
+        failure = VideoError('video_unavailable')
+        failure.decoder_diagnostic = exc.decoder_diagnostic
+        raise failure from None
 
 
 def _number(value, minimum, maximum):
@@ -239,6 +276,7 @@ def decode(raw, material, *, identity, transcripts, recheck, deadline):
             handle.write(raw)
         inputs = ['-protocol_whitelist', 'file', '-enable_drefs', '0',
                   '-use_absolute_path', '0', '-f', 'mov']
+        _require_sandbox(scratch, deadline, recheck)
         _run(scratch, TOOLS[2], [
             '-v', 'error', '-threads', '1', '-err_detect', 'explode', *inputs,
             '-select_streams', 'v:0', '-count_frames',

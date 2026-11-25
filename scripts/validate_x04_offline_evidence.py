@@ -1,0 +1,66 @@
+"""Validate synthetic X04 result claims by recomputing entity-derived evidence."""
+import argparse
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from export_x04_offline_evidence import (
+    DEFAULT_MAX_INPUT_BYTES, check_output_path, export_evidence, positive_byte_limit,
+    read_json, report_failure, validate_sha256_pin, write_json,
+)
+
+
+def validate_evidence(payload):
+    trusted = export_evidence(payload)
+    claimed = payload.get('result')
+    if not isinstance(claimed, dict):
+        raise ValueError('result must contain count, highlight_handles and original_bytes_integrity.')
+    count = claimed.get('count')
+    if type(count) is not int or count != trusted['result']['count']:
+        raise ValueError('Derived count claim does not match physical entities.')
+    handles = claimed.get('highlight_handles')
+    if not isinstance(handles, list) or any(not isinstance(handle, str) for handle in handles):
+        raise ValueError('Highlight claims must be an array of canonical parent handles.')
+    if len(set(handles)) != len(handles) or set(handles) != set(trusted['result']['highlight_handles']):
+        raise ValueError('Derived highlight claims do not match selected physical parents.')
+    if claimed.get('original_bytes_integrity') != 'unverified':
+        raise ValueError('Original-byte integrity must remain unverified for this replay.')
+    return {'schema': 'leaf.x04.offline-validation.v1', 'valid': True,
+            'drawing_id': trusted['drawing']['id'], 'recomputed_result': trusted['result']}
+
+
+def expected_drawing_id(value):
+    if not value.strip():
+        raise argparse.ArgumentTypeError('Expected drawing ID must not be blank.')
+    return value
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument('input', help='Synthetic evidence JSON path, or - for stdin')
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--max-input-bytes', type=positive_byte_limit, default=DEFAULT_MAX_INPUT_BYTES,
+                        help='Maximum input bytes, including BOM and whitespace (default: 16777216)')
+    parser.add_argument('--max-output-bytes', type=positive_byte_limit,
+                        help='Optional encoded JSON byte ceiling (default: unlimited)')
+    parser.add_argument('--expected-drawing-id', type=expected_drawing_id,
+                        help='Optional exact drawing.id label required before recomputation')
+    parser.add_argument('--expected-artifact-sha256', type=validate_sha256_pin,
+                        help='Optional SHA-256 of the exact file or stdin bytes read and decoded')
+    args = parser.parse_args(argv)
+    try:
+        check_output_path(args.input, args.out)
+        payload = read_json(args.input, args.max_input_bytes) if args.expected_artifact_sha256 is None else read_json(
+            args.input, args.max_input_bytes, args.expected_artifact_sha256)
+        if args.expected_drawing_id is not None:
+            drawing = payload.get('drawing') if isinstance(payload, dict) else None
+            if not isinstance(drawing, dict) or drawing.get('id') != args.expected_drawing_id:
+                raise ValueError('Expected drawing ID does not match drawing.id exactly.')
+        result = validate_evidence(payload)
+        write_json(result, args.out, args.max_output_bytes)
+    except (OSError, ValueError, TypeError, RecursionError) as error:
+        return report_failure('validation', error)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

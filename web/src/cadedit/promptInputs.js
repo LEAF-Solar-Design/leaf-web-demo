@@ -20,6 +20,23 @@
 // so on purpose instead of by omission.
 import { isPointExpression, pointExpressionRefusal, resolvePointExpression } from './pointExpression.js'
 
+// GAPS 46 (film take 4): PLINE gathers its points one canvas click at a
+// time, so a list holding fewer than two well-formed x,y pairs is a step
+// still waiting for its next point, never a "Polyline refused" flash after
+// the first click. A malformed pair is not waiting: the store's refusal names
+// it. Bounded: one split over the field's text.
+const PLINE_WAIT_FIRST = { ask: 'Specify first point:', fields: [] }
+const PLINE_WAIT_NEXT = { ask: 'Specify next point:', fields: [] }
+function pointListWaiting(prompt, effective) {
+  if (prompt.verb !== 'PLINE') return null
+  const pairs = String(effective.pts ?? '').trim().split(/[;\s]+/).filter(Boolean)
+  if (pairs.length >= 2) return null
+  if (pairs.length === 0) return PLINE_WAIT_FIRST
+  const parts = pairs[0].split(',')
+  const wellFormed = parts.length === 2 && parts.every((part) => part.trim() !== '' && Number.isFinite(Number(part)))
+  return wellFormed ? PLINE_WAIT_NEXT : null
+}
+
 /** A step is a point step when it asks for exactly two decimal operands. */
 export function isPointStep(step) {
   return step.fields.length === 2 && step.fields.every(([, , mode = 'decimal']) => mode === 'decimal')
@@ -66,7 +83,7 @@ export function resolvePromptInputs(prompt, inputs, from = null) {
     }
   }
   const waitingStep = prompt && !expressionRefusal
-    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => !(prompt.verb === 'BLOCK' && key === 'members' && effective.membersDone) && (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === '')) || null
+    ? prompt.steps.find((step) => step.fields.some(([key, , mode = 'decimal']) => !(prompt.verb === 'BLOCK' && key === 'members' && effective.membersDone) && (mode === 'decimal' || mode === 'edge') && String(effective[key] ?? '').trim() === '')) || pointListWaiting(prompt, effective)
     : null
   return { effective, expressionRefusal, failedExpression, waitingStep, pointSteps }
 }
