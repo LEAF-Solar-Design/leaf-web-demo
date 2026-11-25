@@ -153,6 +153,23 @@ _DIAGNOSTIC_CODES = frozenset({
 })
 
 
+def refund_unstarted_build(
+    tenant_id: str, change_set_id: str, *, log: logging.Logger | None = None,
+) -> None:
+    log = _LOG if log is None else log
+    try:
+        refunded = author_quota.refund_unstarted(tenant_id, change_set_id)
+        log.info(
+            "author_quota_refund_unstarted: change_set=%s refunded=%s",
+            change_set_id, refunded,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal state wins
+        log.warning(
+            "author_quota_refund_unstarted_failed: exception=%s",
+            type(exc).__name__,
+        )
+
+
 class CustomizationServiceError(RuntimeError):
     harness_not_called = False
 
@@ -2136,9 +2153,13 @@ class CustomizationService:
             try:
                 grant = self.store.get_stage_grant(tenant_id, change.change_set_id)
             except Exception as exc:
-                raise CustomizationServiceError("stage_grant_refused", 409) from exc
+                refusal = CustomizationServiceError("stage_grant_refused", 409)
+                refusal.harness_not_called = True
+                raise refusal from exc
             if grant is not None and grant["revoked_ms"] is not None:
-                raise CustomizationServiceError("stage_grant_withdrawn", 409)
+                refusal = CustomizationServiceError("stage_grant_withdrawn", 409)
+                refusal.harness_not_called = True
+                raise refusal
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)

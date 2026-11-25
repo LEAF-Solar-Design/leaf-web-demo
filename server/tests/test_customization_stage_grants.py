@@ -119,6 +119,7 @@ def refuse(lane, change, code="stage_grant_refused", owner="worker-a"):
     with pytest.raises(CustomizationServiceError) as caught:
         grants.admit(lane.service, change, owner)
     assert (caught.value.code, caught.value.status_code) == (code, 409)
+    assert caught.value.harness_not_called is True
 
 
 @pytest.mark.parametrize("failure", ["removed", "suspended", "store_down"])
@@ -695,8 +696,9 @@ def test_dispatch_store_failures_refuse_before_http(lane, monkeypatch, method):
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
     code = "stage_grant_refused" if method == "get_stage_grant" else "stage_grant_unavailable"
-    with pytest.raises(CustomizationServiceError, match=code):
+    with pytest.raises(CustomizationServiceError, match=code) as caught:
         lane.service.dispatch_stage(change)
+    assert caught.value.harness_not_called is True
     post.assert_not_called()
 
 
@@ -707,8 +709,9 @@ def test_active_dispatch_grant_read_error_refuses_before_http(lane, monkeypatch)
     monkeypatch.setattr(lane.store, "get_stage_grant", read)
     post = Mock()
     monkeypatch.setattr(requests, "post", post)
-    with pytest.raises(CustomizationServiceError, match="stage_grant_refused"):
+    with pytest.raises(CustomizationServiceError, match="stage_grant_refused") as caught:
         lane.service.dispatch_stage(change)
+    assert caught.value.harness_not_called is True
     read.assert_called_once_with(TENANT, change.change_set_id)
     post.assert_not_called()
 
@@ -760,6 +763,7 @@ def test_admit_refusal_order_never_consumes_or_calls_harness(lane, monkeypatch, 
     with pytest.raises(CustomizationServiceError) as caught:
         grants.admit(lane.service, change, "worker-a")
     assert (caught.value.code, caught.value.status_code) == (code, 409)
+    assert caught.value.harness_not_called is True
     assert terminal.call_count == (1 if failure in {"turn", "live"} else 0)
     assert live.call_count == (1 if failure == "live" else 0)
     consume.assert_not_called()
@@ -916,3 +920,213 @@ def test_withdraw_cleanup_failure_preserves_success(lane, monkeypatch, failure):
         finish.assert_not_called()
     else:
         finish.assert_called_once_with(failed)
+
+
+@pytest.fixture
+def refund_lane(lane, monkeypatch):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "memory")
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    author_quota.reset_memory_state()
+    yield lane
+    author_quota.reset_memory_state()
+
+
+def charge_build(change):
+    assert author_quota.charge(
+        TENANT, "2026-11-25", 10, idempotency_key=change.change_set_id,
+    )[0]
+
+
+def refund_count():
+    return author_quota._MEMORY_STATE["2026-11-25:tenant-a"]
+
+
+def refuse_dispatch(lane, monkeypatch, code):
+    original = lane.service.dispatch_stage
+
+    def dispatch(change):
+        if code == "stage_grant_expired":
+            with lane.store._transaction() as conn:
+                conn.execute("UPDATE customization_stage_grants SET issued_ms = 1, expires_ms = 2")
+        elif code == "stage_grant_refused":
+            monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda _: (None, None))
+        elif code == "stage_grant_withdrawn":
+            assert lane.store.withdraw_stage(
+                tenant_id=TENANT, change_set_id=change.change_set_id,
+                author_subject=SUBJECT, now_ms=int(time.time() * 1000),
+            ) == {"withdrawn": False, "revoked": True}
+        elif code == "stage_grant_unavailable":
+            monkeypatch.setattr(lane.store, "consume_stage_grant", Mock(side_effect=RuntimeError("store down")))
+        elif code == "stage_grant_exhausted":
+            with lane.store._transaction() as conn:
+                conn.execute("UPDATE customization_stage_grants SET dispatches = 2")
+        return original(change)
+
+    monkeypatch.setattr(lane.service, "dispatch_stage", dispatch)
+
+
+@pytest.mark.parametrize("code", [
+    "stage_grant_expired", "stage_grant_refused", "stage_grant_withdrawn",
+    "stage_grant_turn_open", "stage_grant_unavailable",
+])
+@pytest.mark.parametrize("refund_on,attempt", [(True, 1), (False, 1), (True, 2)])
+def test_grant_refusal_refunds_only_enabled_first_attempt(
+    refund_lane, monkeypatch, code, refund_on, attempt,
+):
+    lane = refund_lane
+    if not refund_on:
+        monkeypatch.delenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED")
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    charge_build(change)
+    if code != "stage_grant_turn_open":
+        clean(lane)
+    if attempt == 2:
+        prior = lane.store.claim_stage(owner="prior-worker")
+        assert prior.stage_attempt == 1
+        # A previous dispatch might have reached the harness.
+        if code != "stage_grant_turn_open":
+            grants.admit(lane.service, prior, "prior-worker")
+        lane.store.defer_stage_claim(
+            tenant_id=TENANT, change_set_id=change.change_set_id,
+            owner="prior-worker", reason_code="retry", delay_seconds=0,
+        )
+    refuse_dispatch(lane, monkeypatch, code)
+    refund = Mock(wraps=author_quota.refund_unstarted) if refund_on else Mock(
+        side_effect=AssertionError("refund disabled"),
+    )
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    assert worker.run_once("worker-a", service=lane.service)
+    failed = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
+    assert failed.state is ChangeState.FAILED
+    assert failed.stage_attempt == attempt
+    assert failed.stage_error_code == code
+    assert failed.stage_error_retryable is (code in {"stage_grant_expired", "stage_grant_unavailable"})
+    if refund_on and attempt == 1:
+        assert refund_count() == 0
+        refund.assert_called_once_with(TENANT, change.change_set_id)
+    else:
+        assert refund_count() == 1
+        refund.assert_not_called()
+    post.assert_not_called()
+
+
+def test_exhausted_grant_never_refunds_even_on_first_claim(refund_lane, monkeypatch):
+    lane = refund_lane
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    clean(lane)
+    charge_build(change)
+    refuse_dispatch(lane, monkeypatch, "stage_grant_exhausted")
+    refund = Mock(side_effect=AssertionError("exhausted"))
+    post = Mock()
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    monkeypatch.setattr(requests, "post", post)
+    assert worker.run_once("worker-a", service=lane.service)
+    assert refund_count() == 1
+    refund.assert_not_called()
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["success", "revoked_only", "disabled", "raising"])
+def test_withdraw_refund_follows_committed_withdrawal(refund_lane, monkeypatch, caplog, case):
+    lane = refund_lane
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    charge_build(change)
+    if case == "revoked_only":
+        lane.store.claim_stage(owner="worker-a")
+    if case == "disabled":
+        monkeypatch.delenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED")
+    original = author_quota.refund_unstarted
+
+    def refund(tenant, change_id):
+        assert lane.store.get_change_set(tenant_id=tenant, change_set_id=change_id).state is ChangeState.FAILED
+        if case == "raising":
+            raise RuntimeError("private refund detail")
+        return original(tenant, change_id)
+
+    refund = Mock(side_effect=refund)
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+    app = FastAPI()
+    app.include_router(author_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: lane.tenant
+    with TestClient(app) as client:
+        first = client.post(f"/api/author/stages/{change.change_set_id}/withdraw")
+        second = client.post(f"/api/author/stages/{change.change_set_id}/withdraw")
+    assert first.status_code == second.status_code == 200
+    assert first.json()["withdrawn"] is (case != "revoked_only")
+    assert second.json()["withdrawn"] is False
+    if case in {"success", "raising"}:
+        refund.assert_called_once_with(TENANT, change.change_set_id)
+    else:
+        refund.assert_not_called()
+    assert refund_count() == (0 if case == "success" else 1)
+    if case != "revoked_only":
+        assert lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id).state is ChangeState.FAILED
+    if case == "raising":
+        warnings = [record for record in caplog.records if "author_quota_refund_unstarted_failed" in record.message]
+        assert len(warnings) == 1
+        assert "RuntimeError" in warnings[0].message
+        assert "private refund detail" not in caplog.text
+
+
+@pytest.mark.parametrize("route_first", [True, False])
+def test_withdraw_and_worker_refusal_refund_at_most_once(refund_lane, monkeypatch, route_first):
+    lane = refund_lane
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    charge_build(change)
+    clean(lane)
+    refund = Mock(wraps=author_quota.refund_unstarted)
+    post = Mock()
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+
+    def withdraw():
+        return author_router.withdraw_stage(change.change_set_id, tenant=lane.tenant)
+
+    if route_first:
+        assert withdraw()["withdrawn"] is True
+        assert worker.run_once("worker-a", service=lane.service) is False
+    else:
+        original = lane.service.dispatch_stage
+
+        def dispatch(claimed):
+            assert withdraw() == {
+                "contract": "leaf.customization-stage-withdraw.v1",
+                "withdrawn": False, "revoked": True,
+            }
+            return original(claimed)
+
+        monkeypatch.setattr(lane.service, "dispatch_stage", dispatch)
+        assert worker.run_once("worker-a", service=lane.service)
+        assert withdraw()["withdrawn"] is False
+    refund.assert_called_once_with(TENANT, change.change_set_id)
+    assert refund_count() == 0
+    post.assert_not_called()
+
+
+@pytest.mark.parametrize("route_first", [True, False])
+def test_worker_and_route_share_three_refunds_per_tenant_day(refund_lane, monkeypatch, route_first):
+    lane = refund_lane
+    clean(lane)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    for index in range(4):
+        change = queue(lane, key=f"refund-{index}")
+        assert grants.issue(lane.service, change)
+        charge_build(change)
+        if (index % 2 == 0) == route_first:
+            assert author_router.withdraw_stage(change.change_set_id, tenant=lane.tenant)["withdrawn"] is True
+        else:
+            with monkeypatch.context() as dispatch_patch:
+                refuse_dispatch(lane, dispatch_patch, "stage_grant_refused")
+                assert worker.run_once("worker-a", service=lane.service)
+        assert refund_count() == (0 if index < 3 else 1)
+    post.assert_not_called()

@@ -1073,6 +1073,8 @@ def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> D
             author_subject=binding.subject, now_ms=int(time.time() * 1000),
         )
         if result["withdrawn"]:
+            if author_quota.refund_enabled():
+                customization_service.refund_unstarted_build(str(tenant), change_set_id)
             try:
                 change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
                 customization_service.finish_stage_authority_for_change(change)

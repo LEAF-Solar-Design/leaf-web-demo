@@ -413,6 +413,58 @@ def test_postgres_stage_grant_withdraw_loses_to_claim(store):
     )
 
 
+def test_postgres_withdrawn_build_refund_is_once(store, monkeypatch):
+    from uuid import uuid4
+
+    import author_quota
+    from customization_service import refund_unstarted_build
+
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    key = f"grant-refund:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    day = "2026-11-25"
+    assert author_quota.charge(
+        change.tenant_id, day, 1, idempotency_key=change.change_set_id,
+    ) == (True, 1)
+    original = author_quota.lookup_attempt(change.tenant_id, change.change_set_id)
+
+    def used():
+        with platform_db().transaction(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM author_quota_counters "
+                "WHERE namespace = 'author_daily' AND counter_key = %(key)s",
+                {"key": author_quota.counter_key(change.tenant_id, day)},
+            ).fetchone()
+            return int(row["value"])
+
+    assert used() == 1
+    assert store.withdraw_stage(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, now_ms=now_ms,
+    ) == {"withdrawn": True, "revoked": True}
+    assert store.get_change_set(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+    ).state is ChangeState.FAILED
+    refund_unstarted_build(change.tenant_id, change.change_set_id)
+    assert used() == 0
+    refund_unstarted_build(change.tenant_id, change.change_set_id)
+    assert used() == 0
+    assert author_quota.lookup_attempt(change.tenant_id, change.change_set_id) == original
+
+
 def test_postgres_turn_terminal_events_are_turn_and_tenant_bound(store, monkeypatch):
     from uuid import uuid4
 

@@ -169,9 +169,12 @@ def admit(service, change, owner) -> None:
                 raise CustomizationServiceError("stage_grant_unavailable", 409) from exc
             if consumed:
                 return
-    except CustomizationServiceError:
+    except CustomizationServiceError as exc:
+        exc.harness_not_called = True
         raise
     except Exception:
         code = "stage_grant_refused"
     _LOG.warning("stage_grant_refusal change_set=%s code=%s", change.change_set_id, code)
-    raise CustomizationServiceError(code, 409)
+    exc = CustomizationServiceError(code, 409)
+    exc.harness_not_called = True
+    raise exc
