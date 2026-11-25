@@ -65,3 +65,56 @@ def test_refuse_missing_identity_or_unresolved_layer(ask, params, raw):
     _, source, _ = tools_fallback.author_tool(ask)
     status, payload = invoke(source, raw, params)
     assert status == "tool_error" and "viewport" in str(payload).lower(), payload
+
+
+def crop_drawing(service_x, viewport_tags=(), boundary=()):
+    raw = drawing()
+    service = b"5\nC2\n2\nPV Module\n8\nService\n10\n0\n"
+    assert raw.count(service) == 1
+    raw = raw.replace(service, service[:-2] + f"{service_x}\n".encode())
+    view = b"69\n2\n331\n12\n"
+    tags = list(viewport_tags)
+    if boundary:
+        tags.append((340, "F0"))
+        outline = [(0, "LWPOLYLINE"), (5, "F0"), (67, 1), (410, "Sheet"),
+                   (8, "0"), (70, 1), (90, len(boundary))]
+        outline.extend(pair for x, y in boundary for pair in ((10, x), (20, y)))
+        raw = raw.replace(b"0\nENDSEC\n0\nEOF\n",
+                          "".join(f"{c}\n{v}\n" for c, v in outline).encode()
+                          + b"0\nENDSEC\n0\nEOF\n")
+    assert raw.count(view) == 1
+    return raw.replace(view, view + "".join(f"{c}\n{v}\n" for c, v in tags).encode())
+
+
+@pytest.mark.parametrize("ask,raw,expected", [
+    ("Count only thawed panels that also lie inside the viewport crop polygon.",
+     crop_drawing(1000, boundary=((-10, -10), (10, -10), (10, 10), (-10, 10))),
+     ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
+    ("Which PV modules on unfrozen layers are inside the viewport A1 clipping boundary?",
+     crop_drawing(3, boundary=((-1, -1), (4, -1), (4, -.5), (1, -.5), (1, 1), (-1, 1))),
+     ["C1[0,0]/B1[0,0]"]),
+    ("List panel placements on thawed layers inside the crop of viewport A1.",
+     crop_drawing(6, ((12, 5), (17, 5), (45, 10))), ["C2[0,0]"]),
+])
+def test_crop_and_thaw_composition(ask, raw, expected):
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, raw, {"viewport_handle": "A1"})
+    assert status == "ok", payload
+    assert payload[0]["visible_paths"] == expected
+    assert payload[0]["total"] == len(expected)
+    assert "anchors" in payload[0]["scope"]
+
+
+@pytest.mark.parametrize("tags,expected", [
+    (((340, "FF"),), "missing or ambiguous"),
+    (((51, 0.5),), "untwisted orthographic"),
+])
+def test_crop_evidence_refused_without_changing_layer_count(tags, expected):
+    raw = crop_drawing(6, tags)
+    _, cropped, _ = tools_fallback.author_tool(
+        "Count thawed panels in the viewport A1 crop.")
+    status, payload = invoke(cropped, raw)
+    assert status == "tool_error" and expected in str(payload).lower(), payload
+    _, layer_only, _ = tools_fallback.author_tool(ASKS[0])
+    status, payload = invoke(layer_only, raw)
+    assert status == "ok" and payload[0]["total"] == 3, payload
