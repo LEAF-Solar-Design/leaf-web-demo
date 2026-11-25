@@ -223,3 +223,60 @@ def test_named_equipment_ports_require_both_ends():
     state, output = invoke(source, raw)
     assert state == "ok", output
     assert output[0]["status"] == "needs_equipment_ports"
+
+
+def clearance_drawing(units, scale=1, closed_aisle=False):
+    upper = [START, (-5, 2), (5, 2), END]
+    lower = [START, (-5, -4), (5, -4), END]
+    rows = [entity("Roof Keepout", "A1", [(-1, -1), (1, -1), (1, 1), (-1, 1)], True),
+            entity("Aisle", "C1", upper), entity("Aisle", "C2", lower),
+            entity("Tray", "B1", lower)]
+    if closed_aisle:
+        rows.append(entity("Aisle", "C3", [(-7, -5), (7, -5), (7, 5), (-7, 5)], True))
+    for row in rows:
+        row["pts"] = [[x*scale, y*scale, z] for x, y, z in row["pts"]]
+    raw = intake_dxf.intake_to_dxf(dict(layers=sorted({e["layer"] for e in rows}), polylines=rows))
+    if units is None:
+        return raw
+    # The intake writer synthesizes a HEADER without $INSUNITS.
+    return raw.replace(b"9\n$HANDSEED\n", f"9\n$INSUNITS\n70\n{units}\n9\n$HANDSEED\n".encode(), 1)
+
+
+@pytest.mark.parametrize("ask,units,scale,length,gap,violation", [
+    ("Which cable routes can I shorten around keepouts with tray width 1 m and side clearance 0.25 m?",
+     6, 1, 14, 0.75, False),
+    ("Find the shortest aisle paths for a 2000 mm wide tray with 25 centimetres of side clearance.",
+     4, 1000, 18, 1.25, False),
+    ("Check conduit runs around obstacles for a 6 metre tray. Clearance: 250 mm each side.",
+     6, 1, None, 3.25, True),
+    ("Find shorter tray routes. Tray width is 1.5 m and clearance is .25 m on each side.",
+     6, 1, 14, 1, False),
+])
+def test_shortest_swept_tray_route(ask, units, scale, length, gap, violation):
+    _, source, _ = tools_fallback.author_tool(ask)
+    state, output = invoke(source, clearance_drawing(units, scale))
+    assert state == "ok", output
+    report, overlay = output
+    assert report["swept_half_width"] == gap * scale
+    assert report["crossed_obstacles"] == {}
+    assert report["clearance_violations"] == ({"B1": ["A1"]} if violation else {})
+    if length is None:
+        assert report["unavailable"] == {"B1": "no_legal_detour"}
+        assert report["shortest_legal_routes"] == {}
+    else:
+        assert report["unavailable"] == {}
+        assert report["shortest_legal_routes"]["B1"]["length"] == length * scale
+    assert overlay["highlight_handles"] == (["B1"] if length == 14 else [])
+
+
+@pytest.mark.parametrize("details,units,closed_aisle,status", [
+    ("tray width 2 m", 6, False, "needs_tray_clearance"),
+    ("tray width 1 m and tray width 2 m with clearance 1 in", 6, False, "needs_tray_clearance"),
+    ("tray width 2 ft and clearance 6 inches", None, False, "needs_drawing_units"),
+    ("tray width 2 ft and clearance 6 inches", 6, True, "needs_aisle_centerlines"),
+])
+def test_swept_tray_route_requires_geometry_and_dimensions(details, units, closed_aisle, status):
+    _, source, _ = tools_fallback.author_tool(f"Find shortest cable routes with {details}.")
+    state, output = invoke(source, clearance_drawing(units, closed_aisle=closed_aisle))
+    assert state == "ok", output
+    assert output[0]["status"] == status

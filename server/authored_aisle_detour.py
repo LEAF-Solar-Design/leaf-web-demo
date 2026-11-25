@@ -1,7 +1,45 @@
 """Author a plan-view cable crossing check and shortest drawn-aisle detour."""
 import re
+from fractions import Fraction
 
 from authored_route_crossings import PLANAR_GEOMETRY_BODY
+
+
+_LENGTHS = {
+    alias: Fraction(metres)
+    for metres, aliases in (
+        ("0.001", "mm millimetre millimetres millimeter millimeters"),
+        ("0.01", "cm centimetre centimetres centimeter centimeters"),
+        ("1", "m metre metres meter meters"),
+        ("0.0254", "in inch inches"),
+        ("0.3048", "ft foot feet"),
+    )
+    for alias in aliases.split()
+}
+_LENGTH_UNIT = "(?:" + "|".join(_LENGTHS) + ")"
+_LENGTH = rf"([+-]?(?:\d{{1,12}}(?:\.\d{{1,12}})?|\.\d{{1,12}}))\s*({_LENGTH_UNIT})\b"
+
+
+def requests_clearance(prompt):
+    return bool(re.search(r"\btrays?\b", prompt)
+                and re.search(r"\b(?:clearance|wide|width)\b", prompt)
+                and re.search(r"\b(?:routes?|paths?|runs?|detours?)\b", prompt))
+
+
+def tray_dimensions(prompt):
+    def measure(patterns):
+        values = {Fraction(value) * _LENGTHS[unit]
+                  for pattern in patterns for value, unit in re.findall(pattern, prompt)}
+        return values.pop() if len(values) == 1 else None
+
+    width = measure((rf"\b(?:tray\s+)?width\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
+                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)wide\b",
+                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)trays?\b"))
+    side = measure((rf"\b(?:side\s+)?clearance\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
+                    rf"(?<![\d.]){_LENGTH}(?:\s+of)?\s+(?:side\s+)?clearance\b"))
+    if width is None or width <= 0 or side is None or side < 0:
+        return ()
+    return str(width), str(side)
 
 
 def compares_lengths(prompt):
@@ -66,6 +104,8 @@ def equipment_ports(description):
 
 def matches(description):
     prompt = description.casefold()
+    if requests_clearance(prompt):
+        return True
     if compares_ports(prompt):
         return True
     if (prefers_fewer_bends(prompt)
@@ -85,6 +125,7 @@ def matches(description):
 
 def build_body(description):
     prompt = description.casefold()
+    dimensions = tray_dimensions(prompt) if requests_clearance(prompt) else None
     ports = equipment_ports(description) if compares_ports(prompt) else None
     fewer_bends = ports is not None or prefers_fewer_bends(prompt)
     headings = equipment_headings(prompt)
@@ -92,12 +133,17 @@ def build_body(description):
     body = _BODY.replace("__FEWER_BENDS__", str(fewer_bends))
     body = body.replace("__EQUIPMENT_PORTS__", repr(ports))
     body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
-    return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(fewer_bends or compares_lengths(prompt)))
+    body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
+    compare = dimensions is not None or fewer_bends or compares_lengths(prompt)
+    return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(compare))
 
 
 _BODY = r"""
 import math
 from heapq import heappop, heappush
+
+METRES_PER_UNIT = {1: "0.0254", 2: "0.3048", 3: "1609.344", 4: "0.001", 5: "0.01",
+                   6: "1", 7: "1000", 10: "0.9144", 14: "0.1"}
 
 
 def read_geometry(intake):
@@ -109,7 +155,8 @@ def read_geometry(intake):
         words = set(re.findall(r"[a-z0-9]+", entity.get("layer", "").casefold()))
         if words & {"aisle", "aisles"}:
             role = "aisle"
-        elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"}:
+        elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"} or (
+                __TRAY_DIMENSIONS__ is not None and words & {"tray", "trays"}):
             role = "cable"
         elif words & {"array", "arrays", "panel", "panels", "module", "modules"}:
             role = "array"
@@ -169,6 +216,35 @@ def enters_array(a, b, arrays):
     return any(location(p, edges) == 1 for p in intervals(a, b, hit) for box, edges in hit)
 
 
+def point_segment_distance_squared(point, a, b):
+    dx, dy = difference(b, a)
+    px, py = difference(point, a)
+    t = max(0, min(1, (px*dx + py*dy) / (dx*dx + dy*dy)))
+    return (px - t*dx)**2 + (py - t*dy)**2
+
+
+def violates_clearance(a, b, arrays, radius):
+    x0, y0, x1, y1 = bounds((a, b))
+    extent = (x0-radius, y0-radius, x1+radius, y1+radius)
+    limit = radius**2
+    for box, edges in arrays:
+        if not overlaps(extent, box):
+            continue
+        if location(a, edges) >= 0 or location(b, edges) >= 0:
+            return True
+        cuts = set()
+        split_at_edges(a, difference(b, a), edges, cuts)
+        if cuts:
+            return True
+        # For disjoint segments a nearest pair includes a segment endpoint.
+        if any(min(point_segment_distance_squared(a, p, q),
+                   point_segment_distance_squared(b, p, q),
+                   point_segment_distance_squared(p, a, b),
+                   point_segment_distance_squared(q, a, b)) < limit for p, q in edges):
+            return True
+    return False
+
+
 def inside_drawn_aisles(a, b, aisles):
     hit = nearby(a, b, aisles)
     return bool(hit) and all(any(location(p, edges) >= 0 for box, edges in hit)
@@ -181,7 +257,7 @@ def add_edge(graph, a, b):
     graph.setdefault(b, {})[a] = weight
 
 
-def build_graph(arrays, aisles, centerlines, endpoints):
+def build_graph(arrays, aisles, centerlines, endpoints, radius=None):
     # Split the planar arrangement at every crossing, including T junctions
     # and overlaps. Inside closed aisle footprints a shortest path can turn
     # at boundary vertices; on open centerlines it must follow drawn edges.
@@ -203,7 +279,9 @@ def build_graph(arrays, aisles, centerlines, endpoints):
         vertices.update(pieces)
         if (a, b) in lines:
             for start, end in zip(pieces, pieces[1:]):
-                if not enters_array(start, end, arrays):
+                blocked = (enters_array(start, end, arrays) if radius is None
+                           else violates_clearance(start, end, arrays, radius))
+                if not blocked:
                     add_edge(graph, start, end)
     if aisles:
         # Connect mutually visible vertices in the legal polygonal domain.
@@ -286,6 +364,23 @@ def shortest(graph, start, end, departure=None, arrival=None, ports=None):
 def run(intake, params):
     arrays, aisles, centerlines, cables, obstacle_ids = read_geometry(intake)
     if __COMPARE_LENGTHS__:
+        dimensions = __TRAY_DIMENSIONS__
+        radius = None
+        if dimensions is not None:
+            empty_overlay = {"highlight_handles": [], "markers": [], "polylines": []}
+            if not dimensions:
+                return ({"status": "needs_tray_clearance",
+                         "message": "Specify one positive tray width and one nonnegative side clearance, each with a unit."},
+                        empty_overlay)
+            unit = METRES_PER_UNIT.get(intake.get("insunits"))
+            if unit is None:
+                return ({"status": "needs_drawing_units", "message": "Declare drawing insertion units."}, empty_overlay)
+            if not centerlines or aisles:
+                return ({"status": "needs_aisle_centerlines",
+                         "message": "Swept-clearance routing requires an aisle network drawn as open centerlines."},
+                        empty_overlay)
+            width, side = map(Fraction, dimensions)
+            radius = (width/2 + side) / Fraction(unit)
         ports = __EQUIPMENT_PORTS__
         headings = __EQUIPMENT_HEADINGS__ if ports is None else None
         if ports == {}:
@@ -298,13 +393,19 @@ def run(intake, params):
                     {"highlight_handles": [], "markers": [], "polylines": []})
         departure, arrival = headings or (None, None)
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
-        graph = build_graph(arrays, aisles, centerlines, endpoints)
+        graph = build_graph(arrays, aisles, centerlines, endpoints, radius)
         findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
+        legal, violations = {}, {}
         for handle, edges in cables.items():
             crossed = [name for name, outline in zip(obstacle_ids, arrays)
                        if any(enters_array(a, b, [outline]) for a, b in edges)]
             if crossed:
                 crossings[handle] = crossed
+            if radius is not None:
+                too_close = [name for name, outline in zip(obstacle_ids, arrays)
+                             if any(violates_clearance(a, b, [outline], radius) for a, b in edges)]
+                if too_close:
+                    violations[handle] = too_close
             start, end = edges[0][0], edges[-1][1]
             if start == end:
                 unavailable[handle] = "closed_route"
@@ -315,6 +416,8 @@ def run(intake, params):
                 continue
             if ports:
                 choices[handle] = route
+            if radius is not None:
+                legal[handle] = route
             drawn = math.fsum(math.dist(a, b) for a, b in edges)
             best = route["length"]
             if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
@@ -337,7 +440,12 @@ def run(intake, params):
             report["equipment_travel_headings"] = {"departure": list(departure), "arrival": list(arrival)}
         if ports:
             report["port_choices"] = choices
+        if radius is not None:
+            report["shortest_legal_routes"] = legal
+            report["clearance_violations"] = violations
+            report["swept_half_width"] = float(radius)
         alternatives = {**findings, **tied}
+        alternatives.update({handle: legal[handle] for handle in violations if handle in legal})
         return (report, {"highlight_handles": list(alternatives), "markers": [],
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
