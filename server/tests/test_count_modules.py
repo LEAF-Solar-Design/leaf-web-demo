@@ -316,6 +316,19 @@ def region_intake(x=2, y=2):
             "inserts": [{"name": "Panel", "layer": "Design", "handle": "A", "x": x, "y": y, "z": 0}]}
 
 
+def _dxf_panel_intake(positions):
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    intake = region_intake()
+    intake["blocks"]["Panel"]["children"][0].update(nrm=[0, 0, 1], elev=0, layer="0")
+    intake["inserts"] = [
+        {"name": "Panel", "layer": layer, "handle": format(index, "X"), "x": x, "y": y, "z": 0}
+        for index, (layer, x, y) in enumerate(positions, start=256)
+    ]
+    return parse_dxf_bytes(intake_to_dxf(intake))
+
+
 def run_region(intake, bounds):
     listing, _ = module.run(intake, {})
     identity = next(row["set_id"] for row in listing["sets"] if row["block"] == "Panel")
@@ -761,31 +774,16 @@ def test_window_rank_series_routes_and_reports_strict_trends(template, rows, exp
      {"A": [None, None, 2], "B": [None, None, 1], "D": [None, 1, None], "E": [None, 1, None]}),
 ])
 def test_exclude_highest_count_tiers_per_window_from_dxf(prompt, counts, excluded, expected):
-    from io import StringIO
-
-    import ezdxf
-
     import deps
     import nl_router
-    from dxf_intake import parse_dxf_bytes
 
-    layers = "ABCDE"
     windows = [[20 * index, 0, 20 * index + 18, 18] for index in range(len(counts))]
-    drawing = ezdxf.new()
-    drawing.blocks.new("Panel").add_lwpolyline(
-        [(0, 0), (1, 0), (1, 1), (0, 1)], close=True,
+    intake = _dxf_panel_intake(
+        (layer, left + 2 * column + 1, 2 * row + 1)
+        for (left, _, _, _), window_counts in zip(windows, counts)
+        for row, (layer, count) in enumerate(zip("ABCDE", window_counts))
+        for column in range(count)
     )
-    for layer in layers:
-        drawing.layers.new(layer)
-    for (left, _, _, _), window_counts in zip(windows, counts):
-        for row, (layer, count) in enumerate(zip(layers, window_counts)):
-            for column in range(count):
-                drawing.modelspace().add_blockref(
-                    "Panel", (left + 2 * column + 1, 2 * row + 1), dxfattribs={"layer": layer},
-                )
-    stream = StringIO()
-    drawing.write(stream)
-    intake = parse_dxf_bytes(stream.getvalue().encode())
     query = prompt.format(", ".join(f"({x1},{y1}) to ({x2},{y2})" for x1, y1, x2, y2 in windows))
     route = nl_router.classify(query, deps.all_tools())
     assert route["tool"] == "count-modules"
@@ -886,25 +884,15 @@ def test_plain_count_prompt_keeps_legacy_numeric_binding(prompt, value):
     ],
 )
 def test_minimum_coverage_excludes_named_layers(prompt, excluded, solutions):
-    import io
-
-    import ezdxf
     import deps
     import nl_router
-    from dxf_intake import parse_dxf_bytes
 
     counts = {"Roof A": 8, "Roof B": 5, "Roof C": 10, "Roof D": 8, "Roof E": 4}
-    drawing = ezdxf.new()
-    block = drawing.blocks.new("SOLAR_PANEL")
-    block.add_lwpolyline([(0, 0), (1, 0), (1, 1), (0, 1)], close=True)
-    model = drawing.modelspace()
-    for row, (layer, count) in enumerate(counts.items()):
-        drawing.layers.new(layer)
-        for column in range(count):
-            model.add_blockref("SOLAR_PANEL", (2 * column, 2 * row), dxfattribs={"layer": layer})
-    stream = io.StringIO()
-    drawing.write(stream)
-    intake = parse_dxf_bytes(stream.getvalue().encode())
+    intake = _dxf_panel_intake(
+        (layer, 2 * column, 2 * row)
+        for row, (layer, count) in enumerate(counts.items())
+        for column in range(count)
+    )
 
     route = nl_router.classify(prompt, deps.all_tools())
     assert route["tool"] == "count-modules"
