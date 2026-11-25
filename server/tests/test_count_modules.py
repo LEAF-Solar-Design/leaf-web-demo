@@ -674,6 +674,50 @@ def test_region_rank_comparison_requires_two_windows():
         module.run({}, {"rank_windows": []})
 
 
+@pytest.mark.parametrize("template, rows, expected_ranks, expected_risers", [
+    ("Compare panel layer ranks across these windows: {}.",
+     [(1, 2, 3), (2, 1, 2), (3, 3, 1)],
+     {"A": [3, 2, 1], "B": [2, 3, 2], "C": [1, 1, 3]}, ["A"]),
+    ("Rank layers by module count over these regions: {}. Which layers keep rising?",
+     [(3, 2, 1), (2, 1, 2), (1, 3, 3)],
+     {"A": [1, 2, 3], "B": [2, 3, 2], "C": [3, 1, 1]}, []),
+    ("Show panel layer ranking in windows {} and flag improving ranks.",
+     [(1, 2, 3, 4), (4, 1, 0, 0), (3, 4, 1, 2), (2, 3, 4, 1)],
+     {"A": [4, 3, 2, 1], "B": [1, 4, None, None], "C": [2, 1, 3, 2], "D": [3, 2, 1, 3]}, ["A"]),
+])
+def test_window_rank_series_routes_and_reports_strict_trends(template, rows, expected_ranks, expected_risers):
+    import deps
+    import nl_router
+
+    windows = [[20 * i, 0, 20 * i + 18, 18] for i in range(len(rows[0]))]
+    query = template.format(", ".join(f"({x1},{y1}) to ({x2},{y2})" for x1, y1, x2, y2 in windows))
+    route = nl_router.classify(query, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["rank_windows"] == windows
+    outlines = []
+    for row, counts in enumerate(rows):
+        layer = "ABCD"[row]
+        for col, count in enumerate(counts):
+            for offset in range(count):
+                x, y = 20 * col + 2 + 3 * offset, 2 + 3 * row
+                outlines.append({
+                    "layer": layer, "handle": f"{len(outlines) + 16:X}", "closed": True,
+                    "pts": [[x, y], [x + 2, y], [x + 2, y + 1], [x, y + 1]],
+                })
+    intake = {"polylines": outlines}
+    listing, _ = module.run(intake, {})
+    params = dict(route["params"], set_ids=[row["set_id"] for row in listing["sets"]])
+    result, overlay = module.run(intake, params)
+    assert result["schema_version"] == 1
+    assert result["window_ranks"] == expected_ranks
+    assert result["consistently_rising_layers"] == expected_risers
+    assert result["count"] == sum(map(sum, rows))
+    assert set(overlay["highlight_handles"]) == {row["handle"] for row in outlines}
+    pair, _ = module.run(intake, dict(params, rank_windows=windows[:2]))
+    assert "consistently_rising_layers" not in pair
+    assert pair["window_ranks"] == {layer: places[:2] for layer, places in expected_ranks.items()}
+
+
 def test_empty_selection_has_no_percentage_point_delta():
     d = {"inserts": [{"layer": "W", "name": "Module", "handle": "A"}]}
     r, _ = module.run(d, {"compare_selections": {"by": "block", "before": [], "after": ["Module"]}})

@@ -623,11 +623,11 @@ def _decide(
             and re.search(r"\b(?:module|panel)s?\b", text, re.I)
             and re.search(r"\b(?:windows?|regions?)\b", text, re.I)):
         windows = re.findall(rf"{_PAIR}\s+to\s+{_PAIR}", text, re.I)
-        if len(windows) == 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        if len(windows) >= 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
             options = {"group_by": "layer", "panel_scope": "all_layers",
                        "rank_windows": [[float(value) for value in bounds] for bounds in windows]}
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
-                                  rationale="Compare physical module counts by layer in two drawing windows.")
+                                  rationale="Compare physical module counts by layer across the drawing windows.")
 
     comparison = _share_change_params(text)
     if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):

@@ -307,11 +307,11 @@ def run(intake, params):
     if params.get("rank_windows") is None:
         return _run(intake, params)
     windows = params["rank_windows"]
-    if not isinstance(windows, list) or len(windows) != 2 or _selection_region(params) is not None:
-        raise InputValidationError("Choose two windows to compare.")
+    if not isinstance(windows, list) or not 2 <= len(windows) <= 8 or _selection_region(params) is not None:
+        raise InputValidationError("Choose two windows or an ordered series of up to eight windows.")
     for bounds in windows:
         if _selection_region({"region": bounds}) is None:
-            raise InputValidationError("Choose two complete windows.")
+            raise InputValidationError("Choose complete windows for the comparison.")
     base, overlay = _run(intake, dict(params, group_by="layer"))
     base["schema_version"] = 1
     if not base["selected_sets"]:
@@ -330,8 +330,14 @@ def run(intake, params):
                 previous = count
             rank_by_layer[layer] = place
         ranks.append(rank_by_layer)
-    base["window_ranks"] = {layer: [rank.get(layer) for rank in ranks]
-                            for layer in sorted(ranks[0].keys() | ranks[1].keys())}
+    layers = sorted({layer for window_rank in ranks for layer in window_rank})
+    window_ranks = {layer: [rank.get(layer) for rank in ranks] for layer in layers}
+    base["window_ranks"] = window_ranks
+    if len(windows) > 2:
+        base["consistently_rising_layers"] = [
+            layer for layer, places in window_ranks.items()
+            if None not in places and all(previous > current for previous, current in zip(places, places[1:]))
+        ]
     return base, overlay
 
 
