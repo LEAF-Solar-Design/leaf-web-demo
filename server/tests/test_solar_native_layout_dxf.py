@@ -631,3 +631,22 @@ def test_worker_export_preserves_canonical_dxf_escapes_in_opaque_parameters(sour
         assert after.parameters == parameters and after.scope == before.scope
         assert after.handles == before.handles
         parent = result
+
+
+def test_solar_write_preserves_export_metadata(generated):
+    source = intake_dxf.intake_to_dxf({"layers": ["0", "Defpoints"]})
+    comment = b"999\nDrawing preserved by source converter\n"
+    thumbnail = b"0\nSECTION\n2\nTHUMBNAILIMAGE\n90\n2\n310\n424D\n0\nENDSEC\n"
+    sort_order = (b"0\nSORTENTSTABLE\n5\nF001\n330\nF002\n"
+                  b"100\nAcDbSortentsTable\n330\n100\n331\n100\n5\n100\n")
+    extension = (b"0\nDICTIONARY\n5\nF002\n102\n{ACAD_REACTORS\n330\nF001\n102\n}\n"
+                 b"330\n100\n100\nAcDbDictionary\n281\n1\n")
+    source = insert(source, "OBJECTS", sort_order + extension)
+    source = comment + source.replace(b"0\nEOF\n", thumbnail + b"0\nEOF\n")
+    output = write(generated[0], generated[1], source)
+    assert output.startswith(comment)
+    assert sort_order + extension in output
+    assert thumbnail in output
+    assert native.decode_native_layout(output).frames
+    duplicate_handle = source.replace(b"5\nF001\n", b"5\nF002\n")
+    refuse("SOURCE_AMBIGUOUS", write, generated[0], generated[1], duplicate_handle)
