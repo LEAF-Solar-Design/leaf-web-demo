@@ -1266,14 +1266,29 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
 
     # Instant artifacts with no batch fallback must never resolve onto a
     # same-named compatibility body in this batch executor.
-    if tool.get("execution_class") == "instant" and tool.get("batch_fallback") is False:
+    instant = tool.get("execution_class") == "instant"
+    if instant and (tool.get("batch_fallback") is not True or test_source is not None):
         return err_envelope(
             ErrorCode.BAD_PARAMS,
             "tool requires the instant executor (batch_fallback=false); batch execution is unavailable",
             retryable=False, tool=name, version=version, timing_ms=_ms())
 
+    artifact = None
     test_filename = None
-    if test_source is not None:
+    if instant:
+        import deps
+        from instant_execution import ARTIFACT_REGISTRY
+        seed = deps.load_seed_catalog_tools()
+        definition = next((row for row in seed if row.get("name") == name), None)
+        try:
+            if not definition or deps.catalog_tool_digest(definition) != deps.catalog_tool_digest(tool):
+                raise ValueError("instant fallback differs from published platform definition")
+            artifact = ARTIFACT_REGISTRY.resolve(definition, catalog_commit=deps.base_catalog_pin(seed)["catalog_commit"])
+        except (ValueError, OSError):
+            return err_envelope(ErrorCode.BAD_PARAMS, "unverified instant fallback artifact",
+                                retryable=False, tool=name, version=version, timing_ms=_ms())
+        local = None
+    elif test_source is not None:
         if aps_live:
             return err_envelope(
                 ErrorCode.BAD_PARAMS,
@@ -1295,7 +1310,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         local = resolve_local_file(tool, tenant_id)
 
     # 2) APS path (kind:appbundle OR kind:script with only .lsp/engine_script)
-    if aps_live and da is not None and hasattr(da, "run_tool") and local is None:
+    if artifact is None and aps_live and da is not None and hasattr(da, "run_tool") and local is None:
         try:
             if hasattr(da, "ensure_tool_activity"):
                 da.ensure_tool_activity(tool)
@@ -1313,7 +1328,7 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     # local_only: its implementation IS the local file by design (a preflight that
     # must cost nothing), so running it here is the contract, not a fallback.
     degraded = bool(aps_live) and not bool(tool.get("local_only"))
-    if local is None and test_source is None:
+    if artifact is None and local is None and test_source is None:
         return err_envelope(
             ErrorCode.BAD_PARAMS,
             f"no local implementation resolvable for tool {name!r} "
@@ -1346,8 +1361,14 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     # stay sandboxed because a protected live write requires microvm provenance.
     use_sandbox = tier != "off" and not trusted_read_builtin
     execution_provenance = None
-    if use_sandbox:
-        if test_source is not None:
+    if use_sandbox or artifact is not None:
+        if artifact is not None:
+            source = artifact.source.decode("utf-8")
+            if tier == "microvm":
+                kind, payload = _run_source_in_sandbox_e2b(source, definition["entry"], intake, params, tenant_id=tenant_id)
+            else:
+                kind, payload = _run_source_in_sandbox(source, definition["entry"], intake, params)
+        elif test_source is not None:
             assert test_filename is not None
             if tier == "microvm":
                 kind, payload = _run_source_in_sandbox_e2b(
@@ -1410,6 +1431,9 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         # passing `leaf.tool-execution.v1` microvm receipt over any 64-hex
         # digest) and every downstream reader would take it as verified.
         # Dropped at the seam it enters; only a `_MicrovmSuccess` sets it.
+        env.pop("executed_code_digest", None)
+        if artifact is not None:
+            env["executed_code_digest"] = artifact.code_digest
         env.pop("execution_provenance", None)
         if execution_provenance is not None:
             env["execution_provenance"] = execution_provenance
@@ -1417,6 +1441,8 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     result, overlay = coerced
     env = ok_envelope(name, version, result, overlay, timing_ms=_ms(), cost=None,
                       degraded_mode=degraded)
+    if artifact is not None:
+        env["executed_code_digest"] = artifact.code_digest
     if execution_provenance is not None:
         env["execution_provenance"] = execution_provenance
 

@@ -41,7 +41,7 @@ def load_run(validation_errors=()):
 def catalog_tool():
     catalog = json.loads((SERVER / "catalog_tools.json").read_text(encoding="utf-8"))
     rows = catalog["tools"] if isinstance(catalog, dict) else catalog
-    return next(dict(tool) for tool in rows if tool["name"] == "instant-list-layers")
+    return next(dict(tool, batch_fallback=False) for tool in rows if tool["name"] == "instant-list-layers")
 
 
 @pytest.mark.parametrize("aps_live", [False, True])
@@ -57,10 +57,7 @@ def test_catalog_instant_without_batch_fallback_never_resolves_another_body(aps_
 
 
 @pytest.mark.parametrize("changes", [{"execution_class": "batch"},
-                                     {"execution_class": None},
-                                     {"batch_fallback": True},
-                                     {"batch_fallback": None},
-                                     {"batch_fallback": 0}])
+                                     {"execution_class": None}])
 def test_guard_preserves_existing_dispatch_for_other_metadata(changes):
     tool = catalog_tool()
     tool.update(changes)

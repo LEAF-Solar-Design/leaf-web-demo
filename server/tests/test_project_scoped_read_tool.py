@@ -993,13 +993,20 @@ def test_c1a_loader_failure_and_owned_metadata(lane, monkeypatch, code):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_project_read_refuses_instant_only_catalog_tool_in_batch(lane):
+@pytest.mark.parametrize("version, names, prefix, expected", [
+    (V1, ["0", "Defpoints", "MODULE", "ROOF"], "", ["0", "Defpoints", "MODULE", "ROOF"]),
+    (V2, ["0", "BlockOnly", "Unused"], "Block", ["BlockOnly"]),
+    (V2, ["0", "Renamed"], "", ["0", "Renamed"]),
+])
+def test_project_read_executes_catalog_source(lane, version, names, prefix, expected):
+    store_intake(lane.memory, version, {"layers": names, "polylines": [{"layer": names[-1]}]})
     tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
-    assert tool["batch_fallback"] is False
-    response = request(lane, tool=tool)
-    assert response.status_code == 400
-    assert response.json()["error"]["error_code"] == "BAD_PARAMS"
-    assert "requires the instant executor" in response.json()["error"]["message"]
+    response = request(lane, tool=tool, params={"prefix": prefix}, dwg=str(version))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["result"] == {"layers": expected, "count": len(expected)}
+    assert result["executed_code_digest"] == tool["artifact_digest"]
+    assert result["project_context"]["input_version_id"] == str(version)
 
 
 def test_c1a_real_loader_parameter_validation(lane):
