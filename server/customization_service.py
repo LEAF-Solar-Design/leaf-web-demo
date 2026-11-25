@@ -154,6 +154,8 @@ _DIAGNOSTIC_CODES = frozenset({
 
 
 class CustomizationServiceError(RuntimeError):
+    harness_not_called = False
+
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
@@ -2125,7 +2127,9 @@ class CustomizationService:
                     and customization_stage_grants.ttl_s() is not None):
                 without_services = True
             else:
-                raise CustomizationServiceError("stage_authority_invalid", 409)
+                exc = CustomizationServiceError("stage_authority_invalid", 409)
+                exc.harness_not_called = True
+                raise exc
         import customization_stage_grants
         if (self is not None and change.tool_target == "branch"
                 and customization_stage_grants.ttl_s() is not None):
