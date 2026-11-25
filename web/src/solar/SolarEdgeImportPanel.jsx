@@ -118,7 +118,7 @@ export default function SolarEdgeImportPanel({
     if (step === 'report' && !sourceValue) { setOutcome({ step, drawingId, message: SOLAREDGE_PANEL_REASONS.source_required }); return }
     if (step === 'report' && !parsed.ok) { setOutcome({ step, drawingId, message: parsed.reason }); return }
     if (step === 'upload' && file.size > SOLAREDGE_PDF_MAX_BYTES) {
-      setOutcome({ step, drawingId, message: `Upload failed. ${solarEdgeReason('IMPORT_PDF_TOO_LARGE')}` })
+      setOutcome({ step, drawingId, message: `Upload failed. Selected file “${file.name}”. ${solarEdgeReason('IMPORT_PDF_TOO_LARGE')}.` })
       return
     }
     const controller = new AbortController()
@@ -147,7 +147,10 @@ export default function SolarEdgeImportPanel({
       const reason = step === 'report' && result.code === 'REPORT_ASSOCIATIONS_INVALID'
         ? 'The PDF choices do not match these groups. Review or clear association choices, then build the report again'
         : solarEdgeReason(result.code)
-      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${reason}.` })
+      const message = step === 'upload'
+        ? `Upload failed. Selected file “${file.name}”. ${reason}.`
+        : `Report failed. ${reason}.`
+      setOutcome({ step, drawingId, message })
       return
     }
     if (step === 'upload') {

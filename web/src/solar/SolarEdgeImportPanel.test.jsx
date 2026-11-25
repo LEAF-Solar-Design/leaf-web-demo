@@ -74,6 +74,21 @@ it('S02 does not mark an unknown typed acceptance refusal as a sent report', asy
 })
 
 describe('SolarEdgeImportPanel', () => {
+  it.each(['north-array.pdf', 'south roof.pdf', 'toit-électricité.pdf'])(
+    'names the submitted PDF %s when its contents are refused',
+    async (filename) => {
+      const { props } = setup()
+      props.client.uploadPdf.mockResolvedValueOnce({
+        ok: false, status: 400, code: 'IMPORT_PDF_MALFORMED', retryable: false,
+      })
+      const file = selectFile(new File(['%PDF-1.7'], filename, { type: 'application/pdf' }))
+      fireEvent.click(uploadButton())
+      await waitFor(() => expect(screen.getByRole('status').textContent).toContain(filename))
+      expect(screen.getByRole('status').textContent).toContain(SOLAREDGE_IMPORT_REASONS.IMPORT_PDF_MALFORMED)
+      expect(props.client.uploadPdf).toHaveBeenCalledWith(expect.objectContaining({ file }))
+    },
+  )
+
   it('requires explicit partial intent and resets it when the report is rebuilt', async () => {
     const { props } = setup({ allowMatchedOnly: true, onAccept: vi.fn(() => true) })
     await upload(); await build()
