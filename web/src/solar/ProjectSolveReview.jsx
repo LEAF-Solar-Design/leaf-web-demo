@@ -37,7 +37,8 @@ export function useSubmission(props, tool) {
         meta.authorityKey !== authorityKey || !sameSolarDrawingBinding(meta.binding, solarBinding) ||
         meta.signal?.aborted || !current(meta.isCurrent) || !current(accepted.current)) return
     setFeedback({ state: outcome.state, reason: code(outcome.reasonCode),
-      message: tool === 'solar-solve-proposal' && outcome.state === 'failed' ? outcome.message : undefined })
+      message: tool === 'solar-solve-proposal' && ['pending', 'failed'].includes(outcome.state)
+        ? outcome.message : undefined })
     if (['failed', 'refused'].includes(outcome.state)) local.current.accepted = false
   }, [accepted, projectOutcome, solarBinding, authorityKey, tool])
   async function submit(params, extras = {}) {

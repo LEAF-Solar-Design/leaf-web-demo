@@ -86,6 +86,21 @@ it.each([
   expect(h.props.onProjectSubmit).toHaveBeenCalledOnce()
 })
 
+it('shows bound running progress while retaining the solve lock', async () => {
+  const h = fixture()
+  const view = h.mount()
+  await h.choose()
+  const button = screen.getByRole('button', { name: 'Run solve' })
+  fireEvent.click(button)
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/submitted/i))
+  const outcome = { state: 'pending', jobId: JOB, message: 'Solved 2 of 3 pieces.' }
+  const meta = { tool: 'solar-solve-proposal', authorityKey: 'epoch', binding: B, isCurrent: () => true }
+  view.rerender(<ProjectSolarPreparedSolveForm {...h.props} projectOutcome={{ outcome, meta }} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Solved 2 of 3 pieces.')
+  expect(button).toBeDisabled()
+  expect(h.props.onProjectSubmit).toHaveBeenCalledOnce()
+})
+
 it('refuses a mismatched fresh preparation revision without any submission', async () => {
   const h = fixture(); h.mount(); await h.choose(); h.revision = 7
   fireEvent.click(screen.getByRole('button', { name: 'Run solve' }))

@@ -214,7 +214,14 @@ export function useAppProjectSolarRuntime(props) {
     observe()
     const owner = { a, epoch: m.epoch, sessionGeneration: m.seen[4], abort: new AbortController() }
     owner.controller = createProjectSolarRunController({ projectClient: a.projectClient,
-      onOutcome: (outcome, meta) => onOutcome(owner, outcome, meta) })
+      onOutcome: (outcome, meta) => onOutcome(owner, outcome, meta),
+      onProgress: (outcome, meta) => {
+        const run = m.run
+        if (run?.owner !== owner || run.tool !== meta.tool || run.authorityKey !== meta.authorityKey ||
+            !sameSolarDrawingBinding(run.binding, meta.binding)) return
+        publish(() => m.run === run && !run.terminal && run.current() && current(meta.isCurrent),
+          { projectOutcome: { outcome, meta } })
+      } })
     m.owner = owner
     if (m.transition && !transitionCurrent(m.transition)) retire()
     if (!m.transition) publish(() => m.alive && m.owner === owner, resetOwnerState)
