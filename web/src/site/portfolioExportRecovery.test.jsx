@@ -264,6 +264,30 @@ describe('actual exported portfolio image failure recovery', () => {
 
 
 describe('current material selection after document edits', () => {
+  for (const closeBy of ['Escape', 'Close', 'Navigate then Close']) {
+    it(`returns focus to the updated grid opener on ${closeBy}`, () => {
+      const original = { ...first, preview_sha256: 'a'.repeat(64) }
+      const replacement = { ...original, alt: 'Updated portrait', preview_sha256: 'b'.repeat(64) }
+      const gallery = image => <Gallery page={{}} category={{ slug: 'work', images: [image, second] }} />
+      const view = render(gallery(original))
+      const opener = screen.getByRole('button', { name: 'View ' + original.alt })
+      const previousPreview = within(opener).getByRole('img')
+      fireEvent.click(opener)
+      view.rerender(gallery(replacement))
+      expect(opener.isConnected).toBe(true)
+      expect(previousPreview.isConnected).toBe(false)
+      fireEvent.error(previousPreview)
+      if (closeBy === 'Navigate then Close') {
+        fireEvent.keyDown(window, { key: 'ArrowRight' })
+        expect(screen.getByRole('dialog', { name: second.alt })).toBeTruthy()
+      }
+      if (closeBy === 'Escape') fireEvent.keyDown(window, { key: 'Escape' })
+      else fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close image' }))
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + replacement.alt }))
+      expect(within(opener).getByRole('img', { name: replacement.alt })).toBeTruthy()
+    })
+  }
+
   it('updates caption and alt for the same material without moving retry focus', () => {
     const view = render(<Gallery page={{}} category={category(first)} />)
     fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
