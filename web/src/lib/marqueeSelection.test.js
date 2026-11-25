@@ -34,6 +34,12 @@ describe('SSD1-24C directional geometry', () => {
     expect(marqueeHandles(polys, { ...rect, maxX: 0 }, 'crossing')).toEqual([])
     expect(marqueeHandles(polys, { ...rect, maxY: 0 }, 'crossing')).toEqual([])
   })
+  it('rejects segments outside one edge before clipping can round to the endpoint', () => {
+    const boundary = { minX: 747, minY: 432, maxX: 748.0000000003879, maxY: 434 }
+    const outside = line('outside', [[4096, 433], [748.000000000388, 433]])
+    const touching = line('touching', [[4096, 433], [boundary.maxX, 433]])
+    expect(marqueeHandles([outside, touching], boundary, 'crossing')).toEqual(['touching'])
+  })
   it('SSD1-24C skips hidden layers', () => {
     expect(marqueeHandles([{ ...line('A', [[1, 1]]), layer: 'hidden' }], rect, 'window', p => p.layer !== 'hidden')).toEqual([])
   })
@@ -108,6 +114,48 @@ describe('client-space marquee', () => {
         expect(marqueeHandles(polys, rect, marqueeMode(a, b), visible, project)).toEqual(expected)
       }
     })
+
+  it.each([
+    [20, 12, 30, 'maxX'],
+    [-23, 18, 14, 'minX'],
+    [6, -35, 9, 'maxY'],
+  ])('uses the exact crossing boundary at camera (%s, %s, %s) on %s', (x, y, z, side) => {
+    const camera = cameraAt(x, y, z)
+    const polyline = line('outline', [[2, -3], [4, -2]])
+    const pixels = polyline.pts.map(([u, v]) => {
+      const point = new Vector3(u, v, 0).project(camera)
+      return {
+        x: bounds.left + (1 + point.x) * bounds.width / 2,
+        y: bounds.top + (1 - point.y) * bounds.height / 2,
+      }
+    })
+    const [first, second] = pixels
+    const left = side === 'minX'
+    const bottom = side === 'maxY'
+    const axis = bottom ? 'y' : 'x'
+    const edge = (left ? Math.max : Math.min)(...pixels.map(point => point[axis]))
+    const bits = new DataView(new ArrayBuffer(8))
+    for (const [offset, expected] of [[-1n, []], [0n, ['outline']], [1n, ['outline']]]) {
+      bits.setFloat64(0, edge)
+      bits.setBigUint64(0, bits.getBigUint64(0) + (left ? -offset : offset))
+      const limit = bits.getFloat64(0)
+      const a = { x: Math.max(first.x, second.x) + 10, y: Math.max(first.y, second.y) + 10 }
+      const b = { x: Math.min(first.x, second.x) - 10, y: Math.min(first.y, second.y) - 10 }
+      if (left) {
+        a.x = limit + 20
+        b.x = limit
+      } else if (bottom) {
+        a.y = limit
+        b.y = limit - 20
+      } else {
+        a.x = limit
+        b.x = limit - 20
+      }
+      const { rect, project } = marqueeMapping(camera, bounds, a, b)
+      expect(marqueeHandles([polyline], rect, marqueeMode(a, b), undefined, project))
+        .toEqual(expected)
+    }
+  })
 
   it('keeps the flat view in world coordinates and refuses unusable mappings', () => {
     const camera = cameraAt(2, -3, 30)
