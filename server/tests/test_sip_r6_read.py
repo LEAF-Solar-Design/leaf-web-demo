@@ -664,3 +664,14 @@ def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkey
     assert state["runnable"] is False and state["input_ready"] is False
     assert state["input_reason"] == "invalid_drawing_context"
     assert state["refusal_reasons"] == ["invalid_drawing_context"]
+
+def test_sip_r6_string_continuity_read(lane):
+    params = {"format": "continuity-json", "max_panel_pitch_m": 0.001}
+    response = run(lane, "solar-string-data", params)["result"]
+    result = response["output"]
+    assert result["summary"]["max_panel_pitch_m"] == params["max_panel_pitch_m"]
+    assert result["summary"]["strings"] == 1
+    assert result["artifact"]["filename"] == "StringContinuity.json"
+    assert response["input_version_id"] == str(lane.head)
+    assert response["drawing_changed"] is False
+    assert response["graph_sha256"] == lane.ctx.graph_sha256

@@ -11,8 +11,7 @@
   "readiness": {
     "kind": "facets",
     "facets": [
-      "strings",
-      "frames"
+      "strings"
     ]
   },
   "engine": "server-builtin",
@@ -23,7 +22,7 @@
   "record": {
     "name": "solar-string-data",
     "version": "1.0.0",
-    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates. Choose design-json for the complete current design, including panel memberships, routes and metadata; it does not certify electrical sizing.",
+    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates. Choose design-json for the complete current design, including panel memberships, routes and metadata. Choose continuity-json to identify consecutive panels farther apart than a maximum centre spacing you supply in metres.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_string_data",
@@ -37,8 +36,13 @@
         },
         "format": {
           "type": "string",
-          "enum": ["string-data", "design-json"],
-          "description": "String Data keeps the endpoint report. Full design JSON exports every current panel, group, ordered string, route and design metadata."
+          "enum": ["string-data", "design-json", "continuity-json"],
+          "description": "Choose endpoints, complete design, or physical string continuity."
+        },
+        "max_panel_pitch_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "For continuity only. Maximum allowed distance between consecutive panel centres in metres."
         },
         "string_refs": {
           "type": "array",

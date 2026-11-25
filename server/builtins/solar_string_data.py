@@ -77,13 +77,56 @@ def _design_export(graph):
                                          canonical_bytes(payload))
 
 
+def _continuity_report(graph, selected, maximum):
+    """Audit consecutive saved panel centres in their declared string order."""
+    if sum(len(string["ordered_panel_refs"]) for string in selected) > 100_000:
+        raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+    centres = {panel["id"]: panel["centre"] for panel in single.panel_views(graph)}
+    reports = []
+    total_gaps = 0
+    for string in selected:
+        refs = string["ordered_panel_refs"]
+        gaps = []
+        for index, (before, after) in enumerate(zip(refs, refs[1:]), 1):
+            try:
+                distance = math.dist(centres[before], centres[after])
+            except KeyError:
+                raise GraphValidationError("STRING_EDIT_MAPPING_FAILED") from None
+            if not math.isfinite(distance):
+                raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+            if distance > maximum:
+                total_gaps += 1
+                if total_gaps > 2_048:
+                    raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+                gaps.append({"before": before, "after": after, "distance_m": distance,
+                             "split_index": index})
+        splits = [0, *(gap["split_index"] for gap in gaps), len(refs)]
+        runs = [{"first": refs[a], "last": refs[b - 1], "panel_count": b - a}
+                for a, b in zip(splits, splits[1:]) if a < b]
+        reports.append({"string_ref": string["id"], "panel_count": len(refs),
+                        "gaps": gaps, "ordered_runs": runs})
+    report = {"schema": "leaf.solar-string-continuity.v1",
+              "rule": "consecutive-panel-centre-distance",
+              "max_panel_pitch_m": maximum, "strings": reports}
+    summary = {"status": "written", "format": "continuity-json",
+               "strings": len(selected), "gap_count": total_gaps,
+               "max_panel_pitch_m": maximum}
+    return solar_artifacts.ArtifactOutput(summary, MEDIA_TYPE, "StringContinuity.json",
+                                         canonical_bytes(report))
+
+
 def run(graph, params):
     _bounded_json(params)
-    if (type(params) is not dict or not set(params) <= {"string_refs", "format"}
+    if (type(params) is not dict or not set(params) <= {"string_refs", "format", "max_panel_pitch_m"}
             or type(params.get("format", "string-data")) is not str
-            or params.get("format", "string-data") not in ("string-data", "design-json")
+            or params.get("format", "string-data") not in ("string-data", "design-json", "continuity-json")
             or ("string_refs" in params and not _refs(params["string_refs"]))
             or (params.get("format") == "design-json" and "string_refs" in params)):
+        raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
+    continuity = params.get("format") == "continuity-json"
+    pitch = params.get("max_panel_pitch_m")
+    if (continuity and (type(pitch) not in (int, float) or not math.isfinite(pitch) or pitch <= 0)
+            or not continuity and "max_panel_pitch_m" in params):
         raise GraphValidationError("INVALID_STRING_DATA_REQUEST")
     if params.get("format") == "design-json":
         return _design_export(graph)
@@ -98,6 +141,8 @@ def run(graph, params):
         selected = list(graph["strings"])
         if len(selected) > MAX_SELECTED:
             raise GraphValidationError("STRING_EDIT_BOUNDS_EXCEEDED")
+    if continuity:
+        return _continuity_report(graph, selected, pitch)
     scale = graph["project"]["units"]["meters_per_unit"]
     tables = single.slot_tables(graph)
     # Ids only, in panel_views order: no view is built for a slot panel.
