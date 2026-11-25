@@ -9,7 +9,7 @@ _SUBTOTAL = re.compile(
 )
 _COUNT = re.compile(
     r"(?:count|tally) (?:entities|objects) on (?:each |every |the )?"
-    r"(?P<family>[\w-]+) layers?[.!]?",
+    r"(?P<family>[\w-]+) (?P<scope>layers?)[.!]?",
     re.IGNORECASE,
 )
 
@@ -29,6 +29,9 @@ def requested_family(description):
              or _COMPARISON.fullmatch(request))
     if match:
         family = match["family"].casefold()
+        # The generic author resolves a singular active or current layer at run time.
+        if match.re is _COUNT and match["scope"].casefold() == "layer" and family in {"active", "current"}:
+            return None
         if match.groupdict().get("both") and "," in family:
             return None
         return family
