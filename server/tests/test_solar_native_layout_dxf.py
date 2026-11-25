@@ -1,7 +1,7 @@
 """Native metadata and raw-source conservation, independent of native execution."""
 import copy
 import hashlib
-from io import BytesIO
+from io import BytesIO, StringIO
 import json
 from pathlib import Path
 import sys
@@ -320,6 +320,23 @@ def test_duplicate_sections_handles_and_unmanaged_leaf_refused(generated):
     refuse("SOURCE_AMBIGUOUS", write, generated[0], generated[1], duplicate)
     unmanaged = insert(source, "ENTITIES", b"0\nCIRCLE\n5\nF003\n8\nLEAF-PILING\n40\n1\n")
     refuse("OWNERSHIP_AMBIGUOUS", write, generated[0], generated[1], unmanaged)
+
+
+def test_solar_write_preserves_tiled_viewport_configuration(generated):
+    ezdxf = pytest.importorskip("ezdxf")
+    drawing = ezdxf.new()
+    drawing.units = 6
+    for left in (0, 0.5):
+        drawing.viewports.add("Split", dxfattribs={
+            "lower_left": (left, 0), "upper_right": (left + 0.5, 1),
+        })
+    stream = StringIO()
+    drawing.write(stream)
+    source = stream.getvalue().encode()
+    output = write(generated[0], generated[1], source)
+    table = source.split(b"\nVPORT\n", 1)[1].split(b"\nENDTAB\n", 1)[0]
+    assert table.count(b"\nSplit\n") == 2
+    assert table in output
 
 
 def test_namespace_corruption_scope_and_entity_tampering_refused(generated):
