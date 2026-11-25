@@ -854,3 +854,61 @@ def test_comparison_schema_at_broker_reader(monkeypatch, params, wire_version):
     else:
         assert got["ok"] is False and got["result"] is None and got["overlay"] is None
         assert "Unsupported module comparison schema_version" in got["error"]["message"]
+@pytest.mark.parametrize(("prompt", "value"), [("count modules 12", 12), ("show modules 120", 120)])
+def test_plain_count_prompt_keeps_legacy_numeric_binding(prompt, value):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"] == {"coverage_percent": value}
+    module.run({"inserts": [], "polylines": []}, route["params"])
+
+
+@pytest.mark.parametrize(
+    ("prompt", "excluded", "solutions"),
+    [
+        (
+            'Find the fewest layers covering at least 45% of the physical modules after excluding layer "Roof A".',
+            ["Roof A"],
+            [["Roof B", "Roof C"], ["Roof B", "Roof D"], ["Roof C", "Roof D"], ["Roof C", "Roof E"]],
+        ),
+        (
+            'Find the smallest set of layers reaching 70 percent of the modules without layers "roof a" and "Roof E".',
+            ["roof a", "Roof E"],
+            [["Roof C", "Roof D"]],
+        ),
+        (
+            "Find the minimum number of layers covering 100% of the panels, omitting Roof A, Roof C, and Roof E.",
+            ["Roof A", "Roof C", "Roof E"],
+            [["Roof B", "Roof D"]],
+        ),
+    ],
+)
+def test_minimum_coverage_excludes_named_layers(prompt, excluded, solutions):
+    import io
+
+    import ezdxf
+    import deps
+    import nl_router
+    from dxf_intake import parse_dxf_bytes
+
+    counts = {"Roof A": 8, "Roof B": 5, "Roof C": 10, "Roof D": 8, "Roof E": 4}
+    drawing = ezdxf.new()
+    block = drawing.blocks.new("SOLAR_PANEL")
+    block.add_lwpolyline([(0, 0), (1, 0), (1, 1), (0, 1)], close=True)
+    model = drawing.modelspace()
+    for row, (layer, count) in enumerate(counts.items()):
+        drawing.layers.new(layer)
+        for column in range(count):
+            model.add_blockref("SOLAR_PANEL", (2 * column, 2 * row), dxfattribs={"layer": layer})
+    stream = io.StringIO()
+    drawing.write(stream)
+    intake = parse_dxf_bytes(stream.getvalue().encode())
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["coverage_excluded_layers"] == excluded
+    result, _ = module.run(intake, route["params"])
+    assert result["counts"] == counts
+    assert result["coverage"] == {"reachable": True, "solutions": solutions}

@@ -330,7 +330,9 @@ def _extract_params(tool: Dict[str, Any], text: str) -> Dict[str, Any]:
     for key, spec in props.items():
         if key in params or not isinstance(spec, dict):
             continue
-        if tool.get("name") == "count-modules" and key == "layer_count_at_least":
+        if tool.get("name") == "count-modules" and key in {
+            "layer_count_at_least", "layer_share_above", "exclude_highest_count_tiers",
+        }:
             continue
         if spec.get("type") in ("number", "integer") and remaining:
             val = remaining.pop(0)
@@ -438,6 +440,10 @@ _GROUPED_PANELS = re.compile(
 
 
 _COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_COVERAGE_EXCLUSION = re.compile(
+    r"\b(?:excluding|exclude|without|omitting|omit|leaving out|leave out|ignoring|ignore)"
+    r"\s+(?:the\s+)?(?:layers?\s+)?(?P<names>.+?)[.!?]*$", re.I,
+)
 _PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
 _SHARE_WINDOW = re.compile(
     rf"\b(?:within|inside|in|between)\s+(?:(?:the\s+)?(?:window|region|box)\s+)?"
@@ -653,6 +659,18 @@ def _decide(
         target = re.search(r"\b(?:cover(?:ing)?|reach(?:ing)?)\s+(?:at least\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent\b)", text, re.I)
         if target and any(doc.tool.get("name") == "count-modules" for doc in docs):
             options = {"group_by": "layer", "panel_scope": "all_layers", "coverage_percent": float(target[1])}
+            exclusion = _COVERAGE_EXCLUSION.search(text[target.end():].strip())
+            if exclusion:
+                names = re.split(r'\s*("(?:[^"]+)"|\x27[^\x27]+\x27)\s*', exclusion["names"])
+                excluded_layers = []
+                for index, name in enumerate(names):
+                    if index % 2:
+                        excluded_layers.append(name[1:-1])
+                    else:
+                        excluded_layers.extend(part.strip() for part in
+                                               re.split(r",|\s*\band\b\s*", name, flags=re.I) if part.strip())
+                if excluded_layers:
+                    options["coverage_excluded_layers"] = excluded_layers
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Find the minimum-size layer sets that reach the module coverage target.")
 

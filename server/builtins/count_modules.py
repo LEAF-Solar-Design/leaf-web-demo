@@ -247,13 +247,21 @@ def _cumulative_shares(counts):
                      "percentage": 100 * running / total})
     return rows
 
-def _coverage(counts, percent):
+def _coverage(counts, percent, excluded_layers=None):
     from fractions import Fraction
     from itertools import combinations
 
     target = Fraction(str(percent))
     if target < 0:
         raise InputValidationError("Choose a nonnegative coverage percentage.")
+    if excluded_layers is not None:
+        excluded = {name.casefold() for name in excluded_layers}
+        selected = {name.casefold() for name in counts}
+        if excluded - selected:
+            raise InputValidationError("An excluded layer is absent from the coverage selection. Check the layer names.")
+        counts = {name: count for name, count in counts.items() if name.casefold() not in excluded}
+        if not counts and target > 0:
+            return {"reachable": False, "solutions": []}
     required = target * _module_total(counts.values()) / 100
     weights = sorted(counts.values(), reverse=True)
     size = 0
@@ -350,6 +358,15 @@ def run(intake, params):
 
 
 def _run(intake, params, *, allow_absent_in_window=False):
+    excluded_layers = params.get("coverage_excluded_layers")
+    if excluded_layers is not None and (
+        params.get("coverage_percent") is None
+        or params.get("group_by") != "layer"
+        or not isinstance(excluded_layers, list)
+        or not excluded_layers
+        or any(not isinstance(name, str) or not name.strip() for name in excluded_layers)
+    ):
+        raise InputValidationError("Supply named excluded layers with a coverage percentage and a layer breakdown.")
     top = params.get("top_layers")
     if "top_layers" in params and (type(top) is not int or top < 1):
         raise InputValidationError("Choose a positive integer for the number of top layers.")
@@ -474,7 +491,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
         if cumulative:
             breakdown["cumulative_shares"] = _cumulative_shares(counts)
         if params.get("coverage_percent") is not None:
-            breakdown["coverage"] = _coverage(counts, params["coverage_percent"])
+            breakdown["coverage"] = _coverage(counts, params["coverage_percent"], excluded_layers)
         if top is not None:
             breakdown["ranking"] = _rank_layers(counts, top)
 
