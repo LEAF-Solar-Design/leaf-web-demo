@@ -750,3 +750,48 @@ def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypa
     assert dispatched["called"] is False
     assert jobs.get_job(job_id)["status"] == "failed"
     jobs.reset_connection()
+
+
+@pytest.mark.parametrize("insunits, side, source_unit, squared_scale", [
+    (2, 1.0, "ft", 1.0),
+    (1, 12.0, "in", 1.0 / 144),
+    (4, 304.8, "mm", (1.0 / 304.8) ** 2),
+])
+def test_panel_area_square_feet_uses_dxf_insertion_units(insunits, side, source_unit, squared_scale):
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import run_tool_dynamic
+
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    pairs = [
+        (0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, insunits), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"), (0, "LWPOLYLINE"), (8, "Roof"), (90, 4), (70, 1),
+        (10, 0), (20, 0), (10, side), (20, 0), (10, side), (20, side), (10, 0), (20, side),
+        (0, "ENDSEC"), (0, "EOF"),
+    ]
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode("ascii"))
+    result = run_tool_dynamic(tool, intake, {"layer": "Roof", "output_units": "ft2"}, aps_live=False)
+    assert result["ok"], result
+    value = result["result"]
+    assert value["total_area"] == value["avg_area"] == 1.0
+    assert value["units"] == "ft2"
+    assert value["unit_conversion"] == {
+        "source": "$INSUNITS", "source_code": insunits, "source_unit": source_unit,
+        "area_factor": pytest.approx(squared_scale),
+    }
+
+    legacy = run_tool_dynamic(tool, intake, {"layer": "Roof"}, aps_live=False)
+    assert legacy["result"] == {
+        "layer": "Roof", "count": 1, "total_area": round(side * side, 3),
+        "avg_area": round(side * side, 3), "units": "drawing",
+    }
+
+
+@pytest.mark.parametrize("intake", [{}, {"insunits": 0}, {"insunits": 2, "insunits_error": "conflict"}])
+def test_panel_area_square_feet_refuses_unknown_drawing_units(intake):
+    from tool_loader import run_tool_dynamic
+
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    result = run_tool_dynamic(tool, intake, {"output_units": "ft2"}, aps_live=False)
+    assert not result["ok"]
+    assert result["error"]["error_code"] == "BAD_PARAMS"
+    assert "$INSUNITS" in result["error"]["message"]

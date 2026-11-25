@@ -107,14 +107,25 @@
     {
       "name": "measure-panel-area",
       "version": "1.0.0",
-      "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
+      "description": "Measures total and average closed-polyline area on a layer. Use output_units=ft2 for square feet with DXF insertion-unit provenance.",
       "kind": "script",
       "engine_op": "measure_panel_area",
       "script": "engine/tools/measure_panel_area.lsp",
-      "params": { "type": "object", "properties": {}, "required": [] },
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string", "default": "Panels" },
+          "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" }
+        },
+        "required": []
+      },
       "returns": {
         "type": "object",
         "properties": {
+          "total_area": { "type": "number" },
+          "avg_area": { "type": "number" },
+          "units": { "enum": ["drawing", "ft2"] },
+          "unit_conversion": { "type": "object" },
           "area_sqft": { "type": "number" },
           "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
           "units_assumption": { "type": "string" }

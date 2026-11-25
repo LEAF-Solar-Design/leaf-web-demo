@@ -87,19 +87,53 @@ def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[d
     return ({"counts": counts, "total": sum(counts.values())}, None)
 
 
+class AreaUnitValidationError(ValueError):
+    """The drawing cannot support the requested physical area conversion."""
+
+
+_DXF_AREA_SOURCE_UNITS = {
+    1: ("in", 0.0254),
+    2: ("ft", 0.3048),
+    3: ("mi", 1609.344),
+    4: ("mm", 0.001),
+    5: ("cm", 0.01),
+    6: ("m", 1.0),
+    7: ("km", 1000.0),
+    10: ("yd", 0.9144),
+    14: ("dm", 0.1),
+}
+
+
 def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
     layer = params.get("layer", DEFAULT_LAYER)
     polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
     areas = [_shoelace_area(p.get("pts", [])) for p in polys if p.get("closed")]
     total = sum(areas)
     count = len(areas)
+    units = params.get("output_units", "drawing")
+    conversion = {}
+    if units == "ft2":
+        code = intake.get("insunits")
+        if intake.get("insunits_error") or type(code) is not int or code not in _DXF_AREA_SOURCE_UNITS:
+            raise AreaUnitValidationError("Square feet requires a supported, unambiguous $INSUNITS value.")
+        source_unit, metres_per_unit = _DXF_AREA_SOURCE_UNITS[code]
+        area_factor = (metres_per_unit / _DXF_AREA_SOURCE_UNITS[2][1]) ** 2
+        total *= area_factor
+        conversion["unit_conversion"] = {
+            "source": "$INSUNITS",
+            "source_code": code,
+            "source_unit": source_unit,
+            "area_factor": area_factor,
+        }
+
     return (
         {
             "layer": layer,
             "count": count,
             "total_area": round(total, 3),
             "avg_area": round(total / count, 3) if count else 0.0,
-            "units": "drawing",
+            "units": units,
+            **conversion,
         },
         None,
     )
@@ -208,7 +242,10 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
         "entry": "builtins/measure_area_by_layer.py",
         "params": {
             "type": "object",
-            "properties": {"layer": {"type": "string", "default": DEFAULT_LAYER}},
+            "properties": {
+                "layer": {"type": "string", "default": DEFAULT_LAYER},
+                "output_units": {"type": "string", "enum": ["drawing", "ft2"], "default": "drawing"},
+            },
             "required": [],
         },
         "returns": {"type": "object"},
