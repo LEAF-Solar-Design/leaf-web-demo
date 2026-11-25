@@ -172,6 +172,36 @@ describe('exported viewer background exclusion', () => {
 })
 
 describe('actual exported portfolio image failure recovery', () => {
+  for (const retryFrom of ['grid', 'viewer']) {
+    it(`shares retry attempts from the ${retryFrom} without changing an adjacent image`, () => {
+      const view = render(<Gallery page={{}} category={{ slug: 'work', images: [first, second] }} />)
+      const [tile, adjacent] = view.container.querySelectorAll('figure')
+      const opener = within(tile).getByRole('button', { name: 'View ' + first.alt })
+      fireEvent.click(opener)
+      const dialog = within(screen.getByRole('dialog'))
+      fireEvent.error(tile.querySelector('img'))
+      fireEvent.error(dialog.getByRole('img'))
+      if (retryFrom === 'grid') {
+        fireEvent.keyDown(window, { key: 'Escape' })
+        fireEvent.click(within(tile).getByRole('button', { name: 'Retry photo' }))
+        expect(document.activeElement).toBe(opener)
+        fireEvent.click(opener)
+      } else {
+        fireEvent.click(dialog.getByRole('button', { name: 'Retry photo' }))
+      }
+      const currentDialog = within(screen.getByRole('dialog'))
+      for (const image of [tile.querySelector('img'), currentDialog.getByRole('img')]) {
+        expect(image.getAttribute('src')).toBe(`/images/${first.material_id}.jpg?retry=1`)
+        fireEvent.load(image)
+      }
+      expect(adjacent.querySelector('img').getAttribute('src')).toBe(`/images/${second.material_id}.jpg`)
+      expect(document.activeElement).toBe(currentDialog.getByRole('button', { name: 'Close image' }))
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(document.activeElement).toBe(opener)
+      expect(within(tile).queryByRole('button', { name: 'Retry photo' })).toBeNull()
+    })
+  }
+
   it('detects an image that failed before hydration attached its error handler', () => {
     vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true)
     vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(0)
@@ -234,6 +264,75 @@ describe('actual exported portfolio image failure recovery', () => {
 
 
 describe('current material selection after document edits', () => {
+  it('uses the last visible opener position after a reorder and removal', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Third photo')
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second, third]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    view.rerender(gallery([second, first, third]))
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    view.rerender(gallery([second, third]))
+    expect(screen.getByRole('dialog', { name: third.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + third.alt }))
+  })
+
+  it('focuses the visible photo at the removed opener position after navigation', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Third photo')
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second, third]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + second.alt }))
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    view.rerender(gallery([first, third]))
+    expect(screen.getByRole('dialog', { name: third.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + third.alt }))
+  })
+
+  it('focuses the last visible photo when the removed opener was last', () => {
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + second.alt }))
+    view.rerender(gallery([first]))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + first.alt }))
+  })
+
+  it('focuses the empty status when the only photo is hidden', () => {
+    const view = render(<Gallery page={{}} category={category(first)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    view.rerender(<Gallery page={{}} category={category({ ...first, display: { hidden: true } })} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+    const status = screen.getByRole('status')
+    expect(status.textContent).toBe('No photos in this gallery yet.')
+    expect(document.activeElement).toBe(status)
+  })
+
+  for (const closeBy of ['Escape', 'Close', 'Navigate then Close']) {
+    it(`returns focus to the updated grid opener on ${closeBy}`, () => {
+      const original = { ...first, preview_sha256: 'a'.repeat(64) }
+      const replacement = { ...original, alt: 'Updated portrait', preview_sha256: 'b'.repeat(64) }
+      const gallery = image => <Gallery page={{}} category={{ slug: 'work', images: [image, second] }} />
+      const view = render(gallery(original))
+      const opener = screen.getByRole('button', { name: 'View ' + original.alt })
+      const previousPreview = within(opener).getByRole('img')
+      fireEvent.click(opener)
+      view.rerender(gallery(replacement))
+      expect(opener.isConnected).toBe(true)
+      expect(previousPreview.isConnected).toBe(false)
+      fireEvent.error(previousPreview)
+      if (closeBy === 'Navigate then Close') {
+        fireEvent.keyDown(window, { key: 'ArrowRight' })
+        expect(screen.getByRole('dialog', { name: second.alt })).toBeTruthy()
+      }
+      if (closeBy === 'Escape') fireEvent.keyDown(window, { key: 'Escape' })
+      else fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close image' }))
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + replacement.alt }))
+      expect(within(opener).getByRole('img', { name: replacement.alt })).toBeTruthy()
+    })
+  }
+
   it('updates caption and alt for the same material without moving retry focus', () => {
     const view = render(<Gallery page={{}} category={category(first)} />)
     fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
