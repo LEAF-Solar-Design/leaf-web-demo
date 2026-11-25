@@ -129,28 +129,36 @@ def _upstream_basis(graph, tables):
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def _frame_geometry(graph, frame):
+    """Selected frame's cell identities and saved (x, y, angle), without site expansion."""
+    if "ground_slots" in frame:
+        from solar_ground_graph_codec import decode_slots
+        table = decode_slots(frame["ground_slots"])
+        return [list(table.ids)], {
+            ref: (table.centres[2 * col], table.centres[2 * col + 1], table.angle)
+            for col, ref in enumerate(table.ids)}
+    return [[cell["panel_ref"] for cell in row] for row in frame["matrix"]], {
+        panel["id"]: (*panel["centre"][:2], panel["angle"]) for panel in graph["panels"]}
+
+
 def _frame_request(graph, frame_ref, request, *, request_model=StringerRequest):
     """Bind original (not truncated) cells to application-owned panel ids."""
     try:
         parsed = request_model.model_validate(request)
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
-        panels = {p["id"]: p for p in graph["panels"]}
+        matrix, geometry = _frame_geometry(graph, frame)
         if (len(parsed.grid.Rows) != frame["module_rows"]
                 or len(parsed.grid.Rows[0].Panels) != frame["module_columns"]):
             raise ValueError()
         for r, row in enumerate(parsed.grid.Rows):
             for c, wire in enumerate(row.Panels):
-                cell = frame["matrix"][r][c]
-                ref = cell["panel_ref"]
+                ref = matrix[r][c]
                 if (wire.Code == 1) != (ref is not None):
                     raise ValueError()
                 if ref is not None:
-                    panel = panels[ref]
                     if wire.Id != ref or any(
                         not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
-                        for a, b in ((wire.X, panel["centre"][0]),
-                                     (wire.Y, panel["centre"][1]),
-                                     (wire.Angle, panel["angle"]))
+                        for a, b in zip((wire.X, wire.Y, wire.Angle), geometry[ref])
                     ):
                         raise ValueError()
         return frame, parsed
