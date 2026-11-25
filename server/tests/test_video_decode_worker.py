@@ -263,3 +263,57 @@ def test_decoder_dispatch_before_schema(monkeypatch):
     monkeypatch.setattr(worker, 'main', lambda argv: calls.append(argv))
     canonical_worker.main()
     assert calls == [['--once']]
+
+
+def test_decoder_db_sets_timeout_after_connect_without_startup_options(monkeypatch):
+    from types import ModuleType
+
+    connect_kwargs = {}
+    executed = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return {'video_decode_heartbeat': True}
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    def connect(dsn, **kwargs):
+        connect_kwargs.update(kwargs)
+        return Connection()
+
+    psycopg = ModuleType('psycopg')
+    psycopg.connect = connect
+    psycopg.rows = ModuleType('psycopg.rows')
+    psycopg.rows.dict_row = object()
+    psycopg.types = ModuleType('psycopg.types')
+    psycopg.types.json = ModuleType('psycopg.types.json')
+    psycopg.types.json.Jsonb = lambda value: value
+    for name, module in (('psycopg', psycopg), ('psycopg.rows', psycopg.rows),
+                         ('psycopg.types', psycopg.types), ('psycopg.types.json', psycopg.types.json)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+    result = worker.DecoderDB('postgresql://u:p@h/d').video_decode_heartbeat('job', 'w', 60)
+
+    assert result is True
+    assert 'options' not in connect_kwargs
+    assert connect_kwargs['connect_timeout'] == 5
+    assert connect_kwargs['autocommit'] is True
+    assert executed[0][0] == 'SET statement_timeout = 5000'
+    assert executed[1][0].startswith('SELECT * FROM video_decode_heartbeat(')
