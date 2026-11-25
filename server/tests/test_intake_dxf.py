@@ -616,3 +616,32 @@ def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
     assert again["hidden_layers"] == ["RAILS", "TAGS"]
     shown = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf({"layers": ["A"], "polylines": []}), source_name="x")
     assert "hidden_layers" not in shown
+
+
+@pytest.mark.parametrize(("first", "second", "base", "length"), [
+    ("Rail", "Rail", 0, 5),
+    ("Tracker", "TRACKER", 3, 1),
+    ("Canopy", "canopy", 4, 6),
+])
+def test_dxf_refuses_ambiguous_block_names_in_either_order(first, second, base, length):
+    def block(name, handle, x, end):
+        return (f"0\nBLOCK\n2\n{name}\n10\n{x}\n20\n0\n"
+                f"0\nLINE\n5\n{handle}\n8\n0\n10\n0\n20\n0\n"
+                f"11\n{end}\n21\n1\n0\nENDBLK\n")
+
+    def drawing(*definitions):
+        return ("0\nSECTION\n2\nBLOCKS\n" + "".join(definitions) +
+                f"0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA1\n"
+                f"8\n0\n2\n{first.upper()}\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n").encode()
+
+    original = block(first, "21", 0, 1)
+    conflict = block(second, "22", base, length)
+    for definitions in ((original, conflict), (conflict, original)):
+        with pytest.raises(dxf_intake.DxfParseError, match="conflicting block definitions"):
+            dxf_intake.parse_dxf_bytes(drawing(*definitions))
+
+    distinct = block(second + "_ALT", "22", base, length)
+    result = dxf_intake.parse_dxf_bytes(drawing(original, distinct))
+    assert list(result["blocks"]) == [first, second + "_ALT"]
+    assert result["inserts"][0]["name"] == first
+    assert result["blocks"][second + "_ALT"]["base"] == [base, 0, 0]

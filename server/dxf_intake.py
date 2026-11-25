@@ -99,6 +99,7 @@ def parse_dxf_bytes(
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
     blocks: Dict[str, Any] = {}
+    block_names: Dict[str, str] = {}
     parse_errors: List[str] = []
     block_count = 0
     has_blocks = False
@@ -209,9 +210,15 @@ def parse_dxf_bytes(
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
             name, block, i = _parse_block(pairs, i + 1, parse_errors, include_measurement_evidence)
             if name and not _layout_block_name(name):
+                # Use the same case-insensitive identity as INSERT resolution.
+                key = name.casefold()
+                prior = block_names.get(key)
+                if prior is not None and blocks[prior] != block:
+                    raise DxfParseError(f"conflicting block definitions: {name[:120]!r}")
                 block_count += 1
                 if block_count <= 200:
                     blocks[name] = block
+                    block_names[key] = name
             continue
         if section == "ENTITIES" and code == 0:
             space_info = {}
@@ -343,7 +350,6 @@ def parse_dxf_bytes(
             continue
         i += 1
 
-    block_names = {name.casefold(): name for name in blocks}
     resolved_inserts = []
     for entity in inserts:
         block_name = block_names.get(entity["name"].casefold())
