@@ -571,6 +571,32 @@ def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
     assert [row["layer"] for row in result["ranking"]] == expected
 
 
+@pytest.mark.parametrize("prompt, expected_layers, expected_handles, expected_total", [
+    ("Which roof layers are tied for the largest module count? Highlight only the tied winners.",
+     ["Roof A", "Roof C"], {"B", "D"}, 16),
+    ("Rank the top two layers by panel count and only highlight the ranked layers.",
+     ["Ground", "Roof A", "Roof C"], {"A", "B", "D"}, 115),
+    ("Show top 3 roof layers by module count, highlight only the top layers.",
+     ["Roof A", "Roof C", "Roof B"], {"B", "C", "D"}, 16),
+])
+def test_ranked_highlight_requests_keep_ties_and_preserve_selection_total(
+    prompt, expected_layers, expected_handles, expected_total
+):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["highlight_ranked_layers"] is True
+    drawing = {"inserts": [{"name": "Panel", "layer": layer, "rows": count, "handle": handle}
+                           for layer, count, handle in [("Ground", 99, "A"), ("Roof A", 7, "B"),
+                                                        ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
+    result, overlay = module.run(drawing, route["params"])
+    assert result["count"] == expected_total
+    assert [row["layer"] for row in result["ranking"]] == expected_layers
+    assert set(overlay["highlight_handles"]) == expected_handles
+
+
 @pytest.mark.parametrize("phrase,expected", [
     ("What percentage of all panels is on each layer?", {"East", "West", "North"}),
     ("Select only the west, north, and East panel sets. What percentage of that selection is on each layer?",

@@ -517,8 +517,19 @@ _TOP_LAYER_COUNT = re.compile(
 )
 
 
+_RANKED_LAYER_HIGHLIGHTS = re.compile(
+    r"(?:\s+and\s+|[,.!?;]\s*|\s+)\s*"
+    r"(?:highlight\s+only|only\s+highlight)\s+(?:the\s+)?"
+    r"(?:(?:ranked|top|winning)\s+layers|(?:tied\s+)?winners)[?.!]?$",
+    re.I,
+)
+
+
 def _layer_ranking_params(text):
     query = text.strip()
+    highlights = _RANKED_LAYER_HIGHLIGHTS.search(query)
+    if highlights:
+        query = query[:highlights.start()].rstrip(" ,.")
     match = _LAYER_LEADERS.fullmatch(query)
     limit = 1
     if match is None:
@@ -529,7 +540,8 @@ def _layer_ranking_params(text):
         words = "one two three four five six seven eight nine ten".split()
         limit = int(number) if number.isdecimal() else words.index(number) + 1
     scope = "roof_layers" if match["roof"] else "all_layers"
-    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit}
+    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit,
+            **({"highlight_ranked_layers": True} if highlights else {})}
 
 
 def _decide(

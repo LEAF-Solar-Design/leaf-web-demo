@@ -338,6 +338,9 @@ def _run(intake, params, *, allow_absent_in_window=False):
     top = params.get("top_layers")
     if "top_layers" in params and (type(top) is not int or top < 1):
         raise InputValidationError("Choose a positive integer for the number of top layers.")
+    highlight_ranked = params.get("highlight_ranked_layers", False)
+    if type(highlight_ranked) is not bool or (highlight_ranked and top is None):
+        raise InputValidationError("Ranked-layer highlights require a top layer ranking.")
     window = _selection_region(params)
     if not isinstance(intake, dict):
         raise InputValidationError("Saved intake must be an object; re-import the drawing.")
@@ -457,6 +460,11 @@ def _run(intake, params, *, allow_absent_in_window=False):
     def public_set(group):
         return {k: v for k, v in group.items() if k not in ("handles", "_keys")}
 
+    highlighted_sets = selected_sets
+    if highlight_ranked and selected_sets:
+        ranked_layers = {row["layer"] for row in breakdown["ranking"]}
+        highlighted_sets = [group for group in selected_sets if group["layer"] in ranked_layers]
+
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
@@ -466,5 +474,5 @@ def _run(intake, params, *, allow_absent_in_window=False):
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]
                           for key in set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
-            {"highlight_handles": list(dict.fromkeys(h for s in selected_sets for h in s["handles"]))}
+            {"highlight_handles": list(dict.fromkeys(h for s in highlighted_sets for h in s["handles"]))}
             if selected_sets else None)
