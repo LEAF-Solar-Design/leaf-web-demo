@@ -245,6 +245,77 @@ def test_equidistant_label_and_unproven_panel_do_not_supply_identity():
     assert parsed.identity_matrices()[0]["Optimizers"][1]["cells"] == []
 
 
+def measured_pair_page(axis, scale=1.0, origin=(300.0, 500.0), gap=None):
+    from solar_solaredge_pdf import PagePrimitives
+    from test_solar_solaredge_parse import _optimizer_path, _word, PANEL_FILL, RED
+    x, y = origin
+    width, height = 14.23 * scale, 24.33 * scale
+    offset = (7.29 if axis == "horizontal" else 12.35) * scale
+    if gap is not None:
+        offset = ((width if axis == "horizontal" else height) + gap * scale) / 2
+    centers = [(x - offset, y), (x + offset, y)] if axis == "horizontal" else [
+        (x, y - offset), (x, y + offset)]
+    paths = [(True, True, (cx - width / 2, cy - height / 2,
+                          cx + width / 2, cy + height / 2), PANEL_FILL, None)
+             for cx, cy in centers]
+    paths.append(_optimizer_path(x, y))
+    return PagePrimitives(page_width=2000.0, page_height=2000.0, paths=paths,
+                          letters=_word("3.2", x, y), lines=[],
+                          curves=[(x, 2000 - y, x + 10, 2000 - y,
+                                   x + 20, 2000 - y, x + 30, 2000 - y, RED)])
+
+
+@pytest.mark.parametrize("axis,scale,origin", [
+    ("horizontal", 1.0, (300.0, 500.0)),
+    ("vertical", 1.0, (300.0, 500.0)),
+    ("horizontal", 1.8, (650.0, 720.0)),
+    ("vertical", 1.8, (650.0, 720.0)),
+])
+def test_measured_pairs_emit_exact_cells_and_sequence(axis, scale, origin):
+    import solar_solaredge_parse as parser
+    parsed = parser.SolarEdgeParse(measured_pair_page(axis, scale, origin))
+    for grid in parsed.final_grids:
+        parsed._assign_row_column_coordinates(grid)
+    legacy = parsed.generate_matrix_jsons()
+    legacy_digest = canonical_sha(legacy)
+    legacy_members = [list(o.panel_ids) for o in parsed.optimizers]
+    modern = parsed.identity_matrices()
+    assert len(modern) == 1
+    matrix = modern[0]
+    cells = matrix["Optimizers"][0]["cells"]
+    expected = {(0, 0), (0, 1)} if axis == "horizontal" else {(0, 0), (1, 0)}
+    assert len(cells) == 2 and set(map(tuple, cells)) == expected
+    assert matrix["Sequences"] == [2]
+    panels = [matrix["Rows"][r]["Panels"][c] for r, c in cells]
+    assert sorted(p["Seq"] for p in panels) == [1, 2]
+    assert {(p["InverterId"], p["StringInputNumber"]) for p in panels} == {(3, 2)}
+    assert [o.panel_ids for o in parsed.optimizers] == legacy_members
+    assert canonical_sha(parsed.generate_matrix_jsons()) == legacy_digest
+    assert parsed.identity_matrices() == modern
+
+
+@pytest.mark.parametrize("ambiguity", ["competing-pairs", "shared-panel", "wide-gap",
+                                        "duplicate-cell"])
+def test_measured_pairs_refuse_ambiguous_ownership(ambiguity):
+    import solar_solaredge_parse as parser
+    page = measured_pair_page("horizontal", gap=8 if ambiguity == "wide-gap" else None)
+    if ambiguity == "competing-pairs":
+        page.paths.insert(0, page.paths[0])
+    parsed, _ = parser.parse_primitives(page)
+    for grid in parsed.final_grids:
+        parsed._assign_row_column_coordinates(grid)
+    if ambiguity == "shared-panel":
+        original = parsed.optimizers[0]
+        rival = parser.Optimizer(99, original.cx, original.cy, original.color)
+        parsed.optimizers.append(rival)
+    if ambiguity == "duplicate-cell":
+        parsed.panels[1].row = parsed.panels[0].row
+        parsed.panels[1].col = parsed.panels[0].col
+    modern = parsed.identity_matrices()
+    assert all(not opt["cells"] for matrix in modern for opt in matrix["Optimizers"])
+    assert all(not matrix["Sequences"] for matrix in modern)
+
+
 @pytest.mark.parametrize("bad", ["dotted-vendor", "bool-cell", "outside", "extra", "huge-id"])
 def test_worker_rejects_malformed_optimizer_identity(bad):
     matrix = {"Rows": [{"Panels": [{"Code": 1}]}], "Optimizers": [
