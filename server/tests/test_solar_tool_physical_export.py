@@ -1338,6 +1338,40 @@ def test_estimate_refuses_invalid_billing_increment(increment):
         estimate_price(inputs)
 
 
+@pytest.mark.parametrize("mode,expected", [
+    ("volume", ["12.00", "24.00", "18.00"]),
+    ("marginal", ["12.00", "24.00", "27.60"]),
+])
+def test_estimate_supplier_tiers_inclusive_threshold(mode, expected):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs(("48", "96", "120"), ("0.50",) * 3)
+    for rate in inputs[1]["rates"]:
+        rate.update(tier_mode=mode, tiers=[{"up_to": 96, "rate": "0.25"}, {"up_to": None, "rate": "0.15"}])
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert [row["amount"] for row in material["lines"]] == expected
+    assert material["rate_card"] == inputs[1]
+
+
+def test_estimate_tiers_apply_to_rounded_billing_quantity_before_basis_and_minimum():
+    inputs = estimate_inputs(("95.1", "96.1"), ("1", "1"))
+    for rate in inputs[1]["rates"]:
+        rate.update(tier_mode="marginal", tiers=[{"up_to": "96", "rate": "250"}, {"up_to": None, "rate": "150"}],
+                    increment="8", increment_semantics="ceil_quantity_before_pricing",
+                    price_basis="1000", basis_unit="ea", minimum_amount="25.00",
+                    minimum_semantics="per_line_floor_after_rounding")
+    lines = estimate_price(inputs)["lines"]
+    assert [(line["quantity"], line["billed_quantity"], line["amount"]) for line in lines] == [
+        ("95.1", "96", "25.00"), ("96.1", "104", "25.20")]
+
+
+@pytest.mark.parametrize("bounds", [[], [None, 96], [96], [96, 96, None], [True, None], [0, None]])
+def test_estimate_rejects_invalid_tier_schedule(bounds):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(tier_mode="volume", tiers=[{"up_to": bound, "rate": "0.15"} for bound in bounds])
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
 def test_estimate_bounds_and_long_exact_decimals():
     inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
                              ("1000000000000", "0.12345678901234567890123456789012345678"))

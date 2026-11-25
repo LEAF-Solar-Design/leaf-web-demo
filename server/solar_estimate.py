@@ -93,6 +93,45 @@ def _increment(value):
     return Fraction(numerator, denominator)
 
 
+def _tier_schedule(rate):
+    bands = rate["tiers"]
+    if rate["tier_mode"] not in ("volume", "marginal") or type(bands) is not list or not 1 <= len(bands) <= 128:
+        _fail("ESTIMATE_RATE_CARD_INVALID")
+    lower = Fraction(0)
+    result = []
+    for index, band in enumerate(bands):
+        if type(band) is not dict or band.keys() != {"up_to", "rate"}:
+            _fail("ESTIMATE_RATE_CARD_INVALID")
+        price = _decimal(band["rate"])
+        upper = band["up_to"]
+        if price is None or (upper is None) != (index == len(bands) - 1):
+            _fail("ESTIMATE_RATE_CARD_INVALID")
+        if upper is not None:
+            bound = _decimal(str(upper) if type(upper) is int else upper)
+            if bound is None or bound <= lower:
+                _fail("ESTIMATE_RATE_CARD_INVALID")
+            upper = Fraction(bound)
+            lower = upper
+        result.append((upper, Fraction(price)))
+    return result
+
+
+def _tier_charge(quantity, schedule, mode):
+    lower = Fraction(0)
+    charge = Fraction(0)
+    for upper, rate in schedule:
+        last_band = upper is None or quantity <= upper
+        if mode == "volume":
+            if last_band:
+                return quantity * rate
+        else:
+            end = quantity if last_band else upper
+            charge += (end - lower) * rate
+            if last_band:
+                return charge
+        lower = upper
+
+
 def _binding(binding):
     ids = ("organization_id", "project_id", "drawing_id", "input_version_id")
     if type(binding) is not dict or set(binding) != set(ids) | {"intake_sha256", "graph_sha256"}:
@@ -152,12 +191,14 @@ def price_takeoff(summary, rate_card, *, source_binding):
         _fail("ESTIMATE_LIMIT_EXCEEDED")
     rates = {}
     increments = {}
+    tier_schedules = {}
     required_rate_fields = {"line_id", "unit", "rate"}
     minimum_fields = {"minimum_amount", "minimum_semantics"}
     basis_fields = {"price_basis", "basis_unit"}
     increment_fields = {"increment", "increment_semantics"}
-    term_pairs = (minimum_fields, basis_fields, increment_fields)
-    allowed_fields = required_rate_fields | minimum_fields | basis_fields | increment_fields
+    tier_fields = {"tiers", "tier_mode"}
+    term_pairs = (minimum_fields, basis_fields, increment_fields, tier_fields)
+    allowed_fields = required_rate_fields | minimum_fields | basis_fields | increment_fields | tier_fields
     for rate in rate_card["rates"]:
         if (type(rate) is not dict or not required_rate_fields <= rate.keys()
                 or rate.keys() - allowed_fields
@@ -179,6 +220,8 @@ def price_takeoff(summary, rate_card, *, source_binding):
             if increment is None or rate["increment_semantics"] != "ceil_quantity_before_pricing":
                 _fail("ESTIMATE_RATE_CARD_INVALID")
             increments[rate["line_id"]] = increment
+        if "tiers" in rate:
+            tier_schedules[rate["line_id"]] = _tier_schedule(rate)
         rates[rate["line_id"]] = rate
     takeoff = copy.deepcopy(summary)
     takeoff["lines"].sort(key=lambda row: row["line_id"])
@@ -208,14 +251,17 @@ def price_takeoff(summary, rate_card, *, source_binding):
             billed_quantity = None
             if reason is None:
                 increment = increments.get(line["line_id"])
+                schedule = tier_schedules.get(line["line_id"])
                 price = _decimal(rate["rate"])
-                if increment is not None or "price_basis" in rate:
+                if increment is not None or schedule is not None or "price_basis" in rate:
                     billing = Fraction(quantity)
                     if increment is not None:
                         billing = math.ceil(billing / increment) * increment
                         billed_quantity = str(billing)
                     basis = Fraction(_decimal(rate["price_basis"])) if "price_basis" in rate else 1
-                    charge_cents = billing * Fraction(price) * 100 / basis
+                    charge = (_tier_charge(billing, schedule, rate["tier_mode"]) if schedule is not None
+                              else billing * Fraction(price))
+                    charge_cents = charge * 100 / basis
                     amount = Decimal(round(charge_cents)).scaleb(-2)
                 else:
                     amount = (quantity * price).quantize(Decimal("0.01"))
