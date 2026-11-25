@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 
 import solar_solaredge_parse as sp
+import solar_solaredge_pdf as pdf
 from solar_solaredge_parse import SolarEdgeParseError
 from solar_solaredge_pdf import PagePrimitives, extract_primitives
+from solar_solaredge_parse_worker import verdict_bytes
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -182,3 +184,88 @@ def test_refuses_too_many_optimizers(monkeypatch):
     with pytest.raises(SolarEdgeParseError) as err:
         sp.parse_primitives(_page())
     assert err.value.code == "TOO_MANY_OPTIMIZERS"
+
+
+def _stamp_layout(x, y):
+    return f"""
+    .9 .95 1 rg 0 0 0 RG {x} {y} 30 60 re B
+    1 0 0 RG {x + 10} {y + 25} 10 10 re S
+    {x + 15} {y + 30} m {x + 22} {y + 31} {x + 30} {y + 31} {x + 35} {y + 30} c S
+    0 0 0 rg BT /F1 6 Tf {x + 12} {y + 28} Td (1.1) Tj ET
+    """.encode()
+
+
+def _stamp_report(content, *, stamp=None, rect=b"0 0 1000 1000", matrix=b"", state=False,
+                  flags=4, subtype=b"Stamp"):
+    font = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+    def stream(data, attrs=b""):
+        return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), attrs, data)
+
+    annots = b"/Annots [5 0 R]" if stamp is not None else b""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 4 0 R "
+        b"/Resources << %s >> %s >>" % (font, annots),
+        stream(content),
+    ]
+    if stamp is not None:
+        appearance = b"<< /On 6 0 R /Off 7 0 R >>" if state else b"6 0 R"
+        state_name = b"/AS /On" if state else b""
+        objects.append(b"<< /Type /Annot /Subtype /%s /F %d /Rect [%s] /AP << /N %s >> %s >>"
+                       % (subtype, flags, rect, appearance, state_name))
+        form = b"/Type /XObject /Subtype /Form /BBox [0 0 1000 1000] /Resources << %s >> %s" % (font, matrix)
+        objects.append(stream(stamp, form))
+        if state:
+            objects.append(stream(_stamp_layout(750, 750), form))
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf += b"%d 0 obj\n%s\nendobj\n" % (number, obj)
+    xref = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        pdf += b"%010d 00000 n \n" % offset
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(pdf)
+
+
+@pytest.mark.parametrize("rect,matrix,state,offset", [
+    (b"0 0 1000 1000", b"", False, (0, 0)),
+    (b"50 25 1050 1025", b"/Matrix [2 0 0 3 15 -20]", False, (50, 25)),
+    (b"0 0 1000 1000", b"", True, (0, 0)),
+], ids=["direct-normal", "transformed-normal", "chosen-normal-state"])
+def test_printable_stamp_import_matches_flattened_layout(rect, matrix, state, offset):
+    source = _stamp_layout(100, 500) + _stamp_layout(700, 100)
+    flat = _stamp_layout(100 + offset[0], 500 + offset[1]) + _stamp_layout(700 + offset[0], 100 + offset[1])
+    expected = json.loads(verdict_bytes(_stamp_report(flat)))
+    assert len(expected["matrices"]) == 2
+    assert json.loads(verdict_bytes(_stamp_report(b"", stamp=source, rect=rect, matrix=matrix, state=state))) == expected
+
+
+@pytest.mark.parametrize("flags,subtype", [(0, b"Stamp"), (6, b"Stamp"), (4, b"FreeText")])
+def test_nonprinting_hidden_and_other_annotations_do_not_supply_panels(flags, subtype):
+    base = _stamp_layout(100, 500)
+    assert verdict_bytes(_stamp_report(base, stamp=_stamp_layout(700, 100), flags=flags, subtype=subtype)) == (
+        verdict_bytes(_stamp_report(base))
+    )
+
+
+@pytest.mark.parametrize("stamp", [
+    _stamp_layout(1000, 500),
+    b"0 0 10 10 re W n\n" + _stamp_layout(100, 500),
+], ids=["outside-bbox", "clip-operator"])
+def test_stamp_refuses_clipped_layout_instead_of_importing_hidden_panels(stamp):
+    verdict = json.loads(verdict_bytes(_stamp_report(_stamp_layout(100, 500), stamp=stamp)))
+    assert verdict["refusal"] == "REPORT_PDF_UNSUPPORTED"
+
+
+def test_stamp_content_counts_toward_the_page_content_budget(monkeypatch):
+    base = _stamp_layout(100, 500)
+    stamp = _stamp_layout(700, 100)
+    monkeypatch.setattr(pdf, "MAX_CONTENT_BYTES", max(len(base), len(stamp)))
+    assert "matrices" in json.loads(verdict_bytes(_stamp_report(base)))
+    verdict = json.loads(verdict_bytes(_stamp_report(base, stamp=stamp)))
+    assert verdict["refusal"] == "REPORT_RESOURCE_LIMIT"

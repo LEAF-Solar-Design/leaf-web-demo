@@ -43,11 +43,13 @@ from pdfminer.pdfinterp import PDFContentParser, PDFPageInterpreter, PDFResource
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
 from pdfminer.pdftypes import PDFStream, resolve1, stream_value
-from pdfminer.psparser import PSEOF, PSKeyword, PSLiteral, keyword_name, literal_name
+from pdfminer.psparser import LIT, PSEOF, PSKeyword, PSLiteral, keyword_name, literal_name
+from pdfminer.utils import MATRIX_IDENTITY, apply_matrix_pt, mult_matrix
 
 
 MAX_PDF_BYTES = 64 * 1024 * 1024
 MAX_PAGES = 1000
+MAX_ANNOTATIONS = 10_000
 MAX_CONTENT_BYTES = 256 * 1024 * 1024
 MAX_OPERATORS = 5_000_000
 MAX_PATHS = 1_000_000
@@ -435,11 +437,12 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     with its own q/Q stack: (stroke_space, stroke_components, fill_space, fill_components).
     """
 
-    def __init__(self, rsrcmgr, device, out, counter, depth=0):
+    def __init__(self, rsrcmgr, device, out, counter, depth=0, *, appearance=False):
         super().__init__(rsrcmgr, device)
         self.out = out
         self.counter = counter
         self.depth = depth
+        self.appearance = appearance
         self.color = ("DeviceGray", (0.0,), "DeviceGray", (0.0,))
         self.color_stack = []
         # Feed A state: never reset by q/Q, S or BT, exactly as the converter keeps it.
@@ -450,7 +453,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         if self.depth + 1 > MAX_FORM_DEPTH:
             raise SolarEdgePdfError("FORM_TOO_DEEP", str(MAX_FORM_DEPTH))
         child = _PrimitiveInterpreter(self.rsrcmgr, self.device, self.out, self.counter,
-                                      self.depth + 1)
+                                      self.depth + 1, appearance=self.appearance)
         child.color = self.color
         return child
 
@@ -464,10 +467,9 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             total += len(stream.get_data())
             if total > MAX_CONTENT_BYTES:
                 raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
-        if len(self.counter) > 1:
-            self.counter[1] += total
-            if self.counter[1] > MAX_CONTENT_BYTES:
-                raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
+        self.counter[1] += total
+        if self.counter[1] > MAX_CONTENT_BYTES:
+            raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
         try:
             parser = PDFContentParser(streams)
         except PSEOF:
@@ -484,6 +486,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             if self.counter[0] > MAX_OPERATORS:
                 raise SolarEdgePdfError("TOO_MANY_OPERATORS", str(MAX_OPERATORS))
             name = keyword_name(obj)
+            if self.appearance and name in ("W", "W*"):
+                raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "explicit clipping path")
             expected = _ARG_COUNTS.get(name)
             if expected is not None and len(self.argstack) < expected:
                 raise SolarEdgePdfError("MISSING_OPERANDS", name)
@@ -524,7 +528,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     def do_RG(self, r, g, b):
         rgb = (_num(r), _num(g), _num(b))
         self.color = ("DeviceRGB", rgb, self.color[2], self.color[3])
-        if self.depth == 0:
+        if self.depth == 0 or (self.appearance and self.depth == 1):
             self.raw_stroke = rgb
 
     def do_rg(self, r, g, b):
@@ -582,20 +586,24 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.do_sc()
 
     # ---- path construction: pdfminer path (feed B) plus the raw feed A ----
-    def _flip(self, y):
-        return self.out.page_height - y
+    def _raw_xy(self, x, y):
+        # Page operations keep legacy raw coordinates. A stamp's coordinates
+        # belong to its appearance, so place its wiring on the page first.
+        if self.appearance:
+            x, y = apply_matrix_pt(self.ctm, (x, y))
+        return x, self.out.page_height - y
 
     def do_m(self, x, y):
         xf, yf = _num(x), _num(y)
         self.curpath.append(("m", xf, yf))
-        if self.depth == 0:
-            self.raw_point = (xf, self._flip(yf))
+        if self.depth == 0 or (self.appearance and self.depth == 1):
+            self.raw_point = self._raw_xy(xf, yf)
 
     def do_l(self, x, y):
         xf, yf = _num(x), _num(y)
         self.curpath.append(("l", xf, yf))
-        if self.depth == 0 and self.raw_point is not None:
-            end = (xf, self._flip(yf))
+        if self.raw_point is not None:
+            end = self._raw_xy(xf, yf)
             self.out.lines.append((self.raw_point[0], self.raw_point[1], end[0], end[1],
                                    self.raw_stroke))
             self.raw_point = end
@@ -603,32 +611,27 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     def do_c(self, x1, y1, x2, y2, x3, y3):
         v = (_num(x1), _num(y1), _num(x2), _num(y2), _num(x3), _num(y3))
         self.curpath.append(("c",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
-            end = (v[4], flip(v[5]))
-            self.out.curves.append((self.raw_point[0], self.raw_point[1], v[0], flip(v[1]),
-                                    v[2], flip(v[3]), end[0], end[1], self.raw_stroke))
+        if self.raw_point is not None:
+            end = self._raw_xy(*v[4:6])
+            self.out.curves.append((*self.raw_point, *self._raw_xy(*v[0:2]),
+                                    *self._raw_xy(*v[2:4]), *end, self.raw_stroke))
             self.raw_point = end
 
     def do_v(self, x2, y2, x3, y3):
         v = (_num(x2), _num(y2), _num(x3), _num(y3))
         self.curpath.append(("v",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
+        if self.raw_point is not None:
             start = self.raw_point
-            end = (v[2], flip(v[3]))
-            self.out.curves.append((start[0], start[1], start[0], start[1], v[0], flip(v[1]),
-                                    end[0], end[1], self.raw_stroke))
+            end = self._raw_xy(*v[2:4])
+            self.out.curves.append((*start, *start, *self._raw_xy(*v[0:2]), *end, self.raw_stroke))
             self.raw_point = end
 
     def do_y(self, x1, y1, x3, y3):
         v = (_num(x1), _num(y1), _num(x3), _num(y3))
         self.curpath.append(("y",) + v)
-        if self.depth == 0 and self.raw_point is not None:
-            flip = self._flip
-            end = (v[2], flip(v[3]))
-            self.out.curves.append((self.raw_point[0], self.raw_point[1], v[0], flip(v[1]),
-                                    end[0], end[1], end[0], end[1], self.raw_stroke))
+        if self.raw_point is not None:
+            end = self._raw_xy(*v[2:4])
+            self.out.curves.append((*self.raw_point, *self._raw_xy(*v[0:2]), *end, *end, self.raw_stroke))
             self.raw_point = end
 
     def do_re(self, x, y, w, h):
@@ -667,6 +670,98 @@ def _count_pages(doc):
     return sum(1 for _ in itertools.islice(PDFPage.create_pages(doc), MAX_PAGES + 1))
 
 
+def _appearance_numbers(value, size):
+    values = resolve1(value)
+    if not isinstance(values, (list, tuple)) or len(values) != size:
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "invalid rectangle or matrix")
+    return tuple(_num(resolve1(item)) for item in values)
+
+
+def _stamp_placement(annot, appearance):
+    left, bottom, right, top = _appearance_numbers(annot.get("Rect"), 4)
+    left, right = _ordered(left, right)
+    bottom, top = _ordered(bottom, top)
+    x0, y0, x1, y1 = _appearance_numbers(appearance.get("BBox"), 4)
+    matrix = _appearance_numbers(appearance.get("Matrix", MATRIX_IDENTITY), 6)
+    a, b, c, d, _, _ = matrix
+    if x0 == x1 or y0 == y1 or not ((a and d and not (b or c)) or (b and c and not (a or d))):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "unsupported form bounds or orientation")
+    corners = [apply_matrix_pt(matrix, (x, y)) for x in (x0, x1) for y in (y0, y1)]
+    xs, ys = zip(*corners)
+    width, height = max(xs) - min(xs), max(ys) - min(ys)
+    if not (0 < width < math.inf and 0 < height < math.inf and right > left and top > bottom):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "empty rectangle or bounds")
+    sx, sy = (right - left) / width, (top - bottom) / height
+    fit = (sx, 0, 0, sy, left - min(xs) * sx, bottom - min(ys) * sy)
+    placement = mult_matrix(matrix, fit)
+    if not all(math.isfinite(value) for value in placement):
+        raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "nonfinite placement")
+    return placement, (left, bottom, right, top)
+
+
+def _check_stamp_bounds(out, bounds, starts):
+    left, bottom, right, top = bounds
+    left, bottom = max(0, left), max(0, bottom)
+    right, top = min(out.page_width, right), min(out.page_height, top)
+
+    def inside(x, y):
+        return left <= x <= right and bottom <= y <= top
+
+    paths, letters, lines, curves = starts
+    for i in range(paths, len(out.paths)):
+        bbox = out.paths[i][2]
+        if bbox is not None and not (inside(*bbox[:2]) and inside(*bbox[2:])):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped path")
+    for i in range(letters, len(out.letters)):
+        _, x, y, _ = out.letters[i]
+        if not inside(x, y):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped text origin")
+    for records, start in ((out.lines, lines), (out.curves, curves)):
+        for i in range(start, len(records)):
+            points = records[i][:-1]
+            if any(not inside(points[j], out.page_height - points[j + 1])
+                   for j in range(0, len(points), 2)):
+                raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "clipped wire")
+
+
+def _render_printable_stamps(page, resources, interpreter):
+    annotations = resolve1(page.annots)
+    if not isinstance(annotations, list):
+        return
+    interpreter.counter[2] += len(annotations)
+    if interpreter.counter[2] > MAX_ANNOTATIONS:
+        raise SolarEdgePdfError("RESOURCE_LIMIT", "annotation count")
+    for reference in annotations:
+        annot = resolve1(reference)
+        if not isinstance(annot, dict) or resolve1(annot.get("Subtype")) is not LIT("Stamp"):
+            continue
+        flags = resolve1(annot.get("F", 0))
+        if type(flags) is not int or not flags & 4 or flags & 2:  # Print, Hidden
+            continue
+        appearances = resolve1(annot.get("AP"))
+        if not isinstance(appearances, dict):
+            continue
+        normal = resolve1(appearances.get("N"))
+        if isinstance(normal, dict):
+            state = resolve1(annot.get("AS"))
+            normal = resolve1(normal.get(literal_name(state))) if isinstance(state, PSLiteral) else None
+        if normal is None:
+            continue
+        if not isinstance(normal, PDFStream) or resolve1(normal.get("Subtype")) is not LIT("Form"):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "normal appearance is not a form")
+        form_resources = resolve1(normal.get("Resources", resources))
+        if not isinstance(form_resources, dict):
+            raise SolarEdgePdfError("BAD_STAMP_APPEARANCE", "invalid resources")
+        # Annotation graphics state starts independently of the page and other stamps.
+        out = interpreter.out
+        starts = (len(out.paths), len(out.letters), len(out.lines), len(out.curves))
+        placement, bounds = _stamp_placement(annot, normal)
+        stamp = _PrimitiveInterpreter(interpreter.rsrcmgr, interpreter.device, out,
+                                      interpreter.counter, depth=1, appearance=True)
+        stamp.render_contents(form_resources, [normal], ctm=placement)
+        _check_stamp_bounds(out, bounds, starts)
+
+
 def extract_primitives(pdf_bytes):
     """Read page one of the report for callers using the original extractor."""
     return next(_iter_primitives(pdf_bytes, first_only=True))
@@ -695,7 +790,7 @@ def _iter_primitives(pdf_bytes, *, first_only):
         if first_only:
             page_objects = itertools.islice(page_objects, 1)
         rsrcmgr = _ResourceManager(caching=True)
-        counter = [0] if first_only else [0, 0]
+        counter = [0, 0, 0]  # operators, decoded content bytes, annotation entries
         paths = segments = letters = text_characters = 0
         for page in page_objects:
             # Raw-coordinate parity is proven only for default units. Never silently scale labels.
@@ -711,8 +806,9 @@ def _iter_primitives(pdf_bytes, *, first_only):
             out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
             device = _PrimitiveDevice(rsrcmgr, out)
             interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter)
-            interpreter.render_contents(resolve1(page.resources) or {}, page.contents,
-                                        ctm=(1, 0, 0, 1, 0, 0))
+            resources = resolve1(page.resources) or {}
+            interpreter.render_contents(resources, page.contents, ctm=MATRIX_IDENTITY)
+            _render_printable_stamps(page, resources, interpreter)
             paths += len(out.paths)
             segments += device.segments
             letters += len(out.letters)
