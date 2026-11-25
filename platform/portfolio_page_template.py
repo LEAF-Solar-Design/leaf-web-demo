@@ -233,26 +233,30 @@ function Photograph({image,page,attempt,onRetry,onOpen,onRetryFocus}){
   : <img ref={element} key={JSON.stringify([version,attempt])} loading={onOpen?'lazy':undefined} src={'/images/'+image.material_id+'.jpg'+(attempt?'?retry='+attempt:'')} alt={image.alt} aria-busy={!settled}
      onLoad={event=>settle(event.currentTarget,false)}
      onError={event=>settle(event.currentTarget,true)} style={style}/>;
- return <>{onOpen?<button ref={opener} style={{width:'100%'}} aria-label={'View '+image.alt} onClick={e=>onOpen(image,e.currentTarget)}>{picture}<span style={textStyle(image.captionStyle)}>{image.title}</span></button>:picture}
+ return <>{onOpen?<button ref={opener} data-photo-opener="" style={{width:'100%'}} aria-label={'View '+image.alt} onClick={e=>onOpen(image,e.currentTarget)}>{picture}<span style={textStyle(image.captionStyle)}>{image.title}</span></button>:picture}
   {failed&&<div role="status"><p>The photo could not load. Check your connection and try again.</p><button style={{marginTop:'0.5rem',textDecoration:'underline'}} onClick={retry}>Retry photo</button></div>}</>;
 }
 export default function Gallery({page,category}){
- const [selectedId,setSelectedId]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),restoreBackground=useRef(()=>{}),emptyStatus=useRef(null);
+ const [selectedId,setSelectedId]=useState(null),trigger=useRef(null),closeButton=useRef(null),dialog=useRef(null),grid=useRef(null),restoreBackground=useRef(()=>{}),emptyStatus=useRef(null);
  const [attempts,setAttempts]=useState({});
  const recovery=image=>{
   const version=photoVersion(image);
   return {attempt:attempts[version]||0,onRetry:()=>setAttempts(previous=>({...previous,[version]:(previous[version]||0)+1}))};
  };
- const selected=category.images.find(image=>image.material_id===selectedId&&!image.display?.hidden)||null;
- const currentImages=useRef(category.images);currentImages.current=category.images;
- const close=()=>{restoreBackground.current();setSelectedId(null);trigger.current?.focus();};
+ const visibleImages=category.images.filter(image=>!image.display?.hidden);
+ const selected=visibleImages.find(image=>image.material_id===selectedId)||null;
+ const currentImages=useRef(visibleImages);currentImages.current=visibleImages;
+ const close=()=>{
+  restoreBackground.current();setSelectedId(null);
+  const opened=trigger.current;trigger.current=null;
+  if(opened?.button.isConnected){opened.button.focus();return;}
+  const buttons=grid.current?.querySelectorAll('[data-photo-opener]')||[];
+  const fallback=buttons.length?buttons[Math.min(opened?.index??0,buttons.length-1)]:emptyStatus.current;
+  fallback?.focus();
+ };
  useEffect(()=>{setSelectedId(null);trigger.current=null;},[category.slug]);
  useEffect(()=>{
-  if(selectedId&&!selected){
-   restoreBackground.current();setSelectedId(null);
-   if(trigger.current?.isConnected)trigger.current.focus();else emptyStatus.current?.focus();
-   trigger.current=null;
-  }
+  if(selectedId&&!selected)close();
  },[category.images,selectedId,selected]);
  useEffect(()=>{
    if(!selected)return;
@@ -266,7 +270,7 @@ export default function Gallery({page,category}){
   const key=e=>{
    if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&!e.altKey&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey){
     e.preventDefault();
-    const images=currentImages.current.filter(image=>!image.display?.hidden);
+    const images=currentImages.current;
     setSelectedId(current=>{
      const index=images.findIndex(image=>image.material_id===current);
      return index<0?current:images[Math.max(0,Math.min(images.length-1,index+(e.key==='ArrowRight'?1:-1)))].material_id;
@@ -281,8 +285,8 @@ export default function Gallery({page,category}){
    window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
  },[Boolean(selected)]);
  useEffect(()=>{if(selectedId)closeButton.current?.focus();},[selectedId,selected?.preview_sha256]);
- const open=(image,button)=>{trigger.current=button;setSelectedId(image.material_id);};
- return <>{!category.images.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph {...recovery(image)} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={photoVersion(selected)} {...recovery(selected)} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
+ const open=(image,button)=>{trigger.current={button,index:visibleImages.indexOf(image)};setSelectedId(image.material_id);};
+ return <>{!visibleImages.length&&<p ref={emptyStatus} role="status" tabIndex={-1}>No photos in this gallery yet.</p>}<div ref={grid} className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{visibleImages.map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><Photograph {...recovery(image)} image={image} page={page} onOpen={open}/></figure>)}</div>{selected&&<div ref={dialog} className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><Photograph key={photoVersion(selected)} {...recovery(selected)} image={selected} page={page} onRetryFocus={()=>closeButton.current?.focus()}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
 }
 ''',
     }

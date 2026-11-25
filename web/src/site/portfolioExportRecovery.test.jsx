@@ -264,6 +264,38 @@ describe('actual exported portfolio image failure recovery', () => {
 
 
 describe('current material selection after document edits', () => {
+  it('focuses the visible photo at the removed opener position after navigation', () => {
+    const third = photo('33333333-3333-4333-8333-333333333333', 'Third photo')
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second, third]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + second.alt }))
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    view.rerender(gallery([first, third]))
+    expect(screen.getByRole('dialog', { name: third.alt })).toBeTruthy()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + third.alt }))
+  })
+
+  it('focuses the last visible photo when the removed opener was last', () => {
+    const gallery = images => <Gallery page={{}} category={{ slug: 'work', images }} />
+    const view = render(gallery([first, second]))
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + second.alt }))
+    view.rerender(gallery([first]))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'View ' + first.alt }))
+  })
+
+  it('focuses the empty status when the only photo is hidden', () => {
+    const view = render(<Gallery page={{}} category={category(first)} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View ' + first.alt }))
+    view.rerender(<Gallery page={{}} category={category({ ...first, display: { hidden: true } })} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+    const status = screen.getByRole('status')
+    expect(status.textContent).toBe('No photos in this gallery yet.')
+    expect(document.activeElement).toBe(status)
+  })
+
   for (const closeBy of ['Escape', 'Close', 'Navigate then Close']) {
     it(`returns focus to the updated grid opener on ${closeBy}`, () => {
       const original = { ...first, preview_sha256: 'a'.repeat(64) }
