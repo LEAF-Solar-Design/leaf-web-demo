@@ -9,8 +9,11 @@ import hashlib
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import client  # noqa: E402
+import intake_parse  # noqa: E402
 import lisp  # noqa: E402
 
 
@@ -78,3 +81,33 @@ def test_dwg_and_dxf_scripts_differ_only_in_the_quit_line():
 def test_dxf_and_dwg_activities_have_distinct_ids():
     assert client.EXTRACT_ACTIVITY != client.EXTRACT_DXF_ACTIVITY
     assert client.extract_activity_spec()["id"] != client.extract_dxf_activity_spec()["id"]
+
+
+def test_successor_script_emits_only_source_verified_units():
+    for code in (0, 1, 4, 6, 123):
+        script = lisp.build_scr(declared_insunits=code)
+        assert script.count(f'INSUNITS|1|{code}"') == 1
+        assert script.replace(next(line for line in script.splitlines(keepends=True)
+                                   if "INSUNITS|" in line), "") == lisp.build_scr()
+    for invalid in (True, -1, 2147483648, "4"):
+        with pytest.raises(ValueError, match="Invalid source insertion unit code"):
+            lisp.build_scr(declared_insunits=invalid)
+
+
+@pytest.mark.parametrize("records,fields", [
+    ("", {}),
+    ("INSUNITS|2|4", {}),
+    ("INSUNITS|1|0", {"insunits": 0}),
+    ("INSUNITS|1|1", {"insunits": 1}),
+    ("INSUNITS|1|4", {"insunits": 4}),
+    ("INSUNITS|1|6", {"insunits": 6}),
+    ("INSUNITS|1|123", {"insunits": 123}),
+    ("INSUNITS|1|4\nINSUNITS|1|4", {"insunits": 4}),
+    ("INSUNITS|1|1\nINSUNITS|1|4\nINSUNITS|1|1",
+     {"insunits_error": "Conflicting drawing insertion units."}),
+    ("INSUNITS|1|4\nINSUNITS|1|\nINSUNITS|1|4",
+     {"insunits_error": "Malformed drawing insertion units."}),
+])
+def test_decode_successor_units_record(records, fields):
+    baseline = intake_parse.parse_text("LAYER|Panels\n", "sample.dwg")
+    assert intake_parse.parse_text(f"LAYER|Panels\n{records}", "sample.dwg") == {**baseline, **fields}
