@@ -124,7 +124,7 @@ const common = (layer, colors, counts) => {
     expect(mesh.geometry).toBeInstanceOf(THREE.BufferGeometry)
     expect(mesh.geometry.index).toBe(null)
     const position = mesh.geometry.getAttribute('position')
-    expect(position).toBeInstanceOf(THREE.Float32BufferAttribute)
+    expect(position).toBeInstanceOf(THREE.BufferAttribute)
     expect(position.array).toBeInstanceOf(Float32Array)
     expect(position.itemSize).toBe(3)
     expect(position.count).toBe(counts[index])
@@ -198,6 +198,20 @@ describe('unmounted Solar graph overlay layer', () => {
       [3.25, 2.25], [2.75, 2.25], [2.75, 2.25], [2.75, 1.75],
     ])
     expect(vertices(layer.group.children[2])).toEqual([[2, 0], [3, 0], [3, 0], [3, 2]])
+    layer.dispose()
+  })
+
+  it('writes interleaved colour batches to exact size without connecting separate strings', () => {
+    const layer = buildSolarGraphOverlayLayer([
+      { color: green, pts: [[0, 0], [1, 0]] },
+      { color: amber, pts: [[8, 9]] },
+      { color: blue, pts: [[2, 3], [4, 5], [6, 7]] },
+      { color: green, pts: [] },
+      { color: green, pts: [[10, 11], [12, 13]] },
+    ])
+    common(layer, [green, amber, blue], [4, 0, 4])
+    expect(vertices(layer.group.children[0])).toEqual([[0, 0], [1, 0], [10, 11], [12, 13]])
+    expect(vertices(layer.group.children[2])).toEqual([[2, 3], [4, 5], [4, 5], [6, 7]])
     layer.dispose()
   })
 
