@@ -192,3 +192,43 @@ def test_invalid_run_does_not_create(tmp_path, run):
     with pytest.raises(ValueError):
         store.observe(PAIR, result(), run)
     assert store.items() == []
+
+
+@pytest.mark.parametrize(("seen", "expected"), [
+    (
+        [("1", "night-03"), ("1", "night-01"), ("1", "night-02")],
+        {"1": ("night-03", "night-02", 3)},
+    ),
+    (
+        [("1", "night-01"), ("2", "night-02"), ("1", "night-03")],
+        {"1": ("night-01", "night-03", 2), "2": ("night-02", None, 1)},
+    ),
+    (
+        [("1", "night-01"), ("1", "night-02"), ("1", "night-01")],
+        {"1": ("night-01", "night-02", 2)},
+    ),
+], ids=["recorded-order", "independent-revisions", "replayed-first"])
+def test_report_identifies_first_failure_and_latest_distinct_repeat(tmp_path, seen, expected):
+    path = tmp_path / "ledger.db"
+    store = FailureStore(path)
+    for version, run_id in seen:
+        store.observe(dict(PAIR, version=version), result(), run_id)
+
+    reopened = FailureStore(path)
+    report_path = tmp_path / "failures.md"
+    reopened.export_markdown(report_path)
+    sections = report_path.read_text(encoding="utf-8").split("\n## ")
+    rows = reopened.items()
+    assert {row["version"] for row in rows} == set(expected)
+    for row in rows:
+        first, repeat, count = expected[row["version"]]
+        first_hash = hashlib.sha256(first.encode()).hexdigest()
+        repeat_hash = hashlib.sha256(repeat.encode()).hexdigest() if repeat else None
+        assert row["first_failure_run_sha256"] == first_hash
+        assert row["latest_repeat_run_sha256"] == repeat_hash
+        assert row["count"] == count
+        section = next(section for section in sections if section.startswith(row["key"] + "\n"))
+        assert f"- First recorded failure run: sha256:{first_hash}" in section
+        latest = f"sha256:{repeat_hash}" if repeat_hash else "None recorded"
+        assert f"- Latest distinct repeat run: {latest}" in section
+        assert first not in section and (repeat is None or repeat not in section)

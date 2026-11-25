@@ -118,9 +118,26 @@ class FailureStore:
         return {"verdict": verdict, "key": key}
 
     def items(self):
-        """Return identity-only snapshots, ordered by canonical key."""
+        """Return snapshots with observed failure order, keyed by failure identity."""
         with self._transaction() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM failures ORDER BY key")]
+            # Sightings are append-only and deduplicated by key and run hash.
+            # Row order reflects recording order, independent of IDs supplied by callers.
+            rows = db.execute("""
+                WITH bounds AS (
+                    SELECT key, MIN(rowid) AS first_id, MAX(rowid) AS last_id
+                    FROM sightings GROUP BY key
+                )
+                SELECT failures.*,
+                       first_sighting.run_hash AS first_failure_run_sha256,
+                       last_sighting.run_hash AS latest_repeat_run_sha256
+                FROM failures
+                LEFT JOIN bounds ON bounds.key = failures.key
+                LEFT JOIN sightings AS first_sighting ON first_sighting.rowid = bounds.first_id
+                LEFT JOIN sightings AS last_sighting
+                    ON last_sighting.rowid = bounds.last_id AND bounds.last_id > bounds.first_id
+                ORDER BY failures.key
+            """)
+            return [dict(row) for row in rows]
 
     def notify_new(self, sender):
         """Claim each FYI before calling sender outside any DB transaction.
@@ -161,8 +178,14 @@ class FailureStore:
         """Atomically replace the caller's report with one item per identity."""
         lines = ["# X09 failure ledger", ""]
         for item in self.items():
+            first = item["first_failure_run_sha256"]
+            repeat = item["latest_repeat_run_sha256"]
+            first_ref = f"sha256:{first}" if first else "Unavailable"
+            repeat_ref = f"sha256:{repeat}" if repeat else "None recorded"
             lines.extend([f"## {item['key']}", "",
                           f"- Status: {item['status']}", f"- Count: {item['count']}",
+                          f"- First recorded failure run: {first_ref}",
+                          f"- Latest distinct repeat run: {repeat_ref}",
                           f"- Tool: {_display(item['name'])}",
                           f"- Version: {_display(item['version'])}",
                           f"- Drawing SHA256: {item['drawing_sha256']}",
