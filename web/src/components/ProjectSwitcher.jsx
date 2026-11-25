@@ -45,7 +45,7 @@ export default function ProjectSwitcher({
   const hasBootstrapState = bootstrapState !== undefined
   const bound = hasBootstrapState ? bootstrapState === 'bound' : !!orgId
   const unbound = hasBootstrapState ? bootstrapState === 'unbound' : !orgId
-  const draftError = hasBootstrapState ? (unbound ? orgDraftError : projectDraftError) : null
+  const draftError = unbound ? (hasBootstrapState && orgDraftError) : projectDraftError
   const onOrgCreated = () => setOrgName('My workspace')
   const onProjectCreated = () => setProjectDraft('')
   const [submitError, setSubmitError] = useState(null)
@@ -231,7 +231,7 @@ export default function ProjectSwitcher({
 
       {menu.shown && (
         <div className={`proj-menu resolver${menu.exiting ? ' exit' : ''}`} role="menu">
-          {unavailable && (!hasBootstrapState || (!unbound && unavailable !== draftError)) ? (
+          {unavailable && (!hasBootstrapState || !unbound) && unavailable !== draftError ? (
             <div className="proj-empty">
               <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">

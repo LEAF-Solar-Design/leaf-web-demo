@@ -1,5 +1,32 @@
-import { describe, expect, it } from 'vitest'
-import { isWorkspaceBootstrapRequired } from './api.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createProject, isWorkspaceBootstrapRequired } from './api.js'
+
+afterEach(() => vi.unstubAllGlobals())
+
+describe('project creation intent', () => {
+  const project = { project_id: 'p1', name: 'Maple' }
+  const reply = (created) => new Response(JSON.stringify({ project, created }), { status: 200 })
+
+  it.each([true, false])('preserves the default project result when created is %s', async (created) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(created)))
+    expect(await createProject('Maple', 'o1')).toEqual(project)
+  })
+
+  it('allows deliberate replay and rejects only explicit fresh-create collisions', async () => {
+    const fetch = vi.fn().mockImplementation(() => Promise.resolve(reply(false)))
+    vi.stubGlobal('fetch', fetch)
+    expect(await createProject('Maple', 'o1', { requireCreated: false })).toEqual(project)
+    await expect(createProject('Maple', 'o1', { requireCreated: true })).rejects.toMatchObject({
+      code: 'project_name_collision', message: expect.stringMatching(/Choose a different name.*open the existing project/),
+    })
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({ name: 'Maple' })
+  })
+
+  it('returns a unique fresh project without changing the public result shape', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(true)))
+    expect(await createProject('Maple', 'o1', { requireCreated: true })).toEqual(project)
+  })
+})
 
 const messages = [
   'verified subject has no active platform identity binding',

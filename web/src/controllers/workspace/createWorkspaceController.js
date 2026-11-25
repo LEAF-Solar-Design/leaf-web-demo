@@ -461,7 +461,7 @@ export function createWorkspaceController({
     return autoProvisionOrg({ ...options, retry: true })
   }
 
-  async function createProject(givenName) {
+  async function createProject(givenName, { requireCreated = false } = {}) {
     if (state.projectBusy || givenName == null || !String(givenName).trim()) return null
     const name = String(givenName).trim()
     const request = nextGeneration('project')
@@ -469,7 +469,9 @@ export function createWorkspaceController({
     const workspaceRequest = generations.workspace
     publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
-      const project = await services.createProject(name, orgId)
+      const project = await (requireCreated
+        ? services.createProject(name, orgId, { requireCreated: true })
+        : services.createProject(name, orgId))
       const projectId = projectIdOf(project)
       if (!projectId) throw new Error('The workspace service returned a project without an id.')
       if (!isCurrent('project', request) || state.orgId !== orgId) return null
@@ -511,7 +513,7 @@ export function createWorkspaceController({
       return project
     } catch (error) {
       if (!isCurrent('project', request)) return null
-      const message = explain(error)
+      const message = error?.code === 'project_name_collision' ? error.message : explain(error)
       publish({ projectDraftError: message, projectsError: message, projectBusy: false })
       return null
     }
