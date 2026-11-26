@@ -47,6 +47,7 @@ const EXTERNAL_EVIDENCE_REQUIRED = [
 ]
 
 const DUPLICATE_JSON_KEY = 'DUPLICATE_JSON_KEY'
+const NON_FINITE_JSON_NUMBER = 'NON_FINITE_JSON_NUMBER'
 
 export class AcceptanceError extends Error {
   constructor(check, message, details = undefined) {
@@ -103,6 +104,7 @@ export function safeFailureDetails(error) {
     DUPLICATE_JSON_KEY,
     'ENTITLEMENT_REQUIRED',
     'INTERNAL',
+    NON_FINITE_JSON_NUMBER,
     'already_decided',
     'quota_exceeded',
     'version_conflict',
@@ -375,6 +377,18 @@ function hasDuplicateJsonKeys(text) {
   return false
 }
 
+function hasNonFiniteJsonNumber(body) {
+  const pending = [body]
+  while (pending.length) {
+    const value = pending.pop()
+    if (typeof value === 'number' && !Number.isFinite(value)) return true
+    if (value !== null && typeof value === 'object') {
+      for (const entry of Object.values(value)) pending.push(entry)
+    }
+  }
+  return false
+}
+
 async function parseJsonResponse(response, check) {
   const length = Number(response.headers.get('content-length') || 0)
   if (length > MAX_RESPONSE_BYTES) {
@@ -394,6 +408,11 @@ async function parseJsonResponse(response, check) {
   if (hasDuplicateJsonKeys(text)) {
     throw new AcceptanceError(check, 'response contains a duplicate JSON object key', {
       error_code: DUPLICATE_JSON_KEY,
+    })
+  }
+  if (hasNonFiniteJsonNumber(body)) {
+    throw new AcceptanceError(check, 'response contains a number outside the finite range', {
+      error_code: NON_FINITE_JSON_NUMBER,
     })
   }
   return body
@@ -545,8 +564,9 @@ export async function provisionAcceptanceDrawings(
 
 function jobStatusReadFailure(jobId, message, error) {
   const details = { job_id: jobId, terminal_status: 'http_error' }
-  if (error instanceof AcceptanceError && error.details?.error_code === DUPLICATE_JSON_KEY) {
-    details.error_code = DUPLICATE_JSON_KEY
+  const errorCode = error instanceof AcceptanceError ? error.details?.error_code : undefined
+  if (errorCode === DUPLICATE_JSON_KEY || errorCode === NON_FINITE_JSON_NUMBER) {
+    details.error_code = errorCode
   }
   return new AcceptanceError('authored_job', message, details)
 }

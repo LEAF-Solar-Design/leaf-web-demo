@@ -557,6 +557,51 @@ describe('deployed authored CAD acceptance checks', () => {
     })
   }
 
+  for (const [name, body] of [
+    ['result version', '{"status":"complete","result":{"ok":true,"result":{"new_version":{"version":1e999}}}}'],
+    ['nested array entry', '{"status":"complete","result":{"ok":true,"rows":[{"raw-marker":-1e999}]}}'],
+    ['top-level metadata', '{"status":"complete","raw-marker":1.8e308}'],
+  ]) {
+    it(`refuses numeric overflow in job JSON ${name}`, async () => {
+      const config = validateConfig(environment(), true)
+      const tenant = config.tenants[0]
+      const jobId = '11111111-1111-4111-8111-111111111111'
+      const fetchImpl = async () => new Response(body)
+      const errorCode = 'NON_FINITE_JSON_NUMBER'
+      await assert.rejects(
+        () => requestJson(config, tenant, `/api/jobs/${jobId}`, { fetchImpl }),
+        (error) => {
+          const record = safeFailureRecord(error)
+          assert.deepEqual(record.details, { error_code: errorCode })
+          assert.doesNotMatch(JSON.stringify(record), /raw-marker|1e999|1\.8e308/)
+          return true
+        },
+      )
+      for (const poll of [waitForTerminalJob, waitForJobOutcome]) {
+        await assert.rejects(
+          () => poll(config, tenant, jobId, { fetchImpl, maxPolls: 1 }),
+          (error) => {
+            const record = safeFailureRecord(error)
+            assert.deepEqual(record.details, {
+              job_id: jobId,
+              terminal_status: 'http_error',
+              error_code: errorCode,
+            })
+            assert.doesNotMatch(JSON.stringify(record), /raw-marker|1e999|1\.8e308/)
+            return true
+          },
+        )
+      }
+    })
+  }
+
+  it('preserves finite numbers and quoted numeric text in response JSON', async () => {
+    const config = validateConfig(environment(), true)
+    const fetchImpl = async () => new Response('{"values":[1.79e308,5e-324,"1e999",null]}')
+    const { body } = await requestJson(config, config.tenants[0], '/api/drawings', { fetchImpl })
+    assert.deepEqual(body.values, [1.79e308, Number.MIN_VALUE, '1e999', null])
+  })
+
   it('rejects a deep duplicate key containing punctuation through requestJson', async () => {
     const config = validateConfig(environment(), true)
     const tenant = config.tenants[0]
