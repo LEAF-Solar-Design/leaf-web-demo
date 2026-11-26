@@ -1511,7 +1511,8 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
 def _running_split_progress(rec, tenant_id):
     context = rec.get("execution_context")
-    if (rec.get("status") != "running" or rec.get("tool_name") != "solar-solve-proposal"
+    adapter = capability_catalog.capability_adapter(rec.get("tool_name"))
+    if (rec.get("status") != "running" or adapter != capability_catalog.CLOUD_PROPOSAL_ADAPTER
             or not isinstance(context, dict)
             or context.get("schema") != "leaf.solar-project-graph-job.v1"):
         return None
