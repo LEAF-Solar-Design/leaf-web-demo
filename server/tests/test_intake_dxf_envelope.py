@@ -57,6 +57,40 @@ def _get(record, code):
     return next(v for c, v in record if c == str(code))
 
 
+@pytest.mark.parametrize("unit,units_per_metre", [(4, 1000), (5, 100), (6, 1)])
+def test_reexport_preserves_insertion_units_and_native_coordinates(unit, units_per_metre):
+    points = [[0, 0], [units_per_metre, 0], [units_per_metre, units_per_metre / 2]]
+    source = intake_to_dxf({"polylines": [
+        {"handle": "A", "layer": "0", "pts": points, "closed": True},
+    ]}).replace(b"1\nAC1015\n", f"1\nAC1015\n9\n$INSUNITS\n70\n{unit}\n".encode(), 1)
+    parsed = parse_dxf_bytes(source)
+    assert parsed["insunits"] == unit
+    raw = intake_to_dxf(parsed)
+    assert _sections(raw)["HEADER"][-2:] == [("9", "$INSUNITS"), ("70", str(unit))]
+    reopened = parse_dxf_bytes(raw)
+    assert reopened["insunits"] == unit
+    assert reopened["polylines"] == parsed["polylines"]
+
+
+def test_reexport_distinguishes_unitless_and_absent_insertion_units():
+    assert "insunits" not in parse_dxf_bytes(intake_to_dxf({}))
+    assert parse_dxf_bytes(intake_to_dxf({"insunits": 0}))["insunits"] == 0
+
+
+def test_reexport_rejects_conflicting_insertion_units():
+    source = b"0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n9\n$INSUNITS\n70\n6\n0\nENDSEC\n0\nEOF\n"
+    parsed = parse_dxf_bytes(source)
+    assert "insunits_error" in parsed
+    with pytest.raises(intake_dxf.IntakeDxfError, match="insertion units"):
+        intake_to_dxf(parsed)
+
+
+@pytest.mark.parametrize("unit", [-1, 25, True, "4", 4.0, None])
+def test_reexport_rejects_invalid_insertion_unit_code(unit):
+    with pytest.raises(intake_dxf.IntakeDxfError, match="INSUNITS"):
+        intake_to_dxf({"insunits": unit})
+
+
 def _assert_pointers_resolve(raw):
     sections = _sections(raw)
     records = [record for name, pairs in sections.items() if name != "HEADER"

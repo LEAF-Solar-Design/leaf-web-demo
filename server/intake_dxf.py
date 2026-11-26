@@ -145,6 +145,11 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         _fail("intake is not an object")
     if "solar_inspection" in intake or "solar_mapping" in intake:
         _fail("solar interchange requires the original drawing and the licensed mutation lane")
+    if "insunits_error" in intake:
+        _fail("Cannot export a drawing with conflicting insertion units")
+    insunits = intake.get("insunits")
+    if "insunits" in intake and (type(insunits) is not int or not 0 <= insunits <= 24):
+        _fail("INSUNITS must be an integer unit code from 0 through 24")
     layers_in = intake.get("layers", [])
     polylines = intake.get("polylines", [])
     texts = intake.get("texts", [])
@@ -946,7 +951,11 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
         head, records = tables[name]
         sections["TABLES"].extend([head, *records, [("0", "ENDTAB")]])
     result = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1015",
-              "9", "$HANDSEED", "5", handseed(), "0", "ENDSEC"]
+              "9", "$HANDSEED", "5", handseed()]
+    insunits = intake.get("insunits")
+    if insunits is not None:
+        result.extend(["9", "$INSUNITS", "70", str(insunits)])
+    result.extend(["0", "ENDSEC"])
     for name in ("TABLES", "BLOCKS", "ENTITIES", "OBJECTS"):
         result.extend(["0", "SECTION", "2", name])
         for record in sections[name]:
