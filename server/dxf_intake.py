@@ -60,10 +60,14 @@ def _mleader_number(value, integer=False):
         raise DxfParseError("malformed MLEADER numeric value") from exc
 
 
-def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
+def parse_dxf_file(
+    path: Path, *, source_name: str = "", include_model_entity_counts: bool = False,
+) -> Dict[str, Any]:
     raw = Path(path).read_bytes()
-    return parse_dxf_bytes(raw, source_name=source_name or Path(path).name,
-                           include_model_entity_counts=True)
+    return parse_dxf_bytes(
+        raw, source_name=source_name or Path(path).name,
+        include_model_entity_counts=include_model_entity_counts,
+    )
 
 
 def parse_dxf_bytes(

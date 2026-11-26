@@ -58,8 +58,9 @@ def test_model_entity_counts_can_be_empty(tmp_path):
     raw = _dxf("0\nPOINT\n5\nA1\n8\nPaper\n67\n1\n")
     path = tmp_path / "t.dxf"
     path.write_bytes(raw)
-    intake = dxf_intake.parse_dxf_file(path)
+    intake = dxf_intake.parse_dxf_file(path, include_model_entity_counts=True)
     assert intake["model_entity_counts"] == {}
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_file(path)
     assert "model_entity_counts" not in dxf_intake.parse_dxf_bytes(raw)
 
 

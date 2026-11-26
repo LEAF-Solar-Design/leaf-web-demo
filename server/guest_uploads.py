@@ -1404,8 +1404,10 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             # `dxf_local_ok: True`. Fidelity: LWPOLYLINE/POLYLINE + layer names
             # only, less than the APS extract's INSERT/3DFACE/geo/xdata.
             import dxf_intake
-            intake = dxf_intake.parse_dxf_file(source_path,
-                                               source_name=marker.get("filename") or drawing_id)
+            intake = dxf_intake.parse_dxf_file(
+                source_path, source_name=marker.get("filename") or drawing_id,
+                include_model_entity_counts=True,
+            )
         elif _resolved_dwg_engine(marker) == "local":
             # APS-FREE DWG READ: dwg2dxf (CAGED subprocess; GPL-3 note in
             # dwg_convert.py — subprocess only, never linked) converts THEIR
@@ -1421,7 +1423,9 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                 with dwg_convert.converted_dxf(source_path) as dxf_path:
                     intake = dxf_intake.parse_dxf_file(
                         dxf_path,
-                        source_name=marker.get("filename") or drawing_id)
+                        source_name=marker.get("filename") or drawing_id,
+                        include_model_entity_counts=True,
+                    )
             except dwg_convert.ConvertError as exc:
                 raise _ExtractError(exc.error_code, exc.message,
                                     exc.retryable) from exc
