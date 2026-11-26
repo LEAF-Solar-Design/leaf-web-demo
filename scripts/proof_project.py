@@ -1351,7 +1351,8 @@ def _validate_ownership(owned, run_id, *, allocated):
                 or owned.present is not allocated or type(owned.pid) is not int
                 or type(owned.started_at) is not int
                 or (allocated and (owned.pid <= 0 or owned.started_at <= 0
-                    or type(owned.start_id) is not str or re.fullmatch(r"ps:[0-9]{1,12}", owned.start_id) is None))
+                    or type(owned.start_id) is not str
+                    or re.fullmatch(r"(?:ps:[0-9]{1,12}|win:[0-9]{17,20})", owned.start_id) is None))
                 or (not allocated and (owned.pid != 0 or owned.start_id != "" or owned.started_at != 0))):
             _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
         return owned
