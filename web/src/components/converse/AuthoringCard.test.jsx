@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { getAuthorStage, getAuthorStageSource, postReview, reviewContext } from '../../api.js'
+import { getAuthorStage, getAuthorStageSource, postReview, reviewContext, withdrawAuthorStage } from '../../api.js'
 import { postMessage } from '../../converse.js'
 import { track } from '../../telemetry.js'
 import AuthoringCard from './AuthoringCard.jsx'
 
 vi.mock('../../api.js', () => ({
   getAuthorStage: vi.fn(), getAuthorStageSource: vi.fn(), postReview: vi.fn(), reviewContext: vi.fn(),
+  withdrawAuthorStage: vi.fn(),
 }))
 vi.mock('../../converse.js', () => ({ postMessage: vi.fn(), resolveApproval: vi.fn() }))
 vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
@@ -85,11 +86,103 @@ it('deploys a self-built tool that passed its checks with one inline button', as
   expect(screen.getByText('Deploying to AutoCAD...')).toBeVisible()
   expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
   await act(async () => finishStage({ ...staged,
-    publication: { status: 'published', published_at: '2026-11-21T03:15:00Z' } }))
+    publication: { state: 'published', published_at: '2026-11-21T03:15:00Z' } }))
   expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
   expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
   expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
 })
+
+const selfReview = { decision: 'approve', approval_kind: 'self', approver_role: 'owner',
+  decided_at: '2026-11-21T03:14:00Z' }
+
+it('shows the deployed publication and its time after a fresh reload of the server stage shape', async () => {
+  const publishedAt = '2026-11-21T03:15:00Z'
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'staged', review: selfReview,
+    publication: { state: 'published', published_at: publishedAt } })
+  await mount()
+  for (const label of [/Deployed to AutoCAD/, /Published to your plugin catalog/]) {
+    const row = screen.getByText(label)
+    expect(row).toHaveTextContent(/\d+:\d{2}/)
+    expect(row.querySelector('time')).toHaveAttribute('datetime', new Date(publishedAt).toISOString())
+  }
+  expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['rolled_back', 'Rolled back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not deployed', 'Not published: another change was published first'],
+  ['denied', 'Not deployed', 'Not published: changes were requested'],
+  ['publishing', 'Deploying to AutoCAD...', 'Publishing...'],
+  ['awaiting_approval', 'Deploying to AutoCAD...', 'Waiting for approval'],
+])('shows the reported %s publication after a reload', async (state, deploy, publish) => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  expect(screen.getByText(deploy)).toBeVisible()
+  expect(screen.getByText(publish)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each(['published', 'denied', 'superseded', 'rolled_back', 'publishing'])(
+  'keeps source and approval closed for publication %s even without a reported review', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state } })
+    await mount()
+    expect(getAuthorStageSource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  })
+
+it.each([
+  ['rolled_back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not published: another change was published first'],
+  ['denied', 'Not published: changes were requested'],
+  ['awaiting_approval', 'Published to your plugin catalog'],
+  ['publishing', 'Published to your plugin catalog'],
+  [undefined, 'Published to your plugin catalog'],
+])('reconciles a published decision with stage publication %s', async (state, label) => {
+  postReview.mockResolvedValue({ change_set_id: 'change', ...selfReview, status: 'published' })
+  await mount()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+    ...(state ? { publication: { state } } : {}) })
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(screen.getByText(new RegExp(label))).toBeVisible()
+  if (['rolled_back', 'superseded', 'denied'].includes(state)) {
+    expect(screen.queryByText(/Deployed to AutoCAD/)).toBeNull()
+    expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
+  } else expect(screen.getByText(/Deployed to AutoCAD/)).toBeVisible()
+})
+
+it.each(['rolled_back', 'superseded', 'denied'])('stops polling for a %s publication without Branch evidence', async state => {
+  vi.useFakeTimers()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+})
+
+it('keeps polling a published stage until Branch reports', async () => {
+  vi.useFakeTimers()
+  const published = { ...staged, review: selfReview, publication: { state: 'published' } }
+  getAuthorStage.mockResolvedValueOnce(published)
+    .mockResolvedValue({ ...published, branch: { last_event: 'synced' } })
+  await mount()
+  await advance(2000)
+  expect(screen.getByText('Synced')).toBeVisible()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+})
+
+it.each(['rolled_back', 'superseded', 'denied', 'publishing'])(
+  'keeps the independent Review row unchanged for %s', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state },
+      review: { ...selfReview, approval_kind: 'independent', approver_role: 'reviewer' } })
+    await mount()
+    expect(screen.getByText('Review')).toBeVisible()
+    expect(screen.getByText(/Approved by reviewer/)).toBeVisible()
+    expect(screen.queryByText('Deploy')).toBeNull()
+  })
 
 it('offers no deploy for a self-built tool whose compile failed, only the retry', async () => {
   getAuthorStage.mockResolvedValue({ ...staged, status: 'failed',
@@ -256,4 +349,99 @@ it('reads the stage contract: compile attempts by n and the Branch receipt by la
   expect(screen.getByText('Attempt 2: passed')).toBeVisible()
   expect(screen.getByText('Synced')).toBeVisible()
   expect(screen.queryByText('Branch has not reported yet')).toBeNull()
+})
+
+it.each([
+  [{ ahead: 0 }, 'Waiting, next in line'],
+  [{ ahead: 1 }, 'Waiting, 1 ahead'],
+  [{ ahead: 3, estimated_wait_s: 444 }, 'Waiting, 3 ahead · about 8 min'],
+  [{ ahead: 0, estimated_wait_s: 1 }, 'Waiting, next in line · about 1 min'],
+])('shows the reported queued build position %j', async (queue, text) => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', queue })
+  await mount()
+  expect(screen.getByText(text)).toBeVisible()
+  expect(screen.getByText(text).closest('dd').previousElementSibling).toHaveTextContent('Build')
+})
+
+it.each([
+  { ahead: -1 }, { ahead: 1.5 }, { ahead: '2' }, { ahead: null }, null, {}, '2', [],
+])('ignores malformed queue data %j', async queue => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', queue })
+  await mount()
+  expect(screen.queryByText(/Waiting/)).toBeNull()
+})
+
+it.each([-1, 0, 1.5, '60', null])('ignores malformed estimated wait %j', async estimated_wait_s => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued',
+    queue: { ahead: 1, estimated_wait_s } })
+  await mount()
+  expect(screen.getByText('Waiting, 1 ahead')).toBeVisible()
+  expect(screen.queryByText(/about/)).toBeNull()
+})
+
+it.each(['running', 'staged'])('withholds queue details and withdrawal for a %s build', async status => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status, queue: { ahead: 1 }, withdrawable: true })
+  await mount()
+  expect(screen.queryByText(/Waiting/)).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+})
+
+it.each([undefined, false, 'true', 1])('withholds withdrawal without an explicit server flag %j', async withdrawable => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable })
+  await mount()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+})
+
+it('refreshes the stage after a successful withdrawal', async () => {
+  getAuthorStage.mockResolvedValueOnce({ change_set_id: 'change', status: 'queued', withdrawable: true })
+    .mockResolvedValue({ change_set_id: 'change', status: 'failed', error: { message: 'Build withdrawn' } })
+  withdrawAuthorStage.mockResolvedValue({ withdrawn: true, revoked: true })
+  await mount()
+  expect(button('Withdraw')).toHaveAttribute('type', 'button')
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(withdrawAuthorStage).toHaveBeenCalledExactlyOnceWith('change')
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('Build withdrawn')).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+})
+
+it.each([
+  [true, 'Stopped. It will not start again.'],
+  [false, 'This build can no longer be withdrawn.'],
+])('closes withdrawal after withdrawn false and revoked %s', async (revoked, text) => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockResolvedValue({ withdrawn: false, revoked })
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(screen.getByText(text)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Withdraw' })).toBeNull()
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+})
+
+it('keeps withdrawal available after a rejection and tracks each retry click', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockRejectedValue(new Error('unavailable'))
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(screen.getByText('Could not withdraw. Try again.')).toBeVisible()
+  expect(button('Withdraw')).toBeEnabled()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(withdrawAuthorStage).toHaveBeenCalledTimes(2)
+  expect(track.mock.calls).toEqual([['build.withdraw_clicked'], ['build.withdraw_clicked']])
+})
+
+it('disables withdrawal while the request is pending', async () => {
+  let finishWithdraw
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', withdrawable: true })
+  withdrawAuthorStage.mockReturnValue(new Promise(resolve => { finishWithdraw = resolve }))
+  await mount()
+  await act(async () => fireEvent.click(button('Withdraw')))
+  expect(button('Withdraw')).toBeDisabled()
+  fireEvent.click(button('Withdraw'))
+  expect(withdrawAuthorStage).toHaveBeenCalledTimes(1)
+  expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
+  await act(async () => finishWithdraw({ withdrawn: false, revoked: false }))
+  expect(screen.getByText('This build can no longer be withdrawn.')).toBeVisible()
 })

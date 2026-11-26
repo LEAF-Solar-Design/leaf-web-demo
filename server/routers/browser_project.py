@@ -222,6 +222,23 @@ async def check_preview(project_id: str, source_request_id: str, job_id: str, re
         return _failure(flow.FlowError(503))
 
 
+@router.get('/requests/{source_request_id}/preview/{job_id}/candidate')
+async def read_preview_candidate(project_id: str, source_request_id: str, job_id: str, request: Request,
+                                 tenant=Depends(deps.require_active_tenant)):
+    try:
+        await run_in_threadpool(flow.scope, tenant, project_id)
+        if len(request.scope.get('query_string', b'')) > 2048:
+            raise flow.FlowError(422)
+        witnesses = source_export.parse_query(request.query_params.multi_items())
+        result = await run_in_threadpool(static_build.readback, tenant, project_id, source_request_id,
+                                         job_id, witnesses)
+        return JSONResponse(result, headers=_PRIVATE)
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
+
+
 @router.get('/requests/{source_request_id}/preview/{job_id}/chart-state')
 async def read_chart_state(project_id: str, source_request_id: str, job_id: str, request: Request,
                            tenant=Depends(deps.require_active_tenant)):

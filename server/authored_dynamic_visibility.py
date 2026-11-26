@@ -143,14 +143,14 @@ def active_children(evidence, name, handle, children):
 INSTANCE_SOURCE = VISIBILITY_SOURCE + r"""
 
 
-def visible_instances(intake, evidence, hidden_layers=None, known_layers=None):
+def visible_instances(intake, evidence, hidden_layers=None, known_layers=None, placement_filter=None):
     if any("unresolved block reference" in msg for msg in intake.get("parseErrors", [])):
         raise ValueError("Unresolved INSERT in visibility traversal.")
     blocks = {name.casefold(): definition for name, definition in intake.get("blocks", {}).items()}
     visible_paths = []
     visited = 0
 
-    def visit(ref, prefix, ancestors, parent_layer):
+    def visit(ref, prefix, ancestors, parent_layer, placements=()):
         layer = ref.get("layer", "0").casefold()
         layer = parent_layer if layer == "0" else layer
         if known_layers is not None and layer not in known_layers:
@@ -184,11 +184,13 @@ def visible_instances(intake, evidence, hidden_layers=None, known_layers=None):
         for row in range(rows):
             for col in range(cols):
                 path = prefix + f"{handle}[{row},{col}]"
+                chain = placements + ((ref, block, row, col),) if placement_filter else ()
                 if module:
-                    visible_paths.append(path)
+                    if placement_filter is None or placement_filter(chain):
+                        visible_paths.append(path)
                 else:
                     for child in children:
-                        visit(child, path + "/", ancestors + (name,), layer)
+                        visit(child, path + "/", ancestors + (name,), layer, chain)
 
     for ref in intake.get("inserts", []):
         if ref.get("space") != "paper":

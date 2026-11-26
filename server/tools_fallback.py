@@ -581,11 +581,19 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         drawing_body = authored_material_revision.build_body(description)
         summary = "compares verified records across pinned import revisions"
     elif authored_viewport_panels.matches(description):
-        verb, engine_op = "count", "viewport_layer_panels"
+        if authored_viewport_panels.comparison_requested(description):
+            verb, engine_op = "compare", "viewport_panel_comparison"
+            summary = "compares panel placements in two selected viewports"
+        else:
+            verb, engine_op = "count", "viewport_layer_panels"
+            summary = "counts model-space panel placements by viewport layer visibility"
         drawing_body = authored_viewport_panels.build_body(description)
-        drawing_params = {"type": "object", "properties": {"viewport_handle": {"type": "string"}},
-                          "required": [] if authored_viewport_panels.viewport_handle(description) else ["viewport_handle"]}
-        summary = "counts model-space panel placements by viewport layer visibility"
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+    elif authored_viewport_panels.camera_diagnostics_requested(description):
+        verb, engine_op = "report", "viewport_camera_diagnostics"
+        summary = "reports unresolved camera geometry by paper-space viewport"
+        drawing_body = authored_viewport_panels.CAMERA_DIAGNOSTICS
+        drawing_params = {"type": "object", "properties": {}}
     elif authored_panel_regions.matches(description):
         verb, engine_op = "measure", authored_panel_regions.operation(description)
         drawing_body = authored_panel_regions.build_body(description)

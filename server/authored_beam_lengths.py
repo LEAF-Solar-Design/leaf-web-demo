@@ -17,6 +17,15 @@ _UNITS = (
 
 def matches(description):
     prompt = description.casefold()
+    # Aggregate linear takeoffs do not require an explicit grouping instruction.
+    if re.search(r"\b(?:total|combined|aggregate|sum)\s+beam\s+lengths?\b"
+                 r"|\b(?:total|combined|aggregate)\s+lengths?\s+of\s+"
+                 r"(?:(?:the|each|all|my|these|those)\s+)*beams?\b", prompt):
+        return True
+    if (re.search(r"\bbeam\s+totals?\b", prompt)
+            and re.search(r"\b(?:framing|centerlines?|centrelines?)\b", prompt)
+            and not re.search(r"\b(?:count|number|area|volume|weight|cost|mass)\b", prompt)):
+        return True
     spline = re.search(r"\b(?:splines?|nurbs|knots?)\b", prompt)
     if spline and re.search(r"\bbeams?\b", prompt) and re.search(r"\b(?:lengths?|measure|how long)\b", prompt):
         return True

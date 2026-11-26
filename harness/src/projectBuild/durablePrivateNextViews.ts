@@ -6,7 +6,7 @@ import {createHash} from "node:crypto";
 import type {ProjectRepositoryAuthority} from "../ports/index.js";
 import {NextBuildError,nextRequestDigest,staticManifestDigest} from "./genericNextBuild.js";
 import type {NextBuildScope,NextPreview,PrivateStaticArtifacts} from "./genericNextBuild.js";
-import type {BrowserCandidateBuildRequest,BrowserCandidateWitness,PublishedBrowserCandidate} from "./browserCandidateBuild.js";
+import type {BrowserCandidateBuildRequest,BrowserCandidateLoader,BrowserCandidateWitness} from "./browserCandidateBuild.js";
 import type {PrivateBuildObservation} from "./privateBuildLifecycle.js";
 
 /** Normalized view, NOT the raw leaf.static-next.v1 provider receipt schema.
@@ -36,7 +36,7 @@ export class DurablePrivateNextViews {
   constructor(private readonly deps:{
     catalog:{load(authority:ProjectRepositoryAuthority,request:BrowserCandidateBuildRequest):Promise<DurableNextViewRecord|null>};
     artifacts:Pick<PrivateStaticArtifacts,"read"|"bindingId">;
-    loadCandidate(authority:ProjectRepositoryAuthority,requestId:string):Promise<PublishedBrowserCandidate|null>;
+    loadCandidate:BrowserCandidateLoader;
   }){}
 
   private snapshot(a:ProjectRepositoryAuthority,r:BrowserCandidateBuildRequest){
@@ -45,7 +45,7 @@ export class DurablePrivateNextViews {
     return {a:Object.freeze({tenantId:a.tenantId,organizationId:a.organizationId,projectId:a.projectId,repoKey:a.repoKey}),r:Object.freeze({jobId:r.jobId,...candidate(r)})};
   }
   private async current(a:ProjectRepositoryAuthority,r:BrowserCandidateBuildRequest){
-    const row=await this.deps.loadCandidate(a,r.sourceRequestId);
+    const row=await this.deps.loadCandidate(a,r.sourceRequestId,r);
     if(!row||row.schema!=="leaf.browser-project-source.v1"||row.state!=="published"||!row.authority||scopeKey(row.authority)!==scopeKey(a)||witnessKey(row)!==witnessKey(r))fail();
   }
   private validate(a:ProjectRepositoryAuthority,r:BrowserCandidateBuildRequest,value:DurableNextViewRecord):NextPreview{

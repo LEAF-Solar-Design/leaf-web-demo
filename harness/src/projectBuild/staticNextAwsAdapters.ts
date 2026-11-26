@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import type { GetObjectCommandOutput, PutObjectCommandOutput } from "@aws-sdk/client-s3";
 import { BatchGetBuildsCommand, StartBuildCommand, StopBuildCommand } from "@aws-sdk/client-codebuild";
@@ -63,7 +64,10 @@ export function createCodeBuildStaticNextBuildProvider(options: {
   const { client, projectName } = options;
   return {
     async start(executionId) {
+      const idempotencyToken = createHash("sha256")
+        .update(JSON.stringify([projectName, executionId])).digest("hex");
       const response = await client.send(new StartBuildCommand({ projectName,
+        idempotencyToken,
         environmentVariablesOverride: [{ name: "EXECUTION_ID", value: executionId, type: "PLAINTEXT" }] }));
       if (!response.build?.id) throw new Error("static_next_build_id_missing");
       return response.build.id;
