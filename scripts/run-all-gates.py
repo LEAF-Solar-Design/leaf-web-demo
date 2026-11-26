@@ -230,8 +230,8 @@ class Result:
     vitest_selection: dict = field(default_factory=dict)
 
 
-def _py_pytest(target: str) -> List[str]:
-    return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
+def _py_pytest(*targets: str) -> List[str]:
+    return [sys.executable, "-m", "pytest", *targets, "-q", "--color=no",
             "-r", "s", "-p", "no:cacheprovider"]
 
 
@@ -1035,9 +1035,10 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
         Suite("server-solar-tool-physical-export",
-              "server tests/test_solar_tool_physical_export.py",
+              "server physical export and saved estimate comparison",
               "pytest", SERVER,
-              _py_pytest("tests/test_solar_tool_physical_export.py"), 24),
+              _py_pytest("tests/test_solar_tool_physical_export.py",
+                         "tests/test_project_estimate_comparison.py"), 27),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
@@ -1135,7 +1136,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
                   "tests/test_x07_customer_profile_store.py", "tests/test_x07_role_discovery_failures.py",
-                  "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
+                  "tests/test_x07_tracker_profile.py", "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
                   "tests/test_x07_profile_storage_failures.py", "tests/test_x07_profile_json_roundtrip.py",
                   "tests/test_x07_workflow_recovery.py", "tests/test_x07_workflow_scope_matrix.py",
                   "tests/test_x07_selection_metamorphic.py", "tests/test_x07_adapter_snapshot_isolation.py",
@@ -2201,7 +2202,7 @@ def build_suites() -> List[Suite]:
               ], 1934),
         Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
-                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py", "tests/test_x06_layer_subtotals.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
                   "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
                   "tests/test_x03_joined_spline_author.py",
@@ -3791,6 +3792,9 @@ def build_suites() -> List[Suite]:
                   # harness image build runs the same four packages against the
                   # Windows goldens and fails on any mismatch.
                   ("test/branchCompileCheck.test.ts", 4),
+                  # The area-marks real-compiler case needs a built Branch checker
+                  # (LEAF_BRANCH_COMPILE_BIN/REFS), like the four parity cases above.
+                  ("test/branchTarget.test.ts", 1),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),

@@ -101,6 +101,12 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   }, [pending, live])
   const reportValid = validDrafts(drafts)
   const canExport = live && !busy && !pending && !!saved?.graph && reportValid
+  const confirmed = saved?.graph && totals?.confirmed?.hash === saved.hash ? totals.confirmed : null
+  const oracleSources = drafts.map((value, index) => {
+    if (confirmed) return value === confirmed.values[index] ? 'saved' : 'unsaved'
+    return value === '' ? 'not_supplied' : 'unsaved'
+  })
+  const exportHasDrafts = oracleSources.includes('unsaved')
   const canSave = canExport && !storagePending && totals?.canWrite === true &&
     totals?.hash === saved.hash && Number.isSafeInteger(totals?.revision) && !totals?.conflict && typeof projectClient.saveEngineeringTotals === 'function'
   async function store(operation, hash, readGeneration, reload = false) {
@@ -157,7 +163,8 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
         setDraft({ scope, values: restoredValues })
         scope.dirty = false
       }
-      updateReport({ hash, revision: conflict ? before.revision : revision, canWrite, conflict, pending: null,
+      const confirmed = conflict ? before.confirmed : restoredValues && { hash, revision, values: restoredValues }
+      updateReport({ hash, revision: conflict ? before.revision : revision, confirmed, canWrite, conflict, pending: null,
         status: operation === 'save' ? unchanged ? 'Engineering totals saved.'
           : 'Submitted engineering totals saved. Newer edits remain unsaved.' : conflict
           ? 'Engineering totals changed. Reload saved engineering totals before saving.'
@@ -225,7 +232,10 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     if (!canExport || !current()) return
     let url, anchor
     try {
-      url = URL.createObjectURL(new Blob([reconciliationCsv(rows)], { type: 'text/csv;charset=utf-8' }))
+      const csv = reconciliationCsv(rows, {
+        designRevision: saved.graph.rev, totalsRevision: confirmed?.revision, oracleSources,
+      })
+      url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
       if (!current()) return
       anchor = document.createElement('a')
       anchor.href = url
@@ -283,6 +293,10 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     </table>
     </div>
     <p>Delta is Studio minus the supplied report/BOM value.</p>
+    {canExport && <p aria-live="polite">
+      {confirmed ? `Last confirmed engineering totals revision ${confirmed.revision}.` : 'No confirmed engineering totals revision.'}
+      {exportHasDrafts && ' CSV includes unsaved values.'}
+    </p>}
     <button type="button" disabled={!canExport} onClick={download}>Download CSV</button>
   </section>
 }

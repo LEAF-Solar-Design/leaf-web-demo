@@ -542,6 +542,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
     import authored_spatial_clearance
     import authored_beam_openings
     import authored_beam_lengths
+    import authored_layer_subtotals
     import authored_route_crossings
 
     verb, engine_op = _detect_op(description)
@@ -580,12 +581,25 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "compare", "material_revision_diff"
         drawing_body = authored_material_revision.build_body(description)
         summary = "compares verified records across pinned import revisions"
-    elif authored_viewport_panels.matches(description):
-        verb, engine_op = "count", "viewport_layer_panels"
+    elif authored_viewport_panels.revision_comparison_requested(description):
+        verb, engine_op = "compare", "viewport_panel_revision_comparison"
         drawing_body = authored_viewport_panels.build_body(description)
-        drawing_params = {"type": "object", "properties": {"viewport_handle": {"type": "string"}},
-                          "required": [] if authored_viewport_panels.viewport_handle(description) else ["viewport_handle"]}
-        summary = "counts model-space panel placements by viewport layer visibility"
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+        summary = "compares visible panel placements in two selected viewports across the verified parent revision"
+    elif authored_viewport_panels.matches(description):
+        if authored_viewport_panels.comparison_requested(description):
+            verb, engine_op = "compare", "viewport_panel_comparison"
+            summary = "compares panel placements in two selected viewports"
+        else:
+            verb, engine_op = "count", "viewport_layer_panels"
+            summary = "counts model-space panel placements by viewport layer visibility"
+        drawing_body = authored_viewport_panels.build_body(description)
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+    elif authored_viewport_panels.camera_diagnostics_requested(description):
+        verb, engine_op = "report", "viewport_camera_diagnostics"
+        summary = "reports unresolved camera geometry by paper-space viewport"
+        drawing_body = authored_viewport_panels.CAMERA_DIAGNOSTICS
+        drawing_params = {"type": "object", "properties": {}}
     elif authored_panel_regions.matches(description):
         verb, engine_op = "measure", authored_panel_regions.operation(description)
         drawing_body = authored_panel_regions.build_body(description)
@@ -645,6 +659,13 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None:
+        family = authored_layer_subtotals.requested_family(description)
+        if family:
+            verb, engine_op = "count", "layer_family_subtotals"
+            drawing_body = authored_layer_subtotals.build_body(family)
+            summary = f"counts supported drawing entities on each layer matching {family}"
 
     relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
     if drawing_body is not None:

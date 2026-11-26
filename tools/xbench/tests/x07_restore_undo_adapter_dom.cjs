@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict'), { execFileSync } = require('node:child_process')
 const h = require('./x07_profile_review_dom_harness.cjs')
+// These states settle after the real Python worker responds.
+const adapterWait = { timeout: 15000 }
 async function main() {
   try {
     const Editor = h.component('X07CustomerProfileEditor'), pins = []
@@ -13,10 +15,10 @@ async function main() {
       h.render(h.React.createElement(Editor, { customerKey: customer, drawingKey: context.drawing_key, applicationRecord: pin,
         loadProfile: (value, options) => rpc('editor_load', value, options.signal),
         saveProfile: (value, roles, options) => { saves++; return rpc('editor_save', { customer: value, roles, expected_version: options.expected_version }, options.signal) } }))
-      await h.screen.findByRole('textbox', { name: 'Module layer' })
+      await h.screen.findByRole('textbox', { name: 'Module layer' }, adapterWait)
       h.fireEvent.click(h.screen.getByRole('button', { name: 'Add roof role' }))
       h.fireEvent.change(h.screen.getByRole('textbox', { name: 'Roof layer' }), { target: { value: 'ROOF' } })
-      await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 2')
+      await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 2', {}, adapterWait)
       h.fireEvent.change(h.screen.getByRole('textbox', { name: 'Module layer' }), { target: { value: 'NEXT' } })
       h.fireEvent.click(h.screen.getByRole('button', { name: 'Remove roof role' }))
       h.fireEvent.click(h.screen.getByRole('button', { name: 'Add obstruction role' }))
@@ -29,7 +31,7 @@ async function main() {
       assert.equal(h.screen.getByRole('textbox', { name: 'Module layer' }).value, 'NEXT')
       assert.equal(h.screen.getByRole('textbox', { name: 'Obstruction layer' }).value, 'DRAFT_ONLY')
       assert.equal((await rpc('editor_load', customer)).version, 2); assert.equal(saves, 1)
-      await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 3')
+      await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 3', {}, adapterWait)
       assert.equal(saves, 2)
       assert.deepEqual((await rpc('editor_load', customer)).roles, { module: { block: 'Panel', layer: 'NEXT' }, obstruction: { layer: 'DRAFT_ONLY' } })
       assert.deepEqual((await rpc('load')).application_record, pin); h.cleanup()
