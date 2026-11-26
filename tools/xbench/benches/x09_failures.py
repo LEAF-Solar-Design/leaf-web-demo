@@ -116,7 +116,7 @@ class FailureStore:
             return {"verdict": "UNREADABLE", "key": None}
         key = failure_key(pair, assertion)
         run_hash = _digest(_text(run_id, 256))
-        timestamp = _execution_time(executed_at) if verdict == "FAIL" and executed_at is not None else None
+        timestamp = _execution_time(executed_at) if executed_at is not None else None
         with self._transaction() as db:
             old = db.execute("SELECT status FROM failures WHERE key=?", (key,)).fetchone()
             status = "open" if verdict == "FAIL" else "resolved"

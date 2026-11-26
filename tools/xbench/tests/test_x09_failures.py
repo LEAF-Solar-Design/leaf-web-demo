@@ -288,7 +288,23 @@ def test_legacy_execution_history_stays_unknown_until_backfilled(tmp_path):
             PRIMARY KEY(key, run_hash))""")
         db.execute("INSERT INTO sightings SELECT key, run_hash FROM previous_sightings")
         db.execute("DROP TABLE previous_sightings")
-    store = FailureStore(path)
+    barrier = Barrier(3)
+
+    def open_store(_):
+        barrier.wait(timeout=10)
+        return FailureStore(path)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        stores = list(executor.map(open_store, range(3)))
+    for store in stores:
+        row, = store.items()
+        assert row["count"] == 1
+        assert row["earliest_execution_run_sha256"] is None
+    with sqlite3.connect(path) as db:
+        columns = db.execute("PRAGMA table_info(sightings)").fetchall()
+        assert [column[1] for column in columns].count("executed_at") == 1
+
+    store = stores[0]
     store.observe(PAIR, result(), "new", executed_at="2026-11-02T00:00:00Z")
     row, = store.items()
     assert row["earliest_execution_run_sha256"] is None
@@ -312,3 +328,17 @@ def test_bad_or_conflicting_execution_time_preserves_existing_sighting(tmp_path,
     with pytest.raises(ValueError, match="executed_at"):
         store.observe(PAIR, result(), "one", executed_at=time)
     assert store.items() == before
+
+
+@pytest.mark.parametrize("time", ["2026-11-01T00:00:00", "broken", True])
+def test_bad_pass_execution_time_leaves_failure_open(tmp_path, time):
+    store = FailureStore(tmp_path / "ledger.db")
+    store.observe(PAIR, result(), "one", executed_at="2026-11-01T00:00:00Z")
+    before = store.items()
+
+    with pytest.raises(ValueError, match="executed_at"):
+        store.observe(PAIR, result("PASS"), "two", executed_at=time)
+    assert store.items() == before
+
+    store.observe(PAIR, result("PASS"), "two", executed_at="2026-11-02T00:00:00Z")
+    assert store.items() == [dict(before[0], status="resolved")]
