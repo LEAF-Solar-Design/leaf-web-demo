@@ -755,7 +755,7 @@ const PROJECT_SOLAR_SUPPORTED_TOOLS = new Set([
   'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
   'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
-  'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff', 'solar-assignment-report',
+  'solar-electrical-schedules', 'solar-cable-export', 'solar-takeoff', 'solar-assignment-report', 'solar-feeder-audit',
   'solar-solaredge-accept', 'solar-solaredge-tracking-read',
 ])
 

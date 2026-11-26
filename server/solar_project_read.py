@@ -25,12 +25,14 @@ MAX_REQUEST_BYTES = 262144
 MAX_OUTPUT_BYTES = local.MAX_OUTPUT_BYTES
 RESULT_SCHEMA = "leaf.solar-project-read.v1"
 REQUEST_SCHEMA = "leaf.solar-project-read-request.v1"
+FEEDER_AUDIT = "solar-feeder-audit"
 SUPPORTED_READ_TOOLS = frozenset((
     "solar-select-by-zone", "solar-design-presets-list", "solar-autofill-plan",
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
     "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report",
+    FEEDER_AUDIT,
 ))
 
 
@@ -77,7 +79,9 @@ def _trusted(tenant, name, catalog_digest):
         _fail("SIP_R6_TOOL_MANIFEST_MISMATCH")
     declaration = solar_tools.get(name)
     module = local._load_builtin(name)
-    if (type(declaration) is not dict or declaration["adapter"] != "local-graph-read" or declaration["trusted_inputs"]
+    expected_inputs = ["source_intake"] if name == FEEDER_AUDIT else []
+    if (type(declaration) is not dict or declaration["adapter"] != "local-graph-read"
+            or declaration["trusted_inputs"] != expected_inputs
             or entitlements.tool_required_capability(trusted) != "run_read"
             or (local._reads_physical_head(module) and name != "solar-takeoff")
             or (local._reads_version_history(module) and name != "solar-solaredge-tracking-read")):
@@ -146,7 +150,8 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
         "input_intake_sha256": context.intake_sha256, "graph_sha256": context.graph_sha256,
         "tool": tool_name, "tool_manifest_sha256": catalog_digest, "parameters": normalized}
     request_sha = sha256(canonical_bytes(request)).hexdigest()
-    graph_adapter.require_project_sizing(context)
+    if tool_name != FEEDER_AUDIT:
+        graph_adapter.require_project_sizing(context)
     sink = artifacts.ProjectArtifactSink(None, artifacts.project_artifact_binding(
         context, tool_name, catalog_digest, request_sha))
     if tool_name == "solar-solaredge-tracking-read":
@@ -172,6 +177,9 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
             physical_head=physical, source_binding={"drawing_id": str(drawing_id),
                 "drawing_version": verified.binding.version.seq,
                 "graph_sha256": context.graph_sha256, "project_id": str(project_id)})
+    elif tool_name == FEEDER_AUDIT:
+        output, data = local._read_output(tool_name, context.graph, normalized, sink,
+                                         source_intake=graph_adapter._canonical_source_intake(context))
     else:
         output, data = local._read_output(tool_name, context.graph, normalized, sink)
     result = {"schema": RESULT_SCHEMA, "adapter": "project-local-graph-read",

@@ -100,6 +100,10 @@ def test_solar_rows_keep_their_project_policy(lane):
     for name, state in before.items():
         if name == "solar-takeoff":  # X10 #3262 deliberately exposes project_read for solar-takeoff.
             assert isinstance(state.get("project_read"), bool)
+        elif name == "solar-feeder-audit":
+            assert state["project_read"] is False
+            assert state["entitled"] is False and state["runnable"] is False
+            assert state["refusal_reasons"] == ["entitlement_required"]
         elif name == "solar-assignment-report":
             assert state["project_read"] is True
             assert state["entitled"] is False and state["runnable"] is False
@@ -107,6 +111,16 @@ def test_solar_rows_keep_their_project_policy(lane):
         else:
             assert "project_read" not in state
         assert after[name] == state
+
+
+def test_feeder_audit_requires_entitlement_and_exact_version(lane, monkeypatch):
+    _grant_run_read(monkeypatch)
+    ready = _project_states(lane)["solar-feeder-audit"]
+    assert ready["project_read"] is True and ready["runnable"] is True
+    assert ready["admission_checked"] is False
+    unpinned = _project_states(lane, version=False)["solar-feeder-audit"]
+    assert unpinned["project_read"] is False and unpinned["runnable"] is False
+    assert unpinned["refusal_reasons"] == ["project_request_required"]
 
 
 def test_catalog_read_writes_nothing(lane):

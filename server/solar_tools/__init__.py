@@ -136,8 +136,9 @@ def _validate(row, stem, server_dir, families):
     if row["adapter"] == "local-graph-commit":
         _require(_text(row["invalid_request_code"]), "local adapter requires invalid_request_code")
     if "source_intake" in row["trusted_inputs"]:
-        _require(row["adapter"] == "local-graph-commit" and row["seedable"] is False,
-                 "source_intake requires a non-seed local graph commit")
+        _require(row["seedable"] is False and (row["adapter"] == "local-graph-commit"
+                 or (row["name"] == "solar-feeder-audit" and row["adapter"] == "local-graph-read")),
+                 "source_intake requires a non-seed commit or the exact feeder audit")
     if "proposal_candidate" in row["trusted_inputs"]:
         _require(row["adapter"] == "local-graph-commit" and row["seedable"] is False,
                  "proposal_candidate requires a non-seed local graph commit")
@@ -171,8 +172,11 @@ def _validate(row, stem, server_dir, families):
         _require(row["entitlement"] == "run_read", "read adapter requires run_read")
         _require(row["requires_persisted_graph"] is True, "read adapter requires a persisted graph")
         _require(readiness["kind"] in ("facets", "hook"), "read adapter requires facets or hook readiness")
-        _require(row["trusted_inputs"] == [] or (row["name"] == "solar-pvcase-export"
-                 and row["trusted_inputs"] == ["pvcase_source"]), "read adapter takes no trusted inputs")
+        if row["name"] == "solar-feeder-audit":
+            _require(row["trusted_inputs"] == ["source_intake"], "feeder audit requires source_intake")
+        else:
+            _require(row["trusted_inputs"] == [] or (row["name"] == "solar-pvcase-export"
+                     and row["trusted_inputs"] == ["pvcase_source"]), "read adapter takes no trusted inputs")
     record = row["record"]
     if row["record_store"] == "registry":
         _require(isinstance(record, dict), "registry store requires record")

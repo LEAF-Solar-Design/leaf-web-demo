@@ -1,0 +1,39 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-feeder-audit",
+  "builtin": "builtins/solar_feeder_audit.py",
+  "family": "routing",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_FEEDER_AUDIT_REQUEST",
+  "readiness": {"kind": "facets", "facets": []},
+  "engine": "server-builtin",
+  "interaction": {"mode": "form"},
+  "record_store": "registry",
+  "record": {
+    "name": "solar-feeder-audit",
+    "version": "1.0.0",
+    "description": "Check saved rooftop feeder routes for panel footprint intersections. Roof boundary and obstruction clearance remain unverified.",
+    "kind": "script",
+    "family_id": "routing",
+    "engine_op": "solar_feeder_audit",
+    "entry": "builtins/solar_feeder_audit.py",
+    "params": {
+      "type": "object",
+      "properties": {"drawing_id": {"type": "string", "maxLength": 128}},
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {"type": "object"},
+    "capabilities": ["drawing.read"],
+    "allow_local_fallback": false
+  },
+  "ledger": ["route-l2-feeders"],
+  "trusted_inputs": ["source_intake"],
+  "maturity": "preview",
+  "wave": 3,
+  "order": 61,
+  "scenario": "w3-ground-routing"
+}

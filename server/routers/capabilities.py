@@ -270,6 +270,7 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
         # Takeoff uses the synchronous exact-version read lane, never worker admission.
         names.discard("solar-takeoff")
         names.discard("solar-assignment-report")
+        names.discard("solar-feeder-audit")
         try:
             requests = _project_requests(project_runs, names, drawing_id)
         except (ValueError, TypeError, UnicodeError, RecursionError):
@@ -332,7 +333,7 @@ def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
                         drawing_states[name] = state
                         row["availability"] = deepcopy(state)
                         continue
-                    if name == "solar-takeoff":
+                    if name in ("solar-takeoff", "solar-feeder-audit"):
                         import solar_project_read
                         trusted = False
                         try:

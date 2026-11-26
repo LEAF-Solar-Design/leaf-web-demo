@@ -19,6 +19,8 @@ import solar_tools
 import store
 import write_loop
 from solar_design_graph import GraphValidationError, validate_graph
+from solar_feeder_audit import _crosses, _panel_xy, audit_feeders
+from solar_panel_group_kernel import panels_from_intake
 from solar_sizing_client import digest
 from solar_solve_results import finish_mutation
 from test_w1_design_graph import app_id, graph  # noqa: F401
@@ -334,3 +336,100 @@ def test_solar_tool_feeders_refusal_copy_scan():
     assert reasons <= keys
     assert {code.lower() for code in set(builtin().CODE_MAP.values()) | literals} <= keys
     assert '"input_ready": True, "input_reason": None' in text
+
+
+@pytest.fixture(scope="module")
+def captured(rooftop):
+    graph, groups = rooftop
+    solved = builtin().run(graph, {"expected_rev": graph["rev"]},
+                           source_intake={"panel_groups": groups})
+    path = ROOT / "data/rooftop_demo.intake.json"
+    source = json.loads(path.read_text(encoding="utf-8"))
+    solved["settings"]["panel_layer_contains"] = "Panels"
+    return solved, source
+
+
+def test_captured_feeders_report_crossings_without_claiming_roof_coverage(captured):
+    graph, intake = captured
+    snapshot = copy.deepcopy((graph, intake))
+    result = audit_feeders(graph, intake)
+    assert (graph, intake) == snapshot
+    assert result["recognized_panels"] == 2345
+    assert {item["route_ref"] for item in result["feeders"]} == {
+        item["id"] for item in graph["routes"] if item["route_kind"] == "feeder"
+    }
+    assert len(result["feeders"]) == 14
+    assert any(item["panel_handles_crossed"] for item in result["feeders"])
+    assert result["roof_boundary"] == result["obstructions"] == "unverified"
+
+
+def test_capture_in_feet_converts_intake_without_rescaling_saved_routes(captured):
+    graph, intake = captured
+    expected = audit_feeders(graph, intake)
+    graph = copy.deepcopy(graph)
+    graph["project"]["units"].update(drawing_units="ft", meters_per_unit=0.3048,
+                                     drawing_unit_is_feet=True)
+    converted = {"polylines": [
+        {**entity, "pts": [[coordinate / 12 for coordinate in point] for point in entity["pts"]]}
+        for entity in intake["polylines"] if entity["layer"] == "Panels"
+    ]}
+    assert audit_feeders(graph, converted) == expected
+
+
+def test_contiguous_terminal_exit_is_distinct_from_reentry(captured):
+    _, intake = captured
+    panel = next(iter(panels_from_intake(intake, layer_contains="Panels")))
+    frame = _panel_xy(panel, 0.0254)
+    (x, y), (cosine, sine), (half_length, _) = frame
+
+    def position(along):
+        return x + along * cosine * half_length, y + along * sine * half_length
+
+    assert not _crosses([position(0), position(0.5), position(2)], frame)
+    assert _crosses([position(0), position(2), position(0.5), position(3)], frame)
+    assert _crosses([position(-2), position(2)], frame)
+
+
+def test_missing_panel_intake_refuses(captured):
+    graph, _ = captured
+    with pytest.raises(GraphValidationError, match="FEEDER_AUDIT_PANEL_SOURCE_REQUIRED"):
+        audit_feeders(graph, {"polylines": []})
+
+
+@pytest.mark.parametrize("variant", ["inches", "feet", "missing-panels", "unresolved-units"])
+def test_project_feeder_audit_uses_exact_capture(captured, monkeypatch, variant):
+    from test_sip_r6_read import blocked, run, setup, tools_cases
+
+    lane = setup(monkeypatch)
+    graph, intake = copy.deepcopy(captured)
+    # The signed geometry travels through the standard version store fixture.
+    expected = audit_feeders(graph, intake) if variant in ("inches", "feet") else None
+    if variant == "feet":
+        graph["project"]["units"].update(drawing_units="ft", meters_per_unit=0.3048,
+                                         drawing_unit_is_feet=True)
+        for entity in intake["polylines"]:
+            if entity["layer"] == "Panels":
+                entity["pts"] = [[coord / 12 for coord in point] for point in entity["pts"]]
+    elif variant == "missing-panels":
+        intake["polylines"] = [entity for entity in intake["polylines"] if entity["layer"] != "Panels"]
+    elif variant == "unresolved-units":
+        graph["project"]["units"]["meters_per_unit"] = 1
+
+    lane.set_parent(tools_cases.embedded(graph, **intake))
+    version = lane.parent.version_id
+    before = copy.deepcopy((lane.versions, lane.blobs, lane.writes, lane.head))
+    from solar_project_read import FEEDER_AUDIT, graph_adapter, project
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(graph_adapter, "require_project_sizing", blocked)
+    if expected is None:
+        reason = {"missing-panels": "FEEDER_AUDIT_PANEL_SOURCE_REQUIRED",
+                  "unresolved-units": "FEEDER_AUDIT_UNITS_UNRESOLVED"}[variant]
+        with pytest.raises(GraphValidationError, match=reason):
+            run(lane, FEEDER_AUDIT, {}, version=version)
+    else:
+        result = run(lane, FEEDER_AUDIT, {}, version=version)["result"]
+        assert result["input_version_id"] == str(version)
+        assert result["graph_sha256"] == digest(graph)
+        assert result["drawing_changed"] is False
+        assert result["output"] == {"schema": "leaf.solar-feeder-audit.v1", **expected}
+    assert (lane.versions, lane.blobs, lane.writes, lane.head) == before

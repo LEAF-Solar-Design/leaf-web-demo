@@ -28,7 +28,7 @@ SAFE = frozenset((
     "solar-string-rebuild", "solar-string-data", "solar-color-strings", "solar-guardrails-read",
     "solar-electrical-schedules", "solar-cable-export", "solar-nec-ampacity-correction",
     "solar-nec-ac-voltage-drop", "solar-nec-conduit-fill", "solar-nec-feeder-ocpd",
-    "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report"))
+    "solar-solaredge-tracking-read", "solar-takeoff", "solar-assignment-report", "solar-feeder-audit"))
 NEC = {
     "solar-nec-ampacity-correction": dict(base_ampacity=100, temp_factor=.91, conduit_factor=.8),
     "solar-nec-ac-voltage-drop": dict(current_a=100, one_way_length_ft=100,
@@ -78,7 +78,7 @@ def blocked(*args, **kwargs):
 
 
 def test_sip_r6_exact_read_population(lane, monkeypatch):
-    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 16
+    assert read.SUPPORTED_READ_TOOLS == SAFE and len(SAFE) == 17
     for declaration in solar_tools.entries():
         if declaration["name"] not in SAFE:
             refused("SIP_R6_TOOL_UNSUPPORTED", lambda: run(lane, declaration["name"], {}))
