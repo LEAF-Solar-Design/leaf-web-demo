@@ -251,6 +251,7 @@ class HostFacts:
     environment: Mapping[str, str] = field(repr=False)
     engine_outputs: tuple[FileProof, ...] = ()
     toolchain: tuple[tuple[str, str], ...] = ()
+    windows_library_paths: str = field(default="", repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
@@ -873,6 +874,7 @@ def preflight(config: Config, *, effects: Effects) -> Plan:
 _OS_KEYS = frozenset({"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
                       "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "LANG", "LC_ALL"})
 _AUTHORITY_KEYS = ("LEAF_PROOF_PROJECT_AUTHORITY", "LEAF_PG_BIN")
+_WINDOWS_RUNTIME_HOST = os.name == "nt"
 
 
 class _PrivateEnvironment(dict):
@@ -893,6 +895,11 @@ def _host_environment(environ):
     env = _essential_environment(environ)
     env.update({key: environ[key] for key in _AUTHORITY_KEYS if key in environ})
     return env
+
+
+def _windows_library_paths(environ):
+    paths = environ.get("LIB", "") if _WINDOWS_RUNTIME_HOST else ""
+    return paths if paths.strip() else ""
 
 
 def _load_file(name, path, *, package=False):
@@ -1033,9 +1040,13 @@ def prepare_runtime(plan: Plan, *, effects: Effects, scope: RunScope) -> Runtime
         for name in TOOLS:
             _await_runtime(ProcessSpec("runtime-version", (tools[name], "--version"), REPO, env,
                 effects.clock.monotonic() + VERSION_TIMEOUT_S, root / (name + "-version.txt")), effects, scope)
+        # Cargo links native build scripts using the Windows developer environment.
+        build_env = env
+        if facts.windows_library_paths:
+            build_env = env | {"LIB": facts.windows_library_paths}
         _await_runtime(ProcessSpec("runtime-build", (tools["wasm-pack"], "build", "--release",
             "--target", "web", ".", "--out-dir", str(root / "cad-engine"), "--out-name", "engine"),
-            root / "vendor-source", env, effects.clock.monotonic() + BUILD_TIMEOUT_S), effects, scope)
+            root / "vendor-source", build_env, effects.clock.monotonic() + BUILD_TIMEOUT_S), effects, scope)
         built = effects.host.inspect(plan.config)
         if {f.path for f in built.engine_outputs} != set(ENGINE_OUTPUTS):
             _refuse(FailureCode.RUNTIME, Stage.RUNTIME)
@@ -2839,7 +2850,8 @@ class _Host:
             tuple(name for name in (".env", ".env.local", ".env.development", ".env.development.local")
                   if (REPO / "web" / name).exists()), candidates, requirements,
             sys.version.split()[0], tuple((name, shutil.which(name) or "") for name in TOOLS),
-            _host_environment(os.environ), tuple(outputs), tuple(versions))
+            _host_environment(os.environ), tuple(outputs), tuple(versions),
+            windows_library_paths=_windows_library_paths(os.environ))
 
     def source_snapshot(self):
         commit = _git("rev-parse", "HEAD").decode().strip()
@@ -4983,6 +4995,8 @@ def _guardian_process_main():
     disarm into a failure; os._exit skips finalization after an explicit flush.
     """
     try:
+        # The parent reads a binary pipe and requires an exact LF acknowledgment.
+        sys.stdout.reconfigure(newline="\n")
         result = _guardian_entry()
         code = result if type(result) is int and 0 <= result <= 255 else 1
     except BaseException:
