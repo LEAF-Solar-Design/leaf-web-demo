@@ -62,13 +62,14 @@ it('returns null when fetch throws', async () => {
 })
 
 it('preserves sign-in invalidation on 401 without request failure diagnostics', async () => {
-  localStorage.setItem('leaf.jwt', 'current-token')
+  const token = 'current-token'
+  localStorage.setItem('leaf.jwt', token)
   const fetch = vi.fn().mockResolvedValue(new Response('{}', { status: 401 }))
   vi.stubGlobal('fetch', fetch)
 
   await expect(api.getTenantToolStatus()).resolves.toBeNull()
 
-  expect(fetch.mock.calls[0][1].headers.Authorization).toBe('Bearer current-token')
+  expect(fetch.mock.calls[0][1].headers.Authorization).toBe(`Bearer ${token}`)
   expect(localStorage.getItem('leaf.jwt')).toBeNull()
   expect(fetch).toHaveBeenCalledTimes(1)
   expect(api.recentRequestFailures()).toEqual([])
