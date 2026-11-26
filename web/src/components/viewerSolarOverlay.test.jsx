@@ -457,19 +457,26 @@ describe('stored Solar graph in real Viewer', () => {
   })
 
   it.each([
-    { name: 'zero', originX: 0, originY: 0 },
-    { name: 'offset', originX: 2450, originY: -780 },
-    { name: 'billion-scale', originX: 1e9, originY: -1e9 },
-  ])('highlights a complete bent homerun at the $name drawing origin', ({ originX, originY }) => {
+    { kind: 'start homerun', label: 'Start home run', originX: 0, originY: 0 },
+    { kind: 'end homerun', label: 'End home run', originX: 2450, originY: -780 },
+    { kind: 'feeder', label: 'Feeder', originX: 1e9, originY: -1e9 },
+  ])('inspects and highlights a complete $kind at ($originX, $originY)', ({ kind, label, originX, originY }) => {
     const toDrawing = ([x, y]) => [originX + x, originY + y]
     const graph = G({ routes: [
-      R(1, 'start homerun', [[2, 0], [3, 0], [3, 2]].map(toDrawing)),
+      R(1, kind, [[2, 0], [3, 0], [3, 2]].map(toDrawing)),
       R(2, 'start homerun', [[3, 0], [3, 2], [4, 2]].map(toDrawing)),
     ] })
     const shown = intakeOf(graph), onSelectEntity = vi.fn()
     shown.polylines[0].pts = [[-5, -5], [5, -5], [5, 5], [-5, 5]].map(toDrawing)
-    const view = mountViewer(shown, { solarOverlay: overlayOf(shown), onSelectEntity })
+    const solarOverlay = overlayOf(shown)
+    const view = mountViewer(shown, { solarOverlay, onSelectEntity })
+    fireEvent.click(view.getByText('Cable routes'))
     clickDrawingPoint(view, ...toDrawing([3, 1]))
+    const picker = view.getByLabelText('Route')
+    expect(picker.selectedOptions[0].textContent).toBe(`${label} 1`)
+    expect(view.getByRole('status').textContent).toContain(`Point 1 of 3 · X ${originX + 2}, Y ${originY}`)
+    fireEvent.click(view.getByRole('button', { name: 'Next point' }))
+    expect(view.getByRole('status').textContent).toContain(`Point 2 of 3 · X ${originX + 3}, Y ${originY}`)
     const highlight = routeHighlight()
     expect(Array.from(highlight.geometry.attributes.position.array)).toEqual([
       2, 0, 1.5, 3, 0, 1.5, 3, 0, 1.5, 3, 2, 1.5,
@@ -479,6 +486,17 @@ describe('stored Solar graph in real Viewer', () => {
     expect(onSelectEntity).not.toHaveBeenCalled()
     clickDrawingPoint(view, ...toDrawing([3, 1]), { shiftKey: true })
     expect(onSelectEntity).toHaveBeenCalledWith('A', { additive: true })
+    fireEvent.change(picker, { target: { value: picker.options[2].value } })
+    expect(view.getByRole('status').textContent).toContain(`Point 1 of 3 · X ${originX + 3}, Y ${originY}`)
+    expect(worldVertices(routeHighlight())).toEqual([[3, 0], [3, 2], [3, 2], [4, 2]]
+      .flatMap(point => [...toDrawing(point), 1.5]))
+    view.update({ solarOverlay: { ...solarOverlay, drawingKey: 'console:other' } })
+    expect(view.queryByText('Cable routes')).toBeNull()
+    expect(routeHighlight()).toBeUndefined()
+    view.update({ solarOverlay })
+    fireEvent.click(view.getByText('Cable routes'))
+    expect(view.getByLabelText('Route').value).toBe('')
+    expect(view.queryByRole('status')).toBeNull()
   })
 
   it('cycles stable identities on coincident segments instead of highlighting both', () => {
