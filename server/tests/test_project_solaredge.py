@@ -21,7 +21,7 @@ import solar_project_solaredge as se
 import solar_tools
 import store
 from leaf_cloud_client import canonical_bytes
-from solar_design_graph import GraphValidationError
+from solar_design_graph import GraphValidationError, validate_graph
 from routers import project_drawings as routes
 import test_sip_r3b_tools as tools
 import test_solar_solaredge_report as samples
@@ -763,6 +763,93 @@ def test_incomplete_optimizer_measurement_never_supplies_counts(lane, monkeypatc
     assert measured["complete"] is False
     assert measured["total_count"] is None and measured["string_counts"] is None
     assert read(lane, accepted)["output"]["optimizer_measurement"]["total_count"] is None
+
+
+def _graph_with_saved_string_partition(variant):
+    graph = samples.small_graph()
+    groups = [list(frame["panel_refs"]) for frame in graph["frames"]]
+    if variant == "swap":
+        groups[0][-1], groups[1][-1] = groups[1][-1], groups[0][-1]
+    if variant == "split":
+        groups.append([groups[0].pop()])
+    graph["strings"] = [
+        samples.entity("string", n, circuit_tag=f"DC-{n}", circuit_kind="String",
+            ordered_panel_refs=refs, module_count=len(refs), from_ref=refs[0], to_ref=refs[-1],
+            tag_text_ref=None, wire_gauge="10 AWG", length_ft=10, route=[[0, 0], [1, 0]],
+            inverter_ref=None)
+        for n, refs in enumerate(groups, 1)
+    ]
+    assignments = {
+        ref: {"string_ref": string["id"], "seq": seq}
+        for string in graph["strings"] for seq, ref in enumerate(string["ordered_panel_refs"])
+    }
+    for panel in graph["panels"]:
+        panel["assignment"] = assignments[panel["id"]]
+    for frame in graph["frames"]:
+        frame_refs = set(frame["panel_refs"])
+        frame["sequences"] = []
+        for string in graph["strings"]:
+            refs = [ref for ref in string["ordered_panel_refs"] if ref in frame_refs]
+            if refs:
+                frame["sequences"].append({"string_ref": string["id"], "ordered_panel_refs": refs})
+        for row in frame["matrix"]:
+            for cell in row:
+                if cell["panel_ref"] is not None:
+                    cell["seq"] = assignments[cell["panel_ref"]]["seq"]
+        for assignment in frame["panel_assignments"]:
+            assignment.update(assignments[assignment["panel_ref"]])
+    return validate_graph(graph)
+
+
+@pytest.mark.parametrize("variant,expected,reason", [
+    ("match", [("match", [0]), ("match", [1])], None),
+    ("swap", [("different", [0, 1]), ("different", [0, 1])], None),
+    ("split", [("different", [0]), ("match", [1]), ("different", [0])], None),
+    ("no-measurement", [("unavailable", []), ("unavailable", [])], "missing_optimizer_measurement"),
+    ("incomplete", [("unavailable", []), ("unavailable", [])], "incomplete_optimizer_measurement"),
+    ("stale", [("unavailable", []), ("unavailable", [])], "stale_optimizer_measurement"),
+])
+def test_reconcile_saved_optimizer_string_assignments(lane, monkeypatch, variant, expected, reason):
+    graph = _graph_with_saved_string_partition(variant)
+    lane.set_parent(tools.embedded(graph))
+    lane.ctx = graphs.resolve_project_graph_context(lane.context())
+    matrices = deepcopy(samples.GRIDS)
+    if variant != "no-measurement":
+        for index, matrix in enumerate(matrices):
+            matrix["Optimizers"] = [
+                {"id": f"pdf-optimizer-{1 + index * 3 + col}", "vendor_label": "42", "cells": [[0, col]]}
+                for col in range(3)
+            ]
+        if variant == "incomplete":
+            matrices[0]["Optimizers"].pop()
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    _, _, accepted = accept(lane, report(lane))
+    before = (lane.head, deepcopy(lane.writes), len(lane.versions))
+    section = "optimizer_assignment_changes"
+    if variant == "stale":
+        later_graph = deepcopy(accepted.graph)
+        later_graph["rev"] += 1
+        intake = accepted.intake
+        intake["solar_design_graph"] = later_graph
+        intake["solar_design_graph_sha256"] = graphs.local.digest(later_graph)
+        data = canonical_bytes(intake)
+        later = replace(accepted, intake_bytes=data, intake_sha256=sha256(data).hexdigest())
+        output = se.read_tracking(lane.tenant, later, {"section": section})
+    else:
+        output = read(lane, accepted, section=section)["output"]
+        suffix = read(lane, accepted, section=section, offset=1)["output"]
+        assert suffix["items"] == output["items"][1:]
+    assert output["labels_only"] and output["references"]["current"]
+    assert output["provenance"]["report"]["source_version_id"] == str(lane.ctx.parent_version_id)
+    if reason is None:
+        assert output["optimizer_measurement"]["total_count"] == 6
+        assert output["optimizer_measurement"]["string_counts"] == [3, 3]
+    assert output["items"] == [
+        {"saved_string_id": string["id"], "circuit_tag": string["circuit_tag"],
+         "verdict": verdict, "report_string_indexes": indexes, "reason": reason}
+        for string, (verdict, indexes) in zip(graph["strings"], expected, strict=True)
+    ]
+    assert (lane.head, lane.writes, len(lane.versions)) == before
 
 
 # Synthetic intake-phase diagnostics share this registered producer suite.
