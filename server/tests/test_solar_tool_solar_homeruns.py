@@ -602,3 +602,86 @@ def test_parity_receipt_replays_through_the_studio_producer():
         for key in ("output_sha256", "input_sha256", "fixture_sha256"):
             assert docs["i12"][key] == receipt["comparison"][side][key]
     assert docs["i12"]["after"] == receipt["comparison"]["studio"]["after"]
+
+
+def _box(assigned, left, right, layer="Keepout", **properties):
+    scale = assigned["project"]["units"]["meters_per_unit"]
+    return {"handle": "B8", "layer": layer, "closed": True, **properties,
+            "pts": [[x / scale, y / scale] for x, y in
+                    [(left, -.4), (right, -.4), (right, .4), (left, .4)]]}
+
+
+def _save(assigned, monkeypatch, directory, polylines):
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "1")
+    backend = store.FilesystemBackend(str(directory / "drawings"))
+    path = directory / "seed.json"
+    path.write_text(json.dumps({
+        "dwg": {}, "layers": [], "polylines": polylines, "inserts": [], "faces3d": [],
+        "blockdefs": [], "geodata": None, "solar_design_graph": assigned,
+        "solar_design_graph_sha256": digest(assigned),
+    }), encoding="utf-8")
+    store.ingest_drawing(backend, TENANT, str(path), drawing_id="solar")
+    return backend
+
+
+ALL_LEADS = {f"{string}/{terminal} homerun" for string in (S1, S2) for terminal in ("start", "end")}
+
+
+@pytest.mark.parametrize("left,right,layer,leads", [
+    (3.5, 4.0, "Keepout", ALL_LEADS),
+    (1.5, 1.75, "PV_KEEP_OUT", {f"{S1}/start homerun"}),
+    (4.75, 5.25, "Roof Keepouts", ALL_LEADS),
+], ids=["crosses-all", "one-lead", "assigned-inverter-in-keepout"])
+def test_saved_keepout_refuses_with_exact_manual_leads(assigned, isolated_jobs, no_network,
+                                                     monkeypatch, tmp_path, left, right, layer, leads):
+    backend = _save(assigned, monkeypatch, tmp_path, [_box(assigned, left, right, layer)])
+    _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    parent = backend.get(key)
+    prefix = "Route these homerun leads manually. "
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(api, TOOL, {"expected_rev": assigned["rev"]}))
+        assert response.status_code == 400, response.text
+        envelope = response.json()
+        assert envelope["reason_code"] == "JOINT_ROUTING_INFEASIBLE"
+        message = envelope["error"]["message"]
+        assert message.startswith(prefix)
+        assert set(message.removeprefix(prefix).split(", ")) == leads
+    record, = jobs._query("SELECT job_id FROM jobs")
+    job = jobs.get_job(record["job_id"])
+    assert job["status"] == "failed"
+    assert job["error"]["message"] == message
+    assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
+    assert backend.get(key) == parent
+
+
+def test_saved_keepout_combines_with_explicit_detour(assigned, no_network, monkeypatch, tmp_path):
+    polylines = [_box(assigned, 3.5, 4.0), _box(assigned, 4.75, 5.25, space="paper")]
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    requested = {"keep_outs": [{"name": "Drawing keepout 1", "min_xy": [0, -2], "max_xy": [1, -1]}],
+                 "aisles": [{"name": "North aisle", "points": [[3, 1, 0], [4.5, 1, 0]],
+                             "lead_capacity": 4}]}
+    with held(backend) as fence:
+        receipt = dispatch(backend, fence, {"drawing_id": "solar", "expected_rev": assigned["rev"],
+                                            "routing_constraints": requested})
+    _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 2)
+    saved = json.loads(backend.get(key))
+    result = saved["solar_design_graph"]
+    assert saved["polylines"] == polylines
+    assert receipt["graph_sha256"] == digest(result)
+    assert len(result["routes"]) == 4
+    for route in result["routes"]:
+        assert route["points"][1:] == [[3, 1, 0], [4.5, 1, 0], [5, 0, 0]]
+        assert route["extra"]["routing"]["direct_keep_outs"] == ["Drawing keepout 2"]
+        assert route["validity"]["state"] == "valid"
+
+
+def test_saved_curve_refuses_on_api_rail(assigned, isolated_jobs, no_network, monkeypatch, tmp_path):
+    backend = _save(assigned, monkeypatch, tmp_path, [_box(assigned, 3.5, 4.0, bulges=[1, 0, 0, 0])])
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(api, TOOL, {"expected_rev": assigned["rev"]}))
+        assert response.status_code == 400, response.text
+        assert response.json()["reason_code"] == "INVALID_ROUTING_CONSTRAINTS", response.text
+    assert store.load_manifest(backend, TENANT, "solar")["head"] == 1

@@ -3865,10 +3865,13 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             return env, 200
         except GraphValidationError as exc:
             from solar_combiner_graph import CombinerCapacityError
+            from solar_joint_homerun_routing import HomerunRoutingInfeasible
 
             env, status = _graph_commit_refused(exc.code, tool=tool["name"])
             if isinstance(exc, CombinerCapacityError):
                 env["error"]["unplaced_string_refs"] = list(exc.unplaced_string_refs)
+            if isinstance(exc, HomerunRoutingInfeasible):
+                env["error"]["message"] = exc.user_message
             return env, status
         except OSError:
             return graph_store_unavailable()

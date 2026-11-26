@@ -10,6 +10,13 @@ from solar_design_graph import GraphValidationError
 
 MAX_DRAWING_LEADS = 512
 MAX_AISLE_LEADS = 64
+MAX_KEEP_OUTS = 16
+
+
+class HomerunRoutingInfeasible(GraphValidationError):
+    def __init__(self, affected_leads):
+        super().__init__("JOINT_ROUTING_INFEASIBLE", ", ".join(affected_leads))
+        self.user_message = f"Route these homerun leads manually. {self.path}"
 
 
 @dataclass(frozen=True)
@@ -77,7 +84,7 @@ def _touches_box(segment, box):
 
 def _constraints(value):
     if (type(value) is not dict or set(value) != {"keep_outs", "aisles"}
-            or type(value["keep_outs"]) is not list or len(value["keep_outs"]) > 16
+            or type(value["keep_outs"]) is not list or len(value["keep_outs"]) > MAX_KEEP_OUTS
             or type(value["aisles"]) is not list or len(value["aisles"]) > 8):
         raise _invalid()
     names = set()
@@ -235,7 +242,7 @@ def route_together(routes, constraints):
     if None in allocation:
         affected = [f"{route['from_ref']}/{route['route_kind']}" for route, path in zip(routes, allocation)
                     if path is None]
-        raise GraphValidationError("JOINT_ROUTING_INFEASIBLE", ", ".join(affected))
+        raise HomerunRoutingInfeasible(affected)
 
     use = Counter(path.aisle for path in allocation)
     for route, (paths, blocked), selected in zip(routes, candidates, allocation):
