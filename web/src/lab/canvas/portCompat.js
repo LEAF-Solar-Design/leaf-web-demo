@@ -1,5 +1,5 @@
 import { compatible } from '../contract.js'
-import { manifestFor, registry } from './registry.js'
+import { manifestFor, registry, resolveManifest } from './registry.js'
 
 export function portCompatibility(output, input) {
   if (!output || !input) return { ok: false, reason: 'Pin missing' }
@@ -25,4 +25,12 @@ export function connectionStatus(document, pipe, entries = registry) {
     return document.pipes.filter(edge => edge.from.node === id).some(edge => reaches(edge.to.node, visited))
   }
   return reaches(pipe.to.node) ? { ok: false, reason: 'Cycles are refused' } : { ok: true, reason: '' }
+}
+
+export function compatibleSources(document, to, entries = registry) {
+  const target = document.blocks.find(block => block.id === to.node)
+  if (!target || !Object.hasOwn(resolveManifest(target, entries).manifest.inputs, to.port)) return []
+  return document.blocks.flatMap(block => Object.keys(resolveManifest(block, entries).manifest.outputs)
+    .map(port => ({ node: block.id, port })))
+    .filter(from => connectionStatus(document, { from, to }, entries).ok)
 }
