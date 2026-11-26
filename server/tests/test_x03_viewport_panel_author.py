@@ -345,3 +345,50 @@ def test_viewport_camera_diagnostics(ask, handle, edit, replacement, checked_cou
             "List complete thawed panel footprints in perspective viewport A2's crop.")
         status, payload = invoke(source, raw, {})
         assert status == "tool_error" and "viewport crop boundary" in str(payload).lower(), payload
+
+
+@pytest.mark.parametrize("ask,code,uncheckable", [
+    ("Report uncheckable cameras by layout even when one viewport has unreadable activation flags.",
+     68, True),
+    ("Diagnose malformed viewport cameras by layout.", 90, True),
+    ("Find invalid or unreadable cameras in paper-space viewports by layout.", 69, True),
+    ("Report uncheckable viewport cameras by layout.", None, False),
+    ("Report uncheckable viewport cameras by layout.", 90, False),
+])
+def test_camera_diagnostics_isolates_unreadable_activation(ask, code, uncheckable):
+    raw = comparison_drawing("distinct")
+    start = raw.index(b"0\nVIEWPORT\n5\nA1\n")
+    second = raw.index(b"0\nVIEWPORT\n5\nA2\n")
+    end = raw.index(b"0\nENDSEC\n", second)
+    first = raw[start:second]
+    third = first.replace(b"5\nA1\n", b"5\nA3\n").replace(b"410\nSheet\n", b"410\nDetail\n")
+    invalid_camera = raw[second:end].replace(b"36\n100\n", b"36\n0\n")
+    if code is not None:
+        tags = first.splitlines(keepends=True)
+        index = tags[::2].index(f"{code}\n".encode()) * 2 + 1
+        tags[index] = b"unreadable\n"
+        if not uncheckable:
+            tags[tags[::2].index(b"68\n") * 2 + 1] = b"0\n"
+        first = b"".join(tags)
+    raw = raw[:start] + first + invalid_camera + third + raw[end:]
+
+    manifest, source, _ = tools_fallback.author_tool(ask)
+    assert manifest["engine_op"] == "viewport_camera_diagnostics"
+    status, payload = invoke(source, raw, {})
+    assert status == "ok", payload
+    report = payload[0]
+    assert report["checked_count"] == (3 if code is None else 2)
+    assert report["total"] == 1
+    assert report["affected_cameras"] == [
+        {"viewport_handle": "A2", "layout": "Sheet",
+         "reason": "Viewport crop requires a finite view direction and twist."},
+    ]
+    assert report["uncheckable_count"] == int(uncheckable)
+    assert report["uncheckable_cameras"] == ([
+        {"viewport_handle": "A1", "layout": "Sheet",
+         "reason": f"Unreadable viewport activation field (DXF group {code})."},
+    ] if uncheckable else [])
+    if uncheckable:
+        _, source, _ = tools_fallback.author_tool(ASKS[0])
+        status, payload = invoke(source, raw, {})
+        assert status == "tool_error" and "invalid literal for int()" in str(payload), payload

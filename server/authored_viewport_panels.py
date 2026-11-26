@@ -18,8 +18,8 @@ def matches(description):
 def camera_diagnostics_requested(description):
     return (re.search(r"\bviewports?\b", description, re.I)
             and re.search(r"\bcameras?\b", description, re.I)
-            and re.search(r"\b(?:degenerate|invalid|malformed|broken|diagnos(?:e|tic|tics))\b",
-                          description, re.I))
+            and re.search(r"\b(?:degenerate|invalid|malformed|broken|uncheckable|unreadable|"
+                          r"diagnos(?:e|tic|tics))\b", description, re.I))
 
 
 def viewport_handle(description):
@@ -133,6 +133,13 @@ def _crop(fields, boundaries, camera):
             "back": back if math.isfinite(back) else None}
 
 
+def _activation_value(fields, code, default):
+    try:
+        return int(fields.get(code, default))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unreadable viewport activation field (DXF group {code}).") from exc
+
+
 def attach_viewports(pairs, out):
     if (0, "VIEWPORT") not in pairs:
         return
@@ -141,6 +148,7 @@ def attach_viewports(pairs, out):
     crop_inputs, boundaries = {}, {}
     hidden = set()
     names = set()
+    activation_error = None
     try:
         for kind, record in _records(pairs):
             fields = dict(record)
@@ -167,11 +175,18 @@ def attach_viewports(pairs, out):
                 handle = fields.get(5, "").upper()
                 if not re.fullmatch("[A-F0-9]+", handle) or handle in viewports:
                     raise ValueError("Missing or duplicate viewport identity.")
-                viewports[handle] = {"layout": fields.get(410, ""),
-                                     "layers": [v.upper() for c, v in record if c == 331],
-                                     "enabled": int(fields.get(68, 1)) != 0 and
-                                     not int(fields.get(90, 0)) & 131072 and int(fields.get(69, 0)) != 1}
-                if viewports[handle]["enabled"]:
+                view = {"layout": fields.get(410, ""),
+                        "layers": [v.upper() for c, v in record if c == 331]}
+                viewports[handle] = view
+                try:
+                    view["enabled"] = (_activation_value(fields, 68, 1) != 0
+                                       and not _activation_value(fields, 90, 0) & 131072
+                                       and _activation_value(fields, 69, 0) != 1)
+                except ValueError as exc:
+                    view["activation_error"] = str(exc)
+                    activation_error = activation_error or str(exc.__cause__)
+                    continue
+                if view["enabled"]:
                     crop_inputs[handle] = fields
             elif (kind == "LWPOLYLINE" and section == "ENTITIES"
                   and (fields.get(67) == "1" or fields.get(410, "Model").casefold() != "model")):
@@ -189,8 +204,10 @@ def attach_viewports(pairs, out):
             except (KeyError, TypeError, ValueError) as exc:
                 view["crop_error"] = "Unresolved viewport crop: " + str(exc)
         out["viewport_layers"] = {"layers": layers, "globally_hidden": sorted(hidden), "views": viewports}
+        if activation_error:
+            out["viewport_layers"]["error"] = activation_error
     except (ValueError, TypeError) as exc:
-        out["viewport_layers"] = {"error": str(exc)}
+        out["viewport_layers"] = {"error": activation_error or str(exc)}
 
 
 def build_body(description):
@@ -210,15 +227,24 @@ def build_body(description):
 CAMERA_DIAGNOSTICS = """
 def run(intake, params):
     inventory = intake.get("viewport_layers", {})
-    if inventory.get("error"):
+    if "views" not in inventory and inventory.get("error"):
         raise ValueError(inventory["error"])
-    active = {handle: view for handle, view in inventory.get("views", {}).items() if view["enabled"]}
-    if not active:
+    affected, uncheckable = [], []
+    checked = 0
+    for handle, view in sorted(inventory.get("views", {}).items()):
+        if "activation_error" in view:
+            uncheckable.append({"viewport_handle": handle, "layout": view["layout"],
+                                "reason": view["activation_error"]})
+        elif view["enabled"]:
+            checked += 1
+            if "camera_error" in view:
+                affected.append({"viewport_handle": handle, "layout": view["layout"],
+                                 "reason": view["camera_error"]})
+    if not checked and not uncheckable:
         raise ValueError("No active paper-space viewport cameras found.")
-    affected = [{"viewport_handle": handle, "layout": view["layout"], "reason": view["camera_error"]}
-                for handle, view in sorted(active.items()) if "camera_error" in view]
     return {"affected_cameras": affected,
-            "checked_count": len(active), "total": len(affected),
+            "checked_count": checked, "total": len(affected),
+            "uncheckable_cameras": uncheckable, "uncheckable_count": len(uncheckable),
             "scope": "active paper-space viewport cameras"}, None
 """
 
