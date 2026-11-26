@@ -19,14 +19,18 @@ restart:
     configured raises, and the router turns that into a refusal, because a gate
     that silently degrades to unmetered is not a gate.
 
-The counter is charged BEFORE the harness runs and is never refunded. An
-authoring attempt that fails downstream still spent Anthropic and sandbox money,
-which is exactly what this quota bounds. (Guest uploads refund because a
-rejected upload consumed nothing.)
+The counter is charged BEFORE the harness runs. The one opt-in refund exception
+is a first-attempt build refused before the harness was called: it consumed no
+Anthropic or sandbox money. Refunds are bounded to three per tenant and quota
+day so repeated submissions cannot occupy the shared queue for free.
+Downstream failures are never refunded because
+that spend is exactly what this quota bounds.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import sys
 import threading
@@ -41,8 +45,11 @@ PROJECT_ROOT = SERVER_DIR.parent
 # The authority-owned table bound to the shared counter primitive (migration 0023).
 COUNTER_TABLE = "author_quota_counters"
 ATTEMPT_TABLE = "author_quota_attempts"
-# One namespace for this authority; the day and tenant live in the counter key.
+# Authoring usage is isolated from refund markers by namespace.
 COUNTER_NAMESPACE = "author_daily"
+REFUND_ONCE_NAMESPACE = "author_refund_once"
+REFUND_NAMESPACE = "author_refund_day"
+REFUND_LIMIT = 3
 
 _PG_COUNTER: Any = None
 _USAGE_POLICY: Any = None
@@ -51,6 +58,8 @@ _MEMORY_LOCK = threading.Lock()
 # {counter_key: value} — reset implicitly, since a new UTC day is a new key.
 _MEMORY_STATE: dict[str, int] = {}
 _MEMORY_ATTEMPTS: dict[tuple[str, str], "AttemptDecision"] = {}
+_MEMORY_REFUNDS: dict[str, int] = {}
+_MEMORY_REFUNDED: set[tuple[str, str]] = set()
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,80 @@ def store_mode() -> str:
         raise AuthorQuotaStoreError(
             "LEAF_AUTHOR_QUOTA_STORE must be either 'memory' or 'postgres'")
     return mode
+
+
+def refund_enabled() -> bool:
+    return os.environ.get("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "").strip() == "1"
+
+
+class _RefundLimitReached(Exception):
+    """Roll back refund markers when the cap or aggregate prevents a refund."""
+
+
+def refund_unstarted(tenant_id: str, attempt_key: str) -> bool:
+    """Return a slot once, at most three times per tenant and original UTC day."""
+    try:
+        if store_mode() == "postgres":
+            db, _counter_type = _load_platform_counters()
+
+            def refund(conn):
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%(key)s, 0))",
+                    {"key": f"{len(tenant_id)}:{tenant_id}{attempt_key}"},
+                )
+                row = conn.execute(
+                    f"SELECT counter_key FROM {ATTEMPT_TABLE} "
+                    "WHERE tenant_id = %(tenant_id)s AND attempt_key = %(attempt_key)s "
+                    "AND accepted",
+                    {"tenant_id": tenant_id, "attempt_key": attempt_key},
+                ).fetchone()
+                if row is None:
+                    return False
+                identity_key = hashlib.sha256(json.dumps(
+                    [tenant_id, attempt_key], ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                once = _postgres_counter().consume_in_transaction(
+                    conn, namespace=REFUND_ONCE_NAMESPACE, key=identity_key, limit=1,
+                )
+                if not once.accepted:
+                    return False
+                result = _postgres_counter().consume_in_transaction(
+                    conn, namespace=REFUND_NAMESPACE, key=row["counter_key"],
+                    limit=REFUND_LIMIT,
+                )
+                if not result.accepted:
+                    raise _RefundLimitReached
+                updated = conn.execute(
+                    f"UPDATE {COUNTER_TABLE} SET value = GREATEST(value - 1, 0), "
+                    "updated_at = NOW() WHERE namespace = %(namespace)s "
+                    "AND counter_key = %(counter_key)s",
+                    {"namespace": COUNTER_NAMESPACE, "counter_key": row["counter_key"]},
+                )
+                if updated.rowcount != 1:
+                    raise _RefundLimitReached
+                return True
+
+            return db.run_transaction(refund, isolation="serializable", max_attempts=3)
+        with _MEMORY_LOCK:
+            identity = (tenant_id, attempt_key)
+            decision = _MEMORY_ATTEMPTS.get(identity)
+            if decision is None or not decision.accepted or identity in _MEMORY_REFUNDED:
+                return False
+            if decision.counter_key not in _MEMORY_STATE:
+                return False
+            refunds = _MEMORY_REFUNDS.get(decision.counter_key, 0)
+            if refunds >= REFUND_LIMIT:
+                return False
+            _MEMORY_REFUNDS[decision.counter_key] = refunds + 1
+            _MEMORY_REFUNDED.add(identity)
+            _MEMORY_STATE[decision.counter_key] = max(
+                _MEMORY_STATE.get(decision.counter_key, 0) - 1, 0
+            )
+            return True
+    except _RefundLimitReached:
+        return False
+    except Exception as exc:  # noqa: BLE001 - never expose store details
+        raise AuthorQuotaStoreError(type(exc).__name__) from None
 
 
 def retention_days() -> int:
@@ -161,7 +244,7 @@ def _postgres_counter():
 
 
 def _cleanup_old_counters(conn) -> None:
-    """Delete a bounded batch of expired aggregate counter rows."""
+    """Expire aggregate rows; keep once markers as long as the immutable ledger."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days())
     conn.execute(
         f"""
@@ -169,12 +252,12 @@ def _cleanup_old_counters(conn) -> None:
         WHERE ctid IN (
           SELECT ctid
           FROM {COUNTER_TABLE}
-          WHERE updated_at < %(cutoff)s
+          WHERE updated_at < %(cutoff)s AND namespace != %(refund_once)s
           ORDER BY updated_at
           LIMIT 100
         )
         """,
-        {"cutoff": cutoff},
+        {"cutoff": cutoff, "refund_once": REFUND_ONCE_NAMESPACE},
     )
 
 
@@ -451,6 +534,8 @@ def reset_memory_state() -> None:
     with _MEMORY_LOCK:
         _MEMORY_STATE.clear()
         _MEMORY_ATTEMPTS.clear()
+        _MEMORY_REFUNDS.clear()
+        _MEMORY_REFUNDED.clear()
 
 
 def reset_postgres_counter() -> None:

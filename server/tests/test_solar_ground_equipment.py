@@ -445,8 +445,8 @@ def test_ground_equipment_readiness_chain(graph, service, pinned, name):
     g = _stage(graph, pinned, name)
     found = reasons(g)
     assert {key: found[key] for key in STAGES[name]} == STAGES[name]
-    # The solve keeps refusing a compact design: its request binding refuses a compact frame.
-    assert found["solar-solve-proposal"] == found["solar-commit-solve"] == "sized_panel_groups_required"
+    assert found["solar-solve-proposal"] is None
+    assert found["solar-commit-solve"] is None
     # The equipment answer is the expansion's answer, decided without expanding.
     assert found[EQUIPMENT] == reasons(codec.expand_graph(g))[EQUIPMENT]
 
@@ -456,11 +456,14 @@ def test_ground_equipment_readiness_reads_slot_template_validity(graph, service,
     g = strung(sized(converted(graph)), pinned)
     g["frames"][frame]["ground_slots"]["panel"]["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
     validate_graph(copy.deepcopy(g))
-    assert reasons(g)[EQUIPMENT] == "valid_strings_required"
+    observed = reasons(g)
+    assert observed[EQUIPMENT] == "valid_strings_required"
     assert reasons(codec.expand_graph(g))[EQUIPMENT] == "valid_strings_required"
+    for tool in ("solar-solve-proposal", "solar-commit-solve"):
+        assert observed[tool] == "sized_panel_groups_required"
 
 
-def test_ground_equipment_partial_compaction_keeps_solve_unready(graph, service, pinned):
+def test_ground_equipment_partial_compaction_preserves_solve_readiness(graph, service, pinned):
     g = strung(sized(converted(graph)), pinned)
     expanded = codec.expand_graph(g)
     partial = codec.compact_graph(expanded, [g["frames"][1]["id"]])
@@ -470,9 +473,8 @@ def test_ground_equipment_partial_compaction_keeps_solve_unready(graph, service,
     sdg._reset_validation_caches()
     expanded_readiness = availability.w1_graph_readiness(copy.deepcopy(expanded))
     for tool in ("solar-solve-proposal", "solar-commit-solve"):
-        assert compact_readiness[tool] == {
-            "input_ready": False, "input_reason": "sized_panel_groups_required"}
-        assert expanded_readiness[tool] == {"input_ready": True, "input_reason": None}
+        assert compact_readiness[tool] == expanded_readiness[tool] == {
+            "input_ready": True, "input_reason": None}
 
 
 def test_ground_equipment_ready_reads_slot_template_validity(graph, service, pinned):

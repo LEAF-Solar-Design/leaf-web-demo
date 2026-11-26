@@ -87,6 +87,7 @@ def test_downstream_overlay_inventory_matches_current_vendor():
         "agent/authorLoop.ts",
         "agent/branchTargetPrompt.ts",
         "agent/tools/branchCompileCheck.ts",
+        "agent/tools/decodeHtmlEntities.ts",
         "agent/tools/submitBranchToolProposal.ts",
         "agent/tools/submitToolProposal.ts",
         "ports/converse.ts",

@@ -18,6 +18,8 @@ export interface BranchSubmissionResult {
   /** Exact content retained by the trusted author loop for post-run verification. */
   contents: Record<string, string>;
   package_digest: string;
+  /** Disclosed operator entities decoded and recompiled by the trusted loop. */
+  source_decoded?: number;
 }
 
 export function branchPackageDigest(files: Record<string, string>): string {
