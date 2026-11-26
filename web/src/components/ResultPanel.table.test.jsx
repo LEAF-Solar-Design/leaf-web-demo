@@ -69,6 +69,32 @@ describe('ResultPanel generic table results', () => {
   })
 })
 
+describe('ResultPanel scalar lists', () => {
+  it.each([
+    ['named layer list', { layers: ['ROOF', 'PV-ROW', 'ROOF'] }, 'layers', ['ROOF', 'PV-ROW', 'ROOF']],
+    ['nested mixed values', { details: { values: [0, false, null, '', 3.5] } }, 'details / values', ['0', 'false', 'null', '""', '3.5']],
+    ['root list', [false, 12, true], 'result', ['false', '12', 'true']],
+    ['generic strings field', { strings: ['one', 'two'] }, 'strings', ['one', 'two']],
+  ])('renders %s in order', (_case, data, label, expected) => {
+    render(<ResultPanel result={{ ok: true, result: data }} />)
+    const table = screen.getByRole('table', { name: label })
+    expect(within(table).getAllByRole('cell').map(cell => cell.textContent)).toEqual(expected)
+    expect(screen.getAllByRole('cell')).toHaveLength(expected.length)
+  })
+
+  it('paginates long lists beside structured rows without repeating their cells', () => {
+    const values = Array.from({ length: 101 }, (_, index) => `Layer ${index + 1}`)
+    render(<ResultPanel result={{ ok: true, result: { values, rows: [{ tags: ['roof', 'south'] }] } }} />)
+    const list = screen.getByRole('table', { name: 'values' })
+    expect(within(list).getAllByRole('cell')).toHaveLength(100)
+    expect(within(list).queryByText('Layer 101')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Next values page' }))
+    expect(within(list).getAllByRole('cell').map(cell => cell.textContent)).toEqual(['Layer 101'])
+    expect(within(screen.getByRole('table', { name: 'rows' })).getByText('["roof","south"]')).toBeVisible()
+    expect(screen.getAllByRole('table')).toHaveLength(2)
+  })
+})
+
 describe('String result presentation', () => {
   const stringResult = { ok: true, tool: 'string-panels', result: {
     strings: [{ id: 'S001', modules: 2, pts: [[0, 0], [1, 0]], voc_at_tmin: 100, inverter: 'INV1' },
