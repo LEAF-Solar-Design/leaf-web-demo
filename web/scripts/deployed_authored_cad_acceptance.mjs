@@ -46,6 +46,8 @@ const EXTERNAL_EVIDENCE_REQUIRED = [
   'durable audit-row inspection',
 ]
 
+const DUPLICATE_JSON_KEY = 'DUPLICATE_JSON_KEY'
+
 export class AcceptanceError extends Error {
   constructor(check, message, details = undefined) {
     super(message)
@@ -98,6 +100,7 @@ export function safeFailureDetails(error) {
   }
   const allowedErrorCodes = new Set([
     'BAD_PARAMS',
+    DUPLICATE_JSON_KEY,
     'ENTITLEMENT_REQUIRED',
     'INTERNAL',
     'already_decided',
@@ -342,6 +345,36 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+// The caller validates the JSON first. Only a key string can precede a colon
+// in valid JSON, and each object gets its own set, including inside arrays.
+function hasDuplicateJsonKeys(text) {
+  const objects = []
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === '{') {
+      objects.push(new Set())
+    } else if (character === '}') {
+      objects.pop()
+    } else if (character === '"') {
+      const start = index
+      index += 1
+      while (text[index] !== '"') {
+        if (text[index] === '\\') index += 1
+        index += 1
+      }
+      let next = index + 1
+      while (next < text.length && /\s/.test(text[next])) next += 1
+      if (text[next] === ':') {
+        const key = JSON.parse(text.slice(start, index + 1))
+        const keys = objects.at(-1)
+        if (keys.has(key)) return true
+        keys.add(key)
+      }
+    }
+  }
+  return false
+}
+
 async function parseJsonResponse(response, check) {
   const length = Number(response.headers.get('content-length') || 0)
   if (length > MAX_RESPONSE_BYTES) {
@@ -351,11 +384,19 @@ async function parseJsonResponse(response, check) {
   if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
     throw new AcceptanceError(check, 'response exceeds the acceptance size limit')
   }
+  if (!text) return {}
+  let body
   try {
-    return text ? JSON.parse(text) : {}
+    body = JSON.parse(text)
   } catch {
     throw new AcceptanceError(check, 'response is not JSON')
   }
+  if (hasDuplicateJsonKeys(text)) {
+    throw new AcceptanceError(check, 'response contains a duplicate JSON object key', {
+      error_code: DUPLICATE_JSON_KEY,
+    })
+  }
+  return body
 }
 
 export async function requestJson(
@@ -502,6 +543,14 @@ export async function provisionAcceptanceDrawings(
   return drawingIds
 }
 
+function jobStatusReadFailure(jobId, message, error) {
+  const details = { job_id: jobId, terminal_status: 'http_error' }
+  if (error instanceof AcceptanceError && error.details?.error_code === DUPLICATE_JSON_KEY) {
+    details.error_code = DUPLICATE_JSON_KEY
+  }
+  return new AcceptanceError('authored_job', message, details)
+}
+
 export async function waitForTerminalJob(
   config,
   tenant,
@@ -524,12 +573,8 @@ export async function waitForTerminalJob(
         `/api/jobs/${encodeURIComponent(jobId)}`,
         { fetchImpl },
       )
-    } catch {
-      throw new AcceptanceError(
-        'authored_job',
-        'the authored write job status could not be read',
-        { job_id: jobId, terminal_status: 'http_error' },
-      )
+    } catch (error) {
+      throw jobStatusReadFailure(jobId, 'the authored write job status could not be read', error)
     }
     if (observed.status !== 200) {
       throw new AcceptanceError(
@@ -585,12 +630,8 @@ export async function waitForJobOutcome(
         `/api/jobs/${encodeURIComponent(jobId)}`,
         { fetchImpl },
       )
-    } catch {
-      throw new AcceptanceError(
-        'authored_job',
-        'the authored replay job status could not be read',
-        { job_id: jobId, terminal_status: 'http_error' },
-      )
+    } catch (error) {
+      throw jobStatusReadFailure(jobId, 'the authored replay job status could not be read', error)
     }
     if (observed.status !== 200) {
       throw new AcceptanceError(

@@ -528,6 +528,64 @@ describe('deployed authored CAD acceptance checks', () => {
     assert.deepEqual(await pending, ['drawing-a', 'drawing-b'])
   })
 
+  for (const [name, body] of [
+    ['status', '{"status":"complete","status":"complete"}'],
+    ['result', '{"status":"complete","result":{"ok":true,"ok":true}}'],
+    ['version in an array entry', '{"status":"complete","result":[{"new_version":{"version":2,"version":2}}]}'],
+    ['escaped key', String.raw`{"status":"complete","raw-marker":1,"raw-\u006darker":2}`],
+  ]) {
+    it(`rejects duplicate job JSON keys in ${name}`, async () => {
+      const config = validateConfig(environment(), true)
+      const jobId = '11111111-1111-4111-8111-111111111111'
+      const fetchImpl = async () => new Response(body)
+      for (const poll of [waitForTerminalJob, waitForJobOutcome]) {
+        await assert.rejects(
+          () => poll(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+          (error) => {
+            const record = safeFailureRecord(error)
+            assert.deepEqual(record.details, {
+              job_id: jobId,
+              terminal_status: 'http_error',
+              error_code: 'DUPLICATE_JSON_KEY',
+            })
+            assert.doesNotMatch(JSON.stringify(record), /raw-marker/)
+            return true
+          },
+        )
+      }
+    })
+  }
+
+  it('accepts repeated job JSON keys across distinct objects', async () => {
+    const config = validateConfig(environment(), true)
+    const jobId = '11111111-1111-4111-8111-111111111111'
+    const body = {
+      status: 'complete',
+      result: [{ status: 'brace { and quote "' }, { status: 'brace } and slash \\' }],
+    }
+    const fetchImpl = async () => new Response(JSON.stringify(body))
+    assert.deepEqual(
+      await waitForTerminalJob(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+      body,
+    )
+  })
+
+  it('keeps literal NaN on the malformed job JSON path', async () => {
+    const config = validateConfig(environment(), true)
+    const jobId = '11111111-1111-4111-8111-111111111111'
+    const fetchImpl = async () => new Response('{"status":"complete","version":NaN}')
+    await assert.rejects(
+      () => waitForTerminalJob(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+      (error) => {
+        assert.deepEqual(safeFailureRecord(error).details, {
+          job_id: jobId,
+          terminal_status: 'http_error',
+        })
+        return true
+      },
+    )
+  })
+
   it('reports a terminal broker failure before waiting for browser version state', async () => {
     const config = validateConfig(environment(), true)
     const tenant = config.tenants[0]
