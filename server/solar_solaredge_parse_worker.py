@@ -48,12 +48,31 @@ def verdict_bytes(data, *, legacy=False):
     try:
         import solar_solaredge_pdf
         import solar_solaredge_parse
-        parsed = solar_solaredge_parse.SolarEdgeParse(solar_solaredge_pdf.extract_primitives(bytes(data)))
-        matrices = (parsed.generate_matrix_jsons(PARSE_BASE_NAME) if legacy
-                    else parsed.identity_matrices(PARSE_BASE_NAME))
-        _validate_identities(matrices)
-        payload = json.dumps({"schema": VERDICT_SCHEMA, "matrices": matrices},
-                             separators=(",", ":")).encode("utf-8")
+        prefix = ('{"schema":"' + VERDICT_SCHEMA + '","matrices":[').encode("utf-8")
+        fragments = []
+        size = len(prefix) + len(b"]}")
+        if size > MAX_OUTPUT_BYTES:
+            return _refusal_bytes()
+        offset = 0
+        optimizer_total = cell_total = 0
+        for number, page in enumerate(solar_solaredge_pdf.iter_page_primitives(bytes(data)), 1):
+            parsed = solar_solaredge_parse.SolarEdgeParse(page)
+            name = PARSE_BASE_NAME if number == 1 else f"{PARSE_BASE_NAME}_page{number}"
+            matrices = (parsed.generate_matrix_jsons(name) if legacy else parsed.identity_matrices(name))
+            optimizer_total, cell_total = _validate_identities(matrices, optimizer_total, cell_total)
+            highest = offset - 1
+            for matrix in matrices:
+                for optimizer in matrix.get("Optimizers", ()):
+                    occurrence = int(optimizer["id"].removeprefix("pdf-optimizer-")) + offset
+                    optimizer["id"] = f"pdf-optimizer-{occurrence}"
+                    highest = max(highest, occurrence)
+                data_part = json.dumps(matrix, separators=(",", ":")).encode("utf-8")
+                size += len(data_part) + bool(fragments)
+                if size > MAX_OUTPUT_BYTES:
+                    return _refusal_bytes()
+                fragments.append(data_part)
+            offset = highest + 1
+        return prefix + b",".join(fragments) + b"]}"
     except (ValueError, LookupError, TypeError, ArithmeticError, RecursionError, MemoryError) as error:
         if isinstance(error, (MemoryError, RecursionError)) or getattr(error, "code", None) in {
                 "RESOURCE_LIMIT", "PDF_RESOURCE_LIMIT", "PDF_TOO_LARGE", "CONTENT_TOO_LARGE",
@@ -61,9 +80,6 @@ def verdict_bytes(data, *, legacy=False):
                 "TOO_MANY_SEGMENTS", "TOO_MANY_LETTERS"}:
             return _refusal_bytes(RESOURCE_REFUSAL)
         return _refusal_bytes()
-    if len(payload) > MAX_OUTPUT_BYTES:
-        return _refusal_bytes()
-    return payload
 
 
 def _unique_object(pairs):
@@ -123,10 +139,9 @@ def decode_verdict(returncode, out):
     return None
 
 
-def _validate_identities(matrices):
+def _validate_identities(matrices, count=0, cells=0):
     """Bound the additive identity data without changing the historical matrix protocol."""
     import re
-    count = cells = 0
     for matrix in matrices:
         if type(matrix) is not dict or "Optimizers" not in matrix:
             continue
@@ -156,6 +171,7 @@ def _validate_identities(matrices):
                 rows = matrix["Rows"]
                 if r >= len(rows) or c >= len(rows[r]["Panels"]) or rows[r]["Panels"][c]["Code"] != 1:
                     raise ValueError("optimizer cell is not a panel")
+    return count, cells
 
 
 def decode_refusal(returncode, out):

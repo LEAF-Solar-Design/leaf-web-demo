@@ -11,10 +11,15 @@ import { nativeProjectSourceProfile } from "./nativeProjectSourceProfile.js";
 import { canonicalVideo, validateProjectVideo, validateVideoReport, VideoInspectionError, type ProjectVideoInspector, type VideoInspectionResult } from "./projectVideoInspection.js";
 
 export interface ProjectSourceAuthorDependencies { editor: RepoEditor; oauth: OAuthGrantProvider; videoInspector?: ProjectVideoInspector }
+function webPackageJson(next: string): string {
+  return JSON.stringify({ private: true, scripts: { build: "next build", dev: "next dev", start: "next start" },
+    dependencies: { next, react: "18.3.1", "react-dom": "18.3.1" },
+    devDependencies: { typescript: "5.7.3", "@types/node": "22.10.2", "@types/react": "18.3.18", "@types/react-dom": "18.3.5" } }, null, 2) + "\n";
+}
+const legacyWebPackage = Buffer.from(webPackageJson("16.4.3"));
+
 export const PROJECT_SOURCE_SCAFFOLD: Readonly<Record<string, string>> = Object.freeze({
-  "package.json": JSON.stringify({ private: true, scripts: { build: "next build", dev: "next dev", start: "next start" },
-    dependencies: { next: "16.4.3", react: "18.3.1", "react-dom": "18.3.1" },
-    devDependencies: { typescript: "5.7.3", "@types/node": "22.10.2", "@types/react": "18.3.18", "@types/react-dom": "18.3.5" } }, null, 2) + "\n",
+  "package.json": webPackageJson("16.4.6"),
   "next.config.mjs": 'export default { output: "export", images: { unoptimized: true } };\n',
   "tsconfig.json": JSON.stringify({ compilerOptions: { target: "ES2017", lib: ["dom", "dom.iterable", "esnext"],
     allowJs: true, skipLibCheck: true, strict: true, noEmit: true, esModuleInterop: true, module: "esnext",
@@ -197,7 +202,10 @@ export function authorProjectSource(service: CampaignSourceService, deps: Projec
       baseline = inventory(dir);
       assertPathCasing([...baseline.keys(), ...protectedFiles.keys(), ...git(dir, ["ls-files", "-z"]).toString().split("\0").filter(Boolean)]);
       if (editing) {
-        for (const [path, content] of Object.entries(profile.scaffold)) if (!baseline.get(path)?.equals(Buffer.from(content))) invalid();
+        if (!native && baseline.get("package.json")?.equals(legacyWebPackage)) {
+          protectedFiles.set("package.json", legacyWebPackage);
+        }
+        for (const path of Object.keys(profile.scaffold)) if (!baseline.get(path)?.equals(protectedFiles.get(path)!)) invalid();
         for (const path of profile.requiredProductPaths) if (!baseline.get(path)?.toString("utf8").trim()) invalid();
       }
       for (const path of baseline.keys()) {
