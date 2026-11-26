@@ -18,6 +18,7 @@ import solar_project_context as project
 import solar_project_graph as graphs
 import solar_project_read as reads
 import solar_project_solaredge as se
+from solar_solaredge_revision_compare import PAGE_ITEMS, compare
 import solar_tools
 import store
 from leaf_cloud_client import canonical_bytes
@@ -1033,3 +1034,159 @@ def test_missing_v1_report_replays_original_matrix_protocol(lane, monkeypatch):
     assert restored["accepted"] and restored["report_download"]["available"] is False
     assert restored["provenance"]["report"]["content_sha256"] == record["report"]["content_sha256"]
     assert modes == [True]
+
+
+def _post_tracking_comparison(http, version, **params):
+    s = http.s
+    return http.client.post(
+        f"/api/projects/{s.project}/drawings/{s.drawing}/versions/{version}/solar-reads",
+        json={"tool": se.READ_TOOL, "catalog_digest": tools.manifest(se.READ_TOOL), "params": params},
+    )
+
+
+def test_compare_two_pinned_saved_versions_with_independent_report_downloads(http):
+    s = http.s
+    first_report = report(s)
+    _, _, first = accept(s, first_report)
+    s.ctx = first
+    second_report = report(s)
+    _, _, second = accept(s, second_report)
+    tools.commit(s, "solar-settings", {"expected_rev": second.graph["rev"],
+        "project_changes": {"name": "Later"}}, second)
+
+    response = _post_tracking_comparison(http, second.parent_version_id, section="saved_assignment_changes",
+                        compare_to_version_id=str(first.parent_version_id))
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["is_head"] is False and result["drawing_changed"] is False
+    output = result["output"]
+    assert output["counts"] == dict(retained=6, newly_assigned=0, removed=0, reassigned=0)
+    assert output["items"] == [] and output["labels_only"] is True
+    assert first_report["report"]["content_sha256"] != second_report["report"]["content_sha256"]
+    for side, saved, built in (("before", first, first_report), ("after", second, second_report)):
+        revision = output[side]
+        assert revision["version_id"] == str(saved.parent_version_id)
+        assert revision["report"] == built["report"]
+        assert revision["report_download_available"] is True
+        download = http.client.get(revision["report"]["download"])
+        assert download.status_code == 200, download.text
+        assert sha256(download.content).hexdigest() == revision["report"]["content_sha256"]
+
+
+def test_comparison_can_replay_an_unavailable_baseline_report(http, monkeypatch):
+    s = http.s
+    first_report = report(s)
+    _, _, first = accept(s, first_report)
+    s.ctx = first
+    second_report = report(s)
+    _, _, second = accept(s, second_report)
+    meta, _ = se.artifacts.read_project_artifact(str(s.org), s.project, s.drawing,
+                                                first_report["report"]["artifact_id"])
+    scope = {key: meta[key] for key in ("organization_id", "project_id", "drawing_id")}
+    monkeypatch.delitem(s.blobs, se.artifacts._key(scope, meta["content_sha256"], blob=True))
+
+    response = _post_tracking_comparison(http, second.parent_version_id,
+        section="saved_assignment_changes", compare_to_version_id=str(first.parent_version_id))
+
+    assert response.status_code == 200, response.text
+    comparison = response.json()["result"]["output"]
+    assert comparison["counts"] == dict(retained=6, newly_assigned=0, removed=0, reassigned=0)
+    assert comparison["before"]["report"] == dict(first_report["report"], download=None)
+    assert comparison["before"]["report_download_available"] is False
+    assert comparison["after"]["report"] == second_report["report"]
+    assert comparison["after"]["report_download_available"] is True
+
+
+@pytest.mark.parametrize("params", [
+    {"section": "saved_assignment_changes"},
+    {"section": "saved_assignment_changes", "compare_to_version_id": "head"},
+    {"section": "strings", "compare_to_version_id": str(uuid4())},
+    {"section": "saved_assignment_changes", "compare_to_version_id": str(uuid4()), "offset": 400001},
+])
+def test_comparison_selector_must_be_explicit_and_bounded(http, params):
+    response = _post_tracking_comparison(http, http.s.ctx.parent_version_id, **params)
+
+    assert response.status_code == 409
+    assert "INVALID_SOLAREDGE_TRACKING_READ_REQUEST" in response.text
+
+
+def test_comparison_refuses_unsaved_tracking_and_unknown_version(http):
+    s = http.s
+    _, _, saved = accept(s, report(s))
+    unsaved = _post_tracking_comparison(http, saved.parent_version_id, section="saved_assignment_changes",
+                       compare_to_version_id=str(s.ctx.parent_version_id))
+    unknown = _post_tracking_comparison(http, saved.parent_version_id, section="saved_assignment_changes",
+                        compare_to_version_id=str(uuid4()))
+
+    assert unsaved.status_code == 409
+    assert "SOLAREDGE_TRACKING_COMPARISON_REQUIRES_SAVED_TRACKING" in unsaved.text
+    assert unknown.status_code == 404
+
+
+def _assignment_revision(assignments, frames):
+    return (
+        {"strings": [
+            {"panel_refs": panels, "pdf_matrix": 0, "pdf_inverter_id": 1,
+             "pdf_string_input": number}
+            for number, panels in assignments
+        ]},
+        {"frames": [{"id": name, "panel_refs": panels} for name, panels in frames]},
+    )
+
+
+def test_saved_assignments_distinguish_added_removed_reassigned_and_retained():
+    before = _assignment_revision([(1, ["removed", "changed", "retained"])],
+                      [("roof-a", ["removed", "changed", "retained"])])
+    after = _assignment_revision([(2, ["changed", "new"]), (1, ["retained"])],
+                     [("roof-b", ["changed", "new"]), ("roof-a", ["retained"])])
+
+    result = compare(*before, *after, 0)
+
+    assert result["counts"] == dict(retained=1, newly_assigned=1, removed=1, reassigned=1)
+    assert result["changed_frame_count"] == 2
+    changed, added, removed = result["items"]
+    assert changed == {
+        "panel_ref": "changed", "change": "reassigned",
+        "before": {"frame_ref": "roof-a", "pdf_matrix": 0, "pdf_inverter_id": 1, "pdf_string_input": 1},
+        "after": {"frame_ref": "roof-b", "pdf_matrix": 0, "pdf_inverter_id": 1, "pdf_string_input": 2},
+    }
+    assert added["change"] == "newly_assigned" and added["before"] is None
+    assert removed["change"] == "removed" and removed["after"] is None
+    assert compare(*after, *before, 0)["items"][0]["before"] == changed["after"]
+
+
+def test_saved_assignment_without_a_source_frame_is_rejected():
+    incomplete = _assignment_revision([(1, ["missing-panel"])], [])
+    empty = _assignment_revision([], [])
+
+    with pytest.raises(se.GraphValidationError, match="SOLAREDGE_IMPORT_RECORD_INVALID"):
+        compare(*incomplete, *empty, 0)
+
+
+def test_report_row_and_panel_order_do_not_change_assignments():
+    before = _assignment_revision([(2, ["panel-c"]), (1, ["panel-a", "panel-b"])],
+                      [("roof-a", ["panel-a", "panel-b"]), ("roof-b", ["panel-c"])])
+    after = _assignment_revision([(1, ["panel-b", "panel-a"]), (2, ["panel-c"])],
+                     [("roof-b", ["panel-c"]), ("roof-a", ["panel-b", "panel-a"])])
+
+    result = compare(*before, *after, 0)
+
+    assert result["counts"] == dict(retained=3, newly_assigned=0, removed=0, reassigned=0)
+    assert result["items"] == []
+    assert result["changed_frame_count"] == 0
+
+
+def test_large_comparison_paginates_stably_and_keeps_the_same_totals():
+    panels = [f"panel-{i:04d}" for i in reversed(range(PAGE_ITEMS + 1))]
+    before = _assignment_revision([], [])
+    after = _assignment_revision([(1, panels)], [("roof-a", panels)])
+
+    first = compare(*before, *after, 0)
+    last = compare(*before, *after, first["page"]["next_offset"])
+    exhausted = compare(*before, *after, len(panels) + 1)
+
+    assert [row["panel_ref"] for row in first["items"] + last["items"]] == sorted(panels)
+    assert first["counts"] == last["counts"] == exhausted["counts"]
+    assert last["page"] == dict(offset=PAGE_ITEMS, returned=1, total=len(panels), next_offset=None)
+    assert exhausted["items"] == [] and exhausted["page"]["next_offset"] is None

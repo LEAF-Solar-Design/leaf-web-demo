@@ -192,19 +192,33 @@ def test_solaredge_tracking_read_declaration():
                 "drawing_id": {"type": "string", "maxLength": 128},
                 "section": {"type": "string", "enum": [
                                 "strings", "frames", "unassigned", "reference_changes",
-                                "optimizer_assignment_changes", "optimizers"],
+                                "saved_assignment_changes", "optimizer_assignment_changes", "optimizers"],
                             "description": (
                                 "reference_changes lists missing frames, missing panels, moved panels with saved "
-                                "and current frame references, and new framed panels. optimizer_assignment_changes "
+                                "and current frame references, and new framed panels. saved_assignment_changes compares "
+                                "accepted tracking in two explicit versions of the same project drawing and returns each "
+                                "report's download reference. optimizer_assignment_changes "
                                 "compares saved electrical string membership with a complete current report by "
                                 "shared panel identity. optimizers pages explicit report measurement rows, including "
                                 "partial observations. When an optimizer measurement summary includes optimizer_rows, "
                                 "use optimizers for details and strings for available optimizer_count values."),
                             "default": "strings"},
+                "compare_to_version_id": {
+                    "type": "string", "minLength": 36, "maxLength": 36,
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "Baseline saved version UUID for saved_assignment_changes. "
+                                   "The version in the request URL is the other side of the comparison."},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 410000, "default": 0}},
-                "allOf": [{"if": {"required": ["section"], "properties": {
-                    "section": {"const": "reference_changes"}}},
-                    "else": {"properties": {"offset": {"maximum": 200000}}}}],
+                "allOf": [
+                    {"if": {"required": ["section"], "properties": {
+                        "section": {"enum": ["reference_changes", "saved_assignment_changes"]}}},
+                     "else": {"properties": {"offset": {"maximum": 200000}}}},
+                    {"if": {"required": ["section"], "properties": {
+                        "section": {"const": "saved_assignment_changes"}}},
+                     "then": {"required": ["compare_to_version_id"],
+                              "properties": {"offset": {"maximum": 400000}}},
+                     "else": {"not": {"required": ["compare_to_version_id"]}}},
+                ],
                 "required": [], "additionalProperties": False},
             "returns": {"type": "object"}, "capabilities": ["drawing.read"],
             "allow_local_fallback": False},
