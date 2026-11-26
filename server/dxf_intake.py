@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Group 410 uses the same name bound as the DXF writer's MAX_LAYER_CHARS.
+_LAYOUT_NAME_MAX_CHARS = 255
 # Mirrors server/intake_dxf.py's _LINEWEIGHTS (the DXF group-370 enumeration
 # the writer accepts): duplicated, not imported, because intake_dxf already
 # imports from this module and a reverse import would be circular.
@@ -244,10 +246,16 @@ def parse_dxf_bytes(
                                 record.append(pairs[vertex_end])
                             vertex_end += 1
                 model_records[handle] = (value, record)
-            if space_info.get("space") != "paper":
+            layout = space_info.get("layout", "")
+            if layout and layout.casefold() != "model":
+                space_info["space"] = "paper"
+            if not space_info.get("space"):
                 space_info.clear()
+            elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
+                # Keep paper classification without exporting an invalid name or inventing a tab.
+                space_info.pop("layout", None)
         if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
-            if not space_info and dict(record).get(410, "Model") == "Model":
+            if not space_info:
                 mleader_records.append(record)
             i = j
             continue
@@ -535,8 +543,6 @@ def parse_dxf_bytes(
                 entity["bulges"] = bulges
             if kind in ("LWPOLYLINE", "POLYLINE") and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
                 entity["width"] = True
-            if groups.get(67) == "1" or groups.get(410, "Model") != "Model":
-                entity["space"] = "paper"
             if handle.upper() in associated or dimension_dependency(record):
                 entity["dimensionRef"] = True
     if parse_errors:
