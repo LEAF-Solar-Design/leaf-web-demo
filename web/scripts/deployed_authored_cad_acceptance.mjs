@@ -358,7 +358,7 @@ function hasDuplicateJsonKeys(text) {
     } else if (character === '"') {
       const start = index
       index += 1
-      while (text[index] !== '"') {
+      while (index < text.length && text[index] !== '"') {
         if (text[index] === '\\') index += 1
         index += 1
       }

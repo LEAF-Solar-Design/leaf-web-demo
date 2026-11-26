@@ -20,6 +20,7 @@ import {
   provePinnedWriteRejections,
   provisionAcceptanceDrawing,
   provisionAcceptanceDrawings,
+  requestJson,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
@@ -555,6 +556,33 @@ describe('deployed authored CAD acceptance checks', () => {
       }
     })
   }
+
+  it('rejects a deep duplicate key containing punctuation through requestJson', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const path = '/api/drawings'
+    const body = String.raw`{"drawings":[{"layout":{"groups":[[{"sheet:{a}":1,"sheet:\u007ba\u007d":2}]]}}]}`
+    const fetchImpl = async () => new Response(body)
+
+    await assert.rejects(
+      () => requestJson(config, tenant, path, { fetchImpl }),
+      (error) => {
+        const record = safeFailureRecord(error)
+        assert.equal(record.check, path)
+        assert.deepEqual(record.details, { error_code: 'DUPLICATE_JSON_KEY' })
+        assert.doesNotMatch(JSON.stringify(record), /sheet:/)
+        return true
+      },
+    )
+  })
+
+  it('accepts punctuated keys in distinct objects through requestJson', async () => {
+    const config = validateConfig(environment(), true)
+    const body = { drawings: [{ 'sheet:{a}': 1 }, { 'sheet:{a}': 2 }] }
+    const fetchImpl = async () => new Response(JSON.stringify(body))
+    const response = await requestJson(config, config.tenants[0], '/api/drawings', { fetchImpl })
+    assert.deepEqual(response.body, body)
+  })
 
   it('accepts repeated job JSON keys across distinct objects', async () => {
     const config = validateConfig(environment(), true)
