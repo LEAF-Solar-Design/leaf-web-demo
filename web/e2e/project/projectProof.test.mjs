@@ -399,13 +399,16 @@ it('PP3B-17 injected global is read only after managed-origin navigation and rei
   expect(events).toEqual(['navigate', 'inject', 'read'])
   expect(spec.match(/window\.__pp3bApi/g)).toHaveLength(7)
   expect(spec.match(/\.goto\(/g)).toHaveLength(1)
-  expect(spec).toMatch(/async function openProjectUI\(page\) \{\s+await navigateProject\(page\)/)
+  expect(spec).toMatch(/async function openProjectUI\(page, name = projectName\) \{\s+await navigateProject\(page\)/)
   expect(spec).toMatch(/test\('project_browser_create_import',[\s\S]*?withIdentity\(browser, async \(\{ page \}\) => \{\s+await navigateProject\(page\)/)
   expect(spec).toMatch(/test\('project_browser_bearer_required',[\s\S]*?await openProjectUI\(page\)[\s\S]*?await snapshot\(page,/)
   expect(spec).toMatch(/await page\.reload\(\)\s+await injectProjectApi\(page, metadata.web_origin, await projectApiBundle\(\)\)\s+check\(await page.evaluate/)
   expect(spec).toMatch(/async verifier => \{\s+await openProjectUI\(verifier.page\)\s+check\(JSON.stringify\(await snapshot/)
   expect(spec).toMatch(/test\('project_settings_worker_readback',[\s\S]*?await openProjectUI\(page\)[\s\S]*?await readContext\(page,/)
-  expect(spec).toMatch(/await page\.reload\(\)\s+await openProjectUI\(page\)/)
+  expect(spec).toMatch(/async function reopenProjectVersion\(page, name, versionId\) \{\s+await openProjectUI\(page, name\)\s+await openVersionUI\(page, versionId\)/)
+  expect(spec).toMatch(/await releaseCheckout\(page\)\s+await reopenProjectVersion\(page, projectName, published.output_version_id\)\s+const reopenedForm = await openSettingsForm\(page\)/)
+  expect(spec).toMatch(/await reopenProjectVersion\(page, sizingNames.recovery, job.output_version_id\)/)
+  expect(spec).toMatch(/await reopenProjectVersion\(page, sizingNames.service, binding.panels_output_version_id\)/)
 })
 
 it('PP3B-18 bundle builds once per worker including concurrent callers and caches failures', async () => {

@@ -72,9 +72,15 @@ async function openProjectPanel(page) {
 
 async function openProjectUI(page, name = projectName) {
   await navigateProject(page)
-  const sidebar = await ensureProjectSidebar(page)
-  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name, exact: true }).click()
-  await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
+  const switcher = page.getByRole('button', { name: /^Projects: change project\./ })
+  const selected = page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })
+  await expect(switcher).toBeVisible()
+  if (!(await selected.isVisible())) {
+    await switcher.click()
+    const projects = page.getByRole('group', { name: 'All projects', exact: true })
+    await projects.getByRole('menuitem').filter({ has: page.getByText(name, { exact: true }) }).click()
+  }
+  await expect(selected).toBeVisible()
 }
 
 async function ensureProjectSidebar(page) {
