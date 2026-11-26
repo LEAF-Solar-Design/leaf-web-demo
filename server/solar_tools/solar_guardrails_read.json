@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-guardrails-read",
     "version": "1.0.0",
-    "description": "Run the plugin's 14 design guardrails on the stored design: verdicts in palette order and the health banner counts.",
+    "description": "Run the saved design guardrails or request per-string cold voltage and operating-window evidence with per_string_voltage.",
     "kind": "script",
     "family_id": "placement",
     "engine_op": "solar_guardrails_read",
@@ -24,6 +24,7 @@
       "type": "object",
       "properties": {
         "drawing_id": {"type": "string", "maxLength": 128},
+        "per_string_voltage": {"type": "boolean"},
         "mppt_voltage_window": {
           "type": "object",
           "properties": {

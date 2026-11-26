@@ -32,6 +32,7 @@ it("ready observation and inert asset depend on the full stored candidate and sc
  const f=fixture();expect((await f.views.observe(a,r)).status).toBe("ready");
  expect(Object.keys((await f.views.observe(a,r)).result!.preview)).not.toContain("repoKey");
  const result=await f.views.asset(a,r,f.witness);expect(result.body_base64).toBe(f.body.toString("base64"));expect(result.path).toBe("/index.html");
+ expect(f.loadCandidate).toHaveBeenLastCalledWith(a,r.sourceRequestId,r);
  await expect(f.views.observe({...a,projectId:id(99)},r)).rejects.toHaveProperty("code");
  await expect(f.views.observe(a,{...r,version:2})).rejects.toHaveProperty("code");
 });
