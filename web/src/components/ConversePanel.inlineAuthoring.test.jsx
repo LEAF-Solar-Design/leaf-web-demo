@@ -47,10 +47,12 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
       branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Counted 12 panels' } },
   ]
   const requests = []
+  let statusCalls = 0
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const { pathname, search } = new URL(url, 'http://test')
     const path = pathname + search
     const body = init.body ? JSON.parse(init.body) : undefined
+    if (path === '/api/tool-envelopes/tenant/status') { statusCalls++; return response(404, {}) }
     requests.push([init.method || 'GET', path, body])
     if (path === '/api/sessions/session/messages') return response(202, { turn_id: body.answers ? 'answer' : 'build' })
     if (path === '/api/agent/approvals/p1') return response(200, { resolved: true })
@@ -113,6 +115,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     ['POST', reviewPath, { change_set_id: id, staged_commit: commit, catalog_digest: digest, decision: 'approve' }],
     ['GET', stagePath, undefined], ['GET', stagePath, undefined],
   ])
+  expect(statusCalls).toBeGreaterThanOrEqual(1)
   expect(track).toHaveBeenCalledWith('plan.approved', { revision: 1 })
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'independent' })
 })

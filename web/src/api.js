@@ -501,7 +501,14 @@ export async function getSessionIdentity(mock) {
 export async function getTenantToolStatus() {
   try {
     if (isMockConversation()) return null
-    const data = await http('/api/tool-envelopes/tenant/status', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
+    const headers = authHeaders()
+    const serviceAuthority = serviceRequestAuthority()
+    const res = noteUnauthorized(
+      await fetchWithBudget(fetch, `${API_BASE}/api/tool-envelopes/tenant/status`, { cache: 'no-store', headers }, STARTUP_FETCH_TIMEOUT_MS),
+      '/api/tool-envelopes/tenant/status', headers.Authorization, { serviceAuthority },
+    )
+    if (!res.ok) return null
+    const data = await res.json()
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null
     return {
       workspaceId: typeof data.workspace_id === 'string' ? data.workspace_id : null,
