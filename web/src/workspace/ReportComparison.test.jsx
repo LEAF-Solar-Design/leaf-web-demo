@@ -93,6 +93,49 @@ function compare(left, right) {
 }
 
 it.each([
+  ['filter only', { filter: null, exact: false }, { filter: 'Panels', exact: false },
+    ['All layers', 'Panels', 'Changed'], ['Pattern match', 'Pattern match', 'Same']],
+  ['matching mode only', { filter: 'Feeder', exact: false }, { filter: 'Feeder', exact: true },
+    ['Feeder', 'Feeder', 'Same'], ['Pattern match', 'Exact match', 'Changed']],
+  ['both options', { filter: 'Roof', exact: true }, { filter: 'Canopy', exact: false },
+    ['Roof', 'Canopy', 'Changed'], ['Exact match', 'Pattern match', 'Changed']],
+  ['equal options', { filter: 'Drain', exact: true }, { filter: 'Drain', exact: true },
+    ['Drain', 'Drain', 'Same'], ['Exact match', 'Exact match', 'Same']],
+  ['invalid options', { filter: 17, exact: 'true' }, { filter: 'Civil', exact: true },
+    ['Unknown', 'Civil', 'Unavailable'], ['Unknown', 'Exact match', 'Unavailable']],
+])('compares saved options for %s', (_label, a, b, filter, matching) => {
+  const left = areaReport(first, [['Example', 10]], a)
+  const right = areaReport(third, [['Example', 20]], b)
+  right.params.unrelated_option = 'unrelated saved value'
+  compare(left, right)
+
+  const options = screen.getByRole('table', { name: 'Saved layer report options' })
+  expect(within(options).getByRole('row', { name: /Layer filter/ })).toHaveTextContent(filter.join(''))
+  expect(within(options).getByRole('row', { name: /Layer matching/ })).toHaveTextContent(matching.join(''))
+  expect(options).not.toHaveTextContent('unrelated saved value')
+})
+
+it('distinguishes an omitted exact-match option from missing saved params', () => {
+  const left = areaReport(first, [])
+  const right = areaReport(third, [])
+  left.params = {}
+  delete right.params
+  delete right.result.result.layer_filter
+  compare(left, right)
+
+  const options = screen.getByRole('table', { name: 'Saved layer report options' })
+  expect(within(options).getByRole('row', { name: /Layer filter/ })).toHaveTextContent('roofUnknownUnavailable')
+  expect(within(options).getByRole('row', { name: /Layer matching/ })).toHaveTextContent('Pattern matchUnknownUnavailable')
+})
+
+it('omits the option table when the report tools or versions differ', () => {
+  compare(areaReport(first, []), areaReport(second, []))
+
+  expect(screen.getByText('Different tool versions')).toBeVisible()
+  expect(screen.queryByRole('table', { name: 'Saved layer report options' })).toBeNull()
+})
+
+it.each([
   ['case-distinct roof layers reverse', [['Roof', 16], ['ROOF', 4]], [['ROOF', 25], ['Roof', 9]],
     'Layer area ranking changed', false, 'Roof', ['1', '2']],
   ['civil layer areas change with stable ranks', [['Pad', 20], ['Access', 3]], [['Access', 6], ['Pad', 30]],

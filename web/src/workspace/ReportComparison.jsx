@@ -26,6 +26,54 @@ function toolVersionResult(first, second) {
   return first.toolVersion === second.toolVersion ? 'Same tool version' : 'Different tool versions'
 }
 
+function sameToolVersion(first, second) {
+  return Boolean(first.tool && first.toolVersion && first.tool === second.tool &&
+    first.toolVersion === second.toolVersion)
+}
+
+function savedLayerOptions(job) {
+  const result = job.result?.result
+  if (!Array.isArray(result?.layers) || !Number.isInteger(result.layer_count)) return null
+  const filter = result.layer_filter
+  const params = job.params
+  const exact = params?.exact_match
+  return {
+    filter: filter === null || typeof filter === 'string' ? filter : undefined,
+    exact: params && typeof params === 'object' && !Array.isArray(params) &&
+      (exact === undefined || typeof exact === 'boolean') ? exact ?? false : undefined,
+  }
+}
+
+function LayerOptionsComparison({ first, second }) {
+  if (!sameToolVersion(first, second)) return null
+  const a = savedLayerOptions(first.job)
+  const b = savedLayerOptions(second.job)
+  if (!a || !b) return null
+
+  const rows = [
+    { name: 'Layer filter', left: a.filter, right: b.filter, display: value => value === null ? 'All layers' : value },
+    { name: 'Layer matching', left: a.exact, right: b.exact, display: value => value ? 'Exact match' : 'Pattern match' },
+  ]
+  return (
+    <table>
+      <caption>Saved layer report options</caption>
+      <thead>
+        <tr><th scope="col">Option</th><th scope="col">First report</th><th scope="col">Second report</th><th scope="col">Comparison</th></tr>
+      </thead>
+      <tbody>
+        {rows.map(({ name, left, right, display }) => (
+          <tr key={name}>
+            <th scope="row">{name}</th>
+            <td>{left === undefined ? 'Unknown' : display(left)}</td>
+            <td>{right === undefined ? 'Unknown' : display(right)}</td>
+            <td>{left === undefined || right === undefined ? 'Unavailable' : left === right ? 'Same' : 'Changed'}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 function layerAreaReport(job) {
   const { layers, layer_count: count, layer_filter: filter } = job.result?.result ?? {}
   const drawing = job.result?.project_context?.drawing_id
@@ -59,8 +107,7 @@ function rankAreas(areas, layers = areas.keys()) {
 }
 
 function LayerAreaComparison({ first, second }) {
-  if (!first.tool || !first.toolVersion || first.tool !== second.tool ||
-      first.toolVersion !== second.toolVersion) return null
+  if (!sameToolVersion(first, second)) return null
   const a = layerAreaReport(first.job)
   const b = layerAreaReport(second.job)
   if (!a || !b || a.drawing !== b.drawing || a.filter !== b.filter || a.exactMatch !== b.exactMatch) return null
@@ -146,6 +193,7 @@ export default function ReportComparison({ jobs, projectId }) {
               <dt>Tool version</dt>
               <dd>{toolVersionResult(first, second)}</dd>
             </dl>
+            <LayerOptionsComparison first={first} second={second} />
             <LayerAreaComparison first={first} second={second} />
           </>
         )}
