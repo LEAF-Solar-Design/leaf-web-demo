@@ -17,7 +17,11 @@ router = APIRouter()
 @router.get("/api/session/identity")
 def session_identity(tenant=Depends(deps.require_active_tenant)):
     """Prove the active account identity without reading a drawing."""
-    return deps.tenant_echo({}, tenant)
+    body = {}
+    workspace = deps.workspace_view(tenant)
+    if workspace is not None:
+        body["workspace"] = workspace
+    return deps.tenant_echo(body, tenant)
 
 
 def _stored_drawing_intake(tenant: str, drawing_id: str):
