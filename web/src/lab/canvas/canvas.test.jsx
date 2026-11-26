@@ -702,7 +702,9 @@ describe('canvas authoring', () => {
     ['occupied input', 3, 2, false, 'Input already connected; disconnect it first'],
     ['reverse cycle', 1, 1, true, 'Cycles are refused'],
     ['typed mismatch', 1, 2, false, 'Scalar and stream modes differ'],
-  ])('explains a refused %s drop without editing the graph', (variant, from, to, reverse, reason) => {
+    ['output-to-output', 1, 2, false, 'Connect an output to an input', 'source'],
+    ['input-to-input', 1, 2, false, 'Connect an output to an input', 'target'],
+  ])('explains a refused %s drop without editing the graph', (variant, from, to, reverse, reason, sameType) => {
     const initial = variant === 'occupied input' ? connectPipe(documentOf(3), edge(1, 2)) : documentOf(3)
     const incompatible = { ...manifest, inputs: { ...manifest.inputs, value: { ...manifest.inputs.value, mode: 'stream' } } }
     const entries = entriesOf(variant === 'typed mismatch' ? incompatible : manifest)
@@ -712,7 +714,11 @@ describe('canvas authoring', () => {
     const pipe = edge(from, to)
     const source = { nodeId: pipe.from.node, id: pipe.from.port, type: 'source' }
     const target = { nodeId: pipe.to.node, id: pipe.to.port, type: 'target' }
-    const [fromHandle, toHandle] = reverse ? [target, source] : [source, target]
+    const [fromHandle, toHandle] = sameType === 'source'
+      ? [source, { ...source, nodeId: target.nodeId }]
+      : sameType === 'target'
+        ? [{ ...target, nodeId: source.nodeId }, target]
+        : reverse ? [target, source] : [source, target]
     const [endConnection] = flowProps.mock.calls.at(-1)
     act(() => endConnection(null, { fromHandle, toHandle, isValid: false }))
     expect(container.querySelector('footer [role="status"]')).toHaveTextContent(reason)

@@ -16,6 +16,7 @@ import { humanizeError } from '../../errorHumanize.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
+const directionRefusal = 'Connect an output to an input'
 const asPipe = connection => ({ from: { node: connection.source, port: connection.sourceHandle }, to: { node: connection.target, port: connection.targetHandle } })
 
 function Editor({ initialDocument, onChange, entries, measurements, upstream, codeEvidence, tools, onLoadTools }) {
@@ -122,7 +123,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         { from: { node: pending.node, port: pending.port }, to: { node: block.id, port: name } }, entries)
       if (pending.type === 'target' && direction === 'outputs') return connectionStatus(document,
         { from: { node: block.id, port: name }, to: { node: pending.node, port: pending.port } }, entries)
-      return { ok: false, reason: 'Connect an output to an input' }
+      return { ok: false, reason: directionRefusal }
     }
     return { id: block.id, type: 'block', position: positions[block.id] || { x: index * 370, y: 30 }, selected: selected === block.id,
       data: { manifest, unresolved: problem, missing: missingInputs(document, block, entries), settingsError,
@@ -177,7 +178,11 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
           onConnectStart={(_, params) => setPending({ node: params.nodeId, port: params.handleId, type: params.handleType })}
           onConnectEnd={(_, { fromHandle, toHandle, isValid }) => {
             setPending(null)
-            if (isValid || !fromHandle || !toHandle || fromHandle.type === toHandle.type) return
+            if (isValid || !fromHandle || !toHandle) return
+            if (fromHandle.type === toHandle.type) {
+              if (fromHandle.nodeId !== toHandle.nodeId || fromHandle.id !== toHandle.id) setMessage(directionRefusal)
+              return
+            }
             // React Flow can skip validation for handles disabled during the drag.
             const [source, target] = fromHandle.type === 'source' ? [fromHandle, toHandle] : [toHandle, fromHandle]
             const status = statusOfPipe({
