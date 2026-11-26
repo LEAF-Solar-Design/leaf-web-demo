@@ -444,6 +444,7 @@ it('disables withdrawal while the request is pending', async () => {
   expect(track).toHaveBeenCalledExactlyOnceWith('build.withdraw_clicked')
   await act(async () => finishWithdraw({ withdrawn: false, revoked: false }))
   expect(screen.getByText('This build can no longer be withdrawn.')).toBeVisible()
+})
 
 it('discloses the number of HTML escapes Studio decoded in an accepted source', async () => {
   getAuthorStage.mockResolvedValue({ ...staged, compile_attempts: undefined,
