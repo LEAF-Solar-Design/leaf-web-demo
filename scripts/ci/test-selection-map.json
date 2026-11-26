@@ -706,6 +706,7 @@
     "server-branch-sync-receipts",
     "server-tenant-catalog",
     "server-workspace-identity-echo",
+    "server-tenant-plugin-check",
     "server-tenant-publish",
     "server-tool-validate-structural",
     "server-turn-queue",
