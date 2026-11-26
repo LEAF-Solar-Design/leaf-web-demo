@@ -37,15 +37,20 @@ def _replace_homeruns(graph, routes):
     return dropped
 
 
-def create_homeruns(intake, params, *, licensed_write=None):
+def _validate_request(params):
     _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel"}
-            or type(params.get("cancel", False)) is not bool):
+    if (type(params) is not dict or set(params) - {"expected_rev", "cancel", "routing_constraints"}
+            or type(params.get("cancel", False)) is not bool
+            or ("routing_constraints" in params and type(params["routing_constraints"]) is not dict)):
         raise GraphValidationError("INVALID_ROUTING_REQUEST")
+
+
+def create_homeruns(intake, params, *, licensed_write=None):
+    _validate_request(params)
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return {"graph": graph, "cancelled": True}
-    routes = local_routes(graph)
+    routes = local_routes(graph, params.get("routing_constraints"))
     # Replace only the terminal leads (feeders and trenches stay) and invalidate derived tables.
     dropped = _replace_homeruns(graph, routes)
     changed = list(routes)
@@ -59,10 +64,7 @@ def create_homeruns(intake, params, *, licensed_write=None):
 
 
 def run(intake, params):
-    _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel"}
-            or type(params.get("cancel", False)) is not bool):
-        raise GraphValidationError("INVALID_ROUTING_REQUEST")
+    _validate_request(params)
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return graph
@@ -76,7 +78,7 @@ def run(intake, params):
     if not readiness["input_ready"]:
         raise GraphValidationError(readiness["input_reason"].upper())
 
-    routes = local_routes(graph)
+    routes = local_routes(graph, params.get("routing_constraints"))
     prior = {}
     for route in graph["routes"]:
         if route["route_kind"] in HOMERUN_KINDS:

@@ -499,10 +499,15 @@ def test_sip_r3b_feeders(memory):
     assert r["after_rev"] == 2
 
 
-def test_sip_r3b_homeruns(memory, case, monkeypatch):
+@pytest.mark.parametrize("constrained", [False, True])
+def test_sip_r3b_homeruns(memory, case, monkeypatch, constrained):
     ctx = assigned_parent(memory, case)
     ctx = canonical_custody(memory, monkeypatch, ctx.graph)
     params = {"expected_rev": ctx.graph["rev"]}
+    if constrained:
+        from test_solar_tool_solar_homeruns import route_constraints
+
+        params["routing_constraints"] = route_constraints()
     expected = direct(ctx, "solar-homeruns", params)
     p = prepare(memory, "solar-homeruns", params, ctx)
     assert prepare(memory, "solar-homeruns", params, ctx) == p
