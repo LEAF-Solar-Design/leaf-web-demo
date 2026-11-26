@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getAuthorStage, getAuthorStageSource, postReview, reviewContext } from '../../api.js'
+import { getAuthorStage, getAuthorStageSource, postReview, reviewContext, withdrawAuthorStage } from '../../api.js'
 import { postMessage } from '../../converse.js'
 import { track } from '../../telemetry.js'
 import { capabilityLabel } from './PlanCard.jsx'
@@ -50,7 +50,9 @@ function attemptLabel(attempt) {
   const diagnostics = Array.isArray(attempt.diagnostics) ? attempt.diagnostics.map(diagnostic).filter(Boolean) : []
   const status = resultLabel(attempt)
   const label = ['failed', 'compile_failed'].includes(status) ? 'refused' : status === 'accept' ? 'passed' : status
-  return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}`
+  const entities = attempt.source_decoded?.entities
+  const decoded = Number.isInteger(entities) && entities >= 1 ? `, Studio decoded HTML escapes in the source (${entities})` : ''
+  return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}${decoded}`
 }
 
 // The stage read reports the plugin's latest receipt as { last_event, at, plugin_version, diagnostics }.
@@ -130,6 +132,9 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const [reviewError, setReviewError] = useState('')
   const [actionError, setActionError] = useState('')
   const [refresh, setRefresh] = useState(0)
+  const [withdrawing, setWithdrawing] = useState(false)
+  const [withdrawMessage, setWithdrawMessage] = useState('')
+  const [withdrawClosed, setWithdrawClosed] = useState(false)
   const pollAfter = useRef(0)
   const pollUntil = useRef(Infinity)
   const pollStopped = useRef(false)
@@ -289,10 +294,37 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
       setBusy(false)
     }
   }
+  const queue = stage?.status === 'queued' && stage.queue && typeof stage.queue === 'object'
+    && !Array.isArray(stage.queue) && Number.isInteger(stage.queue.ahead) && stage.queue.ahead >= 0 ? stage.queue : null
+  const waiting = queue ? `Waiting, ${queue.ahead === 0 ? 'next in line' : `${queue.ahead} ahead`}${
+    Number.isInteger(queue.estimated_wait_s) && queue.estimated_wait_s > 0
+      ? ` · about ${Math.max(1, Math.ceil(queue.estimated_wait_s / 60))} min` : ''}` : ''
+  const withdraw = async () => {
+    if (withdrawing || withdrawClosed || stage?.status !== 'queued' || stage.withdrawable !== true) return
+    setWithdrawing(true)
+    setWithdrawMessage('')
+    track('build.withdraw_clicked')
+    try {
+      const result = await withdrawAuthorStage(changeSetId)
+      if (result.withdrawn) refreshStage()
+      else {
+        setWithdrawMessage(result.revoked ? 'Stopped. It will not start again.' : 'This build can no longer be withdrawn.')
+        setWithdrawClosed(true)
+      }
+    } catch {
+      setWithdrawMessage('Could not withdraw. Try again.')
+    } finally {
+      setWithdrawing(false)
+    }
+  }
   return <section ref={card} className="inline-authoring" aria-label="Tool authoring" data-converse-role="authoring">
     <h4>{plan?.title || 'Tool build'}</h4>
     <dl className="inline-build-rows">
       <dt>Build</dt><dd>{stage?.status === 'running' ? 'authoring' : string(stage?.status) || notReported}
+        {waiting && <p>{waiting}</p>}
+        {stage?.status === 'queued' && stage.withdrawable === true && !withdrawClosed
+          && <button type="button" className="chip-neutral" disabled={withdrawing} onClick={withdraw}>Withdraw</button>}
+        {withdrawMessage && <p>{withdrawMessage}</p>}
         {stage?.status === 'failed' && <p>{string(stage.error?.message) || string(stage.error?.reason_code)}</p>}</dd>
       <dt>Compile</dt><dd>{attempts.length > 0 && <ul>{attempts.map(row => <li key={row.attempt}>{attemptLabel(row)}</li>)}</ul>}
         {studioTest && <p>Test run · {resultLabel(studioTest) || notReported}{studioTest.summary && ` · ${studioTest.summary}`}</p>}
