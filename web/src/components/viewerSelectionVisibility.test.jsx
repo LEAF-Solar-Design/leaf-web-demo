@@ -127,32 +127,41 @@ const marqueeProp = findMarqueeProp(parse(appSource, { sourceType: 'module', plu
 const projectCallback = Function('projectMode', 'workspaceCardRef', 'viewerRef', 'setSelectedHandle',
   `return (${appSource.slice(marqueeProp.start, marqueeProp.end)})`)
 
-function mountProject(initialHandle) {
+function mountProject(initialHandle, polylines = [panel('A', 'Roof', 0), panel('B', 'Panels', 10), panel('C', 'Roof', 20)]) {
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800)
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(600)
-  const intake = { polylines: [panel('A', 'Roof', 0), panel('B', 'Panels', 10), panel('C', 'Roof', 20)],
-    inserts: [], faces3d: [] }
+  const intake = { polylines, inserts: [], faces3d: [] }
+  const selected = vi.fn()
   const ref = createRef()
   function Project({ layers }) {
     const [selectedHandle, setSelectedHandle] = useState(initialHandle)
     return <Viewer ref={ref} intake={intake} colorForLayer={colorForLayer} visibleLayers={layers}
       selectedHandle={selectedHandle} marqueeGate={() => true}
-      onMarqueeSelect={projectCallback(true, { current: null }, ref, setSelectedHandle)} />
+      onMarqueeSelect={(handles, gesture) => {
+        selected(handles, gesture)
+        projectCallback(true, { current: null }, ref, setSelectedHandle)(handles, gesture)
+      }} />
   }
   const view = render(<Project />)
   const canvas = view.container.querySelector('canvas')
   vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 800, height: 600 })
+  const dragBetween = (start, end, modifiers = {}) => {
+    for (const [type, point] of [['pointerdown', start], ['pointermove', end], ['pointerup', end]]) {
+      const event = new MouseEvent(type, { bubbles: true, ...modifiers })
+      Object.defineProperties(event, {
+        pointerId: { value: 1 }, clientX: { value: point.x }, clientY: { value: point.y },
+      })
+      fireEvent(canvas, event)
+    }
+  }
   return {
+    api: ref.current,
+    selected,
     identity: view.container.firstChild.dataset,
     layers: layers => view.rerender(<Project layers={layers} />),
+    dragBetween,
     drag(left, right, modifiers = {}) {
-      const start = ref.current.project(left, 3)
-      const end = ref.current.project(right, -1)
-      for (const [type, point] of [['pointerdown', start], ['pointermove', end], ['pointerup', end]]) {
-        const event = new MouseEvent(type, { bubbles: true, clientX: point.x, clientY: point.y, ...modifiers })
-        Object.defineProperty(event, 'pointerId', { value: 1 })
-        fireEvent(canvas, event)
-      }
+      dragBetween(ref.current.project(left, 3), ref.current.project(right, -1), modifiers)
     },
   }
 }
@@ -187,4 +196,55 @@ it('retains hidden selections across disjoint and empty Alt-drags', () => {
   expectHighlights(0)
   view.layers({})
   expectHighlights(0, 10)
+})
+
+
+// Archived rooftop I5 feeder polylines, stored in graph meters and displayed
+// in original drawing inches. The designated Upper layer is the test toggle.
+const retainedBends = [
+  ['470', 'clockwise', -1, [
+    [358.8147735056913, 51.970072721747684], [340.8939148597521, 51.970072721747684],
+    [340.8939148597521, 41.7601430113689], [363.1844047071577, 41.7601430113689],
+  ]],
+  ['472', 'counterclockwise', -1, [
+    [420.1944131994379, 46.45194027003977], [401.2507642576333, 46.45194027003977],
+    [401.2507642576333, 40.032885816747914], [425.6622506987236, 40.032885816747914],
+  ]],
+  ['475', 'reset', 1, [
+    [512.7755272439267, 55.79365337960151], [549.379032564767, 55.79365337960151],
+    [549.379032564767, 51.45373050866659], [514.6256397266237, 51.45373050866659],
+  ]],
+]
+
+it.each(retainedBends)('selects archived feeder %s after %s and a layer visibility cycle', (handle, direction, outside, points) => {
+  const pts = points.map(point => point.map(meters => meters / 0.0254))
+  const view = mountProject(undefined, [{ handle, layer: 'Upper', pts, closed: false }])
+  const x = pts[1][0]
+  const y = (pts[1][1] + pts[2][1]) / 2
+  const halfHeight = Math.abs(pts[1][1] - pts[2][1]) / 4
+  const distance = halfHeight * 2
+  expect(view.api.setView({ center: { x, y }, zoom: 1.25 })).toBe(true)
+  const pose = view.api.getPose()
+  const dragAcross = (innerOffset = 0) => {
+    const first = view.api.project(x + outside * distance, y - halfHeight)
+    const second = view.api.project(x + outside * innerOffset, y + halfHeight)
+    view.dragBetween({ x: Math.max(first.x, second.x), y: Math.max(first.y, second.y) },
+      { x: Math.min(first.x, second.x), y: Math.min(first.y, second.y) })
+    expect(view.selected).toHaveBeenLastCalledWith(expect.any(Array), { additive: false, mode: 'crossing' })
+    return view.selected.mock.lastCall[0]
+  }
+  expect(dragAcross(-0.01)).toEqual([handle])
+  view.layers({ Upper: false })
+  if (direction === 'reset') {
+    expect(view.api.rollDrawing('clockwise')).toBe(true)
+    expect(view.api.rollDrawing('counterclockwise')).toBe(true)
+    expect(view.api.rollDrawing('counterclockwise')).toBe(true)
+  }
+  expect(view.api.rollDrawing(direction)).toBe(true)
+  expect(view.api.getPose()).toMatchObject({ target: pose.target, zoom: pose.zoom })
+  expect(dragAcross(-0.01)).toEqual([])
+  view.layers({})
+  expect(dragAcross(-0.01)).toEqual([handle])
+  expect(dragAcross(0.01)).toEqual([])
+  if (direction !== 'reset') expect(dragAcross()).toEqual([handle])
 })
