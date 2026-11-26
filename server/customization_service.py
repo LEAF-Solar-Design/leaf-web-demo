@@ -2212,6 +2212,14 @@ class CustomizationService:
                 exc = CustomizationServiceError("stage_authority_invalid", 409)
                 exc.harness_not_called = True
                 raise exc
+        url, secret = _harness_config()
+        if not url:
+            raise CustomizationServiceError("customization_harness_unavailable", 503)
+        revision_base = None
+        if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
+            revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
+        # Last read before the request: a Stop or withdraw that landed during
+        # the URL and revision-base work still refuses this build.
         import customization_stage_grants
         if (self is not None and change.tool_target == "branch"
                 and customization_stage_grants.ttl_s() is not None):
@@ -2226,12 +2234,6 @@ class CustomizationService:
                 refusal = CustomizationServiceError(code, 409)
                 refusal.harness_not_called = True
                 raise refusal
-        url, secret = _harness_config()
-        if not url:
-            raise CustomizationServiceError("customization_harness_unavailable", 503)
-        revision_base = None
-        if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
-            revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
         if without_services:
             customization_stage_grants.admit(self, change, change.stage_lease_owner)
         try:
