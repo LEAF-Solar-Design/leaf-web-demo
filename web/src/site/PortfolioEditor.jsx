@@ -201,7 +201,8 @@ export default function PortfolioEditor(props) {
 
 function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, selectedField, onSelectElement, scope }) {
   const [showIntake, setShowIntake] = useState(false)
-  const { photos, error, loading, loadPhotos } = useProjectPhotos(projectId, scope)
+  const { photos, error, loading, loadPhotos, pageNumber, hasNext, previousPage, nextPage } = useProjectPhotos(projectId, scope)
+  const paginated = pageNumber > 1 || hasNext
   const latest = useRef(null), alive = useRef(false)
   latest.current = { document, photos }
   useEffect(() => {
@@ -280,6 +281,11 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
       else delete next.galleryLayout
     })}><option value="grid">Grid</option><option value="single">Single column</option></select></label>
     <button type="button" disabled={loading || !scope} onClick={loadPhotos}>{loading ? 'Loading photos…' : 'Load project photos'}</button>
+    {paginated && <div role="group" aria-label="Project photo pages">
+      <button type="button" aria-disabled={loading || pageNumber === 1} onClick={previousPage}>Previous photo page</button>
+      <span role="status">Photo page {pageNumber}</span>
+      <button type="button" aria-disabled={loading || !hasNext} onClick={nextPage}>Next photo page</button>
+    </div>}
     <details onToggle={event => setShowIntake(event.currentTarget.open)}><summary>Upload project photos</summary>{showIntake && <PhotoMaterialIntake projectId={projectId} onUploaded={loadPhotos} />}</details>
     {error && <p role="alert">{error}</p>}
     {document.categories.map((item, ci) => <section className="portfolio-editor__category" key={`${scope}:${projectId}:${identity(item)}`} aria-label={`Gallery ${ci + 1}`}>
@@ -294,7 +300,9 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
           <Photo image={photoReference(photo)} projectId={projectId} scope={scope} />
           <span>{photo.name}</span>
         </button>)}
-        {photos.every(photo => item.images.some(entry => entry.material_id === photo.material_id)) && <p>All project photos are already in this gallery.</p>}
+        {photos.every(photo => item.images.some(entry => entry.material_id === photo.material_id)) && <p>
+          {paginated ? 'All photos on this page are already in this gallery.' : 'All project photos are already in this gallery.'}
+        </p>}
       </div>}
       {count >= 200 && <p role="status">The portfolio has reached its 200 photo limit. Remove a photo before adding another.</p>}
       {!loading && !photos.length && <p>Use Load project photos after uploading in Photos.</p>}
