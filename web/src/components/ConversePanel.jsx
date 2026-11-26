@@ -1489,8 +1489,8 @@ export default function ConversePanel({
       {model.grantRefused ? (
         <div className="banner" role="status">
           <span>{model.grantRefused.code === 'authentication_failed'
-            ? 'Claude no longer accepts the linked account. Link it again, then resend your message.'
-            : "The linked account's organization does not allow it here. Link a different account, then resend your message."}</span>
+            ? 'Claude no longer accepts the linked account. Add a working API key, then resend your message.'
+            : "The linked account's organization does not allow it here. Add a different API key, then resend your message."}</span>
           <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>
           {typeof model.grantRefused.text === 'string' && model.grantRefused.text.trim() && !input && !busy && (
             <button type="button" className="chip-act" onClick={() => { setSecretNotice(null); setInput(model.grantRefused.text); composerRef.current?.focus() }}>Use my message again</button>

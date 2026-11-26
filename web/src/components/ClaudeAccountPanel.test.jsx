@@ -11,17 +11,16 @@ function panel(props = {}) {
     onToggle={vi.fn()} onLink={vi.fn()} onUnlink={vi.fn()} {...props} />)
 }
 function noManagement() {
-  expect(screen.queryByLabelText('Claude token')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('Anthropic API key')).not.toBeInTheDocument()
   expect(screen.queryByText('not linked')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /Link Claude account|Link another account|Remove|Unlink/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Link API key|Add an API key|Remove|Unlink/ })).not.toBeInTheDocument()
 }
 
-const account = { id: 'old', label: 'Work', kind: 'oauth', plan: 'max', active: true, auth_refused_code: 'authentication_failed' }
+const account = { id: 'old', label: 'Work', kind: 'api_key', active: true, auth_refused_code: 'authentication_failed' }
 const linkedResult = { linked: true, active_account_id: 'new', accounts: [{ id: 'new', label: 'New', kind: 'oauth', plan: 'max', active: true }] }
 
-function enterSubscription(value = 'sk-ant-oat01-FAKE-secret') {
-  fireEvent.click(screen.getByRole('radio', { name: 'Max' }))
-  fireEvent.change(screen.getByLabelText('Claude token'), { target: { value } })
+function enterApiKey(value = 'sk-ant-api03-FAKE-secret') {
+  fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value } })
 }
 
 describe('Claude link safety and recovery', () => {
@@ -41,33 +40,64 @@ describe('Claude link safety and recovery', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['https://signin.test/#FAKE', 'http://signin.test', 'FAKE#code', 'claude setup-token'])('explains mistaken subscription input %s without sending it', (value) => {
+  it.each(['https://signin.test/#FAKE', 'https://signin.test', 'http://signin.test', 'FAKE#code', 'claude setup-token'])('explains mistaken API key input %s without sending it', (value) => {
     const onLink = vi.fn()
     panel({ grant: { linked: false }, onLink })
-    enterSubscription(value)
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    enterApiKey(value)
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
     expect(onLink).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('Claude token')).toHaveValue(value)
-    expect(screen.getByRole('alert')).toHaveTextContent(value.startsWith('claude ')
-      ? 'That is the command. Run it in a terminal, then paste the token it prints.'
-      : 'That is the sign-in code or link, not the token.')
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue(value)
+    expect(screen.getByRole('alert')).toHaveTextContent('That is not an API key. Copy the key from Claude Console (it starts with sk-ant-api).')
     expect(screen.getByRole('alert').textContent).not.toContain(value)
   })
 
+  it('rejects a setup token locally while keeping it masked', () => {
+    const onLink = vi.fn()
+    panel({ grant: { linked: false }, onLink })
+    const value = 'sk-ant-oat01-FAKE-not-an-api-key-fixture-only'
+    enterApiKey(value)
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
+    expect(onLink).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue(value)
+    expect(screen.getByRole('alert')).toHaveTextContent('That is not an API key. Create an API key in Claude Console and paste that instead.')
+    expect(screen.getByRole('alert').textContent).not.toContain(value)
+  })
+
+  it('keeps an existing max subscription and never replaces it automatically', async () => {
+    const old = { ...account, kind: 'oauth', plan: 'max' }
+    const result = { ...linkedResult, accounts: [old, { ...linkedResult.accounts[0], kind: 'api_key' }] }
+    const onUnlink = vi.fn()
+    panel({ grant: { linked: true, accounts: [old] }, onLink: vi.fn().mockResolvedValue(result), onUnlink })
+    expect(screen.getByText('max subscription')).toBeInTheDocument()
+    expect(screen.getByText('Claude no longer accepts this account. It expired or was revoked.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Link again:/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add an API key instead of Work' }))
+    enterApiKey()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
+    expect(onUnlink).not.toHaveBeenCalled()
+  })
+
+  it('offers one ordinary add button for a working subscription', () => {
+    panel({ grant: { linked: true, accounts: [{ ...account, kind: 'oauth', plan: 'max', auth_refused_code: null }] } })
+    expect(screen.getByText('max subscription')).toBeInTheDocument()
+    const button = screen.getByRole('button', { name: 'Add an API key' })
+    expect(button).not.toHaveAttribute('aria-label')
+  })
+
   it.each(['failure', 'rejection', 'success'])('removes a fake token everywhere after submit, including %s', async (outcome) => {
-    const fakeToken = 'sk-ant-oat01-FAKE-no-lingering-secret'
+    const fakeToken = 'sk-ant-api03-FAKE-no-lingering-secret'
     let resolve, reject
     const onLink = vi.fn(() => new Promise((done, fail) => { resolve = done; reject = fail }))
     const logs = ['log', 'warn', 'error'].map((name) => vi.spyOn(console, name))
     const storage = vi.spyOn(Storage.prototype, 'setItem')
     try {
       panel({ grant: { linked: false }, onLink })
-      enterSubscription(fakeToken)
-      const input = screen.getByLabelText('Claude token')
+      enterApiKey(fakeToken)
+      const input = screen.getByLabelText('Anthropic API key')
       expect(input).toHaveAttribute('data-bwignore', 'true')
       expect(input).toHaveAttribute('writingsuggestions', 'false')
       expect(input.closest('form')).toBeNull()
-      fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
       const noLeak = () => {
         expect(document.documentElement.outerHTML).not.toContain(fakeToken)
         document.querySelectorAll('input').forEach((field) => expect(field.value).not.toContain(fakeToken))
@@ -95,37 +125,42 @@ describe('Claude link safety and recovery', () => {
   it('normalizes a terminal-wrapped token and clears it before the callback settles', async () => {
     const onLink = vi.fn().mockResolvedValue(null)
     panel({ grant: { linked: false }, onLink })
-    enterSubscription('  sk-ant-oat01-FAKE wrapped\tvalue  ')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
-    expect(onLink).toHaveBeenCalledWith('sk-ant-oat01-FAKEwrappedvalue', 'oauth', 'My Claude account', 'max')
-    expect(screen.getByLabelText('Claude token')).toHaveValue('')
+    enterApiKey('  sk-ant-api03-FAKE wrapped\tvalue  ')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
+    expect(onLink).toHaveBeenCalledWith('sk-ant-api03-FAKEwrappedvalue', 'api_key', 'My API key', undefined)
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
   })
 
   it('clears the field on close and sign out', () => {
     const props = { grant: { linked: false }, onToggle: vi.fn() }
     const view = panel(props)
-    enterSubscription()
+    enterApiKey()
     view.rerender(<ClaudeAccountPanel {...props} open={false} />)
     view.rerender(<ClaudeAccountPanel {...props} open />)
-    expect(screen.getByLabelText('Claude token')).toHaveValue('')
-    enterSubscription()
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
+    enterApiKey()
     view.rerender(<ClaudeAccountPanel {...props} open signedOut />)
     view.rerender(<ClaudeAccountPanel {...props} open />)
-    expect(screen.getByLabelText('Claude token')).toHaveValue('')
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
+    enterApiKey()
+    view.rerender(<ClaudeAccountPanel {...props} open mock />)
+    view.rerender(<ClaudeAccountPanel {...props} open />)
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
   })
 
   it.each([
     [linkedResult, '1 account linked, Max. Claude checks it on your first request.'],
     [{ linked: true }, '1 account linked. Claude checks it on your first request.'],
     [{ linked: true, accounts: [{ id: 'a', active: true, plan: 'unknown' }] }, '1 account linked. Claude checks it on your first request.'],
-    [{ linked: true, accounts: [{ id: 'a', active: true, kind: 'api_key' }] }, '1 account linked, API key. Claude checks it on your first request.'],
+    [{ linked: true, accounts: [{ id: 'a', active: true, kind: 'api_key' }] }, '1 API key linked. Claude checks it on your first request.'],
     [{ ...linkedResult, accounts: [...linkedResult.accounts, { id: 'other' }] }, '2 accounts linked. Added: Max. Claude checks it on your first request.'],
+    [{ linked: true, accounts: [{ id: 'a', active: true, kind: 'api_key' }, { id: 'b' }] }, '2 accounts linked. Added: API key. Claude checks it on your first request.'],
     [{ linked: true, accounts: [{ id: 'a' }, { id: 'b' }] }, '2 accounts linked. Claude checks it on your first request.'],
   ])('announces and focuses result-derived success', async (result, text) => {
     const props = { grant: { linked: false }, onLink: vi.fn().mockResolvedValue(result), onToggle: vi.fn() }
     const view = panel(props)
-    enterSubscription()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
+    enterApiKey()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     view.rerender(<ClaudeAccountPanel {...props} grant={result} open />)
     expect(screen.getByRole('status')).toHaveTextContent(text)
     expect(screen.getByRole('status')).toHaveFocus()
@@ -148,10 +183,9 @@ describe('Claude link safety and recovery', () => {
     expect(screen.getByText('Needs a new link')).toBeInTheDocument()
     expect(screen.queryByText('Recently used')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))
-    expect(screen.getByLabelText('Account label')).toHaveValue('Work')
-    expect(screen.getByRole('radio', { name: 'Max' })).toHaveAttribute('aria-checked', 'true')
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE-replacement' } })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
+    expect(screen.getByLabelText('Key label')).toHaveValue('Work')
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-api03-FAKE-replacement' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     view.rerender(<ClaudeAccountPanel {...props} grant={outcome === 'removed' ? linkedResult : result} open />)
     expect(onUnlink).toHaveBeenCalledExactlyOnceWith('old')
     expect(screen.getByRole('status')).toHaveTextContent(outcome === 'removed' ? '1 account linked, Max.' : '2 accounts linked. Added: Max.')
@@ -171,27 +205,27 @@ describe('Claude link safety and recovery', () => {
   it('clears the token and local error on Cancel', () => {
     panel({ grant: { linked: true, accounts: [account] } })
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'claude setup-token' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
-    expect(screen.getByRole('alert')).toHaveTextContent('That is the command.')
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'claude setup-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('That is not an API key.')
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(document.documentElement.outerHTML).not.toContain('value="claude setup-token"')
-    fireEvent.click(screen.getByRole('button', { name: 'Link another account' }))
-    expect(screen.getByLabelText('Claude token')).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Add an API key' }))
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
-  it('clears a retained local error when Link another account opens the form', () => {
+  it('clears a retained local error when Add an API key opens the form', () => {
     const props = { grant: { linked: true, accounts: [account] }, onToggle: vi.fn() }
     const view = panel(props)
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'claude setup-token' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'claude setup-token' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
     expect(screen.getByRole('alert')).toBeInTheDocument()
     // A refreshed account list closes the form without discarding the local error.
     view.rerender(<ClaudeAccountPanel {...props} grant={{ linked: true, accounts: [account, ...linkedResult.accounts] }} open />)
-    fireEvent.click(screen.getByRole('button', { name: 'Link another account' }))
-    expect(screen.getByLabelText('Claude token')).toHaveValue('')
+    fireEvent.click(screen.getByRole('button', { name: 'Add an API key' }))
+    expect(screen.getByLabelText('Anthropic API key')).toHaveValue('')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -202,19 +236,19 @@ describe('Claude link safety and recovery', () => {
     try {
       const props = { grant: { linked: true, accounts: [account] }, onToggle: vi.fn() }
       const view = panel(props)
-      fireEvent.click(screen.getByRole('button', { name: 'Link another account' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Add an API key' }))
       view.rerender(<ClaudeAccountPanel {...props} error="Could not link this account." open />)
       const alert = screen.getByRole('alert')
       expect(screen.getAllByRole('alert')).toHaveLength(1)
-      expect(alert.previousElementSibling).toBe(screen.getByRole('button', { name: 'Link Claude account' }))
+      expect(alert.previousElementSibling).toBe(screen.getByRole('button', { name: 'Link API key' }))
       expect(alert.closest('.ca-setup')).not.toBeNull()
       expect(alert.compareDocumentPosition(screen.getByText('Credentials are stored securely for your workspace and are hidden after linking.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
       expect(scroll.mock.contexts).toContain(alert)
       scroll.mockClear()
-      fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'fake-input' } })
-      fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
-      const localAlert = screen.getByText('Choose your Claude plan above (Pro, Max, Team or Enterprise).')
+      fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'claude fake-input' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
+      const localAlert = screen.getByText('That is not an API key. Copy the key from Claude Console (it starts with sk-ant-api).')
       expect(scroll.mock.contexts).toContain(localAlert)
       expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
@@ -233,8 +267,8 @@ describe('Claude link safety and recovery', () => {
     ] }
     const props = { grant: { linked: false }, onLink: vi.fn().mockResolvedValue(result), onToggle: vi.fn() }
     const view = panel(props)
-    enterSubscription()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
+    enterApiKey()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     view.rerender(<ClaudeAccountPanel {...props} grant={result} open />)
     expect(screen.getByRole('status')).toHaveTextContent('2 accounts linked. Added: Team.')
     fireEvent.click(screen.getAllByRole('button', { name: 'Unlink' })[0])
@@ -246,8 +280,8 @@ describe('Claude link safety and recovery', () => {
     const onUnlink = vi.fn()
     panel({ grant: { linked: true, accounts: [account] }, onLink: vi.fn().mockResolvedValue(result), onUnlink })
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE-replacement' } })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-api03-FAKE-replacement' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     expect(onUnlink).not.toHaveBeenCalled()
   })
 
@@ -258,13 +292,13 @@ describe('Claude link safety and recovery', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Work' }))
     if (action === 'cancel') {
       fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-      fireEvent.click(screen.getByRole('button', { name: 'Link another account' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Add an API key' }))
     } else {
       view.rerender(<ClaudeAccountPanel {...props} open={false} />)
       view.rerender(<ClaudeAccountPanel {...props} open />)
     }
-    enterSubscription()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' })) })
+    enterApiKey()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     expect(props.onUnlink).not.toHaveBeenCalled()
   })
 
@@ -272,38 +306,14 @@ describe('Claude link safety and recovery', () => {
     let resolve
     const props = { grant: { linked: false }, onLink: () => new Promise((done) => { resolve = done }), onToggle: vi.fn() }
     const view = panel(props)
-    enterSubscription()
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    enterApiKey()
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
     view.rerender(<ClaudeAccountPanel {...props} open={false} />)
     await act(async () => { resolve(linkedResult) })
     view.rerender(<ClaudeAccountPanel {...props} grant={linkedResult} open />)
     expect(screen.queryByText(/Claude checks it on your first request/)).not.toBeInTheDocument()
   })
 
-  it('copies each command independently and reports clipboard denial', async () => {
-    vi.useFakeTimers()
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
-    const view = panel({ grant: { linked: false } })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy install command' })) })
-    expect(screen.getByRole('button', { name: 'Install command copied' })).toHaveTextContent('Copied')
-    expect(screen.getByRole('button', { name: 'Copy setup command' })).toHaveTextContent('Copy')
-    expect(writeText).toHaveBeenCalledWith('irm https://claude.ai/install.ps1 | iex')
-    act(() => { vi.advanceTimersByTime(1000) })
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy setup command' })) })
-    expect(screen.getByRole('button', { name: 'Setup command copied' })).toHaveTextContent('Copied')
-    act(() => { vi.advanceTimersByTime(1000) })
-    expect(screen.getByRole('button', { name: 'Copy install command' })).toHaveTextContent('Copy')
-    expect(screen.getByRole('button', { name: 'Setup command copied' })).toHaveTextContent('Copied')
-    act(() => { vi.advanceTimersByTime(1000) })
-    expect(screen.getByRole('button', { name: 'Copy setup command' })).toHaveTextContent('Copy')
-    writeText.mockRejectedValueOnce(new Error('Denied'))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy install command' })) })
-    expect(screen.getByRole('status')).toHaveTextContent('Copy was blocked. Select the command and copy it by hand.')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy setup command' })) })
-    view.unmount()
-    expect(vi.getTimerCount()).toBe(0)
-  })
 })
 
 describe('Claude account administrative status', () => {
@@ -367,13 +377,13 @@ describe('Claude account administrative status', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ linked: false }), { status: 200 })))
     panel({ grant: await getClaudeGrant() })
     expect(screen.getByText('not linked')).toBeInTheDocument()
-    expect(screen.getByLabelText('Claude token')).toBeInTheDocument()
+    expect(screen.getByLabelText('Anthropic API key')).toBeInTheDocument()
   })
   it('shows known linked status and preserves mutation errors', () => {
     panel({ grant: { linked: true, kind: 'oauth', accounts: [] }, error: 'Could not unlink this account.' })
     expect(screen.getByText('1 linked')).toBeInTheDocument()
     expect(screen.getByText('Could not unlink this account.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Link another account' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add an API key' })).toBeInTheDocument()
   })
   it('suppresses controls while checking even with a previous linked result', () => {
     panel({ loading: true, grant: { linked: true } })
@@ -420,7 +430,6 @@ function expectYielded(event) {
 async function credentialComposition(marks) {
   const onLink = vi.fn().mockResolvedValue({ linked: true })
   panel({ grant: { linked: false }, onLink })
-  fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
   const input = screen.getByLabelText('Anthropic API key')
   fireEvent.change(input, { target: { value: 'draft-value' } })
   input.focus()
@@ -449,52 +458,38 @@ it('KEYS-D20 credential Enter yields key code 229', async () => {
 })
 
 describe('Claude account onboarding instructions', () => {
-  it('tells a new owner how to get a subscription token and an API key, with a copyable command', async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined)
-    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+  it('offers only an API key with three Console steps', () => {
     panel({ grant: { linked: false, accounts: [] } })
     const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
-    expect(dialog).toHaveTextContent('No Claude account is linked yet.')
-    const steps = within(dialog).getByRole('list', { name: 'How to get a Claude setup token' })
-    expect(within(steps).getAllByRole('listitem')).toHaveLength(4)
-    expect(within(steps).getByRole('link', { name: 'Claude Code' })).toHaveAttribute('href', 'https://code.claude.com/docs/en/setup')
-    expect(steps).toHaveTextContent('claude setup-token')
-    expect(steps).toHaveTextContent('Approve the request in the browser')
-    expect(steps).toHaveTextContent('sk-ant-oat01-')
-    for (const name of ['Copy install command', 'Copy setup command']) {
-      const command = within(steps).getByRole('button', { name }).closest('.ca-cmd')
-      expect(command.tagName).toBe('SPAN')
-      expect(command.querySelector('code')).not.toBeNull()
-    }
-    fireEvent.click(within(steps).getByRole('button', { name: 'Copy setup command' }))
-    expect(writeText).toHaveBeenCalledWith('claude setup-token')
-    await waitFor(() => expect(within(steps).getByRole('button', { name: 'Setup command copied' })).toBeInTheDocument())
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'Anthropic API key' }))
-    expect(dialog).toHaveTextContent('Create a key at console.anthropic.com under API keys, then paste it below.')
-    expect(within(dialog).getByRole('link', { name: 'console.anthropic.com' })).toHaveAttribute('href', 'https://console.anthropic.com/settings/keys')
+    expect(dialog).toHaveTextContent('No Anthropic API key is linked yet.')
+    expect(dialog.textContent).not.toMatch(/subscription|setup-token|Claude Code|\bPro\b|\bMax\b/)
+    expect(within(dialog).queryByRole('radiogroup')).not.toBeInTheDocument()
+    const steps = within(dialog).getByRole('list', { name: 'How to get an Anthropic API key' })
+    expect(within(steps).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'Sign in to Claude Console and open API keys.',
+      'Create a key and copy it. Console shows it only once.',
+      'Paste it below.',
+    ])
+    expect(within(steps).getByRole('link', { name: 'Claude Console' })).toHaveAttribute('href', 'https://platform.claude.com/settings/keys')
+    expect(dialog).toHaveTextContent('Usage bills to your Anthropic account at API rates.')
+    expect(screen.getByLabelText('Key label')).toHaveValue('My API key')
+    expect(screen.getByLabelText('Key label')).toHaveAttribute('maxlength', '120')
   })
 })
 
 describe('Claude account link form (rehearsal issues 24 and 25)', () => {
-  it('explains a missing plan instead of silently doing nothing', () => {
-    const onLink = vi.fn()
+  it('links an API key without a plan choice', async () => {
+    const onLink = vi.fn().mockResolvedValue(null)
     panel({ grant: { linked: false, accounts: [] }, onLink })
-    const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
-    fireEvent.change(within(dialog).getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-example' } })
-    const link = within(dialog).getByRole('button', { name: 'Link Claude account' })
-    expect(link).not.toBeDisabled()
-    fireEvent.click(link)
-    expect(onLink).not.toHaveBeenCalled()
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('Choose your Claude plan above')
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'Max' }))
-    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
-    fireEvent.click(link)
-    expect(onLink).toHaveBeenCalledWith('sk-ant-oat01-example', 'oauth', 'My Claude account', 'max')
+    fireEvent.change(screen.getByLabelText('Key label'), { target: { value: '  My API key  ' } })
+    enterApiKey()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
+    expect(onLink).toHaveBeenCalledWith('sk-ant-api03-FAKE-secret', 'api_key', 'My API key', undefined)
   })
 
   it('masks the credential without a password field, so browsers do not offer to save it', () => {
     panel({ grant: { linked: false, accounts: [] } })
-    const field = screen.getByLabelText('Claude token')
+    const field = screen.getByLabelText('Anthropic API key')
     expect(field).toHaveAttribute('type', 'text')
     expect(field).toHaveAttribute('autocomplete', 'off')
     expect(field).toHaveClass('ca-secret')
@@ -523,22 +518,21 @@ describe('Claude account form safety', () => {
   it('refuses a token typed into the visible account label and clears it', () => {
     const onLink = vi.fn()
     panel({ grant: { linked: false, accounts: [] }, onLink })
-    fireEvent.change(screen.getByLabelText('Account label'), { target: { value: 'sk-ant-oat01-FAKE' } })
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE' } })
-    fireEvent.click(screen.getByRole('radio', { name: 'Max' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    fireEvent.change(screen.getByLabelText('Key label'), { target: { value: 'sk-ant-api03-FAKE' } })
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-api03-FAKE' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
     expect(onLink).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('Account label')).toHaveValue('')
-    expect(screen.getByRole('alert')).toHaveTextContent('not the account label')
+    expect(screen.getByLabelText('Key label')).toHaveValue('')
+    expect(screen.getByRole('alert')).toHaveTextContent('The key goes in the key field, not the label.')
   })
   it('does not unlink an account that is no longer refused when its replacement links', async () => {
-    const old = { id: 'a', label: 'Mine', kind: 'oauth', plan: 'max' }
+    const old = { id: 'a', label: 'Mine', kind: 'api_key' }
     const onUnlink = vi.fn()
     const onLink = vi.fn().mockResolvedValue({ linked: true, active_account_id: 'b', accounts: [old, { id: 'b', label: 'Mine', kind: 'oauth', plan: 'max', active: true }] })
     panel({ grant: { linked: true, accounts: [{ ...old, auth_refused_code: 'authentication_failed' }] }, onLink, onUnlink })
     fireEvent.click(screen.getByRole('button', { name: 'Link again: Mine' }))
-    fireEvent.change(screen.getByLabelText('Claude token'), { target: { value: 'sk-ant-oat01-FAKE' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Link Claude account' }))
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value: 'sk-ant-api03-FAKE' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
     expect(await screen.findByText(/2 accounts linked/)).toBeInTheDocument()
     expect(onUnlink).not.toHaveBeenCalled()
   })

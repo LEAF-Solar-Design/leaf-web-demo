@@ -35,8 +35,8 @@ afterEach(() => { cleanup(); vi.clearAllMocks() })
 
 describe('refused Claude grant recovery', () => {
   it.each([
-    ['authentication_failed', 'Claude no longer accepts the linked account. Link it again, then resend your message.'],
-    ['oauth_org_not_allowed', "The linked account's organization does not allow it here. Link a different account, then resend your message."],
+    ['authentication_failed', 'Claude no longer accepts the linked account. Add a working API key, then resend your message.'],
+    ['oauth_org_not_allowed', "The linked account's organization does not allow it here. Add a different API key, then resend your message."],
   ])('keeps the prompt available after %s and never sends automatically', async (code, message) => {
     const onLinkClaude = await setup(code)
     expect(screen.getByText(message).closest('[role="status"]')).toBeInTheDocument()
