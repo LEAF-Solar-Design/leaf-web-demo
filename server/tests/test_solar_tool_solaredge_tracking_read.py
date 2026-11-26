@@ -164,7 +164,7 @@ def test_solaredge_tracking_read_constants():
         "leaf.solar-solaredge-tracking-read.v1", "INVALID_SOLAREDGE_TRACKING_READ_REQUEST",
         "SOLAREDGE_IMPORT_RECORD_INVALID")
     assert module.SECTIONS == (
-        "strings", "frames", "unassigned", "reference_changes", "optimizer_assignment_changes")
+        "strings", "frames", "unassigned", "reference_changes", "optimizer_assignment_changes", "optimizers")
     assert (module.PAGE_ITEMS, module.PAGE_BYTES, module.MAX_REF, module.MAX_VERSION) == (
         1_000, 262_144, 100, 99_999_999)
     assert (tracking.STORE_KEY, tracking.STORE_SCHEMA) == ("solaredge_import", "leaf.solar-solaredge-import.v1")
@@ -191,12 +191,15 @@ def test_solaredge_tracking_read_declaration():
             "params": {"type": "object", "properties": {
                 "drawing_id": {"type": "string", "maxLength": 128},
                 "section": {"type": "string", "enum": [
-                                "strings", "frames", "unassigned", "reference_changes", "optimizer_assignment_changes"],
+                                "strings", "frames", "unassigned", "reference_changes",
+                                "optimizer_assignment_changes", "optimizers"],
                             "description": (
                                 "reference_changes lists missing frames, missing panels, moved panels with saved "
                                 "and current frame references, and new framed panels. optimizer_assignment_changes "
                                 "compares saved electrical string membership with a complete current report by "
-                                "shared panel identity."),
+                                "shared panel identity. optimizers pages explicit report measurement rows, including "
+                                "partial observations. When an optimizer measurement summary includes optimizer_rows, "
+                                "use optimizers for details and strings for available optimizer_count values."),
                             "default": "strings"},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 410000, "default": 0}},
                 "allOf": [{"if": {"required": ["section"], "properties": {
@@ -224,6 +227,8 @@ def test_solaredge_tracking_read_declaration():
     ({"section": "reference_changes", "offset": 410001}, False),
     ({"section": "optimizer_assignment_changes", "offset": 200000}, True),
     ({"section": "optimizer_assignment_changes", "offset": 200001}, False),
+    ({"section": "optimizers", "offset": 200000}, True),
+    ({"section": "optimizers", "offset": 200001}, False),
     ({"section": "frames", "offset": 200001}, False),
     ({"section": "panels"}, False),
     ({"section": "Strings"}, False),
