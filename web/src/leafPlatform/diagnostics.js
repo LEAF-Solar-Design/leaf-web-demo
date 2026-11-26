@@ -1,10 +1,11 @@
 const PHASES = new Set([
   'start', 'hello-sent', 'handshake', 'handshake-rejected', 'envelope-rejected',
   'bind-sent', 'bind-result', 'command-sent', 'command-outcome', 'timeout',
+  'send-copy-sent', 'send-copy-result',
 ])
 const VALUES = {
-  kind: new Set(['webview', 'none', 'ready', 'unbound', 'handshake', 'bind', 'command']),
-  status: new Set(['accepted', 'rejected', 'applied', 'stale', 'unknown', 'superseded']),
+  kind: new Set(['webview', 'none', 'ready', 'unbound', 'handshake', 'bind', 'command', 'send-copy']),
+  status: new Set(['accepted', 'rejected', 'applied', 'stale', 'unknown', 'superseded', 'sent', 'declined', 'failed']),
   action: new Set(['select', 'focus']),
 }
 const REJECTIONS = new Set(['origin', 'shape', 'timestamp-format', 'lifetime', 'signature',
@@ -19,7 +20,7 @@ export function sanitizeDetail(phase, detail = {}) {
     if (key === 'ms' || key === 'count') {
       if (Number.isSafeInteger(value) && value >= 0) safe[key] = value
     } else if (key === 'reason') {
-      safe.reason = (phase === 'bind-result' || phase === 'command-outcome')
+      safe.reason = (phase === 'bind-result' || phase === 'command-outcome' || phase === 'send-copy-result')
         ? (typeof value === 'string' && value === value.trim() && /^[a-z_]{1,40}$/.test(value) ? value : 'other')
         : (REJECTIONS.has(value) ? value : 'other')
     } else if (VALUES[key].has(value)) safe[key] = value.slice(0, 80)
