@@ -1584,7 +1584,7 @@ describe('solar refusal copy', () => {
   // scan can see. Measured per builtin; a new dynamic hook must land here.
   const DYNAMIC_HOOK_CODES = Object.freeze({
     'builtins/solar_electrical_schedules.py': Object.freeze([
-      'schedules_kernel_refused', 'schedules_mapping_failed', 'schedules_optimizers_unsupported',
+      'schedules_kernel_refused', 'schedules_mapping_failed',
       'schedules_zone_sizing_unsupported', 'sizing_confirmation_required', 'solar_output_not_current', 'unresolved_units',
     ]),
     'builtins/solar_guardrails_read.py': Object.freeze([
