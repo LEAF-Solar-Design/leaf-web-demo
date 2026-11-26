@@ -30,6 +30,7 @@ import solar_artifacts
 import solar_electrical_route_bridge as rb
 import solar_local_graph
 import solar_local_read as local
+import solar_route_export
 import solar_tools
 import solar_xlsx
 import store
@@ -370,6 +371,68 @@ def test_route_bundle_joins_real_drawing_routes_to_workbook_rows(i8, unit, mpu, 
         for point, (x, y) in zip(polyline["pts"], route["points"]):
             assert point == pytest.approx([x / mpu, y / mpu, 0])
         assert rows[entry["homeruns_row"]][2] == kinds[entry["kind"]]
+
+
+@pytest.fixture
+def route_bundle_inputs(i8):
+    design = unsized(i8)
+    module = builtin()
+    state = module.export_state(design, "topology")
+    _, _, workbook = module.kernel.cable_export(
+        state, {"UseL2Collectors": True, "SessionCableIndexHasFeeders": True},
+        module.FORM, include_route_rows=True,
+    )
+    return design, workbook
+
+
+@pytest.mark.parametrize("change", ["missing-cable", "extra-cable", "out-of-range-row"])
+def test_route_bundle_refuses_misaligned_cable_rows(route_bundle_inputs, change):
+    design, workbook = route_bundle_inputs
+    if change == "missing-cable":
+        workbook["route_count"] -= 1
+    elif change == "extra-cable":
+        workbook["route_count"] += 1
+    else:
+        workbook["route_rows"][workbook["route_count"]] = 2
+    with pytest.raises(GraphValidationError) as error:
+        solar_route_export.build(design, workbook)
+    assert error.value.code == "SCHEDULES_MAPPING_FAILED"
+
+
+def test_route_bundle_refuses_unsupported_drawing_units(route_bundle_inputs):
+    design, workbook = route_bundle_inputs
+    design["project"]["units"]["drawing_units"] = "custom"
+    with pytest.raises(GraphValidationError) as error:
+        solar_route_export.build(design, workbook)
+    assert error.value.code == "UNRESOLVED_UNITS"
+
+
+@pytest.mark.parametrize("limit", ["vertex-floor", "total-points", "points-per-route", "combined-members"])
+def test_route_bundle_refuses_over_budget_before_zip(route_bundle_inputs, monkeypatch, limit):
+    design, workbook = route_bundle_inputs
+    routes = [route for route in design["routes"] if route["route_kind"] != "trench"]
+    if limit == "vertex-floor":
+        point_bytes = sum(len(route["points"]) for route in routes) * solar_route_export.MIN_DXF_POINT_BYTES
+        monkeypatch.setattr(solar_route_export, "MAX_ARTIFACT_BYTES", len(workbook["bytes"]) + point_bytes - 1)
+    elif limit == "total-points":
+        monkeypatch.setattr(solar_route_export, "MAX_POINTS", sum(len(route["points"]) for route in routes) - 1)
+    elif limit == "points-per-route":
+        monkeypatch.setattr(solar_route_export, "MAX_POINTS_PER_ENTITY", max(len(route["points"]) for route in routes) - 1)
+    else:
+        content, missing = solar_route_export.build(design, workbook)
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            combined_size = sum(member.file_size for member in archive.infolist())
+        monkeypatch.setattr(solar_route_export, "MAX_ARTIFACT_BYTES", combined_size)
+        assert solar_route_export.build(design, workbook) == (content, missing)
+        monkeypatch.setattr(solar_route_export, "MAX_ARTIFACT_BYTES", combined_size - 1)
+
+    def unexpected_zip(*args, **kwargs):
+        pytest.fail("route bundle reached compression after exceeding its budget")
+
+    monkeypatch.setattr(solar_route_export.zipfile, "ZipFile", unexpected_zip)
+    with pytest.raises(GraphValidationError) as error:
+        solar_route_export.build(design, workbook)
+    assert error.value.code == "ARTIFACT_TOO_LARGE"
 
 
 def test_cable_export_no_strings_writes_nothing(graph):

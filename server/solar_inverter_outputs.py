@@ -1719,6 +1719,7 @@ def cable_export(state, host, form_values, *, include_route_rows=False):
     data = write_workbook(sheets)
     workbook = {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}
     if include_route_rows:
+        workbook["route_count"] = len(after["rows"]["cable"])
         workbook["route_rows"] = {route_index: row_number
                                   for row_number, (_, _, route_index) in enumerate(items, 2)
                                   if route_index is not None}
