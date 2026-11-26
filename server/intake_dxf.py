@@ -1207,10 +1207,15 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
             note_layer(layer)
             references.append((fields, ent["handle"] if handle is not None else None))
         source_count = block.get("count")
-        # Intake can omit malformed or capped children and retains nested INSERTs separately.
-        # Account for separately retained references without double-counting their previews.
-        if (type(source_count) is int and source_count > len(children)
-                and source_count > len(rows) + len(references)):
+        # Nested INSERT previews can overlap the actual references.
+        captured = max(len(children), len(rows) + len(references))
+        if "dropped_legacy_geometry" in block:
+            dropped = block["dropped_legacy_geometry"]
+            if (type(dropped) is not int or not 1 <= dropped <= 60
+                    or block.get("complete") is not False
+                    or type(source_count) is not int or source_count != captured + dropped):
+                _fail(f"blocks[{name}]: cannot export truncated block children")
+        elif type(source_count) is int and source_count > captured:
             _fail(f"blocks[{name}]: cannot export truncated block children")
         result[name] = {"base": base, "children": rows, "nested_inserts": references}
     return result

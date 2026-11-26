@@ -312,6 +312,21 @@ def test_nested_block_polyline_refuses_malformed_geometry(invalid_groups):
         intake_to_dxf(drawing)
 
 
+@pytest.mark.parametrize("extra", [
+    [(0, "POINT"), (10, 1), (20, 2)] * 60,
+    [(0, "LWPOLYLINE"), (10, 0), (20, 0), (42, "nan"), (10, 1), (20, 1)],
+    [(0, "LWPOLYLINE"), (10, "bad"), (20, 0), (42, "nan")],
+])
+def test_legacy_block_geometry_drop_does_not_hide_another_omission(extra):
+    pairs = [(0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "LINE"), (10, 0), (20, 0), *extra,
+             (0, "ENDBLK"), (0, "ENDSEC"), (0, "EOF")]
+    drawing = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    assert drawing["blocks"]["Module"]["dropped_legacy_geometry"] == 1
+    with pytest.raises(intake_dxf.IntakeDxfError, match="truncated block children"):
+        intake_to_dxf(drawing)
+
+
 @pytest.mark.parametrize("name,reference,font,bigfont,width,oblique,label_kind", [
     ("ModuleNotes", "ModuleNotes", "txt.shx", "", 1.0, 0, "TEXT"),
     ("PanelLabels", "panellabels", "simplex.shx", "bigfont.shx", 0.85, 12, "MTEXT"),

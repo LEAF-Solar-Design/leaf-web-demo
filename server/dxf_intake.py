@@ -752,26 +752,55 @@ def _parse_insert(pairs, i, dropped=None):
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 
 
+class _DroppedBlockGeometry(ValueError):
+    """An invalid geometric primitive the legacy DXF parser already discarded."""
+
+
+def _block_polyline_edges(pairs, groups):
+    thickness = float(groups.get(39, "0"))
+    if not math.isfinite(thickness):
+        raise ValueError("LWPOLYLINE thickness must be finite")
+    bulges = []
+    bulge_seen = False
+    for code, value in pairs:
+        if code == 10:
+            bulges.append(0.0)
+            bulge_seen = False
+        elif code == 42:
+            bulge = float(value)
+            if not bulges or bulge_seen or not math.isfinite(bulge):
+                raise ValueError("LWPOLYLINE needs one finite bulge per vertex at most")
+            bulges[-1] = bulge
+            bulge_seen = True
+    return thickness, bulges
+
+
 def _parse_block_child(pairs, i, kind):
     groups, end = _entity_groups(pairs, i)
     child = {"kind": kind, "layer": groups.get(8, "0") or "0"}
     properties = _entity_properties(groups.get(62), groups.get(6), groups.get(370), groups.get(420))
     if properties is not None:
         child["properties"] = properties
+    if kind == "LWPOLYLINE":
+        thickness, bulges = _block_polyline_edges(pairs[i:end], groups)
     if kind in ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
         # These children must not inherit the legacy top-level parsers'
         # substitution of zero for unreadable coordinates.
         for code, value in pairs[i:end]:
             if code in (10, 20, 30, 11, 21, 31, 38, 40, 50, 51, 210, 220, 230):
-                if not math.isfinite(float(value)):
-                    raise ValueError("malformed block geometry")
+                try:
+                    numeric = float(value)
+                except ValueError as exc:
+                    raise _DroppedBlockGeometry(str(exc)) from exc
+                if not math.isfinite(numeric):
+                    raise _DroppedBlockGeometry("malformed block geometry")
     if kind == "POINT":
         if not all(code in groups for code in (10, 20)):
-            raise ValueError("POINT needs a complete position")
+            raise _DroppedBlockGeometry("POINT needs a complete position")
         child["pt"] = [round(v, 3) for v in _group_point(groups)]
     elif kind == "LINE":
         if not all(code in groups for code in (10, 20, 11, 21)):
-            raise ValueError("LINE needs two points")
+            raise _DroppedBlockGeometry("LINE needs two points")
         entity, end = _parse_line(pairs, i)
         child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
     elif kind == "LWPOLYLINE":
@@ -779,34 +808,19 @@ def _parse_block_child(pairs, i, kind):
         if (len(entity["pts"]) < 2 or
                 sum(code == 10 for code, _ in pairs[i:end]) !=
                 sum(code == 20 for code, _ in pairs[i:end])):
-            raise ValueError("LWPOLYLINE needs at least two complete points")
+            raise _DroppedBlockGeometry("LWPOLYLINE needs at least two complete points")
         child.update(closed=entity["closed"],
                      nrm=[round(v, 6) for v in _group_point(groups, 210, (0, 0, 1))],
                      elev=round(_float(groups.get(38, "0")), 3),
                      pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]])
-        thickness = float(groups.get(39, "0"))
-        if not math.isfinite(thickness):
-            raise ValueError("LWPOLYLINE thickness must be finite")
         if thickness:
             child["thickness"] = thickness
-        bulges = []
-        bulge_seen = False
-        for code, value in pairs[i:end]:
-            if code == 10:
-                bulges.append(0.0)
-                bulge_seen = False
-            elif code == 42:
-                bulge = float(value)
-                if not bulges or bulge_seen or not math.isfinite(bulge):
-                    raise ValueError("LWPOLYLINE needs one finite bulge per vertex at most")
-                bulges[-1] = bulge
-                bulge_seen = True
         if any(bulges):
             child["bulges"] = bulges
     elif kind in ("CIRCLE", "ARC"):
         entity, end = _parse_circle_or_arc(pairs, i, kind)
         if entity is None or round(entity["r"], 3) <= 0:
-            raise ValueError(f"{kind} radius must be positive")
+            raise _DroppedBlockGeometry(f"{kind} radius must be positive")
         # BKE centres are block-local OCS points; the normal is the child's
         # own 210/220/230 (default +z), matching the top-level CI/AR shape.
         child.update(c=[round(v, 3) for v in _group_point(groups)], r=round(entity["r"], 3),
@@ -1045,6 +1059,8 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
+            if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:
+                block["dropped_legacy_geometry"] = block.get("dropped_legacy_geometry", 0) + 1
             if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
