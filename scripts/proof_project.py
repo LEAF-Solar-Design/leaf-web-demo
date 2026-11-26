@@ -3076,6 +3076,15 @@ def _group_empty(pgid, deadline):
         time.sleep(min(0.05, remaining))
 
 
+def _retained_python_command(argv, environment):
+    # A Windows venv launcher creates another process. Use CPython directly
+    # while preserving the venv so identity and handles stay with the child.
+    if _PLATFORM == "win32" and argv[0] == sys.executable and sys.prefix != sys.base_prefix:
+        environment["__PYVENV_LAUNCHER__"] = sys.executable
+        return (sys._base_executable, *argv[1:])
+    return argv
+
+
 class _RuntimeProcess:
     def __init__(self, spec):
         self.spec = spec
@@ -3109,16 +3118,8 @@ class _RuntimeProcess:
                 self.job = _WindowsJob()
             argv = spec.argv
             environment = dict(spec.environment)
-            if (
-                os.name == "nt"
-                and spec.role in {"stack-launcher", "canonical-child"}
-                and argv[0] == sys.executable
-                and sys.prefix != sys.base_prefix
-            ):
-                # The Windows venv executable redirects to a second process.
-                # Preserve the venv while running Python in the retained process.
-                environment["__PYVENV_LAUNCHER__"] = sys.executable
-                argv = (sys._base_executable, *argv[1:])
+            if spec.role in {"stack-launcher", "canonical-child"}:
+                argv = _retained_python_command(argv, environment)
             process = subprocess.Popen(argv, cwd=spec.cwd, env=environment,
                 stdin=subprocess.DEVNULL, stdout=self.output or subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=(0x08000000 | 0x4) if os.name == "nt" else 0,
@@ -4860,7 +4861,9 @@ class _GuardianLease:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         options = ({"creationflags": 0x08000000} if _PLATFORM == "win32"
                    else {"start_new_session": True})
-        self.process = subprocess.Popen((sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")),
+        argv = _retained_python_command(
+            (sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")), environment)
+        self.process = subprocess.Popen(argv,
             cwd=REPO.parent, env=dict(environment), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, **options)
         def read():

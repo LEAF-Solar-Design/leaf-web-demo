@@ -2268,6 +2268,25 @@ def g_arm(monkeypatch, platform):
     return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
 
 
+@pytest.mark.parametrize(("platform", "venv", "direct"), [
+    ("win32", True, True),
+    ("win32", False, False),
+    ("darwin", True, False),
+])
+def test_guardian_launch_retains_python_process(monkeypatch, platform, venv, direct):
+    python = "venv/python" if venv else "base/python"
+    monkeypatch.setattr(p, "sys", SimpleNamespace(
+        executable=python, _base_executable="base/python",
+        prefix="venv" if venv else "base", base_prefix="base",
+        modules=p.sys.modules,
+    ))
+    case = g_arm(monkeypatch, platform)
+    argv, kwargs = case.calls[0]
+    assert argv[0] == ("base/python" if direct else python)
+    assert argv[1:3] == ("-B", "-c")
+    assert kwargs["env"].get("__PYVENV_LAUNCHER__") == (python if direct else None)
+
+
 def test_teardown_guardian_process_exits_hard(monkeypatch):
     c = g_arm(monkeypatch, "darwin")
     code = c.calls[0][0][3]
