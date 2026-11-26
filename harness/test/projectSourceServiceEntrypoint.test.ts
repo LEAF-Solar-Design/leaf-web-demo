@@ -27,17 +27,18 @@ class Portfolio {
   constructor(readonly dependencies: unknown) {}
 }
 
-function options(repository: object | undefined) {
+function options(repository: object | undefined, privateStaticPreview?: object) {
   const oauth = { resolve: () => { throw new Error("Grant access is outside this test"); } };
   const evaluate = new Function("ports", "projectRepositoryEdits", "standardServicesApproval",
-    "glugMushyAuthor", "PortfolioProposalService", "SdkRepoEditor", "SdkProjectVideoInspector", compiled);
-  return { oauth, value: evaluate({ oauth }, repository, undefined, undefined, Portfolio, Editor, Inspector) };
+    "privateStaticPreview", "glugMushyAuthor", "PortfolioProposalService", "SdkRepoEditor", "SdkProjectVideoInspector", compiled);
+  return { oauth, value: evaluate({ oauth }, repository, undefined, privateStaticPreview, undefined, Portfolio, Editor, Inspector) };
 }
 
 describe("project source author service entrypoint", () => {
   it("mounts source author dependencies alongside the repository coordinator", () => {
     const repository = {};
-    const { oauth, value } = options(repository);
+    const preview = { projectStaticBuilds: {}, projectStaticViews: {} };
+    const { oauth, value } = options(repository, preview);
     expect(value.projectRepositoryEdits).toBe(repository);
     expect(value.projectSourceAuthoring).toEqual({
       oauth,
@@ -45,12 +46,16 @@ describe("project source author service entrypoint", () => {
       videoInspector: new Inspector(),
     });
     expect(value.projectSourceAuthoring.oauth).toBe(oauth);
+    expect(value.projectStaticBuilds).toBe(preview.projectStaticBuilds);
+    expect(value.projectStaticViews).toBe(preview.projectStaticViews);
   });
 
   it("keeps both source services absent when repository coordination is unavailable", () => {
     const { value } = options(undefined);
     expect(value).not.toHaveProperty("projectRepositoryEdits");
     expect(value).not.toHaveProperty("projectSourceAuthoring");
+    expect(value).not.toHaveProperty("projectStaticBuilds");
+    expect(value).not.toHaveProperty("projectStaticViews");
   });
 
   it("the container startup invokes the tested service entrypoint", () => {
