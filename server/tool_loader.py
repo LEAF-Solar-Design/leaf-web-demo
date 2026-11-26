@@ -1235,6 +1235,20 @@ def _normalize_aps_envelope(raw: Dict[str, Any], name: Optional[str], version: s
     return raw
 
 
+def resolve_instant_batch_artifact(tool: Dict[str, Any]):
+    """Resolve the trusted artifact used by the instant tool's batch fallback."""
+    import deps
+    from instant_execution import ARTIFACT_REGISTRY
+
+    if tool.get("execution_class") != "instant" or tool.get("batch_fallback") is not True:
+        raise ValueError("tool has no instant batch fallback")
+    seed = deps.load_seed_catalog_tools()
+    definition = next((row for row in seed if row.get("name") == tool.get("name")), None)
+    if not definition or deps.catalog_tool_digest(definition) != deps.catalog_tool_digest(tool):
+        raise ValueError("instant fallback differs from published platform definition")
+    return ARTIFACT_REGISTRY.resolve(definition, catalog_commit=deps.base_catalog_pin(seed)["catalog_commit"])
+
+
 def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[str, Any],
                      aps_live: bool, da: Any = None, *,
                      dwg_path: Optional[str] = None,
@@ -1276,14 +1290,8 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     artifact = None
     test_filename = None
     if instant:
-        import deps
-        from instant_execution import ARTIFACT_REGISTRY
-        seed = deps.load_seed_catalog_tools()
-        definition = next((row for row in seed if row.get("name") == name), None)
         try:
-            if not definition or deps.catalog_tool_digest(definition) != deps.catalog_tool_digest(tool):
-                raise ValueError("instant fallback differs from published platform definition")
-            artifact = ARTIFACT_REGISTRY.resolve(definition, catalog_commit=deps.base_catalog_pin(seed)["catalog_commit"])
+            artifact = resolve_instant_batch_artifact(tool)
         except (ValueError, OSError):
             return err_envelope(ErrorCode.BAD_PARAMS, "unverified instant fallback artifact",
                                 retryable=False, tool=name, version=version, timing_ms=_ms())
@@ -1365,9 +1373,9 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
         if artifact is not None:
             source = artifact.source.decode("utf-8")
             if tier == "microvm":
-                kind, payload = _run_source_in_sandbox_e2b(source, definition["entry"], intake, params, tenant_id=tenant_id)
+                kind, payload = _run_source_in_sandbox_e2b(source, tool["entry"], intake, params, tenant_id=tenant_id)
             else:
-                kind, payload = _run_source_in_sandbox(source, definition["entry"], intake, params)
+                kind, payload = _run_source_in_sandbox(source, tool["entry"], intake, params)
         elif test_source is not None:
             assert test_filename is not None
             if tier == "microvm":

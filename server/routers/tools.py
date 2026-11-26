@@ -25,6 +25,7 @@ import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 from branch_tools import dev_catalog, sync_receipts, tenant_catalog, tenant_publish, online_signer
+from text_match import text_matches
 
 router = APIRouter()
 
@@ -204,6 +205,45 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
     }))
 
 
+def _catalog_tools(tenant, investor: bool):
+    return deps.shared_tools() if investor else deps.all_tools(str(tenant))
+
+
+@router.get("/api/tools/{name}/executable-identity")
+def executable_identity(name: str, catalog_digest: str,
+                        tenant=Depends(deps.require_tenant)) -> Response:
+    """Resolve one catalog-confirmed read tool without running it."""
+    from tool_loader import published_tool_source_sha256, resolve_instant_batch_artifact
+
+    headers = {"Cache-Control": "no-store"}
+    investor = investor_demo.is_investor_context(tenant)
+    try:
+        selected = next((tool for tool in _catalog_tools(tenant, investor)
+                         if tool.get("name") == name), None)
+    except customization_service.CustomizationServiceError as exc:
+        return _catalog_error(exc)
+    if selected is None:
+        return JSONResponse({"detail": "Tool unavailable"}, status_code=404, headers=headers)
+    if not text_matches(catalog_digest, deps.catalog_tool_digest(selected)):
+        return JSONResponse({"detail": "Tool changed. Refresh the catalog."},
+                            status_code=409, headers=headers)
+
+    identity = None
+    if selected.get("capabilities") == ["drawing.read"]:
+        if selected.get("execution_class") == "instant":
+            try:
+                artifact = resolve_instant_batch_artifact(selected)
+            except (ValueError, OSError):
+                pass
+            else:
+                identity = {"kind": "instant-artifact", "digest": artifact.code_digest}
+        elif not investor:
+            source_digest = published_tool_source_sha256(selected, str(tenant))
+            if source_digest:
+                identity = {"kind": "published-source", "digest": source_digest}
+    return JSONResponse({"executable_identity": identity}, headers=headers)
+
+
 @router.get("/api/tools")
 def tools(tenant=Depends(deps.require_tenant)) -> Any:
     """Flat tool list, TENANT-SCOPED for the folded portion (wave 4): the engine
@@ -212,10 +252,7 @@ def tools(tenant=Depends(deps.require_tenant)) -> Any:
     invisible to tenant B). Auth OFF -> tenant is the X-Tenant-Id stub (default
     demo-tenant); with no tenant repo configured this is byte-identical to before."""
     try:
-        if investor_demo.is_investor_context(tenant):
-            catalog_tools = deps.shared_tools()
-        else:
-            catalog_tools = deps.all_tools(str(tenant))
+        catalog_tools = _catalog_tools(tenant, investor_demo.is_investor_context(tenant))
     except customization_service.CustomizationServiceError as exc:
         return _catalog_error(exc)
     return with_envelope_fields({

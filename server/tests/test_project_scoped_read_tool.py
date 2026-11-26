@@ -18,6 +18,7 @@ import solar_project_context as service
 import tool_loader
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 from routers import jobs as route
+from routers import tools as catalog_route
 from test_sip_r1_context import memory, O1, O2, P1, P2, D1, D2, V1, V2
 import re
 import sqlite3
@@ -320,6 +321,7 @@ def lane(memory, monkeypatch):
     monkeypatch.setattr(stored, "stored_job_entitlement_verdict", lambda *_: (None, None))
     app = FastAPI()
     app.include_router(route.router)
+    app.include_router(catalog_route.router)
     app.dependency_overrides[deps.require_tenant] = lambda: memory.tenant
     with TestClient(app) as client:
         yield SimpleNamespace(memory=memory, client=client, stored=stored)
@@ -1012,6 +1014,11 @@ def test_project_read_executes_catalog_source(lane, catalog_read_case):
 
     version, prefix, expected = catalog_read_case
     tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    identity = lane.client.get(f"/api/tools/{tool['name']}/executable-identity", params={
+        "catalog_digest": deps.catalog_tool_digest(tool),
+    })
+    assert identity.status_code == 200, identity.text
+    assert identity.headers["cache-control"] == "no-store"
     response = request(lane, tool=tool, params={"prefix": prefix}, dwg=str(version))
     assert response.status_code == 200, response.text
     result = response.json()
@@ -1033,6 +1040,42 @@ def test_project_read_executes_catalog_source(lane, catalog_read_case):
     board = [row.to_dict() for row in store.list_jobs(O1, P1)]
     assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
     assert board[0]["result"]["executed_code_digest"] == tool["artifact_digest"]
+    assert identity.json() == {"executable_identity": {
+        "kind": "instant-artifact", "digest": board[0]["result"]["executed_code_digest"],
+    }}
+
+
+def test_selected_executable_identity_tracks_published_body(lane, tmp_path, monkeypatch):
+    tool = {
+        "name": "revision-area", "kind": "script", "entry": "revision_area.py",
+        "capabilities": ["drawing.read"],
+    }
+    other_tenant_tool = {**tool, "name": "other-tenant-area"}
+    monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda tenant: [
+        tool if tenant == str(lane.memory.tenant) else other_tenant_tool,
+    ])
+    monkeypatch.setattr(tool_loader, "_tenant_repo_root",
+                        lambda tenant: tmp_path if tenant == str(lane.memory.tenant) else None)
+    source = tmp_path / tool["entry"]
+    url = "/api/tools/revision-area/executable-identity"
+    params = {"catalog_digest": deps.catalog_tool_digest(tool)}
+    assert lane.client.get(url, params=params).json() == {"executable_identity": None}
+
+    for body in ("def run(intake, params):\n    return {}, None\n",
+                 "def run(intake, params):\n    return {'area': 20}, None\n"):
+        source.write_text(body, encoding="utf-8")
+        result = lane.client.get(url, params=params)
+        assert result.status_code == 200, result.text
+        assert result.json() == {"executable_identity": {
+            "kind": "published-source", "digest": hashlib.sha256(body.encode()).hexdigest(),
+        }}
+
+    stale = lane.client.get(url, params={"catalog_digest": "sha256:" + "0" * 64})
+    assert stale.status_code == 409
+    foreign = lane.client.get("/api/tools/other-tenant-area/executable-identity", params={
+        "catalog_digest": deps.catalog_tool_digest(other_tenant_tool),
+    })
+    assert foreign.status_code == 404
 
 
 def test_c1a_real_loader_parameter_validation(lane):
