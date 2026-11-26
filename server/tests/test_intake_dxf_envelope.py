@@ -108,6 +108,70 @@ def _round_trip_with_resolved_pointers(intake):
     return parse_dxf_bytes(raw, source_name="x.dxf")
 
 
+@pytest.mark.parametrize("parent,middle,override", [
+    ("Roof", "Branch", "Override"),
+    ("Circuit-7", "Circuit-8", "Circuit-9"),
+    ("South Roof", "East Rack", "Manual Override"),
+])
+def test_reexport_preserves_nested_insert_paths_and_arrays(parent, middle, override):
+    def insert(handle, name, layer, columns):
+        return [(0, "INSERT"), (5, handle), (2, name), (8, layer),
+                (10, 5), (20, 10), (30, 2), (41, -2), (42, 3), (50, 90),
+                (210, 0), (220, 1), (230, 0), (70, columns), (71, 2), (44, 4), (45, 7)]
+
+    def block(name, *records):
+        return [(0, "BLOCK"), (2, name), *[pair for record in records for pair in record],
+                (0, "ENDBLK")]
+
+    pairs = [(0, "SECTION"), (2, "BLOCKS"),
+             *block("Module", [(0, "POINT"), (8, "0"), (10, 0), (20, 0)]),
+             *block("Tray", insert("A1", "Module", "0", 2),
+                    insert("A2", "Module", override, 3)),
+             *block("Rack", insert("B1", "Tray", "0", 1),
+                    insert("B2", "Tray", middle, 1)),
+             (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+             *insert("C1", "Rack", parent, 2), (0, "ENDSEC"), (0, "EOF")]
+    parsed = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    assert not parsed.get("parse_errors")
+    raw = intake_to_dxf(parsed)
+    reopened = parse_dxf_bytes(raw)
+    assert reopened["inserts"] == parsed["inserts"]
+    for name in ("Rack", "Tray"):
+        assert reopened["blocks"][name]["nested_inserts"] == parsed["blocks"][name]["nested_inserts"]
+    sections = _sections(raw)
+    owners = {_get(row, 2): _get(row, 5) for row in _records(sections["TABLES"])
+              if row[0] == ("0", "BLOCK_RECORD")}
+    nested = {_get(row, 5): _get(row, 330) for row in _records(sections["BLOCKS"])
+              if row[0] == ("0", "INSERT")}
+    assert nested == {"A1": owners["Tray"], "A2": owners["Tray"],
+                      "B1": owners["Rack"], "B2": owners["Rack"]}
+    _assert_pointers_resolve(raw)
+
+
+@pytest.mark.parametrize("issue,match", [
+    ("incomplete", "nested INSERT data is incomplete"),
+    ("unresolved", "unresolved block reference"),
+    ("duplicate", "duplicate handle A"),
+    ("bad-count", "columns must be an integer"),
+])
+def test_reexport_rejects_unusable_nested_insert_data(issue, match):
+    intake = _small(with_blocks=True)
+    fixture = intake["blocks"]["Fixture"]
+    reference = {"name": "Leaf", "handle": "B", "layer": "0", "x": 0, "y": 0, "z": 0}
+    intake["blocks"]["Leaf"] = {"base": [0, 0, 0], "children": []}
+    fixture["nested_inserts"] = [reference]
+    if issue == "incomplete":
+        fixture["nested_inserts_incomplete"] = True
+    elif issue == "unresolved":
+        reference["name"] = "Missing"
+    elif issue == "duplicate":
+        reference["handle"] = "a"
+    elif issue == "bad-count":
+        reference["columns"] = 32768
+    with pytest.raises(intake_dxf.IntakeDxfError, match=match):
+        intake_to_dxf(intake)
+
+
 def test_exhausted_handle_space_is_rejected():
     intake = {"layers": ["0"], "polylines": [
         {"layer": "0", "closed": True, "pts": [[0, 0, 0], [1, 0, 0], [1, 1, 0]],

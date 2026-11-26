@@ -423,38 +423,20 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             kind_sources.append(ent)
             kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
 
+    raw_blocks = intake.get("blocks", {})
+    known_blocks = raw_blocks if isinstance(raw_blocks, dict) else {}
     for k, ent in enumerate(inserts):
         where = f"inserts[{k}]"
-        if not isinstance(ent, dict):
-            _fail(f"{where}: not an object")
-        name = _layer_name(ent.get("name"), where)
-        raw_blocks = intake.get("blocks", {})
-        known = raw_blocks if isinstance(raw_blocks, dict) else {}
-        if _layout_block_name(name) or name not in known:
+        fields = _validated_insert(ent, where)
+        layer, name = fields[:2]
+        if _layout_block_name(name) or name not in known_blocks:
             _fail(f"{where}: unresolved block reference {name}")
-        layer = _layer_name(ent.get("layer"), where)
-        point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
-        normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
-        if not any(normal):
-            _fail(f"{where}: nrm must not be the zero vector")
-        scale = _vector(ent.get("scale", [1, 1, 1]), f"{where}.scale")
-        rotation = _number(ent.get("rot", 0), f"{where}.rot")
-        degrees = math.degrees(rotation)
-        # Recover whole degrees when their radians have the exact same
-        # six-decimal reading (for example 1.570796 represents 90 degrees).
-        whole_degrees = round(degrees)
-        rotation = (float(whole_degrees)
-                    if rotation == round(math.radians(whole_degrees), 6)
-                    else round(degrees, 6))
         h = _real_handle(ent.get("handle"), where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
             h = ent["handle"]
         note_layer(layer)
-        invisible = ent.get("invisible", False)
-        if type(invisible) is not bool:
-            _fail(f"{where}: invisible must be a boolean")
-        kinds.append(("insert", layer, name, point, normal, scale, rotation, invisible, h))
+        kinds.append(("insert", fields, h))
         kind_sources.append(ent)
         kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
     for k, ent in enumerate(dimensions):
@@ -524,12 +506,17 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         kind_sources.append(ent)
         kind_properties.append([])
 
-    blocks = _validated_blocks(intake["blocks"], note_layer) if "blocks" in intake else None
+    blocks = (_validated_blocks(raw_blocks, note_layer, real, MAX_ENTITIES - len(kinds))
+              if "blocks" in intake else None)
     if blocks is not None:
         total_points += sum(len(child.get("pts", [])) for block in blocks.values()
                             for child in block["children"])
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
+        for block in blocks.values():
+            for _, handle in block["nested_inserts"]:
+                if handle is not None:
+                    highest = max(highest, int(handle, 16))
 
     next_handle = highest + 1
 
@@ -601,13 +588,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     if blocks is not None:
         out += ["0", "SECTION", "2", "BLOCKS"]
         for name, owner in block_records.items():
-            block = blocks.get(name, {"base": [0.0, 0.0, 0.0], "children": []})
+            block = blocks.get(name, {"base": [0.0, 0.0, 0.0], "children": [], "nested_inserts": []})
             out += ["0", "BLOCK", "5", fresh_handle(), "330", owner,
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin",
                     "2", name, "70", "1" if name.startswith("*") and not _layout_block_name(name) else "0",
                     *_point_groups(block["base"]), "3", name, "1", ""]
             for child in block["children"]:
                 out += _emit_block_child(child, fresh_handle(), owner)
+            for fields, handle in block["nested_inserts"]:
+                out += _emit_insert(fields, handle or fresh_handle(), owner)
             out += ["0", "ENDBLK", "5", fresh_handle(), "330", owner,
                     "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd"]
         out += ["0", "ENDSEC"]
@@ -655,17 +644,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                             "10", _num(x), "20", _num(y), "30", _num(z), "70", "32"]
                 out += ["0", "SEQEND", "100", "AcDbEntity", "8", layer]
         elif row[0] == "insert":
-            _, layer, name, point, normal, scale, rotation, invisible, _ = row
-            point = _wcs_to_ocs(point, normal)
-            out += ["0", "INSERT", "5", h]
-            if block_records:
-                out += ["330", block_records["*Model_Space"]]
-            out += ["100", "AcDbEntity", "8", layer]
-            if invisible:
-                out += ["60", "1"]
-            out += ["100", "AcDbBlockReference", "2", name,
-                    *_point_groups(point), "41", _num(scale[0]), "42", _num(scale[1]),
-                    "43", _num(scale[2]), "50", _num(rotation), *_point_groups(normal, 210)]
+            out += _emit_insert(row[1], h, block_records["*Model_Space"])
         elif row[0] == "round":
             _, layer, field, (cx, cy, cz), radius, normal, angles, _ = row
             tilted = normal != [0.0, 0.0, 1.0]
@@ -1033,9 +1012,58 @@ def _vector(value, where, width=3):
     return [_number(v, where) for v in value]
 
 
-def _validated_blocks(blocks, note_layer):
+def _validated_insert(ent, where):
+    if not isinstance(ent, dict):
+        _fail(f"{where}: not an object")
+    name = _layer_name(ent.get("name"), where)
+    layer = _layer_name(ent.get("layer"), where)
+    point = [_number(ent.get(axis), f"{where}.{axis}") for axis in ("x", "y", "z")]
+    normal = _vector(ent.get("nrm", [0, 0, 1]), f"{where}.nrm")
+    if not any(normal):
+        _fail(f"{where}: nrm must not be the zero vector")
+    scale = _vector(ent.get("scale", [1, 1, 1]), f"{where}.scale")
+    rotation = _number(ent.get("rot", 0), f"{where}.rot")
+    degrees = math.degrees(rotation)
+    # Recover whole degrees from the parser's six-decimal radians.
+    whole_degrees = round(degrees)
+    rotation = (float(whole_degrees)
+                if rotation == round(math.radians(whole_degrees), 6)
+                else round(degrees, 6))
+
+    array_groups = []
+    array_fields = ("columns", "rows", "column_spacing", "row_spacing")
+    if any(field in ent for field in array_fields):
+        for field, code in (("columns", "70"), ("rows", "71")):
+            count = ent.get(field, 1)
+            if type(count) is not int or not 1 <= count <= 32767:
+                _fail(f"{where}: {field} must be an integer from 1 through 32767")
+            array_groups.extend((code, str(count)))
+        for field, code in (("column_spacing", "44"), ("row_spacing", "45")):
+            spacing = _number(ent.get(field, 0), f"{where}.{field}")
+            array_groups.extend((code, _num(spacing)))
+    invisible = ent.get("invisible", False)
+    if type(invisible) is not bool:
+        _fail(f"{where}: invisible must be a boolean")
+    return layer, name, point, normal, scale, rotation, array_groups, invisible
+
+
+def _emit_insert(fields, handle, owner):
+    layer, name, point, normal, scale, rotation, array_groups, invisible = fields
+    visibility_groups = ["60", "1"] if invisible else []
+    point = _wcs_to_ocs(point, normal)
+    return ["0", "INSERT", "5", handle, "330", owner,
+            "100", "AcDbEntity", "8", layer, *visibility_groups,
+            "100", "AcDbBlockReference", "2", name,
+            *_point_groups(point), "41", _num(scale[0]), "42", _num(scale[1]),
+            "43", _num(scale[2]), "50", _num(rotation), *array_groups, *_point_groups(normal, 210)]
+
+
+def _validated_blocks(blocks, note_layer, real, remaining_entities):
     if not isinstance(blocks, dict) or len(blocks) > 200:
         _fail("blocks must be an object of at most 200 definitions")
+    if any(not isinstance(name, str) for name in blocks):
+        _fail("block name must be a string")
+    known_names = {name.casefold() for name in blocks}
     result = {}
     for name, block in blocks.items():
         _layer_name(name, "block name")
@@ -1096,7 +1124,25 @@ def _validated_blocks(blocks, note_layer):
                 _fail(f"{where}: unsupported block child kind")
             note_layer(layer)
             rows.append(row)
-        result[name] = {"base": base, "children": rows}
+        nested_inserts = block.get("nested_inserts", [])
+        if block.get("nested_inserts_incomplete"):
+            _fail(f"blocks[{name}]: nested INSERT data is incomplete")
+        if not isinstance(nested_inserts, list) or len(nested_inserts) > 10000:
+            _fail(f"blocks[{name}]: nested_inserts must be a list of at most 10000")
+        remaining_entities -= len(nested_inserts)
+        if remaining_entities < 0:
+            _fail(f"more than {MAX_ENTITIES} entities including nested INSERTs")
+        references = []
+        for k, ent in enumerate(nested_inserts):
+            where = f"blocks[{name}].nested_inserts[{k}]"
+            fields = _validated_insert(ent, where)
+            layer, target = fields[:2]
+            if _layout_block_name(target) or target.casefold() not in known_names:
+                _fail(f"{where}: unresolved block reference {target}")
+            handle = _real_handle(ent.get("handle"), where, real)
+            note_layer(layer)
+            references.append((fields, ent["handle"] if handle is not None else None))
+        result[name] = {"base": base, "children": rows, "nested_inserts": references}
     return result
 
 
