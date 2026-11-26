@@ -1205,12 +1205,13 @@ export default function ToolCast({
     requestCatalogRun(last.tool, { ...last.params }, { complete: true })
   }, [busy, jobRunning, requestCatalogRun])
 
-  const openWorkspaceProject = useCallback(async (projectId) => {
-    if (!sessionReady) return
-    const opened = await workspace.openProject(projectId)
-    const canonical = opened?.drawing_versions?.[0]?.version_id || null
-    workspace.selectCanonicalVersion(canonical)
+  const openWorkspaceProject = useCallback(async (projectId, revision = null) => {
+    if (!sessionReady) return null
+    const opened = await workspace.openProject(projectId, revision)
+    if (!opened) return null
+    if (!revision) workspace.selectCanonicalVersion(opened.drawing_versions?.[0]?.version_id || null)
     setLeftView('workspace')
+    return opened
   }, [sessionReady, workspace])
 
   const createWorkspaceOrg = useCallback(async (name) => {
