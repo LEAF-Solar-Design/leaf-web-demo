@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assignment-report",
     "version": "1.0.0",
-    "description": "Preview string-to-collector assignments and name every remaining string without committing. Candidate assignments are tentative; a partial plan still refuses the atomic assignment command.",
+    "description": "Show saved string assignments and nominal spare DC inputs by collector, then preview tentative assignments without committing. A partial plan still refuses the atomic assignment command.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assignment_report",
@@ -32,13 +32,36 @@
     },
     "returns": {
       "type": "object",
-      "required": ["schema", "expected_rev", "status", "committed", "commit_refusal_code", "eligible_string_refs", "candidate_assignments", "remaining_string_refs", "counts"],
+      "required": ["schema", "expected_rev", "status", "committed", "commit_refusal_code", "saved_state", "eligible_string_refs", "candidate_assignments", "remaining_string_refs", "counts"],
       "properties": {
         "schema": {"const": "leaf.solar-assignment-report.v1"},
         "expected_rev": {"type": "integer", "minimum": 0},
         "status": {"enum": ["complete", "partial", "unassigned"]},
         "committed": {"const": false},
         "commit_refusal_code": {"type": ["string", "null"]},
+        "saved_state": {
+          "type": "object",
+          "required": ["assignments", "unassigned_string_refs", "collector_capacity"],
+          "properties": {
+            "assignments": {"type": "array", "items": {"type": "object"}},
+            "unassigned_string_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+            "collector_capacity": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["inverter_ref", "total_dc_inputs", "occupied_inputs", "spare_inputs"],
+                "properties": {
+                  "inverter_ref": {"type": "string"},
+                  "total_dc_inputs": {"type": "integer", "minimum": 0},
+                  "occupied_inputs": {"type": "integer", "minimum": 0},
+                  "spare_inputs": {"type": "integer", "minimum": 0}
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        },
         "eligible_string_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "remaining_string_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "candidate_assignments": {"type": "array", "items": {"type": "object"}},

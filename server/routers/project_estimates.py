@@ -9,12 +9,13 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, Response
 import deps
 import project_estimate_custody as custody
-from envelopes import ErrorCode, err_envelope
+from envelopes import ErrorCode, err_envelope, with_envelope_fields
 from solar_design_graph import GraphValidationError
 
 _ERRORS = frozenset(("ESTIMATE_REQUEST_INVALID", "ESTIMATE_MEDIA_TYPE_REFUSED",
     "ESTIMATE_REQUEST_TOO_LARGE", "ESTIMATE_NOT_SAVED", "ESTIMATE_SNAPSHOT_INVALID",
     "ESTIMATE_SOURCE_CHANGED", "ESTIMATE_SOURCE_MISMATCH", "ESTIMATE_INTERNAL",
+    "ESTIMATE_COMPARISON_SOURCE_MISMATCH",
     "ESTIMATE_LIMIT_EXCEEDED", "ESTIMATE_INPUT_INVALID", "ESTIMATE_SOURCE_INVALID",
     "ESTIMATE_TAKEOFF_INVALID", "ESTIMATE_RATE_CARD_INVALID", "ESTIMATE_SCHEMA_INVALID",
     "ESTIMATE_DIGEST_INVALID", "ESTIMATE_DIGEST_MISMATCH", "ESTIMATE_MATERIAL_MISMATCH",
@@ -25,7 +26,7 @@ def _failure(reason):
     reason = reason if reason in _ERRORS else "ESTIMATE_INTERNAL"
     status = {"ESTIMATE_MEDIA_TYPE_REFUSED": 415, "ESTIMATE_REQUEST_TOO_LARGE": 413,
               "ESTIMATE_SOURCE_CHANGED": 409, "ESTIMATE_NOT_SAVED": 404,
-              "ESTIMATE_INTERNAL": 500}.get(reason, 400)
+              "ESTIMATE_COMPARISON_SOURCE_MISMATCH": 409, "ESTIMATE_INTERNAL": 500}.get(reason, 400)
     body = err_envelope(ErrorCode.INTERNAL if status == 500 else ErrorCode.BAD_PARAMS,
                         "Project estimate operation unavailable.", False)
     body["error"]["reason_code"] = reason
@@ -148,6 +149,55 @@ def export_route(project_id: str, drawing_id: str, version_id: str,
         x_project_id: Optional[str] = Header(default=None)):
     return _dispatch(lambda: _read(tenant, project_id, drawing_id, version_id,
                                   x_org_id, x_project_id, export=True))
+
+
+def _cents(amount):
+    # An unpriced line contributes zero to the priced subtotal. Its reason stays visible.
+    return int(amount.replace(".", "")) if amount is not None else 0
+
+
+def _compare(tenant, project_id, drawing_id, version_id, compare_version_id, org, project):
+    estimates = []
+    for candidate in (version_id, compare_version_id):
+        response = _read(tenant, project_id, drawing_id, candidate, org, project, export=False)
+        if isinstance(response, Response):
+            return response
+        if not response["result"]["saved"]:
+            raise GraphValidationError("ESTIMATE_NOT_SAVED")
+        estimates.append(response["result"]["estimate"])
+    before, after = estimates
+    if (before["source_binding"] != after["source_binding"]
+            or before["takeoff_sha256"] != after["takeoff_sha256"]):
+        raise GraphValidationError("ESTIMATE_COMPARISON_SOURCE_MISMATCH")
+
+    lines = []
+    fields = ("rate", "amount", "pricing_reason")
+    for old, new in zip(before["lines"], after["lines"], strict=True):
+        old_price = {key: old[key] for key in fields}
+        new_price = {key: new[key] for key in fields}
+        if old_price != new_price:
+            lines.append({"line_id": old["line_id"], "unit": old["unit"], "quantity": old["quantity"],
+                          "before": old_price, "after": new_price,
+                          "subtotal_delta_cents": str(_cents(new["amount"]) - _cents(old["amount"]))})
+    return with_envelope_fields({"result": {
+        "schema": "leaf.project-estimate-comparison.v1",
+        "currency": before["currency"], "source_binding": before["source_binding"],
+        "before": {"version_id": version_id, "priced_subtotal": before["priced_subtotal"],
+                   "content_sha256": before["content_sha256"], "complete": before["complete"]},
+        "after": {"version_id": compare_version_id, "priced_subtotal": after["priced_subtotal"],
+                  "content_sha256": after["content_sha256"], "complete": after["complete"]},
+        # A JSON string keeps large signed cent values exact in browser clients.
+        "subtotal_delta_cents": str(_cents(after["priced_subtotal"]) - _cents(before["priced_subtotal"])),
+        "lines": lines,
+    }})
+
+
+@router.get(_PATH + "/compare")
+def compare_route(project_id: str, drawing_id: str, version_id: str, compare_version_id: str,
+        tenant=Depends(deps.require_active_tenant), x_org_id: Optional[str] = Header(default=None),
+        x_project_id: Optional[str] = Header(default=None)):
+    return _dispatch(lambda: _compare(tenant, project_id, drawing_id, version_id,
+                                    compare_version_id, x_org_id, x_project_id))
 
 
 from routers import project_drawings as parent

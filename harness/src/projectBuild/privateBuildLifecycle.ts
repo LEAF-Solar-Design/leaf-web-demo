@@ -6,9 +6,8 @@ import type { ProjectRepositoryAuthority } from "../ports/index.js";
 import { NextBuildError } from "./genericNextBuild.js";
 import type { GenericNextProducer } from "./genericNextBuild.js";
 import { BrowserCandidateBuildAdapter } from "./browserCandidateBuild.js";
-import type { BrowserCandidateBuildRequest, BrowserCandidatePreview, PublishedBrowserCandidate } from "./browserCandidateBuild.js";
+import type { BrowserCandidateBuildRequest, BrowserCandidateLoader, BrowserCandidatePreview, BrowserStaticCustody } from "./browserCandidateBuild.js";
 
-type Loader = (authority: ProjectRepositoryAuthority, requestId: string) => Promise<PublishedBrowserCandidate | null>;
 type Record = { identity: string; result?: BrowserCandidatePreview; failed: boolean };
 export type PrivateBuildObservation = Readonly<{
   schema: "leaf.private-static-build.v1";
@@ -26,7 +25,8 @@ export class PrivateBuildLifecycle {
   private readonly adapter: BrowserCandidateBuildAdapter;
   constructor(private readonly deps: {
     producer: Pick<GenericNextProducer,"build"|"status"|"lastValid">;
-    loadCandidate: Loader;
+    loadCandidate: BrowserCandidateLoader;
+    custody?: BrowserStaticCustody;
   }) { this.adapter = new BrowserCandidateBuildAdapter(deps); }
 
   private snapshot(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest) {
@@ -37,7 +37,7 @@ export class PrivateBuildLifecycle {
       r:Object.freeze({jobId:r.jobId,sourceRequestId:r.sourceRequestId,version:r.version,receiptDigest:r.receiptDigest,sourceCommit:r.sourceCommit,sourceTree:r.sourceTree}) };
   }
   private async current(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest) {
-    const row = await this.deps.loadCandidate(a,r.sourceRequestId);
+    const row = await this.deps.loadCandidate(a,r.sourceRequestId,r);
     if (!row || row.schema !== "leaf.browser-project-source.v1" || row.state !== "published" ||
         !row.authority || scopeKey(row.authority) !== scopeKey(a) ||
         witnessKey({...row,jobId:r.jobId}) !== witnessKey(r)) throw new NextBuildError("candidate_conflict");
@@ -88,6 +88,8 @@ export class PrivateBuildLifecycle {
 }
 
 /** One producer supplies execution, cleanup status and asset reads. */
-export function createPrivateBuildServices(options: {producer: GenericNextProducer; loadCandidate: Loader}) {
+export function createPrivateBuildServices(options: {
+  producer: GenericNextProducer; loadCandidate: BrowserCandidateLoader; custody?: BrowserStaticCustody;
+}) {
   return {projectStaticPreviews:options.producer,projectStaticBuilds:new PrivateBuildLifecycle(options)};
 }

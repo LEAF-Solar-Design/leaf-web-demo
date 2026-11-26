@@ -1,8 +1,9 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { getSessionIdentity, getStoredOrgId, setStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
 import * as drawingApi from '../api.js'
 import { resolveDrawingStore, pull, publish } from './drawingSync.js'
-import { isSignedIn, login } from '../auth.js'
+import { isSignedIn, login, subscribeTokenStored } from '../auth.js'
+import useSessionOrgAdoption from '../controllers/workspace/useSessionOrgAdoption.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
 import BranchToolsPanel from './BranchToolsPanel.jsx'
@@ -153,6 +154,8 @@ export default function LeafPlatformScene() {
   const [awaitingReady, setAwaitingReady] = useState(false)
   const [readyTimedOut, setReadyTimedOut] = useState(false)
   const [, refreshAuth] = useState(0)
+  const [tokenGeneration, setTokenGeneration] = useState(0)
+  const [sessionOrg, setSessionOrg] = useState(null)
   const grantRequest = useRef(null)
   const grantAttempt = useRef(false)
   const [working, setWorking] = useState(false)
@@ -179,12 +182,36 @@ export default function LeafPlatformScene() {
   }, [bridge])
 
   useEffect(() => {
-    const changed = (event) => {
-      if (event.key === null || ['leaf.jwt', 'leaf.org_id'].includes(event.key)) refreshAuth((value) => value + 1)
+    const tokenChanged = () => {
+      setTokenGeneration((value) => value + 1)
+      refreshAuth((value) => value + 1)
     }
+    const changed = (event) => {
+      if (event.key === null || event.key === 'leaf.jwt') tokenChanged()
+      else if (event.key === 'leaf.org_id') refreshAuth((value) => value + 1)
+    }
+    const unsubscribe = subscribeTokenStored(tokenChanged)
     window.addEventListener('storage', changed)
-    return () => window.removeEventListener('storage', changed)
+    return () => { unsubscribe(); window.removeEventListener('storage', changed) }
   }, [])
+
+  useEffect(() => {
+    let live = true
+    setSessionOrg(null)
+    if (signedIn) {
+      getSessionIdentity(false).then((identity) => {
+        if (live && isUuid(identity?.org)) setSessionOrg({ org: identity.org, generation: tokenGeneration })
+      }).catch(() => {})
+    }
+    return () => { live = false }
+  }, [signedIn, tokenGeneration])
+
+  const adoptOrgId = useCallback((org) => {
+    if (sameId(getStoredOrgId(), org)) return
+    setStoredOrgId(org)
+    refreshAuth((value) => value + 1)
+  }, [])
+  useSessionOrgAdoption(signedIn && sessionOrg?.generation === tokenGeneration ? sessionOrg.org : null, adoptOrgId)
 
   useEffect(() => {
     return () => {

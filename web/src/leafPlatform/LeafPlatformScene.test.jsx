@@ -2,15 +2,15 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getStoredOrgId, listProjects, openProject, requestBindingGrant, getDrawingVersions } from '../api.js'
+import { getSessionIdentity, getStoredOrgId, setStoredOrgId, listProjects, openProject, requestBindingGrant, getDrawingVersions } from '../api.js'
 import { pull, publish } from './drawingSync.js'
-import { isSignedIn, login } from '../auth.js'
+import { isSignedIn, login, subscribeTokenStored } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import LeafPlatformScene from './LeafPlatformScene.jsx'
 
-vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
+vi.mock('../api.js', () => ({ getSessionIdentity: vi.fn(), getStoredOrgId: vi.fn(), setStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
 vi.mock('./drawingSync.js', async (importOriginal) => ({ ...await importOriginal(), pull: vi.fn(), publish: vi.fn() }))
-vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn() }))
+vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn(), subscribeTokenStored: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
 
 const FAKE_ACCESS_TOKEN = 'test-bearer'
@@ -40,6 +40,9 @@ beforeEach(() => {
   }
   getLeafHostBridge.mockReturnValue(bridge)
   getStoredOrgId.mockReturnValue(orgId)
+  setStoredOrgId.mockImplementation((org) => getStoredOrgId.mockReturnValue(org))
+  getSessionIdentity.mockResolvedValue({ org: null })
+  subscribeTokenStored.mockReturnValue(vi.fn())
   isSignedIn.mockReturnValue(true)
   login.mockResolvedValue(undefined)
   listProjects.mockResolvedValue([{ project_id: projectId, name: 'Roof project' }])
@@ -63,6 +66,107 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  it.each([null, '55555555-5555-4555-8555-555555555555'])(
+    'adopts the verified session org over stored org %s and lists its projects', async storedOrg => {
+      getStoredOrgId.mockReturnValue(storedOrg)
+      getSessionIdentity.mockResolvedValue({ org: orgId })
+      mountUnbound()
+      expect(await screen.findByRole('option', { name: 'Roof project' })).toBeTruthy()
+      expect(setStoredOrgId).toHaveBeenCalledTimes(1)
+      expect(setStoredOrgId).toHaveBeenCalledWith(orgId)
+      expect(listProjects).toHaveBeenLastCalledWith(orgId)
+      expect(getSessionIdentity).toHaveBeenCalledTimes(1)
+      expect(getSessionIdentity).toHaveBeenCalledWith(false)
+    })
+
+  it.each(['null', 'invalid', 'rejected'])('keeps the Studio message for %s identity', async kind => {
+    getStoredOrgId.mockReturnValue(null)
+    if (kind === 'rejected') getSessionIdentity.mockRejectedValue(new Error('identity unavailable'))
+    else getSessionIdentity.mockResolvedValue({ org: kind === 'null' ? null : 'not-a-uuid' })
+    mountUnbound()
+    await act(async () => {})
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(listProjects).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch identity while signed out', async () => {
+    isSignedIn.mockReturnValue(false)
+    mountUnbound()
+    await act(async () => {})
+    expect(getSessionIdentity).not.toHaveBeenCalled()
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+  })
+
+  it('does not rewrite a matching org or refetch identity on org storage events', async () => {
+    const storedOrg = 'abcdef12-1111-4111-8111-111111111111'
+    getStoredOrgId.mockReturnValue(storedOrg)
+    getSessionIdentity.mockResolvedValue({ org: storedOrg.toUpperCase() })
+    mountUnbound()
+    await act(async () => {})
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.org_id' })))
+    await act(async () => {})
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(getSessionIdentity).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['leaf.jwt', null, 'same-tab'])('drops a late identity after token change via %s', async key => {
+    let finish
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue({ org: null })
+    mountUnbound()
+    act(() => {
+      if (key === 'same-tab') subscribeTokenStored.mock.calls[0][0]()
+      else window.dispatchEvent(new StorageEvent('storage', { key }))
+    })
+    await act(async () => finish({ org: orgId }))
+    expect(getSessionIdentity).toHaveBeenCalledTimes(2)
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+  })
+
+  it('clears the held org when a new token arrives', async () => {
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockResolvedValueOnce({ org: orgId }).mockResolvedValue({ org: null })
+    mountUnbound()
+    await screen.findByRole('option', { name: 'Roof project' })
+    setStoredOrgId.mockClear()
+    getStoredOrgId.mockReturnValue(null)
+    act(() => subscribeTokenStored.mock.calls[0][0]())
+    await act(async () => {})
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+  })
+
+  it.each(['sign-out', 'unmount'])('drops a late identity after %s', async action => {
+    let finish
+    getStoredOrgId.mockReturnValue(null)
+    getSessionIdentity.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const view = mountUnbound()
+    if (action === 'unmount') view.unmount()
+    else {
+      isSignedIn.mockReturnValue(false)
+      act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })))
+    }
+    await act(async () => finish({ org: orgId }))
+    expect(setStoredOrgId).not.toHaveBeenCalled()
+    if (action === 'unmount') expect(subscribeTokenStored.mock.results[0].value).toHaveBeenCalledTimes(1)
+  })
+
+  it('never adopts the bridge or URL org when verified identity has no org', async () => {
+    getStoredOrgId.mockReturnValue(null)
+    window.history.replaceState({}, '', `/?org_id=${orgId}`)
+    try {
+      state = { status: 'connected', ready }
+      render(<LeafPlatformScene />)
+      await act(async () => {})
+      expect(setStoredOrgId).not.toHaveBeenCalled()
+      expect(listProjects).not.toHaveBeenCalled()
+      expect(screen.getByText('Choose a workspace in Studio, then reopen this palette.')).toBeTruthy()
+    } finally { window.history.replaceState({}, '', '/') }
+  })
+
   it.each([undefined, false, true])('mounts Branch tools only with runTool true (%s)', async (runTool) => {
     state = { status: 'connected', ready: { ...ready, ...(runTool === undefined ? {} : { capabilities: { planGrammarMax: 2, runTool, hostApi: 1 } }) } }
     render(<LeafPlatformScene />)
