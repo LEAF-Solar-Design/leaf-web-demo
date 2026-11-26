@@ -85,11 +85,103 @@ it('deploys a self-built tool that passed its checks with one inline button', as
   expect(screen.getByText('Deploying to AutoCAD...')).toBeVisible()
   expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
   await act(async () => finishStage({ ...staged,
-    publication: { status: 'published', published_at: '2026-11-21T03:15:00Z' } }))
+    publication: { state: 'published', published_at: '2026-11-21T03:15:00Z' } }))
   expect(screen.getByText(/Deployed to AutoCAD/)).toHaveTextContent(/\d+:\d{2}/)
   expect(screen.getByText(/Published to your plugin catalog/)).toBeVisible()
   expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
 })
+
+const selfReview = { decision: 'approve', approval_kind: 'self', approver_role: 'owner',
+  decided_at: '2026-11-21T03:14:00Z' }
+
+it('shows the deployed publication and its time after a fresh reload of the server stage shape', async () => {
+  const publishedAt = '2026-11-21T03:15:00Z'
+  getAuthorStage.mockResolvedValue({ ...staged, status: 'staged', review: selfReview,
+    publication: { state: 'published', published_at: publishedAt } })
+  await mount()
+  for (const label of [/Deployed to AutoCAD/, /Published to your plugin catalog/]) {
+    const row = screen.getByText(label)
+    expect(row).toHaveTextContent(/\d+:\d{2}/)
+    expect(row.querySelector('time')).toHaveAttribute('datetime', new Date(publishedAt).toISOString())
+  }
+  expect(screen.queryByText('Deploying to AutoCAD...')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each([
+  ['rolled_back', 'Rolled back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not deployed', 'Not published: another change was published first'],
+  ['denied', 'Not deployed', 'Not published: changes were requested'],
+  ['publishing', 'Deploying to AutoCAD...', 'Publishing...'],
+  ['awaiting_approval', 'Deploying to AutoCAD...', 'Waiting for approval'],
+])('shows the reported %s publication after a reload', async (state, deploy, publish) => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  expect(screen.getByText(deploy)).toBeVisible()
+  expect(screen.getByText(publish)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+  expect(getAuthorStageSource).not.toHaveBeenCalled()
+})
+
+it.each(['published', 'denied', 'superseded', 'rolled_back', 'publishing'])(
+  'keeps source and approval closed for publication %s even without a reported review', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state } })
+    await mount()
+    expect(getAuthorStageSource).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Deploy to AutoCAD' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  })
+
+it.each([
+  ['rolled_back', 'Rolled back from your plugin catalog'],
+  ['superseded', 'Not published: another change was published first'],
+  ['denied', 'Not published: changes were requested'],
+  ['awaiting_approval', 'Published to your plugin catalog'],
+  ['publishing', 'Published to your plugin catalog'],
+  [undefined, 'Published to your plugin catalog'],
+])('reconciles a published decision with stage publication %s', async (state, label) => {
+  postReview.mockResolvedValue({ change_set_id: 'change', ...selfReview, status: 'published' })
+  await mount()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+    ...(state ? { publication: { state } } : {}) })
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(screen.getByText(new RegExp(label))).toBeVisible()
+  if (['rolled_back', 'superseded', 'denied'].includes(state)) {
+    expect(screen.queryByText(/Deployed to AutoCAD/)).toBeNull()
+    expect(screen.queryByText(/Published to your plugin catalog/)).toBeNull()
+  } else expect(screen.getByText(/Deployed to AutoCAD/)).toBeVisible()
+})
+
+it.each(['rolled_back', 'superseded', 'denied'])('stops polling for a %s publication without Branch evidence', async state => {
+  vi.useFakeTimers()
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: { state } })
+  await mount()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(1)
+})
+
+it('keeps polling a published stage until Branch reports', async () => {
+  vi.useFakeTimers()
+  const published = { ...staged, review: selfReview, publication: { state: 'published' } }
+  getAuthorStage.mockResolvedValueOnce(published)
+    .mockResolvedValue({ ...published, branch: { last_event: 'synced' } })
+  await mount()
+  await advance(2000)
+  expect(screen.getByText('Synced')).toBeVisible()
+  await advance(10000)
+  expect(getAuthorStage).toHaveBeenCalledTimes(2)
+})
+
+it.each(['rolled_back', 'superseded', 'denied', 'publishing'])(
+  'keeps the independent Review row unchanged for %s', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, publication: { state },
+      review: { ...selfReview, approval_kind: 'independent', approver_role: 'reviewer' } })
+    await mount()
+    expect(screen.getByText('Review')).toBeVisible()
+    expect(screen.getByText(/Approved by reviewer/)).toBeVisible()
+    expect(screen.queryByText('Deploy')).toBeNull()
+  })
 
 it('offers no deploy for a self-built tool whose compile failed, only the retry', async () => {
   getAuthorStage.mockResolvedValue({ ...staged, status: 'failed',

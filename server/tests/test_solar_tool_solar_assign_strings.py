@@ -401,6 +401,40 @@ def test_assignment_report_read_adapter_pins_version_and_preserves_store(graph, 
         assignment_report(g, expected_rev=1)
 
 
+@pytest.mark.parametrize(
+    ("case", "expected_capacity"),
+    [("U", [(4, 0, 4)]), ("P", [(4, 1, 3)]), ("CB", [(3, 0, 3), (4, 0, 4)])],
+)
+def test_assignment_report_separates_saved_capacity_from_candidate_plan(graph, case, expected_capacity):
+    g = variant(graph, case)
+    if case in ("U", "P"):
+        _declined_total(g)
+    g = validate_graph(g)
+    before = copy.deepcopy(g)
+    report = assignment_report(g)
+    saved = report["saved_state"]
+    collectors = sorted(g["inverters"], key=lambda inverter: inverter["id"])
+    assert saved["collector_capacity"] == [
+        {"inverter_ref": collector["id"], "total_dc_inputs": total,
+         "occupied_inputs": occupied, "spare_inputs": spare}
+        for collector, (total, occupied, spare) in zip(collectors, expected_capacity)
+    ]
+    expected_unassigned = {string["id"] for string in g["strings"]}
+    if case == "P":
+        (input_assignment,) = g["inverters"][0]["input_assignments"]
+        assert input_assignment["string_ref"] == S1
+        assert saved["assignments"] == [
+            {**input_assignment, "inverter_ref": g["inverters"][0]["id"],
+             "circuit_tag": next(string["circuit_tag"] for string in g["strings"] if string["id"] == S1)}
+        ]
+        expected_unassigned.remove(S1)
+    else:
+        assert saved["assignments"] == []
+    assert saved["unassigned_string_refs"] == sorted(expected_unassigned)
+    assert {item["string_ref"] for item in report["candidate_assignments"]} == expected_unassigned
+    assert report["committed"] is False and g == before
+
+
 def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainder(graph):
     g = variant(graph, "P")
     before = copy.deepcopy(g)

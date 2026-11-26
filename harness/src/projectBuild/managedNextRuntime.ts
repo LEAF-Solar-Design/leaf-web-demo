@@ -35,6 +35,10 @@ export interface StaticNextStopResult {
   readonly bindingId: string;
   readonly confirmed: boolean;
 }
+export interface CleanedStaticNextBuild {
+  readonly result: StaticNextJobResult & { readonly providerBuildId: string };
+  readonly stop: StaticNextStopResult;
+}
 /** run is idempotent on executionId, rejecting different input. stop fences any
  * queued/running admission for that identity and confirms provider termination,
  * including an uncertain run submission. No credentials enter bundle or plan.
@@ -97,7 +101,9 @@ export class ExecutorManagedNextRuntime implements ManagedNextRuntime {
     this.stop = executor.stop.bind(executor);
   }
 
-  async create(value: NextBuildScope): Promise<Awaited<ReturnType<ManagedNextRuntime["create"]>>> {
+  async create(value: NextBuildScope): Promise<Awaited<ReturnType<ManagedNextRuntime["create"]>> & {
+    cleanedBuild(): CleanedStaticNextBuild | null;
+  }> {
     const scope = copyScope(value);
     const identity: StaticNextJobIdentity = Object.freeze({ protocol: "leaf.static-next.v1",
       executionId: nextRequestDigest(scope), bindingId: this.bindingId,
@@ -105,7 +111,8 @@ export class ExecutorManagedNextRuntime implements ManagedNextRuntime {
     let digest: string | undefined;
     let pending: Promise<{ requestDigest: string; bundleSha256: string; files: readonly StaticFile[] }> | undefined;
     let closing = false;
-    let confirmed = false;
+    let completed: CleanedStaticNextBuild["result"] | undefined;
+    let stopReceipt: StaticNextStopResult | undefined;
     let stopping: Promise<{ confirmed: boolean }> | undefined;
     return Object.freeze({
       build: (source: Buffer, bundleSha256: string, plan: typeof NEXT_PLAN) => {
@@ -135,26 +142,36 @@ export class ExecutorManagedNextRuntime implements ManagedNextRuntime {
               30: "runtime_policy_failed", 40: "source_conflict", 50: "toolchain_unavailable" };
             fail(errors[result.exitCode] ?? "producer_conflict");
           }
-          return Object.freeze({ requestDigest: identity.executionId, bundleSha256,
-            files: filesCopy(result.files) });
+          const files = filesCopy(result.files);
+          const providerBuildId = result.providerBuildId;
+          if (typeof providerBuildId === "string" && providerBuildId.trim() && providerBuildId.length <= 512) {
+            completed = Object.freeze({ protocol: result.protocol, executionId: result.executionId,
+              bindingId: result.bindingId, toolchainSha256: result.toolchainSha256, bundleSha256,
+              providerBuildId, exitCode: result.exitCode, files: filesCopy(files) });
+          }
+          return Object.freeze({ requestDigest: identity.executionId, bundleSha256, files });
         })();
         return pending;
       },
       destroy: () => {
         closing = true;
-        if (confirmed) return Promise.resolve({ confirmed: true });
+        if (stopReceipt) return Promise.resolve({ confirmed: true });
         if (stopping) return stopping;
         stopping = (async () => {
           try {
             const receipt = await this.stop(identity);
             if (!receipt || receipt.protocol !== identity.protocol || receipt.executionId !== identity.executionId ||
                 receipt.bindingId !== identity.bindingId || receipt.confirmed !== true) fail("cleanup_required");
-            confirmed = true;
+            stopReceipt = Object.freeze({ protocol: receipt.protocol, executionId: receipt.executionId,
+              bindingId: receipt.bindingId, confirmed: receipt.confirmed });
             return { confirmed: true };
           } catch { return fail("cleanup_required"); }
         })().finally(() => { stopping = undefined; });
         return stopping;
       },
+      cleanedBuild: () => completed && stopReceipt
+        ? Object.freeze({ result: Object.freeze({ ...completed, files: filesCopy(completed.files) }), stop: stopReceipt })
+        : null,
     });
   }
 }

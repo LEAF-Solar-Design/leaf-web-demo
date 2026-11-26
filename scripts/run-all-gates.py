@@ -1136,7 +1136,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
                   "tests/test_x07_customer_profile_store.py", "tests/test_x07_role_discovery_failures.py",
-                  "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
+                  "tests/test_x07_tracker_profile.py", "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
                   "tests/test_x07_profile_storage_failures.py", "tests/test_x07_profile_json_roundtrip.py",
                   "tests/test_x07_workflow_recovery.py", "tests/test_x07_workflow_scope_matrix.py",
                   "tests/test_x07_selection_metamorphic.py", "tests/test_x07_adapter_snapshot_isolation.py",

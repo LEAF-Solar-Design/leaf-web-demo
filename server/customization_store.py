@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Sequence
 from uuid import uuid4
 
 from customization_audit import audit_payload, event_from_row
@@ -672,8 +672,43 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 raise ChangeSetNotFoundError("change set was not found")
             return self._change_set(row)
 
+    def stage_queue_depth(self) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS depth FROM customization_change_sets "
+                "WHERE state = ? AND NOT EXISTS "
+                "(SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
+                (ChangeState.STAGING.value,),
+            ).fetchone()
+            return int(row["depth"])
+
+    def stage_queue_ahead(self, change: ChangeSet) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS ahead FROM customization_change_sets "
+                "WHERE state = ? AND NOT (tenant_id = ? AND change_set_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id) "
+                "AND ((stage_lease_owner IS NOT NULL AND stage_lease_expires_at > ?) "
+                "OR created_at < ? OR (created_at = ? AND change_set_id < ?))",
+                (ChangeState.STAGING.value, change.tenant_id, change.change_set_id,
+                 int(time.time() * 1000), change.created_at, change.created_at,
+                 change.change_set_id),
+            ).fetchone()
+            return int(row["ahead"])
+
     def claim_stage(
-        self, *, owner: str, lease_seconds: float = 30.0
+        self, *, owner: str, lease_seconds: float = 30.0,
+        fair: bool = False, exclude_tenants: Sequence[str] = (),
     ) -> ChangeSet | None:
         owner = require_bounded(owner, "owner", 300)
         if lease_seconds <= 0:
@@ -681,6 +716,32 @@ class SQLiteCustomizationStore(CustomizationRepository):
         now_ms = int(time.time() * 1000)
         expires_ms = now_ms + int(lease_seconds * 1000)
         with self._transaction() as conn:
+            fair_sql = ""
+            fair_params = ()
+            order_sql = "created_at, change_set_id"
+            if fair:
+                fair_sql = (
+                    "AND NOT EXISTS (SELECT 1 FROM customization_change_sets AS live "
+                    "WHERE live.tenant_id = customization_change_sets.tenant_id "
+                    "AND live.change_set_id <> customization_change_sets.change_set_id "
+                    "AND live.state = ? AND live.stage_lease_owner IS NOT NULL "
+                    "AND live.stage_lease_expires_at > ?) "
+                )
+                fair_params = (ChangeState.STAGING.value, now_ms)
+                if exclude_tenants:
+                    fair_sql += "AND tenant_id NOT IN (" + ", ".join("?" for _ in exclude_tenants) + ") "
+                    fair_params += tuple(exclude_tenants)
+                last_service = (
+                    "COALESCE((SELECT MAX(served.stage_started_at) "
+                    "FROM customization_change_sets AS served "
+                    "WHERE served.tenant_id = customization_change_sets.tenant_id), '')"
+                )
+                # Virtual FIFO moves a tenant's next job behind every arrival
+                # before its last service, while new arrivals cannot starve it.
+                order_sql = (
+                    f"CASE WHEN created_at > {last_service} THEN created_at "
+                    f"ELSE {last_service} END, created_at, change_set_id"
+                )
             candidate = conn.execute(
                 "SELECT tenant_id, change_set_id FROM customization_change_sets "
                 "WHERE state = ? AND stage_next_attempt_at <= ? "
@@ -690,8 +751,8 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 "customization_change_sets.tenant_id AND "
                 "customization_removal_requests.change_set_id = "
                 "customization_change_sets.change_set_id) "
-                "ORDER BY created_at, change_set_id LIMIT 1",
-                (ChangeState.STAGING.value, now_ms, now_ms),
+                + fair_sql + "ORDER BY " + order_sql + " LIMIT 1",
+                (ChangeState.STAGING.value, now_ms, now_ms) + fair_params,
             ).fetchone()
             if candidate is None:
                 return None
@@ -720,6 +781,32 @@ class SQLiteCustomizationStore(CustomizationRepository):
             return self._find_change_set(
                 conn, candidate["tenant_id"], candidate["change_set_id"]
             )
+
+    def stage_queue_stats(self) -> dict[str, int]:
+        self.initialize()
+        now = time.time()
+        now_ms = int(now * 1000)
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN 1 ELSE 0 END), 0) AS running, "
+                "COALESCE(SUM(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN 0 ELSE 1 END), 0) AS depth, "
+                "MIN(CASE WHEN stage_lease_owner IS NOT NULL "
+                "AND stage_lease_expires_at > ? THEN NULL ELSE created_at END) AS oldest "
+                "FROM customization_change_sets WHERE state = ? "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
+                (now_ms, now_ms, now_ms, ChangeState.STAGING.value),
+            ).fetchone()
+        oldest_wait_s = 0
+        if row["oldest"] is not None:
+            oldest = datetime.fromisoformat(row["oldest"].replace("Z", "+00:00"))
+            oldest_wait_s = max(0, int(now - oldest.replace(tzinfo=timezone.utc).timestamp()))
+        return {"running": int(row["running"]), "depth": int(row["depth"]), "oldest_wait_s": oldest_wait_s}
 
     def stage_failure_history(self, *, tenant_id: str, change_set_id: str) -> list[StageAttemptFailure]:
         with self._connection() as conn:
