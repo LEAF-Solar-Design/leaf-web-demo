@@ -9,10 +9,12 @@ const valid = row => row && typeof row.block === 'string' && row.block && typeof
   && (row.design_window ?? row.insertion_bounds)[1] <= (row.design_window ?? row.insertion_bounds)[3]
 const identity = row => JSON.stringify([row.block, row.layer])
 const PAGE_SIZE = 10
+const OUTLINE_HANDLE = /^[0-9A-F]{1,32}$/
+const MAX_EXCLUSIONS = 4
 
 // Data and persistence are injected. A resolved callback confirms once; rejection
 // preserves the chosen set for retry. Cancellation supplies an aborted signal.
-export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
+export default function X07RoleConfirmation({ proposal, outlineChoices, onConfirm, onCancel }) {
   const model = useMemo(() => {
     const rows = Array.isArray(proposal?.module?.candidates) ? proposal.module.candidates.filter(valid) : []
     const first = proposal?.module?.first_choice
@@ -20,12 +22,13 @@ export default function X07RoleConfirmation({ proposal, onConfirm, onCancel }) {
     const key = JSON.stringify([proposal?.id, [...rows].sort((a,b) => identity(a).localeCompare(identity(b)))])
     return { rows, initial, key }
   }, [proposal])
-  return <Confirmation key={model.key} rows={model.rows} initial={model.initial}
+  return <Confirmation key={model.key} rows={model.rows} initial={model.initial} outlineChoices={outlineChoices}
     onConfirm={onConfirm} onCancel={onCancel} />
 }
 
-function Confirmation({ rows, initial, onConfirm, onCancel }) {
+function Confirmation({ rows, initial, outlineChoices, onConfirm, onCancel }) {
   const radioName = useId()
+  const outlineListId = useId()
   const [selected, select] = useState(() => rows[initial] ? identity(rows[initial]) : null)
   const [page, setPage] = useState(Math.floor(initial / PAGE_SIZE))
   const byIdentity = useMemo(() => new Map(rows.map(row => [identity(row), row])), [rows])
@@ -36,6 +39,9 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
   const [confirmed, setConfirmed] = useState(false)
   const [cancelled, setCancelled] = useState(false)
   const [error, setError] = useState(null)
+  const [outline, setOutline] = useState('')
+  const [exclusions, setExclusions] = useState([''])
+  const hasOutlineChoices = Array.isArray(outlineChoices) && outlineChoices.length > 0
   const mounted = useRef(true), pending = useRef(null), retired = useRef(false)
   useEffect(() => {
     mounted.current = true
@@ -45,13 +51,23 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
     event.preventDefault()
     event.stopPropagation()
     if (pending.current || confirmed || retired.current || !selectedRow || typeof onConfirm !== 'function') return
+    const include = hasOutlineChoices ? outline.trim().toUpperCase() : ''
+    const exclude = hasOutlineChoices ? exclusions.map(handle => handle.trim().toUpperCase()).filter(Boolean) : []
+    if ((include || exclude.length) && (!OUTLINE_HANDLE.test(include) || exclude.length > MAX_EXCLUSIONS
+        || exclude.some(handle => !OUTLINE_HANDLE.test(handle))
+        || new Set([include, ...exclude]).size !== exclude.length + 1)) {
+      setError('Enter one design outline and up to four distinct exclusion handles.')
+      return
+    }
+    const row = selectedRow
+    const designWindow = include ? { outline_handle: include, exclude_handles: exclude }
+      : [...(row.design_window ?? row.insertion_bounds)]
     const controller = new AbortController()
     pending.current = controller
     setBusy(true)
     setError(null)
-    const row = selectedRow
     const selection = { block: row.block, layer: row.layer, count: row.count,
-      design_window: [...(row.design_window ?? row.insertion_bounds)] }
+      design_window: designWindow }
     const current = () => mounted.current && !retired.current && pending.current === controller
     Promise.resolve().then(() => current() ? onConfirm(selection, { signal: controller.signal }) : undefined).then(result => {
       if (!current()) return
@@ -90,6 +106,23 @@ function Confirmation({ rows, initial, onConfirm, onCancel }) {
       </nav>}
       {selectedRow && <p>Selected module set: {selectedRow.block} on {selectedRow.layer}, {selectedRow.count} inserts</p>}
     </fieldset>
+    {hasOutlineChoices && selectedRow && <fieldset disabled={busy}>
+      <legend>Drawing outlines</legend>
+      <label>Design outline handle
+        <input list={outlineListId} value={outline} maxLength={32} onChange={event => setOutline(event.target.value)} />
+      </label>
+      <datalist id={outlineListId}>{outlineChoices.map(({ handle, layer }) =>
+        <option key={handle} value={handle} label={layer || undefined} />)}</datalist>
+      <p>Leave the design outline blank to use the module set bounds.</p>
+      {exclusions.map((handle, index) => <label key={index}>Exclusion outline {index + 1}
+        <input list={outlineListId} value={handle} maxLength={32} onChange={event => {
+          const value = event.target.value
+          setExclusions(previous => previous.map((entry, position) => position === index ? value : entry))
+        }} />
+      </label>)}
+      {exclusions.length < MAX_EXCLUSIONS && <button type="button"
+        onClick={() => setExclusions(previous => [...previous, ''])}>Add exclusion outline</button>}
+    </fieldset>}
     {error && <p role="alert">{error}</p>}
     <button type="submit" disabled={busy || !rows.length || typeof onConfirm !== 'function'}>{busy ? 'Saving roles…' : 'Confirm roles'}</button>
     <button type="button" onClick={cancel}>Cancel</button>

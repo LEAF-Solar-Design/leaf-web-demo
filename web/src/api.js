@@ -885,8 +885,8 @@ export async function getOrg(orgId) {
 }
 
 // GET /api/projects -> {projects:[{project_id,name,status,created_at,...}]}. X-Org-Id scoped.
-export async function listProjects(orgId) {
-  const data = await http('/api/projects', { headers: { ...orgHeaders(orgId) } })
+export async function listProjects(orgId, { signal } = {}) {
+  const data = await http('/api/projects', { headers: { ...orgHeaders(orgId) }, signal })
   return data.projects || []
 }
 
@@ -966,8 +966,43 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
   } finally { clearTimeout(timer) }
 }
 
-export async function openProject(projectId, orgId) {
-  return http(`/api/projects/${encodeURIComponent(projectId)}`, { headers: { ...orgHeaders(orgId) } })
+export async function openProject(projectId, orgId, { signal } = {}) {
+  return http(`/api/projects/${encodeURIComponent(projectId)}`, { headers: { ...orgHeaders(orgId) }, signal })
+}
+
+export async function reviewRoleProfileReuse(orgId, revisions, { signal } = {}) {
+  return http('/api/role-profiles/reuse-review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId) },
+    body: JSON.stringify({ revisions }), cache: 'no-store', signal,
+  })
+}
+
+export async function exportRemovedProfileRoles(orgId, payload, { signal } = {}) {
+  return http('/api/role-profiles/reuse-review/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId) },
+    body: JSON.stringify(payload), cache: 'no-store', signal,
+  })
+}
+
+function previewRolePlacements(kind, orgId, revision, payload, signal) {
+  const { project_id: project, drawing_id: drawing, input_version_id: version } = revision
+  const path = '/api/projects/' + encodeURIComponent(project) + '/drawings/' + encodeURIComponent(drawing)
+    + '/versions/' + encodeURIComponent(version) + '/role-profile/' + kind + '/preview'
+  return http(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...orgHeaders(orgId), 'X-Project-Id': project },
+    body: JSON.stringify(payload), cache: 'no-store', signal,
+  })
+}
+
+export function previewRoofPlacementChanges(orgId, revision, payload, { signal } = {}) {
+  return previewRolePlacements('placement-changes', orgId, revision, payload, signal)
+}
+
+export function previewRackPlacementOverrides(orgId, revision, payload, { signal } = {}) {
+  return previewRolePlacements('placement-overrides', orgId, revision, payload, signal)
 }
 
 // --- Operator tenant controls (?ops=1 only) -------------------------------

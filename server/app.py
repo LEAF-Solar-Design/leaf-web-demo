@@ -468,6 +468,10 @@ app.include_router(project_drawings.router)
 from routers import x07_profiles  # noqa: E402
 app.middleware("http")(x07_profiles.no_store_responses)
 app.include_router(x07_profiles.router)
+from routers import x07_profile_history  # noqa: E402
+app.include_router(x07_profile_history.router)
+from routers import x07_profile_portfolio  # noqa: E402
+app.include_router(x07_profile_portfolio.router)
 from routers import project_physical  # noqa: E402
 app.include_router(project_physical.router)
 app.include_router(solar_terrain.router)  # Head-bound Ground terrain preview operations

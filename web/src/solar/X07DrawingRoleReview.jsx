@@ -32,7 +32,7 @@ export default function X07DrawingRoleReview(props) {
     } catch { /* Callback details stay in the owning host. */ }
     return { ok: false, message: 'Roles could not be saved. Try again.' }
   }
-  return <X07RoleConfirmation key={read.readKey} proposal={read.data}
+  return <X07RoleConfirmation key={read.readKey} proposal={read.data} outlineChoices={props.outlineChoices}
     onConfirm={typeof props.onConfirm === 'function' ? confirm : undefined} onCancel={() => {
       const started = submitted.current?.key === read.readKey && submitted.current.client === props.projectClient
       setCancelled({ key: read.readKey, client: props.projectClient, kind: started ? 'after-submit' : 'before-submit' })

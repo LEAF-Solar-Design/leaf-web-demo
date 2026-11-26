@@ -2,12 +2,59 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import X07DrawingRoleReview from './X07DrawingRoleReview.jsx'
 import X07DrawingRoleProfileReview from './X07DrawingRoleProfileReview.jsx'
+import X07ProjectProfileReview from './X07ProjectProfileReview.jsx'
+import { createSolarProjectClient } from './solarProjectClient.js'
 
 afterEach(cleanup)
 const row = { block: 'Review Panel', layer: 'MODULES', count: 3, insertion_bounds: [0, 0, 2, 2] }
 const reply = { ok: true, data: { role_discovery: { schema: 'leaf.drawing-role-discovery.v1',
   module: { first_choice: row, candidates: [row], competing: false }, roof: [], obstruction: [] } } }
 const scope = { authorityKey: 'customer-a-session', solarBinding: { project_id: 'synthetic-project' }, isCurrent: () => true }
+
+it('confirms the exact revision outline and exclusions through the project client', async () => {
+  const id = value => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`
+  const binding = { kind: 'project', organization_id: id(1), project_id: id(2),
+    drawing_id: id(3), input_version_id: id(4) }
+  const identity = { customer_key: binding.organization_id, project_key: binding.project_id,
+    drawing_key: binding.drawing_id, input_version_id: binding.input_version_id }
+  const path = `/api/projects/${id(2)}/drawings/${id(3)}/versions/${id(4)}/role-profile`
+  const pin = { ...identity, profile_id: id(5), version: 1, roles: { module: { block: row.block, layer: row.layer } } }
+  const fetchImpl = vi.fn(async (url, init) => ({ ok: true, status: 200, json: async () => {
+    if (url.includes('/context?')) return { ...reply.data,
+      context: { ...binding, head_version_id: id(4), is_head: true } }
+    expect(url).toBe(path)
+    if (init.method === 'POST') return { ...identity, ok: true, applied_profile: pin, profile: pin, selection: { count: 2 } }
+    return { ...identity, application_record: null, profile: null, expected_version: 0,
+      outline_choices: ['E1', 'E2', 'E3'].map(handle => ({ handle, layer: 'Roof outlines' })) }
+  } }))
+  const client = createSolarProjectClient({ fetchImpl })
+  client.setScope(binding, scope.authorityKey)
+  const view = render(<X07ProjectProfileReview {...scope} solarBinding={binding} projectClient={client} />)
+  try {
+    const include = await screen.findByLabelText('Design outline handle')
+    expect([...document.getElementById(include.list.id).options].map(option => option.value)).toEqual(['E1', 'E2', 'E3'])
+    fireEvent.change(include, { target: { value: 'e1' } })
+    const first = screen.getByLabelText('Exclusion outline 1')
+    fireEvent.change(first, { target: { value: 'E1' } })
+    const submit = screen.getByRole('button', { name: 'Confirm roles' })
+    fireEvent.click(submit)
+    expect(screen.getByRole('alert')).toHaveTextContent('distinct exclusion handles')
+    expect(fetchImpl.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+    fireEvent.change(first, { target: { value: 'e2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add exclusion outline' }))
+    fireEvent.change(screen.getByLabelText('Exclusion outline 2'), { target: { value: 'E3' } })
+    fireEvent.click(submit)
+    expect(await screen.findByText('Selected module inserts: 2')).toBeTruthy()
+    const posts = fetchImpl.mock.calls.filter(([, init]) => init.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(posts[0][0]).toBe(path)
+    expect(JSON.parse(posts[0][1].body)).toEqual({ block: row.block, layer: row.layer, expected_version: 0,
+      design_window: { outline_handle: 'E1', exclude_handles: ['E2', 'E3'] } })
+  } finally {
+    view.unmount()
+    client.dispose()
+  }
+})
 
 it('requires one explicit confirmation and passes captured authority and drawing binding', async () => {
   let finish

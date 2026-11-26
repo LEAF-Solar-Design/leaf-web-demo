@@ -1,6 +1,6 @@
-import { validTrackers, trackerValues } from './x07TrackerRoles.js'
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import X07ProfileRoleDiff from './X07ProfileRoleDiff.jsx'
+import { validTrackers, trackerValues } from './x07TrackerRoles.js'
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
 const valid = (record, customer) => record?.customer_key === customer && typeof record.profile_id === 'string'
@@ -9,12 +9,43 @@ const valid = (record, customer) => record?.customer_key === customer && typeof 
   && Object.entries(record.roles).every(([role, value]) => role === 'trackers' ? validTrackers(value) : !['module', 'roof', 'obstruction'].includes(role)
     || (object(value) && typeof value.layer === 'string' && (value.block === undefined || typeof value.block === 'string')))
 const clone = value => JSON.parse(JSON.stringify(value))
-const roleNames = ['module', 'roof', 'obstruction', 'trackers']
+const singleRoles = ['module', 'roof', 'obstruction']
+const roleNames = [...singleRoles, 'trackers']
+const roleFields = ['block', 'layer']
+const fieldDiffers = (before, after, field) => Object.hasOwn(before, field) !== Object.hasOwn(after, field)
+  || before[field] !== after[field]
+const trackersDiffer = (before, after) => JSON.stringify(trackerValues(before.trackers))
+  !== JSON.stringify(trackerValues(after.trackers))
 const roleDiffers = (before, after, role) => role === 'trackers'
-  ? JSON.stringify(trackerValues(before.trackers)) !== JSON.stringify(trackerValues(after.trackers))
+  ? trackersDiffer(before, after)
   : Boolean(before[role]) !== Boolean(after[role])
-  || ['block', 'layer'].some(field => Object.hasOwn(before[role] || {}, field) !== Object.hasOwn(after[role] || {}, field)
-    || before[role]?.[field] !== after[role]?.[field])
+  || roleFields.some(field => fieldDiffers(before[role] || {}, after[role] || {}, field))
+
+function rebaseDraft(previous, draft, latest) {
+  const localTrackerEdit = trackersDiffer(previous, draft)
+  if (localTrackerEdit && trackersDiffer(previous, latest) && trackersDiffer(draft, latest)) return null
+
+  const next = clone(latest)
+  if (localTrackerEdit) {
+    if (Object.hasOwn(draft, 'trackers')) next.trackers = clone(draft.trackers)
+    else delete next.trackers
+  }
+  for (const role of singleRoles) {
+    if (!roleDiffers(previous, draft, role)) continue
+    if (!Object.hasOwn(draft, role)) {
+      delete next[role]
+    } else if (!previous[role] || !latest[role]) {
+      next[role] = clone(draft[role])
+    } else {
+      for (const field of roleFields) {
+        if (!fieldDiffers(previous[role], draft[role], field)) continue
+        if (Object.hasOwn(draft[role], field)) next[role][field] = draft[role][field]
+        else delete next[role][field]
+      }
+    }
+  }
+  return next
+}
 
 export default function X07CustomerProfileEditor(props) {
   return <LeaveBoundary {...props} />
@@ -47,13 +78,17 @@ function LeaveBoundary(props) {
   return <>{message && <p role="status">{message}</p>}<Editor key={held.key} {...active} onDirtyChange={value => { dirty.current = value }} /></>
 }
 
-function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applicationRecord, pinnedRoles, onDirtyChange }) {
+function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applicationRecord,
+  pinnedRoles, onDirtyChange, renderUndoReview, roofPreview }) {
   const [profile, setProfile] = useState(() => valid(initialProfile, customerKey) ? initialProfile : null)
   const [draft, setDraft] = useState(() => profile ? clone(profile.roles) : null)
+  const latestDraft = useRef(draft)
+  useLayoutEffect(() => { latestDraft.current = draft }, [draft])
   const [busy, setBusy] = useState(false), [error, setError] = useState(null)
   const [stale, setStale] = useState(false), [message, setMessage] = useState(null)
   const [reconcile, setReconcile] = useState(false)
   const [undo, setUndo] = useState(null)
+  const [undoReview, setUndoReview] = useState(null)
   const form = useRef(null), saveButton = useRef(null), reloadButton = useRef(null), retryButton = useRef(null)
   const composing = useRef(false)
   const draftRevision = useRef(0)
@@ -91,9 +126,17 @@ function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applica
       .then(record => {
         if (!current(controller)) return
         if (!valid(record, customerKey)) throw new Error('invalid scoped record')
-        const copy = clone(record.roles)
+        if (keepEdits && (record.profile_id !== profile.profile_id || record.version <= profile.version)) {
+          throw new Error('invalid successor record')
+        }
+        const nextDraft = keepEdits ? rebaseDraft(profile.roles, latestDraft.current, record.roles) : clone(record.roles)
+        if (nextDraft === null) {
+          setError('Tracker roles changed while you edited them. Restore the loaded tracker roles, then reload to keep your other edits.')
+          return
+        }
         if (restoreRetryFocus) focusRole.current = 'module'
-        setProfile(record); if (!keepEdits) { setDraft(copy);onDirtyChange?.(false) }
+        setProfile(record); setDraft(nextDraft); setUndo(null)
+        onDirtyChange?.(keepEdits && roleNames.some(role => roleDiffers(record.roles, nextDraft, role)))
         setStale(false)
         if (reconcile) setMessage('Stored profile reloaded.')
         setReconcile(false)
@@ -188,6 +231,7 @@ function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applica
   const undoRestore = () => {
     if (!undo || !profile) return
     const next = clone(undo.draft)
+    setUndoReview(undo.role === 'module' && renderUndoReview ? { before: draft.module, draft: next } : null)
     draftRevision.current++
     focusRole.current = next[undo.role] ? undo.role : 'module'
     setDraft(next); setUndo(null); setError(null)
@@ -195,6 +239,17 @@ function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applica
     setMessage('Last restore undone in draft. Save to keep changes.')
   }
   const changedRoles = profile && draft ? roleNames.filter(role => roleDiffers(profile.roles, draft, role)) : []
+  const roofCandidates = profile && draft?.roof && roofPreview?.profile?.profile_id === profile.profile_id
+    && roofPreview.profile.version === profile.version ? (roofPreview.candidates ?? []) : []
+  const chooseRoof = roof => {
+    setUndo(null)
+    draftRevision.current++
+    focusRole.current = 'roof'
+    setDraft(previous => ({ ...previous, roof }))
+    onDirtyChange?.(true)
+    setError(null)
+    setMessage('Roof candidate selected in draft. Save to keep changes.')
+  }
   const pin = profile && applicationRecord?.customer_key === customerKey && applicationRecord.profile_id === profile.profile_id
     && Number.isSafeInteger(applicationRecord.version) && applicationRecord.version > 0 ? applicationRecord : null
   return <section aria-label="Customer role profile">
@@ -213,6 +268,18 @@ function Editor({ customerKey, initialProfile, loadProfile, saveProfile, applica
         Restore loaded {role} value
       </button>)}
       {undo && <button type="button" onClick={undoRestore}>Undo last restore</button>}
+      {undoReview?.draft === draft && renderUndoReview?.(undoReview.before, draft.module)}
+      {!!roofCandidates.length && <fieldset><legend>Roof role candidates</legend>
+        <ul>{roofCandidates.map(({ handle, role, kind, bounds }) => <li key={handle}>
+          <span>{role.layer}{role.block ? ` · ${role.block}` : ''} · {handle}</span>
+          <p>{kind === 'outline' ? 'Outline bounds' : 'Insertion point'}: {(
+            kind === 'outline' ? bounds : bounds.slice(0, 2)
+          ).join(', ')}</p>
+          <button type="button" onClick={() => chooseRoof(role)}>
+            Use {role.layer}{role.block ? ` · ${role.block}` : ''} in draft
+          </button>
+        </li>)}</ul>
+      </fieldset>}
       <fieldset><legend>Drawing roles</legend>
         {Object.keys(draft).filter(role => ['module', 'roof', 'obstruction'].includes(role)).map(role => {
           const label = role[0].toUpperCase() + role.slice(1)

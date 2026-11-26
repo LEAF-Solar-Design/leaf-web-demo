@@ -440,6 +440,21 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
           data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
       })
     }),
+    readRoleProfileHistory: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { cursor, signal } = options
+      const b = scope.binding
+      const query = new URLSearchParams()
+      if (cursor !== undefined) {
+        assert(typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 256)
+        query.set('cursor', cursor)
+      }
+      const path = `/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/role-profile/history`
+      return request(cursor === undefined ? path : `${path}?${query}`, {
+        scope, signal, validate: data => data?.customer_key === b.organization_id &&
+          data?.project_key === b.project_id && data?.drawing_key === b.drawing_id && data?.input_version_id === b.input_version_id,
+      })
+    }),
     confirmRoleProfile: (selection, options = {}) => guarded((scope) => {
       assert(plain(selection) && plain(options))
       const b = scope.binding

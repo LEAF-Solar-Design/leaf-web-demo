@@ -81,11 +81,14 @@ function ScopedProfileReview(props) {
       ? { customer_key: pin.customer_key, profile_id: pin.profile_id,
           version: latestProfile.version, roles: structuredClone(latestProfile.roles) }
       : null
-    setApplied({ client: owner.projectClient, pin, initialProfile })
+    const selectedCount = typeof selection.design_window?.outline_handle === 'string'
+      && Number.isSafeInteger(result.selection?.count) && result.selection.count >= 0 ? result.selection.count : null
+    setApplied({ client: owner.projectClient, pin, initialProfile, selectedCount })
     return { ok: true }
   }
   if (applied?.client === props.projectClient) return <section ref={container} aria-label="Confirmed drawing profile" aria-describedby={statusId}>
     <p id={statusId} role="status">Roles confirmed.</p>
+    {applied.selectedCount !== null && <p>Selected module inserts: {applied.selectedCount}</p>}
     <section aria-label="Pinned drawing roles"><h3>Pinned drawing roles</h3>
       <p>Pinned profile version: {applied.pin.version}</p>
       <dl>{Object.entries(applied.pin.roles).map(([name, role]) => <div key={name}>

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useLayoutEffect } from 'react'
 import X07CustomerProfileEditor from './X07CustomerProfileEditor.jsx'
@@ -47,6 +47,105 @@ it('clears the previous customer and never displays its pinned record', async ()
   await screen.findByText('Profile id: profile-b')
   expect(screen.queryByText('Profile id: profile-a')).toBeNull()
   expect(screen.queryByText(/Project is pinned/)).toBeNull()
+})
+
+it.each(['roof', 'obstruction'])('reviews a peer deletion of %s while keeping the other draft', async role => {
+  const loaded = { ...record('a'), roles: { ...record('a').roles, [role]: { layer: 'ORIGINAL' } } }
+  let current = loaded
+  const load = vi.fn(async () => current)
+  const save = vi.fn()
+    .mockRejectedValueOnce({ code: 'STALE_VERSION' })
+    .mockImplementationOnce(async (_customer, roles) => ({ ...current, version: 4, roles }))
+  render(<X07CustomerProfileEditor customerKey="a" loadProfile={load} saveProfile={save}
+    applicationRecord={loaded} pinnedRoles={loaded.roles} />)
+
+  fireEvent.change(await screen.findByLabelText('Module layer'), { target: { value: 'KEEP-DRAFT' } })
+  const roleInput = screen.getByLabelText(new RegExp(`^${role} layer$`, 'i'))
+  fireEvent.change(roleInput, { target: { value: 'LOCAL-DRAFT' } })
+  current = { ...loaded, version: 2, roles: { ...loaded.roles, [role]: { layer: 'PEER-EDIT' } } }
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await screen.findByRole('alert')
+
+  current = { ...record('a', 3), roles: { ...record('a').roles } }
+  fireEvent.click(screen.getByRole('button', { name: 'Reload version, keep edits' }))
+  await screen.findByText('Profile version: 3')
+  const pinDiff = within(screen.getByRole('region', { name: 'Pinned versus current roles' }))
+  const deletion = within(pinDiff.getByRole('region', { name: `Removed ${role}` }))
+  expect(deletion.getByText('"ORIGINAL"')).toBeTruthy()
+  expect(roleInput).toHaveValue('LOCAL-DRAFT')
+  expect(screen.getByLabelText('Module layer')).toHaveValue('KEEP-DRAFT')
+  expect(save).toHaveBeenCalledTimes(1)
+
+  fireEvent.click(screen.getByRole('button', { name: `Restore loaded ${role} value` }))
+  expect(roleInput.isConnected).toBe(false)
+  expect(screen.getByLabelText('Module layer')).toHaveValue('KEEP-DRAFT')
+  expect(save).toHaveBeenCalledTimes(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await screen.findByText('Profile version: 4')
+  expect(save.mock.calls[1][1]).toEqual({ module: { block: 'Panel', layer: 'KEEP-DRAFT' } })
+  expect(save.mock.calls.map(call => call[2].expected_version)).toEqual([1, 3])
+  expect(screen.getByText('Project is pinned to version 1.')).toBeTruthy()
+})
+
+it.each([
+  { name: 'a restored roof and edited obstruction',
+    peer: { roof: { layer: 'RESTORED' }, obstruction: { layer: 'NEW-OBSTRUCTION' } } },
+  { name: 'a deleted roof and edited obstruction',
+    peer: { obstruction: { layer: 'NEW-OBSTRUCTION' } } },
+  { name: 'another field on the edited module role',
+    peer: { module: { block: 'Peer block', layer: 'MODULES' }, roof: { layer: 'RESTORED' } } },
+])('keeps the local module edit alongside $name', async ({ peer }) => {
+  const initial = { ...record('a'), roles: { ...record('a').roles,
+    roof: { layer: 'ORIGINAL-ROOF' }, obstruction: { layer: 'ORIGINAL-OBSTRUCTION' } } }
+  const deleted = { ...initial, version: 2, roles: { module: initial.roles.module, obstruction: initial.roles.obstruction } }
+  const latest = { ...initial, version: 4, roles: { module: initial.roles.module, ...peer } }
+  const other = { ...record('b'), roles: { ...record('b').roles, roof: { layer: 'OTHER' } } }
+  const load = vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(deleted)
+    .mockResolvedValueOnce(latest).mockResolvedValueOnce(other)
+  const save = vi.fn().mockRejectedValueOnce({ code: 'STALE_VERSION' })
+    .mockRejectedValueOnce({ code: 'STALE_VERSION' })
+    .mockImplementationOnce(async (_customer, roles) => ({ ...latest, version: 5, roles }))
+  const view = render(<X07CustomerProfileEditor customerKey="a" drawingKey="a:v1" loadProfile={load}
+    saveProfile={save} applicationRecord={initial} pinnedRoles={initial.roles} />)
+  fireEvent.change(await screen.findByLabelText('Module layer'), { target: { value: 'MY-DRAFT' } })
+  const saveDraft = () => fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  const reload = () => fireEvent.click(screen.getByRole('button', { name: 'Reload version, keep edits' }))
+
+  saveDraft()
+  await screen.findByRole('alert')
+  reload()
+  await screen.findByText('Profile version: 2')
+  const pinDiff = within(screen.getByRole('region', { name: 'Pinned versus current roles' }))
+  expect(pinDiff.getByRole('region', { name: 'Removed roof' })).toBeTruthy()
+  expect(screen.queryByLabelText('Roof layer')).toBeNull()
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MY-DRAFT')
+
+  saveDraft()
+  await screen.findByRole('alert')
+  reload()
+  await screen.findByText('Profile version: 4')
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MY-DRAFT')
+  expect(screen.getByLabelText('Module block')).toHaveValue(latest.roles.module.block)
+  for (const role of ['roof', 'obstruction']) {
+    const input = screen.queryByLabelText(new RegExp(`^${role} layer$`, 'i'))
+    if (latest.roles[role]) expect(input).toHaveValue(latest.roles[role].layer)
+    else expect(input).toBeNull()
+  }
+  expect(save).toHaveBeenCalledTimes(2)
+
+  saveDraft()
+  await screen.findByText('Profile version: 5')
+  expect(save.mock.calls.map(([customer, , options]) => [customer, options.expected_version]))
+    .toEqual([['a', 1], ['a', 2], ['a', 4]])
+  expect(save.mock.calls[2][1]).toEqual({ ...latest.roles, module: { ...latest.roles.module, layer: 'MY-DRAFT' } })
+  expect(screen.getByText('Project is pinned to version 1.')).toBeTruthy()
+
+  view.rerender(<X07CustomerProfileEditor customerKey="b" drawingKey="b:v8" loadProfile={load}
+    saveProfile={save} applicationRecord={other} pinnedRoles={other.roles} />)
+  await screen.findByText('Profile id: profile-b')
+  expect(screen.getByLabelText('Roof layer')).toHaveValue('OTHER')
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MODULES')
+  expect(save).toHaveBeenCalledTimes(3)
 })
 
 it('restores changed, removed and draft-only roles independently without an implicit save', async () => {
@@ -148,4 +247,51 @@ it('authors tracker type and multiplier, restores the legacy draft and reopens t
   renderEditor(await save.mock.results[0].value)
   expect(await screen.findByLabelText('Tracker type')).toHaveValue('west-2')
   expect(screen.getByLabelText('Modules per instance')).toHaveValue(24)
+})
+
+it.each([
+  { name: 'a peer tracker edit', peerEdit: true, removeLocal: false },
+  { name: 'a local tracker removal', peerEdit: false, removeLocal: true },
+  { name: 'a conflicting local removal and peer edit', peerEdit: true, removeLocal: true },
+])('reloads a stale profile with $name', async ({ peerEdit, removeLocal }) => {
+  const tracker = { block: 'T', layer: 'Posts', tracker_type: 'west-2', modules_per_instance: 24 }
+  const original = record('a')
+  const initial = { ...original, roles: { ...original.roles, trackers: [tracker] } }
+  const latest = { ...initial, version: 2, roles: { ...initial.roles,
+    obstruction: { layer: 'PEER-OBSTRUCTION' },
+    trackers: [peerEdit ? { ...tracker, modules_per_instance: 36 } : tracker] } }
+  const load = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(latest)
+  const save = vi.fn().mockRejectedValueOnce({ code: 'STALE_VERSION' })
+    .mockImplementation(async (_customer, roles) => ({ ...latest, roles, version: 3 }))
+  render(<X07CustomerProfileEditor customerKey="a" loadProfile={load} saveProfile={save}
+    applicationRecord={initial} pinnedRoles={initial.roles} />)
+  fireEvent.change(await screen.findByLabelText('Module layer'), { target: { value: 'MY-DRAFT' } })
+  if (removeLocal) fireEvent.click(screen.getByRole('button', { name: 'Remove tracker 1' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  const reload = () => fireEvent.click(screen.getByRole('button', { name: 'Reload version, keep edits' }))
+  await screen.findByRole('alert')
+  reload()
+
+  if (peerEdit && removeLocal) {
+    await screen.findByText(/Tracker roles changed while you edited them/)
+    expect(screen.getByText('Profile version: 1')).toBeTruthy()
+    expect(screen.queryByLabelText('Tracker type')).toBeNull()
+    const retry = screen.queryByRole('button', { name: /save profile/i })
+    if (retry) expect(retry).toBeDisabled()
+    expect(save).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore loaded trackers value' }))
+    reload()
+  }
+
+  await screen.findByText('Profile version: 2')
+  expect(screen.getByLabelText('Obstruction layer')).toHaveValue('PEER-OBSTRUCTION')
+  expect(screen.getByLabelText('Module layer')).toHaveValue('MY-DRAFT')
+  const { trackers, ...latestRoles } = latest.roles
+  const expected = { ...latestRoles, module: { ...latestRoles.module, layer: 'MY-DRAFT' } }
+  if (peerEdit || !removeLocal) expected.trackers = trackers
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await screen.findByText('Profile version: 3')
+  expect(save.mock.calls[1][1]).toEqual(expected)
+  expect(save.mock.calls.map(call => call[2].expected_version)).toEqual([1, 2])
+  expect(screen.getByText('Project is pinned to version 1.')).toBeTruthy()
 })

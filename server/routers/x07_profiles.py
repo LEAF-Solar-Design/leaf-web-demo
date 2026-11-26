@@ -1,11 +1,11 @@
 """Project-authorized customer roles on the canonical PostgreSQL store."""
 import json
-from typing import Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StrictInt, StrictStr, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, FiniteFloat, StrictInt, StrictStr, field_validator
 
 import deps
 import platform_link
@@ -16,7 +16,10 @@ from x07_customer_profile_store import TrackerRole, validate_trackers
 from x07_postgres_profile_store import PostgresProfileStore
 from x07_profile_compatibility import check_compatibility
 from x07_profile_workflow import ProfileWorkflow
-from x07_role_selection import select_modules
+from x07_role_selection import (
+    MAX_EXCLUSION_OUTLINES, MAX_OVERRIDE_PLACEMENTS, MAX_PLACEMENT_PATH_LENGTH,
+    outline_choices, roof_inheritance_candidates, select_modules,
+)
 
 router = APIRouter()
 RECOVERY_PATH = '/api/role-profiles/recovery-report'
@@ -36,19 +39,42 @@ class Role(BaseModel):
     layer: StrictStr = Field(min_length=1, max_length=512)
 
 
+OutlineHandle = Annotated[StrictStr, Field(pattern=r'^[0-9A-Fa-f]{1,32}$')]
+
+
+class OutlineWindow(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    outline_handle: OutlineHandle
+    exclude_handles: list[OutlineHandle] = Field(default_factory=list, max_length=MAX_EXCLUSION_OUTLINES)
+
+
+def _numeric_coordinates(value):
+    if not isinstance(value, list) or any(type(item) not in (int, float) for item in value):
+        raise ValueError('numeric coordinates required')
+    return value
+
+
+RectangleWindow = Annotated[
+    list[FiniteFloat], Field(min_length=4, max_length=4), BeforeValidator(_numeric_coordinates),
+]
+PlacementPath = Annotated[StrictStr, Field(min_length=1, max_length=MAX_PLACEMENT_PATH_LENGTH)]
+
+
+class PlacementWindow(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    within: RectangleWindow | OutlineWindow
+
+
+class PlacementOverride(PlacementWindow):
+    placement_paths: list[PlacementPath] = Field(min_length=1, max_length=MAX_OVERRIDE_PLACEMENTS)
+
+
 class Confirmation(BaseModel):
     model_config = ConfigDict(extra='forbid')
     block: StrictStr = Field(min_length=1, max_length=512)
     layer: StrictStr = Field(min_length=1, max_length=512)
-    design_window: list[FiniteFloat] = Field(min_length=4, max_length=4)
+    design_window: RectangleWindow | OutlineWindow | PlacementOverride
     expected_version: StrictInt = Field(ge=0, le=2**53 - 2)
-
-    @field_validator('design_window', mode='before')
-    @classmethod
-    def numeric_window(cls, value):
-        if not isinstance(value, list) or any(type(item) not in (int, float) for item in value):
-            raise ValueError('numeric coordinates required')
-        return value
 
 
 class Edit(BaseModel):
@@ -87,7 +113,12 @@ def _operate(tenant, project_id, drawing_id, input_version_id, org_header, proje
             plan = workflow.inspect(context.intake, customer_key=customer,
                                     project_key=project, drawing_key=drawing)
             if action == 'read':
-                return {**plan, **identity, 'profile': store.latest(customer)}
+                choices = outline_choices(context.intake)
+                profile = store.latest(customer)
+                roof = profile['roles'].get('roof') if profile else None
+                candidates = roof_inheritance_candidates(context.intake, roof, choices)
+                return {**plan, **identity, 'profile': profile, 'outline_choices': choices,
+                        'roof_inheritance_candidates': candidates}
             if action == 'edit':
                 roles = payload.model_dump(exclude_none=True)['roles']
                 candidate = {'customer_key': customer, 'profile_id': 'explicit-edit',
@@ -98,28 +129,38 @@ def _operate(tenant, project_id, drawing_id, input_version_id, org_header, proje
                     raise ValueError('incompatible roles')
                 return {**identity, 'profile': store.save_version(customer, compatible['roles'], expected_version=payload.expected_version)}
             roles = {'module': {'block': payload.block, 'layer': payload.layer}}
+            window = payload.model_dump()['design_window']
             pin = plan['application_record']
             if pin is not None:
                 # Lost confirmation replies replay the original immutable pin.
                 if pin['roles']['module'] != roles['module']:
                     raise ValueError('project already pinned')
                 selection = select_modules(context.intake, block=payload.block, layer=payload.layer,
-                                           window=payload.design_window)
+                                           window=window)
+                record = connection.execute(
+                    'SELECT design_window_json FROM x07_confirmation_evidence '
+                    'WHERE project_key = %s AND drawing_key = %s AND input_version_id = %s',
+                    (project, drawing, str(input_version_id)),
+                ).fetchone()
+                saved_window = json.loads(record['design_window_json']) if record else None
+                if (isinstance(window, dict) or isinstance(saved_window, dict)) and (
+                        selection['design_window'] != saved_window):
+                    raise ValueError('project already pinned with a different design window')
                 result = workflow._result(plan, pin, pin['roles'], selection)
             elif plan['compatibility']['decision'] == 'apply' and plan['compatibility']['roles']['module'] == roles['module']:
                 if plan['expected_version'] != payload.expected_version:
                     raise ValueError('profile version changed')
                 result = workflow.apply(context.intake, customer_key=customer, project_key=project,
-                                        drawing_key=drawing, window=payload.design_window)
+                                        drawing_key=drawing, window=window)
             else:
                 result = workflow.confirm(context.intake, customer_key=customer, project_key=project,
-                                          drawing_key=drawing, roles=roles, window=payload.design_window,
+                                          drawing_key=drawing, roles=roles, window=window,
                                           expected_version=payload.expected_version)
             if pin is None:
                 connection.execute(
                     'INSERT INTO x07_confirmation_evidence '
                     '(project_key, drawing_key, input_version_id, design_window_json) VALUES (%s, %s, %s, %s)',
-                    (project, drawing, str(input_version_id), json.dumps(payload.design_window)),
+                    (project, drawing, str(input_version_id), json.dumps(result['selection']['design_window'])),
                 )
             # A replay can return an older project pin. Read the editable profile
             # separately under the same customer lock as confirmation.

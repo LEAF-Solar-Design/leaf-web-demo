@@ -1,5 +1,7 @@
 """Affine block placement primitives to embed in sandboxed drawing tools."""
 
+import math
+
 TRANSFORM_SOURCE = """
 def identity_frame():
     return ((0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1))
@@ -46,3 +48,10 @@ def insert_frame(parent, insert, base, row=0, column=0):
                  for axis, scale in ((rx, sx), (ry, sy), (z_axis, sz)))
     return (origin, *axes)
 """
+
+# Native product code and authored drawing tools use the same affine equations.
+_native = {"math": math}
+exec(TRANSFORM_SOURCE, _native)
+identity_frame = _native["identity_frame"]
+insert_frame = _native["insert_frame"]
+transform_point = _native["transform_point"]

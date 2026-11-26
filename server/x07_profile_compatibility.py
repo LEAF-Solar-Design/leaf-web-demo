@@ -9,6 +9,7 @@ import unicodedata
 
 from solar_drawing_roles import discover_roles
 from x07_customer_profile_store import validate_trackers
+from x07_role_selection import SelectionError, nested_module_spellings
 
 
 def _label(value):
@@ -99,13 +100,24 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
         # Normalization is only an ambiguity detector, never an implicit alias.
         # Do not combine distinct raw labels which collapse under NFC/casefold.
         normalized_targets = {_label(target) for target in targets}
+        normalized_layer = _label(wanted['layer'])
+        role_pairs = pairs
+        if role == 'module':
+            try:
+                role_pairs = pairs | nested_module_spellings(
+                    intake, normalized_targets, normalized_layer, normalize=_label,
+                )
+            except SelectionError:
+                # Keep existing root-role checks. Selection still validates
+                # actual placements before a confirmation or application.
+                pass
         spellings = {}
-        for name, value in pairs:
-            if _label(name) in normalized_targets and _label(value) == _label(wanted['layer']):
+        for name, value in role_pairs:
+            if _label(name) in normalized_targets and _label(value) == normalized_layer:
                 spellings.setdefault((_label(name), _label(value)), set()).add((name, value))
         if any(len(values) > 1 for values in spellings.values()):
             return fresh('AMBIGUOUS_ROLE_LABEL')
-        matches = sorted({(name, value) for name, value in pairs
+        matches = sorted({(name, value) for name, value in role_pairs
                           if name.casefold() in targets and value.casefold() == layer})
         logical = {(name.casefold(), value.casefold()) for name, value in matches}
         if not logical:

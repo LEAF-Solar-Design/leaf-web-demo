@@ -39,7 +39,9 @@ it('shows the first choice from the real scoped context client while catalog is 
   expect(calls.filter(([url]) => url.includes('/context?'))).toHaveLength(2)
   expect(calls.filter(([url]) => url.endsWith('/role-profile'))).toHaveLength(1)
   expect(calls.every(([, init]) => init.method === 'GET')).toBe(true)
-  expect(screen.queryAllByRole('button')).toHaveLength(2)
+  expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Review profile reuse across drawings' })).toBeTruthy()
+  expect(screen.queryByLabelText('Design outline handle')).toBeNull()
 })
 
 it('rejects a late context after the current project changes', async () => {
