@@ -216,9 +216,26 @@ function disposalSpies(layer) {
   ])
 }
 function disposedOnce(spies) { for (const spy of spies) expect(spy).toHaveBeenCalledTimes(1) }
+function clickDrawingPoint(view, x, y, modifiers = {}) {
+  vi.stubGlobal('PointerEvent', MouseEvent)
+  const dom = gl.renderers.at(-1).domElement
+  vi.spyOn(dom.parentElement, 'clientWidth', 'get').mockReturnValue(1000)
+  vi.spyOn(dom.parentElement, 'clientHeight', 'get').mockReturnValue(1000)
+  act(() => view.ref.current.fit())
+  const camera = gl.controls.at(-1).object
+  camera.updateMatrixWorld(true)
+  const point = new THREE.Vector3(x, y, 1.5).project(camera)
+  vi.spyOn(dom, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 1000 })
+  const event = { clientX: (point.x + 1) * 500, clientY: (1 - point.y) * 500,
+    button: 0, pointerId: 1, ...modifiers }
+  fireEvent.pointerDown(dom, event)
+  fireEvent.pointerUp(dom, event)
+}
+const routeHighlight = () => attached()[0]?.group.children.find(mesh => mesh.renderOrder === 10)
 afterEach(() => {
   cleanup()
   for (const controls of gl.controls) document.removeEventListener('keydown', controls.keys, true)
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   gl.renderers.length = 0
   gl.controls.length = 0
@@ -410,9 +427,11 @@ describe('stored Solar graph in real Viewer', () => {
     for (const object of retained) expect(reaches(object, scene())).toBe(true)
   })
 
-  it('A1B2-V12 Solar lines are never pick inputs', () => {
+  it('A1B2-V12 Solar lines without cable metadata are never pick inputs', () => {
     vi.stubGlobal('PointerEvent', MouseEvent)
-    const shown = intakeOf(roof()), snapshot = JSON.stringify(shown)
+    const shown = intakeOf(roof())
+    shown.solar_design_graph.routes = []
+    const snapshot = JSON.stringify(shown)
     const view = mountViewer(shown, { solarOverlay: overlayOf(shown) })
     const solar = attached()[0].group, outer = solar.parent
     expect(outer).toBeTruthy()
@@ -435,6 +454,47 @@ describe('stored Solar graph in real Viewer', () => {
       }
     expect(JSON.stringify(shown)).toBe(snapshot)
     expect(view.ref.current).toBeTruthy()
+  })
+
+  it('highlights a complete bent homerun when its shared aisle is picked', () => {
+    const graph = roof()
+    graph.routes.push(R(2, 'start homerun', [[3, 0], [3, 2], [4, 2]]))
+    const shown = intakeOf(graph), onSelectEntity = vi.fn()
+    const view = mountViewer(shown, { solarOverlay: overlayOf(shown), onSelectEntity })
+    clickDrawingPoint(view, 3, 1)
+    expect(worldVertices(routeHighlight())).toEqual([2, 0, 1.5, 3, 0, 1.5, 3, 0, 1.5, 3, 2, 1.5])
+    expect(onSelectEntity).not.toHaveBeenCalled()
+    clickDrawingPoint(view, 3, 1, { shiftKey: true })
+    expect(onSelectEntity).toHaveBeenCalledWith('A', { additive: true })
+  })
+
+  it('cycles stable identities on coincident segments instead of highlighting both', () => {
+    const graph = roof()
+    graph.routes.push(R(2, 'start homerun', [[2, 0], [3, 0], [3, -2]]))
+    const shown = intakeOf(graph)
+    const view = mountViewer(shown, { solarOverlay: overlayOf(shown) })
+    clickDrawingPoint(view, 2.5, 0)
+    const first = routeHighlight()
+    expect(worldVertices(first).at(-2)).toBe(2)
+    clickDrawingPoint(view, 2.5, 0)
+    expect(worldVertices(routeHighlight()).at(-2)).toBe(-2)
+    expect(first.parent).toBe(null)
+  })
+
+  it('drops the highlight on version replacement even when the route ID is reused', () => {
+    const shown = intakeOf(roof()), view = mountViewer(shown, { solarOverlay: overlayOf(shown) })
+    clickDrawingPoint(view, 3, 1)
+    const highlight = routeHighlight()
+    const dispose = vi.spyOn(highlight.geometry, 'dispose')
+    const replacement = roof()
+    replacement.routes[0].points = [[2, 0], [4, 0], [4, 2]]
+    const next = intakeOf(replacement)
+    act(() => view.ref.current.applyVersion(next))
+    view.update({ solarOverlay: overlayOf(next) })
+    expect(routeHighlight()).toBeUndefined()
+    expect(dispose).toHaveBeenCalledTimes(1)
+    clickDrawingPoint(view, 4, 1)
+    expect(worldVertices(routeHighlight())).toEqual([2, 0, 1.5, 4, 0, 1.5, 4, 0, 1.5, 4, 2, 1.5])
   })
 
   it('A1B2-V13 phone and desktop admit alike', () => {

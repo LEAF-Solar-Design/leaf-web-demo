@@ -856,6 +856,8 @@ const Viewer = forwardRef(function Viewer(
     const activeTouches = new Set()
     let suppressTouchPick = false
     const stackedPick = createStackedPickCycle()
+    const stackedRoutePick = createStackedPickCycle()
+    let lastRouteLayer = null
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
       if (e.pointerType === 'touch' && (suppressTouchPick || e.isPrimary === false)) return
@@ -880,8 +882,20 @@ const Viewer = forwardRef(function Viewer(
         ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
       raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
       scene.updateMatrixWorld(true)
-      const hits = raycaster.intersectObjects(pickables, false)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
+      const routeLayer = stateRef.current?.solarLayer ?? null
+      if (routeLayer !== lastRouteLayer || additive) stackedRoutePick.reset()
+      lastRouteLayer = routeLayer
+      if (!additive && routeLayer?.pickObjects.length) {
+        const routeHits = raycaster.intersectObjects(routeLayer.pickObjects, false)
+        const routeId = stackedRoutePick.pick(routeLayer.routesFromHits(routeHits), e.clientX, e.clientY, performance.now())
+        routeLayer.selectRoute(routeId)
+        if (routeId !== null) {
+          stackedPick.reset()
+          return
+        }
+      }
+      const hits = raycaster.intersectObjects(pickables, false)
       let handle
       if (additive) {
         stackedPick.reset()
@@ -899,7 +913,10 @@ const Viewer = forwardRef(function Viewer(
     function onPointerCancel(e) {
       if (down && down.pointerId === e.pointerId) down = null
     }
-    function onPickMove(e) { stackedPick.move(e.clientX, e.clientY) }
+    function onPickMove(e) {
+      stackedPick.move(e.clientX, e.clientY)
+      stackedRoutePick.move(e.clientX, e.clientY)
+    }
     const dom = renderer.domElement
     let candidate = null
     let marquee = null
