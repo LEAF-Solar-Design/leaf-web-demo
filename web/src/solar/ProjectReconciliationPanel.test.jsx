@@ -44,6 +44,9 @@ const blobText = blob => new Promise(resolve => {
   reader.onload = () => resolve(reader.result)
   reader.readAsText(blob)
 })
+const comparisonColumns = csv => csv.split('\r\n')
+  .map(line => line.split(',').slice(0, 5).join(',')).join('\r\n')
+const comparisonCsv = async blob => comparisonColumns(await blobText(blob))
 
 it('contains a synchronous read throw and releases the request for a clean retry', async () => {
   const h = fixture()
@@ -80,10 +83,11 @@ it('exports UTF-8 CSV with the exact safe filename, MIME and accepted five rows'
   expect(blob.type).toBe('text/csv;charset=utf-8')
   expect(anchor.download).toBe('engineering-reconciliation.csv')
   expect(anchor.href).toBe('blob:metadata')
-  expect(await blobText(blob)).toBe('metric,studio,oracle,delta,verdict\r\n' +
-    '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
-    '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
-    '"kw_dc","0.4","0.400","0","PASS"\r\n')
+  expect(screen.getByText('No confirmed engineering totals revision. CSV includes unsaved values.')).toBeTruthy()
+  expect(await blobText(blob)).toBe('metric,studio,oracle,delta,verdict,design_revision,engineering_totals_revision,oracle_source\r\n' +
+    '"panels","1","01","0","PASS","9","","unsaved"\r\n"optimizers","","00","","UNREADABLE","9","","unsaved"\r\n' +
+    '"inverters","1","01","0","PASS","9","","unsaved"\r\n"strings","1","01","0","PASS","9","","unsaved"\r\n' +
+    '"kw_dc","0.4","0.400","0","PASS","9","","unsaved"\r\n')
 })
 
 it.each(['valid', 'invalid', 'pending'])('Enter in every report input does not start read or download (%s)', async state => {
@@ -128,6 +132,58 @@ function canonicalReports(h, file = { response: totalsResponse() }) {
   return file
 }
 const reportsLoaded = () => screen.findByText(/No saved engineering totals|Saved engineering totals loaded/)
+
+function reconciliationDownload() {
+  const createObjectURL = vi.fn(() => 'blob:provenance')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  return () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
+    return blobText(createObjectURL.mock.calls.at(-1)[0])
+  }
+}
+
+it('exports saved and edited sources and retains the confirmed revision across a save conflict', async () => {
+  const h = fixture()
+  const file = canonicalReports(h, { response: totalsResponse(4, reportValues) })
+  read(); await reportsLoaded()
+  const download = reconciliationDownload()
+  expect(screen.getByText('Last confirmed engineering totals revision 4.')).toBeTruthy()
+  expect((await download()).match(/"9","4","saved"/g)).toHaveLength(5)
+
+  fill(['1', '00', '01', '01', ''])
+  expect(screen.getByText('Last confirmed engineering totals revision 4. CSV includes unsaved values.')).toBeTruthy()
+  const mixed = await download()
+  expect(mixed).toContain('"panels","1","1","0","PASS","9","4","unsaved"\r\n')
+  expect(mixed).toContain('"kw_dc","0.4","","","UNREADABLE","9","4","unsaved"\r\n')
+  expect(mixed.match(/"9","4","saved"/g)).toHaveLength(3)
+
+  file.response = totalsResponse(5, ['2', '00', '01', '01', '0.400'])
+  saveTotals(); await screen.findByText(/Engineering totals changed\. Reload/)
+  expect(await download()).toBe(mixed)
+  reloadTotals(); await screen.findByText('Saved engineering totals loaded.')
+  expect((await download()).match(/"9","5","saved"/g)).toHaveLength(5)
+})
+
+it('clears prior report provenance on a graph switch even before the new report loads', async () => {
+  const h = fixture()
+  canonicalReports(h, { response: totalsResponse(4, reportValues) })
+  read(); await reportsLoaded()
+  const next = response()
+  next.data.intake.solar_design_graph.rev = 10
+  next.data.intake.solar_design_graph_sha256 = 'b'.repeat(64)
+  h.client.readContext.mockResolvedValueOnce(next)
+  let finishLoad
+  h.client.loadEngineeringTotals.mockReturnValueOnce(new Promise(resolve => { finishLoad = resolve }))
+  read(); await screen.findByText('Saved design revision 10.')
+  const download = reconciliationDownload()
+  expect((await download()).match(/"10","","unsaved"/g)).toHaveLength(5)
+  expect(screen.getByText('No confirmed engineering totals revision. CSV includes unsaved values.')).toBeTruthy()
+
+  await act(async () => finishLoad(totalsResponse()))
+  fill(['01', '00', '01', '01', ''])
+  expect(await download()).toContain('"kw_dc","0.4","","","UNREADABLE","10","","not_supplied"\r\n')
+})
 
 it.each([2147483646, 2147483647])('retains drafts, CSV and CAS at the revision ceiling after loading %i', async initialRevision => {
   const h = fixture(); canonicalReports(h, { response: totalsResponse(initialRevision, reportValues) })
@@ -189,7 +245,7 @@ it.each([['', '0', ''], ['0', '', '0']])('reloads optional DC through %j, %j and
       '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
       '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
       (dc === '' ? '"kw_dc","0.4","","","UNREADABLE"\r\n' : '"kw_dc","0.4","0","0.4","FAIL"\r\n')
-    expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(expected)
+    expect(await comparisonCsv(createObjectURL.mock.calls.at(-1)[0])).toBe(expected)
   }
   const final = [...reportValues]; final[4] = dcValues.at(-1)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(10, final))
@@ -365,7 +421,7 @@ it.each(['idle', 'Save'])('keeps native parent form reset coherent while %s', as
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(phase === 'Save' ? 2 : 1, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: phase === 'Save' ? 1 : 0, drafts: dirtyFormValues })
@@ -387,7 +443,7 @@ it.each(['Save', 'Reload'])('settles %s inside a disabled parent fieldset', asyn
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
@@ -408,7 +464,7 @@ it.each(['success', 'rejection'])('preserves same-panel caret through held Save 
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
 })
 
 it.each(['Save', 'Reload'])('ignores visibility events during held %s', async operation => {
@@ -430,7 +486,7 @@ it.each(['Save', 'Reload'])('ignores visibility events during held %s', async op
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
@@ -462,7 +518,7 @@ it.each(Object.keys(persistenceEvents).flatMap(kind => ['Save', 'Reload'].map(op
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
@@ -519,7 +575,7 @@ it.each(['historyUndo', 'historyRedo'].flatMap(type => ['success', 'rejection'].
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(type === 'historyUndo' ? historyCsv : dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(type === 'historyUndo' ? historyCsv : dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(outcome === 'success' ? 2 : 1, final))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: final })
@@ -606,7 +662,7 @@ it.each(['Save', 'Reload'])('keeps canceled beforeinput inert through held %s', 
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(historyCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(historyCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, historyValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: historyValues })
@@ -641,7 +697,7 @@ it.each(['requestSubmit', 'formdata', 'resize'].flatMap(kind => ['Save', 'Reload
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
@@ -665,7 +721,7 @@ it.each(['success', 'rejection'])('preserves direction changes through held Save
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(outcome === 'success' ? 2 : 1, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: outcome === 'success' ? 1 : 0, drafts: dirtyFormValues })
@@ -696,7 +752,7 @@ it.each(['Save', 'Reload'])('preserves mocked reduced-motion transitions during 
   vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(dirtyFormCsv)
   h.client.saveEngineeringTotals.mockResolvedValueOnce(totalsResponse(2, dirtyFormValues))
   saveTotals(); await screen.findByText('Engineering totals saved.')
   expect(h.client.saveEngineeringTotals.mock.calls.at(-1)[0]).toMatchObject({ expectedRevision: 1, drafts: dirtyFormValues })
@@ -724,7 +780,7 @@ function traceDownload() {
   vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
   return async (version, root = screen) => {
     fireEvent.click(root.getByRole('button', { name: 'Download CSV' }))
-    expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(traceCsv(version))
+    expect(await comparisonCsv(createObjectURL.mock.calls.at(-1)[0])).toBe(traceCsv(version))
   }
 }
 const saveCommandTraces = Array.from({ length: 16 }, (_, mask) => ({ mask,
@@ -1288,7 +1344,7 @@ it('exports a sibling own five rows twice during Save with exact URL cleanup and
     '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
     '"kw_dc","0.4","0.400","0","PASS"\r\n'
   for (let i = 0; i < 2; i++) {
-    b.click('Download CSV'); expect(await blobText(createObjectURL.mock.calls[i][0])).toBe(expected)
+    b.click('Download CSV'); expect(await comparisonCsv(createObjectURL.mock.calls[i][0])).toBe(expected)
   }
   expect(click).toHaveBeenCalledTimes(2); expect(revokeObjectURL.mock.calls).toEqual([['blob:sibling-1'], ['blob:sibling-2']])
   expect(h.client.loadEngineeringTotals).toHaveBeenCalledTimes(loads)
@@ -2288,7 +2344,7 @@ it.each([
     expect(remove).toHaveBeenCalledTimes(attempt)
     expect(removedAnchors[attempt - 1]).toBe(anchors[attempt - 1])
     expect(revokeObjectURL).toHaveBeenCalledTimes(attempt)
-    expect(await blobText(createObjectURL.mock.calls[attempt - 1][0])).toBe(expected)
+    expect(await comparisonCsv(createObjectURL.mock.calls[attempt - 1][0])).toBe(expected)
     expect(screen.getByRole('table').textContent).toBe(table)
     expect(screen.getAllByRole('textbox').map(input => input.value)).toEqual(drafts)
     expect(download.disabled).toBe(false)
@@ -2317,7 +2373,7 @@ it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cache
   const guidance = inputs.map(input => input.getAttribute('aria-describedby'))
   const download = screen.getByRole('button', { name: 'Download CSV' })
   fireEvent.click(download)
-  const baseline = await blobText(createObjectURL.mock.calls[0][0])
+  const baseline = await comparisonCsv(createObjectURL.mock.calls[0][0])
   expect(baseline).toBe('metric,studio,oracle,delta,verdict\r\n' +
     '"panels","1","01","0","PASS"\r\n"optimizers","","00","","UNREADABLE"\r\n' +
     '"inverters","1","01","0","PASS"\r\n"strings","1","01","0","PASS"\r\n' +
@@ -2327,7 +2383,7 @@ it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cache
   fireEvent.click(download)
   expect(createObjectURL).toHaveBeenCalledTimes(index === 4 ? 2 : 1)
   if (index === 4) {
-    const fresh = await blobText(createObjectURL.mock.calls[1][0])
+    const fresh = await comparisonCsv(createObjectURL.mock.calls[1][0])
     expect(fresh).toBe(baseline.replace('"kw_dc","0.4","0.400","0","PASS"',
       '"kw_dc","0.4","","","UNREADABLE"'))
   }
@@ -2337,7 +2393,7 @@ it.each([0, 1, 2, 3, 4])('clears report %s after export and restores exact cache
   expect(screen.getByRole('table').textContent).toBe(table)
   expect(inputs.map(input => input.value)).toEqual(drafts)
   fireEvent.click(download)
-  expect(await blobText(createObjectURL.mock.calls.at(-1)[0])).toBe(baseline)
+  expect(await comparisonCsv(createObjectURL.mock.calls.at(-1)[0])).toBe(baseline)
   expect(revokeObjectURL).toHaveBeenCalledTimes(createObjectURL.mock.calls.length)
   expect(h.client.readContext).toHaveBeenCalledOnce()
   expect(derive).toHaveBeenCalledOnce()
@@ -2439,7 +2495,7 @@ it.each(['binding', 'client'].flatMap(change => ['before', 'after'].map(phase =>
   if (change === 'client') expect(bClient.readContext).toHaveBeenCalledOnce()
   expect(oldSignal.aborted).toBe(true)
   download()
-  expect(await blobText(createObjectURL.mock.calls[0][0])).toBe(
+  expect(await comparisonCsv(createObjectURL.mock.calls[0][0])).toBe(
     'metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
     '"optimizers","","0","","UNREADABLE"\r\n"inverters","1","1","0","PASS"\r\n' +
     '"strings","1","1","0","PASS"\r\n"kw_dc","0.8","0.8","0","PASS"\r\n')
@@ -2907,7 +2963,7 @@ it.each(['\u0661', '\uff11', '1,0', '1\u200b', '=1+1', '+SUM(1)', '@SUM(1)', '-1
     const csv = await new Promise(resolve => {
       const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(createObjectURL.mock.calls[0][0])
     })
-    expect(csv).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","01","0","PASS"\r\n' +
+    expect(comparisonColumns(csv)).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","01","0","PASS"\r\n' +
       '"optimizers","","00","","UNREADABLE"\r\n"inverters","1","001","0","PASS"\r\n' +
       '"strings","1","01","0","PASS"\r\n"kw_dc","0.4","0.400","0","PASS"\r\n')
   })
@@ -3035,7 +3091,7 @@ it('reads only on demand, shows five editable rows and exports precisely the cur
   fireEvent.click(screen.getByRole('button', { name: 'Download CSV' }))
   const blob = createObjectURL.mock.calls[0][0]
   const csv = await new Promise((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob) })
-  expect(csv).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
+  expect(comparisonColumns(csv)).toBe('metric,studio,oracle,delta,verdict\r\n"panels","1","1","0","PASS"\r\n' +
     '"optimizers","","0","","UNREADABLE"\r\n"inverters","1","2","-1","FAIL"\r\n' +
     '"strings","1","1","0","PASS"\r\n"kw_dc","0.4","0.400000000000000001","-0.000000000000000001","FAIL"\r\n')
   expect(click).toHaveBeenCalledOnce()

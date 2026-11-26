@@ -3791,6 +3791,9 @@ def build_suites() -> List[Suite]:
                   # harness image build runs the same four packages against the
                   # Windows goldens and fails on any mismatch.
                   ("test/branchCompileCheck.test.ts", 4),
+                  # The area-marks real-compiler case needs a built Branch checker
+                  # (LEAF_BRANCH_COMPILE_BIN/REFS), like the four parity cases above.
+                  ("test/branchTarget.test.ts", 1),
               )),
         Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
               [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),

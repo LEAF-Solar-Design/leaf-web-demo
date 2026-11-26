@@ -117,6 +117,7 @@
       "0114",
       "0115",
       "0116",
+      "0118",
       "0119"
     ],
     "migration_files": [
@@ -236,6 +237,7 @@
       "0114_video_decode_job_functions.sql",
       "0115_sizing_exchange_trigger_search_path.sql",
       "0116_x07_confirmation_evidence.sql",
+      "0118_sizing_exchange_check_security_definer.sql",
       "0119_browser_static_build_admission.sql"
     ],
     "completeness": "partial",

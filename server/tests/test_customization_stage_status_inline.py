@@ -31,6 +31,7 @@ from test_customization_inline_review import review
 LOCATION = {"code": "CS0117", "file": "lib/example.csx", "line": 42}
 REFUSAL = {"n": 1, "decision": "compile_failed", "errors": 1, "diagnostics": [LOCATION]}
 ACCEPT = {"n": 2, "decision": "accept", "errors": 0, "diagnostics": []}
+DECODED = {"entities": 2, "original_sha256": "a" * 64, "compiled_sha256": "b" * 64}
 
 
 def _reserve(tmp_path, **fields):
@@ -456,3 +457,40 @@ def test_queue_router_error_contract(code, retryable, caplog):
     if code == "customization_stage_queue_full":
         assert any(record.levelno == logging.WARNING and code in record.message for record in caplog.records)
         assert "not counted against your daily builds" in body["error"]["message"]
+
+
+def test_decoded_attempt_round_trips_to_stage_status(lane, monkeypatch):
+    post = requests.post
+    attempts = [REFUSAL, dict(ACCEPT, source_decoded=DECODED)]
+
+    def stage(url, **kwargs):
+        response = post(url, **kwargs)
+        response.json()["compile_attempts"] = attempts
+        return response
+
+    monkeypatch.setattr(requests, "post", stage)
+    job = lane.service.enqueue_stage(**_request(lane))
+    assert customization_stage_worker.run_once("worker", service=lane.service)
+    status = lane.service.stage_status_change(_change(lane, job))
+    assert status["compile"]["attempts"] == attempts
+
+
+@pytest.mark.parametrize("decoded", [
+    None, {}, [], dict(DECODED, extra=True),
+    {key: value for key, value in DECODED.items() if key != "entities"},
+    {key: value for key, value in DECODED.items() if key != "original_sha256"},
+    {key: value for key, value in DECODED.items() if key != "compiled_sha256"},
+    *[dict(DECODED, entities=value) for value in (True, False, 0, -1, 10001, 1.5, "2", None)],
+    *[dict(DECODED, **{key: value}) for key in ("original_sha256", "compiled_sha256")
+      for value in (None, 42, "a" * 63, "a" * 65, "A" * 64, "g" * 64, "a" * 64 + "\n")],
+    dict(DECODED, compiled_sha256=DECODED["original_sha256"]),
+])
+def test_invalid_decoded_attempt_is_rejected(tmp_path, caplog, decoded):
+    test_invalid_attempt_drops_entire_field(tmp_path, caplog, [dict(ACCEPT, source_decoded=decoded)])
+
+
+@pytest.mark.parametrize("decision", ["compile_failed", "malformed", "unavailable"])
+def test_decoding_disclosure_requires_acceptance(tmp_path, caplog, decision):
+    test_invalid_attempt_drops_entire_field(
+        tmp_path, caplog, [dict(REFUSAL, decision=decision, source_decoded=DECODED)],
+    )
