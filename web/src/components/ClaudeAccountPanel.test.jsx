@@ -464,7 +464,7 @@ describe('Claude account onboarding instructions', () => {
     expect(dialog).toHaveTextContent('No Anthropic API key is linked yet.')
     expect(dialog.textContent).not.toMatch(/subscription|setup-token|Claude Code|\bPro\b|\bMax\b/)
     expect(within(dialog).queryByRole('radiogroup')).not.toBeInTheDocument()
-    const steps = within(dialog).getByRole('list', { name: 'How to get an Anthropic API key' })
+    const steps = within(dialog).getByRole('list', { name: 'Steps to create a key' })
     expect(within(steps).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
       'Sign in to Claude Console and open API keys.',
       'Create a key and copy it. Console shows it only once.',

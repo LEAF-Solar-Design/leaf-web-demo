@@ -263,7 +263,7 @@ export default function ClaudeAccountPanel({
                   No Anthropic API key is linked yet.
                 </p>
               )}
-              <ol className="ca-steps" aria-label="How to get an Anthropic API key">
+              <ol className="ca-steps" aria-label="Steps to create a key">
                 <li>Sign in to <a href={ANTHROPIC_CONSOLE_KEYS_URL} target="_blank" rel="noreferrer">Claude Console</a> and open API keys.</li>
                 <li>Create a key and copy it. Console shows it only once.</li>
                 <li>Paste it below.</li>
