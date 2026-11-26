@@ -1057,7 +1057,11 @@ describe('project page editor', () => {
     const email = { label: 'General questions', href: 'mailto:hello@example.test' }
     const booking = { label: 'Book a tasting', href: 'https://example.test/book' }
     const catering = { label: 'Catering', href: 'mailto:catering@example.test' }
-    const stored = page(2, { actions: [email, booking, catering] })
+    const actions = [email, booking, catering, ...Array.from({ length: 9 }, (_, index) => ({
+      label: `Regional office ${index + 1}`,
+      href: `mailto:office-${index + 1}@example.test`,
+    }))]
+    const stored = page(2, { actions })
     loadProjectPage.mockResolvedValueOnce(page(1, { action: email })).mockResolvedValueOnce(stored)
     saveProjectPage.mockResolvedValueOnce(stored)
     function EditorAndPreview() {
@@ -1067,7 +1071,7 @@ describe('project page editor', () => {
     }
     render(<EditorAndPreview />)
     await openSaved()
-    for (const action of [booking, catering]) {
+    for (const action of actions.slice(1)) {
       fireEvent.click(button('Add contact link'))
       const label = screen.getAllByLabelText('Contact link label').at(-1)
       const url = screen.getAllByLabelText('Contact link URL').at(-1)
@@ -1075,7 +1079,7 @@ describe('project page editor', () => {
       fireEvent.change(url, { target: { value: action.href } })
     }
     expect(screen.getAllByRole('link').map(link => [link.textContent, link.getAttribute('href')]))
-      .toEqual([email, booking, catering].map(({ label, href }) => [label, href]))
+      .toEqual(actions.map(({ label, href }) => [label, href]))
     expect(screen.queryByRole('button', { name: 'Add contact link' })).toBeNull()
     fireEvent.click(button('Save page'))
     await waitFor(() => expect(saveProjectPage).toHaveBeenCalled())
@@ -1084,7 +1088,9 @@ describe('project page editor', () => {
     await waitFor(() => expect(loadProjectPage).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(button('Remove contact link 2').disabled).toBe(false))
     fireEvent.click(button('Remove contact link 2'))
-    expect(screen.getAllByRole('link').map(link => link.textContent)).toEqual([email.label, catering.label])
+    expect(screen.getAllByRole('link').map(link => [link.textContent, link.getAttribute('href')]))
+      .toEqual([email, ...actions.slice(2)].map(({ label, href }) => [label, href]))
+    expect(button('Add contact link')).toBeEnabled()
   })
 
   it('authors a contact action and preserves it through the saved page and revision export', async () => {
