@@ -38,7 +38,6 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [message, setMessage] = useState('')
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
-  const lastRefusal = useRef('')
   const canvas = useRef(null)
   const search = useRef(null)
   const flow = useReactFlow()
@@ -60,6 +59,10 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     onChange?.({ document: draft(current.current), ready, problems })
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
+  const statusOfPipe = pipe => {
+    try { return connectionStatus(current.current, pipe, entries) }
+    catch (error) { return { ok: false, reason: humanizeError(error) } }
+  }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }
   const remove = id => { commit(removeBlock(current.current, id)); setSelected(null) }
   const add = (manifest, position) => {
@@ -171,15 +174,19 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
             const removed = new Set(changes.filter(change => change.type === 'remove').map(change => change.id))
             if (removed.size) commit({ ...current.current, pipes: current.current.pipes.filter(pipe => !removed.has(pipeId(pipe))) })
           }}
-          onConnectStart={(_, params) => { lastRefusal.current = ''; setPending({ node: params.nodeId, port: params.handleId, type: params.handleType }) }}
-          onConnectEnd={() => { setPending(null); if (lastRefusal.current) setMessage(lastRefusal.current) }}
-          isValidConnection={connection => {
-            let status
-            try { status = connectionStatus(document, asPipe(connection), entries) }
-            catch (error) { status = { ok: false, reason: humanizeError(error) } }
-            lastRefusal.current = status.reason
-            return status.ok
+          onConnectStart={(_, params) => setPending({ node: params.nodeId, port: params.handleId, type: params.handleType })}
+          onConnectEnd={(_, { fromHandle, toHandle, isValid }) => {
+            setPending(null)
+            if (isValid || !fromHandle || !toHandle || fromHandle.type === toHandle.type) return
+            // React Flow can skip validation for handles disabled during the drag.
+            const [source, target] = fromHandle.type === 'source' ? [fromHandle, toHandle] : [toHandle, fromHandle]
+            const status = statusOfPipe({
+              from: { node: source.nodeId, port: source.id },
+              to: { node: target.nodeId, port: target.id },
+            })
+            if (!status.ok) setMessage(status.reason)
           }}
+          isValidConnection={connection => statusOfPipe(asPipe(connection)).ok}
           onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
           <Background color="var(--leaf-color-border)" /><Controls />
         </ReactFlow>
