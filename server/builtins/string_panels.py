@@ -9,8 +9,8 @@ Serpentine DC string routing over the intake's closed "Panels"-layer polylines:
      the geometry is scaled to inches for every distance rule below and the
      returned points are scaled back),
   2. cluster panels into BANKS (roof sections): union-find over centroid pairs
-     within ``cluster_radius_factor`` x the median nearest-neighbor distance —
-     a string never leaps a roof-section gap,
+     on the same supporting plane within ``cluster_radius_factor`` x the median
+     same-plane nearest-neighbor distance,
   3. per bank, estimate the row orientation from the panels' longest polyline
      edges (rotated banks band along their own rows, not the world axes),
      rotate into the bank frame, band centroids into rows by frame-y
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, NamedTuple, Tuple
 
 # MARKETING-DEMO defaults (Q.Peak DUO XL-G11.7 / 425 class, public datasheet
 # ballpark) — pending operator blessing. Every value is overridable per-run.
@@ -152,9 +152,57 @@ def _longest_edge_angle(panel: Dict[str, Any]) -> float:
 
 
 _GRID_CELL = 200.0  # inches; nearest-neighbor search window (>> module pitch)
+_FACE_HEIGHT_TOLERANCE = 1 / 16  # inch; allows intake rounding and local extrapolation
+_FACE_SLOPE_TOLERANCE = 0.001  # rise per run
 
 
-def _cluster_banks(cents: List[Tuple[float, float]], radius_factor: float
+class _PanelPlane(NamedTuple):
+    z: float  # elevation at the panel centroid
+    slope_x: float
+    slope_y: float
+
+
+def _panel_plane(panel: Dict[str, Any]) -> _PanelPlane | None:
+    """Find the support plane from the largest projected triangle in the outline fan."""
+    points = panel["pts"]
+    if all(len(point) == 2 for point in points):
+        return _PanelPlane(0.0, 0.0, 0.0)
+    if any(len(point) < 3 or not math.isfinite(point[2]) for point in points):
+        return None
+    x, y, z = points[0][:3]
+    # Horizontal outlines need no projected area calculation, which can underflow
+    # for very small but supported drawing-unit scales.
+    if all(point[2] == z for point in points):
+        return _PanelPlane(z, 0.0, 0.0)
+    offsets = [(p[0] - x, p[1] - y, p[2] - z) for p in points[1:]]
+    area, slope_x, slope_y = 0.0, 0.0, 0.0
+    for (ax, ay, az), (bx, by, bz) in zip(offsets, offsets[1:]):
+        determinant = ax * by - ay * bx
+        if abs(determinant) > area:
+            area = abs(determinant)
+            slope_x = (az * by - ay * bz) / determinant
+            slope_y = (ax * bz - az * bx) / determinant
+    if not area or not math.isfinite(area):
+        return None
+    if not all(abs(dz - slope_x * dx - slope_y * dy) <= _FACE_HEIGHT_TOLERANCE
+               for dx, dy, dz in offsets):
+        return None
+    return _PanelPlane(z + sum(dz / len(points) for _, _, dz in offsets), slope_x, slope_y)
+
+
+def _same_panel_plane(a: _PanelPlane | None, b: _PanelPlane | None,
+                      dx: float, dy: float) -> bool:
+    if a is None or b is None:
+        return False
+    dz = b.z - a.z
+    return (abs(a.slope_x - b.slope_x) <= _FACE_SLOPE_TOLERANCE
+            and abs(a.slope_y - b.slope_y) <= _FACE_SLOPE_TOLERANCE
+            and abs(dz - a.slope_x * dx - a.slope_y * dy) <= _FACE_HEIGHT_TOLERANCE
+            and abs(dz - b.slope_x * dx - b.slope_y * dy) <= _FACE_HEIGHT_TOLERANCE)
+
+
+def _cluster_banks(cents: List[Tuple[float, float]], radius_factor: float,
+                   planes: List[_PanelPlane | None] | None = None
                    ) -> List[List[int]]:
     """Union-find over centroid pairs within radius_factor x the median
     nearest-neighbor distance. Returns banks as index lists, deterministically
@@ -170,7 +218,11 @@ def _cluster_banks(cents: List[Tuple[float, float]], radius_factor: float
             for dy in (-1, 0, 1):
                 for j in grid.get((int(cx // _GRID_CELL) + dx,
                                    int(cy // _GRID_CELL) + dy), []):
-                    if j != i and math.hypot(cents[j][0] - cx, cents[j][1] - cy) <= radius:
+                    if j == i:
+                        continue
+                    step_x, step_y = cents[j][0] - cx, cents[j][1] - cy
+                    if (math.hypot(step_x, step_y) <= radius
+                            and (planes is None or _same_panel_plane(planes[i], planes[j], step_x, step_y))):
                         out.append(j)
         return out
 
@@ -293,7 +345,8 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
         raise InputValidationError(f"Layer {layer!r}: {exc}", exc.next_action) from exc
 
     cents = [_centroid(pl) for pl in panels]
-    banks = _cluster_banks(cents, float(p["cluster_radius_factor"]))
+    planes = [_panel_plane(pl) for pl in panels]
+    banks = _cluster_banks(cents, float(p["cluster_radius_factor"]), planes)
 
     constrained = any(key in (params or {}) for key in
                       ("min_modules_per_string", "max_modules_per_string"))
