@@ -213,6 +213,43 @@ def test_sip_r6_schedule_comparison_direct(http, variant):
     assert (http.s.blobs, http.s.head, http.s.writes) == (blobs, head, writes)
 
 
+def test_sip_r6_schedule_comparison_reports_replaced_string(http):
+    graph = files.schedules_cases.solaredge_layout(files.design_cases.graph.__wrapped__(), "direct")
+    before = schedule_artifact(http, save_schedule_graph(http, graph))
+    target = deepcopy(graph)
+    string = target["strings"][0]
+    removed_id = string["id"]
+    added_id = files.design_cases.app_id("string", 3)
+    string["id"] = added_id
+    for panel in target["panels"]:
+        if panel["id"] in string["ordered_panel_refs"]:
+            panel["assignment"]["string_ref"] = added_id
+    frame = target["frames"][0]
+    for ref in frame["sequences"] + frame["panel_assignments"] + target["inverters"][0]["input_assignments"]:
+        if ref["string_ref"] == removed_id:
+            ref["string_ref"] = added_id
+    for route in target["routes"]:
+        if route["from_ref"] == removed_id:
+            route["from_ref"] = added_id
+    after = schedule_artifact(http, save_schedule_graph(http, target))
+
+    row = {"circuit_label": string["circuit_tag"], "module_count": string["module_count"],
+           "collector_id": string["inverter_ref"], "mppt_letter": "A", "input_number": 0,
+           "upstream_inverter_id": None}
+    for left, right, old_id, new_id in ((before, after, removed_id, added_id),
+                                        (after, before, added_id, removed_id)):
+        response = compare_schedules(http, left, right)
+        assert response.status_code == 200, response.text
+        changes = response.json()["result"]["changes"]
+        assert [change["string_id"] for change in changes] == sorted((old_id, new_id))
+        assert {change["string_id"]: change for change in changes} == {
+            old_id: {"string_id": old_id, "change": "removed", "changed_fields": [],
+                     "before": row, "after": None},
+            new_id: {"string_id": new_id, "change": "added", "changed_fields": [],
+                     "before": None, "after": row},
+        }
+
+
 def test_sip_r6_schedule_comparison_balanced_inverter_swap(http, monkeypatch):
     s = http.s
     record = files.sizing_cases.passing.__wrapped__()
