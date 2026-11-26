@@ -70,11 +70,11 @@ async function openProjectPanel(page) {
   return page.getByRole('region', { name: 'Project sidebar', exact: true })
 }
 
-async function openProjectUI(page) {
+async function openProjectUI(page, name = projectName) {
   await navigateProject(page)
-  const sidebar = await openProjectPanel(page)
-  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name: projectName, exact: true }).click()
-  await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
+  const sidebar = await ensureProjectSidebar(page)
+  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name, exact: true }).click()
+  await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
 }
 
 async function ensureProjectSidebar(page) {
@@ -297,9 +297,7 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
       stored.units.drawing_units === 'm' && stored.units.meters_per_unit === 1)
     await checkpoint(info, 'settings_readback')
     await releaseCheckout(page)
-    await page.reload()
-    await openProjectUI(page)
-    await openVersionUI(page, published.output_version_id)
+    await reopenProjectVersion(page, projectName, published.output_version_id)
     const reopenedForm = await openSettingsForm(page)
     await expect(reopenedForm.getByLabel('Panel layer contains', { exact: true })).toHaveValue('PP3B panels')
     const reopened = await readContext(page, published.output_version_id)
@@ -343,11 +341,8 @@ async function takeCheckout(page, binding) {
   return acquired.fence
 }
 
-async function reopenSizingProject(page, name, versionId) {
-  await navigateProject(page)
-  const sidebar = await openProjectPanel(page)
-  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name, exact: true }).click()
-  await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
+async function reopenProjectVersion(page, name, versionId) {
+  await openProjectUI(page, name)
   await openVersionUI(page, versionId)
 }
 
@@ -355,7 +350,7 @@ async function reopenSizingProject(page, name, versionId) {
 // first, then take again.
 async function moveToHead(page, name, binding, versionId) {
   await releaseCheckout(page)
-  await reopenSizingProject(page, name, versionId)
+  await reopenProjectVersion(page, name, versionId)
   return takeCheckout(page, binding)
 }
 
@@ -453,7 +448,7 @@ async function prepareSizingProject(page, name) {
   const binding = await attached
   check(binding.organization_id === metadata.organization_id && binding.project_id === project.project_id &&
     publicId(binding.drawing_id) && publicId(binding.input_version_id))
-  await reopenSizingProject(page, name, binding.input_version_id)
+  await reopenProjectVersion(page, name, binding.input_version_id)
   const fence = await takeCheckout(page, binding)
   const settings = await openSettingsForm(page)
   await expect(settings).toHaveAttribute('data-mode', 'initialize')
@@ -554,7 +549,7 @@ test('project_sizing_recovery_reopen', async ({ browser }, info) => {
     await checkpoint(info, 'recovery_values_read')
     await releaseCheckout(page)
     await page.reload()
-    await reopenSizingProject(page, sizingNames.recovery, job.output_version_id)
+    await reopenProjectVersion(page, sizingNames.recovery, job.output_version_id)
     await takeCheckout(page, binding)
     const reopened = await openSizingForm(page, { ...sizingInput(binding), input_version_id: job.output_version_id })
     await expect(reopened.getByText('Saved global string length: 27', { exact: true })).toBeVisible()
@@ -570,7 +565,7 @@ test('project_sizing_read_custody', async ({ browser }, info) => {
   await withIdentity(browser, async ({ page }) => {
     check(!!recovered)
     const { binding, job, values } = recovered
-    await reopenSizingProject(page, sizingNames.recovery, job.output_version_id)
+    await reopenProjectVersion(page, sizingNames.recovery, job.output_version_id)
     await takeCheckout(page, binding)
     const form = await openGraphForm(page, 'Panel groups', 'Panel groups')
     await form.getByLabel('Group 1 name', { exact: true }).fill('PP3B group 1')
@@ -672,7 +667,7 @@ test('project_sizing_service_unknown', async ({ browser }, info) => {
     await checkpoint(info, 'service_job_terminal')
     await releaseCheckout(page)
     await page.reload()
-    await reopenSizingProject(page, sizingNames.service, binding.panels_output_version_id)
+    await reopenProjectVersion(page, sizingNames.service, binding.panels_output_version_id)
     expect(await readSizingJob(page, sizingInput(binding), accepted.job_id)).toEqual(job)
     expect((await snapshot(page, binding.project_id)).versions).toEqual(before)
     await checkpoint(info, 'service_reobserved')
