@@ -41,7 +41,27 @@ def test_project_solve_preparation_is_derived_and_read_only(graph):
         graph, frame["id"], max_string_length=graph["settings"]["panels_in_sequence"],
         dwgname=graph["project"]["name"], full_frame=True)
     assert result["frames"][0]["panel_count"] == len(frame["panel_refs"])
+    assert result["frames"][0]["committed_panel_count"] == len(frame["panel_refs"])
+    assert result["frames"][0]["remaining_panel_count"] == 0
     assert "grant_ref" not in result
+    assert intake == before
+
+
+@pytest.mark.parametrize(("retained", "committed", "remaining"), [(1, 2, 1), (0, 0, 3)])
+def test_project_solve_preparation_reports_saved_coverage(graph, retained, committed, remaining):
+    from solar_project_solve_preparation import prepare_solve
+
+    graph["strings"] = graph["strings"][:retained]
+    graph["inverters"][0]["input_assignments"] = graph["inverters"][0]["input_assignments"][:retained]
+    graph["routes"] = []
+    graph["schedules"] = []
+    solve.sync_assignments(graph)
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    before = copy.deepcopy(intake)
+    result = prepare_solve(intake, None, is_head=True)
+    assert result["available"] is True
+    assert result["frames"][0]["committed_panel_count"] == committed
+    assert result["frames"][0]["remaining_panel_count"] == remaining
     assert intake == before
 
 
@@ -94,6 +114,8 @@ def test_project_solve_preparation_compact_ground_matches_expansion(graph, b18, 
     assert choices["available"] is True and "request" not in choices
     assert choices["frames"] == reference["frames"]
     assert [choice["panel_count"] for choice in choices["frames"]] == [294, 294]
+    assert [choice["committed_panel_count"] for choice in choices["frames"]] == [0, 0]
+    assert [choice["remaining_panel_count"] for choice in choices["frames"]] == [294, 294]
     result = prepare_solve(intake, frame["id"], is_head=True)
     assert result["available"] is True
     assert result["request"] == reference["request"]

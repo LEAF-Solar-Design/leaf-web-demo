@@ -12,12 +12,13 @@ const JOB = '55555555-5555-4555-8555-555555555555'
 const FRAME = 'leaf:frame:00000000-0000-4000-8000-000000000001'
 const REQUEST = { grid: { Dwgname: 'Saved roof', Sequences: [2, 1, 1, 0], Rows: [], Modify: [] } }
 function fixture() {
-  const h = { current: true, revision: 6, digest: 'b'.repeat(64) }
+  const h = { current: true, revision: 6, digest: 'b'.repeat(64),
+    frames: [{ id: FRAME, name: 'West roof', panel_count: 3 }] }
   const data = (options) => ({ context: { ...B, head_version_id: B.input_version_id, is_head: true, intake_sha256: 'a'.repeat(64) },
     intake: { solar_design_graph_sha256: 'b'.repeat(64), solar_design_graph: {
       rev: 6, settings: { ...SEED_SETTINGS }, project: { name: 'Saved roof', zip_code: '', latitude: null, longitude: null } } },
     solve_preparation: { available: true, graph_revision: h.revision, graph_sha256: h.digest,
-      frames: [{ id: FRAME, name: 'West roof', panel_count: 3 }],
+      frames: h.frames,
       ...(options.solveFrame ? { frame_ref: FRAME, request: REQUEST } : {}) } })
   h.client = { getSnapshot: () => ({ binding: B, authorityKey: 'epoch' }),
     captureCatalogScope: () => () => h.current,
@@ -35,6 +36,26 @@ function fixture() {
   }
   return h
 }
+
+it('shows saved group coverage for complete, partial and untouched groups', async () => {
+  const h = fixture()
+  h.frames = [
+    { ...h.frames[0], committed_panel_count: 3, remaining_panel_count: 0 },
+    { id: 'east', name: 'East roof', panel_count: 6, committed_panel_count: 4, remaining_panel_count: 2 },
+    { id: 'south', name: 'South roof', panel_count: 9, committed_panel_count: 0, remaining_panel_count: 9 },
+    { id: 'north', name: 'North roof', panel_count: 6, committed_panel_count: 4, remaining_panel_count: 4 },
+  ]
+  const view = h.mount()
+  await screen.findByRole('table', { name: 'Saved panel group progress' })
+  expect(screen.getByRole('row', { name: 'West roof 3 0' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'East roof 4 2' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'South roof 0 9' })).toBeInTheDocument()
+  expect(screen.getByRole('row', { name: 'North roof Unavailable Unavailable' })).toBeInTheDocument()
+  expect(screen.getByRole('option', { name: 'South roof (9 panels)' })).toBeInTheDocument()
+  h.client.readContext.mockImplementationOnce(() => new Promise(() => {}))
+  view.rerender(<ProjectSolarPreparedSolveForm {...h.props} authorityKey="next-epoch" />)
+  expect(screen.queryByRole('table', { name: 'Saved panel group progress' })).toBeNull()
+})
 
 it('submits only a fresh server-derived frame request without raw request/frame inputs', async () => {
   const h = fixture(); h.mount(); await h.choose()
