@@ -34,6 +34,7 @@ _TABLES = {
     "customization_deployment_audit",
     "customization_removal_requests",
     "customization_stage_attempt_history",
+    "customization_stage_grants",
 }
 _PG_NOW = (
     "to_char(clock_timestamp() AT TIME ZONE 'UTC', "

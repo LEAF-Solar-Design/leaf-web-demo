@@ -1138,8 +1138,9 @@ export async function fetchInlineAuthoringFlags() {
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
-// a per-user Claude OAuth token minted by `claude setup-token`, stored per tenant
-// server-side. The token is WRITE-ONLY from the UI: we POST it once and never
+// an Anthropic API key billed at API rates, stored per tenant server-side.
+// Existing oauth links from `claude setup-token` remain supported.
+// The credential is WRITE-ONLY from the UI: we POST it once and never
 // read it back (GET never returns it), never log it, never echo it.
 //   GET    /api/tenant/claude-grant -> {linked: bool, linked_at: str|null}
 //   POST   /api/tenant/claude-grant {token} -> {linked: true, linked_at}
@@ -1152,9 +1153,9 @@ export async function getClaudeGrant() {
 
 // POST the token ONCE. Callers must clear their field immediately after; this
 // layer keeps no reference to it beyond the request body and logs nothing.
-// `kind` ("oauth" = a Claude subscription token from `claude setup-token`;
-// "api_key" = an Anthropic org API key billed at API rates) is sent explicitly
-// from the user's choice. It is OPTIONAL in the contract (the server auto-detects
+// `kind` ("api_key" = an Anthropic API key billed at API rates) is sent explicitly
+// for new links. Existing "oauth" links from `claude setup-token` remain supported.
+// It is OPTIONAL in the contract (the server auto-detects
 // from the token shape when omitted); we send it so the linked kind is honest
 // even if detection is ambiguous. The token itself is never stored/echoed/logged.
 export async function linkClaudeGrant(token, kind, label, plan) {

@@ -6,6 +6,7 @@ import {
   StandardServicesOAuthGrantProvider,
   standardServicesResolverFromEnv,
   withAuthorStandardServicesAuthority,
+  withoutAuthorStandardServices,
 } from "../src/ports/impl/leafStandardServicesResolver.js";
 import type {
   AgentRunInput,
@@ -303,6 +304,37 @@ describe("LeafStandardServicesResolver", () => {
 });
 
 describe("author authority and grant separation", () => {
+  it("runs the unchanged input only within the explicit no-services scope", async () => {
+    const input = { grant: { kind: "api_key", apiKey: "model-secret" } } as AgentRunInput;
+    const inner = { run: vi.fn(async (_input: AgentRunInput) => ({ tool: {} as never, code: "", preview: "", files: [] })) };
+    const runner = new AuthorStandardServicesRunner(inner, true);
+    expect(() => runner.run(input)).toThrow("authority_missing");
+    await withoutAuthorStandardServices(async () => {
+      await Promise.resolve();
+      await runner.run(input);
+    });
+    expect(inner.run).toHaveBeenCalledExactlyOnceWith(input);
+    expect(inner.run.mock.calls[0]?.[0]).toBe(input);
+    expect(input.standardServicesContext).toBeUndefined();
+    expect(() => runner.run(input)).toThrow("authority_missing");
+  });
+
+  it("keeps concurrent no-services and authority-required runs separate", async () => {
+    const inner: AgentRunner = {
+      async run() { return { tool: {} as never, code: "", preview: "", files: [] }; },
+    };
+    const runner = new AuthorStandardServicesRunner(inner, true);
+    await Promise.all([
+      withoutAuthorStandardServices(async () => {
+        await Promise.resolve();
+        await runner.run({} as AgentRunInput);
+      }),
+      Promise.resolve().then(() => {
+        expect(() => runner.run({} as AgentRunInput)).toThrow("authority_missing");
+      }),
+    ]);
+  });
+
   it("uses lease account as mount while keeping the raw model grant separate", async () => {
     const oauth: OAuthGrantProvider = {
       async getGrant() { return { kind: "api_key", apiKey: "model-secret" }; },
