@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { clearRequestFailures, getSession, getTools, recentRequestFailures } from './api.js'
+import { clearRequestFailures, getSession, getTools, recentRequestFailures, uploadDrawing } from './api.js'
 
 vi.mock('./telemetry.js', () => ({ track: vi.fn(), trackErrorShown: vi.fn() }))
 
@@ -90,5 +90,31 @@ describe('request failure diagnostics', () => {
     expect(fetch.mock.calls[0][0]).toContain('/api/session?dwg=private-drawing')
     expect(recentRequestFailures()[0].endpointClass).toBe('/api/session')
     expect(JSON.stringify(recentRequestFailures())).not.toContain('private-drawing')
+  })
+})
+
+describe('upload quota reset messages', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('appends the reset in the user local time and preserves the response', async () => {
+    const resetsAt = '2026-11-26T00:00:00Z'
+    const body = { error: { message: 'Daily drawing limit reached.' }, quota: { resets_at: resetsAt } }
+    const time = new Date(resetsAt).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+    failWith(429, body)
+    await expect(uploadDrawing(new File(['drawing'], 'mine.dxf'))).rejects.toMatchObject({
+      message: `Daily drawing limit reached. Resets at ${time}.`, status: 429, body,
+    })
+  })
+
+  it.each([
+    [429, 'not a date'],
+    [429, undefined],
+    [503, '2026-11-26T00:00:00Z'],
+  ])('keeps the message for status %s and reset %s', async (status, resetsAt) => {
+    const body = { error: { message: 'Try again.' }, quota: { resets_at: resetsAt } }
+    failWith(status, body)
+    await expect(uploadDrawing(new File(['drawing'], 'mine.dxf'))).rejects.toMatchObject({
+      message: 'Try again.', status, body,
+    })
   })
 })

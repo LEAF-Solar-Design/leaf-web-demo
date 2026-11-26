@@ -330,12 +330,13 @@ def test_g2a_09_wrong_content_type_415(server, wire, fixture, monkeypatch):
 
 
 def test_g2a_10_synthetic_grant_accepted(tmp_path, monkeypatch):
+    started = int(time.time())  # before minting, so setup time cannot eat the TTL margin
     path, token = grant(tmp_path, monkeypatch)
     resolved = resolve_grant(replay.GRANT_REF, "demo-tenant")
     assert resolved.access_token == token and resolved.tenant_id == "demo-tenant"
     value = json.loads(path.read_bytes())[replay.GRANT_REF]
     assert type(value["expires_at"]) is int
-    assert value["expires_at"] >= int(time.time()) + 359
+    assert value["expires_at"] >= started + 359
     assert value["audience"] == "https://api.leafdesign.ai"
     assert not any(c.isspace() for c in token)
 

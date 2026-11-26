@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 import deps
 import browser_project_flow as flow
 import browser_static_build as build
+import browser_static_build_recheck as recheck
 from routers import browser_project
 
 
@@ -33,6 +34,7 @@ def fixture(monkeypatch):
     monkeypatch.setattr(flow, 'scope', current)
     monkeypatch.setattr(flow, 'repository', lambda *a: deepcopy(authority))
     monkeypatch.setattr(flow, 'read', lambda *a: deepcopy(row))
+    monkeypatch.delenv('LEAF_STATIC_NEXT_EXECUTOR', raising=False)
     monkeypatch.setenv('LEAF_AUTHOR_HARNESS_URL', 'https://fixture.invalid')
     monkeypatch.setattr(build.broker_client, 'harness_headers', lambda: {'X-Harness-Secret': 'fixture-only'})
     class Response:
@@ -80,6 +82,36 @@ def test_build_and_status_are_distinct_and_no_bearer_forwarded(fixture):
     assert 'Authorization' not in kwargs['headers'] and not kwargs['allow_redirects']
     assert json.loads(kwargs['data'])==dict(f.authority,source_request_id=f.request,job_id=f.job,**f.witnesses)
     assert f.calls[-1]=='closed'
+
+
+def test_submission_persists_the_original_actor_and_publication_before_dispatch(fixture, monkeypatch):
+    f = fixture
+    admissions = []
+
+    def admit(*args):
+        assert not f.calls
+        admissions.append(args)
+
+    monkeypatch.setenv('LEAF_STATIC_NEXT_EXECUTOR', 'enabled')
+    monkeypatch.setattr(build.admission, 'admit', admit)
+    assert f.exchange()['status'] == 'building'
+    assert not admissions
+    f.calls.clear()
+    assert f.exchange(True)['status'] == 'building'
+    assert admissions == [(f.authority, f.job, f.scope[2], f.request, f.witnesses)]
+    assert f.calls[0][0].endswith('/build')
+
+
+def test_conflicting_admission_stops_submission_before_dispatch(fixture, monkeypatch):
+    def conflict(*args):
+        raise flow.FlowError(409)
+
+    monkeypatch.setenv('LEAF_STATIC_NEXT_EXECUTOR', 'enabled')
+    monkeypatch.setattr(build.admission, 'admit', conflict)
+    with pytest.raises(flow.FlowError) as error:
+        fixture.exchange(True)
+    assert error.value.status == 409
+    assert not fixture.calls
 
 
 def test_ready_manifest_is_verified_before_return(fixture):
@@ -322,3 +354,112 @@ def test_chart_state_denied_write_precedes_body_read(chart_fixture,monkeypatch):
     monkeypatch.setattr(flow,'scope',scope)
     with TestClient(q.f.app) as client:r=client.put(q.f.path+'/chart-state',content=b'not JSON',headers={'Content-Type':'application/json'})
     assert r.status_code==403 and not q.graph_calls and not q.f.calls
+
+
+@pytest.fixture
+def dispatch_recheck(monkeypatch):
+    authority = dict(tenant_id=uid(1), organization_id=uid(1), project_id=uid(2), repo_key=uid(3))
+    candidate = dict(source_request_id=uid(4), version=3, receipt_digest='a' * 64,
+                     source_commit='b' * 40, source_tree='c' * 40)
+    record = dict(authority, **candidate, job_id=uid(5), actor_binding_id=uid(6))
+    lookup = {k: record[k] for k in recheck._LOOKUP}
+    body = dict(authority, **candidate, job_id=record['job_id'], operation='write')
+    state = SimpleNamespace(
+        record=record, role='write', role_calls=[], publication=dict(candidate, project_id=uid(2), state='published'),
+    )
+
+    def find(tenant_id, project_id, job_id):
+        if state.record and (tenant_id, project_id, job_id) == (uid(1), uid(2), uid(5)):
+            return dict(state.record)
+        return None
+
+    def role(current, *, write):
+        state.role_calls.append((current, write))
+        assert current == (uid(1), uid(2), uid(6))
+        if state.role is None or (write and state.role != 'write'):
+            raise recheck.flow.FlowError(403)
+
+    monkeypatch.setenv('LEAF_STATIC_NEXT_EXECUTOR', 'enabled')
+    monkeypatch.setattr(recheck.deps, '_dispatch_secret_ok', lambda value: value == 'fixture-dispatch')
+    monkeypatch.setattr(recheck, '_store', lambda: SimpleNamespace(find=find))
+    monkeypatch.setattr(recheck, '_require_role', role)
+    monkeypatch.setattr(recheck.flow, 'repository', lambda current: dict(authority))
+    monkeypatch.setattr(recheck.flow, '_read', lambda scope, source_id: state.publication)
+    monkeypatch.setattr(recheck.flow, 'representation', lambda row, scope: row)
+    api = FastAPI()
+    api.include_router(recheck.router)
+    client = TestClient(api)
+    headers = {'X-Tenant-Id': authority['tenant_id'], 'X-Dispatch-Secret': 'fixture-dispatch'}
+
+    def post(value=body, **kwargs):
+        return client.post(recheck.PATH, json=value, headers=headers, **kwargs)
+
+    return SimpleNamespace(**locals())
+
+
+def test_restart_uses_the_persisted_full_candidate_without_returning_actor(dispatch_recheck):
+    result = dispatch_recheck.post(dict(dispatch_recheck.lookup, operation='read'))
+    assert result.status_code == 200
+    assert result.json() == dict(
+        dispatch_recheck.authority, **dispatch_recheck.candidate, job_id=dispatch_recheck.record['job_id'],
+        schema='leaf.browser-static-candidate-recheck.v1',
+        execution_id=build._execution_digest(dispatch_recheck.authority, dispatch_recheck.record['job_id'], dispatch_recheck.candidate),
+    )
+    assert dispatch_recheck.state.role_calls == [((uid(1), uid(2), uid(6)), False)] * 2
+
+
+@pytest.mark.parametrize('field,value,status', [
+    ('tenant_id', uid(9), 403),
+    ('organization_id', uid(9), 403),
+    ('project_id', uid(9), 404),
+    ('repo_key', uid(9), 404),
+    ('job_id', uid(9), 404),
+    ('source_request_id', uid(9), 404),
+    ('version', 4, 404),
+    ('receipt_digest', 'd' * 64, 404),
+    ('source_commit', 'd' * 40, 404),
+    ('source_tree', 'd' * 40, 404),
+    ('actor_binding_id', uid(6), 422),
+])
+def test_foreign_and_caller_supplied_authority_is_refused(dispatch_recheck, field, value, status):
+    assert dispatch_recheck.post(dict(dispatch_recheck.body, **{field: value})).status_code == status
+    assert dispatch_recheck.state.role_calls == []
+
+
+@pytest.mark.parametrize('role,write_status,read_status', [
+    ('write', 200, 200),
+    ('read', 403, 200),
+    (None, 403, 403),
+])
+def test_rechecks_current_operation_specific_project_permission(dispatch_recheck, role, write_status, read_status):
+    dispatch_recheck.state.role = role
+    assert dispatch_recheck.post().status_code == write_status
+    assert dispatch_recheck.post(dict(dispatch_recheck.lookup, operation='read')).status_code == read_status
+
+
+def test_revocation_during_publication_check_is_refused(dispatch_recheck, monkeypatch):
+    def revoke(row, scope):
+        dispatch_recheck.state.role = None
+        return row
+
+    monkeypatch.setattr(recheck.flow, 'representation', revoke)
+    assert dispatch_recheck.post().status_code == 403
+    assert len(dispatch_recheck.state.role_calls) == 2
+
+
+def test_missing_and_stale_admission_fail_closed(dispatch_recheck):
+    dispatch_recheck.state.publication['version'] += 1
+    assert dispatch_recheck.post().status_code == 409
+    dispatch_recheck.state.publication['version'] -= 1
+    dispatch_recheck.state.record = None
+    assert dispatch_recheck.post(dict(dispatch_recheck.lookup, operation='read')).status_code == 404
+
+
+def test_partial_write_uncredentialed_method_and_default_off_are_refused(dispatch_recheck, monkeypatch):
+    assert dispatch_recheck.post(dict(dispatch_recheck.lookup, operation='write')).status_code == 200
+    assert dispatch_recheck.post(dict(dispatch_recheck.lookup, operation='write', source_request_id=uid(4))).status_code == 422
+    assert dispatch_recheck.client.get(recheck.PATH, headers=dispatch_recheck.headers).status_code == 405
+    assert dispatch_recheck.client.post(recheck.PATH, json=dispatch_recheck.body).status_code == 403
+    assert dispatch_recheck.client.post(recheck.PATH + '/', headers=dispatch_recheck.headers, follow_redirects=False).status_code == 307
+    monkeypatch.delenv('LEAF_STATIC_NEXT_EXECUTOR')
+    assert dispatch_recheck.post().status_code == 404

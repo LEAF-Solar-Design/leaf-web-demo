@@ -1260,6 +1260,118 @@ def test_estimate_legacy_material_bytes_without_minimum_fields():
     assert encode_estimate(decode_estimate(legacy_bytes)) == legacy_bytes
 
 
+@pytest.mark.parametrize("quantity,rate,basis,expected", [
+    ("120", "0.25", "1", "30.00"),
+    ("120", "250.00", "1000", "30.00"),
+    ("72", "0.25", "1000", "0.02"),
+    ("1", "1", "200", "0.00"),
+    ("3", "1", "200", "0.02"),
+])
+def test_estimate_quoted_price_basis(quantity, rate, basis, expected):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs((quantity,), (rate,))
+    inputs[1]["rates"][0].update(price_basis=basis, basis_unit="ea")
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert material["priced_subtotal"] == material["lines"][0]["amount"] == expected
+    assert material["lines"][0]["quantity"] == quantity
+    assert material["rate_card"] == inputs[1]
+
+
+@pytest.mark.parametrize("terms", [
+    {"price_basis": "0", "basis_unit": "ea"},
+    {"price_basis": "-1", "basis_unit": "ea"},
+    {"price_basis": None, "basis_unit": "ea"},
+    {"price_basis": "1000", "basis_unit": "m"},
+    {"price_basis": "1000"},
+    {"basis_unit": "ea"},
+])
+def test_estimate_rejects_invalid_quoted_basis(terms):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(terms)
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
+def test_estimate_applies_minimum_after_quoted_basis():
+    inputs = estimate_inputs(("72", "120", "192"), ("173.50",) * 3)
+    for rate in inputs[1]["rates"]:
+        rate.update(price_basis="1000", basis_unit="ea", minimum_amount="20.82",
+                    minimum_semantics="per_line_floor_after_rounding")
+    result = estimate_price(inputs)
+    assert [line["amount"] for line in result["lines"]] == ["20.82", "20.82", "33.31"]
+    assert result["priced_subtotal"] == "74.95"
+
+
+@pytest.mark.parametrize("quantity,billed,amount", [
+    ("29.9", "30", "18.00"),
+    ("30", "30", "18.00"),
+    ("30.1", "40", "20.00"),
+    ("0.1", "10", "18.00"),
+    ("0", "0", "18.00"),
+])
+def test_estimate_billing_increment_before_basis_and_minimum(quantity, billed, amount):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs((quantity,), ("50",))
+    inputs[1]["rates"][0].update(
+        increment="10", increment_semantics="ceil_quantity_before_pricing",
+        price_basis="100", basis_unit="ea", minimum_amount="18.00",
+        minimum_semantics="per_line_floor_after_rounding")
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    line, = material["lines"]
+    assert line["quantity"] == quantity
+    assert line["billed_quantity"] == billed
+    assert line["amount"] == material["priced_subtotal"] == amount
+
+
+def test_estimate_billing_increment_keeps_fractional_quantity_exact():
+    inputs = estimate_inputs(("72",), ("0.31",))
+    inputs[1]["rates"][0].update(increment="145/6", increment_semantics="ceil_quantity_before_pricing")
+    line, = estimate_price(inputs)["lines"]
+    assert (line["quantity"], line["billed_quantity"], line["amount"]) == ("72", "145/2", "22.48")
+
+
+@pytest.mark.parametrize("increment", [None, "0", "-2", "0/1", "1/0", "nan", "1000000000001"])
+def test_estimate_refuses_invalid_billing_increment(increment):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(increment=increment, increment_semantics="ceil_quantity_before_pricing")
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("volume", ["12.00", "24.00", "18.00"]),
+    ("marginal", ["12.00", "24.00", "27.60"]),
+])
+def test_estimate_supplier_tiers_inclusive_threshold(mode, expected):
+    from solar_estimate import decode_estimate, encode_estimate
+    inputs = estimate_inputs(("48", "96", "120"), ("0.50",) * 3)
+    for rate in inputs[1]["rates"]:
+        rate.update(tier_mode=mode, tiers=[{"up_to": 96, "rate": "0.25"}, {"up_to": None, "rate": "0.15"}])
+    material = decode_estimate(encode_estimate(estimate_price(inputs)))
+    assert [row["amount"] for row in material["lines"]] == expected
+    assert material["rate_card"] == inputs[1]
+
+
+def test_estimate_tiers_apply_to_rounded_billing_quantity_before_basis_and_minimum():
+    inputs = estimate_inputs(("95.1", "96.1"), ("1", "1"))
+    for rate in inputs[1]["rates"]:
+        rate.update(tier_mode="marginal", tiers=[{"up_to": "96", "rate": "250"}, {"up_to": None, "rate": "150"}],
+                    increment="8", increment_semantics="ceil_quantity_before_pricing",
+                    price_basis="1000", basis_unit="ea", minimum_amount="25.00",
+                    minimum_semantics="per_line_floor_after_rounding")
+    lines = estimate_price(inputs)["lines"]
+    assert [(line["quantity"], line["billed_quantity"], line["amount"]) for line in lines] == [
+        ("95.1", "96", "25.00"), ("96.1", "104", "25.20")]
+
+
+@pytest.mark.parametrize("bounds", [[], [None, 96], [96], [96, 96, None], [True, None], [0, None]])
+def test_estimate_rejects_invalid_tier_schedule(bounds):
+    inputs = estimate_inputs()
+    inputs[1]["rates"][0].update(tier_mode="volume", tiers=[{"up_to": bound, "rate": "0.15"} for bound in bounds])
+    with pytest.raises(GraphValidationError, match="ESTIMATE_RATE_CARD_INVALID"):
+        estimate_price(inputs)
+
+
 def test_estimate_bounds_and_long_exact_decimals():
     inputs = estimate_inputs(("1000000000000", "0.12345678901234567890123456789012345678"),
                              ("1000000000000", "0.12345678901234567890123456789012345678"))

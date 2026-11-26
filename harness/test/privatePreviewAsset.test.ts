@@ -9,6 +9,7 @@ it("rejects revocation during read",async()=>{const f=fixture();f.producer.read=
 
 import {createHarness} from "../src/server.js";
 import type {HarnessPorts} from "../src/ports/index.js";
+import type {PrivateBuildObservation} from "../src/projectBuild/privateBuildLifecycle.js";
 import type {AddressInfo} from "node:net";
 it("internal asset HTTP requires secret and tenant match, returns inert JSON",async()=>{
  const f=fixture();const server=createHarness({} as HarnessPorts,{auth:{enabled:false,secret:"fixture-only-secret"},projectStaticPreviews:f.producer}).listen();
@@ -20,23 +21,32 @@ it("internal asset HTTP requires secret and tenant match, returns inert JSON",as
  const response=await call({"x-harness-secret":"fixture-only-secret","x-tenant-id":a.tenantId});expect(response.status).toBe(200);expect(response.headers.get("content-type")).toContain("application/json");expect(response.headers.get("cache-control")).toBe("private, no-store");expect(await response.json()).toHaveProperty("body_base64",body.toString("base64"));
  }finally{server.closeAllConnections();await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
 });
-it("durable endpoint views receive full candidate identity and never fall back to process maps",async()=>{
+it("uses durable identity for status and assets and only exposes live building or failed status",async()=>{
  const f=fixture(),legacyRead=vi.spyOn(f.producer,"read");
- const observe=vi.fn(async()=>({schema:"leaf.private-static-build.v1" as const,jobId:f.w.jobId,status:"unknown" as const}));
+ const observation={schema:"leaf.private-static-build.v1" as const,jobId:f.w.jobId,status:"unknown" as const};
+ const observe=vi.fn(async()=>observation);
  const asset=vi.fn(async()=>{throw new Error("missing durable receipt")});
- const legacyObserve=vi.fn(async()=>{throw new Error("legacy observe must not run")});
+ const liveObserve=vi.fn(async():Promise<PrivateBuildObservation>=>observation);
+ const submit=vi.fn(async()=>{throw new Error("must not submit")});
  const server=createHarness({} as HarnessPorts,{auth:{enabled:false,secret:"fixture-only-secret"},projectStaticPreviews:f.producer,
-  projectStaticBuilds:{submit:async()=>{throw new Error("must not submit")},observe:legacyObserve},projectStaticViews:{observe,asset}}).listen();
+  projectStaticBuilds:{submit,observe:liveObserve},projectStaticViews:{observe,asset}}).listen();
  try{
   await new Promise<void>(done=>server.listening?done():server.once("listening",done));
   const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/internal/project-static-preview/`;
   const payload={tenant_id:a.tenantId,organization_id:a.organizationId,project_id:a.projectId,repo_key:a.repoKey,job_id:f.w.jobId,
    source_request_id:id(10),version:1,receipt_digest:"f".repeat(64),source_commit:f.w.sourceCommit,source_tree:f.w.sourceTree};
   const call=(path:string,value:unknown)=>fetch(base+path,{method:"POST",headers:{"content-type":"application/json","x-harness-secret":"fixture-only-secret","x-tenant-id":a.tenantId},body:JSON.stringify(value)});
-  const status=await call("status",payload);expect(status.status).toBe(200);expect(await status.json()).toHaveProperty("status","unknown");
-  expect(legacyObserve).not.toHaveBeenCalled();expect(observe).toHaveBeenCalledTimes(1);
   const request={jobId:f.w.jobId,sourceRequestId:id(10),version:1,receiptDigest:"f".repeat(64),sourceCommit:f.w.sourceCommit,sourceTree:f.w.sourceTree};
-  expect(observe.mock.calls[0]).toEqual([a,request]);
+  const cases = [["unknown","unknown"],["building","building"],["failed","failed"],["ready","unknown"]] as const;
+  for (const [index,[liveStatus,expectedStatus]] of cases.entries()) {
+   liveObserve.mockResolvedValueOnce({...observation,status:liveStatus});
+   const response=await call("status",payload);
+   expect(response.status).toBe(200);
+   expect(await response.json()).toEqual({...observation,status:expectedStatus});
+   expect(observe).toHaveBeenNthCalledWith(index+1,a,request);
+   expect(liveObserve).toHaveBeenNthCalledWith(index+1,a,request,true);
+  }
+  expect(submit).not.toHaveBeenCalled();
   const value={...payload,artifact_id:f.w.artifactId,manifest_sha256:f.w.manifestSha256,path:"/"};
   expect((await call("asset",value)).status).toBe(409);expect(legacyRead).not.toHaveBeenCalled();
   expect(asset.mock.calls[0]).toEqual([a,request,{artifactId:f.w.artifactId,manifestSha256:f.w.manifestSha256,path:"/"}]);

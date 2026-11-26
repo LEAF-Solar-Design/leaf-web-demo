@@ -107,6 +107,7 @@ export default function Page() {
         {page.description && <p className="project-page__description" style={textStyle(page.textStyles?.description)}>{page.description}</p>}
         {page.status && <p className="project-page__status" style={textStyle(page.textStyles?.status)}>{page.status}</p>}
         {page.action && <p className="project-page__action"><a href={page.action.href}>{page.action.label}</a></p>}
+        {page.actions?.map((action, index) => <p key={index} className="project-page__action"><a href={action.href}>{action.label}</a></p>)}
       </div>
     </main>
   );
@@ -173,17 +174,41 @@ def _canonical_json(value: object) -> bytes:
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
+MAX_PAGE_ACTIONS = 3
+
+
+def _validate_action(action):
+    if type(action) is not dict or set(action) != {'label', 'href'}:
+        raise ValueError("Action must contain exactly label and href")
+    label = action['label']
+    if type(label) is not str or not 1 <= len(label) <= 60 or not label.strip():
+        raise ValueError("Invalid action label length")
+    if any(unicodedata.category(char) in ('Cc', 'Cf', 'Cs') for char in label):
+        raise ValueError("Control characters are not allowed in action label")
+    if '<' in label or '>' in label or _URL.search(label):
+        raise ValueError("Use plain text without HTML or URLs in action label")
+    href = action['href']
+    if type(href) is not str or not 1 <= len(href) <= 2048:
+        raise ValueError("Invalid action href length")
+    if any(char.isspace() or unicodedata.category(char) in ('Cc', 'Cf', 'Cs')
+           or char in '<>\"\'`' for char in href):
+        raise ValueError("Invalid characters in action href")
+    if not (_ACTION_HTTPS.fullmatch(href)
+            or (href.startswith('mailto:') and _EMAIL.fullmatch(href[7:]))):
+        raise ValueError("Action href must be an https or mailto link")
+
+
 def validate_document(document: dict) -> dict:
     """Return a detached canonical document, or raise ValueError.
 
     Only literal text, the two closed preset enums, optional design fields and
-    one bounded https or mailto action enter the model. There is no field for
+    a bounded list of https or mailto actions enter the model. There is no field for
     executable source, HTML, CSS, or resource fetching.
     Text is preserved exactly, including newlines; no silent trimming occurs.
     """
     if type(document) is dict and 'schema' in document:
         return _portfolio_template().validate_document(document)
-    if type(document) is not dict or set(document) - set(DESIGN_FIELDS['page']) - {'action'} != set(_TEXT_LIMITS) | set(_ENUMS):
+    if type(document) is not dict or set(document) - set(DESIGN_FIELDS['page']) - {'action', 'actions'} != set(_TEXT_LIMITS) | set(_ENUMS):
         raise ValueError("Page must contain exactly the six supported fields")
     validate_node(document, 'page')
     for field, (minimum, maximum) in _TEXT_LIMITS.items():
@@ -199,26 +224,14 @@ def validate_document(document: dict) -> dict:
     for field, choices in _ENUMS.items():
         if type(document[field]) is not str or document[field] not in choices:
             raise ValueError(f"Invalid {field} preset")
-    if 'action' in document:
-        action = document['action']
-        if type(action) is not dict or set(action) != {'label', 'href'}:
-            raise ValueError("Action must contain exactly label and href")
-        label = action['label']
-        if type(label) is not str or not 1 <= len(label) <= 60 or not label.strip():
-            raise ValueError("Invalid action label length")
-        if any(unicodedata.category(char) in ('Cc', 'Cf', 'Cs') for char in label):
-            raise ValueError("Control characters are not allowed in action label")
-        if '<' in label or '>' in label or _URL.search(label):
-            raise ValueError("Use plain text without HTML or URLs in action label")
-        href = action['href']
-        if type(href) is not str or not 1 <= len(href) <= 2048:
-            raise ValueError("Invalid action href length")
-        if any(char.isspace() or unicodedata.category(char) in ('Cc', 'Cf', 'Cs')
-               or char in '<>\"\'`' for char in href):
-            raise ValueError("Invalid characters in action href")
-        if not (_ACTION_HTTPS.fullmatch(href)
-                or (href.startswith('mailto:') and _EMAIL.fullmatch(href[7:]))):
-            raise ValueError("Action href must be an https or mailto link")
+    if 'actions' in document:
+        actions = document['actions']
+        if 'action' in document or type(actions) is not list or not 1 <= len(actions) <= MAX_PAGE_ACTIONS:
+            raise ValueError("Use one to three contact actions")
+        for action in actions:
+            _validate_action(action)
+    elif 'action' in document:
+        _validate_action(document['action'])
     result = {key: document[key] for key in sorted(document)}
     if len(_canonical_json(result)) > MAX_DOCUMENT_BYTES:
         raise ValueError("Page document is too large")

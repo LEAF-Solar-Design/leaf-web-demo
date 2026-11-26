@@ -1139,6 +1139,44 @@ def assembly_world(graph, monkeypatch):
                               context=context, plan=plan)
 
 
+def test_split_progress_read_is_opt_in_and_project_authorized(assembly_world, monkeypatch):
+    from leaf_platform import project_solve_store
+    a = assembly_world
+    a.observed["status"] = "running"
+    calls = []
+
+    def read(scope, **kwargs):
+        calls.append((scope, kwargs))
+        return {"completed_pieces": 1, "total_pieces": 3}
+
+    monkeypatch.setattr(project_solve_store, "read_running_split_progress", read)
+    url = f"/api/jobs/{ASSEMBLY_JOB}"
+    plain = a.client.get(url)
+    assert plain.status_code == 200 and "solve_progress" not in plain.json()
+    assert calls == []
+    response = a.client.get(url + "?include_solve_progress=true")
+    assert response.status_code == 200
+    assert response.json()["solve_progress"] == {"completed_pieces": 1, "total_pieces": 3}
+    assert len(calls) == 1
+    scope, args = calls[0]
+    assert scope == project_solve_store.ExchangeScope(
+        ASSEMBLY_ORG, ASSEMBLY_PROJECT, ASSEMBLY_DRAWING, ASSEMBLY_JOB)
+    assert args == {"tenant_id": str(ASSEMBLY_ORG), "input_version_id": ASSEMBLY_VERSION,
+                    "graph_revision": a.context.graph["rev"],
+                    "graph_sha256": a.plan["solve_binding"]["graph_sha256"], "conn": a.db}
+
+    a.observed["status"] = "failed"
+    terminal = a.client.get(url + "?include_solve_progress=true")
+    assert terminal.status_code == 200 and "solve_progress" not in terminal.json()
+    assert len(calls) == 1
+
+    a.observed["status"] = "running"
+    a.principal["member"] = False
+    denied = a.client.get(url + "?include_solve_progress=true")
+    assert denied.status_code == 403 and "solve_progress" not in denied.json()
+    assert len(calls) == 1
+
+
 def read_assembly(assembly_world, version=ASSEMBLY_VERSION):
     return assembly_world.client.get(f"/api/jobs/{ASSEMBLY_JOB}?assembly_input_version={version}")
 

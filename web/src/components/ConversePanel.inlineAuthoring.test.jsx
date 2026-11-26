@@ -84,10 +84,10 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     event('tool_call', 'build', { tool: 'author_tool' }), event('tool_result', 'build', built),
     event('tool_result', 'build', built), event('turn_complete', 'build'))
   const build = screen.getByRole('region', { name: 'Tool authoring' })
-  expect(build).toHaveTextContent('queued')
+  expect(build).toHaveTextContent('Waiting to start')
   expect(build).toHaveTextContent('Branch has not reported yet')
   await tick(1999)
-  expect(build).toHaveTextContent('queued')
+  expect(build).toHaveTextContent('Waiting to start')
   await tick(1)
   expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
   await tick(2000)

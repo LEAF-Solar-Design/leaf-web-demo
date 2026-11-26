@@ -6,6 +6,7 @@ const ROUTES = ['start homerun', 'end homerun', 'feeder', 'trench']
 const plain = value => value !== null && typeof value === 'object' &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value))
 const finite = value => typeof value === 'number' && Number.isFinite(value)
+const own = (record, key) => plain(record) && Object.hasOwn(record, key) ? record[key] : undefined
 const refused = refusal => ({ polylines: [], refusal })
 // Plans are null-prototype records, so a field the projector never wrote (points,
 // refs or marker inherited from a polluted Object.prototype) reads undefined.
@@ -34,8 +35,8 @@ const pointOf = value => {
 // Mounted by App in Viewer's matching scene. This is a bounded 2D preview of stored
 // design data, with projection-scoped validation; server/version rails remain
 // authoritative for all other fields, topology, freshness and revisions.
-// Viewer consumes only pts/color, so colours encode kinds. Equipment squares
-// are symbolic 0.5-metre markers, not footprints. Trenches, labels, outlines,
+// Viewer consumes only pts/color, so colours encode kinds. Squares for equipment
+// and single-panel strings are symbolic 0.5-metre markers. Trenches, labels, outlines,
 // selection, layer visibility and automatic framing are excluded.
 function project(graph, options) {
   if (graph === undefined || graph === null) return { polylines: [], refusal: null }
@@ -62,6 +63,7 @@ function project(graph, options) {
 
   const ids = new Set()
   const panels = new Map()
+  const drawingCentres = new Map()
   // Plans retain copied geometry only. No viewer output is allocated until every
   // entity and the aggregate read-point bound have been checked.
   const plans = []
@@ -85,8 +87,8 @@ function project(graph, options) {
       if (pt === null) return { error: 'invalid_graph' }
       pts.push(pt)
     }
-    // One stored point is a valid path (the graph contract sets no minimum, and a single-panel string stores
-    // exactly its panel's centre). It is validated above and has no segment, so it draws nothing.
+    // One stored point is valid but has no line segment. A string can still
+    // supply fallback geometry through its panel references.
     return { pts: length === 1 ? [] : pts }
   }
 
@@ -112,7 +114,15 @@ function project(graph, options) {
     if (id === null) return refused('invalid_graph')
     const centre = pointOf(panel.centre)
     if (centre === null) return refused('invalid_graph')
-    panels.set(id, centre)
+    // The drawing importer stores its source outline centres in drawing units.
+    // Canonical panels and decoded Ground slots already use compute metres.
+    const provenance = own(panel, 'provenance')
+    if (own(provenance, 'created_by') === 'solar-panels-from-drawing') {
+      drawingCentres.set(id, centre)
+      panels.set(id, [centre[0] * scale, centre[1] * scale])
+    } else {
+      panels.set(id, centre)
+    }
   }
   for (let index = 0; index < lists.strings.length; index += 1) {
     const string = lists.strings.list[index]
@@ -130,8 +140,22 @@ function project(graph, options) {
     }
     const route = path(string.route)
     if (route.error) return refused(route.error)
-    if (route.pts.length) plans.push(planOf({ points: route.pts, color: '#22c55e' }))
+    let copiedCentres = false
+    if (route.pts.length && route.pts.length === refs.length && refs.some(ref => drawingCentres.has(ref))) {
+      const provenance = own(own(string, 'extra'), 'length_provenance')
+      // Several tools copy the centres directly into a derived route. Use the
+      // normalized panel positions only when the stored route matches that copy.
+      copiedCentres = own(provenance, 'source') === 'derived' &&
+        own(provenance, 'rule') === 'panel-centre-path' &&
+        route.pts.every(([x, y], index) => {
+          const ref = refs[index]
+          const centre = drawingCentres.get(ref) || panels.get(ref)
+          return x === centre[0] && y === centre[1]
+        })
+    }
+    if (route.pts.length && !copiedCentres) plans.push(planOf({ points: route.pts, color: '#22c55e' }))
     else if (refs.length > 1) plans.push(planOf({ refs, color: '#22c55e' }))
+    else if (refs.length === 1) plans.push(planOf({ marker: panels.get(refs[0]), color: '#22c55e' }))
   }
   for (let index = 0; index < lists.inverters.length; index += 1) {
     const inverter = lists.inverters.list[index]

@@ -10,7 +10,8 @@ frame_ref is the saved group frame (null for bridge/unassigned); current_frame_r
 membership (null when unframed). Rows follow saved frame/string/panel order, then new panel id
 order, independent of current graph array order. The "optimizer_assignment_changes" section
 compares saved electrical string membership with the accepted report's measured optimizer
-membership by shared panel identity. PDF inverter ids and string inputs remain
+membership by shared panel identity. The "optimizers" section pages explicit
+report measurements where available. PDF inverter ids and string inputs remain
 documentary labels. The read does not modify electrical design or Solve state.
 
 Freshness is a reference check, never a digest comparison. record.report.graph_sha256 names the
@@ -46,9 +47,11 @@ READS_VERSION_HISTORY = True
 OUTPUT_SCHEMA = "leaf.solar-solaredge-tracking-read.v1"
 INVALID = "INVALID_SOLAREDGE_TRACKING_READ_REQUEST"
 RECORD_INVALID = "SOLAREDGE_IMPORT_RECORD_INVALID"
-SECTIONS = ("strings", "frames", "unassigned", "reference_changes", "optimizer_assignment_changes")
+SECTIONS = ("strings", "frames", "unassigned", "reference_changes",
+            "optimizer_assignment_changes", "optimizers")
 PAGE_ITEMS = 1_000
 PAGE_BYTES = 262_144
+MEASUREMENT_INLINE_BYTES = 262_144
 MAX_REF = 100
 MAX_VERSION = 99_999_999
 _PARAM_KEYS = frozenset(("section", "offset"))
@@ -221,10 +224,32 @@ def _section(graph, record, section):
     references = _references(graph, record, changes)
     if section == "optimizer_assignment_changes":
         return _optimizer_assignment_rows(graph, record, references), references
+    if section == "optimizers":
+        measurement = record.get("optimizer_measurement")
+        return measurement["optimizers"] if measurement else [], references
     items = changes if changes is not None else {
         "strings": record["strings"], "frames": record["frames"],
         "unassigned": record["unassigned_panel_refs"]}[section]
     return items, references
+
+
+def project_page(graph, record, section, offset):
+    """Page the verified project record and bound duplicated measurement detail."""
+    rows, references = _section(graph, record, section)
+    measurement = record.get("optimizer_measurement")
+    if measurement is not None:
+        measurement = dict(measurement)
+        if measurement["graph_rev"] != graph["rev"] or not references["current"]:
+            measurement.update(complete=False, total_count=None, string_counts=None)
+        if len(canonical_bytes(measurement)) > MEASUREMENT_INLINE_BYTES:
+            counts = measurement["string_counts"]
+            measurement.update(optimizers=None, string_counts=None,
+                               optimizer_rows=len(measurement["optimizers"]))
+            if section == "strings" and counts is not None:
+                rows = [{**row, "optimizer_count": count}
+                        for row, count in zip(rows, counts, strict=True)]
+    items, page = _page(rows, offset)
+    return items, page, references, measurement
 
 
 def _optimizer_assignment_rows(graph, record, references):

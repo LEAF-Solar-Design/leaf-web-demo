@@ -2606,16 +2606,19 @@ export default function App() {
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
   const projectScene = viewerRef.current?.getDrawingScene?.()
-  const projectDrawing = projectSolarDrawingView({
-    solarBinding: projectSolar.scope.binding,
-    contextView: projectSolarRuntime.contextView,
-    current: projectMode && projectSolarRuntime.contextCurrent(),
-    scene: projectScene ? {
-      intake: projectScene.intake,
-      drawingKey: projectScene.drawingKey,
-      current: projectScene.ready === true,
-    } : null,
-  })
+  const projectDrawingBinding = projectSolar.scope.binding
+  const projectContextView = projectSolarRuntime.contextView
+  const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
+  const projectSceneIntake = projectScene?.intake
+  const projectSceneKey = projectScene?.drawingKey
+  const projectSceneReady = projectScene?.ready === true
+  const projectDrawing = useMemo(() => projectSolarDrawingView({
+    solarBinding: projectDrawingBinding,
+    contextView: projectContextView,
+    current: projectContextCurrent,
+    scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
+  }), [projectDrawingBinding, projectContextView, projectContextCurrent,
+    projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
     projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
@@ -5737,6 +5740,7 @@ export default function App() {
               open={claudeOpen}
               onToggle={setClaudeOpen}
               onLink={onLinkClaude}
+              onRefresh={platformActions.loadGrant}
               onUnlink={onUnlinkClaude}
             />
           )}

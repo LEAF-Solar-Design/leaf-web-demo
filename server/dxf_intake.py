@@ -1,8 +1,8 @@
 """
 Minimal, honest ASCII-DXF -> intake parser (guest uploads, the DEFAULT DXF path).
 
-Extracts ONLY what it can literally read from the user's own bytes —
-LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
+Extracts ONLY what it can literally read from the user's own bytes â€”
+LWPOLYLINE / POLYLINE entities and layer names â€” into the exact intake shape
 `data/rooftop_demo.intake.json` established:
 
     {"dwg": <source name>, "layers": [...],
@@ -10,7 +10,7 @@ LWPOLYLINE / POLYLINE entities and layer names — into the exact intake shape
                     "xdata": null, "handle"}]}
 
 HONESTY: nothing is invented. No entities -> an intake with zero polylines
-(honest and renderable as such). A binary DXF raises — nothing reads it here.
+(honest and renderable as such). A binary DXF raises â€” nothing reads it here.
 
 This is the DEFAULT DXF extractor and the ONLY one the local (APS_LIVE=0) demo
 has: it shows a REAL end-to-end guest flow on the user's own DXF without
@@ -97,6 +97,7 @@ def parse_dxf_bytes(
     polylines: List[Dict[str, Any]] = []
     texts: List[Dict[str, Any]] = []
     splines: List[Dict[str, Any]] = []
+    beam_ellipses: List[Dict[str, Any]] = []
     circles: List[Dict[str, Any]] = []
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
@@ -121,6 +122,7 @@ def parse_dxf_bytes(
     # set_lineweight target's actual DXF groups the same way either source.
     properties: Dict[str, Any] = {}
     insert_properties: Dict[str, Any] = {}
+    beam_polyline3d_handles = []
     objects = {}
     elevation_evidence = []
     model_records = {}
@@ -277,7 +279,7 @@ def parse_dxf_bytes(
             i = j
             continue
         if section == "ENTITIES" and code == 0 and value == "INSERT":
-            entity, i = _parse_insert(pairs, i + 1, dropped_count)
+            entity, i = _parse_insert(pairs, i + 1, dropped_count, include_measurement_evidence)
             if entity is not None:
                 entity.update(space_info)
             props = entity.pop("_properties", None)
@@ -288,10 +290,14 @@ def parse_dxf_bytes(
             if props is not None and entity.get("handle"):
                 insert_properties[entity["handle"]] = props
             continue
-        if include_measurement_evidence and section == "ENTITIES" and (code, value) == (0, "SPLINE"):
-            entity = _spline_measurement_path(record)
+        if include_measurement_evidence and section == "ENTITIES" and code == 0 and value in ("SPLINE", "ELLIPSE"):
+            if value == "SPLINE":
+                entity = _spline_measurement_path(record)
+                splines.append(entity)
+            else:
+                entity = _ellipse_measurement_path(record)
+                beam_ellipses.append(entity)
             entity.update(space_info)
-            splines.append(entity)
             if entity["layer"] not in seen_layers:
                 seen_layers.add(entity["layer"])
                 layers.append(entity["layer"])
@@ -307,15 +313,17 @@ def parse_dxf_bytes(
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
         if section == "ENTITIES" and code == 0 and value == "POLYLINE":
-            entity, i = _parse_polyline(pairs, i + 1, dropped_count)
+            entity, i = _parse_polyline(pairs, i + 1, dropped_count, measure=include_measurement_evidence)
             if entity is not None:
                 entity.update(space_info)
             handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
+            if entity.pop("polyline3d", False) and entity["closed"] and len(entity["pts"]) >= 2:
+                beam_polyline3d_handles.append(entity["handle"])
             continue
         if section == "ENTITIES" and code == 0 and value == "LINE":
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
-            # intake field, the frozen §1 shape renders it as-is.
+            # intake field, the frozen Â§1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1, dropped_count)
             if entity is not None:
                 if include_measurement_evidence:
@@ -326,7 +334,7 @@ def parse_dxf_bytes(
             continue
         if section == "ENTITIES" and code == 0 and value in ("CIRCLE", "ARC"):
             # W4g-3: the kinds the browser engine draws besides lines and
-            # polylines, as ADDITIVE §1 fields `circles` / `arcs` (a viewer
+            # polylines, as ADDITIVE Â§1 fields `circles` / `arcs` (a viewer
             # or tool that does not know them ignores them). Centre in WCS,
             # radius, the normal, and for an arc its start/end in degrees.
             entity, i = _parse_circle_or_arc(pairs, i + 1, value, dropped_count)
@@ -380,6 +388,7 @@ def parse_dxf_bytes(
         raise DxfParseError(f"conflicting DXF header declarations: {fields}")
 
     resolved_inserts = []
+    beam_insert_placements = {}
     for entity in inserts:
         block_name = block_names.get(entity["name"].casefold())
         if block_name is None:
@@ -387,10 +396,19 @@ def parse_dxf_bytes(
                 f"INSERT {entity['handle']}: unresolved block reference {entity['name']}")
         else:
             entity["name"] = block_name
+            placement = entity.pop("measurement_placement", None)
+            if placement is not None:
+                beam_insert_placements.setdefault(entity["handle"], []).append(placement)
             resolved_inserts.append(entity)
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if beam_polyline3d_handles:
+        out["beam_polyline3d_handles"] = beam_polyline3d_handles
+    if beam_insert_placements:
+        out["beam_insert_placements"] = beam_insert_placements
+    if beam_ellipses:
+        out["beam_ellipses"] = beam_ellipses
     if splines:
         out["splines"] = splines
     if elevation_evidence:
@@ -477,7 +495,7 @@ def parse_dxf_bytes(
     if dropped_count[0]:
         out["propertiesDropped"] = dropped_count[0]
     if texts:
-        # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
+        # ADDITIVE Â§1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
         out["texts"] = texts
     used_text_styles = {row["style"].casefold() for row in texts if "style" in row}
@@ -730,7 +748,7 @@ def _insert_array_count(raw):
     return count or 1  # Native individual INSERT records use zero default counts.
 
 
-def _parse_insert(pairs, i, dropped=None):
+def _parse_insert(pairs, i, dropped=None, include_measurement_evidence=False):
     groups, i = _entity_groups(pairs, i)
     normal = _group_point(groups, 210, (0.0, 0.0, 1.0))
     point = _ocs_to_wcs(_group_point(groups), normal)
@@ -739,10 +757,15 @@ def _parse_insert(pairs, i, dropped=None):
         array = {"columns": _insert_array_count(groups.get(70, "1")), "rows": _insert_array_count(groups.get(71, "1")),
                  "column_spacing": _float(groups.get(44, "0")),
                  "row_spacing": _float(groups.get(45, "0"))}
+    rotation = math.radians(_float(groups.get(50, "0")))
+    if include_measurement_evidence:
+        source = dict(x=point[0], y=point[1], z=point[2], rot=rotation, nrm=normal)
+        if point != [round(v, 3) for v in point] or rotation != round(rotation, 6) or normal != [round(v, 6) for v in normal]:
+            array["measurement_placement"] = source
     # Match the IN parser's existing x/y/z and nrm keys, including WCS position.
     return {"name": groups.get(2, ""), "layer": groups.get(8, "0") or "0",
             "x": round(point[0], 3), "y": round(point[1], 3), "z": round(point[2], 3),
-            "rot": round(math.radians(_float(groups.get(50, "0"))), 6),
+            "rot": round(rotation, 6),
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
@@ -893,6 +916,29 @@ def _explicit_elevation(pairs, end, kind, groups):
     return count >= 2
 
 
+def _ellipse_measurement_path(record):
+    groups = dict(record)
+    path = {"kind": "ELLIPSE", "layer": groups.get(8) or "0", "handle": groups.get(5)}
+    try:
+        # The major semi-axis is a WCS displacement, including for an oblique
+        # plane. The center cancels from the arc-length integral.
+        if 10 in groups and 20 in groups:
+            path["c"] = [float(groups[10]), float(groups[20]), float(groups.get(30, 0))]
+        path["major"] = [float(groups[11]), float(groups[21]), float(groups.get(31, 0))]
+        path["ratio"] = float(groups[40])
+        path["start_param"] = float(groups.get(41, 0))
+        path["end_param"] = float(groups.get(42, math.tau))
+        path["nrm"] = ([float(groups.get(k, 0)) for k in (210, 220, 230)]
+                       if any(k in groups for k in (210, 220, 230)) else [0, 0, 1])
+        if not all(math.isfinite(v) for v in (*path["major"], *path["nrm"], path["ratio"],
+                                               path["start_param"], path["end_param"])):
+            raise ValueError("Non-finite ellipse geometry")
+    except (KeyError, ValueError, OverflowError):
+        return {"kind": "ELLIPSE", "layer": path["layer"], "handle": path["handle"],
+                "measurement_error": "Invalid ELLIPSE measurement."}
+    return path
+
+
 def _spline_measurement_path(record):
     groups = dict(record)
     path = {"kind": "SPLINE", "layer": groups.get(8) or "0", "handle": groups.get(5)}
@@ -994,17 +1040,25 @@ def _retain_short_segment_vectors(path, record, kind):
 
 
 def _block_measurement_path(pairs, start, end, kind):
+    if kind == "ELLIPSE":
+        return _ellipse_measurement_path(pairs[start:end])
     if kind == "SPLINE":
         return _spline_measurement_path(pairs[start:end])
+    if kind == "ARC":
+        arc, _ = _parse_circle_or_arc(pairs, start, kind)
+        if arc is None:
+            raise ValueError("Invalid beam arc radius.")
+        arc.pop("_properties", None)
+        return {"kind": "ARC", **arc}
     parse = {"LINE": _parse_line, "LWPOLYLINE": _parse_lwpolyline, "POLYLINE": _parse_polyline}[kind]
-    path, _ = parse(pairs, start)
+    path, _ = parse(pairs, start, measure=True) if kind == "POLYLINE" else parse(pairs, start)
     if path and kind in ("LINE", "LWPOLYLINE"):
         _retain_short_segment_vectors(path, pairs[start:end], kind)
     path.pop("_properties", None)
     path.pop("xdata", None)
     groups, _ = _entity_groups(pairs, start)
-    if kind == "POLYLINE" and int(groups.get(70, 0)) & (16 | 64):
-        return None
+    if path.get("measurement_error"):
+        return path
     bulges = []
     for code, value in pairs[start:end]:
         if (kind == "LWPOLYLINE" and code == 10) or (kind == "POLYLINE" and (code, value) == (0, "VERTEX")):
@@ -1020,8 +1074,11 @@ def _block_measurement_path(pairs, start, end, kind):
 def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
     groups, i = _entity_groups(pairs, i)
     name = groups.get(2, "")
-    block = {"base": [round(v, 3) for v in _group_point(groups)],
+    base = _group_point(groups)
+    block = {"base": [round(v, 3) for v in base],
              "count": 0, "complete": True, "children": []}
+    if include_measurement_evidence and base != block["base"]:
+        block["measurement_base"] = base
     while i < len(pairs):
         code, kind = pairs[i]
         if code == 0 and kind == "ENDBLK":
@@ -1041,16 +1098,17 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC", "ELLIPSE"):
                 paths = block.setdefault("beam_paths", [])
                 if len(paths) < 10000:
                     path = _block_measurement_path(pairs, i + 1, end, kind)
-                    if path is not None and (not path.get("closed") or path.get("periodic")):
+                    if path is not None and (not path.get("closed") or path.get("periodic") or path.get("bulges")
+                                             or path.get("polyline3d") or path.get("measurement_error")):
                         paths.append(path)
                 else:
                     block["beam_paths_incomplete"] = True
             if kind == "INSERT":
-                insert, _ = _parse_insert(pairs, i + 1)
+                insert, _ = _parse_insert(pairs, i + 1, include_measurement_evidence=include_measurement_evidence)
                 insert.pop("_properties", None)
                 refs = block.setdefault("nested_inserts", [])
                 if len(refs) < 10000:
@@ -1061,7 +1119,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             block["complete"] = False
             if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:
                 block["dropped_legacy_geometry"] = block.get("dropped_legacy_geometry", 0) + 1
-            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE"):
+            if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC", "ELLIPSE"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
                 block["nested_inserts_incomplete"] = True
@@ -1279,7 +1337,7 @@ def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
         except ValueError:
             # Not a group-code line where one belongs: the pairing is broken;
             # resync by scanning forward one line. (Cheap tolerance for files
-            # with a stray blank line — real writers do not produce these, but
+            # with a stray blank line â€” real writers do not produce these, but
             # a hand-edited demo file might.)
             continue
         value = lines[k + 1].strip()
@@ -1381,7 +1439,7 @@ def _parse_lwpolyline(pairs: List[Tuple[int, str]], i: int, dropped=None, wcs=Tr
 POLYLINE_WCS_VERTEX_FLAGS = 8 | 16 | 64
 
 
-def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
+def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None, *, measure=False):
     """Classic POLYLINE ... VERTEX* ... SEQEND: flags=70 on POLYLINE (bit 0
     closed, bit 8 = 3D polyline, bit 16 = 3D polygon mesh, bit 64 = polyface
     mesh). A 2D polyline (all of POLYLINE_WCS_VERTEX_FLAGS clear) is OCS
@@ -1398,6 +1456,8 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     handle = ""
     closed = False
     wcs_vertices = False
+    flags = 0
+    unsupported_vertex = False
     normal = [0.0, 0.0, 1.0]
     raw_pts: List[List[float]] = []
     aci = linetype = lineweight = truecolor = None
@@ -1443,6 +1503,8 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
                     y = _float(v)
                 elif c == 30:
                     z = _float(v)
+                elif measure and c == 70 and _int(v) & ~32:
+                    unsupported_vertex = True
                 i += 1
             raw_pts.append([x, y, header_z if header_z is not None and not wcs_vertices else z])
             continue
@@ -1455,6 +1517,13 @@ def _parse_polyline(pairs: List[Tuple[int, str]], i: int, dropped=None):
     entity: Dict[str, Any] = {"layer": layer, "closed": closed, "pts": raw_pts,
             "xdata": None, "handle": handle,
             "_properties": _entity_properties(aci, linetype, lineweight, truecolor, dropped)}
+    if measure:
+        if flags & 8:
+            entity["polyline3d"] = True
+        # Straight 2D/3D paths may close or request continuous linetype.
+        # Mesh, polyface and fitted control vertices are not beam edges.
+        if flags & ~(1 | 8 | 128) or unsupported_vertex:
+            entity["measurement_error"] = "Unsupported POLYLINE or VERTEX flags for beam measurement."
     if not wcs_vertices:
         if not all(math.isfinite(v) for v in normal):
             raise DxfParseError(f"POLYLINE {handle} normal must be finite")

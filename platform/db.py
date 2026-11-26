@@ -50,6 +50,11 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "browser_static_build_admissions": {
+        "tenant_id", "organization_id", "project_id", "repo_key", "job_id",
+        "actor_binding_id", "source_request_id", "version", "receipt_digest",
+        "source_commit", "source_tree",
+    },
     "x07_customers": {"customer_key", "profile_id"},
     "x07_profile_versions": {
         "customer_key", "profile_id", "version", "roles_json", "created_at",
@@ -747,6 +752,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "customization": {
+        "customization_stage_grants": {
+            "change_set_id", "tenant_id", "author_subject", "tier", "binding_digest",
+            "authority_session_id", "authority_turn_id", "issued_ms", "expires_ms",
+            "dispatches", "last_attempt", "revoked_ms", "revoked_reason",
+        },
         "customization_stage_attempt_history": {
             "tenant_id", "change_set_id", "failed_version", "attempt",
             "reason_code", "reason_message", "retryable",
@@ -826,6 +836,8 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "browser_static_build_admissions_pkey": _catalog_contract(
+        "browser_static_build_admissions", "PRIMARY KEY (tenant_id, project_id, job_id)"),
     "org_invitations_pkey": _catalog_contract("org_invitations", "PRIMARY KEY (id)"),
     "org_invitations_token_hash_key": _catalog_contract("org_invitations", "UNIQUE (token_hash)"),
     "org_invitations_role_check": _catalog_contract("org_invitations", "CHECK", "role = 'editor'"),
@@ -1863,6 +1875,15 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
+        "customization_stage_grants_pkey": _catalog_contract(
+            "customization_stage_grants", "PRIMARY KEY (change_set_id)"),
+        "customization_stage_grants_change_set_id_fkey": _catalog_contract(
+            "customization_stage_grants", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_stage_grants_dispatches_check": _catalog_contract(
+            "customization_stage_grants", "CHECK", "dispatches >= 0", "dispatches <= 2"),
+        "customization_stage_grants_check": _catalog_contract(
+            "customization_stage_grants", "CHECK", "expires_ms > issued_ms"),
         "customization_stage_attempt_history_pkey": _catalog_contract(
             "customization_stage_attempt_history",
             "PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)"),

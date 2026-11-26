@@ -425,13 +425,17 @@ def synthetic_units_layout(units):
               "TiltDegrees": 15.0, "AxisAzimuthDeg": 180.0,
               "HeightAtLowPoseM": 0.7, "HeightAtHighPoseM": 1.7,
               "PileTemplateName": "Synthetic piles"}
-    return fp.prepare_initial_frames(boundary=[[0, 0], [20, 0], [20, 40], [0, 40]],
+    extent = 20 / {"m": 1.0, "ft": 0.3048, "in": 0.0254}[units]
+    return fp.prepare_initial_frames(boundary=[[0, 0], [extent, 0], [extent, 2 * extent], [0, 2 * extent]],
                                      preset=preset, drawing_units=units)
 
 
-@pytest.mark.parametrize("units,code", [("m", "6"), ("ft", "2")])
-def test_insertion_units_declare_physical_document(units, code):
+@pytest.mark.parametrize("units,code,metres_per_unit", [
+    ("m", "6", 1.0), ("ft", "2", 0.3048), ("in", "1", 0.0254),
+])
+def test_insertion_units_declare_physical_document(units, code, metres_per_unit):
     document, parameters = synthetic_units_layout(units)
+    assert document["units"] == {"drawing_units": units, "meters_per_unit": metres_per_unit}
     raw = write(document, parameters)
     header = sections(raw)["HEADER"]
     index = header.index((9, "$INSUNITS"))
@@ -452,7 +456,7 @@ def test_insertion_units_legacy_read_and_explicit_rewrite(code):
     assert native.decode_native_layout(rewritten).document == document
 
 
-@pytest.mark.parametrize("units,conflicting", [("m", "2"), ("ft", "6")])
+@pytest.mark.parametrize("units,conflicting", [("m", "2"), ("ft", "6"), ("in", "2")])
 def test_insertion_units_conflict_refuses_without_rescaling(units, conflicting):
     document, parameters = synthetic_units_layout(units)
     raw = insertion_units_header(write(document, parameters), [(9, "$INSUNITS"), (70, conflicting)])

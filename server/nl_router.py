@@ -330,6 +330,10 @@ def _extract_params(tool: Dict[str, Any], text: str) -> Dict[str, Any]:
     for key, spec in props.items():
         if key in params or not isinstance(spec, dict):
             continue
+        if tool.get("name") == "count-modules" and key in {
+            "layer_count_at_least", "layer_share_above", "exclude_highest_count_tiers",
+        }:
+            continue
         if spec.get("type") in ("number", "integer") and remaining:
             val = remaining.pop(0)
             params[key] = float(val) if "." in val else int(val)
@@ -436,6 +440,10 @@ _GROUPED_PANELS = re.compile(
 
 
 _COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
+_COVERAGE_EXCLUSION = re.compile(
+    r"\b(?:excluding|exclude|without|omitting|omit|leaving out|leave out|ignoring|ignore)"
+    r"\s+(?:the\s+)?(?:layers?\s+)?(?P<names>.+?)[.!?]*$", re.I,
+)
 _PAIR = rf"\(\s*{_COORDINATE}\s*,\s*{_COORDINATE}\s*\)"
 _SHARE_WINDOW = re.compile(
     rf"\b(?:within|inside|in|between)\s+(?:(?:the\s+)?(?:window|region|box)\s+)?"
@@ -504,6 +512,41 @@ def _share_params(text):
     return params
 
 
+_LAYER_COUNT_THRESHOLD = re.compile(
+    r"\b(?:(?:physical\s+)?(?:module\s+|panel\s+)?count\s+of\s+at\s+least\s+(?P<count>\d{1,9})(?=\s|$)"
+    r"|(?:at\s+least|no\s+fewer\s+than)\s+(?P<modules>\d{1,9})\s+(?:physical\s+)?(?:modules?|panels?)\b)",
+    re.I,
+)
+_LAYER_SHARE_THRESHOLD = re.compile(
+    r"\b(?:more\s+than|greater\s+than|above|over|exceeds?)\s+(\d{1,3}(?:\.\d+)?)\s*(?:%|percent\b)",
+    re.I,
+)
+
+
+def _layer_threshold_params(text):
+    if not re.search(r"\blayers?\b", text, re.I):
+        return None
+    count = _LAYER_COUNT_THRESHOLD.search(text)
+    share = next((
+        match for match in _LAYER_SHARE_THRESHOLD.finditer(text)
+        if re.search(r"\b(?:share|fraction)\s*(?:of\s+)?$", text[:match.start()], re.I)
+        or re.match(
+            r"\s+of\s+(?:(?:all|the|total|selected|physical)\s+)*(?:modules?|panels?|selection|total)\b",
+            text[match.end():], re.I,
+        )
+    ), None)
+    if not count or not share:
+        return None
+    first, second = sorted((count, share), key=lambda match: match.start())
+    conjunction = text[first.end():second.start()]
+    if not re.search(r"\band\b", conjunction, re.I) or re.search(r"\bor\b", conjunction, re.I):
+        return None
+    scope = "roof_layers" if re.search(r"\broof(?:top)?\s+layers?\b", text, re.I) else "all_layers"
+    return {"group_by": "layer", "panel_scope": scope,
+            "layer_count_at_least": int(count["count"] or count["modules"]),
+            "layer_share_above": float(share[1])}
+
+
 _LAYER_LEADERS = re.compile(
     r"(?:which|what)\s+(?P<roof>roof(?:top)?\s+)?layers?\s+"
     r"(?:(?:has|have|holds?|contains?)\s+(?:the\s+)?most\s+(?:solar\s+)?(?:modules?|panels?)"
@@ -517,8 +560,19 @@ _TOP_LAYER_COUNT = re.compile(
 )
 
 
+_RANKED_LAYER_HIGHLIGHTS = re.compile(
+    r"(?:\s+and\s+|[,.!?;]\s*|\s+)\s*"
+    r"(?:highlight\s+only|only\s+highlight)\s+(?:the\s+)?"
+    r"(?:(?:ranked|top|winning)\s+layers|(?:tied\s+)?winners)[?.!]?$",
+    re.I,
+)
+
+
 def _layer_ranking_params(text):
     query = text.strip()
+    highlights = _RANKED_LAYER_HIGHLIGHTS.search(query)
+    if highlights:
+        query = query[:highlights.start()].rstrip(" ,.")
     match = _LAYER_LEADERS.fullmatch(query)
     limit = 1
     if match is None:
@@ -529,7 +583,8 @@ def _layer_ranking_params(text):
         words = "one two three four five six seven eight nine ten".split()
         limit = int(number) if number.isdecimal() else words.index(number) + 1
     scope = "roof_layers" if match["roof"] else "all_layers"
-    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit}
+    return {"group_by": "layer", "panel_scope": scope, "top_layers": limit,
+            **({"highlight_ranked_layers": True} if highlights else {})}
 
 
 def _decide(
@@ -604,18 +659,44 @@ def _decide(
         target = re.search(r"\b(?:cover(?:ing)?|reach(?:ing)?)\s+(?:at least\s+)?(\d+(?:\.\d+)?)\s*(?:%|percent\b)", text, re.I)
         if target and any(doc.tool.get("name") == "count-modules" for doc in docs):
             options = {"group_by": "layer", "panel_scope": "all_layers", "coverage_percent": float(target[1])}
+            exclusion = _COVERAGE_EXCLUSION.search(text[target.end():].strip())
+            if exclusion:
+                names = re.split(r'\s*("(?:[^"]+)"|\x27[^\x27]+\x27)\s*', exclusion["names"])
+                excluded_layers = []
+                for index, name in enumerate(names):
+                    if index % 2:
+                        excluded_layers.append(name[1:-1])
+                    else:
+                        excluded_layers.extend(part.strip() for part in
+                                               re.split(r",|\s*\band\b\s*", name, flags=re.I) if part.strip())
+                if excluded_layers:
+                    options["coverage_excluded_layers"] = excluded_layers
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Find the minimum-size layer sets that reach the module coverage target.")
 
-    if (re.search(r"\brank(?:s|ing)?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
+    if (re.search(r"\b(?:re)?rank(?:s|ing)?\b", text, re.I) and re.search(r"\blayers?\b", text, re.I)
             and re.search(r"\b(?:module|panel)s?\b", text, re.I)
             and re.search(r"\b(?:windows?|regions?)\b", text, re.I)):
         windows = re.findall(rf"{_PAIR}\s+to\s+{_PAIR}", text, re.I)
-        if len(windows) == 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        if len(windows) >= 2 and any(doc.tool.get("name") == "count-modules" for doc in docs):
             options = {"group_by": "layer", "panel_scope": "all_layers",
                        "rank_windows": [[float(value) for value in bounds] for bounds in windows]}
+            tier_words = "one two three four five six seven eight nine ten".split()
+            tier_amount = rf"[0-9]{{1,9}}|{'|'.join(tier_words)}"
+            exclusion = re.search(
+                r"\b(?:exclude|drop|omit)\s+(?:the\s+)?"
+                rf"(?:({tier_amount})\s+(?:highest|top)|(?:highest|top)\s+({tier_amount}))"
+                r"\s+(?:distinct\s+)?(?:physical\s+)?"
+                r"(?:(?:module|panel)\s+)?count\s+tiers?\b",
+                text, re.I,
+            )
+            if exclusion:
+                amount = (exclusion[1] or exclusion[2]).lower()
+                options["exclude_highest_count_tiers"] = (
+                    int(amount) if amount.isdecimal() else tier_words.index(amount) + 1
+                )
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
-                                  rationale="Compare physical module counts by layer in two drawing windows.")
+                                  rationale="Compare physical module counts by layer across the drawing windows.")
 
     comparison = _share_change_params(text)
     if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):
@@ -628,6 +709,10 @@ def _decide(
         return Classification(lane=LANE_RUN, tool="count-modules", params=shares,
                               confidence=0.95, rationale="Compute each selected layer's share of the physical panel count.")
 
+    thresholds = _layer_threshold_params(text)
+    if thresholds and any(doc.tool.get("name") == "count-modules" for doc in docs):
+        return Classification(lane=LANE_RUN, tool="count-modules", params=thresholds,
+                              confidence=0.95, rationale="Highlight layers meeting the count and share thresholds.")
 
     ranking_params = _layer_ranking_params(text)
     if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):

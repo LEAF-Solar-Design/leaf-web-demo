@@ -680,9 +680,15 @@ const ElementShape = {
   query: DatasetQueryV1,
 };
 const ProviderLabel = z.string().min(1).max(120).refine(value => value.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(value));
+const DatasetPairMemberFilterV1 = z.union([
+  z.strictObject({ field: FieldId, op: z.literal("is_null") }),
+  z.strictObject({ field: FieldId, op: z.enum(["lt", "lte", "gt", "gte"]), value: z.number().finite() }),
+]);
+
 export const DatasetRowGroupingV1 = z.strictObject({
   kind: z.literal("provider_pairs"), pair_key_field: FieldId, provider_field: FieldId,
   providers: z.tuple([ProviderLabel, ProviderLabel]),
+  member_filter: DatasetPairMemberFilterV1.optional(),
 }).superRefine((grouping, ctx) => {
   if (grouping.pair_key_field === grouping.provider_field || grouping.providers[0] === grouping.providers[1]) {
     ctx.addIssue({ code: "custom", message: "Pair grouping requires distinct fields and provider labels" });
@@ -701,6 +707,12 @@ export const DatasetElementV1 = z.union([
     if (grouping && [grouping.pair_key_field, grouping.provider_field].some(id =>
       !element.query.fields.includes(id) || !element.props.columns.includes(id))) {
       ctx.addIssue({ code: "custom", path: ["props", "row_grouping"], message: "Grouping fields must be visible requested fields" });
+    }
+    const filter = grouping?.member_filter;
+    if (filter && (!element.query.fields.includes(filter.field) || !element.props.columns.includes(filter.field) ||
+        element.query.filters?.length || element.query.cursor)) {
+      ctx.addIssue({ code: "custom", path: ["props", "row_grouping", "member_filter"],
+        message: "Pair conditions require a visible field and an unfiltered query starting at the first page" });
     }
   }),
   z.strictObject({

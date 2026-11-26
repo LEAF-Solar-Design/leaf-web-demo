@@ -4,7 +4,7 @@
  */
 import type { ProjectRepositoryAuthority } from "../ports/index.js";
 import { NextBuildError } from "./genericNextBuild.js";
-import type { GenericNextProducer } from "./genericNextBuild.js";
+import type { CandidateOperation, GenericNextProducer } from "./genericNextBuild.js";
 import { BrowserCandidateBuildAdapter } from "./browserCandidateBuild.js";
 import type { BrowserCandidateBuildRequest, BrowserCandidateLoader, BrowserCandidatePreview, BrowserStaticCustody } from "./browserCandidateBuild.js";
 
@@ -36,16 +36,22 @@ export class PrivateBuildLifecycle {
     return { a:Object.freeze({tenantId:a.tenantId,organizationId:a.organizationId,projectId:a.projectId,repoKey:a.repoKey}),
       r:Object.freeze({jobId:r.jobId,sourceRequestId:r.sourceRequestId,version:r.version,receiptDigest:r.receiptDigest,sourceCommit:r.sourceCommit,sourceTree:r.sourceTree}) };
   }
-  private async current(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest) {
-    const row = await this.deps.loadCandidate(a,r.sourceRequestId,r);
+  private async current(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest, operation: CandidateOperation) {
+    const row = await this.deps.loadCandidate(a,r.sourceRequestId,r,operation);
     if (!row || row.schema !== "leaf.browser-project-source.v1" || row.state !== "published" ||
         !row.authority || scopeKey(row.authority) !== scopeKey(a) ||
         witnessKey({...row,jobId:r.jobId}) !== witnessKey(r)) throw new NextBuildError("candidate_conflict");
   }
 
-  async submit(authority: ProjectRepositoryAuthority, request: BrowserCandidateBuildRequest): Promise<PrivateBuildObservation> {
+  async submit(authority: ProjectRepositoryAuthority, request: BrowserCandidateBuildRequest,
+    observeDurable?: (a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest) => Promise<PrivateBuildObservation>): Promise<PrivateBuildObservation> {
     const {a,r} = this.snapshot(authority,request);
-    await this.current(a,r);
+    await this.current(a,r,"write");
+    if (observeDurable) {
+      const durable = await observeDurable(a,r);
+      await this.current(a,r,"write");
+      if (durable.status === "ready") return durable;
+    }
     const key = scopeKey(a)+r.jobId;
     const prior = this.jobs.get(key);
     if (prior && prior.identity !== witnessKey(r)) throw new NextBuildError("job_conflict");
@@ -56,17 +62,23 @@ export class PrivateBuildLifecycle {
       this.jobs.set(key,entry);
       void this.adapter.build(a,r).then(result => { entry.result=result; }, () => { entry.failed=true; });
     }
-    return this.observe(a,r);
+    return this.observation(a,r,"write",Boolean(observeDurable));
   }
 
-  async observe(authority: ProjectRepositoryAuthority, request: BrowserCandidateBuildRequest): Promise<PrivateBuildObservation> {
+  async observe(authority: ProjectRepositoryAuthority, request: BrowserCandidateBuildRequest, provisionalOnly = false): Promise<PrivateBuildObservation> {
     const {a,r} = this.snapshot(authority,request);
-    await this.current(a,r);
+    return this.observation(a,r,"read",provisionalOnly);
+  }
+
+  private async observation(a: ProjectRepositoryAuthority, r: BrowserCandidateBuildRequest,
+    operation: CandidateOperation, provisionalOnly: boolean): Promise<PrivateBuildObservation> {
+    await this.current(a,r,operation);
     const entry = this.jobs.get(scopeKey(a)+r.jobId);
     if (entry && entry.identity !== witnessKey(r)) throw new NextBuildError("job_conflict");
     let status: PrivateBuildObservation["status"] = !entry ? "unknown" : entry.failed ? "failed" : "building";
     let result: BrowserCandidatePreview | undefined;
-    if (entry?.result) {
+    if (entry?.result && provisionalOnly) status = "unknown";
+    if (entry?.result && !provisionalOnly) {
       const state = this.deps.producer.status(a,r.jobId);
       const latest = this.deps.producer.lastValid(a);
       const p = entry.result.preview;
@@ -76,7 +88,7 @@ export class PrivateBuildLifecycle {
         throw new NextBuildError("preview_unavailable");
       status="ready"; result=entry.result;
     }
-    await this.current(a,r);
+    await this.current(a,r,operation);
     if (result) {
       const state=this.deps.producer.status(a,r.jobId),latest=this.deps.producer.lastValid(a);
       if (!state.ready || state.cleanup !== "confirmed" || !latest || latest.jobId !== r.jobId ||

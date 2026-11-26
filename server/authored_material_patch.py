@@ -115,9 +115,15 @@ def bind_selection(intake, org_id, project_id, actor_id, material_id, context):
 
 
 def build_body(description):
+    from project_reference_materials import InvalidReference, check_json_unicode
+
     operations = _parse(description)
+    try:
+        check_json_unicode(operations)
+    except InvalidReference as exc:
+        operations = str(exc)
     if isinstance(operations, str):
-        # Do not emit a partially executable plan for an over-budget request.
+        # Refuse the entire plan before any edit runs.
         return "def run(intake, params):\n    raise ValueError(" + repr(operations) + ")\n"
     return _BODY.replace("__OPERATIONS__", repr(operations))
 
@@ -181,7 +187,9 @@ def run(intake, params):
     selected = intake.get("checker_material_selection") or {}
     original = selected.get("record_values")
     operations = __OPERATIONS__
-    if not operations or params or type(original) is not list or selected.get("record_exact_numbers"):
+    if selected.get("record_exact_numbers"):
+        raise ValueError("The selected number exceeds the editable numeric range or precision.")
+    if not operations or params or type(original) is not list:
         raise ValueError("Select editable JSON records and specify ordered insert, remove or move operations.")
     rows = deepcopy(original)
     identities = record_ids(rows)
@@ -198,15 +206,14 @@ def run(intake, params):
         if action in ("copy", "move_field", "set"):
             if action in ("copy", "move_field"):
                 if action == "move_field":
+                    if value == positions:
+                        location(rows, value, read_only=True)
+                        continue
                     if "" in (value, positions):
-                        if value == positions:
-                            continue
                         raise ValueError("Cannot move or replace the material selection root.")
                     if positions.startswith(value + "/"):
                         raise ValueError("Cannot move a material field into its descendant.")
                 source, key = location(rows, value, protect_records=not replaced_root)
-                if action == "move_field" and value == positions:
-                    continue
                 # The destination index is evaluated after removing the source.
                 item = source.pop(key) if action == "move_field" else deepcopy(source[key])
                 parent, dest = location(rows, positions, add=True, protect_records=not replaced_root)

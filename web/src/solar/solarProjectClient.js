@@ -767,7 +767,9 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       assert(plain(options))
       const { tool, signal } = options
       assert(typeof jobId === 'string' && UUID.test(jobId) && typeof tool === 'string' && TOOL.test(tool))
-      return request(`/api/jobs/${jobId}`, { scope, signal, validate: (data, b) => validJob(data?.job || data, b, jobId, tool) })
+      const progress = tool === 'solar-solve-proposal' ? '?include_solve_progress=true' : ''
+      return request(`/api/jobs/${jobId}${progress}`, { scope, signal,
+        validate: (data, b) => validJob(data?.job || data, b, jobId, tool) })
     }),
     async observeJob(jobId, options = {}) {
       if (!plain(options)) return local('SIP_R7_REQUEST_INVALID')

@@ -13,6 +13,7 @@ const FIELDS = Object.freeze({
 const HASH = /^[0-9a-f]{64}$/
 const DRAWING = /^[a-z0-9][a-z0-9_-]{0,62}$/
 const MODES = ['Auto', 'Manual', 'Clearance']
+const METERS_PER_UNIT = new Map([['m', 1], ['ft', 0.3048], ['in', 0.0254]])
 const plain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
   && [Object.prototype, null].includes(Object.getPrototypeOf(v))
 const exact = (v, required, optional = []) => plain(v)
@@ -256,8 +257,8 @@ export function validateCivilOperation(body, request) {
     const head = headCopy(body.head, drawingId, body.project_id)
     if (head === null || (body.outcome === 'unchanged' ? head.state.artifact_id !== base : head.parent !== base)) return null
     if (!exact(body.units, ['drawing_units', 'meters_per_unit'])
-      || !['m', 'ft'].includes(body.units.drawing_units)
-      || body.units.meters_per_unit !== (body.units.drawing_units === 'm' ? 1 : 0.3048)) return null
+      || !METERS_PER_UNIT.has(body.units.drawing_units)
+      || body.units.meters_per_unit !== METERS_PER_UNIT.get(body.units.drawing_units)) return null
     if (Object.hasOwn(sent, 'drawing_units') && sent.drawing_units !== body.units.drawing_units) return null
     const t = body.terrain
     if (!exact(t, ['present', 'sampled', 'rows', 'cols', 'grid_sha256']) || typeof t.present !== 'boolean' || typeof t.sampled !== 'boolean') return null

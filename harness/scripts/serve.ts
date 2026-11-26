@@ -54,6 +54,10 @@ import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
+import { createHostStaticNextExecutor } from "../src/projectBuild/staticNextHostWiring.js";
+import { createManagedStaticNextProducerComposition, createManagedStaticNextViews } from "../src/projectBuild/managedStaticNextComposition.js";
+import { createPrivateBuildServices } from "../src/projectBuild/privateBuildLifecycle.js";
+import { createStaticNextCandidateRecheck } from "../src/projectBuild/staticNextCandidateRecheck.js";
 import { PortfolioProposalService } from "../src/agent/portfolioProposal.js";
 import { SdkProjectVideoInspector } from "../src/agent/projectVideoInspection.js";
 import { SdkRepoEditor } from "../src/vendor/mushy-author/ports/impl/repoEditRunner.js";
@@ -477,6 +481,35 @@ async function main(): Promise<void> {
     : undefined;
   const ports = buildPorts(standardServicesResolver);
   const projectRepositoryEdits = createProjectRepositoryEditsForService(ports.tenantRepo);
+  const staticNext = createHostStaticNextExecutor(process.env);
+  const privateStaticPreview = staticNext ? (() => {
+    if (!projectRepositoryEdits) throw new Error("static_next_project_repository_unavailable");
+    const recheck = createStaticNextCandidateRecheck({
+      appUrl: requiredEnvironment("LEAF_APP_URL"),
+      dispatchSecret: requiredEnvironment("LEAF_APP_DISPATCH_SECRET"),
+    });
+    // Use the managed binding identity to namespace its dedicated artifact root.
+    const { producer, artifacts } = createManagedStaticNextProducerComposition({
+      repository: ports.tenantRepo, executor: staticNext.executor,
+      artifactRoot: staticNext.artifactRoot, artifactBindingId: staticNext.executor.bindingId,
+      isCurrent: recheck.isCurrent,
+    });
+    const retentionValue = requiredEnvironment("LEAF_STATIC_NEXT_RETENTION_MS");
+    const retentionMs = Number(retentionValue);
+    if (!/^[1-9][0-9]*$/.test(retentionValue) || !Number.isSafeInteger(retentionMs) ||
+        !Number.isFinite(new Date(Date.now() + retentionMs).getTime())) {
+      throw new Error("static_next_config_invalid: LEAF_STATIC_NEXT_RETENTION_MS");
+    }
+    const now = () => new Date();
+    const { projectStaticBuilds } = createPrivateBuildServices({
+      producer, loadCandidate: recheck.loadCandidate, custody: { store: staticNext.custodyStore, now, retentionMs },
+    });
+    const projectStaticViews = createManagedStaticNextViews({
+      artifacts, custodyStore: staticNext.custodyStore, resolveStaticNextBundle: staticNext.resolveStaticNextBundle,
+      loadCandidate: recheck.loadCandidate, now,
+    });
+    return { projectStaticBuilds, projectStaticViews };
+  })() : undefined;
   const glugMushyAuthor = glugMushyAuthorEnabled()
     ? new PinnedGlugMushyAuthor({
         artifactRoot: requiredEnvironment("LEAF_GLUG_MUSHY_ARTIFACT_ROOT"),
@@ -497,6 +530,7 @@ async function main(): Promise<void> {
         editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }),
         videoInspector: new SdkProjectVideoInspector() } } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
+    ...privateStaticPreview,
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
     ...(ports.labDocuments ? { labDocuments: ports.labDocuments } : {}),
   };
