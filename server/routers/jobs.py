@@ -1509,9 +1509,34 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
     return JSONResponse(status_code=202, content=body)
 
 
+def _running_split_progress(rec, tenant_id):
+    context = rec.get("execution_context")
+    adapter = capability_catalog.capability_adapter(rec.get("tool_name"))
+    if (rec.get("status") != "running" or adapter != capability_catalog.CLOUD_PROPOSAL_ADAPTER
+            or not isinstance(context, dict)
+            or context.get("schema") != "leaf.solar-project-graph-job.v1"):
+        return None
+    try:
+        db = jobs.platform_link.platform_db()
+        from leaf_platform import project_solve_store
+        scope = project_solve_store.ExchangeScope(
+            uuid.UUID(str(rec["org_id"])), uuid.UUID(str(rec["project_id"])),
+            uuid.UUID(str(context["drawing_id"])), uuid.UUID(str(rec["job_id"])))
+        binding = context["solve_binding"]
+        input_version = uuid.UUID(str(rec["input_version_id"]))
+        return db.run_transaction(lambda conn: project_solve_store.read_running_split_progress(
+            scope, tenant_id=tenant_id, input_version_id=input_version,
+            graph_revision=binding["expected_rev"], graph_sha256=binding["graph_sha256"],
+            conn=conn), read_only=True, max_attempts=1)
+    except Exception:
+        # Optional progress must not turn a readable job status into an error.
+        return None
+
+
 @router.get("/api/jobs/{job_id}")
 def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
-            assembly_input_version: Optional[uuid.UUID] = None):
+            assembly_input_version: Optional[uuid.UUID] = None,
+            include_solve_progress: bool = False):
     tenant_id = _bound_tenant_id(tenant)
     if is_demo_context(tenant):
         rec, denied = _demo_observation(job_id, tenant)
@@ -1529,7 +1554,14 @@ def get_job(job_id: str, tenant=Depends(deps.require_tenant), *,
         from solar_project_solve import readonly_assembly_attribution
         return with_envelope_fields({"ok": True, "assembly_attribution":
             readonly_assembly_attribution(tenant, rec, assembly_input_version)})
-    return denied if denied is not None else _record_body(_with_client_delivery(rec))
+    if denied is not None:
+        return denied
+    body = _record_body(_with_client_delivery(rec))
+    if include_solve_progress:
+        progress = _running_split_progress(rec, tenant_id)
+        if progress is not None:
+            body["solve_progress"] = progress
+    return body
 
 
 @router.post("/internal/jobs/{job_id}/callback")

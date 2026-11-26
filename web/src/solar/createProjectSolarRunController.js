@@ -85,9 +85,12 @@ function transport(value, submitting, tool) {
   } catch { return { kind: submitting || definiteFailure ? 'unknown' : 'unreadable' } }
 }
 
-export function createProjectSolarRunController({ projectClient, onOutcome = () => {} } = {}) {
+export function createProjectSolarRunController({
+  projectClient, onOutcome = () => {}, onProgress = () => {},
+} = {}) {
   if (!projectClient || !['submitRun', 'readJob', 'getSnapshot', 'subscribe'].every((key) =>
-    typeof projectClient[key] === 'function') || typeof onOutcome !== 'function') {
+    typeof projectClient[key] === 'function') ||
+      typeof onOutcome !== 'function' || typeof onProgress !== 'function') {
     throw new TypeError('A project run client and outcome observer are required')
   }
   let disposed = false
@@ -202,6 +205,23 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
     }
     return parsed
   }
+  function notifyProgress(run, job) {
+    if (run.tool !== 'solar-solve-proposal') return
+    try {
+      if (field(job, 'status') !== 'running') return
+      const progress = field(job, 'solve_progress', false)
+      if (progress === undefined) return
+      const completed = field(progress, 'completed_pieces')
+      const total = field(progress, 'total_pieces')
+      if (!Number.isSafeInteger(total) || !Number.isSafeInteger(completed) ||
+          completed < 1 || completed > total || total > 64 ||
+          (run.progress && (total !== run.progress.total || completed <= run.progress.completed))) return
+      run.progress = { completed, total }
+      const result = outcome('pending', run.jobId, null, `Solved ${completed} of ${total} pieces.`)
+      onProgress(result, Object.freeze({ binding: run.binding, authorityKey: run.authorityKey,
+        tool: run.tool, signal: run.controller.signal, isCurrent: () => !run.done && scoped(run) }))
+    } catch { /* Optional progress never changes the job outcome. */ }
+  }
   async function follow(run) {
     for (;;) {
       let recovering = false
@@ -217,6 +237,7 @@ export function createProjectSolarRunController({ projectClient, onOutcome = () 
         return
       }
       const result = readProjectSolarCompletion({ job: read.job, binding: run.binding, jobId: run.jobId, tool: run.tool })
+      if (result.state === 'pending') notifyProgress(run, read.job)
       read = null
       if (result.state !== 'pending') {
         finish(run, recovering && result.state === 'unreadable' ? unknown(run.jobId) : result)
