@@ -562,6 +562,7 @@ export class AuthorLoop {
           const now = new Date();
           let { manifest, files } = prepareBoundBranchPackage(proposal, session, now, request.toolName);
           let sourceDecoded: BranchCompileAttempt["source_decoded"];
+          let decodedRefusal: { entities: number; diagnostics: string[] } | undefined;
           if (!branchCompileDisabled()) {
             // Keep the checked proposal stable across the asynchronous compiler call.
             proposal = snapshotUntrusted(proposal);
@@ -587,6 +588,8 @@ export class AuthorLoop {
                     ({ manifest, files } = prepared);
                     outcome = rechecked;
                     console.error(`[harness] branch source decoded: entities=${sourceDecoded.entities} original=${sourceDecoded.original_sha256.slice(0, 12)} compiled=${sourceDecoded.compiled_sha256.slice(0, 12)} tenant=${tenantId}`);
+                  } else if (rechecked.status === "refused") {
+                    decodedRefusal = { entities: decoded.entities, diagnostics: rechecked.diagnostics };
                   }
                 } catch { /* A retry never replaces the original refusal unless fully accepted. */ }
               }
@@ -610,7 +613,12 @@ export class AuthorLoop {
             if (outcome.status === "refused") {
               const hint = Object.entries(files).some(([p, src]) => p.endsWith(".csx") && /&(?:amp|lt|gt|quot);/.test(src))
                 ? " (source contains HTML entities; write C# operators such as && < > literally)" : "";
-              const message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              let message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              if (decodedRefusal) {
+                const suffix = `; after Studio decoded ${decodedRefusal.entities} HTML escapes the source still fails: ` +
+                  decodedRefusal.diagnostics.slice(0, 5).join("; ");
+                message += suffix.slice(0, 1500 - message.length);
+              }
               throw new BranchCompileRefusal(path, message, { summary: outcome.summary, diagnostics: outcome.structured });
             }
           }
