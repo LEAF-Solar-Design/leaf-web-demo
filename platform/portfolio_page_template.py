@@ -296,16 +296,27 @@ export default function Gallery({page,category}){
     }
    }
   };
-  const keepRecoveryVisible=()=>{
-   const active=document.activeElement;
-   if(active&&active!==closeButton.current&&dialog.current?.contains(active)){
-    active.scrollIntoView({block:'center',inline:'nearest'});
-   }
+  const viewport=window.visualViewport;
+  let resizeFrame=null;
+  const handleResize=()=>{
+   if(resizeFrame!==null)return;
+   resizeFrame=window.requestAnimationFrame(()=>{
+    resizeFrame=null;
+    const active=document.activeElement;
+    if(active===document.body||active===document.documentElement||active===dialog.current){
+     closeButton.current?.focus();
+    }else if(active!==closeButton.current&&dialog.current?.contains(active)){
+     active.scrollIntoView({block:'center',inline:'nearest'});
+    }
+   });
   };
-  window.addEventListener('resize',keepRecoveryVisible);
+  window.addEventListener('resize',handleResize);
+  viewport?.addEventListener('resize',handleResize);
   window.addEventListener('keydown',key);
   return()=>{
-   window.removeEventListener('resize',keepRecoveryVisible);
+   window.removeEventListener('resize',handleResize);
+   viewport?.removeEventListener('resize',handleResize);
+   if(resizeFrame!==null)window.cancelAnimationFrame(resizeFrame);
    window.removeEventListener('keydown',key);
    restore();
    if(restoreBackground.current===restore)restoreBackground.current=()=>{};
