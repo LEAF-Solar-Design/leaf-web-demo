@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Group 410 uses the same name bound as the DXF writer's MAX_LAYER_CHARS.
+_LAYOUT_NAME_MAX_CHARS = 255
 # Mirrors server/intake_dxf.py's _LINEWEIGHTS (the DXF group-370 enumeration
 # the writer accepts): duplicated, not imported, because intake_dxf already
 # imports from this module and a reverse import would be circular.
@@ -242,6 +244,9 @@ def parse_dxf_bytes(
                 space_info["space"] = "paper"
             if not space_info.get("space"):
                 space_info.clear()
+            elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
+                # Keep paper classification without exporting an invalid name or inventing a tab.
+                space_info.pop("layout", None)
         if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
             if not space_info:
                 mleader_records.append(record)

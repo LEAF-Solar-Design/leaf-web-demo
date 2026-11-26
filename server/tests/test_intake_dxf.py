@@ -89,6 +89,48 @@ def test_named_sheets_without_paper_flag_keep_model_only_count(sheets, model_lay
         assert count["overlay"]["highlight_handles"] == ["A"]
 
 
+@pytest.mark.parametrize(("entity_type", "geometry", "layout", "paper_flag", "kept_layout"), [
+    ("LINE", ["10", "0", "20", "0", "11", "1", "21", "0"], "X" * 256, [], None),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "Roof\x00Plan", [], None),
+    ("LWPOLYLINE", ["90", "2", "10", "0", "20", "0", "10", "1", "20", "0"],
+     "Roof\x7fPlan", ["67", "1"], None),
+    ("LINE", ["10", "0", "20", "0", "11", "1", "21", "0"], "É" * 255, [], "É" * 255),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "Roof Notes", [], "Roof Notes"),
+    ("TEXT", ["10", "0", "20", "0", "40", "2", "1", "Note"], "", ["67", "1"], None),
+], ids=["too-long", "nul", "del", "unicode-boundary", "ordinary", "empty"])
+def test_paper_entity_keeps_only_a_writable_layout_name(entity_type, geometry, layout, paper_flag, kept_layout):
+    fields = ["0", "SECTION", "2", "ENTITIES", "0", entity_type, "5", "A", "8", "Roof",
+              *paper_flag, "410", layout, *geometry, "0", "ENDSEC", "0", "EOF"]
+    intake = dxf_intake.parse_dxf_bytes(("\n".join(fields) + "\n").encode())
+    reopened, _ = _roundtrip(intake)
+    collection = "texts" if entity_type == "TEXT" else "polylines"
+    for drawing in (intake, reopened):
+        entity, = drawing[collection]
+        assert entity["handle"] == "A"
+        assert entity["space"] == "paper"
+        if kept_layout is None:
+            assert "layout" not in entity
+        else:
+            assert entity["layout"] == kept_layout
+
+
+@pytest.mark.parametrize(("layout", "in_model"), [("Model", True), ("MODEL", True), ("Roof Notes", False)])
+def test_multileader_uses_the_same_layout_classification(layout, in_model):
+    intake = {"layers": ["0"], "polylines": [], "mleaders": [{
+        "handle": "B", "layer": "0", "style": "Standard", "textstyle": "Standard",
+        "pts": [[0, 0, 0], [5, 4, 0]], "landing": [5, 4, 0], "dogleg_dir": [1, 0, 0],
+        "textpt": [5.45, 4.09, 0], "height": 0.18, "arrow": 0.18, "dogleg": 0.36,
+        "attachment": 1, "text": "Valve",
+    }], "mlstyles": [{"name": "Standard", "textstyle": "Standard", "segments": 1,
+                     "height": 0.18, "arrow": 0.18, "dogleg": 0.36, "gap": 0.09}]}
+    data = intake_dxf.intake_to_dxf(intake)
+    model_field = b"67\n0\n410\nModel\n"
+    assert _entity_bytes(data).count(model_field) == 1
+    data = data.replace(model_field, f"67\n0\n410\n{layout}\n".encode(), 1)
+    reopened = dxf_intake.parse_dxf_bytes(data)
+    assert [leader["handle"] for leader in reopened.get("mleaders", [])] == (["B"] if in_model else [])
+
+
 def _bulged_square(bulges):
     return {"layers": ["A"], "polylines": [
         {"layer": "A", "closed": True, "handle": "10", "xdata": None,
