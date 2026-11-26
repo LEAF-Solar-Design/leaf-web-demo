@@ -44,6 +44,10 @@ def _centroid(pts: List[List[float]]) -> Tuple[float, float]:
 
 
 def _model_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+    census = intake.get("model_entity_counts")
+    if census is not None:
+        return census.copy()
+
     counts: Dict[str, int] = {}
     for key in ("polylines", "inserts", "faces3d"):
         for ent in intake.get(key) or []:
