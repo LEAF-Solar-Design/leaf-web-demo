@@ -39,6 +39,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import write_loop  # noqa: E402
+from test_w1_design_graph import graph  # noqa: E402, F401, fixture
 
 TENANT = "s5-version-restore"
 DRAWING = "chain-demo"
@@ -264,6 +265,69 @@ def test_history_reports_a_replaced_source_and_omits_its_deltas(
         assert row.get("observed_sha256") == counts_row.get("observed_sha256")
         if counts_row["delta"] is None:
             assert row["layer_changes"] is None
+
+
+@pytest.mark.parametrize("representation", ["json", "cached-dwg", "solar-bundle"])
+def test_history_checks_the_published_source_for_each_representation(
+    client, tmp_path, monkeypatch, graph, representation,
+):
+    import store
+
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    backend = _backend(tmp_path)
+    original = tmp_path / "original.json"
+    original.write_text(json.dumps(_intake([_poly("A")])), encoding="utf-8")
+    store.ingest_drawing(backend, TENANT, str(original), drawing_id=DRAWING)
+    intake = _intake([_poly("A", "Roof")])
+    source = (json.dumps(intake).encode("utf-8") if representation == "json"
+              else b"AC1032 saved drawing payload")
+    digest = hashlib.sha256(source).hexdigest()
+
+    if representation == "solar-bundle":
+        _, _, parent = store.resolve_version_entry(backend, TENANT, DRAWING)
+        graph.update(rev=0, parent_rev=None, source_hash=digest)
+        request = {
+            "graph": graph, "intake": intake,
+            "mapping": {"application_to_handle": {graph["panels"][0]["id"]: "A"}},
+            "project_id": graph["project"]["id"], "apply_id": "history-digest-test",
+            "source_version": 1, "source_sha256": parent["sha256"], "source_rev": None,
+        }
+        fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "writer", 300)
+        version = write_loop.apply_graph_version(
+            backend, TENANT, DRAWING, source, request, holder="writer", fence=fence,
+        )
+    else:
+        version = write_loop._put_bytes_version(
+            backend, TENANT, DRAWING, source, parent_version=1, meta={"tool": "test"},
+        )
+        if representation == "cached-dwg":
+            write_loop.publish_intake_cache(backend, TENANT, DRAWING, version, source, intake)
+
+    assert version == 2
+    _, key, entry = store.resolve_version_entry(backend, TENANT, DRAWING, version)
+    assert backend.get(key) == source
+    assert entry["sha256"] == digest
+    endpoint = f"/api/drawings/{DRAWING}/versions"
+    query = {"include_deltas": 1}
+    response = client.get(endpoint, params=query, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    saved = next(row for row in response.json()["versions"] if row["v"] == version)
+    assert saved["delta"] == {"added": 0, "modified": 1, "deleted": 0}
+    assert "observed_sha256" not in saved
+
+    previous, updated = ((b'"Roof"', b'"Deck"') if representation == "json"
+                         else (b"saved", b"other"))
+    replacement = source.replace(previous, updated, 1)
+    assert replacement != source and len(replacement) == len(source)
+    backend.put(key, replacement)
+    response = client.get(endpoint, params=query, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    saved = next(row for row in response.json()["versions"] if row["v"] == version)
+    assert saved["sha256"] == digest
+    assert saved["observed_sha256"] == hashlib.sha256(replacement).hexdigest()
+    assert saved["delta"] is None
 
 
 def test_default_versions_shape_has_no_delta_key(client, tmp_path):
