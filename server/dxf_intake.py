@@ -32,6 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Group 410 uses the same name bound as the DXF writer's MAX_LAYER_CHARS.
+_LAYOUT_NAME_MAX_CHARS = 255
 # Mirrors server/intake_dxf.py's _LINEWEIGHTS (the DXF group-370 enumeration
 # the writer accepts): duplicated, not imported, because intake_dxf already
 # imports from this module and a reverse import would be circular.
@@ -99,6 +101,7 @@ def parse_dxf_bytes(
     arcs: List[Dict[str, Any]] = []
     inserts: List[Dict[str, Any]] = []
     blocks: Dict[str, Any] = {}
+    block_names: Dict[str, str] = {}
     parse_errors: List[str] = []
     block_count = 0
     has_blocks = False
@@ -209,9 +212,15 @@ def parse_dxf_bytes(
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
             name, block, i = _parse_block(pairs, i + 1, parse_errors, include_measurement_evidence)
             if name and not _layout_block_name(name):
+                # Use the same case-insensitive identity as INSERT resolution.
+                key = name.casefold()
+                prior = block_names.get(key)
+                if prior is not None and blocks[prior] != block:
+                    raise DxfParseError(f"conflicting block definitions: {name[:120]!r}")
                 block_count += 1
                 if block_count <= 200:
                     blocks[name] = block
+                    block_names[key] = name
             continue
         if section == "ENTITIES" and code == 0:
             space_info = {}
@@ -237,10 +246,16 @@ def parse_dxf_bytes(
                                 record.append(pairs[vertex_end])
                             vertex_end += 1
                 model_records[handle] = (value, record)
-            if space_info.get("space") != "paper":
+            layout = space_info.get("layout", "")
+            if layout and layout.casefold() != "model":
+                space_info["space"] = "paper"
+            if not space_info.get("space"):
                 space_info.clear()
+            elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
+                # Keep paper classification without exporting an invalid name or inventing a tab.
+                space_info.pop("layout", None)
         if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
-            if not space_info and dict(record).get(410, "Model") == "Model":
+            if not space_info:
                 mleader_records.append(record)
             i = j
             continue
@@ -343,7 +358,6 @@ def parse_dxf_bytes(
             continue
         i += 1
 
-    block_names = {name.casefold(): name for name in blocks}
     resolved_inserts = []
     for entity in inserts:
         block_name = block_names.get(entity["name"].casefold())
@@ -529,8 +543,6 @@ def parse_dxf_bytes(
                 entity["bulges"] = bulges
             if kind in ("LWPOLYLINE", "POLYLINE") and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
                 entity["width"] = True
-            if groups.get(67) == "1" or groups.get(410, "Model") != "Model":
-                entity["space"] = "paper"
             if handle.upper() in associated or dimension_dependency(record):
                 entity["dimensionRef"] = True
     if parse_errors:
@@ -705,6 +717,7 @@ def _parse_insert(pairs, i, dropped=None):
             "nrm": [round(v, 6) for v in normal],
             "scale": [_float(groups.get(code, "1")) for code in (41, 42, 43)],
             "handle": groups.get(5, ""),
+            **({"invisible": True} if groups.get(60) == "1" else {}),
             **array,
             "_properties": _entity_properties(
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
@@ -761,12 +774,34 @@ def _parse_block_child(pairs, i, kind):
                      rot=round(_float(groups.get(50, "0")), 6),
                      text=" ".join(value.split())[:_TEXT_MAX_CHARS])
     else:
-        if kind == "POLYLINE":
-            _, end = _parse_polyline(pairs, i)
         child = {"kind": "OTHER", "type": kind, "layer": ""}
+        if kind == "POLYLINE":
+            entity, parsed_end = _parse_polyline(pairs, i)
+            flags = _int(groups.get(70, "0"))
+            if flags & 8 and not flags & ~(1 | 8 | 128):
+                outline = _block_3d_outline(pairs, end, parsed_end, entity)
+                if outline is not None:
+                    child["outline"] = outline
+            end = parsed_end
     if "nrm" in child and not any(child["nrm"]):
         raise ValueError("block child normal must not be the zero vector")
     return child, end
+
+
+def _block_3d_outline(pairs, start, end, entity):
+    # The top-level parser is permissive. A block outline must contain
+    # ordinary 3D vertices with complete finite coordinates and a SEQEND.
+    vertex_count = 0
+    while start < end and pairs[start] == (0, "VERTEX"):
+        vertex, start = _entity_groups(pairs, start + 1)
+        if _int(vertex.get(70, "32")) != 32:
+            return None
+        if any(axis not in vertex or not math.isfinite(float(vertex[axis])) for axis in (10, 20, 30)):
+            return None
+        vertex_count += 1
+    if start >= end or pairs[start] != (0, "SEQEND") or vertex_count < 2:
+        return None
+    return {"layer": entity["layer"], "closed": entity["closed"], "pts": entity["pts"]}
 
 
 def _explicit_elevation(pairs, end, kind, groups):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 
 DEFAULT_STATE_BUDGET = 50_000
@@ -120,6 +121,69 @@ def _search(component, neighbors, rank, minimum, maximum, budget):
     return "infeasible", [], searched
 
 
+def _spatial_partition(component, points, neighbors, rank, minimum, maximum, budget):
+    """Try balanced spatial cuts to give the path search smaller regions.
+
+    Failure here says nothing about feasibility: a valid string might cross
+    every proposed cut. The caller keeps the remaining budget for _search.
+    """
+    spent = 0
+    dimensions = range(len(points[component[0]]))
+
+    @lru_cache(maxsize=512)
+    def solve(nodes, depth):
+        nonlocal spent
+        if spent >= budget or depth == 0:
+            return None
+        spent += 1
+        parts = list(_components(nodes, neighbors))
+        if any(not _count_feasible(len(part), minimum, maximum) for part in parts):
+            return None
+        if len(parts) > 1:
+            combined = []
+            for part in parts:
+                paths = solve(tuple(sorted(part)), depth - 1)
+                if paths is None:
+                    return None
+                combined.extend(paths)
+            return combined
+        if len(nodes) <= 3 * maximum:
+            status, paths, used = _search(nodes, neighbors, rank, minimum, maximum,
+                                          min(80, budget - spent))
+            spent += used
+            if status == "complete":
+                return paths
+            if status == "infeasible":
+                return None
+        if len(nodes) < 2 * minimum:
+            return None
+
+        axes = sorted(dimensions, key=lambda axis:
+                      max(points[node][axis] for node in nodes)
+                      - min(points[node][axis] for node in nodes), reverse=True)
+        sizes = sorted((size for size in range(minimum, len(nodes) - minimum + 1)
+                        if _count_feasible(size, minimum, maximum)
+                        and _count_feasible(len(nodes) - size, minimum, maximum)),
+                       key=lambda size: abs(2 * size - len(nodes)))
+        for axis in axes:
+            order = sorted(nodes, key=lambda node: (
+                points[node][axis], points[node], rank[node]))
+            for size in sizes:
+                if spent >= budget:
+                    return None
+                spent += 1
+                left = solve(tuple(sorted(order[:size])), depth - 1)
+                if left is None:
+                    continue
+                right = solve(tuple(sorted(order[size:])), depth - 1)
+                if right is not None:
+                    return left + right
+        return None
+
+    result = solve(tuple(sorted(component)), 16)
+    return result, spent
+
+
 def plan_partition(ordered, points, minimum, maximum, max_step,
                    *, state_budget=DEFAULT_STATE_BUDGET):
     """Return a complete validated plan, a proof of infeasibility, or unresolved."""
@@ -149,6 +213,13 @@ def plan_partition(ordered, points, minimum, maximum, max_step,
                                 "maximum_strings": len(component) // minimum}}
     paths, searched = [], 0
     for component in components:
+        if len(component) > 8 * maximum:
+            found, used = _spatial_partition(component, points, neighbors, rank, minimum,
+                                             maximum, (state_budget - searched) // 2)
+            searched += used
+            if found is not None:
+                paths.extend(found)
+                continue
         status, found, used = _search(component, neighbors, rank, minimum, maximum,
                                      max(0, state_budget - searched))
         searched += used

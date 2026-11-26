@@ -254,6 +254,167 @@ def _admission_service(store, monkeypatch):
     return service, tenant
 
 
+def _enqueue_expired_build(store, monkeypatch, active_author_turn):
+    service, tenant = _admission_service(store, monkeypatch)
+    monkeypatch.setattr(
+        customization_service, "_binding",
+        lambda _tenant: SimpleNamespace(subject=ALICE, role="owner"),
+    )
+    monkeypatch.setattr(customization_service.customization_flags, "plan_mode_enabled", lambda _: False)
+    sid, turn = active_author_turn
+    assert deps.active_stage_author_subject("tenant-a", sid, turn) == ALICE
+    result = service.enqueue_stage(
+        tenant=tenant, description=DESCRIPTION, mode="build",
+        idempotency_key="expired-build", authority_session_id=sid, authority_turn_id=turn,
+    )
+    session_store.end_turn(sid, turn)
+    assert deps.active_stage_author_subject("tenant-a", sid, turn) is None
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    return service, result["change_set_id"]
+
+
+def test_unstarted_expired_build_is_charged_by_default(
+    store, monkeypatch, active_author_turn,
+):
+    monkeypatch.delenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", raising=False)
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    monkeypatch.setattr(author_quota, "refund_unstarted", lambda *_a: pytest.fail("refund store called"))
+    assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert service.stage_status_change(change)["error"]["retryable"] is False
+
+
+def test_unstarted_expired_build_refunds_when_enabled(
+    store, monkeypatch, active_author_turn, caplog,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", " 1 ")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.INFO, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert change.stage_attempt == 1
+    assert list(author_quota._MEMORY_STATE.values()) == [0]
+    assert author_quota.lookup_attempt("tenant-a", change_id).accepted is True
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    refunds = [record for record in caplog.records
+               if record.getMessage().startswith("author_quota_refund_unstarted:")]
+    assert len(refunds) == 1
+    assert refunds[0].levelno == logging.INFO
+    assert refunds[0].getMessage() == f"author_quota_refund_unstarted: change_set={change_id} refunded=True"
+
+
+def test_unstarted_refund_cap_keeps_charge_and_terminal_failure_retryable(
+    store, monkeypatch, active_author_turn, caplog,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    admitted = author_quota.lookup_attempt("tenant-a", change_id)
+    for index in range(3):
+        key = f"earlier-refund-{index}"
+        author_quota.charge("tenant-a", admitted.day, 5, idempotency_key=key)
+        assert author_quota.refund_unstarted("tenant-a", key) is True
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.INFO, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert author_quota.lookup_attempt("tenant-a", change_id) == admitted
+    refunds = [record.getMessage() for record in caplog.records
+               if record.getMessage().startswith("author_quota_refund_unstarted:")]
+    assert refunds == [f"author_quota_refund_unstarted: change_set={change_id} refunded=False"]
+
+
+@pytest.mark.parametrize("case", ["attempt_two", "answered_failure", "lost_lease"])
+def test_unstarted_refund_excludes_retries_answered_failures_and_lost_claims(
+    store, monkeypatch, active_author_turn, case,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    monkeypatch.setattr(author_quota, "refund_unstarted", lambda *_a: pytest.fail("unexpected refund"))
+    posts = []
+    if case == "attempt_two":
+        store.claim_stage(owner="earlier-worker", lease_seconds=30)
+        store.defer_stage_claim(
+            tenant_id="tenant-a", change_set_id=change_id, owner="earlier-worker",
+            reason_code="customization_harness_unavailable", delay_seconds=0,
+        )
+    elif case == "answered_failure":
+        monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_a: ALICE)
+        monkeypatch.setattr(customization_service, "_harness_config", lambda: ("http://harness", "secret"))
+
+        def post(*_args, **_kwargs):
+            posts.append(True)
+            return _HarnessErrorResponse(500, {"error": {"message": "authoring failed"}})
+
+        monkeypatch.setattr("requests.post", post)
+    else:
+        real_fail = store.fail_stage_claim
+
+        def lose_claim(**kwargs):
+            # A competing worker owns and terminates the row; our fenced write loses.
+            with store._transaction() as conn:
+                conn.execute(
+                    "UPDATE customization_change_sets SET stage_lease_owner = ? WHERE change_set_id = ?",
+                    ("winner", change_id),
+                )
+            winner_args = dict(kwargs, owner="winner")
+            assert real_fail(**winner_args) is not None
+            return real_fail(**kwargs)
+
+        monkeypatch.setattr(store, "fail_stage_claim", lose_claim)
+    if case != "answered_failure":
+        monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_attempt == (2 if case == "attempt_two" else 1)
+    assert change.stage_error_code == (
+        "customization_author_job_failed" if case == "answered_failure" else "stage_authority_invalid"
+    )
+    assert posts == ([True] if case == "answered_failure" else [])
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert author_quota.lookup_attempt("tenant-a", change_id).accepted
+
+
+@pytest.mark.parametrize("error_type", [author_quota.AuthorQuotaStoreError, RuntimeError])
+def test_unstarted_refund_outage_preserves_terminal_failure(
+    store, monkeypatch, active_author_turn, caplog, error_type,
+):
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    service, change_id = _enqueue_expired_build(store, monkeypatch, active_author_turn)
+    calls = []
+
+    def refund(*args):
+        calls.append(args)
+        raise error_type("secret connection details")
+
+    monkeypatch.setattr(author_quota, "refund_unstarted", refund)
+    monkeypatch.setattr("requests.post", lambda *_a, **_k: pytest.fail("harness called"))
+    with caplog.at_level(logging.WARNING, logger=customization_stage_worker.__name__):
+        assert customization_stage_worker.run_once("worker-a", service=service)
+    change = store.get_change_set(tenant_id="tenant-a", change_set_id=change_id)
+    assert change.state is ChangeState.FAILED
+    assert change.stage_error_code == "stage_authority_invalid"
+    assert service.stage_status_change(change)["error"]["retryable"] is True
+    assert list(author_quota._MEMORY_STATE.values()) == [1]
+    assert calls == [("tenant-a", change_id)]
+    warnings = [record for record in caplog.records
+                if record.getMessage().startswith("author_quota_refund_unstarted_failed:")]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == f"author_quota_refund_unstarted_failed: exception={error_type.__name__}"
+    assert "secret" not in caplog.text
+
+
 @pytest.mark.parametrize("outcome", ["success", "callback", "failure", "defer", "cancel", "expiry"])
 def test_real_authority_route_survives_repository_admission_until_stage_terminal(
     store, monkeypatch, tmp_path, outcome,
@@ -1737,6 +1898,252 @@ def _ag2a_corrupt(store, change_set_id):
     with store._transaction() as conn:
         conn.execute("UPDATE customization_change_sets SET catalog_record_fields_json = ? "
                      "WHERE change_set_id = ?", ("{malformed", change_set_id))
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, 1), ("2", 2), ("4", 4), ("0", 1), ("5", 1), ("x", 1),
+    ("1.5", 1), ("", 1), ("٣", 1), (" 3 ", 3), ("0002", 1),
+    ("02", 1), ("1", 1), ("   ", 1),
+])
+def test_stage_worker_count(value, expected, monkeypatch, caplog):
+    if value is None:
+        monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", value)
+    assert customization_stage_worker.worker_count() == expected
+    assert caplog.records == []
+
+
+def test_fair_claims_invalid_worker_count_never_logs(monkeypatch, caplog):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", "invalid-secret-value")
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    for _ in range(100):
+        assert customization_stage_worker.fair_claims() is False
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("count, setting, expected", [
+    ("1", "", False), ("1", " 1 ", True), ("1", "true", False), ("2", "0", True),
+])
+def test_stage_fair_claims_configuration(monkeypatch, count, setting, expected):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", count)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_FAIR", setting)
+    assert customization_stage_worker.fair_claims() is expected
+
+
+def test_fair_claim_skips_live_tenant_until_expiry(store, monkeypatch):
+    first = queued(store, key="live-first")
+    queued(store, key="live-second")
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET created_at = ? WHERE change_set_id = ?",
+                     ("2020-01-01T00:00:00.000Z", first.change_set_id))
+    clock = [time.time()]
+    monkeypatch.setattr(customization_store.time, "time", lambda: clock[0])
+    assert store.claim_stage(owner="first", fair=True, lease_seconds=10).change_set_id == first.change_set_id
+    assert store.claim_stage(owner="second", fair=True) is None
+    clock[0] += 11
+    assert store.claim_stage(owner="second", fair=True).change_set_id == first.change_set_id
+
+
+def test_fair_claim_excludes_tenants(store):
+    queued(store, tenant="a", key="excluded")
+    other = queued(store, tenant="b", key="allowed")
+    assert store.claim_stage(owner="worker", fair=True, exclude_tenants=("a",)).change_set_id == other.change_set_id
+    assert store.claim_stage(owner="worker", fair=True, exclude_tenants=("a",)) is None
+
+
+@pytest.mark.parametrize("fair, expected", [
+    (True, [0, 3, 4, 1, 2]), (False, [0, 1, 2, 3, 4]),
+])
+def test_stage_virtual_fifo_and_default_order(store, fair, expected):
+    jobs = [queued(store, tenant=tenant, key=f"fifo-{index}")
+            for index, tenant in enumerate(("hog", "hog", "hog", "b", "c"))]
+    with store._transaction() as conn:
+        for index, job in enumerate(jobs):
+            conn.execute("UPDATE customization_change_sets SET created_at = ? WHERE change_set_id = ?",
+                         (f"2020-01-01T00:00:0{index}.000Z", job.change_set_id))
+    for index in expected:
+        claim = store.claim_stage(owner="fifo", fair=fair)
+        assert claim.change_set_id == jobs[index].change_set_id
+        with store._transaction() as conn:
+            conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                         "stage_lease_owner = NULL, stage_lease_expires_at = NULL, "
+                         "stage_started_at = ? WHERE change_set_id = ?",
+                         ("2020-01-02T00:00:00.000Z", claim.change_set_id))
+
+
+def test_run_once_default_claim_kwargs(monkeypatch):
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", raising=False)
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    calls = []
+    service = SimpleNamespace(store=SimpleNamespace(claim_stage=lambda **kwargs: calls.append(kwargs)))
+    assert not customization_stage_worker.run_once("owner", service=service, lease_seconds=12)
+    assert calls == [{"owner": "owner", "lease_seconds": 12}]
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_parallel_workers_hold_tenant_until_dispatch_returns(store, monkeypatch, raises):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", "2")
+    queued(store, tenant="a", key="parallel-a1")
+    queued(store, tenant="a", key="parallel-a2")
+    queued(store, tenant="b", key="parallel-b")
+    service = CustomizationService(store)
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    active = set()
+    seen = []
+
+    def dispatch(change):
+        with lock:
+            assert change.tenant_id not in active
+            active.add(change.tenant_id)
+            seen.append(change.tenant_id)
+        try:
+            barrier.wait(timeout=5)
+            if raises:
+                raise RuntimeError("dispatch failed")
+            return {}
+        finally:
+            with lock:
+                active.remove(change.tenant_id)
+
+    monkeypatch.setattr(service, "dispatch_stage", dispatch)
+    def reconcile(change, body, **kwargs):
+        with store._transaction() as conn:
+            conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                         "stage_lease_owner = NULL, stage_lease_expires_at = NULL "
+                         "WHERE change_set_id = ?", (change.change_set_id,))
+    monkeypatch.setattr(service, "reconcile_stage_worker", reconcile)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(customization_stage_worker.run_once, f"worker-{i}", service=service) for i in range(2)]
+        assert all(f.result(timeout=10) for f in futures)
+    assert sorted(seen) == ["a", "b"]
+    assert customization_stage_worker._active_tenants == set()
+    monkeypatch.setattr(service, "dispatch_stage", lambda change: seen.append(change.tenant_id) or {})
+    assert customization_stage_worker.run_once("third", service=service)
+    assert seen == seen[:2] + ["a"]
+    assert customization_stage_worker._active_tenants == set()
+
+
+@pytest.mark.parametrize("failure", ["construct", "start", "complete"])
+def test_fair_worker_releases_tenant_on_outer_failure(store, monkeypatch, failure):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_FAIR", "1")
+    queued(store, key="outer-failure")
+    service = CustomizationService(store)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("outer failure")
+
+    if failure == "construct":
+        monkeypatch.setattr(customization_stage_worker, "StageLeaseGuard", fail)
+    elif failure == "start":
+        monkeypatch.setattr(customization_stage_worker.StageLeaseGuard, "start", fail)
+    else:
+        monkeypatch.setattr(service, "dispatch_stage", lambda change: {})
+        monkeypatch.setattr(service, "reconcile_stage_worker", lambda *args, **kwargs: None)
+        monkeypatch.setattr(store, "complete_stage_claim", fail)
+    with pytest.raises(RuntimeError, match="outer failure"):
+        customization_stage_worker.run_once("failure", service=service)
+    assert customization_stage_worker._active_tenants == set()
+
+
+@pytest.mark.parametrize("count, interval, names", [
+    (None, None, ["customization-stage-worker"]),
+    ("3", "bad", ["customization-stage-worker", "customization-stage-worker-2", "customization-stage-worker-3"]),
+    ("1", "1", ["customization-stage-worker", "customization-stage-queue-log"]),
+])
+def test_start_stage_workers(monkeypatch, count, interval, names):
+    for key, value in (("LEAF_CUSTOMIZATION_STAGE_WORKERS", count),
+                       ("LEAF_CUSTOMIZATION_STAGE_QUEUE_LOG_S", interval)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(customization_stage_worker, "serve", lambda *, stop_event: stop_event.wait())
+    stop = threading.Event()
+    threads = customization_stage_worker.start_workers(stop)
+    try:
+        assert [t.name for t in threads] == names
+        assert all(t.daemon and t.is_alive() for t in threads)
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=2)
+    assert all(not t.is_alive() for t in threads)
+
+
+@pytest.mark.parametrize("value, invalid", [
+    (None, False), ("", False), ("   ", False), ("1", False),
+    ("2", False), (" 3 ", False), ("4", False), ("0", True),
+    ("5", True), ("invalid-secret-value", True), ("1.5", True),
+    ("٣", True), ("0002", True), ("02", True),
+])
+def test_start_workers_warns_once_only_for_invalid_count(monkeypatch, caplog, value, invalid):
+    if value is None:
+        monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", value)
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_QUEUE_LOG_S", raising=False)
+    monkeypatch.setattr(customization_stage_worker, "serve", lambda *, stop_event: stop_event.wait())
+    stop = threading.Event()
+    threads = customization_stage_worker.start_workers(stop)
+    try:
+        assert len(threads) == customization_stage_worker.worker_count()
+        warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == (["invalid LEAF_CUSTOMIZATION_STAGE_WORKERS"] if invalid else [])
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("", None), ("bad", None), ("nan", None), ("inf", None),
+    ("-1", None), ("0", None), ("1", 10), ("15", 15), ("9999", 3600),
+])
+def test_queue_log_interval(monkeypatch, value, expected):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_QUEUE_LOG_S", value)
+    assert customization_stage_worker.queue_log_interval() == expected
+
+
+def test_queue_log_survives_stats_failure(monkeypatch, caplog):
+    calls = []
+
+    def stats():
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("secret value")
+        return {"depth": 2, "running": 1, "oldest_wait_s": 30}
+
+    monkeypatch.setattr(CustomizationService, "configured", lambda: SimpleNamespace(store=SimpleNamespace(stage_queue_stats=stats)))
+    waits = iter((False, False, True))
+    stop = SimpleNamespace(wait=lambda interval: next(waits))
+    with caplog.at_level(logging.INFO, logger=customization_stage_worker.__name__):
+        customization_stage_worker._queue_log_loop(stop, 10)
+    assert len(calls) == 2
+    assert [r.message for r in caplog.records] == [
+        "customization_stage_queue exception=RuntimeError",
+        "customization_stage_queue depth=2 running=1 oldest_wait_s=30",
+    ]
+
+
+def test_stage_queue_stats_age_counts_and_removal_exclusion(store, monkeypatch):
+    monkeypatch.setattr(customization_store.time, "time", lambda: 1577836860.9)
+    assert store.stage_queue_stats() == {"depth": 0, "running": 0, "oldest_wait_s": 0}
+    waiting = queued(store, key="stats-waiting")
+    expired = queued(store, key="stats-expired")
+    running = queued(store, key="stats-running")
+    removed = queued(store, key="stats-removed")
+    bind_removal_marker(store, removed)
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET created_at = ?", ("2020-01-01T00:00:00.000Z",))
+        for job, expires in ((running, 1577837000000), (expired, 1577836800000)):
+            conn.execute("UPDATE customization_change_sets SET stage_lease_owner = 'stats', "
+                         "stage_lease_expires_at = ? WHERE change_set_id = ?", (expires, job.change_set_id))
+    assert store.stage_queue_stats() == {"depth": 2, "running": 1, "oldest_wait_s": 60}
+    with store._transaction() as conn:
+        conn.execute("UPDATE customization_change_sets SET created_at = ?", ("2030-01-01T00:00:00.000Z",))
+    assert store.stage_queue_stats()["oldest_wait_s"] == 0
 
 
 def test_ag2a_corrupt_predecessor_snapshot_refused(ag2a):

@@ -1,10 +1,11 @@
-const names = ['module', 'obstruction', 'roof']
+import { trackerFields, trackerValues, validTrackers } from './x07TrackerRoles.js'
+const names = ['module', 'obstruction', 'roof', 'trackers']
 const object = value => value && typeof value === 'object' && !Array.isArray(value)
-const valid = roles => object(roles) && Object.keys(roles).every(name => names.includes(name)
+const valid = roles => object(roles) && Object.keys(roles).every(name => name === 'trackers' ? validTrackers(roles[name]) : names.includes(name)
   && object(roles[name]) && Object.keys(roles[name]).every(field => ['block', 'layer'].includes(field)
     && typeof roles[name][field] === 'string' && roles[name][field].length <= 4096))
-const copy = role => Object.fromEntries(['block', 'layer'].filter(key => Object.hasOwn(role, key)).map(key => [key, role[key]]))
-const same = (a, b) => ['block', 'layer'].every(key => Object.hasOwn(a, key) === Object.hasOwn(b, key) && a[key] === b[key])
+const copy = role => Array.isArray(role) ? role.map(row => ({ ...row })) : Object.fromEntries(['block', 'layer'].filter(key => Object.hasOwn(role, key)).map(key => [key, role[key]]))
+const same = (a, b) => Array.isArray(a) ? JSON.stringify(trackerValues(a)) === JSON.stringify(trackerValues(b)) : ['block', 'layer'].every(key => Object.hasOwn(a, key) === Object.hasOwn(b, key) && a[key] === b[key])
 
 export function compareRoleMaps(before, after) {
   if (!valid(before) || !valid(after)) return null
@@ -18,6 +19,9 @@ export function compareRoleMaps(before, after) {
 }
 
 function Values({ role }) {
+  if (Array.isArray(role)) return <ul>{role.map(row => <li key={JSON.stringify([row.block, row.layer])}>
+    {trackerFields.map(key => row[key]).join(' / ')}
+  </li>)}</ul>
   return <dl>{Object.entries(role).map(([field, value]) => <div key={field}>
     <dt>{field === 'block' ? 'Block' : 'Layer'}</dt><dd><code>{JSON.stringify(value)}</code></dd>
   </div>)}</dl>

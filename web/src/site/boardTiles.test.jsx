@@ -18,6 +18,29 @@ const props = {
 }
 const makeActions = () => Object.fromEntries(['onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability'].map((name) => [name, vi.fn()]))
 
+it('labels reports with the saved input version and opens the selected job', () => {
+  const actions = makeActions()
+  const project = { project_id: 'p1' }
+  const saved = (id, version) => ({
+    ...job, job_id: id, input_version_id: version,
+    result: { ok: true, project_context: { ...project, input_version_id: version }, result: { layers: [] } },
+  })
+  const historical = saved('earlier-report', 'earlier-drawing-version')
+  const latest = saved('later-report', 'later-drawing-version')
+  const unbound = { ...job, job_id: 'unbound-report', result: { ok: true, result: { layers: [] } } }
+  const failed = { ...latest, job_id: 'failed-report', status: 'failed', input_version_id: 'failed-version' }
+  const workspace = { ...props.workspace, project, jobs: [job, historical, latest, unbound, failed] }
+  render(<BoardTiles {...props} workspace={workspace} actions={actions} />)
+
+  expect(screen.getByRole('button', { name: 'Measure · succeeded' })).toBeVisible()
+  expect(screen.getByRole('button', { name: /Report input version could not be verified/ })).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Measure · failed' })).toBeVisible()
+  const historicalButton = screen.getByRole('button', { name: /Input version earlier-drawing-version/ })
+  expect(screen.getByRole('button', { name: /Input version later-drawing-version/ })).toBeVisible()
+  fireEvent.click(historicalButton)
+  expect(actions.onOpenJob).toHaveBeenCalledExactlyOnceWith(historical)
+})
+
 it('F64 opens tools from an empty project through SurfaceGrounds without a tool argument', () => {
   const actions = makeActions()
   const workspace = { ...props.workspace, built_tools: [] }

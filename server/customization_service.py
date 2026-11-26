@@ -154,6 +154,8 @@ _DIAGNOSTIC_CODES = frozenset({
 
 
 class CustomizationServiceError(RuntimeError):
+    harness_not_called = False
+
     def __init__(
         self, code: str, status_code: int = 409, detail: str = "", *,
         diagnostic_code: str | None = None, cause: BaseException | None = None,
@@ -193,13 +195,24 @@ def _valid_compile_attempts(attempts: Any) -> bool:
         return False
     previous = 0
     for attempt in attempts:
-        if not isinstance(attempt, dict) or attempt.keys() != {"n", "decision", "errors", "diagnostics"}:
+        if not isinstance(attempt, dict) or attempt.keys() not in (
+                {"n", "decision", "errors", "diagnostics"},
+                {"n", "decision", "errors", "diagnostics", "source_decoded"}):
             return False
         if (not integer(attempt["n"], previous + 1, 8)
                 or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
                 or not integer(attempt["errors"], 0, 10000)):
             return False
         previous = attempt["n"]
+        if "source_decoded" in attempt:
+            decoded = attempt["source_decoded"]
+            if (attempt["decision"] != "accept" or not isinstance(decoded, dict)
+                    or decoded.keys() != {"entities", "original_sha256", "compiled_sha256"}
+                    or not integer(decoded["entities"], 1, 10000)
+                    or any(not isinstance(decoded[key], str) or not re.fullmatch(r"[0-9a-f]{64}", decoded[key])
+                           for key in ("original_sha256", "compiled_sha256"))
+                    or decoded["original_sha256"] == decoded["compiled_sha256"]):
+                return False
         diagnostics = attempt["diagnostics"]
         if not isinstance(diagnostics, list) or len(diagnostics) > 10:
             return False
@@ -374,6 +387,37 @@ def _harness_config() -> tuple[str, str]:
     so the two can never diverge on what "configured" means."""
     return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
             os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
+def _stage_queue_limit() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_MAX_QUEUED", "").strip()
+    try:
+        limit = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return limit if 1 <= limit <= 10000 else 0
+
+
+def _stage_queue_status_enabled() -> bool:
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_QUEUE_STATUS", "").strip() == "1"
+
+
+def _stage_estimate_s() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_ESTIMATE_S", "").strip()
+    try:
+        estimate = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return estimate if 1 <= estimate <= 3600 else 0
+
+
+def _stage_worker_count() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    try:
+        workers = int(value) if value.isascii() and value.isdecimal() else 1
+    except ValueError:
+        return 1
+    return workers if 1 <= workers <= 4 else 1
 
 
 def _harness_stage_timeout_s() -> float:
@@ -1248,6 +1292,24 @@ class CustomizationService:
         )
         if target == "branch" and target_tool_name:
             self._branch_revision_base(tenant_id, base, target_tool_name)
+        limit = _stage_queue_limit()
+        if limit > 0:
+            # The cap is soft: concurrent admissions between this check and the
+            # staging transition can exceed it by their number.
+            try:
+                try:
+                    self.store.get_change_set_by_idempotency(
+                        tenant_id=tenant_id, idempotency_key=idempotency_key
+                    )
+                except ChangeSetNotFoundError:
+                    if self.store.stage_queue_depth() >= limit:
+                        raise CustomizationServiceError("customization_stage_queue_full", 503)
+            except ToolRecordFieldError as exc:
+                raise CustomizationServiceError("record_fields_invalid", 503) from exc
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+                raise CustomizationServiceError("customization_stage_queue_unavailable", 503) from exc
         fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -1904,6 +1966,21 @@ class CustomizationService:
             "poll_url": f"/api/author/stages/{change.change_set_id}",
             "retry_after_ms": 1000,
         }
+        if (_stage_queue_status_enabled() and status == "queued"
+                and change.state is ChangeState.STAGING):
+            # FIFO-order hint: retries or fair queuing can start in another order.
+            try:
+                ahead = self.store.stage_queue_ahead(change)
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+            else:
+                queue = {"ahead": ahead, "position": ahead + 1}
+                estimate = _stage_estimate_s()
+                if estimate > 0:
+                    workers = _stage_worker_count()
+                    queue["estimated_wait_s"] = ((ahead + workers - 1) // workers) * estimate
+                result["queue"] = queue
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
         if change.plan_json and change.plan_digest:
@@ -2116,7 +2193,9 @@ class CustomizationService:
             or not active_subject
             or active_subject != change.author_subject
         ):
-            raise CustomizationServiceError("stage_authority_invalid", 409)
+            exc = CustomizationServiceError("stage_authority_invalid", 409)
+            exc.harness_not_called = True
+            raise exc
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)

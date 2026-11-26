@@ -5,8 +5,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
+
+import author_quota
 
 from customization_models import (
     ChangeSetConflictError,
@@ -429,6 +432,48 @@ def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
     assert sum(claim is not None for claim in claims) == 1
 
 
+def test_postgres_fair_claim_exclusion_and_virtual_fifo(store) -> None:
+    prefix = f"pg-fair-{uuid4()}"
+    with store._connection() as conn:
+        excluded = tuple(row["tenant_id"] for row in conn.execute(
+            "SELECT DISTINCT tenant_id FROM customization_change_sets"
+        ).fetchall())
+    jobs = []
+    try:
+        for index, suffix in enumerate(("hog", "hog", "hog", "b", "c")):
+            change = create(store, f"{prefix}-{suffix}", f"{prefix}-{index}")
+            jobs.append(change)
+            store.transition(
+                tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+                next_state=ChangeState.STAGING, expected_version=change.version,
+                idempotency_key=f"{prefix}-stage-{index}",
+            )
+            with store._transaction() as conn:
+                conn.execute("UPDATE customization_change_sets SET created_at = ? WHERE change_set_id = ?",
+                             (f"2020-01-01T00:00:0{index}.000Z", change.change_set_id))
+        assert store.claim_stage(owner=prefix, fair=True,
+                                 exclude_tenants=excluded + tuple({j.tenant_id for j in jobs})) is None
+        for index in (0, 3, 4, 1, 2):
+            claim = store.claim_stage(owner=prefix, fair=True, exclude_tenants=excluded)
+            assert claim.change_set_id == jobs[index].change_set_id
+            if index == 0:
+                other = store.claim_stage(owner=prefix, fair=True,
+                                          exclude_tenants=excluded + (jobs[3].tenant_id, jobs[4].tenant_id))
+                assert other is None  # The hog's live lease excludes its next job.
+            with store._transaction() as conn:
+                conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                             "stage_lease_owner = NULL, stage_lease_expires_at = NULL, "
+                             "stage_started_at = ? WHERE change_set_id = ?",
+                             ("2020-01-02T00:00:00.000Z", claim.change_set_id))
+        assert store.claim_stage(owner=prefix, fair=True, exclude_tenants=excluded) is None
+    finally:
+        with store._transaction() as conn:
+            for job in jobs:
+                conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                             "stage_lease_owner = NULL, stage_lease_expires_at = NULL "
+                             "WHERE tenant_id = ? AND change_set_id = ?", (job.tenant_id, job.change_set_id))
+
+
 def test_postgres_async_worker_skips_bound_removal_and_claims_ordinary(store) -> None:
     tenant = "pg-removal-worker-boundary"
     _published_authority(store, tenant, "pg-removal-worker-predecessor")
@@ -783,3 +828,61 @@ def test_r1_postgres_authority_parity(store, tmp_path, monkeypatch) -> None:
                          (S, row.change_set_id))
             conn.execute("UPDATE customization_change_sets SET request_description = NULL WHERE change_set_id = ?",
                          (sqlite_row.change_set_id,))
+
+
+def test_postgres_refunds_preserve_immutable_ledger(monkeypatch):
+    url = os.environ.get("PG_CUSTOMIZATION_TEST_URL")
+    if not url:
+        pytest.skip("PG_CUSTOMIZATION_TEST_URL is not configured")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    db, _ = author_quota._load_platform_counters()
+    db.reset_pool()
+    tenant = f"quota-refund-{uuid4().hex}"
+    day = "2026-07-30"
+
+    def used(tenant_id, quota_day):
+        with db.transaction(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM author_quota_counters "
+                "WHERE namespace = 'author_daily' AND counter_key = %(key)s",
+                {"key": author_quota.counter_key(tenant_id, quota_day)},
+            ).fetchone()
+            return int(row["value"])
+
+    try:
+        db.apply_migration()
+        assert author_quota.charge(tenant, day, 1, idempotency_key="first") == (True, 1)
+        original = author_quota.lookup_attempt(tenant, "first")
+        assert author_quota.charge(tenant, day, 1, idempotency_key="refused") == (False, 1)
+        assert author_quota.refund_unstarted(tenant, "refused") is False
+        assert author_quota.refund_unstarted(tenant, "first") is True
+        assert author_quota.refund_unstarted(tenant, "first") is False
+        assert used(tenant, day) == 0
+        assert author_quota.lookup_attempt(tenant, "first") == original
+        assert author_quota.charge(tenant, day, 1, idempotency_key="first",
+                                   return_decision=True) == original
+        assert used(tenant, day) == 0
+        assert author_quota.charge(tenant, day, 1, idempotency_key="concurrent") == (True, 1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda _: author_quota.refund_unstarted(tenant, "concurrent"), range(2),
+            ))
+        assert results.count(True) == 1
+        assert used(tenant, day) == 0
+        assert author_quota.charge(tenant, day, 1, idempotency_key="third") == (True, 1)
+        assert author_quota.refund_unstarted(tenant, "third") is True
+        assert author_quota.charge(tenant, day, 1, idempotency_key="fourth") == (True, 1)
+        fourth = author_quota.lookup_attempt(tenant, "fourth")
+        assert author_quota.refund_unstarted(tenant, "fourth") is False
+        assert author_quota.refund_unstarted(tenant, "fourth") is False
+        assert author_quota.lookup_attempt(tenant, "fourth") == fourth
+        assert used(tenant, day) == 1
+        for other_tenant, other_day in ((tenant + "-other", day), (tenant, "2026-07-31")):
+            assert author_quota.charge(other_tenant, other_day, 1,
+                                       idempotency_key="fresh") == (True, 1)
+            assert author_quota.refund_unstarted(other_tenant, "fresh") is True
+            assert used(other_tenant, other_day) == 0
+    finally:
+        # The append-only ledger deliberately retains these unique test identities.
+        db.reset_pool()

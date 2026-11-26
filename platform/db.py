@@ -55,6 +55,7 @@ _REQUIRED_COLUMNS = {
         "customer_key", "profile_id", "version", "roles_json", "created_at",
     },
     "x07_project_applications": {"project_key", "customer_key", "profile_id", "version"},
+    "x07_confirmation_evidence": {"project_key", "drawing_key", "input_version_id", "design_window_json"},
     "project_checkout_custody": {
         "delegation_id", "tenant_id", "confirmation_id", "session_id", "subject",
         "actor_binding_id", "input_binding", "approved_args", "fence", "expires_at",

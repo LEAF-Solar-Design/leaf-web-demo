@@ -538,8 +538,10 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(git(bare, ["rev-parse", "main"])).toBe(base);
   }, 30000);
 
-  it.each([false, true])("edits an existing protected app and publishes its exact tree once, deleting component=%s", async deleting => {
-    const old = existingApp({ "components/Old.tsx": "export default function Old(){return <p>Old</p>;}\n" });
+  it.each([[false, "16.4.6"], [true, "16.4.6"], [false, "16.4.3"]] as const)(
+    "edits an existing protected app and publishes its exact tree once, deleting component=%s next=%s", async (deleting, next) => {
+    const packageJson = PROJECT_SOURCE_SCAFFOLD["package.json"].replace('"next": "16.4.6"', `"next": "${next}"`);
+    const old = existingApp({ "package.json": packageJson, "components/Old.tsx": "export default function Old(){return <p>Old</p>;}\n" });
     const requirements = "Add a favorite toggle and a comparison message for each fruit.";
     const updated = '"use client";\nimport {useState} from "react";\nexport default function Page(){const [favorite,setFavorite]=useState(false);return <main><button onClick={()=>setFavorite(!favorite)}>{favorite?"Favorite pear":"Compare fruits"}</button></main>;}\n';
     const component = "export const Label = () => <span>Compare</span>;\n";
@@ -577,6 +579,15 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(git(bare, ["rev-parse", "main"])).toBe(head);
     expect(git(bare, ["rev-parse", "main^{tree}"])).toBe(staged.receipt.staged_tree);
     expect(coordination.authorizePublish).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an unrecognized Web package before acquiring a grant", async () => {
+    const old = PROJECT_SOURCE_SCAFFOLD["package.json"].replace('"next": "16.4.6"', '"next": "16.4.3"');
+    existingApp({ "package.json": old.replace('"next build"', '"next build --debug"') });
+    expect((await post({ ...body(), source_operation: "edit", material: [] })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled();
+    expect(oauth.acquireGrant).not.toHaveBeenCalled();
+    unchanged();
   });
 
   it("edits without new material and refuses replay before acquiring another grant", async () => {
@@ -909,7 +920,7 @@ describe("mounted first source author transaction with real private Git", () => 
     for (const [path, content] of Object.entries(PROJECT_SOURCE_SCAFFOLD)) expect(bytes(path)).toEqual(Buffer.from(content));
     expect(bytes(".leaf/source-seed.json").toString()).toBe('{"seed":true}\n');
     expect(bytes("PROMPT.md").toString()).toBe("Protected seed\n");
-    expect(JSON.parse(bytes("package.json").toString()).dependencies).toEqual({ next: "16.4.3", react: "18.3.1", "react-dom": "18.3.1" });
+    expect(JSON.parse(bytes("package.json").toString()).dependencies).toEqual({ next: "16.4.6", react: "18.3.1", "react-dom": "18.3.1" });
     expect(JSON.parse(bytes("package.json").toString()).scripts).toEqual({ build: "next build", dev: "next dev", start: "next start" });
     expect(bytes("next.config.mjs").toString()).toBe('export default { output: "export", images: { unoptimized: true } };\n');
     expect(staged.receipt.changed_paths).toEqual([...Object.keys(PROJECT_SOURCE_SCAFFOLD), "app/page.tsx", "public/data/nested/items.json"].sort());
