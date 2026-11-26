@@ -101,6 +101,13 @@ it.each([
     'No rank changes among shared layers', false, 'South', ['1', '1']],
   ['one electrical layer disappears', [['Feeder', 20], ['Branch', 10]], [['Feeder', 25]],
     'No rank changes among shared layers', true, 'Branch', ['2', 'Absent']],
+  ['a new larger layer shifts absolute ranks only', [['Roof', 16], ['Canopy', 4]],
+    [['Site', 80], ['Roof', 16], ['Canopy', 4]],
+    'No rank changes among shared layers', true, 'Roof', ['1', '2']],
+  ['removing a tied layer leaves the shared ranking intact', [['Pad', 20], ['Road', 20], ['Access', 3]],
+    [['Pad', 20], ['Access', 3]], 'No rank changes among shared layers', true, 'Access', ['3', '2']],
+  ['a new larger layer does not hide a reversal', [['Roof', 16], ['Canopy', 4]],
+    [['Site', 80], ['Canopy', 25], ['Roof', 9]], 'Layer area ranking changed', true, 'Roof', ['1', '3']],
 ])('%s', (_label, a, b, status, matchesChanged, name, expected) => {
   compare(areaReport(first, a), areaReport({ ...third, input_version_id: 'drawing-v2',
     result: { ...third.result, project_context: { project_id: projectId, input_version_id: 'drawing-v2' } } }, b))
@@ -121,5 +128,15 @@ it.each([
   compare(areaReport(first, [['Roof', 16]]), areaReport(third, layers, options))
 
   expect(screen.getByText('Same tool version')).toBeVisible()
-  expect(screen.queryByRole('table', { name: 'Matching layers by area rank' })).toBeNull()
+  expect(screen.queryByRole('table', { name: 'Area rank within each report' })).toBeNull()
+})
+
+it('omits ranking when a report only returns part of its match set', () => {
+  const partial = areaReport(third, [['Roof', 4]])
+  partial.result.result.layer_count = 2
+  compare(areaReport(first, [['Roof', 16], ['Canopy', 3]]), partial)
+
+  expect(screen.getByText('Same tool version')).toBeVisible()
+  expect(screen.queryByRole('table', { name: 'Area rank within each report' })).toBeNull()
+  expect(screen.queryByText('Matching layers changed')).toBeNull()
 })

@@ -26,10 +26,9 @@ function toolVersionResult(first, second) {
   return first.toolVersion === second.toolVersion ? 'Same tool version' : 'Different tool versions'
 }
 
-function layerAreaRanking(job) {
-  const payload = job.result.result
-  const drawing = job.result.project_context.drawing_id
-  const { layers, layer_count: count, layer_filter: filter } = payload
+function layerAreaReport(job) {
+  const { layers, layer_count: count, layer_filter: filter } = job.result?.result ?? {}
+  const drawing = job.result?.project_context?.drawing_id
   const exactMatch = job.params?.exact_match
   if (typeof drawing !== 'string' || !drawing.trim() || !Array.isArray(layers) || layers.length !== count ||
       (filter !== null && typeof filter !== 'string') ||
@@ -42,29 +41,38 @@ function layerAreaRanking(job) {
     areas.set(row.layer, row.area)
   }
 
+  return { drawing, filter, exactMatch: exactMatch ?? false, areas }
+}
+
+function rankAreas(areas, layers = areas.keys()) {
+  const sorted = [...layers].sort((left, right) => areas.get(right) - areas.get(left))
   const ranks = new Map()
   let previousArea
   let rank
-  const sorted = [...areas].sort((left, right) => right[1] - left[1])
-  sorted.forEach(([layer, area], index) => {
+  sorted.forEach((layer, index) => {
+    const area = areas.get(layer)
     if (area !== previousArea) rank = index + 1
     ranks.set(layer, rank)
     previousArea = area
   })
-  return { drawing, filter, exactMatch: exactMatch ?? false, ranks }
+  return ranks
 }
 
 function LayerAreaComparison({ first, second }) {
   if (!first.tool || !first.toolVersion || first.tool !== second.tool ||
       first.toolVersion !== second.toolVersion) return null
-  const a = layerAreaRanking(first.job)
-  const b = layerAreaRanking(second.job)
+  const a = layerAreaReport(first.job)
+  const b = layerAreaReport(second.job)
   if (!a || !b || a.drawing !== b.drawing || a.filter !== b.filter || a.exactMatch !== b.exactMatch) return null
 
-  const layers = new Set([...a.ranks.keys(), ...b.ranks.keys()])
-  const shared = [...a.ranks.keys()].filter(layer => b.ranks.has(layer))
-  const rankChanged = shared.some(layer => a.ranks.get(layer) !== b.ranks.get(layer))
-  const matchesChanged = [...layers].some(layer => a.ranks.has(layer) !== b.ranks.has(layer))
+  const aRanks = rankAreas(a.areas)
+  const bRanks = rankAreas(b.areas)
+  const layers = new Set([...aRanks.keys(), ...bRanks.keys()])
+  const shared = [...aRanks.keys()].filter(layer => bRanks.has(layer))
+  const sharedARanks = rankAreas(a.areas, shared)
+  const sharedBRanks = rankAreas(b.areas, shared)
+  const rankChanged = shared.some(layer => sharedARanks.get(layer) !== sharedBRanks.get(layer))
+  const matchesChanged = shared.length !== layers.size
   const summary = shared.length === 0 ? 'No shared layers' :
     rankChanged ? 'Layer area ranking changed' : 'No rank changes among shared layers'
   return (
@@ -73,7 +81,7 @@ function LayerAreaComparison({ first, second }) {
       {matchesChanged && <p>Matching layers changed</p>}
       {layers.size > 0 && (
         <table>
-          <caption>Matching layers by area rank</caption>
+          <caption>Area rank within each report</caption>
           <thead>
             <tr><th scope="col">Layer</th><th scope="col">First report</th><th scope="col">Second report</th></tr>
           </thead>
@@ -81,8 +89,8 @@ function LayerAreaComparison({ first, second }) {
             {[...layers].map(layer => (
               <tr key={layer}>
                 <th scope="row">{layer}</th>
-                <td>{a.ranks.get(layer) ?? 'Absent'}</td>
-                <td>{b.ranks.get(layer) ?? 'Absent'}</td>
+                <td>{aRanks.get(layer) ?? 'Absent'}</td>
+                <td>{bRanks.get(layer) ?? 'Absent'}</td>
               </tr>
             ))}
           </tbody>
