@@ -206,6 +206,61 @@ def test_history_lists_exact_layer_reference_moves(client, tmp_path, kind, old, 
     assert all("layer_changes" not in row for row in counts.json()["versions"])
 
 
+@pytest.mark.parametrize(("prior_layout", "next_layout"), [
+    (None, "Roof Sheet"),
+    ("Roof Sheet", None),
+    ("Roof Sheet", "ROOF SHEET"),
+    ("Roof Sheet", "Roof Sheet"),
+], ids=["model-to-paper", "paper-to-model", "sheet-to-sheet", "unchanged"])
+def test_history_reports_layout_moves_and_model_space_exclusions(
+    client, tmp_path, prior_layout, next_layout,
+):
+    import store
+    from dxf_intake import parse_dxf_bytes
+
+    def intake(layout):
+        tags = [(0, "SECTION"), (2, "ENTITIES")]
+        for handle, sheet in (("20", layout), ("21", "Title Sheet"), ("22", "Title Sheet")):
+            tags.extend([(0, "LWPOLYLINE"), (5, handle), (8, "Roof"), (90, 3), (70, 1)])
+            if sheet is not None:
+                tags.extend([(67, 1), (410, sheet)])
+            tags.extend([(10, 0), (20, 0), (10, 4), (20, 0), (10, 4), (20, 4)])
+        tags.extend([(0, "ENDSEC"), (0, "EOF")])
+        raw = "".join(f"{code}\n{value}\n" for code, value in tags).encode()
+        return parse_dxf_bytes(raw)
+
+    backend = _backend(tmp_path)
+    source = tmp_path / "original.json"
+    source.write_text(json.dumps(intake(prior_layout)), encoding="utf-8")
+    store.ingest_drawing(backend, TENANT, str(source), drawing_id=DRAWING)
+    assert write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, json.dumps(intake(next_layout)).encode(),
+        parent_version=1, meta={"tool": "layout edit"},
+    ) == 2
+
+    url = f"/api/drawings/{DRAWING}/versions"
+    response = client.get(url, params={"include_layout_changes": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    rows = {row["v"]: row for row in response.json()["versions"]}
+    assert rows[1]["layout_changes"] is None
+    for version, layout in ((1, prior_layout), (2, next_layout)):
+        expected = sorted(["Title Sheet"] + ([layout] if layout is not None else []))
+        assert rows[version]["paper_layouts"] == expected
+    changed = prior_layout != next_layout
+    assert rows[2]["delta"] == {"added": 0, "modified": int(changed), "deleted": 0}
+    assert rows[2]["layout_changes"] == ([{
+        "kind": "polylines", "handle": "20",
+        "from_space": "model" if prior_layout is None else "paper",
+        "from_layout": prior_layout,
+        "to_space": "model" if next_layout is None else "paper",
+        "to_layout": next_layout,
+    }] if changed else [])
+
+    counts = client.get(url, params={"include_deltas": 1}, headers=_h(TENANT)).json()
+    assert all("layout_changes" not in row and "paper_layouts" not in row
+               for row in counts["versions"])
+
+
 def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     """A version blob that fails to parse as JSON must not 500 the whole chain
     -- its own delta (and its child's, since the child's parent-side read also
@@ -310,11 +365,13 @@ def test_history_checks_the_published_source_for_each_representation(
     assert backend.get(key) == source
     assert entry["sha256"] == digest
     endpoint = f"/api/drawings/{DRAWING}/versions"
-    query = {"include_deltas": 1}
+    query = {"include_layout_changes": 1}
     response = client.get(endpoint, params=query, headers=_h(TENANT))
     assert response.status_code == 200, response.text
     saved = next(row for row in response.json()["versions"] if row["v"] == version)
     assert saved["delta"] == {"added": 0, "modified": 1, "deleted": 0}
+    assert saved["paper_layouts"] == []
+    assert saved["layout_changes"] == []
     assert "observed_sha256" not in saved
 
     previous, updated = ((b'"Roof"', b'"Deck"') if representation == "json"
@@ -328,6 +385,8 @@ def test_history_checks_the_published_source_for_each_representation(
     assert saved["sha256"] == digest
     assert saved["observed_sha256"] == hashlib.sha256(replacement).hexdigest()
     assert saved["delta"] is None
+    assert saved["paper_layouts"] is None
+    assert saved["layout_changes"] is None
 
 
 def test_default_versions_shape_has_no_delta_key(client, tmp_path):

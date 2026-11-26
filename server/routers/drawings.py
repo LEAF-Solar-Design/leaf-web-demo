@@ -1177,13 +1177,33 @@ def _entity_map(intake: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
     return out
 
 
+def _entity_location(entity: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    if entity.get("space") != "paper":
+        return "model", None
+    layout = entity.get("layout")
+    return "paper", layout if isinstance(layout, str) and layout else None
+
+
+def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
+    names = set()
+    for kind in ("polylines", "inserts", "faces3d", "texts", "circles", "arcs", "dimensions"):
+        entities = intake.get(kind)
+        if not isinstance(entities, list):
+            continue
+        for entity in entities:
+            if isinstance(entity, dict) and entity.get("space") == "paper":
+                names.add(_entity_location(entity)[1])
+    return sorted(names, key=lambda name: (name is None, name or ""))
+
+
 def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, Any],
-                        include_layer_changes: bool) -> Dict[str, Any]:
-    """Compare stored intake entities by stable identity, preserving layer names."""
+                        include_layer_changes: bool, include_layout_changes: bool) -> Dict[str, Any]:
+    """Compare stored intake entities by stable identity."""
     parent_map = _entity_map(parent_intake or {})
     child_map = _entity_map(child_intake or {})
     added = modified = deleted = 0
     layer_changes = []
+    layout_changes = []
     for ident, entity in child_map.items():
         prior = parent_map.get(ident)
         if prior is None:
@@ -1199,6 +1219,15 @@ def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, A
                         "kind": ident[0], "handle": ident[2],
                         "from_layer": from_layer, "to_layer": to_layer,
                     })
+            if include_layout_changes and ident[1] == "handle":
+                from_space, from_layout = _entity_location(prior)
+                to_space, to_layout = _entity_location(entity)
+                if (from_space, from_layout) != (to_space, to_layout):
+                    layout_changes.append({
+                        "kind": ident[0], "handle": ident[2],
+                        "from_space": from_space, "from_layout": from_layout,
+                        "to_space": to_space, "to_layout": to_layout,
+                    })
     for ident in parent_map:
         if ident not in child_map:
             deleted += 1
@@ -1207,14 +1236,16 @@ def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, A
     }
     if include_layer_changes:
         comparison["layer_changes"] = layer_changes
+    if include_layout_changes:
+        comparison["layout_changes"] = layout_changes
     return comparison
 
 
 def _version_comparisons(
     backend: Any, tenant_id: str, drawing_id: str,
-    entries: List[Dict[str, Any]], include_layer_changes: bool,
-) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, str]]:
-    """Return available comparisons and observed hashes for mismatched versions."""
+    entries: List[Dict[str, Any]], include_layer_changes: bool, include_layout_changes: bool,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, str], Dict[int, List[Optional[str]]]]:
+    """Return available comparisons, observed mismatches and paper-space inventory."""
     cache: Dict[int, Optional[Dict[str, Any]]] = {}
     expected = {int(e["v"]): e.get("sha256") for e in entries}
     mismatches: Dict[int, str] = {}
@@ -1238,28 +1269,34 @@ def _version_comparisons(
         return cache[v]
 
     out: Dict[int, Dict[str, Any]] = {}
+    layouts: Dict[int, List[Optional[str]]] = {}
     for e in entries:
         v = int(e["v"])
         parent = e.get("parent")
         child_intake = _load(v)
+        if include_layout_changes and child_intake is not None:
+            layouts[v] = _paper_layouts(child_intake)
         if parent is None:
             continue
         parent_intake = _load(int(parent))
         if parent_intake is None or child_intake is None:
             continue
         try:
-            out[v] = _version_comparison(parent_intake, child_intake, include_layer_changes)
+            out[v] = _version_comparison(
+                parent_intake, child_intake, include_layer_changes, include_layout_changes,
+            )
         except (KeyError, ValueError, TypeError):
             # Expected malformed-data failures only: a programming defect must
             # surface as a 500, not vanish into a delta:null row.
             continue
-    return out, mismatches
+    return out, mismatches, layouts
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
 def get_versions(drawing_id: str, include_deltas: bool = False,
                  include_layer_changes: bool = False,
-                 tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
+                 tenant_id: str = Depends(deps.require_active_tenant),
+                 include_layout_changes: bool = False) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
 
@@ -1276,6 +1313,11 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     stable entity handles, kinds and exact before/after layer names for this
     parent comparison. An available comparison with no moves has an empty
     list. The root and unavailable comparisons have `layer_changes: null`.
+    `include_layout_changes=1` also requests each revision's `paper_layouts`,
+    the exact names of paper spaces represented in its saved intake and skipped
+    by model-space tools. A null list item denotes unnamed paper space. An
+    unreadable intake has a null inventory. `layout_changes` describes moves
+    for the delta's stable handles, with null layout names in model space.
     Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
@@ -1304,16 +1346,21 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # tab, slice 6a), and the default response shape stays exactly what it
     # was before this feature.
     rows = []
-    if include_deltas or include_layer_changes:
-        comparisons, mismatches = _version_comparisons(
-            backend, str(tenant_id), drawing_id, entries, include_layer_changes,
+    if include_deltas or include_layer_changes or include_layout_changes:
+        comparisons, mismatches, layouts = _version_comparisons(
+            backend, str(tenant_id), drawing_id, entries,
+            include_layer_changes, include_layout_changes,
         )
         unavailable: Dict[str, Any] = {"delta": None}
         if include_layer_changes:
             unavailable["layer_changes"] = None
+        if include_layout_changes:
+            unavailable["layout_changes"] = None
         for e in entries:
             row = _version_row(e)
             row.update(comparisons.get(row["v"], unavailable))
+            if include_layout_changes:
+                row["paper_layouts"] = layouts.get(row["v"])
             if row["v"] in mismatches:
                 row["observed_sha256"] = mismatches[row["v"]]
             rows.append(row)
