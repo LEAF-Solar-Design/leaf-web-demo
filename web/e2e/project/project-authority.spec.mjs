@@ -77,9 +77,23 @@ async function openProjectUI(page) {
   await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
 }
 
-async function openVersionUI(page, version) {
-  await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
+async function ensureProjectSidebar(page) {
+  const toggle = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
+  await expect(toggle).toBeVisible()
+  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click()
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
+  await expect(sidebar).toBeVisible()
+  return sidebar
+}
+
+async function openProjectMaterial(page) {
+  const sidebar = await ensureProjectSidebar(page)
+  await sidebar.getByRole('button', { name: 'Material', exact: true }).click()
+  return sidebar.getByRole('region', { name: 'Material', exact: true })
+}
+
+async function openVersionUI(page, version) {
+  const sidebar = await ensureProjectSidebar(page)
   await sidebar.getByRole('combobox', { name: 'Canonical drawing version', exact: true }).selectOption(version)
   await sidebar.getByRole('button', { name: 'Close Project', exact: true }).click()
   await page.getByRole('combobox', { name: 'Workspace profile', exact: true }).selectOption({ label: 'Solar CAD' })
@@ -165,14 +179,11 @@ test('project_browser_create_import', async ({ browser }, info) => {
       check(stored.project_id === project.project_id && stored.organization_id === metadata.organization_id)
       await checkpoint(info, 'ui_project_created')
       await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
-      // The board's drawing tile opens the live Material pane; upload completion imports through useMaterialIntake.
-      await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
-      await page.getByRole('region', { name: 'Project sidebar', exact: true }).getByRole('region', { name: 'Drawing', exact: true }).getByRole('button').click()
+      const material = await openProjectMaterial(page)
       const attached = response(page, 'POST', `/api/projects/${project.project_id}/drawing-versions/import`, data => {
         const v = data.drawing_version
         return { project_id: v.project_id, drawing_id: v.drawing_id, input_version_id: v.version_id, organization_id: v.org_id }
       })
-      const material = page.getByRole('region', { name: 'Material', exact: true })
       await expect(material.getByText(`Material attaches to ${projectName}`, { exact: true })).toBeVisible()
       await expect(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
       await material.getByLabel('Drawing file', { exact: true }).setInputFiles(fixture)
@@ -431,13 +442,11 @@ async function prepareSizingProject(page, name) {
   const project = await created
   check(publicId(project.project_id) && project.organization_id === metadata.organization_id)
   await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
-  await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
-  await page.getByRole('region', { name: 'Project sidebar', exact: true }).getByRole('region', { name: 'Drawing', exact: true }).getByRole('button').click()
+  const material = await openProjectMaterial(page)
   const attached = response(page, 'POST', `/api/projects/${project.project_id}/drawing-versions/import`, data => ({
     project_id: data.drawing_version.project_id, drawing_id: data.drawing_version.drawing_id,
     input_version_id: data.drawing_version.version_id, organization_id: data.drawing_version.org_id,
   }))
-  const material = page.getByRole('region', { name: 'Material', exact: true })
   await expect(material.getByText(`Material attaches to ${name}`, { exact: true })).toBeVisible()
   await expect(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
   await material.getByLabel('Drawing file', { exact: true }).setInputFiles(sizingFixture)
