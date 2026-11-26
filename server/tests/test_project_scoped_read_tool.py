@@ -522,6 +522,7 @@ def test_c02_callback_failure_is_a_real_replayable_failed_job(lane, read_job_sto
     assert calls == [True] and replay["job_id"] == job["job_id"]
     assert job["status"] == "failed" and job["result"]["ok"] is False
     assert job["error"]["error_code"] == ErrorCode.INTERNAL
+    assert "executed_code_digest" not in job["result"]
     assert job["result"]["project_context"]["input_version_id"] == str(V2)
     assert "private callback" not in json.dumps(job)
     assert read_job_store.db.execute("SELECT status FROM jobs").fetchone()[0] == "failed"
@@ -993,13 +994,23 @@ def test_c1a_loader_failure_and_owned_metadata(lane, monkeypatch, code):
     assert response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("version, names, prefix, expected", [
+@pytest.fixture
+def catalog_read_case(lane, request):
+    version, names, prefix, expected = request.param
+    store_intake(lane.memory, version, {"layers": names, "polylines": [{"layer": names[-1]}]})
+    request.getfixturevalue("read_job_store")
+    return version, prefix, expected
+
+
+@pytest.mark.parametrize("catalog_read_case", [
     (V1, ["0", "Defpoints", "MODULE", "ROOF"], "", ["0", "Defpoints", "MODULE", "ROOF"]),
     (V2, ["0", "BlockOnly", "Unused"], "Block", ["BlockOnly"]),
     (V2, ["0", "Renamed"], "", ["0", "Renamed"]),
-])
-def test_project_read_executes_catalog_source(lane, version, names, prefix, expected):
-    store_intake(lane.memory, version, {"layers": names, "polylines": [{"layer": names[-1]}]})
+], indirect=True, ids=["historical", "filtered-current", "changed-current"])
+def test_project_read_executes_catalog_source(lane, catalog_read_case):
+    from leaf_platform import store
+
+    version, prefix, expected = catalog_read_case
     tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
     response = request(lane, tool=tool, params={"prefix": prefix}, dwg=str(version))
     assert response.status_code == 200, response.text
@@ -1007,6 +1018,21 @@ def test_project_read_executes_catalog_source(lane, version, names, prefix, expe
     assert result["result"] == {"layers": expected, "count": len(expected)}
     assert result["executed_code_digest"] == tool["artifact_digest"]
     assert result["project_context"]["input_version_id"] == str(version)
+
+    headers = {"X-Org-Id": str(O1), "X-Project-Id": str(P1),
+               "Idempotency-Key": "verified-artifact", "Prefer": "respond-async"}
+    saved = request(lane, tool=tool, params={"prefix": prefix}, headers=headers, dwg=str(version))
+    replay = request(lane, tool=tool, params={"prefix": prefix}, headers=headers, dwg=str(version))
+    assert saved.status_code == replay.status_code == 202, saved.text
+    job = saved.json()
+    assert job == replay.json()
+    assert job["status"] == "complete"
+    assert job["input_version_id"] == str(version)
+    assert job["result"]["result"] == result["result"]
+    assert job["result"]["executed_code_digest"] == tool["artifact_digest"]
+    board = [row.to_dict() for row in store.list_jobs(O1, P1)]
+    assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
+    assert board[0]["result"]["executed_code_digest"] == tool["artifact_digest"]
 
 
 def test_c1a_real_loader_parameter_validation(lane):
@@ -1053,6 +1079,7 @@ def test_c1a_full_envelope_allowlist(lane, monkeypatch):
         "error": None,
         "unexpected": {"claim": True},
         "execution_provenance": {"forged": True},
+        "executed_code_digest": "a" * 64,
     }
     tool = tool_override(monkeypatch)
     install_tool_body(

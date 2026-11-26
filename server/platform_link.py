@@ -666,7 +666,8 @@ def run_project_read_job(tenant, resolved_context, tool, params, idempotency_key
                 raise ValueError("invalid read envelope")
             result = {key: result[key] for key in (
                 "ok", "tool", "version", "result", "overlay", "timing_ms", "cost",
-                "error", "degraded_mode", "execution_provenance") if key in result}
+                "error", "degraded_mode", "executed_code_digest",
+                "execution_provenance") if key in result}
             # Reject unserializable/mutated output before it can poison the DB transaction.
             result = json.loads(json.dumps(result, allow_nan=False))
         except Exception:
