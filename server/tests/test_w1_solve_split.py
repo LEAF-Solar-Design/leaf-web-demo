@@ -837,8 +837,36 @@ class PieceStore:
         return copy.deepcopy(row.exchange)
 
 
+@pytest.mark.parametrize("revision_delta,drop_sizing,refusal", [
+    (0, False, None), (-1, False, "STALE_GRAPH_REVISION"), (0, True, "SIZED_PANEL_GROUPS_REQUIRED"),
+], ids=["ready", "stale", "unsized"])
+def test_plan_small_saved_compact_ground(revision_delta, drop_sizing, refusal):
+    from solar_project_solve import plan_request
+    from solar_project_solve_preparation import prepare_solve
+
+    fixture = SERVER.parent / "web/src/solar/__fixtures__/stringComposerGround.json"
+    graph = json.loads(fixture.read_bytes())
+    if drop_sizing:
+        del graph["settings"]["extra"]["string_sizing"]
+    context = SimpleNamespace(graph=graph, organization_id=uuid4())
+    intake = {"solar_design_graph": graph, "solar_design_graph_sha256": solve.digest(graph)}
+    for frame in graph["frames"]:
+        prepared = prepare_solve(intake, frame["id"], is_head=True)
+        params = {"grant_ref": "fixture", "request": prepared["request"]}
+        scope = {"expected_rev": graph["rev"] + revision_delta, "frame_ref": frame["id"],
+                 "phase": "initial"}
+        if refusal:
+            with pytest.raises(GraphValidationError, match=refusal):
+                plan_request(context, params, scope)
+        else:
+            plan = plan_request(context, params, scope)
+            assert "split_binding" not in plan
+            assert plan["binding"]["request"] == cloud.validate_params(params).request.model_dump()
+            assert plan["binding"]["graph_sha256"] == intake["solar_design_graph_sha256"]
+
+
 @pytest.fixture
-def canonical_split(graph, monkeypatch):
+def canonical_split(graph, monkeypatch, request):
     import deps
     import platform_link
     import solar_project_graph
@@ -853,12 +881,15 @@ def canonical_split(graph, monkeypatch):
     value, _ = group_graph(graph, {"group_grid": [
         [f"cell-{r}-{c}" for c in range(16)] for r in range(16)]})
     value["settings"]["panels_in_sequence"] = 14
+    if getattr(request, "param", False):
+        value = ground_graph(graph, request.getfixturevalue("b18"), 2)
+        value["settings"].update(panels_in_sequence=14, global_string_sizing_confirmed=True)
     value["settings"]["voc_cold"] = solar_sizing_client.manual_voltage()
     value["settings"]["extra"]["string_sizing"] = solar_sizing_client.manual_sizing_evidence(value)
     context = SimpleNamespace(graph=value, organization_id=uuid4(), project_id=uuid4(),
         drawing_id=uuid4(), parent_version_id=uuid4(), intake_sha256="c" * 64)
     params = {"grant_ref": "synthetic-grant", "request": solve_request.build_stringer_request(
-        value, value["frames"][0]["id"], max_string_length=14, dwgname="synthetic-frame")}
+        value, value["frames"][0]["id"], max_string_length=14, dwgname="synthetic-frame", full_frame=True)}
     binding = {"frame_ref": value["frames"][0]["id"], "expected_rev": value["rev"], "phase": "initial"}
     plan = canonical.plan_request(context, params, binding)
     manifest = deps.catalog_tool_digest(solar_tools.trusted_record(canonical.TOOL_NAME))
@@ -894,6 +925,7 @@ def canonical_split(graph, monkeypatch):
     return a
 
 
+@pytest.mark.parametrize("canonical_split", [False, True], indirect=True, ids=["roof", "compact-ground"])
 def test_canonical_split_durable_coverage_native_cut_polarity_and_repeat(canonical_split):
     a = canonical_split
     before = copy.deepcopy(a.context.graph)
@@ -904,15 +936,21 @@ def test_canonical_split_durable_coverage_native_cut_polarity_and_repeat(canonic
     candidate = evidence["candidate"]["candidate"]
     accepted = solve.accept_split_candidate(before, candidate, expected_rev=before["rev"])
     flat = [ref for string in accepted["strings"] for ref in string["ordered_panel_refs"]]
-    assert len(flat) == len(set(flat)) == len(before["panels"])
-    assert set(flat) == {panel["id"] for panel in before["panels"]}
+    from solar_ground_graph_codec import expand_graph
+    reference = expand_graph(before)
+    selected = reference["frames"][0]["id"]
+    selected_panels = {panel["id"]: panel for panel in reference["panels"]
+                       if panel["frame_ref"] == selected}
+    assert len(flat) == len(set(flat)) == len(selected_panels)
+    assert set(flat) == set(selected_panels)
+    assert sum(item["panel_count"] for item in result["candidate_summary"]) == len(flat)
     # Native cuts follow final-grid Seq, despite deliberately reversed visited_path.
     expected = [cell["Id"] for proposal in candidate["proposals"]
                 for cell in sorted((cell for row in proposal["proposal"]["data"]["final_grid"]["Rows"]
                                     for cell in row["Panels"] if cell["Code"] == 1),
                                    key=lambda cell: cell["Seq"])]
     assert flat == expected
-    by_id = {panel["id"]: panel for panel in before["panels"]}
+    by_id = selected_panels
     for string in accepted["strings"]:
         refs = string["ordered_panel_refs"]
         assert 1 <= len(refs) <= 14
