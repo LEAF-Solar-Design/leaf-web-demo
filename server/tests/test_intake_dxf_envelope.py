@@ -310,6 +310,55 @@ def test_nested_block_polyline_refuses_malformed_geometry(invalid_groups):
         intake_to_dxf(drawing)
 
 
+@pytest.mark.parametrize("name,reference,font,bigfont,width,oblique,label_kind", [
+    ("ModuleNotes", "ModuleNotes", "txt.shx", "", 1.0, 0, "TEXT"),
+    ("PanelLabels", "panellabels", "simplex.shx", "bigfont.shx", 0.85, 12, "MTEXT"),
+    ("String Labels", "String Labels", "arial.ttf", "", 1.25, -15, "TEXT"),
+])
+def test_reexport_retains_only_used_text_styles(name, reference, font, bigfont, width, oblique, label_kind):
+    style = [(70, 0), (40, 2), (41, width), (50, oblique), (71, 0), (42, 2), (3, font), (4, bigfont)]
+    pairs = [(0, "SECTION"), (2, "TABLES"), (0, "TABLE"), (2, "STYLE"), (70, 2),
+             (0, "STYLE"), (2, name), *style, (0, "STYLE"), (2, "UnusedLabels"), (3, "unused.shx"),
+             (0, "ENDTAB"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "TEXT"), (5, "A0"), (1, "Module label"), (7, reference),
+             (10, 0), (20, 0), (40, 2), (0, "ENDBLK"),
+             (0, "BLOCK"), (2, "Rack"), (0, "INSERT"), (5, "A1"), (2, "Module"),
+             (10, 1), (20, 2), (0, "ENDBLK"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "A2"), (2, "Rack"),
+             (10, 4), (20, 5), (0, label_kind), (5, "A3"), (1, "Drawing label"),
+             (7, reference), (10, 2), (20, 3), (40, 2), (0, "ENDSEC"), (0, "EOF")]
+    source = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    raw = intake_to_dxf(source)
+    reopened = parse_dxf_bytes(raw)
+    for drawing in (source, reopened):
+        assert drawing["inserts"][0]["handle"] == "A2"
+        assert drawing["blocks"]["Rack"]["nested_inserts"][0]["handle"] == "A1"
+        assert drawing["blocks"]["Module"]["children"][0]["style"] == reference
+        assert drawing["texts"][0]["style"] == reference
+        assert set(drawing["text_styles"]) == {name.casefold()}
+    assert reopened["text_styles"] == source["text_styles"]
+    exported = [record for record in _records(_sections(raw)["TABLES"])
+                if record[0] == ("0", "STYLE")]
+    assert {_get(record, 2) for record in exported} == {"Standard", name}
+    custom, = [record for record in exported if _get(record, 2) == name]
+    assert custom[6:] == [(str(code), str(value)) for code, value in style]
+    _assert_pointers_resolve(raw)
+
+
+@pytest.mark.parametrize("catalogue,error", [
+    ({}, "missing STYLE definition"),
+    ({"label": {"name": "Other"}}, "STYLE name does not match"),
+    ({"label": {"name": "Label", "width": "nan"}}, "invalid width"),
+])
+def test_reexport_refuses_unresolved_or_invalid_text_style(catalogue, error):
+    drawing = _small(with_blocks=True)
+    drawing["texts"] = [{"layer": "0", "pt": [0, 1], "text": "Label", "style": "Label"}]
+    drawing["text_styles"] = catalogue
+    with pytest.raises(intake_dxf.IntakeDxfError, match=error):
+        intake_to_dxf(drawing)
+
+
 def test_case_distinct_block_records_keep_definition_owners():
     intake = {"blocks": {name: {"base": [0, 0, 0], "children": []} for name in ("B", "b")}}
     back = _round_trip_with_resolved_pointers(intake)

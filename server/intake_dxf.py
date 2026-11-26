@@ -33,7 +33,7 @@ import math
 import re
 from typing import Any, Dict, List
 
-from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _layout_block_name
+from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _TEXT_STYLE_FIELDS, _layout_block_name
 
 # Bounds shared with the write contract (server/mutation_plan.py) so a document
 # the plan could never describe is refused at the same size here.
@@ -534,6 +534,11 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     # Settle synthetic entity handles before table/definition handles, so
     # BLOCK_RECORD identities are above every model-space entity identity.
     kinds = [row[:-1] + (row[-1] if row[-1] is not None else fresh_handle(),) for row in kinds]
+    text_style_names = [source["style"] for row, source in zip(kinds, kind_sources)
+                        if row[0] == "text" and "style" in source]
+    text_style_names.extend(child["style"] for block in (blocks or {}).values()
+                            for child in block["children"] if "style" in child)
+    text_style_records = _used_text_styles(intake.get("text_styles", {}), text_style_names)
     textstyle_handles = {}
     mlstyle_handles = {}
     ml_linetype = None
@@ -563,17 +568,29 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             out += ["0", "DIMSTYLE", "105", fresh_handle(), "100", "AcDbSymbolTableRecord",
                     "100", "AcDbDimStyleTableRecord", "2", name, "70", "0"]
         out += ["0", "ENDTAB"]
-    if textstyle_handles:
+    if ml_linetype is not None:
         out += ["0", "TABLE", "2", "LTYPE", "70", "1", "0", "LTYPE", "5", ml_linetype,
                 "100", "AcDbSymbolTableRecord", "100", "AcDbLinetypeTableRecord",
                 "2", "ByLayer", "70", "0", "3", "", "72", "65", "73", "0",
                 "40", "0.0", "0", "ENDTAB"]
-        out += ["0", "TABLE", "2", "STYLE", "70", str(len(textstyle_handles))]
-        for name, handle in textstyle_handles.items():
+    styles_to_emit = {name: (handle, None) for name, handle in textstyle_handles.items()}
+    leader_style_names: dict[str, list[str]] = {}
+    for name in textstyle_handles:
+        leader_style_names.setdefault(name.casefold(), []).append(name)
+    for key, (name, fields) in text_style_records.items():
+        existing_names = leader_style_names.get(key)
+        if existing_names:
+            for existing in existing_names:
+                styles_to_emit[existing] = (textstyle_handles[existing], fields)
+        else:
+            styles_to_emit[name] = (fresh_handle(), fields)
+    if styles_to_emit:
+        out += ["0", "TABLE", "2", "STYLE", "70", str(len(styles_to_emit))]
+        for name, (handle, fields) in styles_to_emit.items():
             out += ["0", "STYLE", "5", handle, "100", "AcDbSymbolTableRecord",
-                    "100", "AcDbTextStyleTableRecord", "2", name, "70", "0",
-                    "40", "0.0", "41", "1.0", "50", "0.0", "71", "0",
-                    "42", "0.2", "3", "arial.ttf", "4", ""]
+                    "100", "AcDbTextStyleTableRecord", "2", name]
+            for code, field, default in _TEXT_STYLE_FIELDS:
+                out += [str(code), fields[field] if fields else default]
         out += ["0", "ENDTAB"]
     block_records = {}
     if blocks is not None or mleaders:
@@ -686,14 +703,16 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             _, layer, kind, (x, y, z), value, normal, _ = row
             if normal is not None:
                 x, y, z = _wcs_to_ocs([x, y, z], normal)
+            style = kind_sources[idx].get("style")
+            style_groups = ["7", style] if style is not None else []
             if kind == "TEXT":
                 out += ["0", "TEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbText", "10", _num(x), "20", _num(y), "30", _num(z),
-                        "40", TEXT_HEIGHT, "1", value, "100", "AcDbText"]
+                        "40", TEXT_HEIGHT, "1", value, *style_groups, "100", "AcDbText"]
             else:
                 out += ["0", "MTEXT", "5", h, "100", "AcDbEntity", "8", layer,
                         "100", "AcDbMText", "10", _num(x), "20", _num(y), "30", _num(z),
-                        "40", TEXT_HEIGHT, "1", value]
+                        "40", TEXT_HEIGHT, "1", value, *style_groups]
             if normal is not None:
                 out += _point_groups(normal, 210)
         source = kind_sources[idx]
@@ -1060,6 +1079,39 @@ def _emit_insert(fields, handle, owner):
             "43", _num(scale[2]), "50", _num(rotation), *array_groups, *_point_groups(normal, 210)]
 
 
+def _used_text_styles(catalogue, names):
+    if not isinstance(catalogue, dict):
+        _fail("text_styles must be an object")
+    result = {}
+    for name in names:
+        _layer_name(name, "text style")
+        key = name.casefold()
+        if key == "standard" or key in result:
+            continue
+        definition = catalogue.get(key)
+        if not isinstance(definition, dict):
+            _fail(f"text style {name!r}: missing STYLE definition")
+        canonical_name = _layer_name(definition.get("name"), "STYLE definition")
+        if canonical_name.casefold() != key:
+            _fail(f"text style {name!r}: STYLE name does not match the reference")
+        fields = {}
+        for code, field, default in _TEXT_STYLE_FIELDS:
+            value = definition.get(field, default)
+            if not isinstance(value, str) or len(value) > 255 or _CONTROL_RE.search(value):
+                _fail(f"text style {name!r}: invalid {field}")
+            try:
+                if code in (70, 71):
+                    if not 0 <= int(value) <= 32767:
+                        raise ValueError
+                elif code not in (3, 4) and not math.isfinite(float(value)):
+                    raise ValueError
+            except ValueError:
+                _fail(f"text style {name!r}: invalid {field}")
+            fields[field] = value
+        result[key] = (canonical_name, fields)
+    return result
+
+
 def _validated_blocks(blocks, note_layer, real, remaining_entities):
     if not isinstance(blocks, dict) or len(blocks) > 200:
         _fail("blocks must be an object of at most 200 definitions")
@@ -1130,6 +1182,8 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
                            height=_number(child.get("height"), where),
                            rot=_number(child.get("rot"), where),
                            text=_text_value(child.get("text"), where).replace("|", " "))
+                if "style" in child:
+                    row["style"] = child["style"]
             else:
                 _fail(f"{where}: unsupported block child kind")
             note_layer(layer)
@@ -1192,7 +1246,10 @@ def _emit_block_child(child, handle, owner):
             out += ["100", "AcDbArc", "50", _num(child["start_deg"]), "51", _num(child["end_deg"])]
     else:
         out += ["100", "AcDbText", *_point_groups(child["pt"]), "40", _num(child["height"]),
-                "50", _num(child["rot"]), "1", child["text"], "100", "AcDbText"]
+                "50", _num(child["rot"]), "1", child["text"]]
+        if "style" in child:
+            out += ["7", child["style"]]
+        out += ["100", "AcDbText"]
     return out
 
 

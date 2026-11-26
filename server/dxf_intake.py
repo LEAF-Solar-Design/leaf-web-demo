@@ -123,6 +123,7 @@ def parse_dxf_bytes(
     elevation_evidence = []
     model_records = {}
     textstyles = {}
+    text_style_catalogue = {}
     mleader_records = []
 
     i = 0
@@ -167,8 +168,14 @@ def parse_dxf_bytes(
             continue
         if section == "TABLES" and code == 0 and value == "STYLE":
             groups, i = _entity_groups(pairs, i + 1)
+            name = groups.get(2, "")
             if groups.get(5):
-                textstyles[groups[5].upper()] = groups.get(2, "")
+                textstyles[groups[5].upper()] = name
+            if name and name.casefold() != "standard":
+                text_style_catalogue.setdefault(name.casefold(), {
+                    "name": name,
+                    **{field: groups[code] for code, field, _ in _TEXT_STYLE_FIELDS if code in groups},
+                })
             continue
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
@@ -451,6 +458,14 @@ def parse_dxf_bytes(
         # ADDITIVE §1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
         out["texts"] = texts
+    used_text_styles = {row["style"].casefold() for row in texts if "style" in row}
+    used_text_styles.update(child["style"].casefold()
+                            for block in blocks.values() for child in block["children"]
+                            if child["kind"] == "TEXT" and "style" in child)
+    captured_styles = {key: text_style_catalogue[key] for key in sorted(used_text_styles)
+                       if key in text_style_catalogue}
+    if captured_styles:
+        out["text_styles"] = captured_styles
     if circles:
         out["circles"] = circles
     if arcs:
@@ -786,6 +801,8 @@ def _parse_block_child(pairs, i, kind):
                      height=round(_float(groups.get(40, "0")), 3),
                      rot=round(_float(groups.get(50, "0")), 6),
                      text=" ".join(value.split())[:_TEXT_MAX_CHARS])
+        if "style" in entity:
+            child["style"] = entity["style"]
     else:
         child = {"kind": "OTHER", "type": kind, "layer": ""}
         if kind == "POLYLINE":
@@ -1457,6 +1474,16 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int, dropped=None):
 _MTEXT_FORMAT_CODES = ("\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\S")
 _MTEXT_TOGGLE_CODES = ("\\L", "\\l", "\\O", "\\o", "\\K", "\\k")
 _TEXT_MAX_CHARS = 512
+_TEXT_STYLE_FIELDS = (
+    (70, "flags", "0"),
+    (40, "height", "0.0"),
+    (41, "width", "1.0"),
+    (50, "oblique", "0.0"),
+    (71, "generation_flags", "0"),
+    (42, "last_height", "0.2"),
+    (3, "font", "arial.ttf"),
+    (4, "bigfont", ""),
+)
 
 
 def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
@@ -1475,6 +1502,7 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
     x = y = z = 0.0
     normal = [0.0, 0.0, 1.0]
     parts: List[str] = []
+    style = ""
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -1494,6 +1522,8 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
             normal[1] = _float(value)
         elif code == 230:
             normal[2] = _float(value)
+        elif code == 7:
+            style = value
         elif code == 3:
             parts.append(value)
         elif code == 1:
@@ -1515,6 +1545,8 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
     entity: Dict[str, Any] = {"kind": kind, "layer": layer, "pt": pt, "text": text, "handle": handle}
     if not identity:
         entity["normal"] = [round(v, 6) for v in normal]
+    if style and style.casefold() != "standard":
+        entity["style"] = style
     return entity, i
 
 
