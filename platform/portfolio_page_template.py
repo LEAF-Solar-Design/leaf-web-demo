@@ -296,7 +296,20 @@ export default function Gallery({page,category}){
     }
    }
   };
-   window.addEventListener('keydown',key);return()=>{window.removeEventListener('keydown',key);restore();if(restoreBackground.current===restore)restoreBackground.current=()=>{};};
+  const keepRecoveryVisible=()=>{
+   const active=document.activeElement;
+   if(active&&active!==closeButton.current&&dialog.current?.contains(active)){
+    active.scrollIntoView({block:'center',inline:'nearest'});
+   }
+  };
+  window.addEventListener('resize',keepRecoveryVisible);
+  window.addEventListener('keydown',key);
+  return()=>{
+   window.removeEventListener('resize',keepRecoveryVisible);
+   window.removeEventListener('keydown',key);
+   restore();
+   if(restoreBackground.current===restore)restoreBackground.current=()=>{};
+  };
  },[Boolean(selected)]);
  useEffect(()=>{if(selectedId)closeButton.current?.focus();},[selectedId,selected?.preview_sha256]);
  const open=(image,button)=>{trigger.current={button,materialId:image.material_id,index:visibleImages.indexOf(image)};setSelectedId(image.material_id);};

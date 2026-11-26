@@ -228,7 +228,7 @@ describe('actual exported portfolio image failure recovery', () => {
     expect(screen.getByText(first.title)).toBeTruthy()
   })
 
-  it('keeps viewer Retry reachable with Tab and preserves Escape focus return', () => {
+  it('keeps viewer Retry reachable through keyboard navigation and viewport changes', () => {
     render(<Gallery page={{}} category={category(first)} />)
     const trigger = screen.getByRole('button', { name: 'View Synthetic cake' })
     fireEvent.click(trigger)
@@ -241,16 +241,25 @@ describe('actual exported portfolio image failure recovery', () => {
     close.focus(); fireEvent.keyDown(window, { key: 'Tab' })
     expect(document.activeElement).toBe(retry)
     expect(retry.scrollIntoView).toHaveBeenCalledWith({ block: 'center', inline: 'nearest' })
-    fireEvent.keyDown(window, { key: 'Tab' })
-    expect(document.activeElement).toBe(close)
-    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    fireEvent.resize(window)
     expect(document.activeElement).toBe(retry)
     expect(retry.scrollIntoView).toHaveBeenCalledTimes(2)
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(document.activeElement).toBe(close)
+    close.scrollIntoView = vi.fn()
+    fireEvent.resize(window)
+    expect(close.scrollIntoView).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(retry)
+    expect(retry.scrollIntoView).toHaveBeenCalledTimes(3)
     fireEvent.click(retry)
     expect(document.activeElement).toBe(close)
     fireEvent.keyDown(window, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(document.activeElement).toBe(trigger)
+    trigger.scrollIntoView = vi.fn()
+    fireEvent.resize(window)
+    expect(trigger.scrollIntoView).not.toHaveBeenCalled()
   })
 
   it('retires the previous category viewer and its failed image state', () => {
