@@ -13,6 +13,7 @@ import author_quota
 from customization_models import ChangeState
 from customization_service import (
     CustomizationService, CustomizationServiceError, finish_stage_authority_for_change,
+    refund_unstarted_build,
 )
 
 
@@ -219,29 +220,20 @@ def _run_claimed(service: CustomizationService, change: Any, owner: str, lease_s
                 author_quota.refund_enabled()
                 and getattr(exc, "harness_not_called", False)
                 and change.stage_attempt == 1
+                and exc.code != "stage_grant_exhausted"
             )
             failed = service.store.fail_stage_claim(
                 tenant_id=change.tenant_id,
                 change_set_id=change.change_set_id,
                 owner=owner,
                 reason_code=exc.code,
-                retryable=refund_unstarted or exc.status_code >= 500,
+                retryable=(refund_unstarted and exc.code == "stage_authority_invalid")
+                or exc.status_code >= 500
+                or exc.code in {"stage_grant_expired", "stage_grant_exhausted", "stage_grant_unavailable"},
                 reason_message=reason_message,
             )
             if refund_unstarted and failed is not None:
-                try:
-                    refunded = author_quota.refund_unstarted(
-                        change.tenant_id, change.change_set_id
-                    )
-                    _LOG.info(
-                        "author_quota_refund_unstarted: change_set=%s refunded=%s",
-                        change.change_set_id, refunded,
-                    )
-                except Exception as refund_exc:  # noqa: BLE001 - terminal state wins
-                    _LOG.warning(
-                        "author_quota_refund_unstarted_failed: exception=%s",
-                        type(refund_exc).__name__,
-                    )
+                refund_unstarted_build(change.tenant_id, change.change_set_id, log=_LOG)
         return True
     except Exception:
         guard.close()

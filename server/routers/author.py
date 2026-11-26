@@ -535,6 +535,17 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "Tool authoring requires the requester's active app turn. "
         "The approved request was not executed."
     ),
+    "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
+    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
+    "stage_grant_refused": "Your access changed while this request waited. It was not started.",
+    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
+    "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
 }
 
 
@@ -699,6 +710,7 @@ def _customization_error(
                         content=with_envelope_fields({
         "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
+        **({"harness_not_called": True} if exc.harness_not_called else {}),
         **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 
@@ -1055,6 +1067,37 @@ def recover_stage(
         )
     status_code = {"found": 200, "admission_pending": 202, "not_found": 404}[outcome["status"]]
     return JSONResponse(status_code=status_code, content=outcome)
+
+
+@router.post("/api/author/stages/{change_set_id}/withdraw")
+def withdraw_stage(change_set_id: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+    try:
+        if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", change_set_id):
+            raise CustomizationServiceError("invalid_recovery_request", 422)
+        binding = customization_service._binding(tenant)
+        service = CustomizationService.configured()
+        change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+        if change.author_subject != binding.subject:
+            return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+        result = service.store.withdraw_stage(
+            tenant_id=str(tenant), change_set_id=change_set_id,
+            author_subject=binding.subject, now_ms=int(time.time() * 1000),
+        )
+        if result["withdrawn"]:
+            if author_quota.refund_enabled():
+                customization_service.refund_unstarted_build(str(tenant), change_set_id)
+            try:
+                change = service.store.get_change_set(tenant_id=str(tenant), change_set_id=change_set_id)
+                customization_service.finish_stage_authority_for_change(change)
+            except Exception:
+                pass
+        return {"contract": "leaf.customization-stage-withdraw.v1", **result}
+    except ChangeSetNotFoundError:
+        return _customization_error(CustomizationServiceError("change_set_not_found", 404))
+    except CustomizationServiceError as exc:
+        return _customization_error(exc)
+    except Exception as exc:
+        return _customization_error(CustomizationServiceError("customization_stage_failed", 503), cause=exc)
 
 
 @router.get("/api/author/stages/{change_set_id}")
