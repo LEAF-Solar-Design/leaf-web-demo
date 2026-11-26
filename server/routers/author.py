@@ -499,6 +499,8 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
 
 
 _CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
+    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
     "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
     "invalid_stage_source_request": "Invalid staged source request.",
     "stage_source_not_available": "Staged source is not available.",
@@ -691,8 +693,11 @@ def _customization_error(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
     )
-    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
-        "error": error_obj("BAD_PARAMS", message, retryable=False),
+    retryable = exc.code in {"customization_stage_queue_full", "customization_stage_queue_unavailable"}
+    return JSONResponse(status_code=exc.status_code,
+                        headers={"Retry-After": "60"} if retryable else None,
+                        content=with_envelope_fields({
+        "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
         **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))

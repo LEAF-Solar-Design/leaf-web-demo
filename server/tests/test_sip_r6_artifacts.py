@@ -140,6 +140,24 @@ def test_sip_r6_artifact_producers(lane, monkeypatch):
             assert rows == [520, 37, 179, 1]
 
 
+def test_sip_r6_solaredge_schedule_binds_saved_version(lane):
+    graph = schedules_cases.solaredge_layout(design_cases.graph.__wrapped__(), "partial")
+    lane.set_parent(reads.tools_cases.embedded(graph))
+    version = lane.parent.version_id
+    context = reads.graph_adapter.resolve_project_graph_context(lane.context(version))
+    result = reads.run(lane, "solar-electrical-schedules", {}, version=version)["result"]
+    reference = result["output"]["artifact"]
+    meta, content = download(lane, reference["artifact_id"])
+    assert meta["source_version_id"] == reference["source_version_id"] == result["input_version_id"] == str(version)
+    assert reference["graph_sha256"] == result["graph_sha256"] == context.graph_sha256
+    assert reference["content_sha256"] == sha256(content).hexdigest()
+    table, = json.loads(content)["tables"]
+    assert {row[0]: row[3] for row in table["cells"][2:]} == {
+        graph["strings"][0]["id"]: "Assigned", graph["strings"][1]["id"]: "Unassigned",
+    }
+    assert result["drawing_changed"] is False
+
+
 def test_sip_r6_artifact_immutable_storage(lane):
     before = list(lane.writes)
     sink, prepared = make(lane)

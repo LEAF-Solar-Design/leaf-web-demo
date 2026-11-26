@@ -209,6 +209,26 @@ class _Record:
             _fail("SOURCE_AMBIGUOUS")
         return values[0] if values else default
 
+    def dictionary_owner(self):
+        """Read the owner outside application groups in a DICTIONARY header."""
+        owners = []
+        depth = 0
+        for pair in self.pairs:
+            if pair.code == 100 and not depth:
+                break
+            if pair.code == 102:
+                if pair.value.startswith("{"):
+                    depth += 1
+                elif pair.value == "}":
+                    depth -= 1
+                    if depth < 0:
+                        _fail("SOURCE_INVALID")
+            if pair.code == 330 and not depth:
+                owners.append(pair.value)
+        if depth or len(owners) > 1:
+            _fail("SOURCE_AMBIGUOUS")
+        return owners[0] if owners else "0"
+
 
 class _Drawing:
     def __init__(self, raw):
@@ -236,6 +256,9 @@ class _Drawing:
         self.sections = {}
         i = 0
         while i < len(p) - 1:
+            if p[i].code == 999:
+                i += 1
+                continue
             if (p[i].code, p[i].value) != (0, "SECTION") or p[i + 1].code != 2:
                 _fail("SOURCE_INVALID")
             name = p[i + 1].value
@@ -258,7 +281,7 @@ class _Drawing:
         self.records = {}
         self.handles = {}
         for name, (start, end) in self.sections.items():
-            if name == "HEADER":
+            if name in ("HEADER", "THUMBNAILIMAGE"):
                 continue
             indexes = [j for j in range(start, end) if p[j].code == 0]
             if start != end and (not indexes or indexes[0] != start):
@@ -267,7 +290,13 @@ class _Drawing:
                        for a, b in zip(indexes, indexes[1:] + [end])]
             self.records[name] = records
             for record in records:
-                hs = record.values(5) + record.values(105)
+                handle_pairs = record.pairs
+                if name == "OBJECTS" and record.one(0) == "SORTENTSTABLE":
+                    # Group 5 in the subclass is a sort key, not an object handle.
+                    subclass = next((j for j, pair in enumerate(handle_pairs) if pair.code == 100),
+                                    len(handle_pairs))
+                    handle_pairs = handle_pairs[:subclass]
+                hs = [pair.value for pair in handle_pairs if pair.code in (5, 105)]
                 if len(hs) > 1:
                     _fail("SOURCE_AMBIGUOUS")
                 if hs:
@@ -296,7 +325,7 @@ class _Drawing:
         self.next_handle = max(int(p[seeds[0]].value, 16),
                                max((int(h, 16) for h in self.handles), default=0)) + 1
         roots = [r for r in self.records["OBJECTS"]
-                 if r.one(0) == "DICTIONARY" and r.one(330, "0") == "0"]
+                 if r.one(0) == "DICTIONARY" and r.dictionary_owner() == "0"]
         if len(roots) != 1 or roots[0].one(5) is None:
             _fail("SOURCE_UNSAFE")
         self.root = roots[0]
@@ -323,7 +352,11 @@ class _Drawing:
             _fail("SOURCE_INVALID")
         if not {"LAYER", "APPID", "BLOCK_RECORD"} <= self.tables.keys():
             _fail("SOURCE_UNSAFE")
-        for _, records, _ in self.tables.values():
+        for table, (_, records, _) in self.tables.items():
+            # A tiled viewport configuration has one VPORT row per tile,
+            # all under the configuration name. Handles still identify rows.
+            if table == "VPORT":
+                continue
             names = [r.one(2, "").casefold() for r in records]
             if len(names) != len(set(names)):
                 _fail("SOURCE_AMBIGUOUS")
@@ -497,9 +530,10 @@ def _namespace(drawing):
                 if actual.one(5, "").upper() not in owned:
                     _fail("OWNERSHIP_AMBIGUOUS")
         # Replacing entities must not strand references held by retained foreign data.
+        owned_starts = {drawing.handles[h].start for h in owned}
         for rows in drawing.records.values():
             for actual in rows:
-                if actual.one(5, "").upper() in owned:
+                if actual.start in owned_starts:
                     continue
                 if any((330 <= p.code <= 369 or 390 <= p.code <= 399 or p.code == 1005)
                        and p.value.upper() in owned for p in actual.pairs):

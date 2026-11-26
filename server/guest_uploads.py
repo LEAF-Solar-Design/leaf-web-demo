@@ -63,6 +63,7 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 
 import broker_client
+from drawing_fingerprint import SCHEMA, fingerprint_dxf
 import write_loop
 from write_loop import GUEST_TENANT_PREFIX
 from text_match import text_matches
@@ -1452,6 +1453,14 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                      extraction_fence=extraction_fence)
         return
 
+    fingerprint = None
+    if ext == ".dxf":
+        try:
+            fingerprint = fingerprint_dxf(
+                _verify_staged_source(tenant_id, drawing_id, ext, marker).read_bytes())
+        except Exception:  # Optional metadata must never fail an upload.
+            pass
+
     # Ingest v1 in the FORMAT-CORRECT representation (review rounds 1+2):
     #   * .dwg uploads: the version blob holds the user's RAW DWG bytes —
     #     exactly what a later live write signs and sends to APS as HostDwg.
@@ -1566,6 +1575,8 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             if upload_store_mode() == "postgres":
                 ready_marker = dict(marker)
                 ready_marker["status"] = "ready"
+                if fingerprint is not None:
+                    ready_marker["fingerprint"] = fingerprint
                 ready_marker["extracted_version"] = 1
                 ready_marker["intake_ref"] = cache_key
                 ready_marker["intake_sha256"] = hashlib.sha256(
@@ -1633,6 +1644,8 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             return
         marker = dict(marker)
         marker["status"] = "ready"
+        if fingerprint is not None:
+            marker["fingerprint"] = fingerprint
         marker["extracted_version"] = 1
         marker["intake_ref"] = cache_key
         marker["intake_sha256"] = intake_sha256
@@ -1764,6 +1777,11 @@ def status_view(backend, tenant_id: str, drawing_id: str) -> Optional[Dict[str, 
         "retention_expires_at": marker.get("retention_expires_at"),
         "tenant_kind": marker.get("tenant_kind"),
         "extracted_version": marker.get("extracted_version"),
+        "content_sha256": marker.get("content_sha256"),
+        "fingerprint": marker.get("fingerprint") if (
+            isinstance(marker.get("fingerprint"), dict)
+            and marker["fingerprint"].get("schema") == SCHEMA
+        ) else None,
     }
 
 

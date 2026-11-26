@@ -551,6 +551,71 @@ def test_estimate_parent_router_save_read_export_and_request_guards(estimate_lan
     assert "private authentication detail" not in response.text
 
 
+@pytest.mark.parametrize("new_rate,expected_sign", [("2.75", 1), ("0.25", -1), (None, -1)],
+                         ids=["increase", "decrease", "missing-rate"])
+def test_compare_saved_estimates_attributes_exact_cents(estimate_lane, monkeypatch, new_rate, expected_sign):
+    import json
+    from decimal import Decimal
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    s = estimate_lane
+    old_id, old = s.successor_id, s.successor
+    s.successor_id = UUID(int=1000001)
+    s.request_id = UUID(int=1000002)
+    s.receipt = {"drawing_version": {"version_id": str(s.successor_id)}}
+    card = deepcopy(s.card)
+    card["version"] = "changed-rates"
+    if new_rate is None:
+        card["rates"] = []
+    else:
+        card["rates"][0]["rate"] = new_rate
+    s.save_estimate(card)
+    raw = s.publications[-1][-1]["_restored_intake"]
+    version = replace(old.binding.version, version_id=s.successor_id)
+    s.successor = replace(old, intake=json.loads(raw), intake_bytes=raw,
+                          intake_sha256=sha256(raw).hexdigest(),
+                          binding=replace(old.binding, version=version, input_version_id=s.successor_id))
+    resolve = project.resolve_context
+
+    def resolve_both(tenant, proj, version_id, **kwargs):
+        if version_id == old_id and proj == s.project and kwargs.get("drawing_id") == s.drawing:
+            return old
+        return resolve(tenant, proj, version_id, **kwargs)
+
+    monkeypatch.setattr(project, "resolve_context", resolve_both)
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: s.tenant
+    client = TestClient(app)
+    base = f"/api/projects/{s.project}/drawings/{s.drawing}/versions"
+    old_url, new_url = (f"{base}/{value}/estimates" for value in (old_id, s.successor_id))
+    before, after = (client.get(url + "/export") for url in (old_url, new_url))
+    assert before.status_code == after.status_code == 200
+    response = client.get(old_url + "/compare", params={"compare_version_id": str(s.successor_id)})
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store", response.text
+    result = response.json()["result"]
+    line, = result["lines"]
+    quantity = Decimal(line["quantity"])
+    assert line["line_id"] == "strings.modules" and quantity > 0
+    expected = int(quantity * (Decimal(new_rate or "0") - Decimal("1.25")) * 100)
+    assert expected * expected_sign > 0
+    assert line["subtotal_delta_cents"] == result["subtotal_delta_cents"] == str(expected)
+    assert result["before"]["version_id"] == str(old_id)
+    assert result["after"]["version_id"] == str(s.successor_id)
+    assert line["after"]["pricing_reason"] == ("RATE_MISSING" if new_rate is None else None)
+    assert (line["after"]["amount"] is None) == (new_rate is None)
+    reverse = client.get(new_url + "/compare", params={"compare_version_id": str(old_id)})
+    assert reverse.status_code == 200
+    assert reverse.json()["result"]["subtotal_delta_cents"] == str(-expected)
+    for url, prior in ((old_url, before), (new_url, after)):
+        current = client.get(url + "/export")
+        assert (current.content, current.headers["etag"]) == (prior.content, prior.headers["etag"])
+    unsaved = client.get(old_url + "/compare", params={"compare_version_id": str(s.source_id)})
+    assert unsaved.status_code == 404 and unsaved.json()["error"]["reason_code"] == "ESTIMATE_NOT_SAVED"
+    assert len(s.publications) == 2
+
+
 def test_estimate_manifest_flag_and_unavailable_read_are_not_empty(estimate_lane, monkeypatch):
     import project_estimate_custody as custody
     from routers import project_estimates as estimate_routes

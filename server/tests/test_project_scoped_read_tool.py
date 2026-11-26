@@ -284,8 +284,21 @@ def install_tool_body(monkeypatch, run):
     )
 
 
+BATCH_LAYER_TOOL = "fixture-batch-list-layers"
+
+
 @pytest.fixture
 def lane(memory, monkeypatch):
+    # Project-read success cases deliberately exercise the built-in batch body.
+    # Add its own catalog row and keep the real instant-only row for refusal tests.
+    seed_tools = deps.load_seed_catalog_tools()
+    batch = {
+        "name": BATCH_LAYER_TOOL, "version": "1.0.0", "kind": "script",
+        "execution_class": "batch", "entry": "list_layers.py",
+        "capabilities": ["drawing.read"],
+        "params": {"type": "object", "properties": {"prefix": {"type": "string"}}},
+    }
+    monkeypatch.setattr(deps, "load_seed_catalog_tools", lambda: [*seed_tools, batch])
     memory.role = "read_only"
     memory.tenant.tier = "demo"
     store_intake(memory, V2, {"polylines": [{"layer": "PV-ROW"}, {"layer": "A"}],
@@ -314,7 +327,7 @@ def lane(memory, monkeypatch):
 
 
 def request(lane, *, tool=None, params=None, headers=None, wait=0, **changes):
-    name = (tool or {}).get("name", "instant-list-layers")
+    name = (tool or {}).get("name", BATCH_LAYER_TOOL)
     row = tool if tool is not None else deps.find_tool(name, str(lane.memory.tenant))
     body = {"tool": name, "params": params or {}, "dwg": str(V2),
             "catalog_digest": deps.catalog_tool_digest(row)}
@@ -362,7 +375,7 @@ def read_job_store(lane, real_rules, monkeypatch):
 def _real_read_job(lane, *, version=V2, key="read-once", params=None, calls=None,
                    callback=None, context=None, tool=None):
     context = context or service.resolve_context(lane.memory.tenant, P1, version)
-    tool = tool or deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    tool = tool or deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant))
     params = params or {}
 
     def execute():
@@ -468,7 +481,7 @@ def test_c02_real_persisted_read_and_project_board_tuple(lane, read_job_store, v
                                    "FROM jobs").fetchone()
     assert tuple(row[:4]) == ("succeeded", "run", 1, 1)
     assert json.loads(row["execution_context"])["catalog_digest"] == deps.catalog_tool_digest(
-        deps.find_tool("instant-list-layers", str(lane.memory.tenant)))
+        deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant)))
     assert read_job_store.db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] == 0
     assert all(not write for write in lane.memory.accesses)
 
@@ -488,7 +501,7 @@ def test_c02_changed_input_cannot_retarget_accepted_key(lane, read_job_store, ch
     _real_read_job(lane, calls=calls)
     changes = {"version": V1} if change == "version" else {"params": {"prefix": "OLD"}}
     if change == "catalog":
-        tool = dict(deps.find_tool("instant-list-layers", str(lane.memory.tenant)))
+        tool = dict(deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant)))
         tool["version"] = "99.0.0"
         changes = {"tool": tool}
     with pytest.raises(ValueError, match="idempotency"):
@@ -832,7 +845,7 @@ def test_c1a_standalone_contract(lane, monkeypatch, wait):
         }
 
     monkeypatch.setattr(route.jobs, "wait_for_terminal", terminal)
-    tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    tool = deps.find_tool(BATCH_LAYER_TOOL, str(lane.memory.tenant))
     params = dict(tool.get("default_params", {}))
     params["prefix"] = "A"
 
@@ -980,9 +993,26 @@ def test_c1a_loader_failure_and_owned_metadata(lane, monkeypatch, code):
     assert response.headers["cache-control"] == "no-store"
 
 
+@pytest.mark.parametrize("version, names, prefix, expected", [
+    (V1, ["0", "Defpoints", "MODULE", "ROOF"], "", ["0", "Defpoints", "MODULE", "ROOF"]),
+    (V2, ["0", "BlockOnly", "Unused"], "Block", ["BlockOnly"]),
+    (V2, ["0", "Renamed"], "", ["0", "Renamed"]),
+])
+def test_project_read_executes_catalog_source(lane, version, names, prefix, expected):
+    store_intake(lane.memory, version, {"layers": names, "polylines": [{"layer": names[-1]}]})
+    tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    response = request(lane, tool=tool, params={"prefix": prefix}, dwg=str(version))
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["result"] == {"layers": expected, "count": len(expected)}
+    assert result["executed_code_digest"] == tool["artifact_digest"]
+    assert result["project_context"]["input_version_id"] == str(version)
+
+
 def test_c1a_real_loader_parameter_validation(lane):
     """C1A-26: the real catalog schema and loader reject malformed parameters."""
-    response = request(lane, params={"prefix": 17})
+    tool = deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    response = request(lane, tool=tool, params={"prefix": 17})
     assert response.status_code == 400
     assert response.json()["ok"] is False
     assert response.json()["error"]["error_code"] == "BAD_PARAMS"

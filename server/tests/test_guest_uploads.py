@@ -1370,3 +1370,194 @@ def test_raising_wipe_still_refunds_the_paid_charge(client, monkeypatch):
     assert retry.status_code == 202, "the refunded slot must still be available"
     assert retry.json()["drawing_id"] == did
     assert guest_uploads.read_marker(backend, tenant, did)["status"] == "ready"
+
+
+def _fingerprint_dxf_bytes(records="", newline="\n"):
+    text = "0\nSECTION\n2\nENTITIES\n" + records + "0\nENDSEC\n0\nEOF\n"
+    return text.replace("\n", newline).encode("utf-8")
+
+
+def test_drawing_fingerprint_counts_model_objects_and_header_layers():
+    from drawing_fingerprint import SCHEMA, fingerprint_dxf
+
+    raw = _fingerprint_dxf_bytes(
+        "0\nLINE\n8\n A \n8\nignored-second-layer\n"
+        "0\nLWPOLYLINE\n8\nA\n"
+        "0\nHATCH\n8\nB\n"
+        "0\nPOINT\n8\na\n"
+        "0\nFUTURE_ENTITY\n8\nB\n"
+        "0\nLINE\n8\npaper\n67\n1\n67\n0\n"
+        "0\nPOLYLINE\n8\nA\n"
+        "0\nVERTEX\n8\nchild\n0\nVERTEX\n8\nchild\n0\nSEQEND\n"
+        "0\nINSERT\n8\nB\n0\nATTRIB\n8\nchild\n0\nSEQEND\n"
+        "0\nLINE\n100\nAcDbEntity\n8\nA\n100\nAcDbLine\n8\nlate\n67\n1\n"
+        "0\nLINE\n100\nAcDbEntity\n100\nAcDbLine\n8\nlate\n"
+        "0\nLINE\n1001\nAPP\n8\nxdata\n67\n1\n"
+        "0\nTEXT\n1\ntext\u2028with\vseparators\n999\ncomment\n"
+        "0\nLINE\n8\n\tkept\t\n"
+    )
+    result = fingerprint_dxf(raw)
+    assert result["schema"] == SCHEMA
+    assert result["status"] == "ok"
+    assert result["reason"] is None
+    assert result["model_objects"] == 12
+    assert result["layer_count"] == 5
+    assert result["layers"] == [
+        {"name": "A", "count": 4},
+        {"name": "0", "count": 3},
+        {"name": "B", "count": 3},
+        {"name": "\tkept\t", "count": 1},
+        {"name": "a", "count": 1},
+    ]
+    assert result["layers_omitted"] == 0
+
+
+def test_drawing_fingerprint_newlines_and_bom_preserve_counts_but_hash_raw_bytes():
+    import hashlib
+    from drawing_fingerprint import fingerprint_dxf
+
+    records = "0\nLINE\n8\nroof\n0\nTEXT\n1\na\u2028b\n"
+    lf = _fingerprint_dxf_bytes(records)
+    crlf = _fingerprint_dxf_bytes(records, "\r\n")
+    results = [fingerprint_dxf(raw) for raw in (lf, crlf, b"\xef\xbb\xbf" + lf)]
+    for raw, result in zip((lf, crlf, b"\xef\xbb\xbf" + lf), results):
+        assert result["status"] == "ok"
+        assert result["sha256"] == hashlib.sha256(raw).hexdigest()
+        assert result["bytes"] == len(raw)
+        assert result["model_objects"] == 2
+        assert result["layers"] == results[0]["layers"]
+        assert result["layers_digest"] == results[0]["layers_digest"]
+    assert len({result["sha256"] for result in results}) == 3
+
+
+@pytest.mark.parametrize("raw,reason", [
+    (b"AutoCAD Binary DXF\xff", "binary_dxf"),
+    (b"\xff", "encoding"),
+    (b"0\nEOF\n", "malformed"),
+    (b"0\nSECTION\n2\nENTITIES\n0\nLINE\n", "truncated"),
+    (b"0\nSECTION\n2\nENTITIES\n0\nLINE\n8", "truncated"),
+    (_fingerprint_dxf_bytes("not-a-code\nLINE\n"), "malformed"),
+    (_fingerprint_dxf_bytes("0\nLINE\n8\n" + "x" * 256 + "\n"), "malformed"),
+    (_fingerprint_dxf_bytes() + _fingerprint_dxf_bytes(), "malformed"),
+    (_fingerprint_dxf_bytes("\n0\nLINE\n"), "malformed"),
+])
+def test_drawing_fingerprint_unavailable(raw, reason):
+    import hashlib
+    from drawing_fingerprint import SCHEMA, fingerprint_dxf
+
+    assert fingerprint_dxf(raw) == {
+        "schema": SCHEMA, "sha256": hashlib.sha256(raw).hexdigest(),
+        "bytes": len(raw), "status": "unavailable", "reason": reason,
+        "model_objects": None, "layer_count": None, "layers_digest": None,
+        "layers": [], "layers_omitted": 0,
+    }
+
+
+def test_drawing_fingerprint_empty_entities_and_trailing_blanks():
+    import hashlib
+    from drawing_fingerprint import SCHEMA, fingerprint_dxf
+
+    result = fingerprint_dxf(_fingerprint_dxf_bytes() + b"\n \n\r\n")
+    assert result["status"] == "ok"
+    assert result["model_objects"] == result["layer_count"] == 0
+    assert result["layers"] == []
+    assert result["layers_omitted"] == 0
+    assert result["layers_digest"] == hashlib.sha256((SCHEMA + "\n").encode()).hexdigest()
+
+
+def test_drawing_fingerprint_caps_rows_but_digests_every_layer():
+    import hashlib
+    from drawing_fingerprint import fingerprint_dxf
+
+    names = [f"layer-{i:03d}" for i in range(100)]
+    records = "".join(f"0\nLINE\n8\n{name}\n" * (i + 1)
+                      for i, name in enumerate(names))
+    result = fingerprint_dxf(_fingerprint_dxf_bytes(records))
+    digest_input = "leaf.drawing-fingerprint.v1\n" + "".join(
+        f"{i + 1}\t{name}\n" for i, name in enumerate(names))
+    assert result["status"] == "ok"
+    assert result["model_objects"] == 5050
+    assert result["layer_count"] == 100
+    assert result["layers_omitted"] == 36
+    assert result["layers"] == [
+        {"name": names[i], "count": i + 1} for i in range(99, 35, -1)]
+    assert result["layers_digest"] == hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
+
+
+def test_drawing_fingerprint_non_ascii_digest_and_tie_order():
+    import hashlib
+    from drawing_fingerprint import fingerprint_dxf
+
+    result = fingerprint_dxf(_fingerprint_dxf_bytes(
+        "0\nLINE\n8\n\u96ea\n0\nLINE\n8\n\u00e9\n0\nLINE\n8\nZ\n"))
+    expected = "leaf.drawing-fingerprint.v1\n1\tZ\n1\t\u00e9\n1\t\u96ea\n".encode("utf-8")
+    assert result["layers_digest"] == hashlib.sha256(expected).hexdigest()
+    assert result["layers"] == [
+        {"name": "Z", "count": 1}, {"name": "\u00e9", "count": 1},
+        {"name": "\u96ea", "count": 1},
+    ]
+
+
+def test_upload_status_reports_source_hash_and_fingerprint(client):
+    import hashlib
+
+    upload = _upload(client)
+    assert upload.status_code == 202, upload.text
+    receipt = upload.json()
+    status = client.get(
+        f"/api/drawings/{receipt['drawing_id']}/upload-status",
+        headers={"X-Tenant-Id": receipt["tenant_id"]})
+    assert status.status_code == 200, status.text
+    result = status.json()
+    assert result["status"] == "ready"
+    assert result["content_sha256"] == hashlib.sha256(DXF_BYTES).hexdigest()
+    assert result["fingerprint"]["status"] == "ok"
+    assert result["fingerprint"]["sha256"] == result["content_sha256"]
+    assert result["fingerprint"]["layers"] == [{"name": "Panels", "count": 1}]
+
+
+def test_upload_fingerprint_exception_still_becomes_ready(client, monkeypatch):
+    calls = []
+
+    def broken_fingerprint(raw):
+        calls.append(raw)
+        raise RuntimeError("optional fingerprint failed")
+
+    monkeypatch.setattr(guest_uploads, "fingerprint_dxf", broken_fingerprint)
+    upload = _upload(client)
+    assert upload.status_code == 202, upload.text
+    receipt = upload.json()
+    status = client.get(
+        f"/api/drawings/{receipt['drawing_id']}/upload-status",
+        headers={"X-Tenant-Id": receipt["tenant_id"]})
+    assert status.status_code == 200, status.text
+    assert status.json()["status"] == "ready"
+    assert status.json()["fingerprint"] is None
+    backend = write_loop.upload_backend_for_tenant(receipt["tenant_id"])
+    marker = guest_uploads.read_marker(backend, receipt["tenant_id"], receipt["drawing_id"])
+    assert "fingerprint" not in marker
+    assert calls == [DXF_BYTES]
+
+
+@pytest.mark.parametrize("fingerprint", [None, [], "invalid", {"schema": "future"}])
+def test_upload_status_filters_unrecognized_fingerprint(monkeypatch, fingerprint):
+    monkeypatch.setattr(guest_uploads, "read_marker", lambda *args: {
+        "status": "ready", "fingerprint": fingerprint,
+    })
+    result = guest_uploads.status_view(None, "tenant", "drawing")
+    assert result["fingerprint"] is None
+    assert result["content_sha256"] is None
+
+
+def test_drawing_fingerprint_100000_lines_under_five_seconds():
+    import time
+    from drawing_fingerprint import fingerprint_dxf
+
+    raw = _fingerprint_dxf_bytes("0\nLINE\n8\nroof\n10\n1\n20\n2\n" * 100_000)
+    started = time.perf_counter()
+    result = fingerprint_dxf(raw)
+    elapsed = time.perf_counter() - started
+    assert result["status"] == "ok"
+    assert result["model_objects"] == 100_000
+    assert result["layers"] == [{"name": "roof", "count": 100_000}]
+    assert elapsed < 5, f"fingerprinting took {elapsed:.3f}s"

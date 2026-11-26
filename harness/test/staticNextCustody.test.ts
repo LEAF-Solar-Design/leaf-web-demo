@@ -126,6 +126,52 @@ describe("static Next durable custody writer and READY loader", () => {
     expect(JSON.parse((await f.store.get(`${base}/receipt.json`))!.toString())).toEqual(first);
   });
 
+  it("recovers a receipt after losing the write acknowledgement without extending retention", async () => {
+    const f = await fixture();
+    const store: StaticNextObjectStore = {
+      get: key => f.store.get(key),
+      putIfAbsent: async (key, value) => {
+        await f.store.putIfAbsent(key, value);
+        throw new Error("acknowledgement lost");
+      },
+    };
+    await expect(publishStaticNextCustody({ ...f.publish, store })).rejects.toThrow("acknowledgement lost");
+    const key = `${base}/receipt.json`;
+    const original = await f.store.get(key);
+    const recovered = await publishStaticNextCustody({ ...f.publish,
+      now: () => new Date(instant.getTime() + 1000) });
+    expect(recovered.createdAt).toBe(instant.toISOString());
+    expect(recovered.cleanupAt).toBe(new Date(instant.getTime() + 60_000).toISOString());
+    expect(await f.store.get(key)).toEqual(original);
+  });
+
+  it("returns the winning receipt when another publisher writes during artifact storage", async () => {
+    const f = await fixture();
+    const store: StaticNextObjectStore = {
+      get: key => f.store.get(key),
+      putIfAbsent: async (key, value) => {
+        await publishStaticNextCustody({ ...f.publish, now: () => new Date(instant.getTime() + 1000) });
+        return f.store.putIfAbsent(key, value);
+      },
+    };
+    const recovered = await publishStaticNextCustody({ ...f.publish, store });
+    expect(recovered.createdAt).toBe(new Date(instant.getTime() + 1000).toISOString());
+    expect(await f.store.get(`${base}/receipt.json`)).toEqual(Buffer.from(JSON.stringify(recovered)));
+  });
+
+  it.each(["expired", "cleaned"])("refuses to republish %s custody", async state => {
+    const f = await fixture();
+    await publishStaticNextCustody(f.publish);
+    if (state === "cleaned") {
+      await markStaticNextCleaned({ store: f.store, bundleSha256, executionId, filesRemoved: false, now });
+    }
+    const put = vi.spyOn(f.artifacts, "put");
+    await expect(publishStaticNextCustody({ ...f.publish,
+      now: () => new Date(instant.getTime() + (state === "expired" ? 60_000 : 1000)) }))
+      .rejects.toMatchObject({ code: "job_conflict" });
+    expect(put).not.toHaveBeenCalled();
+  });
+
   it.each(["sourceRequestId", "version", "receiptDigest"] as const)(
     "does not relabel an execution with another candidate's %s", async key => {
       const f = await fixture();
