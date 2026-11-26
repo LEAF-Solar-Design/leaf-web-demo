@@ -295,16 +295,40 @@ def test_stale_source_rejected_before_transport(client, saved, changes, caplog):
     assert failure_records(caplog) == []
 
 
-def test_missing_or_nonportfolio_source_rejected(client, saved):
-    other = uuid.UUID(project_lifecycle.create_blank_project(saved['org'], saved['actor'], name='Empty',
-        idempotency_key=str(uuid.uuid4()))['project']['project_id'])
-    url = f'/api/projects/{other}/page'
-    assert client.post(url + '/proposals', headers=saved['auth'], json=request_body(saved)).status_code == 422
-    simple = {'label': 'Soon', 'headline': 'Coming soon', 'description': '', 'status': '',
-              'theme': 'light', 'alignment': 'left'}
-    page = project_web_page.save(saved['org'], other, saved['actor'], expected_revision=0, document=simple)
-    body = request_body(saved) | {'expected_digest': page['digest']}
-    assert client.post(url + '/proposals', headers=saved['auth'], json=body).status_code == 422
+def test_missing_source_rejected(client, fresh):
+    body = {'expected_revision': 1, 'expected_digest': '1' * 64, 'instruction': 'Add a booking link.'}
+    assert client.post(fresh['url'] + '/proposals', headers=fresh['auth'], json=body).status_code == 422
+
+
+def test_saved_browser_proposal_keeps_contact_order_until_explicit_put(client, fresh, monkeypatch):
+    email = {'label': 'General inquiries', 'href': 'mailto:hello@example.com'}
+    booking = {'label': 'Book a visit', 'href': 'https://example.com/book'}
+    document = {'label': 'Soon', 'headline': 'Coming soon', 'description': '', 'status': '',
+                'theme': 'light', 'alignment': 'left', 'action': email}
+    url, auth = fresh['url'], fresh['auth']
+    initial = client.put(url, headers=auth, json={'expected_revision': 0, 'document': document})
+    assert initial.status_code == 200, initial.text
+    page = initial.json()['page']
+    edits = [{'id': 'f0007', 'value': booking['label']}, {'id': 'f0008', 'value': booking['href']}]
+    calls, _ = install_transport(monkeypatch, lambda payload: Response(encoded(result(payload, edits))))
+    response = client.post(url + '/proposals', headers=auth, json={
+        'expected_revision': 1, 'expected_digest': page['digest'], 'instruction': 'Add a booking link.'})
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    expected = {key: value for key, value in document.items() if key != 'action'}
+    expected['actions'] = [email, booking]
+    assert proposal['source'] == {'project_id': str(fresh['project']), 'revision': 1, 'digest': page['digest']}
+    assert len(calls) == 1
+    assert proposal['proposed_document'] == expected
+    assert proposal['proposed_digest'] == document_digest(expected)
+    assert client.get(url, headers=auth).json()['page'] == page
+
+    applied = client.put(url, headers=auth, json={
+        'expected_revision': 1, 'document': proposal['proposed_document']})
+    assert applied.status_code == 200, applied.text
+    saved_page = client.get(url, headers=auth).json()['page']
+    assert saved_page['revision'] == 2
+    assert saved_page['document'] == expected
 
 
 @pytest.mark.parametrize('kind', [
