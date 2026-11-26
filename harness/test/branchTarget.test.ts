@@ -18,11 +18,13 @@ import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
 import { FakeTenantRepoProvider } from "../src/ports/fakes/fakeTenantRepo.js";
 import type { HarnessPorts, StagedCustomizationReceipt } from "../src/ports/index.js";
 import {
-  branchTargetPrompt, runBranchTargetSession,
+  BRANCH_ACCEPTED_GRACE_MS, branchTargetPrompt, runBranchTargetSession,
   type BranchAuthorInput, type BranchAuthorSdk,
 } from "../src/vendor/mushy-author/agent/branchTargetPrompt.js";
-import { submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
-import { setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
+import { branchPackageDigest, submitBranchToolProposal } from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
+import * as branchSubmission from "../src/vendor/mushy-author/agent/tools/submitBranchToolProposal.js";
+import { decodeOperatorEntities } from "../src/vendor/mushy-author/agent/tools/decodeHtmlEntities.js";
+import { branchCompileCheck, setBranchCompileCheckForTests, type BranchCompileOutcome } from "../src/vendor/mushy-author/agent/tools/branchCompileCheck.js";
 import { FsTenantRepo } from "../src/vendor/mushy-author/agent/tools/fsTenantRepo.js";
 import * as repoPathSafety from "../src/vendor/mushy-author/agent/tools/repoPathSafety.js";
 import {
@@ -37,6 +39,7 @@ const CHANGE = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
 const NOW = new Date("2026-11-20T00:00:00.000Z");
 const ALLOWLIST_SHA = "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd";
+const COMPILE_CONFIGURED = Boolean(process.env.LEAF_BRANCH_COMPILE_BIN && process.env.LEAF_BRANCH_COMPILE_REFS);
 const dirs: string[] = [];
 const servers: Server[] = [];
 
@@ -140,7 +143,39 @@ describe("branch package proposals", () => {
     expect(prompt).toContain("Write C# operators literally (&&, <, >); never HTML entities.");
   });
 
-  it.each(["good-panel-count", "good-label-writer"])("writes exactly the recorded %s package", name => {
+  it("includes the area-marks source verbatim and documents types and members outside the allowlist", () => {
+    const prompt = branchTargetPrompt();
+    expect(prompt).toContain(fixture("good-area-marks").main_csx.replace(/\n$/, ""));
+    const traps = ["HatchPatternType", "HatchLoopTypes", "LineWeight", "TextHorizontalMode",
+      "TextVerticalMode", "AttachmentPoint", "RXClass", "WriteMessage", "JTokenType", "Insunits", "Viewport"];
+    const allowlist = JSON.parse(readFileSync(new URL("../src/vendor/mushy-author/registry/api-allowlist.json", import.meta.url), "utf8"));
+    for (const name of traps) expect(prompt).toContain(name);
+    for (const name of traps.filter(name => name !== "WriteMessage" && name !== "Insunits")) {
+      expect(allowlist.allowed_types.some((type: string) => type.endsWith(`.${name}`))).toBe(false);
+    }
+    expect(prompt).toContain("After a successful submission, end the turn at once with the single word Done: no summary, no more tool calls.");
+    expect(prompt).toContain('A fractional default such as 2.5 is refused. Leave it out of params and write it in main_csx: Ctx.Args.Value<double?>("x") ?? 2.5.');
+    expect(prompt).toContain("defaults, minimum, maximum, multipleOf, enum and examples inside params and returns too");
+    expect(prompt).toContain("ColorMethod.ByAciIndex does not exist");
+    expect(prompt).toContain("Keep the outline when you fill: a fill alone does not draw the shape.");
+  });
+
+  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and refuses HTML-encoded operators", async () => {
+    const proposal = fixture("good-area-marks");
+    const good = prepareBranchPackage(proposal, "compile-test", NOW);
+    expect((await branchCompileCheck(proposal.name, good.files)).status).toBe("accept");
+    const source = proposal.main_csx.replace("pl.NumberOfVertices < 3", "pl.NumberOfVertices &lt; 3")
+      .replace("marked > 0", "marked &gt; 0");
+    expect(source).not.toBe(proposal.main_csx);
+    const encoded = prepareBranchPackage({ ...proposal, main_csx: source }, "compile-test", NOW);
+    expect((await branchCompileCheck(proposal.name, encoded.files)).status).toBe("refused");
+    const decoded = decodeOperatorEntities(source);
+    expect(decoded).toEqual({ source: proposal.main_csx, entities: 2 });
+    const repaired = prepareBranchPackage({ ...proposal, main_csx: decoded!.source }, "compile-test", NOW);
+    expect((await branchCompileCheck(proposal.name, repaired.files)).status).toBe("accept");
+  }, 60_000);
+
+  it.each(["good-panel-count", "good-label-writer", "good-area-marks"])("writes exactly the recorded %s package", name => {
     const root = temp();
     const proposal = fixture(name);
     const submitted = submitBranchToolProposal(root, proposal, { session: "fixture-session", now: NOW });
@@ -228,6 +263,79 @@ describe("branch package proposals", () => {
         expect.objectContaining({ type: "text", text: expect.stringContaining(`${rule}:`) }),
       ]));
       expect(readdirSync(root)).toEqual([]);
+    } finally {
+      await client.close();
+      await mcp?.close();
+    }
+  });
+
+  it("preserves source bytes through installed SDK MCP, submission, compile check and staged Git tree", async () => {
+    vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", undefined);
+    const source = 'int a = 1, b = 2, c = 4, d = 3;\nif (a < b && c >= d) { }\nstring entities = "&lt;&amp;&quot;";\nreturn entities;\n';
+    const proposal = { ...fixture("good-label-writer"), main_csx: source,
+      lib: { "literal.csx": '// π and literal entities\nstring literal = "&lt;&amp;&quot;";\n' } };
+    const { bare, base, ports } = await setup([]);
+    const compiled: Array<{ name: string; files: Record<string, string> }> = [];
+    setBranchCompileCheckForTests(async (name, files) => {
+      compiled.push({ name, files: { ...files } });
+      return { status: "accept", ms: 0, allowlistSha256: ALLOWLIST_SHA,
+        summary: { pass: true, decision: "accept", errors: 0 } };
+    });
+    const installed = await import(["@anthropic-ai", "claude-agent-sdk"].join("/")) as BranchAuthorSdk;
+    const client = new Client({ name: "branch-source-fidelity-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    let mcp: McpServer | undefined;
+    let response: Awaited<ReturnType<Client["callTool"]>> | undefined;
+    const sdk: BranchAuthorSdk = {
+      tool: installed.tool,
+      createSdkMcpServer(options) {
+        const config = installed.createSdkMcpServer(options) as { instance: McpServer };
+        mcp = config.instance;
+        return config;
+      },
+      query() {
+        return {
+          close() {},
+          async *[Symbol.asyncIterator]() {
+            await mcp!.connect(serverTransport);
+            await client.connect(clientTransport);
+            response = await client.callTool({ name: "submitBranchToolProposal",
+              arguments: proposal as unknown as Record<string, unknown> });
+            yield { type: "result", subtype: "success", is_error: false };
+          },
+        };
+      },
+    };
+    const received: unknown[] = [];
+    const written: Record<string, string>[] = [];
+    const loop = new AuthorLoop(ports, input => runBranchTargetSession({
+      ...input,
+      submitBranchToolProposal: async value => {
+        received.push(value);
+        const result = await input.submitBranchToolProposal(value);
+        written.push(Object.fromEntries(Object.keys(result.contents).map(path => [path,
+          readFileSync(join(input.repoDir, result.package_path, path), "utf8")])));
+        return result;
+      },
+    }, { sdkImport: async () => sdk }));
+    try {
+      const { receipt } = await loop.stage(TENANT, "preserve literal source", request(base));
+      expect(response?.isError).not.toBe(true);
+      expect(received).toEqual([proposal]);
+      expect(compiled).toHaveLength(1);
+      expect(compiled[0].name).toBe(proposal.name);
+      expect(written).toEqual([compiled[0].files]);
+      const sources = { "main.csx": source, "lib/literal.csx": proposal.lib["literal.csx"] };
+      for (const [path, text] of Object.entries(sources)) {
+        expect(Buffer.from(compiled[0].files[path], "utf8")).toEqual(Buffer.from(text, "utf8"));
+      }
+      expect(receipt.package_files).toEqual(Object.keys(compiled[0].files)
+        .map(path => `${receipt.package_path}/${path}`).sort());
+      for (const [path, text] of Object.entries(compiled[0].files)) {
+        // Read blobs directly: the git helper trims whitespace and would mask byte changes.
+        const blob = execFileSync("git", ["show", `${receipt.staged_commit}:${receipt.package_path}/${path}`], { cwd: bare.dir });
+        expect(blob).toEqual(Buffer.from(text, "utf8"));
+      }
     } finally {
       await client.close();
       await mcp?.close();
@@ -326,7 +434,7 @@ describe("branch package proposals", () => {
 
 describe("branch stage lifecycle", () => {
   beforeEach(() => { vi.stubEnv("LEAF_BRANCH_COMPILE_CHECK", "off"); });
-  it.each(["good-panel-count", "good-label-writer"])("stages %s through the branch SDK tool without registering Python", async name => {
+  it.each(["good-panel-count", "good-label-writer", "good-area-marks"])("stages %s through the branch SDK tool without registering Python", async name => {
     const proposal = fixture(name);
     const { bare, base, sdk, coordination, studioRun, loop } = await setup([proposal]);
     const staged = await loop.stage(TENANT, "author this C# package", request(base));
@@ -351,9 +459,12 @@ describe("branch stage lifecycle", () => {
     expect(sdk.mounted.map(t => t.name)).toEqual(["fs_tenant_repo", "submitBranchToolProposal"]);
     expect(sdk.options().settingSources).toEqual([]);
     expect(sdk.options().tools).toEqual([]);
+    expect(sdk.options().allowedTools).toEqual([
+      "mcp__branch_author__fs_tenant_repo", "mcp__branch_author__submitBranchToolProposal",
+    ]);
     const permission = sdk.options().canUseTool as (name: string, args: Record<string, unknown>) => Promise<{ behavior: string }>;
     expect(await permission("Bash", {})).toMatchObject({ behavior: "deny" });
-    expect(await permission("mcp__branch_author__submitBranchToolProposal", {})).toMatchObject({ behavior: "allow" });
+    expect(await permission("unknown_tool", {})).toMatchObject({ behavior: "deny" });
     expect(sdk.prompt()).toContain("IToolContext");
     expect(sdk.close).toHaveBeenCalledOnce();
     expect(coordination.recordStaged).toHaveBeenCalledWith(receipt);
@@ -533,6 +644,151 @@ describe("Branch submit compile gate", () => {
       { code: "scan", file: "lib/a.csx", line: 4 },
     ],
   };
+
+  const parserRefusal: Extract<BranchCompileOutcome, { status: "refused" }> = {
+    status: "refused", decision: "compile_failed", ms: 1,
+    summary: { pass: false, decision: "compile_failed", errors: 1 },
+    diagnostics: ["main.csx(1,8): CS1525: invalid expression"],
+    structured: [{ file: "main.csx", line: 1, column: 8, code: "CS1525", message: "invalid expression" }],
+  };
+  const accepted: BranchCompileOutcome = {
+    status: "accept", ms: 1, allowlistSha256: ALLOWLIST_SHA,
+    summary: { pass: true, decision: "accept", errors: 0 },
+  };
+  const parserAttempt = { n: 1, decision: "compile_failed", errors: 1,
+    diagnostics: [{ file: "main.csx", line: 1, code: "CS1525" }] };
+  const originalMessage = "V18: branch-tools/label-writer/main.csx: compile failed: " +
+    parserRefusal.diagnostics[0] + " (source contains HTML entities; write C# operators such as && < > literally)";
+
+  it("binds the decoded source to compiler input, disk, digest and staged bytes with one disclosed attempt", async () => {
+    const source = "if (1 &lt; 2 &amp;&amp; 3 &gt;= 2) { }\nreturn 1;\n";
+    const proposal = { ...fixture("good-label-writer"), main_csx: source };
+    const decoded = decodeOperatorEntities(source)!;
+    const compile = vi.fn(async (_name: string, files: Record<string, string>) =>
+      files["main.csx"] === source ? parserRefusal : accepted);
+    setBranchCompileCheckForTests(compile);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { base, bare, ports } = await setup([]);
+    let submitted: ReturnType<typeof submitBranchToolProposal> | undefined;
+    const sdk = sdkTransport([proposal]);
+    // Reuse the transport's adapter to capture replies while observing publication.
+    const observed = new AuthorLoop(ports, async input => {
+      const submit = input.submitBranchToolProposal;
+      return sdk.run({ ...input, submitBranchToolProposal: async value => {
+        submitted = await submit(value);
+        for (const [path, text] of Object.entries(submitted.contents)) {
+          expect(readFileSync(join(input.repoDir, submitted.package_path, path), "utf8")).toBe(text);
+        }
+        return submitted;
+      } });
+    });
+    const result = await observed.stage(TENANT, "decode source", request(base));
+    expect(proposal.main_csx).toBe(source);
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(compile.mock.calls[0][1]["main.csx"]).toBe(source);
+    expect(compile.mock.calls[1][1]["main.csx"]).toBe(decoded.source);
+    expect(submitted!.contents).toEqual(compile.mock.calls[1][1]);
+    expect(submitted!.package_digest).toBe(branchPackageDigest(compile.mock.calls[1][1]));
+    const hash = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+    expect(result.compile_attempts).toEqual([{ n: 1, decision: "accept", errors: 0, diagnostics: [],
+      source_decoded: { entities: decoded.entities, original_sha256: hash(source), compiled_sha256: hash(decoded.source) } }]);
+    expect(log).toHaveBeenCalledWith(`[harness] branch source decoded: entities=${decoded.entities} original=${hash(source).slice(0, 12)} compiled=${hash(decoded.source).slice(0, 12)} tenant=${TENANT}`);
+    expect(JSON.parse(sdk.replies[0].content[0].text)).toMatchObject({ status: "VALID",
+      source_decoded: decoded.entities, package_digest: submitted!.package_digest });
+    expect(submitted!.manifest).not.toHaveProperty("source_decoded");
+    expect(submitted!.contents).not.toHaveProperty("source_decoded");
+    for (const [path, text] of Object.entries(submitted!.contents)) {
+      expect(execFileSync("git", ["show", `${result.receipt.staged_commit}:${submitted!.package_path}/${path}`],
+        { cwd: bare.dir })).toEqual(Buffer.from(text, "utf8"));
+    }
+  });
+
+  it.each(["refused", "unavailable", "throws"])("retains the original refusal if decoding recheck %s", async mode => {
+    const proposal = { ...fixture("good-label-writer"), main_csx: "return 1 &lt; 2;" };
+    let calls = 0;
+    const compile = vi.fn(async (): Promise<BranchCompileOutcome> => {
+      if (++calls === 1) return parserRefusal;
+      if (mode === "throws") throw new Error("retry checker error");
+      return mode === "refused" ? refusal : {
+        status: "unavailable", code: "timeout", ms: 1, summary: { pass: false, decision: "unavailable", errors: 0 },
+      };
+    });
+    setBranchCompileCheckForTests(compile);
+    const { base, loop, sdk } = await setup([proposal]);
+    const failure = await loop.stage(TENANT, "decode refused", request(base)).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AuthorLoopError);
+    // toEqual: the one original attempt row carries no source_decoded.
+    expect((failure as AuthorLoopError).compile).toEqual({ summary: parserRefusal.summary,
+      diagnostics: parserRefusal.structured, compile_attempts: [parserAttempt] });
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(sdk.replies[0].content[0].text).toBe(originalMessage);
+  });
+
+  it.each(["semantic", "scan", "malformed", "unavailable", "lib-parser"])("never decodes a %s refusal", async mode => {
+    const outcome: BranchCompileOutcome = mode === "unavailable" ? {
+      status: "unavailable", code: "busy", ms: 1, summary: { pass: false, decision: "unavailable", errors: 0 },
+    } : mode === "malformed" ? { ...parserRefusal, decision: "malformed",
+      summary: { pass: false, decision: "malformed", errors: 1 } } : {
+      ...parserRefusal, structured: [{ ...parserRefusal.structured[0],
+        code: mode === "scan" ? "scan" : mode === "semantic" ? "CS0117" : "CS1525",
+        file: mode === "lib-parser" ? "lib/helper.csx" : "main.csx" }],
+    };
+    const compile = vi.fn(async () => outcome);
+    setBranchCompileCheckForTests(compile);
+    const { base, loop } = await setup([{ ...fixture("good-label-writer"), main_csx: "return 1 &lt; 2;" }]);
+    await expect(loop.stage(TENANT, "do not decode", request(base))).rejects.toThrow();
+    expect(compile).toHaveBeenCalledTimes(1);
+  });
+
+  it("never decodes what an attempt row cannot disclose", async () => {
+    const compile = vi.fn(async () => parserRefusal);
+    setBranchCompileCheckForTests(compile);
+    const proposal = { ...fixture("good-label-writer"), main_csx: "return 1 &lt; 2;" };
+    const many = { ...proposal, main_csx: "return 1 " + "&lt;".repeat(10_001) + " 2;" };
+    const { base, loop } = await setup([many, ...Array.from({ length: 8 }, () => proposal)]);
+    await expect(loop.stage(TENANT, "disclosure bounds", request(base))).rejects.toThrow();
+    // Too many entities: one call. Rows 2..8: two calls each. Past row 8: one call.
+    expect(compile).toHaveBeenCalledTimes(1 + 7 * 2 + 1);
+  });
+
+  it("does not decode a failing source containing literal entities", async () => {
+    const proposal = { ...fixture("good-label-writer"), main_csx: 'var s = "&lt;"; return 1 &lt; 2;' };
+    const compile = vi.fn(async () => parserRefusal);
+    setBranchCompileCheckForTests(compile);
+    const { base, loop, sdk } = await setup([proposal]);
+    await expect(loop.stage(TENANT, "literal entities", request(base))).rejects.toThrow();
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(sdk.replies[0].content[0].text).toBe(originalMessage);
+  });
+
+  it("does not decode an operator entity whose name a lib file declares", async () => {
+    const proposal = { ...fixture("good-label-writer"), main_csx: '#load "lib/names.csx"\nreturn 1 &lt; 2;',
+      lib: { "names.csx": "int lt = 1;\n" } };
+    const compile = vi.fn(async () => parserRefusal);
+    setBranchCompileCheckForTests(compile);
+    const { base, loop, sdk } = await setup([proposal]);
+    await expect(loop.stage(TENANT, "lib names", request(base))).rejects.toThrow();
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(sdk.replies[0].content[0].text).toBe(originalMessage);
+  });
+
+  it("discards a decoded candidate that fails package revalidation", async () => {
+    const prepare = branchSubmission.prepareBoundBranchPackage;
+    vi.spyOn(branchSubmission, "prepareBoundBranchPackage").mockImplementation((proposal, ...args) => {
+      if ((proposal as BranchToolProposal).main_csx.includes("1 < 2")) {
+        throw new BranchPackageError([{ rule: "V15", path: "params", message: "expected a safe integer" }]);
+      }
+      return prepare(proposal, ...args);
+    });
+    const compile = vi.fn(async () => parserRefusal);
+    setBranchCompileCheckForTests(compile);
+    const { base, loop, sdk } = await setup([{ ...fixture("good-label-writer"), main_csx: "return 1 &lt; 2;" }]);
+    await expect(loop.stage(TENANT, "revalidate", request(base))).rejects.toMatchObject({
+      compile: { summary: parserRefusal.summary, compile_attempts: [parserAttempt] },
+    });
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(sdk.replies[0].content[0].text).toBe(originalMessage);
+  });
 
   it("returns the diagnostics and entity hint, then stages the corrected proposal", async () => {
     const good = fixture("good-label-writer");
@@ -729,5 +985,183 @@ describe("POST /author/stage target routing", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: { message: 'target must be "studio" or "branch"' } });
     expect(stage).not.toHaveBeenCalled();
+  });
+});
+
+describe("accepted Branch session lifecycle", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  type Reply = Awaited<ReturnType<Mounted["handler"]>>;
+  type Scenario = (submit: () => Promise<Reply>) => AsyncGenerator<unknown>;
+  const assistant = (id?: string, input = 12, output = 7) => ({ type: "assistant",
+    message: { ...(id ? { id } : {}), model: "fixture-model", usage: { input_tokens: input, output_tokens: output } } });
+  const success = { type: "result", subtype: "success", is_error: false, num_turns: 3,
+    usage: { input_tokens: 101, output_tokens: 42 }, total_cost_usd: 0.125 };
+  const hang = () => new Promise<never>(() => {});
+
+  function session(scenario: Scenario, options: { acceptedGraceMs?: number; timeoutMs?: number } = {}) {
+    const root = temp();
+    const mounted: Mounted[] = [];
+    const close = vi.fn();
+    let queryOptions: Record<string, unknown> = {};
+    const input: BranchAuthorInput = {
+      description: "session lifecycle", systemPrompt: "branch prompt", repoDir: root,
+      grant: { kind: "oauth", oauthToken: "fixture-session-grant" }, fsTenantRepo: new FsTenantRepo(root),
+      submitBranchToolProposal: vi.fn(async proposal => submitBranchToolProposal(root, proposal)),
+    };
+    const sdk: BranchAuthorSdk = {
+      tool(name, _description, _shape, handler) { return { name, handler }; },
+      createSdkMcpServer(config) { mounted.push(...config.tools as Mounted[]); return config; },
+      query(config) {
+        queryOptions = config.options;
+        return { close, [Symbol.asyncIterator]: () => scenario(() => mounted.find(tool =>
+          tool.name === "submitBranchToolProposal")!.handler(fixture("good-label-writer") as unknown as Record<string, unknown>)) };
+      },
+    };
+    const run = () => runBranchTargetSession(input, {
+      sdkImport: async () => sdk, acceptedGraceMs: 10, timeoutMs: 100, ...options,
+    });
+    const hook = async () => {
+      const hooks = queryOptions.hooks as { PostToolUse: Array<{ matcher: string; hooks: Array<() => Promise<unknown>> }> };
+      expect(hooks.PostToolUse[0].matcher).toBe("mcp__branch_author__submitBranchToolProposal");
+      return hooks.PostToolUse[0].hooks[0]();
+    };
+    return { run, close, input, hook, options: () => queryOptions };
+  }
+
+  it("keeps acceptance after the grace when the SDK hangs and reports only observed usage", async () => {
+    expect(BRANCH_ACCEPTED_GRACE_MS).toBe(5_000);
+    const transport = session(async function* (submit) {
+      yield assistant("message-1");
+      expect((await submit()).isError).toBeUndefined();
+      await hang();
+    });
+    let ended = false;
+    const result = transport.run().then(value => { ended = true; return value; });
+    await vi.advanceTimersByTimeAsync(9);
+    expect(ended).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await result).telemetry).toEqual({ turns: 1, input_tokens: 12, output_tokens: 7,
+      models: ["fixture-model"], usage_incomplete: true });
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect((transport.options().abortController as AbortController).signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps acceptance when the wall-clock limit expires first", async () => {
+    const transport = session(async function* (submit) {
+      await submit();
+      yield assistant("message-1");
+      await hang();
+    }, { acceptedGraceMs: 500, timeoutMs: 20 });
+    const result = transport.run();
+    await vi.advanceTimersByTimeAsync(20);
+    expect((await result).telemetry).toMatchObject({ usage_incomplete: true, input_tokens: 12, output_tokens: 7 });
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["throw", "rate-event", "rate-error", "spend-cap", "auth-error"])("keeps acceptance after SDK %s", async mode => {
+    const transport = session(async function* (submit) {
+      await submit();
+      yield assistant("observed");
+      if (mode === "throw") throw new Error("late SDK error");
+      if (mode === "rate-event") yield { type: "rate_limit_event", rate_limit_info: { status: "rejected" } };
+      if (mode === "rate-error") yield { ...assistant("limited"), error: "rate_limit" };
+      if (mode === "spend-cap") yield assistant("expensive", 500_001, 2);
+      if (mode === "auth-error") yield { ...assistant("auth"), error: "authentication_failed" };
+    });
+    const result = await transport.run();
+    expect(result.preview).toContain("authored");
+    expect(result.telemetry).toMatchObject({ usage_incomplete: true });
+    expect(result.telemetry).not.toHaveProperty("total_cost_usd");
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { ...success }, { ...success, is_error: true }, { ...success, subtype: "error_max_turns" },
+  ])("keeps acceptance and authoritative result telemetry: %j", async final => {
+    const transport = session(async function* (submit) {
+      await submit();
+      yield assistant("observed");
+      yield final;
+      await hang();
+    });
+    const result = await transport.run();
+    expect(result.telemetry).toEqual({ turns: 3, input_tokens: 101, output_tokens: 42,
+      models: ["fixture-model"], total_cost_usd: 0.125 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still fails without acceptance at the wall-clock limit", async () => {
+    const transport = session(async function* () { yield assistant(); await hang(); });
+    const result = expect(transport.run()).rejects.toThrow("wall-clock limit");
+    await vi.advanceTimersByTimeAsync(100);
+    await result;
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not accept a submission handler still pending at the limit", async () => {
+    let finish!: (value: ReturnType<typeof submitBranchToolProposal>) => void;
+    const transport = session(async function* (submit) { await submit(); yield success; });
+    const pending = new Promise<ReturnType<typeof submitBranchToolProposal>>(resolve => { finish = resolve; });
+    transport.input.submitBranchToolProposal = vi.fn(() => pending);
+    const result = expect(transport.run()).rejects.toThrow("wall-clock limit");
+    await vi.advanceTimersByTimeAsync(100);
+    await result;
+    finish({ manifest: prepareBranchPackage(fixture("good-label-writer"), "late").manifest,
+      files: [], contents: {}, package_path: "branch-tools/label-writer", package_digest: "a".repeat(64) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("asks the SDK to stop only after acceptance", async () => {
+    const replies: unknown[] = [];
+    const transport = session(async function* (submit) {
+      replies.push(await transport.hook());
+      await submit();
+      replies.push(await transport.hook());
+      yield success;
+    });
+    await transport.run();
+    expect(replies).toEqual([{}, { continue: false, stopReason: "branch package accepted" }]);
+  });
+
+  it("deduplicates fallback usage by message id using its highest token values", async () => {
+    const transport = session(async function* (submit) {
+      yield assistant("same", 10, 2);
+      yield assistant("same", 12, 1);
+      yield assistant("same", 11, 7);
+      yield assistant(undefined, 3, 4);
+      yield assistant(undefined, 5, 6);
+      await submit();
+      await hang();
+    });
+    const result = transport.run();
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await result).telemetry).toEqual({ turns: 3, input_tokens: 20, output_tokens: 17,
+      models: ["fixture-model"], usage_incomplete: true });
+  });
+
+  it("observes late drain rejection after grace without an unhandled rejection", async () => {
+    let rejectDrain!: (error: Error) => void;
+    const pending = new Promise<never>((_resolve, reject) => { rejectDrain = reject; });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      const transport = session(async function* (submit) { await submit(); await pending; });
+      const result = transport.run();
+      await vi.advanceTimersByTimeAsync(10);
+      expect((await result).preview).toContain("authored");
+      rejectDrain(new Error("late drain rejection"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 });
