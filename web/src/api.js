@@ -32,6 +32,7 @@ import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
+import { setAccountWorkspace } from './auth/accountIdentity.js'
 import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage, rememberServiceResponse, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 
 // A deployed static bundle talks to the app through the same public origin.
@@ -489,10 +490,12 @@ export function isWorkspaceBootstrapRequired(error) {
 // --- Session / intake ---------------------------------------------------
 export async function getSessionIdentity(mock) {
   conversationMock = mock === true
-  if (mock) return { tenant: null, tier: null, org: null }
+  if (mock) return { tenant: null, tier: null, org: null, workspace: null }
   // Identity proof must be fresh, independently of any selected drawing.
   const data = await http('/api/session/identity', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
-  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null }
+  setAccountWorkspace(data.workspace ?? null)
+  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null,
+    workspace: data.workspace && typeof data.workspace === 'object' ? data.workspace : null }
 }
 
 // Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by

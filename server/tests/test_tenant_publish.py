@@ -127,7 +127,7 @@ def test_self_approval_publishes_verified_reviewed_tenant_package(publishing, si
     assert digest != hashlib.sha256(zipped).hexdigest()
     assert verify(state.client.get(BASE + "/revocations").content, signer)["entries"] == []
     state.tenant = OTHER
-    assert state.client.get(BASE).json() == {"tools": []}
+    assert state.client.get(BASE).json() == {"tools": [], "workspace_id": OTHER}
 
 
 @pytest.mark.parametrize("capability", ["files.write", "net.http", "files.write:/tmp", "net.http:https://example.com"])
@@ -200,7 +200,7 @@ def test_revoke_tenant_and_role_boundaries(publishing, signer):
     assert len(state.client.get(BASE).json()["tools"]) == 1
     state.role = "editor"
     assert state.client.post(REVOKE, json={"reason": "withdrawn"}).status_code == 200
-    assert state.client.get(BASE).json() == {"tools": []}
+    assert state.client.get(BASE).json() == {"tools": [], "workspace_id": TENANT}
     assert state.client.get("/api/author/branch-tools").json()["tools"][0]["revoked"] is True
     raw = state.client.get(BASE + "/revocations").content
     entries = verify(raw, signer)["entries"]
