@@ -128,10 +128,10 @@ export default function ClaudeAccountPanel({
     if (!canManage || signedOut || !value || busy || pending.current) return
     setSuccess(null)
     if (/sk-ant-/i.test(label)) { setLabel(''); setFormError('The key goes in the key field, not the label.'); return }
-    if (/^sk-ant-oat/i.test(value)) {
+    if (/sk-ant-oat/i.test(value)) {
       setFormError('That is not an API key. Create an API key in Claude Console and paste that instead.'); return
     }
-    if (value.includes('#') || /^https?:\/\//i.test(value) || /^claude /i.test(value)) {
+    if (/[=\s]/.test(value) || value.includes('#') || /^https?:\/\//i.test(value) || /^claude /i.test(value)) {
       setFormError('That is not an API key. Copy the key from Claude Console (it starts with sk-ant-api).'); return
     }
     setFormError(null)

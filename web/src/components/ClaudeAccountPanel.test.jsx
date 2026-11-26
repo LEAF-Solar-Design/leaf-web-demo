@@ -537,3 +537,15 @@ describe('Claude account form safety', () => {
     expect(onUnlink).not.toHaveBeenCalled()
   })
 })
+
+describe('API key paste mistakes', () => {
+  it.each(['CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-FAKE', 'export ANTHROPIC_API_KEY=sk-ant-api03-FAKE'])('refuses %s without sending it', (value) => {
+    const onLink = vi.fn()
+    panel({ grant: { linked: false, accounts: [] }, onLink })
+    fireEvent.change(screen.getByLabelText('Anthropic API key'), { target: { value } })
+    fireEvent.click(screen.getByRole('button', { name: 'Link API key' }))
+    expect(onLink).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('That is not an API key.')
+    expect(screen.getByRole('alert').textContent).not.toContain('FAKE')
+  })
+})

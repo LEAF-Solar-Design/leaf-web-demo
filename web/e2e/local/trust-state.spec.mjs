@@ -118,7 +118,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   expect(response.request().postDataJSON()).not.toHaveProperty('plan')
   await expect(panel.locator('.claude-trigger')).toContainText('1 linked')
   const accountDialog = page.getByRole('dialog', { name: 'Claude accounts' })
-  await expect(accountDialog).toContainText('API key')
+  await expect(accountDialog.locator('.ca-account-main span').first()).toHaveText('API key')
 
   const linkedRead = await request.get(`${API_BASE}/api/tenant/claude-grant`, { headers: TENANT_HEADERS })
   expect(linkedRead.status()).toBe(200)
