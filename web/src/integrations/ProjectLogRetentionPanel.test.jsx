@@ -42,6 +42,19 @@ async function previewAndReview() { click('Preview retention'); await screen.fin
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('O03 standalone retention controls, inert client only', () => {
+  it.each([
+    '2026-10-17T09:45:00.000Z',
+    '1970-01-01T00:00:00.000Z',
+    '1969-12-31T23:59:59.999Z',
+  ])('shows the exact UTC instant returned by the dry run (%s)', async retentionClock => {
+    const h = setup()
+    h.client.retentionPlan.mockResolvedValue({ ...plan, retentionClock })
+    render(<ProjectLogRetentionPanel {...h.props} />)
+    await openRun()
+    click('Preview retention')
+    const preview = within(await screen.findByRole('region', { name: 'Retention preview' }))
+    expect(preview.getByText(retentionClock, { selector: 'time' })).toHaveAttribute('datetime', retentionClock)
+  })
   it('opens a stored table by reference without preparing or scheduling', async () => {
     const h = setup()
     h.client.retentionGetPreparedTable = vi.fn().mockResolvedValue({ tableId: table, revision: 1 })
