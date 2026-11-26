@@ -169,7 +169,7 @@ function JobDetail({ job }) {
   const proposal = job.tool_name === 'solar-solve-proposal' && job.status === 'complete' &&
     job.result?.schema === 'leaf.solar-solve-proposal.v1' && !job.output_version_id
   const reportContext = job.result?.project_context
-  const hasBoundResult = job.status === 'complete' && job.input_version_id &&
+  const hasBoundResult = (job.status === 'complete' || job.status === 'succeeded') && job.input_version_id &&
     (reportContext == null || reportContext.input_version_id === job.input_version_id)
   return (
     <section className="ground-job-detail" aria-label="Job detail">

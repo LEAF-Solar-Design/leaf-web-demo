@@ -194,7 +194,7 @@ it('exports the complete retained envelope of the selected report and retires th
       },
     }
     const second = {
-      ...first, job_id: 'second-report', input_version_id: 'second-version',
+      ...first, job_id: 'second-report', status: 'succeeded', input_version_id: 'second-version',
       result: { ok: true, project_context: { input_version_id: 'second-version' }, result: { layers: [] } },
     }
     const readBlob = (blob) => new Promise((resolve, reject) => {
@@ -218,6 +218,7 @@ it('exports the complete retained envelope of the selected report and retires th
     for (const job of [
       { ...second, result: first.result },
       { ...second, status: 'failed' },
+      { ...second, status: 'running' },
       { ...second, input_version_id: null },
     ]) {
       rerender(<ProjectWorkspacePanels {...props} currentJob={job} />)
