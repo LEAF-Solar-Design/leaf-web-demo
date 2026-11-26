@@ -150,6 +150,8 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
     insunits = intake.get("insunits")
     if "insunits" in intake and (type(insunits) is not int or not 0 <= insunits <= 24):
         _fail("INSUNITS must be an integer unit code from 0 through 24")
+    if intake.get("blocksCapped"):
+        _fail("Cannot export because the intake block database was capped")
     layers_in = intake.get("layers", [])
     polylines = intake.get("polylines", [])
     texts = intake.get("texts", [])
@@ -1142,6 +1144,11 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
             handle = _real_handle(ent.get("handle"), where, real)
             note_layer(layer)
             references.append((fields, ent["handle"] if handle is not None else None))
+        source_count = block.get("count")
+        # Intake captures the first 60 child records and retains nested INSERTs separately.
+        # Count only records the writer can emit, since INSERTs in the prefix are also in that list.
+        if type(source_count) is int and source_count > 60 and source_count > len(rows) + len(references):
+            _fail(f"blocks[{name}]: cannot export truncated block children")
         result[name] = {"base": base, "children": rows, "nested_inserts": references}
     return result
 

@@ -226,6 +226,41 @@ def test_case_distinct_textstyles_keep_mleader_style_pointers():
         ("M", "Standard"), ("N", "standard")]
 
 
+@pytest.mark.parametrize(("blocks", "children", "message"), [
+    (201, 1, "block database was capped"),
+    (1, 61, "truncated block children"),
+    (2, 62, "truncated block children"),
+])
+def test_reexport_refuses_truncated_block_data(blocks, children, message):
+    intake = parse_dxf_bytes(_block_capture_dxf(blocks, children))
+    with pytest.raises(intake_dxf.IntakeDxfError, match=message):
+        intake_to_dxf(intake)
+
+
+def _block_capture_dxf(blocks, children, *, nested_tail=False):
+    pairs = [(0, "SECTION"), (2, "BLOCKS")]
+    for index in range(blocks):
+        pairs.extend([(0, "BLOCK"), (2, f"Panel{index}")])
+        for child in range(children if index == 0 else 1):
+            pairs.extend([(0, "POINT"), (8, "0"), (10, child), (20, 0)])
+        if nested_tail and index == 0:
+            pairs.extend([(0, "INSERT"), (5, "A1"), (2, "Panel1"), (10, 60), (20, 0)])
+        pairs.append((0, "ENDBLK"))
+    pairs.extend([(0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+                  (0, "INSERT"), (5, "A2"), (2, "Panel0"), (10, 0), (20, 0),
+                  (0, "ENDSEC"), (0, "EOF")])
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
+
+
+@pytest.mark.parametrize("nested_tail", [False, True])
+def test_reexport_retains_complete_block_capture_at_limits(nested_tail):
+    intake = parse_dxf_bytes(_block_capture_dxf(200, 60, nested_tail=nested_tail))
+    reopened = parse_dxf_bytes(intake_to_dxf(intake))
+    assert len(reopened["blocks"]) == 200
+    assert "blocksCapped" not in reopened
+    assert reopened["blocks"]["Panel0"] == intake["blocks"]["Panel0"]
+
+
 def test_case_distinct_block_records_keep_definition_owners():
     intake = {"blocks": {name: {"base": [0, 0, 0], "children": []} for name in ("B", "b")}}
     back = _round_trip_with_resolved_pointers(intake)
