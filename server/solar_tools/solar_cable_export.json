@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-cable-export",
     "version": "1.0.0",
-    "description": "Write CableExport.xlsx: the plugin's Export All workbook (homeruns, equipment, inverter, string and feeder sheets) for the stored design.",
+    "description": "Export the cable schedule for the stored design. Choose route_bundle to include a DXF overlay and an index linking each route to its Homeruns row.",
     "kind": "script",
     "family_id": "schedules",
     "engine_op": "solar_cable_export",
@@ -25,6 +25,7 @@
       "properties": {
         "drawing_id": {"type": "string", "maxLength": 128},
         "circuit_source": {"type": "string", "enum": ["topology", "labels"]},
+        "export_format": {"type": "string", "enum": ["workbook", "route_bundle"]},
         "inverter_record": {
           "type": "object",
           "properties": {
