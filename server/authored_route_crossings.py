@@ -4,10 +4,18 @@ import re
 
 def is_route_crossing_request(description):
     words = description.casefold()
-    return all(re.search(pattern, words) for pattern in (
-        r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b",
+    if not re.search(r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b", words):
+        return False
+    if all(re.search(pattern, words) for pattern in (
         r"\b(?:arrays?|panels?|modules?)\b",
         r"\b(?:cross(?:es|ing)?|intersect(?:s|ing)?|enter(?:s|ing)?|cut(?:s|ting)? through)\b",
+    )):
+        return True
+    return all(re.search(pattern, words) for pattern in (
+        r"\baisles?\b",
+        r"\b(?:check|verify|validate|audit|confirm|whether|which|flag|find|identify|report|show)\b",
+        r"\b(?:stay(?:s|ing)?|remain(?:s|ing)?|follow(?:s|ing)?|leav(?:e|es|ing)|"
+        r"inside|within|outside|contain(?:ed|ment)?|compliance|compliant|violations?)\b",
     ))
 
 

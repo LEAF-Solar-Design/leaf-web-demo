@@ -93,3 +93,47 @@ def test_mixed_active_layer_counts_named_module_placements_only(ask):
     status, payload = invoke(source, raw)
     assert status == "ok", payload
     assert (payload[0]["layer"], payload[0]["total"]) == ("Equipment", 1)
+
+
+@pytest.mark.parametrize("ask,aisles,route,expected", [
+    (
+        "Check that every segment of this roof cable route follows an allowed aisle.",
+        [[(0, 0), (6, 0), (6, 2), (0, 2)]],
+        [(1, 1), (4, 1), (4, 3)],
+        "outside_aisle",
+    ),
+    (
+        "Verify that the wiring stays within the access aisles.",
+        [[(0, 0), (3, 0), (3, 2), (0, 2)], [(3, 0), (6, 0), (6, 2), (3, 2)]],
+        [(1, 1), (5, 1)],
+        "stays_in_aisle",
+    ),
+    (
+        "Which conduit runs leave the marked aisles?",
+        [[(0, 0), (2, 0), (2, 2), (0, 2)], [(4, 0), (6, 0), (6, 2), (4, 2)]],
+        [(1, 1), (5, 1)],
+        "outside_aisle",
+    ),
+    (
+        "Audit wire paths for aisle compliance.",
+        [[(0, 0), (6, 0), (6, 2), (0, 2)]],
+        [(1, 0), (6, 0), (6, 2), (3, 2)],
+        "stays_in_aisle",
+    ),
+], ids=["every-segment", "adjacent-aisles", "aisle-gap", "aisle-boundary"])
+def test_authored_route_aisle_compliance(ask, aisles, route, expected):
+    polylines = [
+        dict(layer="Access Aisles", handle=f"{0xC1 + i:X}", closed=True,
+             pts=[[x, y, 0] for x, y in points])
+        for i, points in enumerate(aisles)
+    ]
+    polylines.append(dict(layer="Cable", handle="B1", closed=False,
+                          pts=[[x, y, 0] for x, y in route]))
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Access Aisles", "Cable"], polylines=polylines))
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = invoke(source, raw)
+    assert status == "ok", payload
+    assert payload[0] == {
+        category: ["B1"] if category == expected else []
+        for category in ("crosses_array", "stays_in_aisle", "outside_aisle")
+    }
