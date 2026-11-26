@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { savedReportBinding } from '../lib/savedReport.js'
 
 function ReportPicker({ label, value, exclude, reports, onChange }) {
@@ -45,10 +45,12 @@ function savedLayerOptions(job) {
 }
 
 function LayerOptionsComparison({ first, second }) {
-  if (!sameToolVersion(first, second)) return null
   const a = savedLayerOptions(first.job)
   const b = savedLayerOptions(second.job)
   if (!a || !b) return null
+  if (!sameToolVersion(first, second)) {
+    return <p>Comparing saved options requires two reports from the same known tool version.</p>
+  }
 
   const rows = [
     { name: 'Layer filter', left: a.filter, right: b.filter, display: value => value === null ? 'All layers' : value },
@@ -183,8 +185,12 @@ export default function ReportComparison({ jobs, projectId }) {
   }
   const first = reports.get(firstId)
   const second = reports.get(secondId)
-  if (firstId && !first) setFirstId('')
-  if (secondId && !second) setSecondId('')
+  const clearFirst = Boolean(firstId && !first)
+  const clearSecond = Boolean(secondId && !second)
+  useEffect(() => {
+    if (clearFirst) setFirstId(current => current === firstId ? '' : current)
+    if (clearSecond) setSecondId(current => current === secondId ? '' : current)
+  }, [clearFirst, clearSecond, firstId, secondId])
   if (reports.size < 2) return null
   return (
     <section className="ground-job-detail" aria-label="Compare saved reports">

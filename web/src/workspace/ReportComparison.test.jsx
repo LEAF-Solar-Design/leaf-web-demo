@@ -128,10 +128,17 @@ it('distinguishes an omitted exact-match option from missing saved params', () =
   expect(within(options).getByRole('row', { name: /Exact match/ })).toHaveTextContent('OffUnknownUnavailable')
 })
 
-it('omits the option table when the report versions differ', () => {
-  compare(areaReport(first, []), areaReport(second, []))
+it.each([
+  ['versions differ', { version: 'v2' }, 'Different tool versions'],
+  ['tool identity differs', { tool: 'Other layer report' }, 'Different tools'],
+  ['version is missing', { version: undefined }, 'Tool version could not be verified'],
+])('explains why saved options are unavailable when %s', (_label, identity, result) => {
+  const right = areaReport(third, [])
+  Object.assign(right.result, identity)
+  compare(areaReport(first, []), right)
 
-  expect(screen.getByText('Different tool versions')).toBeVisible()
+  expect(screen.getByText(result)).toBeVisible()
+  expect(screen.getByText('Comparing saved options requires two reports from the same known tool version.')).toBeVisible()
   expect(screen.queryByRole('table', { name: 'Saved layer report options' })).toBeNull()
 })
 
