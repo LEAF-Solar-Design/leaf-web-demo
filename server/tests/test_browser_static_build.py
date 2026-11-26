@@ -139,6 +139,76 @@ def test_customer_routes_use_existing_auth_and_read_only_status(fixture):
         assert f.calls[0][0].endswith('/status') and not any(f.scopes)
 
 
+@pytest.mark.parametrize('source_commit', ['a'*40, 'b'*40, 'c'*40],
+                         ids=['chart', 'gallery', 'schedule'])
+def test_readback_returns_only_current_publication_identity(fixture, source_commit):
+    f = fixture
+    f.row['source_commit'] = f.witnesses['source_commit'] = source_commit
+    with TestClient(f.app) as client:
+        response = client.get(f.path + '/candidate', params=f.witnesses)
+    expected = hashlib.sha256(json.dumps(
+        [f.authority[k] for k in flow.AUTHORITY_FIELDS] + [f.job, source_commit, f.row['source_tree']],
+        separators=(',', ':')).encode()).hexdigest()
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.json() == dict(schema='leaf.browser-static-candidate.v1', project_id=f.project,
+                                   source_request_id=f.request, job_id=f.job, execution_id=expected,
+                                   **f.witnesses)
+    assert not f.calls and not any(f.scopes)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('version', 2), ('receipt_digest', 'f'*64), ('source_commit', 'f'*40),
+    ('source_tree', 'f'*40), ('state', 'superseded'), ('source_request_id', uid(99)),
+])
+def test_readback_refuses_stale_or_foreign_row(fixture, field, value):
+    f = fixture
+    f.row[field] = value
+    with TestClient(f.app) as client:
+        response = client.get(f.path + '/candidate', params=f.witnesses)
+    assert response.status_code == 409
+    assert not f.calls and 'execution_id' not in response.json()
+
+
+def test_readback_denies_foreign_project_before_reading_row(fixture, monkeypatch):
+    f = fixture
+    def scope(tenant, project_id, **kwargs):
+        assert project_id == uid(99)
+        raise flow.FlowError(403)
+    monkeypatch.setattr(flow, 'scope', scope)
+    monkeypatch.setattr(flow, 'read', lambda *args: pytest.fail('foreign row lookup'))
+    with TestClient(f.app) as client:
+        response = client.get(f.path.replace(f.project, uid(99), 1) + '/candidate', params=f.witnesses)
+    assert response.status_code == 403 and not f.calls
+
+
+def test_readback_refuses_invalid_job_before_reading_row(fixture, monkeypatch):
+    f = fixture
+    monkeypatch.setattr(flow, 'read', lambda *args: pytest.fail('invalid job row lookup'))
+    with TestClient(f.app) as client:
+        response = client.get(f.path.rsplit('/', 1)[0] + '/invalid/candidate', params=f.witnesses)
+    assert response.status_code == 422 and not f.calls
+
+
+@pytest.mark.parametrize('drift,expected_status', [('caller', 403), ('repository', 403), ('publication', 409)])
+def test_readback_rechecks_after_first_read(fixture, monkeypatch, drift, expected_status):
+    f = fixture
+    def read(*args):
+        row = deepcopy(f.row)
+        if drift == 'caller':
+            f.tenant.subject = 'changed-subject'
+        elif drift == 'repository':
+            f.authority['repo_key'] = uid(99)
+        else:
+            f.row['version'] = 2
+        return row
+    monkeypatch.setattr(flow, 'read', read)
+    with TestClient(f.app) as client:
+        response = client.get(f.path + '/candidate', params=f.witnesses)
+    assert response.status_code == expected_status
+    assert not f.calls and 'execution_id' not in response.json()
+
+
 def test_denied_write_never_consumes_body_or_dispatches(fixture,monkeypatch):
     f=fixture
     def scope(*a,**kw):
