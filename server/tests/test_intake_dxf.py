@@ -40,6 +40,55 @@ def _entity_bytes(data):
     return data.split(b"0\nSECTION\n2\nENTITIES\n", 1)[1].split(b"0\nENDSEC\n", 1)[0]
 
 
+@pytest.mark.parametrize(("sheets", "model_layout"), [
+    ([("Roof Plan", None)], None),
+    ([("Electrical Sheet", "0")], "Model"),
+    ([("North Roof", None), ("South Roof", "0")], "MODEL"),
+])
+def test_named_sheets_without_paper_flag_keep_model_only_count(sheets, model_layout):
+    import tool_loader
+
+    def insert(handle, x, layout, flag=None):
+        fields = ["0", "INSERT", "5", handle, "8", "PV", "2", "Panel",
+                  "10", str(x), "20", "1"]
+        if flag is not None:
+            fields.extend(["67", flag])
+        if layout is not None:
+            fields.extend(["410", layout])
+        return fields
+
+    fields = [
+        "0", "SECTION", "2", "BLOCKS",
+        "0", "BLOCK", "2", "Panel", "10", "0", "20", "0",
+        "0", "LWPOLYLINE", "8", "0", "90", "4", "70", "1",
+        "10", "0", "20", "0", "10", "0.25", "20", "0",
+        "10", "0.25", "20", "0.25", "10", "0", "20", "0.25",
+        "0", "ENDBLK", "0", "ENDSEC",
+        "0", "SECTION", "2", "ENTITIES", *insert("A", 1, model_layout),
+    ]
+    for index, (sheet, flag) in enumerate(sheets, start=1):
+        fields.extend(insert(f"{10 + index:X}", index + 1, sheet, flag))
+    fields.extend(["0", "ENDSEC", "0", "EOF"])
+    intake = dxf_intake.parse_dxf_bytes(("\n".join(fields) + "\n").encode())
+
+    registry = json.loads((SERVER_DIR.parent / "engine" / "registry.json").read_text())
+    tool = next(tool for tool in registry["tools"] if tool["name"] == "count-modules")
+    reopened, _ = _roundtrip(intake)
+    for drawing in (intake, reopened):
+        assert "space" not in drawing["inserts"][0]
+        paper = [(entity.get("space"), entity.get("layout")) for entity in drawing["inserts"][1:]]
+        assert paper == [("paper", sheet) for sheet, _ in sheets]
+        params = {"region": [0, 0, 10, 10]}
+        listing = tool_loader.run_tool_dynamic(tool, drawing, {}, aps_live=False)
+        assert listing["error"] is None
+        selected, = listing["result"]["sets"]
+        params["set_id"] = selected["set_id"]
+        count = tool_loader.run_tool_dynamic(tool, drawing, params, aps_live=False)
+        assert count["error"] is None
+        assert count["result"]["count"] == 1
+        assert count["overlay"]["highlight_handles"] == ["A"]
+
+
 def _bulged_square(bulges):
     return {"layers": ["A"], "polylines": [
         {"layer": "A", "closed": True, "handle": "10", "xdata": None,

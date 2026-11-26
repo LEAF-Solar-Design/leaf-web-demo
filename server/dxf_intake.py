@@ -237,10 +237,13 @@ def parse_dxf_bytes(
                                 record.append(pairs[vertex_end])
                             vertex_end += 1
                 model_records[handle] = (value, record)
-            if space_info.get("space") != "paper":
+            layout = space_info.get("layout", "")
+            if layout and layout.casefold() != "model":
+                space_info["space"] = "paper"
+            if not space_info.get("space"):
                 space_info.clear()
         if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
-            if not space_info and dict(record).get(410, "Model") == "Model":
+            if not space_info:
                 mleader_records.append(record)
             i = j
             continue
@@ -529,8 +532,6 @@ def parse_dxf_bytes(
                 entity["bulges"] = bulges
             if kind in ("LWPOLYLINE", "POLYLINE") and any(float(v) != 0 for c, v in record if c in (40, 41, 43)):
                 entity["width"] = True
-            if groups.get(67) == "1" or groups.get(410, "Model") != "Model":
-                entity["space"] = "paper"
             if handle.upper() in associated or dimension_dependency(record):
                 entity["dimensionRef"] = True
     if parse_errors:
