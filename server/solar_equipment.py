@@ -66,13 +66,14 @@ def _validity(entity, reasons, refreshed=frozenset()):
                           previous["state"] if unresolved else "valid"}
 
 
-def equipment_candidate(graph, params, *, _creation=None):
+def equipment_candidate(graph, params, *, _creation=None, _preserve_collectors=False):
     """Return one isolated revision; the broker owns DWG creation and publication.
 
     `_creation` is the canonical dispatcher's private channel: when given, an empty-ID
     configuration takes the ID derived for its position in `equipment` and a new inverter
     takes the parent's creation time, instead of a random UUID and the clock. A supplied
-    nonempty ID keeps its meaning exactly.
+    nonempty ID keeps its meaning exactly. For a readiness probe, preserve the
+    separate collector records while checking the persisted L1 assignment intent.
     """
     _bounded_json(params)
     if (type(params) is not dict
@@ -90,6 +91,9 @@ def equipment_candidate(graph, params, *, _creation=None):
             or type(requests) is not list or len(requests) > 100000):
         raise GraphValidationError("INVALID_EQUIPMENT_REQUEST")
     previous = {item["id"]: item for item in result["inverters"]}
+    collectors = {ref: item for ref, item in previous.items()
+                  if _preserve_collectors and item["is_l2"]}
+    previous = {ref: item for ref, item in previous.items() if ref not in collectors}
     inverters, numbers = {}, set()
     occupied = None
     if _creation is not None:
@@ -105,7 +109,7 @@ def equipment_candidate(graph, params, *, _creation=None):
             ref = new_id("inverter")
         else:
             ref = _creation["new_id"]("inverter", index, occupied)
-        if ref in inverters or config["number"] in numbers:
+        if ref in inverters or ref in collectors or config["number"] in numbers:
             raise GraphValidationError("DUPLICATE_EQUIPMENT")
         numbers.add(config["number"])
         if occupied is not None:
@@ -119,12 +123,14 @@ def equipment_candidate(graph, params, *, _creation=None):
                     "provenance": {"created_by": "solar-assign-equipment",
                                    "created_at": created_at,
                                    "last_writer": "solar-assign-equipment", "source_rev": result["rev"]}}
+            if result["settings"]["use_l2_collectors"]:
+                item.update(equipment_type="string_inverter", l2_ref=None)
         item.update(copy.deepcopy({key: value for key, value in config.items() if key != "id"}))
         item.update(is_l2=False, input_assignments=[])
         inverters[ref] = item
     if not set(previous) <= set(inverters):
         raise GraphValidationError("EQUIPMENT_REMOVAL_UNSUPPORTED")
-    result["inverters"] = list(inverters.values())
+    result["inverters"] = [*inverters.values(), *collectors.values()]
     strings = {s["id"]: s for s in result["strings"]}
     issues = {ref: [] for ref in strings}
     inverter_issues = {ref: [] for ref in inverters}
@@ -205,21 +211,27 @@ def equipment_candidate(graph, params, *, _creation=None):
     for derived in result["routes"] + result["schedules"]:
         derived["validity"] = {"state": "stale", "reasons": ["equipment_changed"]}
     result["extra"]["equipment"] = {"assignment_requests": copy.deepcopy(requests)}
-    changed = result["inverters"] + result["strings"] + result["frames"] + result["routes"] + result["schedules"]
+    changed = list(inverters.values()) + result["strings"] + result["frames"] + result["routes"] + result["schedules"]
     return advance(result, changed, "solar-assign-equipment")
 
 
 def equipment_ready(graph):
     """Recompute readiness from persisted intent and limits after reopening."""
     graph = validate_graph(graph)
-    configs = [{key: item.get(key) for key in FIELDS} for item in graph["inverters"]]
+    if any(item["is_l2"] and item["input_assignments"] for item in graph["inverters"]):
+        # Direct collector inputs have no L1 assignment intent to replay.
+        return False
+    l1 = [item for item in graph["inverters"] if not item["is_l2"]]
+    configs = [{key: item.get(key) for key in FIELDS} for item in l1]
     try:
-        candidate = equipment_candidate(graph, {"expected_rev": graph["rev"], "equipment": configs,
-                                               "assignments": graph["extra"]["equipment"]["assignment_requests"]})
+        candidate = equipment_candidate(
+            graph, {"expected_rev": graph["rev"], "equipment": configs,
+                    "assignments": graph["extra"]["equipment"]["assignment_requests"]},
+            _preserve_collectors=True)
     except (GraphValidationError, KeyError):
         return False
-    if (any(old["input_assignments"] != new["input_assignments"]
-            for old, new in zip(graph["inverters"], candidate["inverters"]))
+    by_id = {item["id"]: item for item in candidate["inverters"]}
+    if (any(old["input_assignments"] != by_id[old["id"]]["input_assignments"] for old in l1)
             or any(old["inverter_ref"] != new["inverter_ref"]
                    for old, new in zip(graph["strings"], candidate["strings"]))):
         return False
