@@ -149,11 +149,11 @@ function AuthorGate({ onLinkClaude }) {
     <div className="author-gate" role="status">
       <div className="author-gate-body">
         <b>Link your Claude account to author with the agent.</b>{' '}
-        Templated authoring still works below without it. Linking your Claude subscription lets the
+        Templated authoring still works below without it. Linking an Anthropic API key lets the
         real agent write richer tools.
         {onLinkClaude && (
           <div className="author-gate-act">
-            <button className="chip-act" onClick={onLinkClaude}>Link Claude account</button>
+            <button className="chip-act" onClick={onLinkClaude}>Link API key</button>
           </div>
         )}
       </div>

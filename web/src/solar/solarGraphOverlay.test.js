@@ -176,16 +176,17 @@ describe('solarGraphOverlay', () => {
       L([[0, 0], [1, 0]], blue), L([[1, 0], [1, 2]], pink),
     ]))
   })
-  it('SGO14 omits invisible fallback strings and empty conductor routes', () => {
-    expect(run(G({ panels: [P(1, [2, 3])], strings: [S(1, []), S(2, [1])],
+  it('SGO14 omits empty strings and conductor routes', () => {
+    expect(run(G({ panels: [P(1, [2, 3])], strings: [S(1, [])],
       routes: [R(1, 'feeder', [])] }))).toEqual(empty)
   })
-  it('SGO15 draws nothing for a single-panel string and keeps every other line', () => {
-    expect(run(G({ panels: [P(1, [0, 0])], strings: [S(1, [1], [[0, 0]])] }))).toEqual(empty)
+  it('SGO15 marks a single-panel string and keeps every other line', () => {
     const g = roof()
     g.panels.push(P(7, [5, 5]))
     g.strings.push(S(3, [7], [[5, 5]]))
-    expect(run(g)).toEqual(OK(metreLines))
+    const marker = L([[4.75, 4.75], [5.25, 4.75], [5.25, 5.25],
+      [4.75, 5.25], [4.75, 4.75]], green)
+    expect(run(g)).toEqual(OK([...metreLines.slice(0, 2), marker, ...metreLines.slice(2)]))
   })
   it('SGO35 draws the panel-centre line when a multi-panel string stores one route point', () => {
     expect(run(G({ panels: [P(1, [0, 0]), P(2, [1, 0])], strings: [S(1, [1, 2], [[9, 9]])] })))
@@ -208,11 +209,13 @@ describe('solarGraphOverlay', () => {
     expect(run(G({ routes: [big(1), big(2), R(3, 'feeder', [[1, 1]]), R(4, 'feeder', [[2, 2]]),
       R(5, 'feeder', [[3, 3]])] }))).toEqual(NO('overlay_limit'))
   })
-  it('SGO39 draws nothing for a single-panel string on a decoded Ground frame', () => {
+  it('SGO39 marks decoded Ground strings with and without a stored route', () => {
     const g = ground()
-    const centre = decodeGroundFrameSlots(g.frames).frames[0].slots[1].centre
-    g.strings = [S(1, [2], [[centre.x, centre.y]]), S(2, [1])]
-    expect(solarGraphOverlay(g, { metersPerUnit: 2 })).toEqual(empty)
+    g.strings = [S(1, [2], [[2, -2]]), S(2, [1])]
+    expect(solarGraphOverlay(g, { metersPerUnit: 2 })).toEqual(OK([
+      L([[.875, -1.125], [1.125, -1.125], [1.125, -.875], [.875, -.875], [.875, -1.125]], green),
+      L([[.375, -.625], [.625, -.625], [.625, -.375], [.375, -.375], [.375, -.625]], green),
+    ]))
   })
   it('SGO16 includes the 4096-polyline boundary', () => {
     expect(run(lines(4096))).toEqual(OK(Array.from({ length: 4096 }, () => L([[0, 0], [1, 1]], pink))))

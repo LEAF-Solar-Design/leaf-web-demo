@@ -205,19 +205,29 @@ export function createPlatformTrustController({
     try {
       const value = await services.linkClaudeGrant?.(token, kind, label, plan)
       if (!current('grant', generation)) return null
-      recordOutcome('grant')
-      const grant = value ?? {
-        linked: true,
-        linked_at: new Date(now()).toISOString(),
-        kind: kind || null,
-        accounts: [],
+      if (value?.linked !== true) {
+        recordOutcome('grant')
+        publish({ grantBusy: false, grantErr: 'The server did not confirm the link. Reload and check your Claude accounts before you retry.' })
+        return null
       }
+      recordOutcome('grant')
+      const grant = value
       publish({ grant, grantBusy: false })
       return grant
     } catch (error) {
       if (!current('grant', generation)) return null
       recordOutcome('grant', error)
-      publish({ grantBusy: false, grantErr: safeError(error) })
+      const serviceError = 'The account service could not finish the link. Reload and check your Claude accounts before you retry.'
+      const status = error?.status
+      let message = safeError(error)
+      if (typeof status === 'number') {
+        if (status === 400 || status === 422) message = 'That credential was not accepted. Get a new one and paste it again.'
+        else if (status === 401) message = 'Your session has expired. Sign in again, then link your account.'
+        else if (status === 403) message = 'Only the workspace owner can link Claude accounts.'
+        else if (status >= 500) message = serviceError
+      }
+      if (token?.trim() && String(message).includes(token.trim())) message = serviceError
+      publish({ grantBusy: false, grantErr: message })
       return null
     }
   }

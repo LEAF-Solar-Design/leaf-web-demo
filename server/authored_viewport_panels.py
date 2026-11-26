@@ -36,9 +36,19 @@ _VIEWPORT_IDS = re.compile(
 def comparison_requested(description):
     names = re.findall(r"\bviewports?\b", description, re.I)
     return ((len(names) > 1 or any(name.casefold() == "viewports" for name in names)
+             or re.search(r"\b(?:two|2) viewport inventor(?:y|ies)\b", description, re.I)
              or len(_explicit_viewport_ids(description)) > 1)
             and bool(re.search(r"\b(?:compare|comparison|differences?|only one|exclusive|versus|vs)\b",
                                description, re.I)))
+
+
+def revision_comparison_requested(description):
+    panel_scope = re.search(r"\b(?:panels?|modules?|footprints?)\b", description, re.I)
+    layer_inventory = (re.search(r"\binventor(?:y|ies)\b", description, re.I)
+                       and re.search(r"\b(?:layer freezing|dynamic (?:visibility|state))\b", description, re.I))
+    return (comparison_requested(description)
+            and re.search(r"\b(?:revisions?|drawing versions?|parent drawing)\b", description, re.I)
+            and (panel_scope or layer_inventory))
 
 
 def _explicit_viewport_ids(description):
@@ -213,12 +223,14 @@ def attach_viewports(pairs, out):
 def build_body(description):
     crop = bool(re.search(r"\b(?:crops?|cropped|cropping|clip(?:ped|ping)?|boundar(?:y|ies))\b", description, re.I))
     explicit_footprint = bool(re.search(r"\bfootprints?\b", description, re.I))
-    crop = crop or explicit_footprint
+    linked = revision_comparison_requested(description)
+    crop = crop or explicit_footprint or bool(linked and re.search(r"\bperspective\b", description, re.I))
     footprint = explicit_footprint or (crop and bool(re.search(
         r"\b(?:whole|fully|entirely|wholly|completely)\b", description, re.I)))
     body = _BODY.replace("__CROP__", repr(crop)).replace("__FOOTPRINT__", repr(footprint))
     if comparison_requested(description):
-        entry = _COMPARE.replace("__HANDLES__", repr(comparison_handles(description)))
+        entry = _SELECT_PAIR.replace("__HANDLES__", repr(comparison_handles(description)))
+        entry += _REVISION_COMPARE if linked else _COMPARE
     else:
         entry = _SINGLE.replace("__HANDLE__", repr(viewport_handle(description)))
     return CLIP_SOURCE + INSTANCE_SOURCE + _GEOMETRY + body + entry
@@ -397,8 +409,8 @@ def run(intake, params):
 """
 
 
-_COMPARE = """
-def run(intake, params):
+_SELECT_PAIR = """
+def selected_viewports(params):
     bound = __HANDLES__
     selected = params.get("viewport_handles", bound)
     if ("viewport_handle" in params or not isinstance(selected, list) or len(selected) != 2
@@ -408,6 +420,13 @@ def run(intake, params):
     selected = [handle.upper().removeprefix("0X") for handle in selected]
     if len(set(selected)) != 2 or (bound and selected != bound):
         raise ValueError("Duplicate or conflicting viewport identities.")
+    return selected
+"""
+
+
+_COMPARE = """
+def run(intake, params):
+    selected = selected_viewports(params)
     left_id, right_id = selected
     left, right = (measure_viewport(intake, handle) for handle in selected)
     left_paths, right_paths = set(left["visible_paths"]), set(right["visible_paths"])
@@ -415,4 +434,28 @@ def run(intake, params):
     return {"viewport_handles": selected, "counts_by_viewport": {left_id: left["total"], right_id: right["total"]},
             "only_in": only_in, "shared_paths": sorted(left_paths & right_paths),
             "total": len(left_paths ^ right_paths), "scope": left["scope"]}, None
+"""
+
+
+_REVISION_COMPARE = """
+def run(intake, params):
+    binding = intake.get("linked_panel_revision") or {}
+    prior = binding.get("prior_intake")
+    previous, current = binding.get("prior_version"), binding.get("current_version")
+    if (not binding.get("drawing_id") or not isinstance(prior, dict)
+            or type(previous) is not int or type(current) is not int
+            or not 0 < previous < current or binding.get("parent_version") != previous):
+        raise ValueError("Two linked drawing revisions must be supplied by the version host.")
+    selected = selected_viewports(params)
+    changes = {}
+    for handle in selected:
+        before = measure_viewport(prior, handle)
+        after = measure_viewport(intake, handle)
+        old_paths, new_paths = set(before["visible_paths"]), set(after["visible_paths"])
+        changes[handle] = {"prior_count": before["total"], "current_count": after["total"],
+                           "added": sorted(new_paths - old_paths), "removed": sorted(old_paths - new_paths)}
+    return {"viewport_handles": selected, "prior_version": previous, "current_version": current,
+            "changes_by_viewport": changes,
+            "total": sum(len(change["added"]) + len(change["removed"]) for change in changes.values()),
+            "scope": after["scope"]}, None
 """

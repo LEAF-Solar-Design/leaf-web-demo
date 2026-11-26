@@ -14,7 +14,7 @@ def fingerprint(value):
 
 
 def paged_report(service, description, tenant, session, turn, *, limit, page_size, sort, cursor,
-                 cancel_event=None):
+                 cancel_event=None, time_left=None):
     if (type(page_size) is not int or not 1 <= page_size <= 100
             or sort not in ("catalog", "title", "-title") or type(description) is not str):
         raise ReadFailure("invalid_input")
@@ -37,7 +37,8 @@ def paged_report(service, description, tenant, session, turn, *, limit, page_siz
         offset = int(position)
 
     result = service._run_catalog_report("datasets", description, tenant, session, turn, limit,
-                                         expected_authority=authority, cancel_event=cancel_event, dataset_sort=sort)
+                                         expected_authority=authority, cancel_event=cancel_event, dataset_sort=sort,
+                                         time_left=time_left)
     rows = result["datasets"]
     digest = fingerprint(rows)
     if previous is not None and digest != previous:

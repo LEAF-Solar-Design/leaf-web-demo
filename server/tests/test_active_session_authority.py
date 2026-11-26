@@ -183,6 +183,7 @@ def test_identity_proves_tenant_without_drawing_access(identity_client, monkeypa
             "tenant_id": "platform-canonical",
             "org_id": "platform-canonical",
             "tier": "hosted_pro",
+            "workspace": {"id": "platform-canonical", "name": None},
         }
 
 
@@ -260,6 +261,7 @@ def test_identity_ignores_x_tenant_id_under_live_auth(
         "tenant_id": "platform-canonical",
         "org_id": "platform-canonical",
         "tier": "hosted_pro",
+        "workspace": {"id": "platform-canonical", "name": None},
     }
     assert subjects == ["auth0|tester"]
 

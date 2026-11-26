@@ -125,9 +125,9 @@ describe('w3 monitor and account popovers', () => {
     render(<Account />)
     fireEvent.click(screen.getByRole('button', { name: /Claude accounts/ }))
     const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
-    expect(within(dialog).getByLabelText('Account label')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Key label')).toBeInTheDocument()
     expect(dialog.textContent).not.toMatch(/mount|tenant/i)
-    expect(within(dialog).getByRole('button', { name: 'Link Claude account' })).toHaveAttribute('title', 'Enter your credential to link an account.')
+    expect(within(dialog).getByRole('button', { name: 'Link API key' })).toHaveAttribute('title', 'Enter your credential to link an account.')
   })
 
   it('retains inputs and offers sign-in guidance when registration is inert', async () => {

@@ -253,6 +253,31 @@ export function projectSolarRunFailure(code) {
   }
 }
 
+function splitSolveFailureMessage(error) {
+  try {
+    const progress = field(error, 'solve_progress', false)
+    if (progress == null) return null
+    const status = field(progress, 'status')
+    const completed = field(progress, 'completed_pieces')
+    const total = field(progress, 'total_pieces')
+    if (!Number.isSafeInteger(total) || total < 1 || total > 64 ||
+        !Number.isSafeInteger(completed) || completed < 0 || completed > total) return null
+    const phase = field(progress, 'phase', false)
+    let detail
+    if (phase === 'assembly' && status === 'partial' && completed === total) {
+      detail = `Solve could not assemble a proposal from the ${total} completed pieces.`
+    } else if (phase === undefined && completed < total &&
+        field(progress, 'failed_piece_index', false) === completed &&
+        status === (completed === 0 ? 'incomplete' : 'partial')) {
+      detail = completed === 0 ? 'Solve stopped before any pieces finished.'
+        : `Solve stopped after ${completed} of ${total} pieces.`
+    }
+    return detail ? `${detail} The drawing keeps the last saved strings.` : null
+  } catch {
+    return null
+  }
+}
+
 export function readProjectSolarCompletion(options = {}) {
   let job, binding, jobId, tool
   let retainedId = null
@@ -320,6 +345,8 @@ export function readProjectSolarCompletion(options = {}) {
       return completion('outcome_unknown', jobId, null, null, PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
     }
     const failure = projectSolarRunFailure(reason === undefined ? code : reason)
-    return completion('failed', jobId, null, failure.reasonCode, failure.message)
+    const detail = status === 'failed' && tool === 'solar-solve-proposal'
+      ? splitSolveFailureMessage(error) : null
+    return completion('failed', jobId, null, failure.reasonCode, detail ?? failure.message)
   } catch { return unreadable() }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import JobRail from '../components/JobRail.jsx'
+import ReportComparison from './ReportComparison.jsx'
 import ResultJsonDownload from '../components/ResultJsonDownload.jsx'
 import { savedReportBinding, UNVERIFIED_REPORT_VERSION } from '../lib/savedReport.js'
 import ReceiptPanel, { deepRedact } from '../projects/ReceiptPanel.jsx'
@@ -262,12 +263,15 @@ export default function ProjectWorkspacePanels({
         </li>
       ))}</ul> : <p>No built tools yet. Author one from the Manage tab.</p>
       break
-    case 'jobs':
+    case 'jobs': {
+      const projectId = (project || workspace?.project)?.project_id
       content = <>
         <JobRail jobs={[...(workspace?.jobs || [])].reverse()} currentJob={currentJob} onSelectJob={onSelectJob} mock={mock} />
-        {currentJob && <JobDetail job={currentJob} projectId={(project || workspace?.project)?.project_id} />}
+        {currentJob && <JobDetail job={currentJob} projectId={projectId} />}
+        <ReportComparison key={projectId} jobs={workspace?.jobs || []} projectId={projectId} />
       </>
       break
+    }
     case 'receipts':
       content = receipts?.length || shipReceipts?.length ? <>
         {!!receipts?.length && <ReceiptPanel receipts={receipts} />}

@@ -26,23 +26,21 @@ async function openCosts() {
 }
 
 describe('account and cost issue sweep', () => {
-  it('S1-62 retains a rejected token and the existing failure feedback', async () => {
+  it('S1-62 clears a rejected token and retains the existing failure feedback', async () => {
     const onLink = vi.fn().mockResolvedValue(null)
     render(<ClaudeAccountPanel {...accountProps} onLink={onLink} error="This token was rejected. Try another token." />)
-    fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
     const input = screen.getByLabelText('Anthropic API key')
-    fireEvent.change(input, { target: { value: 'rejected-token' } })
+    fireEvent.change(input, { target: { value: 'sk-ant-api03-FAKE-rejected-fixture-only' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     expect(onLink).toHaveBeenCalledTimes(1)
-    expect(input).toHaveValue('rejected-token')
+    expect(input).toHaveValue('')
     expect(screen.getByRole('alert')).toHaveTextContent('This token was rejected. Try another token.')
   })
 
   it('S1-62 clears the credential after a successful grant', async () => {
     render(<ClaudeAccountPanel {...accountProps} onLink={vi.fn().mockResolvedValue({ linked: true })} />)
-    fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
     const input = screen.getByLabelText('Anthropic API key')
-    fireEvent.change(input, { target: { value: 'accepted-token' } })
+    fireEvent.change(input, { target: { value: 'sk-ant-api03-FAKE-accepted-fixture-only' } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Link API key' })) })
     expect(input).toHaveValue('')
   })
@@ -51,7 +49,7 @@ describe('account and cost issue sweep', () => {
     render(<ClaudeAccountPanel {...accountProps} loading grant={null} />)
     const dialog = screen.getByRole('dialog', { name: 'Claude accounts' })
     expect(within(dialog).getByRole('status')).toHaveTextContent('Checking your Claude accounts...')
-    expect(within(dialog).queryByLabelText('Claude token')).not.toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Anthropic API key')).not.toBeInTheDocument()
   })
 
   it('S1-59 explains sign-in and hides controls that cannot read guest costs', () => {

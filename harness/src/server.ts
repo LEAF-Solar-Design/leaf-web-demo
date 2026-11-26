@@ -89,6 +89,7 @@ import { BadMessageError } from "./agent/converseLoop.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 import {
   withAuthorStandardServicesAuthority,
+  withoutAuthorStandardServices,
   type HumanApprovalHostInput,
   type LeafStandardServicesHumanApprovalHost,
 } from "./ports/impl/leafStandardServicesResolver.js";
@@ -1687,7 +1688,13 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
-        const authority = authorAuthorityForRequest(req, tenant);
+        const services = req.headers["x-author-services"];
+        const noServices = services === "none" && body.target === "branch"
+          && !Object.keys(req.headers).some((name) => name.startsWith("x-authority-"));
+        if (services !== undefined && !noServices) {
+          return send(res, 400, { error: { message: "invalid author services selection" } });
+        }
+        const authority = noServices ? undefined : authorAuthorityForRequest(req, tenant);
         // These names deliberately match AuthorLoop.stage's request exactly.
         const stage = () => loop.stage(tenant, description, {
             changeSetId: requiredText(body, "changeSetId"),
@@ -1702,7 +1709,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
           });
-        const out = authority
+        const out = noServices
+          ? await withoutAuthorStandardServices(stage)
+          : authority
           ? await withAuthorStandardServicesAuthority(authority, stage)
           : await stage();
         return send(res, 200, out);

@@ -752,6 +752,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
         },
     },
     "customization": {
+        "customization_stage_grants": {
+            "change_set_id", "tenant_id", "author_subject", "tier", "binding_digest",
+            "authority_session_id", "authority_turn_id", "issued_ms", "expires_ms",
+            "dispatches", "last_attempt", "revoked_ms", "revoked_reason",
+        },
         "customization_stage_attempt_history": {
             "tenant_id", "change_set_id", "failed_version", "attempt",
             "reason_code", "reason_message", "retryable",
@@ -1870,6 +1875,15 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "AND completed_at IS NULL AND uncertain_at IS NOT NULL"),
     },
     "customization": {
+        "customization_stage_grants_pkey": _catalog_contract(
+            "customization_stage_grants", "PRIMARY KEY (change_set_id)"),
+        "customization_stage_grants_change_set_id_fkey": _catalog_contract(
+            "customization_stage_grants", "FOREIGN KEY (change_set_id)",
+            "REFERENCES customization_change_sets(change_set_id)"),
+        "customization_stage_grants_dispatches_check": _catalog_contract(
+            "customization_stage_grants", "CHECK", "dispatches >= 0", "dispatches <= 2"),
+        "customization_stage_grants_check": _catalog_contract(
+            "customization_stage_grants", "CHECK", "expires_ms > issued_ms"),
         "customization_stage_attempt_history_pkey": _catalog_contract(
             "customization_stage_attempt_history",
             "PRIMARY KEY (tenant_id, change_set_id, failed_version, attempt)"),

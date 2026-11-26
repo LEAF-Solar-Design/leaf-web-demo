@@ -34,8 +34,8 @@ const pointOf = value => {
 // Mounted by App in Viewer's matching scene. This is a bounded 2D preview of stored
 // design data, with projection-scoped validation; server/version rails remain
 // authoritative for all other fields, topology, freshness and revisions.
-// Viewer consumes only pts/color, so colours encode kinds. Equipment squares
-// are symbolic 0.5-metre markers, not footprints. Trenches, labels, outlines,
+// Viewer consumes only pts/color, so colours encode kinds. Squares for equipment
+// and single-panel strings are symbolic 0.5-metre markers. Trenches, labels, outlines,
 // selection, layer visibility and automatic framing are excluded.
 function project(graph, options) {
   if (graph === undefined || graph === null) return { polylines: [], refusal: null }
@@ -85,8 +85,8 @@ function project(graph, options) {
       if (pt === null) return { error: 'invalid_graph' }
       pts.push(pt)
     }
-    // One stored point is a valid path (the graph contract sets no minimum, and a single-panel string stores
-    // exactly its panel's centre). It is validated above and has no segment, so it draws nothing.
+    // One stored point is valid but has no line segment. A string can still
+    // supply fallback geometry through its panel references.
     return { pts: length === 1 ? [] : pts }
   }
 
@@ -132,6 +132,7 @@ function project(graph, options) {
     if (route.error) return refused(route.error)
     if (route.pts.length) plans.push(planOf({ points: route.pts, color: '#22c55e' }))
     else if (refs.length > 1) plans.push(planOf({ refs, color: '#22c55e' }))
+    else if (refs.length === 1) plans.push(planOf({ marker: panels.get(refs[0]), color: '#22c55e' }))
   }
   for (let index = 0; index < lists.inverters.length; index += 1) {
     const inverter = lists.inverters.list[index]
