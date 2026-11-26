@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assignment-report",
     "version": "1.0.0",
-    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. The default mode also previews tentative assignments without committing.",
+    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The default mode previews tentative assignments without committing.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assignment_report",
@@ -26,11 +26,12 @@
         "drawing_id": {"type": "string", "maxLength": 128},
         "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
         "accept_excess_capacity": {"type": "boolean"},
-        "mode": {"type": "string", "enum": ["saved"]}
+        "mode": {"type": "string", "enum": ["saved"]},
+        "suggest_minimum_moves": {"type": "boolean"}
       },
       "required": ["expected_rev"],
       "if": {"required": ["mode"]},
-      "else": {"required": ["accept_excess_capacity"]},
+      "else": {"required": ["accept_excess_capacity"], "not": {"required": ["suggest_minimum_moves"]}},
       "additionalProperties": false
     },
     "returns": {
@@ -51,6 +52,17 @@
           "properties": {
             "status": {"const": "unknown"},
             "reason": {"const": "mppt_voltage_current_limits_not_verified"}
+          },
+          "additionalProperties": false
+        },
+        "rebalance": {
+          "type": "object",
+          "required": ["source_rev", "status", "minimum_moves", "moves"],
+          "properties": {
+            "source_rev": {"type": "integer", "minimum": 0},
+            "status": {"enum": ["already_balanced", "proposed", "no_direct_solution", "unavailable", "search_limit"]},
+            "minimum_moves": {"type": ["integer", "null"], "minimum": 0},
+            "moves": {"type": "array", "items": {"type": "object"}}
           },
           "additionalProperties": false
         },

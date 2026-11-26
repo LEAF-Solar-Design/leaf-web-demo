@@ -5,10 +5,11 @@ The read adapter supplies immutable source and output digests and limits output
 bytes. No string identifiers are added to the payload-free exception envelope.
 """
 import solar_local_graph
+from solar_equipment_rebalance import minimum_direct_moves
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision
 
 
-SAVED_REQUEST_KEYS = frozenset({"mode", "expected_rev", "accept_excess_capacity"})
+SAVED_REQUEST_KEYS = frozenset({"mode", "expected_rev", "accept_excess_capacity", "suggest_minimum_moves"})
 
 
 def _saved_state(graph, targets):
@@ -37,13 +38,14 @@ def run(graph, params):
     if type(params) is dict and params.get("mode") == "saved":
         _bounded_json(params)
         if (set(params) - SAVED_REQUEST_KEYS or type(params.get("expected_rev")) is not int
-                or type(params.get("accept_excess_capacity", False)) is not bool):
+                or type(params.get("accept_excess_capacity", False)) is not bool
+                or type(params.get("suggest_minimum_moves", False)) is not bool):
             raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
         before = require_revision(graph, params["expected_rev"])
         targets = assignment._targets(before)
         if not targets:
             raise GraphValidationError("NO_STRING_COLLECTORS")
-        return {
+        result = {
             "schema": "leaf.solar-assignment-report.v1",
             "expected_rev": before["rev"],
             "status": "saved",
@@ -51,6 +53,9 @@ def run(graph, params):
             "saved_state": _saved_state(before, targets),
             "electrical_suitability": {"status": "unknown", "reason": "mppt_voltage_current_limits_not_verified"},
         }
+        if params.get("suggest_minimum_moves", False):
+            result["rebalance"] = minimum_direct_moves(before)
+        return result
     before, binding, state, rows, assigned, remaining, reason, _ = assignment._assignment_plan(graph, params)
     if reason == "STRING_ASSIGNMENT_MAPPING_FAILED":
         assignment._refuse(reason)
