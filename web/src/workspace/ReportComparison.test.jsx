@@ -166,16 +166,34 @@ it.each([
 })
 
 it.each([
-  ['different drawing', { drawing: 'site-b' }, [['Roof', 4]]],
-  ['different filter', { filter: 'canopy' }, [['Roof', 4]]],
-  ['different filter mode', { exact: false }, [['Roof', 4]]],
-  ['ambiguous layer identity', {}, [['Roof', 4], ['Roof', 8]]],
-  ['unusable area', {}, [['Roof', '4']]],
-])('omits ranking for %s', (_label, options, layers) => {
+  ['different drawing', { drawing: 'site-b' }, [['Roof', 4]], /for the same drawing/],
+  ['different filter', { filter: 'canopy' }, [['Roof', 4]], /the same layer filter and exact-match setting/],
+  ['different filter mode', { exact: false }, [['Roof', 4]], /the same layer filter and exact-match setting/],
+  ['ambiguous layer identity', {}, [['Roof', 4], ['Roof', 8]], /complete layer area data/],
+  ['unusable area', {}, [['Roof', '4']], /complete layer area data/],
+])('explains why ranking is unavailable for %s', (_label, options, layers, reason) => {
   compare(areaReport(first, [['Roof', 16]]), areaReport(third, layers, options))
 
   expect(screen.getByText('Same tool version')).toBeVisible()
+  expect(screen.getByText(reason)).toBeVisible()
   expect(screen.queryByRole('table', { name: 'Area rank within each report' })).toBeNull()
+})
+
+it.each(['tool', 'version'])('explains why ranking is unavailable when %s is missing', field => {
+  const incomplete = areaReport(third, [['Roof', 4]])
+  delete incomplete.result[field]
+  compare(areaReport(first, [['Roof', 16]]), incomplete)
+
+  expect(screen.getByText(/Area ranking requires two reports from the same known tool version/)).toBeVisible()
+  expect(screen.queryByRole('table', { name: 'Area rank within each report' })).toBeNull()
+})
+
+it('keeps rank messages out of unrelated report comparisons', () => {
+  const unrelated = job => ({ ...job, result: { ...job.result, result: { stations: [] } } })
+  compare(unrelated(first), unrelated(third))
+
+  expect(screen.getByText('Same tool version')).toBeVisible()
+  expect(screen.queryByText(/Area ranking requires/)).toBeNull()
 })
 
 it('omits ranking when a report only returns part of its match set', () => {
@@ -186,4 +204,5 @@ it('omits ranking when a report only returns part of its match set', () => {
   expect(screen.getByText('Same tool version')).toBeVisible()
   expect(screen.queryByRole('table', { name: 'Area rank within each report' })).toBeNull()
   expect(screen.queryByText('Matching layers changed')).toBeNull()
+  expect(screen.getByText(/complete layer area data/)).toBeVisible()
 })

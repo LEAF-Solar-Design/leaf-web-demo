@@ -107,10 +107,17 @@ function rankAreas(areas, layers = areas.keys()) {
 }
 
 function LayerAreaComparison({ first, second }) {
-  if (!sameToolVersion(first, second)) return null
+  if (!savedLayerOptions(first.job) && !savedLayerOptions(second.job)) return null
+  if (!sameToolVersion(first, second)) {
+    return <p>Area ranking requires two reports from the same known tool version.</p>
+  }
   const a = layerAreaReport(first.job)
   const b = layerAreaReport(second.job)
-  if (!a || !b || a.drawing !== b.drawing || a.filter !== b.filter || a.exactMatch !== b.exactMatch) return null
+  if (!a || !b) return <p>Area ranking requires complete layer area data in both reports.</p>
+  if (a.drawing !== b.drawing) return <p>Area ranking requires two reports for the same drawing.</p>
+  if (a.filter !== b.filter || a.exactMatch !== b.exactMatch) {
+    return <p>Area ranking requires the same layer filter and exact-match setting in both reports.</p>
+  }
 
   const aRanks = rankAreas(a.areas)
   const bRanks = rankAreas(b.areas)
