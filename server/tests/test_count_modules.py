@@ -316,6 +316,19 @@ def region_intake(x=2, y=2):
             "inserts": [{"name": "Panel", "layer": "Design", "handle": "A", "x": x, "y": y, "z": 0}]}
 
 
+def _dxf_panel_intake(positions):
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import intake_to_dxf
+
+    intake = region_intake()
+    intake["blocks"]["Panel"]["children"][0].update(nrm=[0, 0, 1], elev=0, layer="0")
+    intake["inserts"] = [
+        {"name": "Panel", "layer": layer, "handle": format(index, "X"), "x": x, "y": y, "z": 0}
+        for index, (layer, x, y) in enumerate(positions, start=256)
+    ]
+    return parse_dxf_bytes(intake_to_dxf(intake))
+
+
 def run_region(intake, bounds):
     listing, _ = module.run(intake, {})
     identity = next(row["set_id"] for row in listing["sets"] if row["block"] == "Panel")
@@ -552,6 +565,58 @@ def test_layer_ranking_includes_cutoff_ties(limit, expected):
     assert result["count"] == 11 and set(overlay["highlight_handles"]) == set("ABCD")
 
 
+@pytest.mark.parametrize("counts,threshold,expected", [
+    ((4, 2, 1), 50, ["A"]),
+    ((4, 2, 2), 50, []),
+    ((3, 3, 2), 50, []),
+    ((5, 4, 3), 25, ["A", "B"]),
+])
+def test_strict_layer_share_threshold_and_contributing_handles(counts, threshold, expected):
+    intake = {"inserts": [
+        {"handle": layer, "layer": layer, "name": "Panel", "rows": count}
+        for layer, count in zip("ABC", counts)
+    ]}
+    result, overlay = module.run(intake, {
+        "group_by": "layer", "panel_scope": "all_layers", "layer_share_above": threshold,
+    })
+    assert result["count"] == sum(counts)
+    assert [(r["layer"], r["numerator"], r["denominator"])
+            for r in result["layers_above_share"]] == [
+        (layer, counts["ABC".index(layer)], sum(counts)) for layer in expected
+    ]
+    assert overlay == {"highlight_handles": expected}
+
+
+@pytest.mark.parametrize("prompt, counts, minimum, share, expected", [
+    ("Count modules and highlight only layers with a physical count of at least 5 and a share above 25%.",
+     (5, 4, 3), 5, 25, ["East"]),
+    ("Highlight module layers with more than 40% of all modules and at least 4 modules.",
+     (7, 4, 1), 4, 40, ["East"]),
+    ("Show module layers that have at least 3 modules and account for more than 50% of all modules.",
+     (4, 3, 1), 3, 50, []),
+])
+def test_highlight_intersection_of_layer_count_and_share(prompt, counts, minimum, share, expected):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"] == {
+        "group_by": "layer", "panel_scope": "all_layers",
+        "layer_count_at_least": minimum, "layer_share_above": share,
+    }
+    ledger = dict(zip(("East", "West", "North"), counts))
+    handles = {"East": "A1", "West": "B1", "North": "C1"}
+    drawing = {"inserts": [
+        {"name": "Panel", "handle": handles[layer], "layer": layer, "rows": count}
+        for layer, count in ledger.items()
+    ]}
+    result, overlay = module.run(drawing, route["params"])
+    assert result["counts"] == ledger
+    assert result["count"] == sum(counts)
+    assert overlay == {"highlight_handles": [handles[layer] for layer in expected]}
+
+
 @pytest.mark.parametrize("prompt,expected", [
     ("Which roof layer has the most panels?", ["Roof A", "Roof C"]),
     ("Which roof layers are tied for the largest module count?", ["Roof A", "Roof C"]),
@@ -569,6 +634,32 @@ def test_rank_request_routes_and_counts_only_requested_layers(prompt, expected):
                                                         ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
     result, _ = module.run(drawing, route["params"])
     assert [row["layer"] for row in result["ranking"]] == expected
+
+
+@pytest.mark.parametrize("prompt, expected_layers, expected_handles, expected_total", [
+    ("Which roof layers are tied for the largest module count? Highlight only the tied winners.",
+     ["Roof A", "Roof C"], {"B", "D"}, 16),
+    ("Rank the top two layers by panel count and only highlight the ranked layers.",
+     ["Ground", "Roof A", "Roof C"], {"A", "B", "D"}, 115),
+    ("Show top 3 roof layers by module count, highlight only the top layers.",
+     ["Roof A", "Roof C", "Roof B"], {"B", "C", "D"}, 16),
+])
+def test_ranked_highlight_requests_keep_ties_and_preserve_selection_total(
+    prompt, expected_layers, expected_handles, expected_total
+):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["highlight_ranked_layers"] is True
+    drawing = {"inserts": [{"name": "Panel", "layer": layer, "rows": count, "handle": handle}
+                           for layer, count, handle in [("Ground", 99, "A"), ("Roof A", 7, "B"),
+                                                        ("Roof B", 2, "C"), ("Roof C", 7, "D")]]}
+    result, overlay = module.run(drawing, route["params"])
+    assert result["count"] == expected_total
+    assert [row["layer"] for row in result["ranking"]] == expected_layers
+    assert set(overlay["highlight_handles"]) == expected_handles
 
 
 @pytest.mark.parametrize("phrase,expected", [
@@ -626,6 +717,93 @@ def test_region_rank_comparison_requires_two_windows():
         module.run({}, {"rank_windows": []})
 
 
+@pytest.mark.parametrize("template, rows, expected_ranks, expected_risers", [
+    ("Compare panel layer ranks across these windows: {}.",
+     [(1, 2, 3), (2, 1, 2), (3, 3, 1)],
+     {"A": [3, 2, 1], "B": [2, 3, 2], "C": [1, 1, 3]}, ["A"]),
+    ("Rank layers by module count over these regions: {}. Which layers keep rising?",
+     [(3, 2, 1), (2, 1, 2), (1, 3, 3)],
+     {"A": [1, 2, 3], "B": [2, 3, 2], "C": [3, 1, 1]}, []),
+    ("Show panel layer ranking in windows {} and flag improving ranks.",
+     [(1, 2, 3, 4), (4, 1, 0, 0), (3, 4, 1, 2), (2, 3, 4, 1)],
+     {"A": [4, 3, 2, 1], "B": [1, 4, None, None], "C": [2, 1, 3, 2], "D": [3, 2, 1, 3]}, ["A"]),
+])
+def test_window_rank_series_routes_and_reports_strict_trends(template, rows, expected_ranks, expected_risers):
+    import deps
+    import nl_router
+
+    windows = [[20 * i, 0, 20 * i + 18, 18] for i in range(len(rows[0]))]
+    query = template.format(", ".join(f"({x1},{y1}) to ({x2},{y2})" for x1, y1, x2, y2 in windows))
+    route = nl_router.classify(query, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["rank_windows"] == windows
+    outlines = []
+    for row, counts in enumerate(rows):
+        layer = "ABCD"[row]
+        for col, count in enumerate(counts):
+            for offset in range(count):
+                x, y = 20 * col + 2 + 3 * offset, 2 + 3 * row
+                outlines.append({
+                    "layer": layer, "handle": f"{len(outlines) + 16:X}", "closed": True,
+                    "pts": [[x, y], [x + 2, y], [x + 2, y + 1], [x, y + 1]],
+                })
+    intake = {"polylines": outlines}
+    listing, _ = module.run(intake, {})
+    params = dict(route["params"], set_ids=[row["set_id"] for row in listing["sets"]])
+    result, overlay = module.run(intake, params)
+    assert result["schema_version"] == 1
+    assert result["window_ranks"] == expected_ranks
+    assert result["consistently_rising_layers"] == expected_risers
+    assert result["count"] == sum(map(sum, rows))
+    assert set(overlay["highlight_handles"]) == {row["handle"] for row in outlines}
+    pair, _ = module.run(intake, dict(params, rank_windows=windows[:2]))
+    assert "consistently_rising_layers" not in pair
+    assert pair["window_ranks"] == {layer: places[:2] for layer, places in expected_ranks.items()}
+
+
+@pytest.mark.parametrize("prompt,counts,excluded,expected", [
+    ("For each roof window {}, exclude the two highest distinct physical module count tiers "
+     "and rerank the surviving layers.",
+     [(5, 4, 4, 2, 1), (3, 1, 6, 6, 3)], 2,
+     {"B": [None, 1], "D": [1, None], "E": [2, None]}),
+    ("Compare module count ranks by layer in windows {}. Drop the top 1 count tier in each window.",
+     [(8, 6, 6, 4, 0), (2, 7, 7, 3, 3)], 1,
+     {"A": [None, 3], "B": [1, None], "C": [1, None], "D": [3, 1], "E": [None, 1]}),
+    ("Rank panel layers across windows {}. Omit three highest distinct panel count tiers.",
+     [(4, 3, 2, 0, 0), (5, 4, 3, 2, 2), (1, 2, 3, 4, 5)], 3,
+     {"A": [None, None, 2], "B": [None, None, 1], "D": [None, 1, None], "E": [None, 1, None]}),
+])
+def test_exclude_highest_count_tiers_per_window_from_dxf(prompt, counts, excluded, expected):
+    import deps
+    import nl_router
+
+    windows = [[20 * index, 0, 20 * index + 18, 18] for index in range(len(counts))]
+    intake = _dxf_panel_intake(
+        (layer, left + 2 * column + 1, 2 * row + 1)
+        for (left, _, _, _), window_counts in zip(windows, counts)
+        for row, (layer, count) in enumerate(zip("ABCDE", window_counts))
+        for column in range(count)
+    )
+    query = prompt.format(", ".join(f"({x1},{y1}) to ({x2},{y2})" for x1, y1, x2, y2 in windows))
+    route = nl_router.classify(query, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["rank_windows"] == windows
+    assert route["params"]["exclude_highest_count_tiers"] == excluded
+    result, _ = module.run(intake, route["params"])
+    assert result["window_ranks"] == expected
+    assert result["count"] == sum(map(sum, counts))
+
+
+@pytest.mark.parametrize("params", [
+    {"exclude_highest_count_tiers": 2},
+    {"rank_windows": [[0, 0, 2, 2], [3, 3, 5, 5]], "exclude_highest_count_tiers": 0},
+    {"rank_windows": [[0, 0, 2, 2], [3, 3, 5, 5]], "exclude_highest_count_tiers": True},
+])
+def test_highest_count_tier_exclusion_requires_valid_window_request(params):
+    with pytest.raises(ValueError, match="positive number of count tiers"):
+        module.run({}, params)
+
+
 def test_empty_selection_has_no_percentage_point_delta():
     d = {"inserts": [{"layer": "W", "name": "Module", "handle": "A"}]}
     r, _ = module.run(d, {"compare_selections": {"by": "block", "before": [], "after": ["Module"]}})
@@ -674,3 +852,51 @@ def test_comparison_schema_at_broker_reader(monkeypatch, params, wire_version):
     else:
         assert got["ok"] is False and got["result"] is None and got["overlay"] is None
         assert "Unsupported module comparison schema_version" in got["error"]["message"]
+@pytest.mark.parametrize(("prompt", "value"), [("count modules 12", 12), ("show modules 120", 120)])
+def test_plain_count_prompt_keeps_legacy_numeric_binding(prompt, value):
+    import deps
+    import nl_router
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"] == {"coverage_percent": value}
+    module.run({"inserts": [], "polylines": []}, route["params"])
+
+
+@pytest.mark.parametrize(
+    ("prompt", "excluded", "solutions"),
+    [
+        (
+            'Find the fewest layers covering at least 45% of the physical modules after excluding layer "Roof A".',
+            ["Roof A"],
+            [["Roof B", "Roof C"], ["Roof B", "Roof D"], ["Roof C", "Roof D"], ["Roof C", "Roof E"]],
+        ),
+        (
+            'Find the smallest set of layers reaching 70 percent of the modules without layers "roof a" and "Roof E".',
+            ["roof a", "Roof E"],
+            [["Roof C", "Roof D"]],
+        ),
+        (
+            "Find the minimum number of layers covering 100% of the panels, omitting Roof A, Roof C, and Roof E.",
+            ["Roof A", "Roof C", "Roof E"],
+            [["Roof B", "Roof D"]],
+        ),
+    ],
+)
+def test_minimum_coverage_excludes_named_layers(prompt, excluded, solutions):
+    import deps
+    import nl_router
+
+    counts = {"Roof A": 8, "Roof B": 5, "Roof C": 10, "Roof D": 8, "Roof E": 4}
+    intake = _dxf_panel_intake(
+        (layer, 2 * column, 2 * row)
+        for row, (layer, count) in enumerate(counts.items())
+        for column in range(count)
+    )
+
+    route = nl_router.classify(prompt, deps.all_tools())
+    assert route["tool"] == "count-modules"
+    assert route["params"]["coverage_excluded_layers"] == excluded
+    result, _ = module.run(intake, route["params"])
+    assert result["counts"] == counts
+    assert result["coverage"] == {"reachable": True, "solutions": solutions}
