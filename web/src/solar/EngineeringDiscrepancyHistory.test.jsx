@@ -23,7 +23,7 @@ const version = (seq, count) => {
       org_id: binding.organization_id, project_id: binding.project_id } }
 }
 
-function fixture(versions, selected = versions.at(-1), { beforeWorkspace } = {}) {
+function fixture(versions, selected = versions.at(-1), { beforeWorkspace, beforeRevisionRead } = {}) {
   const workspace = { project: { org_id: base.organization_id, project_id: base.project_id },
     drawing_versions: [{ ...versions[0].row, drawing_id: uuid(4) }, ...versions.map(item => item.row)].reverse() }
   vi.stubGlobal('crypto', webcrypto)
@@ -36,11 +36,15 @@ function fixture(versions, selected = versions.at(-1), { beforeWorkspace } = {})
       return Response.json(workspace)
     }
     const design = versions.find(item => url.pathname.endsWith('/' + item.binding.input_version_id + '/context'))
-    if (design) return Response.json({ context: { ...design.binding, is_head: design === versions.at(-1),
-      head_version_id: versions.at(-1).binding.input_version_id },
-    intake: { solar_design_graph: design.graph, solar_design_graph_sha256: design.hash } })
+    if (design) {
+      await beforeRevisionRead?.('context', design, init.signal)
+      return Response.json({ context: { ...design.binding, is_head: design === versions.at(-1),
+        head_version_id: versions.at(-1).binding.input_version_id },
+      intake: { solar_design_graph: design.graph, solar_design_graph_sha256: design.hash } })
+    }
     const report = versions.find(item => url.searchParams.get('path') === item.path)
     if (!report) return new Response(null, { status: 404 })
+    await beforeRevisionRead?.('report', report, init.signal)
     return Response.json({ organization_id: base.organization_id, project_id: base.project_id,
       can_write: false, file: report.file })
   })
@@ -100,4 +104,58 @@ it('does not read or show an old workspace response after an authority change', 
   expect(h.calls).toHaveLength(1)
   expect(screen.queryByText(/Reading saved discrepancy history/)).toBeNull()
   expect(screen.queryByRole('table', { name: /engineering discrepancies/ })).toBeNull()
+})
+
+it.each([
+  ['context', 'Saved design unavailable.'],
+  ['report', 'Saved engineering totals unavailable for this design.'],
+])('preserves surrounding rows when the %s transport fails for one revision', async (endpoint, reason) => {
+  const versions = [version(1, '1'), version(2, '2'), version(3, '2')]
+  const h = fixture(versions, versions[2], {
+    beforeRevisionRead: (kind, design) => {
+      if (kind === endpoint && design.seq === 2) throw new TypeError('Connection lost')
+    },
+  })
+  h.read()
+  const table = await history()
+  expect(revision(table, 1)).toHaveTextContent('Matches')
+  expect(revision(table, 2)).toHaveTextContent(reason)
+  expect(revision(table, 3)).toHaveTextContent('Discrepancy (-1)')
+  expect(table).not.toHaveTextContent(/appeared|resolved/)
+})
+
+it.each(['org_id', 'project_id'])('rejects a version row with a foreign %s before reading its evidence', async field => {
+  const selected = version(1, '1')
+  selected.row[field] = uuid(99)
+  const h = fixture([selected])
+  h.read()
+  expect(await screen.findByText('Saved discrepancy history could not be read. Try again.')).toBeVisible()
+  expect(h.calls).toHaveLength(1)
+  expect(screen.queryByRole('table', { name: /engineering discrepancies/ })).toBeNull()
+})
+
+it('aborts an active revision read when the selected drawing version changes', async () => {
+  const earlier = version(1, '1')
+  const later = version(2, '2')
+  let readStarted, releaseRead
+  const started = new Promise(resolve => { readStarted = resolve })
+  const pending = new Promise(resolve => { releaseRead = resolve })
+  const h = fixture([earlier, later], later, {
+    beforeRevisionRead: (kind, design, signal) => {
+      if (kind !== 'context' || design !== later) return
+      readStarted(signal)
+      return pending
+    },
+  })
+  h.read()
+  const signal = await started
+  expect(signal.aborted).toBe(false)
+  h.retarget(earlier, 'user-a')
+  expect(signal.aborted).toBe(true)
+  h.read()
+  await act(async () => releaseRead())
+  const table = await history()
+  expect(within(table).getAllByRole('rowheader')).toHaveLength(1)
+  expect(revision(table, 1)).toHaveTextContent('Matches')
+  expect(h.calls.some(({ url }) => url.searchParams.get('path') === later.path)).toBe(false)
 })
