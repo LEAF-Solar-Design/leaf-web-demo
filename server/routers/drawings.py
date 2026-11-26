@@ -33,7 +33,7 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
@@ -1168,9 +1168,15 @@ def _entity_identity(kind: str, entity: Dict[str, Any]) -> Any:
     return (kind, "hash", hashlib.sha256(canon.encode("utf-8")).hexdigest())
 
 
+_HISTORY_DELTA_KINDS = ("polylines", "inserts", "faces3d")
+_HISTORY_LAYOUT_KINDS = (
+    *_HISTORY_DELTA_KINDS, "texts", "circles", "arcs", "dimensions", "splines", "mleaders",
+)
+
+
 def _entity_map(intake: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
     out: Dict[Any, Dict[str, Any]] = {}
-    for kind in ("polylines", "inserts", "faces3d"):
+    for kind in _HISTORY_DELTA_KINDS:
         for entity in (intake.get(kind) or []):
             if isinstance(entity, dict):
                 out[_entity_identity(kind, entity)] = entity
@@ -1184,16 +1190,46 @@ def _entity_location(entity: Dict[str, Any]) -> Tuple[str, Optional[str]]:
     return "paper", layout if isinstance(layout, str) and layout else None
 
 
-def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
-    names = set()
-    for kind in ("polylines", "inserts", "faces3d", "texts", "circles", "arcs", "dimensions"):
+def _layout_entities(intake: Dict[str, Any]) -> Iterator[Tuple[str, Dict[str, Any]]]:
+    for kind in _HISTORY_LAYOUT_KINDS:
         entities = intake.get(kind)
-        if not isinstance(entities, list):
-            continue
-        for entity in entities:
-            if isinstance(entity, dict) and entity.get("space") == "paper":
-                names.add(_entity_location(entity)[1])
+        if isinstance(entities, list):
+            for entity in entities:
+                if isinstance(entity, dict):
+                    yield kind, entity
+
+
+def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
+    names = {
+        _entity_location(entity)[1]
+        for _, entity in _layout_entities(intake)
+        if entity.get("space") == "paper"
+    }
     return sorted(names, key=lambda name: (name is None, name or ""))
+
+
+def _entity_locations(intake: Dict[str, Any]) -> Dict[Tuple[str, str], Tuple[str, Optional[str]]]:
+    locations = {}
+    for kind, entity in _layout_entities(intake):
+        handle = entity.get("handle")
+        if isinstance(handle, str) and handle:
+            locations[kind, handle] = _entity_location(entity)
+    return locations
+
+
+def _layout_changes(parent: Dict[str, Any], child: Dict[str, Any]) -> List[Dict[str, Any]]:
+    prior_locations = _entity_locations(parent)
+    changes = []
+    for (kind, handle), (to_space, to_layout) in _entity_locations(child).items():
+        prior = prior_locations.get((kind, handle))
+        if prior is not None and prior != (to_space, to_layout):
+            from_space, from_layout = prior
+            changes.append({
+                "kind": kind, "handle": handle,
+                "from_space": from_space, "from_layout": from_layout,
+                "to_space": to_space, "to_layout": to_layout,
+            })
+    return changes
 
 
 def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, Any],
@@ -1203,7 +1239,6 @@ def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, A
     child_map = _entity_map(child_intake or {})
     added = modified = deleted = 0
     layer_changes = []
-    layout_changes = []
     for ident, entity in child_map.items():
         prior = parent_map.get(ident)
         if prior is None:
@@ -1219,15 +1254,6 @@ def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, A
                         "kind": ident[0], "handle": ident[2],
                         "from_layer": from_layer, "to_layer": to_layer,
                     })
-            if include_layout_changes and ident[1] == "handle":
-                from_space, from_layout = _entity_location(prior)
-                to_space, to_layout = _entity_location(entity)
-                if (from_space, from_layout) != (to_space, to_layout):
-                    layout_changes.append({
-                        "kind": ident[0], "handle": ident[2],
-                        "from_space": from_space, "from_layout": from_layout,
-                        "to_space": to_space, "to_layout": to_layout,
-                    })
     for ident in parent_map:
         if ident not in child_map:
             deleted += 1
@@ -1237,7 +1263,7 @@ def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, A
     if include_layer_changes:
         comparison["layer_changes"] = layer_changes
     if include_layout_changes:
-        comparison["layout_changes"] = layout_changes
+        comparison["layout_changes"] = _layout_changes(parent_intake, child_intake)
     return comparison
 
 

@@ -212,19 +212,31 @@ def test_history_lists_exact_layer_reference_moves(client, tmp_path, kind, old, 
     ("Roof Sheet", "ROOF SHEET"),
     ("Roof Sheet", "Roof Sheet"),
 ], ids=["model-to-paper", "paper-to-model", "sheet-to-sheet", "unchanged"])
+@pytest.mark.parametrize(("source_kind", "kind", "geometry"), [
+    ("LWPOLYLINE", "polylines", [
+        (90, 3), (70, 1), (10, 0), (20, 0), (10, 4), (20, 0), (10, 4), (20, 4),
+    ]),
+    ("LINE", "polylines", [(10, 0), (20, 0), (11, 4), (21, 0)]),
+    ("CIRCLE", "circles", [(10, 0), (20, 0), (40, 2)]),
+    ("ARC", "arcs", [(10, 0), (20, 0), (40, 2), (50, 0), (51, 90)]),
+    ("TEXT", "texts", [(10, 0), (20, 0), (40, 1), (1, "Label")]),
+])
 def test_history_reports_layout_moves_and_model_space_exclusions(
-    client, tmp_path, prior_layout, next_layout,
+    client, tmp_path, prior_layout, next_layout, source_kind, kind, geometry,
 ):
     import store
     from dxf_intake import parse_dxf_bytes
 
     def intake(layout):
-        tags = [(0, "SECTION"), (2, "ENTITIES")]
-        for handle, sheet in (("20", layout), ("21", "Title Sheet"), ("22", "Title Sheet")):
-            tags.extend([(0, "LWPOLYLINE"), (5, handle), (8, "Roof"), (90, 3), (70, 1)])
-            if sheet is not None:
-                tags.extend([(67, 1), (410, sheet)])
-            tags.extend([(10, 0), (20, 0), (10, 4), (20, 0), (10, 4), (20, 4)])
+        tags = [(0, "SECTION"), (2, "ENTITIES"), (0, source_kind), (5, "20"), (8, "Roof")]
+        if layout is not None:
+            tags.extend([(67, 1), (410, layout)])
+        tags.extend(geometry)
+        for handle in ("21", "22"):
+            tags.extend([
+                (0, "LINE"), (5, handle), (8, "Roof"), (67, 1), (410, "Title Sheet"),
+                (10, 0), (20, 0), (11, 4), (21, 0),
+            ])
         tags.extend([(0, "ENDSEC"), (0, "EOF")])
         raw = "".join(f"{code}\n{value}\n" for code, value in tags).encode()
         return parse_dxf_bytes(raw)
@@ -247,9 +259,11 @@ def test_history_reports_layout_moves_and_model_space_exclusions(
         expected = sorted(["Title Sheet"] + ([layout] if layout is not None else []))
         assert rows[version]["paper_layouts"] == expected
     changed = prior_layout != next_layout
-    assert rows[2]["delta"] == {"added": 0, "modified": int(changed), "deleted": 0}
+    assert rows[2]["delta"] == {
+        "added": 0, "modified": int(changed and kind == "polylines"), "deleted": 0,
+    }
     assert rows[2]["layout_changes"] == ([{
-        "kind": "polylines", "handle": "20",
+        "kind": kind, "handle": "20",
         "from_space": "model" if prior_layout is None else "paper",
         "from_layout": prior_layout,
         "to_space": "model" if next_layout is None else "paper",
@@ -278,6 +292,13 @@ def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     assert rows[2]["delta"] is None       # its own payload is corrupt
     assert rows[3]["delta"] is None       # its PARENT (v2) is corrupt
     assert body["error"] is None          # the corruption did not fault the whole read
+
+    history = client.get(f"/api/drawings/{DRAWING}/versions",
+                         params={"include_layout_changes": 1}, headers=_h(TENANT))
+    assert history.status_code == 200, history.text
+    rows = {row["v"]: row for row in history.json()["versions"]}
+    assert all(row["layout_changes"] is None for row in rows.values())
+    assert [rows[v]["paper_layouts"] for v in (1, 2, 3)] == [[], None, []]
 
 
 @pytest.mark.parametrize("replaced_version", [1, 2, 3], ids=["root", "middle", "head"])
