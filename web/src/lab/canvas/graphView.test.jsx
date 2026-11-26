@@ -201,7 +201,7 @@ describe('project corpus evaluation flow', () => {
     }
   })
 
-  it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open loads %i pinned blocks with delayed reveal %s', async (blockCount, delayedReveal) => {
+  it.each([[1, false], [3, false], [3, true]])('L03 cold saved corpus Open waits for %i pinned blocks with a second reveal %s', async (blockCount, revealAgain) => {
     const response = options()
     response.manifest.settings_schema.properties.parameters = {
       type: 'object', additionalProperties: false,
@@ -219,19 +219,30 @@ describe('project corpus evaluation flow', () => {
     const fetchImpl = vi.fn(async url => {
       const result = { ok: true, status: 200,
         json: async () => String(url).includes('/corpus-options') ? response : { runs: [] } }
-      return delayedReveal && String(url).includes('/corpus-options')
+      return String(url).includes('/corpus-options')
         ? new Promise(resolve => pending.push(() => resolve(result))) : result
     })
     vi.stubGlobal('fetch', fetchImpl)
     const view = render(<GraphView client={client} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
-    if (delayedReveal) {
-      await waitFor(() => expect(pending).toHaveLength(1))
+    await waitFor(() => expect(pending).toHaveLength(1))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    const expectLoading = () => {
+      expect(readiness.getByRole('status')).toHaveTextContent('Loading saved corpus controls')
+      expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+      expect(readiness.queryByText(/unknown block/i)).not.toBeInTheDocument()
+      expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+    }
+    expectLoading()
+    if (revealAgain) {
       view.rerender(<GraphView client={client} hidden />)
       view.rerender(<GraphView client={client} />)
       await waitFor(() => expect(pending).toHaveLength(2))
-      await act(async () => { pending.forEach(resolve => resolve()) })
+      await act(async () => { pending[0]() })
+      expectLoading()
     }
+    await act(async () => { pending.at(-1)() })
+    await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
     fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
     const field = await screen.findByLabelText('Evaluation policy overrides (optional)')
     expect(field).toHaveValue('')
@@ -334,7 +345,10 @@ describe('project corpus evaluation flow', () => {
     render(<GraphView client={client} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
     const retry = await screen.findByRole('button', { name: 'Retry corpus controls' })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
     expect(screen.getAllByRole('alert').some(node => node.textContent.includes('Saved corpus controls are unavailable.'))).toBe(true)
+    expect(readiness.queryByText('No valid graph')).not.toBeInTheDocument()
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
     expect(attempts).toBe(1)
     fireEvent.click(retry)
     fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
@@ -344,6 +358,36 @@ describe('project corpus evaluation flow', () => {
       .every(([url]) => String(url).includes('manifest_only=true'))).toBe(true)
     expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
     expect(client.state.restoredGraph).toEqual(graph)
+  })
+
+  it('restores ordinary readiness when the last unresolved corpus block is removed from the draft', async () => {
+    const { manifest } = options()
+    const graph = addBlock(addBlock(emptyGraph(), registry['constant@1.0.0']), manifest)
+    graph.blocks[0].settings = { value: 2 }
+    graph.blocks[1].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const client = clientFor(graph, {})
+    const fetchImpl = vi.fn(async url => String(url).includes('/corpus-options')
+      ? { ok: false, status: 403 }
+      : { ok: true, json: async () => ({ runs: [] }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const onRun = vi.fn()
+    render(<GraphView client={client} onRun={onRun} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open', exact: true }))
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    await readiness.findByRole('button', { name: 'Retry corpus controls' })
+    expect(readiness.getByRole('button', { name: /^Run/ })).toBeDisabled()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Select corpus-evaluator-1' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remove block' }))
+    await readiness.findByText('Ready', { exact: true })
+    expect(readiness.queryByRole('alert')).not.toBeInTheDocument()
+    fireEvent.click(readiness.getByRole('button', { name: /^Run/ }))
+    expect(onRun).toHaveBeenCalledOnce()
+    expect(onRun.mock.calls[0][0].blocks).toEqual([graph.blocks[0]])
+    expect(client.state.restoredGraph).toEqual(graph)
+    expect(fetchImpl.mock.calls.every(([, init = {}]) => (init.method || 'GET') === 'GET')).toBe(true)
   })
 
   // Retry once after observed 5s parallel CI timeouts to avoid expensive whole-job reruns.

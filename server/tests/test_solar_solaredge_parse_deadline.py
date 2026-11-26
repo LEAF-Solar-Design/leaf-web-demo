@@ -159,6 +159,65 @@ def test_parse_deadline_verdict_bytes(monkeypatch):
     assert worker.verdict_bytes(pdf(1)) == REFUSAL_VERDICT
 
 
+def _layout_report(order):
+    layouts = {
+        "A": [(100, 500, "1.1"), (140, 500, "7")],
+        "B": [(100, 500, "2.1"), (600, 100, "2.2")],
+        "C": [(100, 500, "3.1"), (600, 100, "3.1")],
+        "0": [],
+    }
+    kids = " ".join(f"{3 + 2 * page} 0 R" for page in range(len(order)))
+    output = [b"%PDF-1.4\n", b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n",
+              f"2 0 obj<</Type/Pages/Kids[{kids}]/Count {len(order)}>>endobj\n".encode()]
+    for page, layout in enumerate(order):
+        index = 3 + 2 * page
+        rotation = "/Rotate 90" if layout == "R" else ""
+        output.append((f"{index} 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 1000 1000]"
+                       f"/Contents {index+1} 0 R {rotation}"
+                       "/Resources<</Font<</F1<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>>>>>>>endobj\n").encode())
+        commands = []
+        for x, y, label in layouts.get(layout, []):
+            commands.append(f".9 .95 1 rg 0 0 0 RG n {x} {y} 30 60 re B* 1 0 0 RG "
+                            f"n {x+10} {y+25} 10 10 re S "
+                            f"n {x+15} {y+30} m {x+22} {y+31} {x+30} {y+31} {x+35} {y+30} c S "
+                            f"0 0 0 rg BT /F1 6 Tf {x+12} {y+28} Td ({label}) Tj ET\n")
+        if commands:
+            commands.append("BT /F1 6 Tf 940 900 Td (Legend) Tj ET\n")
+        content = "".join(commands).encode()
+        output.extend([f"{index+1} 0 obj<</Length {len(content)}>>stream\n".encode(),
+                       content, b"\nendstream\nendobj\n"])
+    output.append(b"trailer<</Root 1 0 R>>\n%%EOF\n")
+    return b"".join(output)
+
+
+@pytest.mark.parametrize(("order", "sizes"), [
+    ("ABC", [2, 1, 1, 1, 1]),
+    ("BCA", [1, 1, 1, 1, 2]),
+    ("0CAA", [1, 1, 2, 2]),
+])
+def test_layout_report_pages_preserve_group_counts_and_optimizer_occurrences(order, sizes):
+    matrices = worker.decode_verdict(0, worker.verdict_bytes(_layout_report(order)))
+    assert matrices is not None
+    assert [sum(p["Code"] == 1 for row in m["Rows"] for p in row["Panels"])
+            for m in matrices] == sizes
+    names = [matrix["Dwgname"] for matrix in matrices]
+    assert len(set(names)) == len(names)
+    optimizer_ids = [row["id"] for matrix in matrices for row in matrix["Optimizers"]]
+    assert len(set(optimizer_ids)) == len(optimizer_ids) == sum(sizes)
+
+
+def test_layout_report_refuses_an_unsupported_later_page_atomically():
+    assert worker.verdict_bytes(_layout_report("AR")) == REFUSAL_VERDICT
+
+
+def test_layout_report_operator_budget_is_shared_across_pages(monkeypatch):
+    import solar_solaredge_pdf as extract
+
+    monkeypatch.setattr(extract, "MAX_OPERATORS", 50)
+    assert worker.decode_verdict(0, worker.verdict_bytes(_layout_report("A"))) is not None
+    assert worker.decode_refusal(0, worker.verdict_bytes(_layout_report("AA"))) == worker.RESOURCE_REFUSAL
+
+
 VERDICT_CASES = [
     ("ok", 0, EMPTY_VERDICT, []),
     ("grids", 0, None, GRIDS),

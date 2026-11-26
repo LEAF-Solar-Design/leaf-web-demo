@@ -446,7 +446,10 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             highest = max(highest, int(h, 16))
             h = ent["handle"]
         note_layer(layer)
-        kinds.append(("insert", layer, name, point, normal, scale, rotation, h))
+        invisible = ent.get("invisible", False)
+        if type(invisible) is not bool:
+            _fail(f"{where}: invisible must be a boolean")
+        kinds.append(("insert", layer, name, point, normal, scale, rotation, invisible, h))
         kind_sources.append(ent)
         kind_properties.append(_entity_property_groups(properties, ent.get("handle"), where))
     for k, ent in enumerate(dimensions):
@@ -647,12 +650,15 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
                             "10", _num(x), "20", _num(y), "30", _num(z), "70", "32"]
                 out += ["0", "SEQEND", "100", "AcDbEntity", "8", layer]
         elif row[0] == "insert":
-            _, layer, name, point, normal, scale, rotation, _ = row
+            _, layer, name, point, normal, scale, rotation, invisible, _ = row
             point = _wcs_to_ocs(point, normal)
             out += ["0", "INSERT", "5", h]
             if block_records:
                 out += ["330", block_records["*Model_Space"]]
-            out += ["100", "AcDbEntity", "8", layer, "100", "AcDbBlockReference", "2", name,
+            out += ["100", "AcDbEntity", "8", layer]
+            if invisible:
+                out += ["60", "1"]
+            out += ["100", "AcDbBlockReference", "2", name,
                     *_point_groups(point), "41", _num(scale[0]), "42", _num(scale[1]),
                     "43", _num(scale[2]), "50", _num(rotation), *_point_groups(normal, 210)]
         elif row[0] == "round":

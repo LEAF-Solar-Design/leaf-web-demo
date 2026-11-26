@@ -436,6 +436,7 @@ describe("CodeBuild static Next executor over injected ports", () => {
     const runtime = new ExecutorManagedNextRuntime(f.executor);
     const lease = await runtime.create(scope);
     await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+    expect(lease.cleanedBuild()).toBeNull();
     expect(f.provider.start).not.toHaveBeenCalled();
   });
 
@@ -463,5 +464,50 @@ describe("CodeBuild static Next executor over injected ports", () => {
     expect(f.provider.start).toHaveBeenCalledExactlyOnceWith(nextRequestDigest(scope));
     await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
     expect(f.provider.stop).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["/series.json", "application/json", "[1,2]"],
+    ["/captions.vtt", "text/vtt", "WEBVTT"],
+    ["/schedule.csv", "text/csv", "box,input"],
+  ])(
+    "exports the actual cleanup evidence for %s only after a confirmed stop", async (path, contentType, body) => {
+      const f = fixture();
+      const value = input();
+      f.receipt(value, { files: [exported[0], { path, contentType, body: Buffer.from(body).toString("base64") }] });
+      const lease = await new ExecutorManagedNextRuntime(f.executor).create(scope);
+      const built = await lease.build(value.bundle, value.bundleSha256, NEXT_PLAN);
+      const original = Buffer.from(built.files[0].body);
+      built.files[0].body.fill(0);
+      expect(lease.cleanedBuild()).toBeNull();
+      f.provider.state.mockResolvedValue("IN_PROGRESS");
+      await expect(lease.destroy()).rejects.toMatchObject({ code: "cleanup_required" });
+      expect(lease.cleanedBuild()).toBeNull();
+      f.provider.state.mockResolvedValue("STOPPED");
+      await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+      const cleaned = lease.cleanedBuild()!;
+      expect(cleaned.stop).toEqual({ protocol: value.protocol, executionId: value.executionId,
+        bindingId: value.bindingId, confirmed: true });
+      expect(cleaned.result).toMatchObject({ providerBuildId: "build-new",
+        executionId: value.executionId, bundleSha256: value.bundleSha256 });
+      expect(cleaned.result.files.map(f => f.path)).toContain(path);
+      expect(cleaned.result.files[0].body).toEqual(original);
+      cleaned.result.files[0].body.fill(0);
+      expect(lease.cleanedBuild()!.result.files[0].body).toEqual(original);
+    },
+  );
+
+  it("keeps a legacy executor result without a provider identity out of custody", async () => {
+    const f = fixture();
+    const value = input();
+    f.receipt(value);
+    const runtime = new ExecutorManagedNextRuntime({ ...f.executor, async run(job) {
+      const result = await f.executor.run(job);
+      return { ...result, providerBuildId: undefined };
+    } });
+    const lease = await runtime.create(scope);
+    await lease.build(value.bundle, value.bundleSha256, NEXT_PLAN);
+    await expect(lease.destroy()).resolves.toEqual({ confirmed: true });
+    expect(lease.cleanedBuild()).toBeNull();
   });
 });
