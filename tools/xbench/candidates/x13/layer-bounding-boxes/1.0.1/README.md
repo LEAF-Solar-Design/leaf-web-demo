@@ -23,5 +23,5 @@ disabled.
 ```powershell
 $env:APS_LIVE = '0'
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
-python -P -m pytest -q -o pythonpath=server server/tests/test_x13_layer_bounding_boxes_candidate.py
+python -P -m pytest -q -o pythonpath=server server/tests/test_dxf_intake_lines_text.py
 ```
