@@ -17,6 +17,7 @@ import solar_artifacts as standalone
 import solar_project_context as project
 import solar_project_read as read
 import solar_project_artifacts as artifacts
+import solar_project_solaredge as solaredge
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError, validate_graph
 from routers import project_drawings as routes, drawings, jobs, capabilities
@@ -26,6 +27,8 @@ import test_sip_r6_read as reads
 import test_sip_r6_artifacts as files
 import test_sip_r5_routes as admission_cases
 import test_project_scoped_read_tool as generic_cases
+import test_s02_partial_tracking as partial_tracking
+from test_s02_partial_tracking import mixed as partial_tracking_lane
 from test_project_solaredge import accept, lane as tracking_lane, report, samples
 from test_sip_r3b_tools import INTAKE, embedded
 from test_sip_r6_read import lane as engineering_lane
@@ -889,7 +892,8 @@ def test_missing_graph_and_legacy_equipment_keep_each_metric_unavailable(enginee
     assert totals["kw_dc"]["after_reason"] == "complete_module_power_unavailable"
 
 
-def test_uses_only_revision_bound_measured_optimizers(tracking_lane, monkeypatch):
+@pytest.mark.parametrize("complete", [True, False])
+def test_uses_only_revision_bound_measured_optimizers(tracking_lane, monkeypatch, complete):
     lane = tracking_lane
     matrices = deepcopy(samples.GRIDS)
     marker = 0
@@ -903,13 +907,43 @@ def test_uses_only_revision_bound_measured_optimizers(tracking_lane, monkeypatch
                         "id": f"pdf-optimizer-{marker}", "vendor_label": str(marker),
                         "cells": [[row, column]],
                     })
+    if not complete:
+        matrices[-1]["Optimizers"].pop()
     monkeypatch.setattr("solar_project_solaredge.reports.parse_source", lambda data: deepcopy(matrices))
     _, _, accepted = accept(lane, report(lane))
+    tracking = solaredge.read_tracking(lane.tenant, accepted, {"section": "frames"})
+    assert tracking["accepted"] is True
+    assert tracking["optimizer_measurement"]["complete"] is complete
 
     _, totals = _engineering_compare(lane, lane.ctx.parent_version_id, accepted.parent_version_id)
-    assert _engineering_amounts(totals["optimizers"]) == (None, "6", None)
-    assert totals["optimizers"]["before_reason"]
-    assert totals["optimizers"]["after_reason"] is None
+    metric = totals["optimizers"]
+    assert _engineering_amounts(metric) == (None, "6" if complete else None, None)
+    assert metric["before_reason"] == "verified_optimizer_measurement_unavailable"
+    assert metric["after_reason"] == (None if complete else "verified_optimizer_measurement_unavailable")
+    _, reverse_totals = _engineering_compare(lane, accepted.parent_version_id, lane.ctx.parent_version_id)
+    assert reverse_totals["optimizers"]["after_reason"] == "verified_optimizer_measurement_unavailable"
+
+
+def test_matched_only_partial_acceptance_cannot_supply_after_optimizer_total(partial_tracking_lane):
+    lane = partial_tracking_lane
+    lane.matrices[0]["Optimizers"] = [
+        {"id": f"pdf-optimizer-{index + 1}", "vendor_label": str(index + 1), "cells": [[0, index]]}
+        for index in range(2)
+    ]
+    result = partial_tracking.report(lane)
+    prepared = partial_tracking.tools.prepare(
+        lane, solaredge.ACCEPT_TOOL,
+        partial_tracking.params(lane, result, accept_matched_only=True), lane.ctx,
+    )
+    accepted = partial_tracking.tools.output(lane, partial_tracking.tools.publish(lane, prepared))
+    tracking = solaredge.read_tracking(lane.tenant, accepted, {"section": "frames"})
+    assert tracking["accepted"] is True
+    assert tracking["acceptance"]["status"] == "partial"
+    assert tracking["optimizer_measurement"]["complete"] is False
+
+    _, totals = _engineering_compare(lane, lane.ctx.parent_version_id, accepted.parent_version_id)
+    assert _engineering_amounts(totals["optimizers"]) == (None, None, None)
+    assert totals["optimizers"]["after_reason"] == "verified_optimizer_measurement_unavailable"
 
 
 @pytest.mark.parametrize("missing_side", ["before", "after"])
