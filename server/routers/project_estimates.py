@@ -171,8 +171,17 @@ def _compare(tenant, project_id, drawing_id, version_id, compare_version_id, org
         raise GraphValidationError("ESTIMATE_COMPARISON_SOURCE_MISMATCH")
 
     lines = []
+    billing_quantities = []
     fields = ("rate", "amount", "pricing_reason")
     for old, new in zip(before["lines"], after["lines"], strict=True):
+        old_billed = old.get("billed_quantity")
+        new_billed = new.get("billed_quantity")
+        if old_billed is not None or new_billed is not None:
+            billing_quantities.append({
+                "line_id": old["line_id"], "unit": old["unit"],
+                "measured_quantity": old["quantity"],
+                "before_billed_quantity": old_billed, "after_billed_quantity": new_billed,
+            })
         old_price = {key: old[key] for key in fields}
         new_price = {key: new[key] for key in fields}
         if old_price != new_price:
@@ -189,6 +198,7 @@ def _compare(tenant, project_id, drawing_id, version_id, compare_version_id, org
         # A JSON string keeps large signed cent values exact in browser clients.
         "subtotal_delta_cents": str(_cents(after["priced_subtotal"]) - _cents(before["priced_subtotal"])),
         "lines": lines,
+        **({"billing_quantities": billing_quantities} if billing_quantities else {}),
     }})
 
 

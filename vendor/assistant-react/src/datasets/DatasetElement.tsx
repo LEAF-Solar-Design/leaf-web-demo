@@ -150,6 +150,9 @@ export function DatasetElement({
   const grouping = element.kind === "dataset.table" ? element.props.row_grouping : undefined;
   if (grouping && [grouping.pair_key_field, grouping.provider_field].some(id =>
       !["text", "identifier"].includes(fields.get(id)!.type.kind))) return state("invalid");
+  const memberFilter = grouping?.member_filter;
+  if (memberFilter && memberFilter.op !== "is_null" &&
+      !numericKinds.has(fields.get(memberFilter.field)!.type.kind)) return state("invalid");
   const coverage = read.query_coverage;
   const complete = Boolean((read.status === "ready" || read.status === "empty") && coverage &&
     coverage.offset === 0 && coverage.matching_rows === read.rows.length &&
@@ -167,7 +170,7 @@ export function DatasetElement({
       <div role="status" aria-live="polite">
         {isLoading && <p>{messages.loading}</p>}
         {(read.status === "stale" || read.status === "partial") && <p>{messages[read.status]}</p>}
-        {rows.length === 0 && <p>{messages.empty}</p>}
+        {rows.length === 0 && !memberFilter && <p>{messages.empty}</p>}
       </div>
       {element.kind === "dataset.table" ? table : rows.length > 0 ? (
         <>

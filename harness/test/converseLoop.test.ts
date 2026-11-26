@@ -1881,6 +1881,29 @@ describe("ConverseLoop — remaining spine tools", () => {
     expect(JSON.stringify(result.data)).not.toContain("confirmation_id");
   });
 
+  it("request_publication relays entitlement denial without publishing", async () => {
+    const { loop, appRun, gate, store } = makeLoop();
+    const reason = "entitlement_required: tier lacks 'deploy'";
+    gate.deny("request_publication", reason);
+    const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const changeSetId = "7f3a51f0-9d9a-43be-8d29-cbdba31249c8";
+
+    await sendText(loop, s, `PUBLISH:${changeSetId}`);
+
+    expect(appRun.publicationCalls).toHaveLength(0);
+    expect(gate.checks).toContainEqual(expect.objectContaining({
+      action: "request_publication",
+      args: { change_set_id: changeSetId },
+      decision: "deny",
+    }));
+    const events = await store.eventsAfter(s.session_id, 0);
+    const results = ofType(events, "tool_result");
+    expect(results).toHaveLength(1);
+    expect(results[0]!.data).toMatchObject({ tool: "request_publication", ok: false });
+    expect(String(results[0]!.data.summary)).toContain(reason);
+    expect(JSON.stringify(events)).not.toContain("published");
+  });
+
   it("request_confirmation emits the chip carrying the id the GATE minted", async () => {
     const { loop, gate, store } = makeLoop();
     const s = await loop.createOrGetSession("demo-tenant", "rooftop_demo");

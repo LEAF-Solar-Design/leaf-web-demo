@@ -2,10 +2,13 @@
 import copy
 import os
 from pathlib import Path
+import secrets
 import uuid
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 import pytest
 
@@ -235,3 +238,119 @@ def test_execute_only_role_has_no_table_access(jobs):
         assert jobs.call('fail', {'code': 'video_changed'}, job_id=second) == 'failed'
     finally:
         jobs.execute('RESET ROLE')
+
+
+@pytest.fixture
+def committed_decoder():
+    role = 'decoder_test_' + uuid.uuid4().hex
+    password = secrets.token_urlsafe(24)
+    with db.connection() as conn:
+        previous_autocommit = conn.autocommit
+        conn.autocommit = True
+        org = project = job_id = None
+        role_created = False
+        schema = conn.execute('SELECT current_schema() AS schema').fetchone()['schema']
+        try:
+            try:
+                conn.execute(sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(
+                    sql.Identifier(role), sql.Literal(password)))
+                role_created = True
+            except psycopg.errors.InsufficientPrivilege:
+                pytest.skip('test database does not permit CREATE ROLE')
+            org = store.create_org('Decoder functions')
+            project = store.create_project(org.org_id, 'Decoder functions')
+            store.set_project_authority_mode(org.org_id, project.project_id, 'postgres_canonical')
+            job_id = Jobs(conn, org, project).job_id
+            conn.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(
+                sql.Identifier(schema), sql.Identifier(role)))
+            for signature in SIGNATURES:
+                conn.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.{} TO {}').format(
+                    sql.Identifier(schema), sql.SQL(signature), sql.Identifier(role)))
+            role_dsn = make_conninfo(host=conn.info.host, port=conn.info.port, dbname=conn.info.dbname,
+                                     user=role, password=password)
+            yield conn, role_dsn, job_id, schema
+        finally:
+            try:
+                if job_id is not None:
+                    conn.execute(sql.SQL('DELETE FROM {}.jobs WHERE job_id=%s').format(sql.Identifier(schema)),
+                                 (job_id,))
+                if project is not None:
+                    conn.execute(sql.SQL('DELETE FROM {}.projects WHERE project_id=%s').format(sql.Identifier(schema)),
+                                 (project.project_id,))
+                if org is not None:
+                    conn.execute(sql.SQL('DELETE FROM {}.orgs WHERE org_id=%s').format(sql.Identifier(schema)),
+                                 (org.org_id,))
+            finally:
+                try:
+                    if role_created:
+                        for signature in SIGNATURES:
+                            conn.execute(sql.SQL('REVOKE ALL ON FUNCTION {}.{} FROM {}').format(
+                                sql.Identifier(schema), sql.SQL(signature), sql.Identifier(role)))
+                        conn.execute(sql.SQL('REVOKE ALL ON SCHEMA {} FROM {}').format(
+                            sql.Identifier(schema), sql.Identifier(role)))
+                        conn.execute(sql.SQL('DROP ROLE {}').format(sql.Identifier(role)))
+                finally:
+                    conn.autocommit = previous_autocommit
+
+
+def test_decoder_login_commits_claim_and_owner_reads_it_back(committed_decoder):
+    owner, role_dsn, job_id, schema = committed_decoder
+    with psycopg.connect(role_dsn, row_factory=dict_row) as conn:
+        conn.execute('SET search_path = pg_catalog')
+        claimed = conn.execute(sql.SQL('SELECT * FROM {}.video_decode_claim(%s,%s)').format(sql.Identifier(schema)),
+                               ('decoder-test', 60)).fetchone()
+        assert claimed['job_id'] == job_id
+        conn.commit()
+    row = owner.execute(sql.SQL('SELECT status,attempt,lease_owner FROM {}.jobs WHERE job_id=%s').format(
+        sql.Identifier(schema)), (job_id,)).fetchone()
+    assert row == dict(status='running', attempt=1, lease_owner='decoder-test')
+
+
+def test_decoder_login_cannot_touch_tables_directly(committed_decoder):
+    _, role_dsn, _, schema = committed_decoder
+    with psycopg.connect(role_dsn) as conn:
+        for statement in ('SELECT * FROM {}.jobs', 'UPDATE {}.jobs SET status = status',
+                          'SELECT * FROM {}.project_sizing_exchanges',
+                          'UPDATE {}.project_sizing_exchanges SET state = state'):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                conn.execute(sql.SQL(statement).format(sql.Identifier(schema)))
+            conn.rollback()
+
+
+def test_sizing_check_is_definer_with_no_public_execute(committed_decoder):
+    owner, role_dsn, _, schema = committed_decoder
+    role = conninfo_to_dict(role_dsn)['user']
+    migration = Path(__file__).parents[1] / 'migrations' / '0118_sizing_exchange_check_security_definer.sql'
+    for rerun in (False, True):
+        if rerun:
+            owner.execute(migration.read_text(encoding='utf-8'))
+        # OID zero denotes PUBLIC, which is an ACL grantee rather than a pg_roles row.
+        row = owner.execute(
+            "SELECT p.prosecdef, p.proconfig, "
+            "pg_catalog.has_function_privilege(0::oid, p.oid, 'EXECUTE') AS public_execute, "
+            "pg_catalog.has_function_privilege(%s, p.oid, 'EXECUTE') AS role_execute "
+            "FROM pg_catalog.pg_proc p WHERE p.oid=pg_catalog.to_regprocedure("
+            "pg_catalog.quote_ident(%s) || '.check_project_sizing_exchange_completion()')",
+            (role, schema)).fetchone()
+        assert row['prosecdef'] is True
+        assert row['public_execute'] is False
+        assert row['role_execute'] is False
+        assert 'search_path=pg_catalog, pg_temp' in row['proconfig']
+
+
+def test_untrusted_shadow_table_cannot_redirect_check(committed_decoder):
+    owner, role_dsn, job_id, schema = committed_decoder
+    with psycopg.connect(role_dsn, row_factory=dict_row) as conn:
+        try:
+            conn.execute('CREATE TEMP TABLE pg_temp.jobs (job_id uuid)')
+        except psycopg.errors.InsufficientPrivilege:
+            conn.rollback()
+            pytest.skip('test database does not permit decoder role to create a temp table')
+        conn.execute('SET search_path = pg_temp, pg_catalog')
+        claimed = conn.execute(sql.SQL('SELECT * FROM {}.video_decode_claim(%s,%s)').format(sql.Identifier(schema)),
+                               ('decoder-test', 60)).fetchone()
+        assert claimed['job_id'] == job_id
+        conn.commit()
+    row = owner.execute(sql.SQL('SELECT status,attempt,lease_owner FROM {}.jobs WHERE job_id=%s').format(
+        sql.Identifier(schema)), (job_id,)).fetchone()
+    assert row == dict(status='running', attempt=1, lease_owner='decoder-test')

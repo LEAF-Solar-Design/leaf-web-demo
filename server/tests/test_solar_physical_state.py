@@ -163,7 +163,7 @@ def test_physical_state_constants():
     assert (ps.MAX_NODES, ps.MAX_DEPTH, ps.MAX_STRING_CHARS, ps.MAX_BYTES_VALUE) == (
         1_000_000, 32, 8_388_608, 4_194_304)
     assert (ps.MAX_ABS_FLOAT, ps.MAX_ABS_INT, ps.MAX_COUNTER) == (1e15, 2 ** 53 - 1, 1_000_000_000)
-    assert ps.UNITS == {"m": 1.0, "ft": 0.3048}
+    assert ps.UNITS == {"m": 1.0, "ft": 0.3048, "in": 0.0254}
     assert ps.DOCUMENT_ORDER == ("schema", "units", "frame", "source", "capability", "parent", "state")
     assert len(ps.STATE_KEYS) == 34 and ps.COUNTER_KEYS == {"mesh_faces", "next_handle"}
     assert len(ps.CODES) == 26

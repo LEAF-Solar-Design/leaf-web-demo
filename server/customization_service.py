@@ -153,6 +153,23 @@ _DIAGNOSTIC_CODES = frozenset({
 })
 
 
+def refund_unstarted_build(
+    tenant_id: str, change_set_id: str, *, log: logging.Logger | None = None,
+) -> None:
+    log = _LOG if log is None else log
+    try:
+        refunded = author_quota.refund_unstarted(tenant_id, change_set_id)
+        log.info(
+            "author_quota_refund_unstarted: change_set=%s refunded=%s",
+            change_set_id, refunded,
+        )
+    except Exception as exc:  # noqa: BLE001 - terminal state wins
+        log.warning(
+            "author_quota_refund_unstarted_failed: exception=%s",
+            type(exc).__name__,
+        )
+
+
 class CustomizationServiceError(RuntimeError):
     harness_not_called = False
 
@@ -163,6 +180,7 @@ class CustomizationServiceError(RuntimeError):
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        self.harness_not_called = code == "stage_grant_cancelled"
         selected = detail if diagnostic_code is None else diagnostic_code
         self.diagnostic_code = (
             selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
@@ -195,13 +213,24 @@ def _valid_compile_attempts(attempts: Any) -> bool:
         return False
     previous = 0
     for attempt in attempts:
-        if not isinstance(attempt, dict) or attempt.keys() != {"n", "decision", "errors", "diagnostics"}:
+        if not isinstance(attempt, dict) or attempt.keys() not in (
+                {"n", "decision", "errors", "diagnostics"},
+                {"n", "decision", "errors", "diagnostics", "source_decoded"}):
             return False
         if (not integer(attempt["n"], previous + 1, 8)
                 or attempt["decision"] not in ("accept", "compile_failed", "malformed", "unavailable")
                 or not integer(attempt["errors"], 0, 10000)):
             return False
         previous = attempt["n"]
+        if "source_decoded" in attempt:
+            decoded = attempt["source_decoded"]
+            if (attempt["decision"] != "accept" or not isinstance(decoded, dict)
+                    or decoded.keys() != {"entities", "original_sha256", "compiled_sha256"}
+                    or not integer(decoded["entities"], 1, 10000)
+                    or any(not isinstance(decoded[key], str) or not re.fullmatch(r"[0-9a-f]{64}", decoded[key])
+                           for key in ("original_sha256", "compiled_sha256"))
+                    or decoded["original_sha256"] == decoded["compiled_sha256"]):
+                return False
         diagnostics = attempt["diagnostics"]
         if not isinstance(diagnostics, list) or len(diagnostics) > 10:
             return False
@@ -1338,6 +1367,9 @@ class CustomizationService:
                 idempotency_key=f"stage:{idempotency_key}",
                 expected_state=ChangeState.CREATED,
             )
+            import customization_stage_grants
+            if customization_stage_grants.ttl_s() is not None:
+                customization_stage_grants.issue(self, change)
         return self.stage_status_change(change)
 
     def stage_removal(
@@ -1798,7 +1830,20 @@ class CustomizationService:
             )
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
-        return self.stage_status_change(change)
+        result = self.stage_status_change(change)
+        import customization_stage_grants
+
+        if (customization_stage_grants.ttl_s() is not None
+                and result["status"] == "queued"
+                and change.tool_target == "branch"
+                and getattr(tenant, "subject", None) == change.author_subject):
+            try:
+                grant = self.store.get_stage_grant(change.tenant_id, change.change_set_id)
+                if grant is not None and grant["revoked_ms"] is None:
+                    result["withdrawable"] = True
+            except Exception:
+                pass
+        return result
 
     def stage_source(self, *, tenant: Any, change_set_id: str) -> tuple[bytes, dict[str, str]]:
         """Read only the original author's active, receipt-bound tool source."""
@@ -1991,6 +2036,14 @@ class CustomizationService:
                 )}
             if change.state is ChangeState.PUBLISHED:
                 result["publication"] = {"state": "published", "published_at": change.updated_at}
+                if change.tool_target == "branch":
+                    try:
+                        published = self._published_branch_result(change)
+                        result["publication"].update({
+                            field: published[field] for field in ("package_digest", "name", "version")
+                        })
+                    except Exception:
+                        _LOG.warning("publication_digest_unavailable: change_set=%s", change.change_set_id)
             elif change.state in (ChangeState.PUBLISHING, ChangeState.SUPERSEDED, ChangeState.ROLLED_BACK):
                 result["publication"] = {"state": change.state.value}
             else:
@@ -2177,27 +2230,51 @@ class CustomizationService:
             change.authority_session_id,
             change.authority_turn_id,
         )
+        without_services = False
         if (
             tenant_id != change.tenant_id
             or not active_subject
             or active_subject != change.author_subject
         ):
-            exc = CustomizationServiceError("stage_authority_invalid", 409)
-            exc.harness_not_called = True
-            raise exc
+            import customization_stage_grants
+            if (tenant_id == change.tenant_id and not active_subject and self is not None
+                    and customization_stage_grants.ttl_s() is not None):
+                without_services = True
+            else:
+                exc = CustomizationServiceError("stage_authority_invalid", 409)
+                exc.harness_not_called = True
+                raise exc
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
         revision_base = None
         if getattr(change, "tool_target", None) == "branch" and change.target_tool_name:
             revision_base = self._branch_revision_base(change.tenant_id, change.base_commit, change.target_tool_name)
+        # Last read before the request: a Stop or withdraw that landed during
+        # the URL and revision-base work still refuses this build.
+        import customization_stage_grants
+        if (self is not None and change.tool_target == "branch"
+                and customization_stage_grants.ttl_s() is not None):
+            try:
+                grant = self.store.get_stage_grant(tenant_id, change.change_set_id)
+            except Exception as exc:
+                refusal = CustomizationServiceError("stage_grant_refused", 409)
+                refusal.harness_not_called = True
+                raise refusal from exc
+            if grant is not None and grant["revoked_ms"] is not None:
+                code = "stage_grant_cancelled" if grant["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
+                refusal = CustomizationServiceError(code, 409)
+                refusal.harness_not_called = True
+                raise refusal
+        if without_services:
+            customization_stage_grants.admit(self, change, change.stage_lease_owner)
         try:
             import requests
             response = requests.post(
                 f"{url}/author/stage", timeout=_harness_stage_timeout_s(),
                 headers={
                     "X-Harness-Secret": secret,
-                    **({
+                    **({"X-Author-Services": "none"} if without_services else {
                         "X-Authority-Session-Id": change.authority_session_id,
                         "X-Authority-Turn-Id": change.authority_turn_id,
                     } if change.authority_session_id and change.authority_turn_id else {}),
@@ -2235,6 +2312,13 @@ class CustomizationService:
                     "customization_author_job_failed", 502,
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
+                if without_services:
+                    notice = (
+                        "This build waited in line, so it ran without connected services. "
+                        "If it needs one, ask again when the line is short."
+                    )
+                    prefix = (reason or "")[:500 - len(notice) - 1].rstrip()
+                    reason = f"{prefix} {notice}" if prefix else notice
                 error.harness_reason = reason
                 if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
                     refusal = response.json().get("error")

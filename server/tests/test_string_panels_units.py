@@ -365,6 +365,28 @@ def test_string_panels_continuity_actual_demo_rooftop(intake):
                for a, b in zip(string["pts"], string["pts"][1:]))
 
 
+@pytest.mark.parametrize("faces,factor,params", [
+    ([(0, 0, (0, 80)), (120, 0, (0, 80))], 1, {}),
+    ([(240, 0.25, (0, 80)), (240, -0.25, (0, 80))], 1,
+     {"min_modules_per_string": 2, "max_modules_per_string": 2}),
+    ([(0, 0.12, (0, 80)), (200, 0.12, (20, 100))], 25.4,
+     {"meters_per_unit": 0.001}),
+])
+def test_string_panels_keeps_overlapping_roof_faces_separate(faces, factor, params):
+    panels = []
+    for elevation, slope, centres in faces:
+        for centre in centres:
+            panel = rect(centre, 77, 38.5)
+            panel["pts"] = [[x * factor, y * factor, round(elevation + slope * x, 3) * factor]
+                            for x, y in panel["pts"]]
+            panels.append(panel)
+    result, _ = run({"polylines": panels[::-1]}, params)
+    assert result["stats"]["bank_count"] == 2
+    assert sorted(tuple(sorted(round(x / factor, 3) for x, _ in string["pts"]))
+                  for string in result["strings"]) == sorted(centres for _, _, centres in faces)
+    assert [string["length_ft"] for string in result["strings"]] == [6.7, 6.7]
+
+
 @pytest.mark.parametrize("gap,modules", [(115.5, [2]), (115.501, [1, 1])])
 def test_string_panels_continuity_adjacent_slot_boundary(gap, modules):
     drawing = {"polylines": [rect(x, 77, 38.5) for x in (0.0, gap)]}

@@ -175,14 +175,18 @@ def _invalidate(before, after):
     return edited
 
 
-def _assignment_plan(graph, request):
-    """Run the common kernel on a private graph; retain remainders before atomic refusal."""
+def _assignment_source(graph, request):
+    """Validate the request and revision shared by assignment and saved input reads."""
     _bounded_json(request)
     if (type(request) is not dict or set(request) != REQUEST_KEYS
             or type(request["expected_rev"]) is not int
             or type(request["accept_excess_capacity"]) is not bool):
         _refuse("INVALID_STRING_ASSIGNMENT_REQUEST")
-    before = checked_graph(graph, request["expected_rev"])
+    return checked_graph(graph, request["expected_rev"])
+
+
+def _assignment_plan(before, request):
+    """Run the common kernel on a validated graph; retain remainders before atomic refusal."""
     if before["electrical_zones"]:
         _refuse("ELECTRICAL_ZONES_UNSUPPORTED")
     unassigned = [string for string in before["strings"] if string["inverter_ref"] is None]
@@ -221,7 +225,7 @@ def _assignment_plan(graph, request):
                   "STRING_CAPACITY_INSUFFICIENT" if lines == [] else "STRING_ASSIGNMENT_MAPPING_FAILED")
     elif remaining:
         reason = "STRING_ASSIGNMENT_INCOMPLETE"
-    return before, binding, after_state, rows, assigned, remaining, reason, lines
+    return binding, after_state, rows, assigned, remaining, reason, lines
 
 
 def _assignment_candidate(before, binding, after_state, rows, assigned):
@@ -241,7 +245,8 @@ def _assignment_candidate(before, binding, after_state, rows, assigned):
 
 
 def assign_strings(graph, request):
-    before, binding, after_state, rows, assigned, remaining, reason, lines = _assignment_plan(graph, request)
+    before = _assignment_source(graph, request)
+    binding, after_state, rows, assigned, _, reason, lines = _assignment_plan(before, request)
     if reason is not None:
         _refuse(reason)
     result = _assignment_candidate(before, binding, after_state, rows, assigned)

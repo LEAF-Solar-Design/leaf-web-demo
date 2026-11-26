@@ -13,6 +13,8 @@ import build_plan
 import author_quota
 import customization_service
 import customization_stage_worker
+import deps
+from branch_tools import tenant_publish
 from customization_models import ChangeSetNotFoundError, ChangeState
 from customization_service import CustomizationService, CustomizationServiceError
 from customization_store import SQLiteCustomizationStore
@@ -26,11 +28,13 @@ from test_customization_async_stage import (
 from tool_record_fields import ToolRecordFieldError
 from test_customization_branch_target import _change, _request, lane
 from test_customization_inline_review import review
+from test_tenant_publish import NAME, publishing, signer
 
 
 LOCATION = {"code": "CS0117", "file": "lib/example.csx", "line": 42}
 REFUSAL = {"n": 1, "decision": "compile_failed", "errors": 1, "diagnostics": [LOCATION]}
 ACCEPT = {"n": 2, "decision": "accept", "errors": 0, "diagnostics": []}
+DECODED = {"entities": 2, "original_sha256": "a" * 64, "compiled_sha256": "b" * 64}
 
 
 def _reserve(tmp_path, **fields):
@@ -236,6 +240,8 @@ def test_review_and_publication_follow_durable_decisions(review, decision):
     expected = {"state": response.json()["status"]}
     if decision == "approve":
         expected["published_at"] = _change(review, review.body).updated_at
+        published = review.service._published_branch_result(_change(review, review.body))
+        expected.update({key: published[key] for key in ("package_digest", "name", "version")})
     assert result["publication"] == expected
 
 
@@ -456,3 +462,98 @@ def test_queue_router_error_contract(code, retryable, caplog):
     if code == "customization_stage_queue_full":
         assert any(record.levelno == logging.WARNING and code in record.message for record in caplog.records)
         assert "not counted against your daily builds" in body["error"]["message"]
+
+
+def test_decoded_attempt_round_trips_to_stage_status(lane, monkeypatch):
+    post = requests.post
+    attempts = [REFUSAL, dict(ACCEPT, source_decoded=DECODED)]
+
+    def stage(url, **kwargs):
+        response = post(url, **kwargs)
+        response.json()["compile_attempts"] = attempts
+        return response
+
+    monkeypatch.setattr(requests, "post", stage)
+    job = lane.service.enqueue_stage(**_request(lane))
+    assert customization_stage_worker.run_once("worker", service=lane.service)
+    status = lane.service.stage_status_change(_change(lane, job))
+    assert status["compile"]["attempts"] == attempts
+
+
+@pytest.mark.parametrize("decoded", [
+    None, {}, [], dict(DECODED, extra=True),
+    {key: value for key, value in DECODED.items() if key != "entities"},
+    {key: value for key, value in DECODED.items() if key != "original_sha256"},
+    {key: value for key, value in DECODED.items() if key != "compiled_sha256"},
+    *[dict(DECODED, entities=value) for value in (True, False, 0, -1, 10001, 1.5, "2", None)],
+    *[dict(DECODED, **{key: value}) for key in ("original_sha256", "compiled_sha256")
+      for value in (None, 42, "a" * 63, "a" * 65, "A" * 64, "g" * 64, "a" * 64 + "\n")],
+    dict(DECODED, compiled_sha256=DECODED["original_sha256"]),
+])
+def test_invalid_decoded_attempt_is_rejected(tmp_path, caplog, decoded):
+    test_invalid_attempt_drops_entire_field(tmp_path, caplog, [dict(ACCEPT, source_decoded=decoded)])
+
+
+@pytest.mark.parametrize("decision", ["compile_failed", "malformed", "unavailable"])
+def test_decoding_disclosure_requires_acceptance(tmp_path, caplog, decision):
+    test_invalid_attempt_drops_entire_field(
+        tmp_path, caplog, [dict(REFUSAL, decision=decision, source_decoded=DECODED)],
+    )
+
+
+def test_published_branch_status_matches_signed_publish_response(publishing, monkeypatch):
+    state = publishing
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(CustomizationService, "configured", lambda: state.service)
+    monkeypatch.setattr(state.service, "_raw_receipt", lambda change: {
+        "package_path": f"branch-tools/{NAME}",
+    })
+    state.client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        state.tenant, subject=state.subject)
+    assert "publication" not in state.service.stage_status_change(state.change)
+    state.store.get_or_create_publication_request(
+        tenant_id=state.tenant, change_set_id=state.change.change_set_id)
+    assert state.service.stage_status_change(state.change)["publication"] == {"state": "awaiting_approval"}
+    response = state.client.post("/api/author/reviews", json={
+        "change_set_id": state.change.change_set_id, "staged_commit": state.change.staged_commit,
+        "catalog_digest": state.change.catalog_digest, "decision": "approve",
+    })
+    assert response.status_code == 200, response.text
+    change = state.store.get_change_set(tenant_id=state.tenant, change_set_id=state.change.change_set_id)
+    row = state.store.get_review_decision(
+        tenant_id=state.tenant, change_set_id=change.change_set_id, staged_commit=change.staged_commit)
+    # The publish POST can replay a committed publication without signing again.
+    published = state.client.post("/api/author/register", json={
+        "change_set_id": change.change_set_id, "staged_commit": change.staged_commit,
+        "catalog_digest": change.catalog_digest, "platform_release": change.desired_platform_release,
+        "workspace_contract_digest": change.workspace_contract_digest,
+        "confirmation_id": row["confirmation_id"], "idempotency_key": "published-replay",
+    })
+    assert published.status_code == 200, published.text
+    body = published.json()
+    signed = tenant_publish.read_publication(state.root, change.tenant_id, body["name"], body["version"])
+    publication = state.service.stage_status_change(change)["publication"]
+    assert publication == {
+        "state": "published", "published_at": change.updated_at,
+        "package_digest": body["package_digest"], "name": body["name"], "version": body["version"],
+    }
+    assert publication["package_digest"] == signed.package_digest
+    assert len(publication["package_digest"]) == 64
+    assert set(publication["package_digest"]) <= set("0123456789abcdef")
+
+
+@pytest.mark.parametrize("error", [CustomizationServiceError("publish_not_available", 409), RuntimeError("private")])
+def test_publication_read_failure_keeps_published_status(review, monkeypatch, caplog, error):
+    response = review.post()
+    assert response.status_code == 200, response.text
+    change = _change(review, review.body)
+    expected = review.service.stage_status_change(change)
+    expected["publication"] = {"state": "published", "published_at": change.updated_at}
+
+    def unavailable(change):
+        raise error
+
+    monkeypatch.setattr(review.service, "_published_branch_result", unavailable)
+    caplog.clear()
+    assert review.service.stage_status_change(change) == expected
+    assert caplog.messages == [f"publication_digest_unavailable: change_set={change.change_set_id}"]

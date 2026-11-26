@@ -502,20 +502,38 @@ class TestProjectBoundary:
         with pytest.raises(p.ProofRefused):
             p.prepare_runtime(admitted(c), effects=c.effects, scope=c.scope)
 
-    def test_build_provenance(self):
-        c = case()
-        plan = admitted(c)
-        result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
-        assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
-        assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
-        assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
-        assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
-        build = c.launches[-1]
-        assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
-        assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
-        assert build.cwd == ROOT / "vendor-source"
-        assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
-        assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+    def test_build_provenance(self, monkeypatch):
+        sdk_paths = r"C:\SDK\um\x64;C:\SDK\ucrt\x64"
+        for windows, library_paths, expected in (
+            (True, sdk_paths, sdk_paths),
+            (True, None, None),
+            (True, " ", None),
+            (False, "/sdk/lib", None),
+        ):
+            monkeypatch.setattr(p, "_WINDOWS_RUNTIME_HOST", windows)
+            c = case()
+            environ = {"PATH": "toolchain", "LIBPATH": "unrelated"}
+            if library_paths is not None:
+                environ["LIB"] = library_paths
+            captured = p._host_environment(environ)
+            c.host.facts = replace(c.host.facts, environment=captured,
+                windows_library_paths=p._windows_library_paths(environ))
+            plan = admitted(c)
+            result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
+            assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
+            assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
+            assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
+            assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
+            build = c.launches[-1]
+            assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
+            assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
+            assert build.cwd == ROOT / "vendor-source"
+            assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
+            assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+            assert "LIB" not in captured
+            assert all("LIB" not in probe.environment for probe in c.launches[:-1])
+            assert all("LIBPATH" not in process.environment for process in c.launches)
+            assert build.environment.get("LIB") == expected
         for corruption in ({"engine_outputs": (file("engine.js", ""), file("engine_bg.wasm"))},
                            {"requirements": ()}, {"toolchain": ()}):
             c = case()
@@ -2261,16 +2279,26 @@ def test_teardown_guardian_process_exits_hard(monkeypatch):
     def exit_hard(code):
         raise HardExit(code)
     flushed = []
+    wire = io.BytesIO()
+    stdout = io.TextIOWrapper(wire, encoding="ascii", newline="\r\n")
+    flush_stdout = stdout.flush
+    def flush():
+        flushed.append("stdout")
+        flush_stdout()
+    stdout.flush = flush
     monkeypatch.setattr(p.os, "_exit", exit_hard)
     monkeypatch.setattr(p, "sys", SimpleNamespace(
-        stdout=SimpleNamespace(flush=lambda: flushed.append("stdout")),
-        stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
+        stdout=stdout, stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
     for result, expected in ((0, 0), (3, 3), (None, 1), (True, 1), (256, 1), (-1, 1)):
-        monkeypatch.setattr(p, "_guardian_entry", lambda: result)
+        def entry():
+            stdout.write("OK\n")
+            return result
+        monkeypatch.setattr(p, "_guardian_entry", entry)
         with pytest.raises(HardExit) as error:
             p._guardian_process_main()
         assert error.value.code == expected
         assert flushed[-2:] == ["stdout", "stderr"]
+    assert wire.getvalue() == b"OK\n" * 6
     def crash():
         raise RuntimeError("entry failed")
     monkeypatch.setattr(p, "_guardian_entry", crash)

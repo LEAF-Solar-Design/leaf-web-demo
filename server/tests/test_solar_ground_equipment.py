@@ -260,7 +260,9 @@ def test_ground_equipment_plain_graph_never_imports_the_codec(graph, monkeypatch
     assert cloud.sizing_targets(w1, "global") == {w1["settings"]["id"]: w1["settings"]}
     readiness = reasons(w1)
     assert len(readiness) == 56
-    assert readiness.pop("solar-assignment-report") == readiness["solar-assign-strings"]
+    # Saved occupancy is readable even when the electrical zone blocks assignment.
+    assert readiness.pop("solar-assignment-report") is None
+    assert readiness["solar-assign-strings"] == "electrical_zones_unsupported"
     assert len(readiness) == 55
     assert lsha(readiness) == W1_READINESS_SHA
     # X02 #3197 adds one hook-backed entry. Its guard still requires settings.

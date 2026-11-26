@@ -581,6 +581,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "compare", "material_revision_diff"
         drawing_body = authored_material_revision.build_body(description)
         summary = "compares verified records across pinned import revisions"
+    elif authored_viewport_panels.revision_comparison_requested(description):
+        verb, engine_op = "compare", "viewport_panel_revision_comparison"
+        drawing_body = authored_viewport_panels.build_body(description)
+        drawing_params = authored_viewport_panels.parameter_schema(description)
+        summary = "compares visible panel placements in two selected viewports across the verified parent revision"
     elif authored_viewport_panels.matches(description):
         if authored_viewport_panels.comparison_requested(description):
             verb, engine_op = "compare", "viewport_panel_comparison"
@@ -692,8 +697,10 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)
 
-    header = _HEADER_TEMPLATE.format(
-        name=name, description=(description.replace('"', "'") or "(none)"), engine_op=engine_op)
+    # The description is data inside the generated docstring. Preserve its
+    # backslashes so JSON escape sequences are never interpreted as Python.
+    description_literal = repr(description.replace('"', "'") or "(none)")[1:-1]
+    header = _HEADER_TEMPLATE.format(name=name, description=description_literal, engine_op=engine_op)
     code = header + body
 
     tool = {

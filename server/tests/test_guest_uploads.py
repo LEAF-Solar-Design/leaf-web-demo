@@ -1561,3 +1561,259 @@ def test_drawing_fingerprint_100000_lines_under_five_seconds():
     assert result["model_objects"] == 100_000
     assert result["layers"] == [{"name": "roof", "count": 100_000}]
     assert elapsed < 5, f"fingerprinting took {elapsed:.3f}s"
+
+
+@pytest.fixture()
+def account_quota_memory(monkeypatch):
+    monkeypatch.setenv("LEAF_UPLOAD_STORE", "legacy")
+    monkeypatch.delenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", raising=False)
+    monkeypatch.delenv("LEAF_ACCOUNT_UPLOADS_PER_DAY", raising=False)
+    guest_uploads.reset_account_quota_state()
+    yield
+    guest_uploads.reset_account_quota_state()
+
+
+@pytest.fixture()
+def account_quota_client(client, monkeypatch, account_quota_memory):
+    # Same verified-token / active-binding setup as the live account tests above.
+    import auth
+    import tenancy
+
+    binding = {"workspace": "f49766b5-1e5a-4e67-a10f-4e3a9b576266"}
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(auth, "verify_platform_token", lambda authorization: {"sub": "auth0|bound"})
+    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload: {
+        "tenant_id": binding["workspace"], "org_id": binding["workspace"], "tier": "hosted_pro",
+    })
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: (binding["workspace"], "hosted_pro"))
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(resolve_workspace=lambda tenant_id: None))
+    monkeypatch.setattr(entitlements, "entitlements_for", lambda *args: {"upload": True})
+    monkeypatch.setattr(guest_uploads, "start_extraction_thread", lambda *args: None)
+    return client, binding
+
+
+@pytest.mark.parametrize("name,reader,default", [
+    ("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", guest_uploads.account_workspace_daily_cap, 20),
+    ("LEAF_ACCOUNT_UPLOADS_PER_DAY", guest_uploads.account_global_daily_cap, 500),
+])
+@pytest.mark.parametrize("raw", [None, "bad", "1.5", "-1", "1000001", "0", "1", "1000000"])
+def test_account_quota_settings(monkeypatch, name, reader, default, raw):
+    if raw is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, raw)
+    assert reader() == (int(raw) if raw in {"0", "1", "1000000"} else default)
+
+
+def test_account_quota_utc_day_and_reset():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 11, 25, 23, 30, tzinfo=timezone(timedelta(hours=-6)))
+    assert guest_uploads.account_quota_day(now) == "2026-11-26"
+    assert guest_uploads.account_quota_resets_at("2026-12-31") == "2027-01-01T00:00:00Z"
+
+
+def test_account_workspace_daily_limit_and_verified_workspace(account_quota_client):
+    client, binding = account_quota_client
+    headers = {"Authorization": "Bearer verified", "X-Tenant-Id": "forged-workspace"}
+    for _ in range(20):
+        assert _upload(client, headers=headers).status_code == 202
+    response = _upload(client, headers=headers)
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error"]["message"] == (
+        "Your workspace has sent 20 drawings today. You can send more after the daily reset.")
+    assert body["error"]["error_code"] == ErrorCode.QUOTA_EXCEEDED
+    assert body["error"]["retryable"] is True
+    assert body["quota"] == {"scope": "workspace", "limit": 20,
+                             "resets_at": guest_uploads.account_quota_resets_at(guest_uploads.account_quota_day())}
+    assert int(response.headers["Retry-After"]) > 0
+    state = guest_uploads._ACCOUNT_QUOTA_STATE[guest_uploads.account_quota_day()]
+    assert state[f"workspace:{binding['workspace']}"] == 20
+    assert "workspace:forged-workspace" not in state
+    binding["workspace"] = "f49766b5-1e5a-4e67-a10f-4e3a9b576267"
+    assert _upload(client, headers=headers).status_code == 202
+
+
+@pytest.mark.parametrize("cap,message", [
+    (0, "Sending drawings is turned off for your workspace right now."),
+    (1, "Your workspace has sent 1 drawing today. You can send more after the daily reset."),
+])
+def test_account_quota_exact_messages_and_telemetry(account_quota_client, monkeypatch, cap, message):
+    import telemetry_sink
+
+    client, _ = account_quota_client
+    events = []
+    monkeypatch.setattr(telemetry_sink, "emit", lambda event, **kwargs: events.append((event, kwargs)))
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", str(cap))
+    headers = {"Authorization": "Bearer verified"}
+    if cap:
+        assert _upload(client, headers=headers).status_code == 202
+    response = _upload(client, headers=headers)
+    assert response.status_code == 429
+    assert response.json()["error"]["message"] == message
+    assert events[-1][0] == "drawing.upload_rejected"
+    assert events[-1][1]["labels"]["reason"] == "quota"
+
+
+def test_account_global_quota_hides_limit_and_does_not_charge_workspace(account_quota_client, monkeypatch):
+    import telemetry_sink
+
+    client, binding = account_quota_client
+    events = []
+    monkeypatch.setattr(telemetry_sink, "emit", lambda event, **kwargs: events.append(kwargs))
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_DAY", "1")
+    headers = {"Authorization": "Bearer verified"}
+    assert _upload(client, headers=headers).status_code == 202
+    binding["workspace"] = "f49766b5-1e5a-4e67-a10f-4e3a9b576267"
+    response = _upload(client, headers=headers)
+    assert response.status_code == 429
+    assert response.json()["quota"]["scope"] == "global"
+    assert response.json()["quota"]["limit"] is None
+    assert response.json()["error"]["message"] == (
+        "Leaf Automation Studio has reached its daily drawing limit. Please try again after the daily reset.")
+    assert events[-1]["labels"]["reason"] == "quota"
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_DAY", "2")
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "1")
+    assert _upload(client, headers=headers).status_code == 202
+
+
+def test_account_quota_new_day_and_refund_original_day(account_quota_memory, monkeypatch):
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "1")
+    monkeypatch.setattr(guest_uploads, "account_quota_day", lambda: "2026-11-25")
+    yesterday = guest_uploads.check_and_count_account_upload("workspace")
+    assert yesterday.accepted
+    assert not guest_uploads.check_and_count_account_upload("workspace").accepted
+    monkeypatch.setattr(guest_uploads, "account_quota_day", lambda: "2026-11-26")
+    today = guest_uploads.check_and_count_account_upload("workspace")
+    assert today.accepted
+    guest_uploads.refund_account_upload(yesterday)
+    guest_uploads.refund_account_upload(yesterday)
+    assert not guest_uploads.check_and_count_account_upload("workspace").accepted
+    assert guest_uploads._ACCOUNT_QUOTA_STATE["2026-11-25"] == {"workspace:workspace": 0, "global": 0}
+    monkeypatch.setattr(guest_uploads, "account_quota_day", lambda: "2026-11-25")
+    assert guest_uploads.check_and_count_account_upload("workspace").accepted
+    assert not guest_uploads.check_and_count_account_upload("workspace").accepted
+
+
+@pytest.mark.parametrize("refusal", ["size", "type", "entitlement", "engine", "disabled", "fence"])
+def test_account_refusals_do_not_charge(account_quota_client, monkeypatch, refusal):
+    client, _ = account_quota_client
+    headers = {"Authorization": "Bearer verified"}
+    data, name = DXF_BYTES, "mine.dxf"
+    expected = 400
+    if refusal == "size":
+        monkeypatch.setattr(guest_uploads, "max_upload_bytes", lambda: 1)
+        expected = 413
+    elif refusal == "type":
+        name = "mine.txt"
+    elif refusal == "entitlement":
+        monkeypatch.setattr(entitlements, "entitlements_for", lambda *args: {"upload": False})
+        expected = 403
+    elif refusal == "engine":
+        monkeypatch.setattr(uploads_router.dwg_convert, "available", lambda: False)
+        monkeypatch.setattr(guest_uploads, "dwg_extract_mode", lambda: "local")
+        name, data, expected = "mine.dwg", b"AC1027" + b"\x00" * 128, 503
+    elif refusal == "disabled":
+        monkeypatch.setenv("LEAF_UPLOAD_IMPORT_MUTATIONS_ENABLED", "0")
+        expected = 503
+    elif refusal == "fence":
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fenced():
+            yield {"reason_code": "test-fence"}
+
+        monkeypatch.setattr(write_loop, "upload_mutation_refusal_guard", fenced)
+        monkeypatch.setattr(write_loop, "log_mutation_refused", lambda *args, **kwargs: None)
+        monkeypatch.setattr(write_loop, "mutation_refusal_envelope", lambda *args, **kwargs: {"error": {}})
+        expected = 503
+    response = _upload(client, data=data, name=name, headers=headers)
+    assert response.status_code == expected, response.text
+    assert guest_uploads._ACCOUNT_QUOTA_STATE == {}
+
+
+@pytest.mark.parametrize("failure", ["mint", "collision", "marker", "stage"])
+def test_account_pre_staging_failure_refunds(account_quota_client, monkeypatch, failure):
+    client, binding = account_quota_client
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "1")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("staging failed")
+
+    if failure == "mint":
+        monkeypatch.setattr(guest_uploads, "new_account_upload_drawing_id", fail)
+    elif failure == "collision":
+        monkeypatch.setattr(guest_uploads, "read_marker", lambda *args: {"status": "ready"})
+    elif failure == "marker":
+        monkeypatch.setattr(guest_uploads, "write_marker", fail)
+    else:
+        monkeypatch.setattr(Path, "write_bytes", fail)
+    if failure == "collision":
+        response = _upload(client, headers={"Authorization": "Bearer verified"})
+        assert response.status_code == 500
+        assert response.json()["error"]["message"] == "could not mint a drawing id"
+    else:
+        with pytest.raises(RuntimeError, match="staging failed"):
+            _upload(client, headers={"Authorization": "Bearer verified"})
+    assert guest_uploads.check_and_count_account_upload(binding["workspace"]).accepted
+
+
+def test_account_extraction_failure_keeps_charge(account_quota_client, monkeypatch):
+    client, binding = account_quota_client
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "1")
+
+    def fail(*args):
+        raise RuntimeError("extract failed after staging")
+
+    monkeypatch.setattr(guest_uploads, "start_extraction_thread", fail)
+    with pytest.raises(RuntimeError, match="extract failed"):
+        _upload(client, headers={"Authorization": "Bearer verified"})
+    assert not guest_uploads.check_and_count_account_upload(binding["workspace"]).accepted
+
+
+def test_account_store_error_fails_closed(account_quota_client, monkeypatch):
+    client, _ = account_quota_client
+
+    def fail(*args):
+        raise RuntimeError("secret database details")
+
+    monkeypatch.setattr(guest_uploads, "check_and_count_account_upload", fail)
+    monkeypatch.setattr(guest_uploads, "new_account_upload_drawing_id",
+                        lambda: pytest.fail("must not mint an id"))
+    monkeypatch.setattr(guest_uploads, "write_marker", lambda *args: pytest.fail("must not write a marker"))
+    monkeypatch.setattr(guest_uploads, "staged_path", lambda *args: pytest.fail("must not stage bytes"))
+    response = _upload(client, headers={"Authorization": "Bearer verified"})
+    assert response.status_code == 503
+    assert response.json()["error"]["error_code"] == ErrorCode.INTERNAL
+    assert response.json()["error"]["retryable"] is True
+    assert response.json()["error"]["message"] == (
+        "Studio could not check your daily drawing limit. Nothing was uploaded. Please try again.")
+    assert "secret" not in response.text
+
+
+def test_auth_off_and_guest_uploads_never_charge_account(client, monkeypatch, account_quota_memory):
+    monkeypatch.setattr(guest_uploads, "check_and_count_account_upload",
+                        lambda *args: pytest.fail("account quota called"))
+    assert _upload(client, headers={"X-Tenant-Id": "demo-account"}).status_code == 202
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_GUEST_SECRET", "test-secret")
+    assert _upload(client).status_code == 202
+
+
+def test_account_last_slot_is_atomic(account_quota_memory, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    monkeypatch.setenv("LEAF_ACCOUNT_UPLOADS_PER_WORKSPACE_PER_DAY", "1")
+    barrier = Barrier(8)
+
+    def charge(_):
+        barrier.wait()
+        return guest_uploads.check_and_count_account_upload("workspace")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(charge, range(8)))
+    assert sum(result.accepted for result in results) == 1
+    assert sum(result.scope == "workspace" for result in results) == 7

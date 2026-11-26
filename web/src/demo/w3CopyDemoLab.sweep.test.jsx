@@ -40,7 +40,7 @@ const mountDeploys = (fetchImpl = noSchedules) => render(<DeploysView client={cl
 describe('demo and Lab user-facing copy', () => {
   it('offers Claude sign-in without credential jargon', () => {
     render(<DemoConversationPanel canSignIn onSignIn={vi.fn()} />)
-    expect(screen.getByRole('button', { name: 'Sign in to use your Claude subscription' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign in to link your API key' })).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('mounted')
   })
 

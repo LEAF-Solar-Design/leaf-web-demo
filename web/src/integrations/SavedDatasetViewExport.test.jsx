@@ -38,6 +38,19 @@ it.each([1, 0])('downloads the saved revision and its complete query of %i recor
   })
 })
 
+it('withholds an unfiltered source snapshot when the saved view has a pair condition', () => {
+  const filteredElement = { ...element, props: { ...element.props, row_grouping: {
+    kind: 'provider_pairs', pair_key_field: 'pair', provider_field: 'provider', providers: ['Alpha', 'Beta'],
+    member_filter: { field: 'quota', op: 'lt', value: 25 },
+  } } }
+  const filtered = { ...record, element: filteredElement }
+  render(<SavedDatasetViewExport {...props} record={filtered}
+    readIdentity={JSON.stringify(['session-a', filtered.revision, filteredElement])} />)
+  expect(screen.queryByRole('button', { name: 'Download view snapshot (JSON)' })).toBeNull()
+  expect(screen.getByText('Snapshot download is unavailable for views with a pair condition.')).toBeTruthy()
+  expect(create).toHaveBeenCalledTimes(0)
+})
+
 it.each([{ status: 'stale' }, { next_cursor: 'page2' }, { query_coverage: undefined },
   { dataset_ref: { ...reference, version: 2 } }])('withholds incomplete or mismatched reads', changes => {
   render(<SavedDatasetViewExport {...props} read={{ ...read, ...changes }} />)

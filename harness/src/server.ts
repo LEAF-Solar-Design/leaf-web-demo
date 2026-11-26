@@ -89,6 +89,7 @@ import { BadMessageError } from "./agent/converseLoop.js";
 import { authoredExecutionEnabled } from "./runtimeSafety.js";
 import {
   withAuthorStandardServicesAuthority,
+  withoutAuthorStandardServices,
   type HumanApprovalHostInput,
   type LeafStandardServicesHumanApprovalHost,
 } from "./ports/impl/leafStandardServicesResolver.js";
@@ -1425,8 +1426,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
           const authority = {tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string};
           const witness = {jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
           if (path.endsWith("/build") && !authoredExecutionEnabled()) return send(res,503,{error:{code:"authored_execution_disabled"}});
-          // A status request only observes the existing identity. Never build.
-          const result = path.endsWith("/build") ? await builds!.submit(authority,witness) : await (views || builds!).observe(authority,witness);
+          let result;
+          if (path.endsWith("/build")) {
+            result = await builds!.submit(authority, witness, views?.observe.bind(views));
+          } else if (views) {
+            result = await views.observe(authority, witness);
+            if (result.status === "unknown" && builds) {
+              const live = await builds.observe(authority, witness, true);
+              if (live.status === "building" || live.status === "failed") result = live;
+            }
+          } else {
+            result = await builds!.observe(authority, witness);
+          }
           res.setHeader("Cache-Control","private, no-store");
           return send(res,200,result);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }
@@ -1677,7 +1688,13 @@ export function createHarness(ports: HarnessPorts, opts?: {
         }
         const tenant = tenantForRequest(req, body);
         const description = requiredText(body, "description");
-        const authority = authorAuthorityForRequest(req, tenant);
+        const services = req.headers["x-author-services"];
+        const noServices = services === "none" && body.target === "branch"
+          && !Object.keys(req.headers).some((name) => name.startsWith("x-authority-"));
+        if (services !== undefined && !noServices) {
+          return send(res, 400, { error: { message: "invalid author services selection" } });
+        }
+        const authority = noServices ? undefined : authorAuthorityForRequest(req, tenant);
         // These names deliberately match AuthorLoop.stage's request exactly.
         const stage = () => loop.stage(tenant, description, {
             changeSetId: requiredText(body, "changeSetId"),
@@ -1692,7 +1709,9 @@ export function createHarness(ports: HarnessPorts, opts?: {
               ? {}
               : { targetToolName: requiredText(body, "targetToolName") }),
           });
-        const out = authority
+        const out = noServices
+          ? await withoutAuthorStandardServices(stage)
+          : authority
           ? await withAuthorStandardServicesAuthority(authority, stage)
           : await stage();
         return send(res, 200, out);

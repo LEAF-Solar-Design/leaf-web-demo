@@ -23,6 +23,7 @@ import {
 } from "./tools/submitBranchToolProposal.js";
 import { validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
 import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "./tools/branchCompileCheck.js";
+import { CSHARP_PARSER_ERROR_CODES, decodeOperatorEntities } from "./tools/decodeHtmlEntities.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
 import {
@@ -92,6 +93,7 @@ interface BranchCompileAttempt {
   decision: BranchCompileFeedback["summary"]["decision"];
   errors: number;
   diagnostics: Pick<BranchCompileFeedback["diagnostics"][number], "code" | "file" | "line">[];
+  source_decoded?: { entities: number; original_sha256: string; compiled_sha256: string };
 }
 
 export interface StageCustomizationResponse extends Partial<AuthorResponse> {
@@ -558,17 +560,47 @@ export class AuthorLoop {
           if (submission) throw new AuthorLoopError("V16: only one branch package may be submitted", 422);
           const session = `branch-author:${request.changeSetId}`;
           const now = new Date();
-          const { manifest, files } = prepareBoundBranchPackage(proposal, session, now, request.toolName);
+          let { manifest, files } = prepareBoundBranchPackage(proposal, session, now, request.toolName);
+          let sourceDecoded: BranchCompileAttempt["source_decoded"];
+          let decodedRefusal: { entities: number; diagnostics: string[] } | undefined;
           if (!branchCompileDisabled()) {
             // Keep the checked proposal stable across the asynchronous compiler call.
             proposal = snapshotUntrusted(proposal);
-            const outcome = await branchCompileCheck(manifest.name, files);
+            let outcome = await branchCompileCheck(manifest.name, files);
+            if (outcome.status === "refused" && outcome.decision === "compile_failed" &&
+                outcome.structured.some(d => (d.file === "main.csx" || d.file === `${manifest.name}/main.csx` ||
+                  d.file === `branch-tools/${manifest.name}/main.csx`) && CSHARP_PARSER_ERROR_CODES.has(d.code))) {
+              // Decode only what the bounded attempt row can disclose (8 rows, 10000 entities).
+              const libSources = Object.keys(files).filter(path => path.startsWith("lib/")).map(path => files[path]);
+              const decoded = compileAttempts.length < 8 ? decodeOperatorEntities(files["main.csx"], libSources) : null;
+              if (decoded && decoded.entities <= 10_000) {
+                try {
+                  const candidate = { ...(proposal as Record<string, unknown>), main_csx: decoded.source };
+                  const prepared = prepareBoundBranchPackage(candidate, session, now, request.toolName);
+                  const rechecked = await branchCompileCheck(prepared.manifest.name, prepared.files);
+                  if (rechecked.status === "accept") {
+                    sourceDecoded = {
+                      entities: decoded.entities,
+                      original_sha256: createHash("sha256").update(files["main.csx"], "utf8").digest("hex"),
+                      compiled_sha256: createHash("sha256").update(decoded.source, "utf8").digest("hex"),
+                    };
+                    proposal = candidate;
+                    ({ manifest, files } = prepared);
+                    outcome = rechecked;
+                    console.error(`[harness] branch source decoded: entities=${sourceDecoded.entities} original=${sourceDecoded.original_sha256.slice(0, 12)} compiled=${sourceDecoded.compiled_sha256.slice(0, 12)} tenant=${tenantId}`);
+                  } else if (rechecked.status === "refused") {
+                    decodedRefusal = { entities: decoded.entities, diagnostics: rechecked.diagnostics };
+                  }
+                } catch { /* A retry never replaces the original refusal unless fully accepted. */ }
+              }
+            }
             if (compileAttempts.length < 8) {
               const locations = outcome.status === "refused" ? outcome.structured : [];
               compileAttempts.push({
                 n: compileAttempts.length + 1, decision: outcome.summary.decision, errors: outcome.summary.errors,
                 diagnostics: locations.filter(d => d.file.length > 0 && d.file.length <= 120)
                   .slice(0, 10).map(({ code, file, line }) => ({ code, file, line })),
+                ...(sourceDecoded ? { source_decoded: sourceDecoded } : {}),
               });
             }
             console.error(`[harness] branch compile check: decision=${branchCompileDecision(outcome)} ms=${outcome.ms} tenant=${tenantId}`);
@@ -581,7 +613,12 @@ export class AuthorLoop {
             if (outcome.status === "refused") {
               const hint = Object.entries(files).some(([p, src]) => p.endsWith(".csx") && /&(?:amp|lt|gt|quot);/.test(src))
                 ? " (source contains HTML entities; write C# operators such as && < > literally)" : "";
-              const message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              let message = ("compile failed: " + outcome.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+              if (decodedRefusal) {
+                const suffix = `; after Studio decoded ${decodedRefusal.entities} HTML escapes the source still fails: ` +
+                  decodedRefusal.diagnostics.slice(0, 5).join("; ");
+                message += suffix.slice(0, 1500 - message.length);
+              }
               throw new BranchCompileRefusal(path, message, { summary: outcome.summary, diagnostics: outcome.structured });
             }
           }
@@ -589,6 +626,7 @@ export class AuthorLoop {
           const result = submitBranchToolProposal(repoDir, proposal, {
             session, now, targetToolName: request.targetToolName, toolName: request.toolName,
           });
+          if (sourceDecoded) result.source_decoded = sourceDecoded.entities;
           submission = snapshotUntrusted(result) as BranchSubmissionResult;
           return result;
         },

@@ -175,6 +175,13 @@ def _source(tenant, project_id, drawing_id, meta):
 
 
 def read_project_artifact(tenant, project_id, drawing_id, artifact_id, *, current=False):
+    meta, content, _context = read_project_artifact_with_source(
+        tenant, project_id, drawing_id, artifact_id, current=current)
+    return meta, content
+
+
+def read_project_artifact_with_source(tenant, project_id, drawing_id, artifact_id, *, current=False):
+    """Return verified bytes and the exact saved graph bound to the artifact."""
     if not policy.project_runs_enabled():
         _fail("project_execution_disabled")
     if (not isinstance(project_id, UUID) or not isinstance(drawing_id, UUID)
@@ -206,4 +213,4 @@ def read_project_artifact(tenant, project_id, drawing_id, artifact_id, *, curren
             _fail("ARTIFACT_STALE")
         if meta["tool"] in _ELECTRICAL_EXPORTS:
             require_current_export(context.graph)
-    return meta, content
+    return meta, content, context
