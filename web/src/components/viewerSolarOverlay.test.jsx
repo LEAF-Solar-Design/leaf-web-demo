@@ -456,15 +456,28 @@ describe('stored Solar graph in real Viewer', () => {
     expect(view.ref.current).toBeTruthy()
   })
 
-  it('highlights a complete bent homerun when its shared aisle is picked', () => {
-    const graph = roof()
-    graph.routes.push(R(2, 'start homerun', [[3, 0], [3, 2], [4, 2]]))
+  it.each([
+    { name: 'zero', originX: 0, originY: 0 },
+    { name: 'offset', originX: 2450, originY: -780 },
+    { name: 'billion-scale', originX: 1e9, originY: -1e9 },
+  ])('highlights a complete bent homerun at the $name drawing origin', ({ originX, originY }) => {
+    const toDrawing = ([x, y]) => [originX + x, originY + y]
+    const graph = G({ routes: [
+      R(1, 'start homerun', [[2, 0], [3, 0], [3, 2]].map(toDrawing)),
+      R(2, 'start homerun', [[3, 0], [3, 2], [4, 2]].map(toDrawing)),
+    ] })
     const shown = intakeOf(graph), onSelectEntity = vi.fn()
+    shown.polylines[0].pts = [[-5, -5], [5, -5], [5, 5], [-5, 5]].map(toDrawing)
     const view = mountViewer(shown, { solarOverlay: overlayOf(shown), onSelectEntity })
-    clickDrawingPoint(view, 3, 1)
-    expect(worldVertices(routeHighlight())).toEqual([2, 0, 1.5, 3, 0, 1.5, 3, 0, 1.5, 3, 2, 1.5])
+    clickDrawingPoint(view, ...toDrawing([3, 1]))
+    const highlight = routeHighlight()
+    expect(Array.from(highlight.geometry.attributes.position.array)).toEqual([
+      2, 0, 1.5, 3, 0, 1.5, 3, 0, 1.5, 3, 2, 1.5,
+    ])
+    expect(worldVertices(highlight)).toEqual([[2, 0], [3, 0], [3, 0], [3, 2]]
+      .flatMap(point => [...toDrawing(point), 1.5]))
     expect(onSelectEntity).not.toHaveBeenCalled()
-    clickDrawingPoint(view, 3, 1, { shiftKey: true })
+    clickDrawingPoint(view, ...toDrawing([3, 1]), { shiftKey: true })
     expect(onSelectEntity).toHaveBeenCalledWith('A', { additive: true })
   })
 
