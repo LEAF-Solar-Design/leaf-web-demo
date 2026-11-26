@@ -1279,11 +1279,12 @@ export default function ConversePanel({
       // it lands, follows it rather than replacing it.
       const object = c.summary
       const rawOutcome = c.result && c.result !== c.summary ? c.result : ''
+      const structuredOutcome = ['{', '['].includes(String(rawOutcome).trim()[0])
       // A failed chip already says Failed: drop the stacked "error: tool
       // error:" wire prefixes so the chip reads as the reason itself.
       const outcome = st.state === 'failed'
         ? String(rawOutcome).replace(/^(?:\s*(?:tool\s+)?error:\s*)+/i, '')
-        : rawOutcome
+        : structuredOutcome ? '' : rawOutcome
       return (
         <li key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
           <span className={st.dot} aria-hidden="true" />
@@ -1465,6 +1466,12 @@ export default function ConversePanel({
   }
 
   const otherPendingApprovals = pendingApprovals.filter(approval => !model.plans.has(approval.confirmation_id))
+  const showStopNote = (t) => {
+    if (!t.stopReason || !STOP_NOTES[t.stopReason]) return false
+    if (t.stopReason !== 'awaiting_approval') return true
+    const cards = t.feed.filter(item => ['plan', 'confirm', 'proposal'].includes(item.kind))
+    return cards.length === 0 || cards.some(item => !model.decisions.has(item.id) && decidedLocal[item.id] === undefined)
+  }
   const conversation = (
     <>
       {connectionState !== 'connected' && connectionState !== 'connecting' && (
@@ -1573,9 +1580,9 @@ export default function ConversePanel({
                 <span className="dim">thinking…</span>
               </div>
             )}
-            {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
+            {(t.usage || showStopNote(t)) && (
               <div className="converse-turnfoot">
-                {t.stopReason && STOP_NOTES[t.stopReason] && !(t.refused && t.stopReason === 'error') && (
+                {showStopNote(t) && !(t.refused && t.stopReason === 'error') && (
                   <span className="dim">{humanizeError(STOP_NOTES[t.stopReason])}</span>
                 )}
                 {t.usage && modelBadge(t.usage) && (

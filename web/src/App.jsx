@@ -1,6 +1,7 @@
 import './structural.css'
 import InviteAccept from './invites/InviteAccept.jsx'
 import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
+import { planLabel } from './lib/planLabel.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
 import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
@@ -7132,7 +7133,7 @@ export default function App() {
             spend are muted metadata (green is reserved for genuine states). */}
         <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {gateTier}</span>
+        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {planLabel(gateTier) || gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}

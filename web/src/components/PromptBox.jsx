@@ -25,7 +25,7 @@
 // image dropped on that same G2 well, or one picked through the "+ add" chip
 // lands as a quiet chip carrying its name and size.
 
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import PlanToggle from './converse/PlanToggle.jsx'
 import useExit from '../useExit.js'
@@ -42,6 +42,8 @@ import CockpitIcon from '../site/CockpitIcon.jsx'
 import {
   appendPromptHistory,
   autoGrowHeight,
+  LINE_PX,
+  MAX_ROWS,
   createPromptHistoryState,
   filterRunnable,
   historyKeydown,
@@ -226,6 +228,25 @@ export default function PromptBox({
   const [dropErr, setDropErr] = useState(null)
   const dragDepth = useRef(0) // dragenter/leave pair counter (children re-fire them)
   const rootRef = useRef(null)
+  const fieldRef = useRef(null)
+  const [wrapped, setWrapped] = useState(false)
+  const setFieldRef = useCallback((node) => {
+    fieldRef.current = node
+    if (typeof inputRef === 'function') inputRef(node)
+    else if (inputRef) inputRef.current = node
+  }, [inputRef])
+  useLayoutEffect(() => {
+    const field = fieldRef.current
+    if (!field) return
+    const baseline = autoGrowHeight(value)
+    field.style.height = baseline || ''
+    const computedLineHeight = getComputedStyle(field).lineHeight
+    const parsedLineHeight = computedLineHeight.endsWith('px') ? Number.parseFloat(computedLineHeight) : NaN
+    const lineHeight = Number.isFinite(parsedLineHeight) && parsedLineHeight > 0 ? parsedLineHeight : LINE_PX
+    const needsGrowth = field.scrollHeight > field.clientHeight + 1
+    if (needsGrowth) field.style.height = `${Math.min(field.scrollHeight, MAX_ROWS * lineHeight)}px`
+    setWrapped(Boolean(baseline) || needsGrowth)
+  }, [value])
   const scopeMenu = useExit(scopeOpen) // 180 ms M1 exit fade
   const [menuIdx, setMenuIdx] = useState(0)
   const [menuDismissed, setMenuDismissed] = useState(false)
@@ -774,6 +795,7 @@ export default function PromptBox({
       <div
         className={withAlias(`bar${dragging ? ' drag' : ''}${commandLine ? ' bar-command-line' : ''}`, classNames.bar)}
         data-tour="command-bar"
+        data-wrapped={wrapped ? 'true' : undefined}
         ref={rootRef}
         onDragEnter={dropIngestEnabled ? onDragEnter : undefined}
         onDragOver={dropIngestEnabled ? onDragOver : undefined}
@@ -949,7 +971,7 @@ export default function PromptBox({
               half the feature. rows=1 plus the autogrow below keeps the 40 px
               single-line well until the text actually needs a second row. */}
           <textarea
-            ref={inputRef}
+            ref={setFieldRef}
             rows={1}
             // The well's styling hangs off `.bar-input input` (an ELEMENT
             // selector), so a <textarea> matches none of it — width, border
