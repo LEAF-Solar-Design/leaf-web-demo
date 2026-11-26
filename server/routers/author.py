@@ -499,6 +499,8 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
 
 
 _CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
+    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
     "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
     "invalid_stage_source_request": "Invalid staged source request.",
     "stage_source_not_available": "Staged source is not available.",
@@ -534,11 +536,16 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "The approved request was not executed."
     ),
     "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
-    "stage_grant_exhausted": "This build was tried twice and could not be finished. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
     "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
     "stage_grant_refused": "Your access changed while this request waited. It was not started.",
     "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
     "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
 }
 
 
@@ -697,9 +704,13 @@ def _customization_error(
         exc.code,
         "Protected tool authoring could not complete. The approved request was not executed.",
     )
-    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
-        "error": error_obj("BAD_PARAMS", message, retryable=False),
+    retryable = exc.code in {"customization_stage_queue_full", "customization_stage_queue_unavailable"}
+    return JSONResponse(status_code=exc.status_code,
+                        headers={"Retry-After": "60"} if retryable else None,
+                        content=with_envelope_fields({
+        "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
+        **({"harness_not_called": True} if exc.harness_not_called else {}),
         **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 

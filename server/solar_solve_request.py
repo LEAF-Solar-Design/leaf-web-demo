@@ -87,11 +87,13 @@ def _frame(graph, frame_ref):
 def frame_split_grid(graph: dict, frame_ref: str, *, max_string_length: int) -> dict:
     """The plugin's group grid for one frame: panel ids in cells, plugin sizing."""
     frame = _frame(graph, frame_ref)
+    # Rooftop routing only needs identities; do not gather site geometry to count cells.
+    matrix = (_frame_geometry(graph, frame)[0] if "ground_slots" in frame else
+              [[cell["panel_ref"] for cell in row] for row in frame["matrix"]])
     rows, count = [], 0
-    for row in frame["matrix"]:
+    for row in matrix:
         cells = []
-        for cell in row:
-            ref = cell["panel_ref"]
+        for ref in row:
             cells.append({"Code": 1, "Id": ref, "Seq": 0} if ref is not None
                          else {"Code": 0, "Id": "", "Seq": 0})
             count += ref is not None
@@ -113,7 +115,7 @@ def build_split_requests(graph: dict, frame_ref: str, *, max_string_length: int,
     geometry and Modify is empty. row_indices map piece rows to frame rows.
     """
     grid = frame_split_grid(graph, frame_ref, max_string_length=max_string_length)
-    panels = {panel["id"]: panel for panel in graph["panels"]}
+    _, geometry = _frame_geometry(graph, _frame(graph, frame_ref))
     pieces = []
     for piece in split_group(grid, depth=depth, jogs=jogs):
         rows = []
@@ -123,10 +125,11 @@ def build_split_requests(graph: dict, frame_ref: str, *, max_string_length: int,
                 wire = {"Code": 0, "Id": "", "Seq": 0, "InverterId": -1,
                         "StringInputNumber": 0, "X": 0.0, "Y": 0.0, "Angle": 0.0}
                 if cell["Code"] == 1:
-                    panel = panels.get(cell["Id"])
-                    if panel is None:
+                    saved = geometry.get(cell["Id"])
+                    if saved is None:
                         raise GraphValidationError("SOLVE_GRID_MISMATCH")
-                    wire.update(Code=1, Id=cell["Id"], **_panel_geometry(panel))
+                    wire.update(Code=1, Id=cell["Id"], **{
+                        key: value or 0.0 for key, value in zip(("X", "Y", "Angle"), saved)})
                 cells.append(wire)
             rows.append({"Panels": cells})
         pieces.append({

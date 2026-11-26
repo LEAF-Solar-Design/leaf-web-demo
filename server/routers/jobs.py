@@ -704,7 +704,7 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
         key: env[key]
         for key in (
             "ok", "tool", "version", "result", "overlay", "timing_ms",
-            "cost", "error", "degraded_mode", "execution_provenance",
+            "cost", "error", "degraded_mode", "execution_provenance", "executed_code_digest",
         )
         if key in env
     }

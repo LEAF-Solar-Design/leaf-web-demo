@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
@@ -599,6 +600,48 @@ def test_postgres_async_stage_claim_race_is_single_owner(store) -> None:
             ("pg-worker-a", "pg-worker-b"),
         ))
     assert sum(claim is not None for claim in claims) == 1
+
+
+def test_postgres_fair_claim_exclusion_and_virtual_fifo(store) -> None:
+    prefix = f"pg-fair-{uuid4()}"
+    with store._connection() as conn:
+        excluded = tuple(row["tenant_id"] for row in conn.execute(
+            "SELECT DISTINCT tenant_id FROM customization_change_sets"
+        ).fetchall())
+    jobs = []
+    try:
+        for index, suffix in enumerate(("hog", "hog", "hog", "b", "c")):
+            change = create(store, f"{prefix}-{suffix}", f"{prefix}-{index}")
+            jobs.append(change)
+            store.transition(
+                tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+                next_state=ChangeState.STAGING, expected_version=change.version,
+                idempotency_key=f"{prefix}-stage-{index}",
+            )
+            with store._transaction() as conn:
+                conn.execute("UPDATE customization_change_sets SET created_at = ? WHERE change_set_id = ?",
+                             (f"2020-01-01T00:00:0{index}.000Z", change.change_set_id))
+        assert store.claim_stage(owner=prefix, fair=True,
+                                 exclude_tenants=excluded + tuple({j.tenant_id for j in jobs})) is None
+        for index in (0, 3, 4, 1, 2):
+            claim = store.claim_stage(owner=prefix, fair=True, exclude_tenants=excluded)
+            assert claim.change_set_id == jobs[index].change_set_id
+            if index == 0:
+                other = store.claim_stage(owner=prefix, fair=True,
+                                          exclude_tenants=excluded + (jobs[3].tenant_id, jobs[4].tenant_id))
+                assert other is None  # The hog's live lease excludes its next job.
+            with store._transaction() as conn:
+                conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                             "stage_lease_owner = NULL, stage_lease_expires_at = NULL, "
+                             "stage_started_at = ? WHERE change_set_id = ?",
+                             ("2020-01-02T00:00:00.000Z", claim.change_set_id))
+        assert store.claim_stage(owner=prefix, fair=True, exclude_tenants=excluded) is None
+    finally:
+        with store._transaction() as conn:
+            for job in jobs:
+                conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                             "stage_lease_owner = NULL, stage_lease_expires_at = NULL "
+                             "WHERE tenant_id = ? AND change_set_id = ?", (job.tenant_id, job.change_set_id))
 
 
 def test_postgres_async_worker_skips_bound_removal_and_claims_ordinary(store) -> None:

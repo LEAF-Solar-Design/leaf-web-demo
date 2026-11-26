@@ -458,9 +458,9 @@ def _frame_pieces(graph, frame_ref, pieces):
     and that the pieces cover each frame panel exactly once. Fails closed."""
     try:
         frame = next(f for f in graph["frames"] if f["id"] == frame_ref)
-        panels = {p["id"]: p for p in graph["panels"]}
-        where = {cell["panel_ref"]: (r, c) for r, row in enumerate(frame["matrix"])
-                 for c, cell in enumerate(row) if cell["panel_ref"] is not None}
+        matrix, geometry = _frame_geometry(graph, frame)
+        where = {ref: (r, c) for r, row in enumerate(matrix)
+                 for c, ref in enumerate(row) if ref is not None}
         if type(pieces) is not list or not 1 <= len(pieces) <= MAX_SPLIT_PIECES:
             raise ValueError()
         seen, parsed = set(), []
@@ -488,15 +488,13 @@ def _frame_pieces(graph, frame_ref, pieces):
                         offset = frame_col - c
                     if (frame_row, frame_col) != (rows[r], c + offset):
                         raise ValueError()
-                    panel = panels[ref]
                     if any(not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-9)
-                           for a, b in ((wire.X, panel["centre"][0]),
-                                        (wire.Y, panel["centre"][1]),
-                                        (wire.Angle, panel["angle"]))):
+                           for a, b in zip((wire.X, wire.Y, wire.Angle), geometry[ref])):
                         raise ValueError()
                     seen.add(ref)
             parsed.append(request)
-        if seen != set(frame["panel_refs"]):
+        expected = set(where) if "ground_slots" in frame else set(frame["panel_refs"])
+        if seen != expected:
             raise ValueError()
         return frame, parsed
     except (ValueError, TypeError, KeyError, IndexError, StopIteration):

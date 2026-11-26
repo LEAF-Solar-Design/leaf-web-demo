@@ -180,6 +180,7 @@ class CustomizationServiceError(RuntimeError):
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        self.harness_not_called = code == "stage_grant_cancelled"
         selected = detail if diagnostic_code is None else diagnostic_code
         self.diagnostic_code = (
             selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
@@ -393,6 +394,37 @@ def _harness_config() -> tuple[str, str]:
     so the two can never diverge on what "configured" means."""
     return (os.environ.get("LEAF_AUTHOR_HARNESS_URL", "").strip().rstrip("/"),
             os.environ.get("LEAF_HARNESS_SECRET", "").strip())
+
+
+def _stage_queue_limit() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_MAX_QUEUED", "").strip()
+    try:
+        limit = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return limit if 1 <= limit <= 10000 else 0
+
+
+def _stage_queue_status_enabled() -> bool:
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_QUEUE_STATUS", "").strip() == "1"
+
+
+def _stage_estimate_s() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_ESTIMATE_S", "").strip()
+    try:
+        estimate = int(value) if value.isascii() and value.isdecimal() else 0
+    except ValueError:
+        return 0
+    return estimate if 1 <= estimate <= 3600 else 0
+
+
+def _stage_worker_count() -> int:
+    value = os.environ.get("LEAF_CUSTOMIZATION_STAGE_WORKERS", "").strip()
+    try:
+        workers = int(value) if value.isascii() and value.isdecimal() else 1
+    except ValueError:
+        return 1
+    return workers if 1 <= workers <= 4 else 1
 
 
 def _harness_stage_timeout_s() -> float:
@@ -1267,6 +1299,24 @@ class CustomizationService:
         )
         if target == "branch" and target_tool_name:
             self._branch_revision_base(tenant_id, base, target_tool_name)
+        limit = _stage_queue_limit()
+        if limit > 0:
+            # The cap is soft: concurrent admissions between this check and the
+            # staging transition can exceed it by their number.
+            try:
+                try:
+                    self.store.get_change_set_by_idempotency(
+                        tenant_id=tenant_id, idempotency_key=idempotency_key
+                    )
+                except ChangeSetNotFoundError:
+                    if self.store.stage_queue_depth() >= limit:
+                        raise CustomizationServiceError("customization_stage_queue_full", 503)
+            except ToolRecordFieldError as exc:
+                raise CustomizationServiceError("record_fields_invalid", 503) from exc
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+                raise CustomizationServiceError("customization_stage_queue_unavailable", 503) from exc
         fingerprint = _stage_request_fingerprint(description, target)
         change = self._reserve_stage(
             tenant_id=tenant_id, idempotency_key=idempotency_key,
@@ -1926,6 +1976,21 @@ class CustomizationService:
             "poll_url": f"/api/author/stages/{change.change_set_id}",
             "retry_after_ms": 1000,
         }
+        if (_stage_queue_status_enabled() and status == "queued"
+                and change.state is ChangeState.STAGING):
+            # FIFO-order hint: retries or fair queuing can start in another order.
+            try:
+                ahead = self.store.stage_queue_ahead(change)
+            except (sqlite3.DatabaseError, PostgresError, OSError, RuntimeError) as exc:
+                if isinstance(exc, CustomizationServiceError):
+                    raise
+            else:
+                queue = {"ahead": ahead, "position": ahead + 1}
+                estimate = _stage_estimate_s()
+                if estimate > 0:
+                    workers = _stage_worker_count()
+                    queue["estimated_wait_s"] = ((ahead + workers - 1) // workers) * estimate
+                result["queue"] = queue
         if change.target_tool_name:
             result["target_tool_name"] = change.target_tool_name
         if change.plan_json and change.plan_digest:
@@ -2157,7 +2222,8 @@ class CustomizationService:
                 refusal.harness_not_called = True
                 raise refusal from exc
             if grant is not None and grant["revoked_ms"] is not None:
-                refusal = CustomizationServiceError("stage_grant_withdrawn", 409)
+                code = "stage_grant_cancelled" if grant["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
+                refusal = CustomizationServiceError(code, 409)
                 refusal.harness_not_called = True
                 raise refusal
         url, secret = _harness_config()
@@ -2212,6 +2278,13 @@ class CustomizationService:
                     "customization_author_job_failed", 502,
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
+                if without_services:
+                    notice = (
+                        "This build waited in line, so it ran without connected services. "
+                        "If it needs one, ask again when the line is short."
+                    )
+                    prefix = (reason or "")[:500 - len(notice) - 1].rstrip()
+                    reason = f"{prefix} {notice}" if prefix else notice
                 error.harness_reason = reason
                 if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
                     refusal = response.json().get("error")

@@ -983,7 +983,13 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["model"] = effective_model
     if credential_grant is not None:
         payload["credential_grant"] = credential_grant
-    instant_assignment = instant_execution.assignment_for_session(tenant_id, session_id)
+    instant_assignment = None
+    if entity_scope is None:
+        if project_execution_context is not None:
+            instant_assignment = instant_execution.project_assignment(
+                project_principal, session_id, project_execution_context)
+        elif not sess.get("project_id") and not sess.get("org_id"):
+            instant_assignment = instant_execution.assignment_for_session(tenant_id, session_id)
     harness_headers = broker_client.harness_headers()
     if project_execution_context is not None:
         # Constant marker only. The execution back-edge resolves durable turn custody.
@@ -1258,6 +1264,16 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
     if is_reservation(turn_id):
         # Not a turn: a restore owns the slot and releases it itself.
         return "not_cancellable"
+
+    try:
+        import customization_stage_grants
+        if customization_stage_grants.ttl_s() is not None:
+            customization_stage_grants.revoke_for_turn(
+                tenant_id, session_id, turn_id, reason="cancelled",
+            )
+    except Exception as exc:
+        print(f"[leaf-agent] stage grant cancel failed: {type(exc).__name__}",
+              file=sys.stderr)
 
     with _cancellers_lock:
         canceller = _cancellers.get(turn_id)
