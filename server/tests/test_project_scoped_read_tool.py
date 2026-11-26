@@ -513,6 +513,8 @@ def test_c02_changed_input_cannot_retarget_accepted_key(lane, read_job_store, ch
 
 
 def test_c02_callback_failure_is_a_real_replayable_failed_job(lane, read_job_store):
+    from leaf_platform import store
+
     calls = []
 
     def failed():
@@ -525,6 +527,9 @@ def test_c02_callback_failure_is_a_real_replayable_failed_job(lane, read_job_sto
     assert job["status"] == "failed" and job["result"]["ok"] is False
     assert job["error"]["error_code"] == ErrorCode.INTERNAL
     assert "executed_code_digest" not in job["result"]
+    saved = store.list_jobs(O1, P1)[0].to_dict()
+    assert saved["revision_run"]["executable_identity"] is None
+    assert "execution_context" not in saved
     assert job["result"]["project_context"]["input_version_id"] == str(V2)
     assert "private callback" not in json.dumps(job)
     assert read_job_store.db.execute("SELECT status FROM jobs").fetchone()[0] == "failed"
@@ -1043,6 +1048,57 @@ def test_project_read_executes_catalog_source(lane, catalog_read_case):
     assert identity.json() == {"executable_identity": {
         "kind": "instant-artifact", "digest": board[0]["result"]["executed_code_digest"],
     }}
+    assert board[0]["revision_run"] == {
+        "drawing_id": str(D1),
+        "catalog_digest": deps.catalog_tool_digest(tool),
+        **identity.json(),
+    }
+    assert "execution_context" not in board[0]
+
+
+def test_verified_artifact_failure_and_retry_are_saved_for_the_same_revision(
+    lane, read_job_store, tmp_path, monkeypatch,
+):
+    import hashlib
+
+    import instant_execution
+    from instant_artifact_registry import FilesystemTrustedPlatformArtifactRegistry
+    from leaf_platform import store
+
+    source = (b'def run(intake, params):\n'
+              b'    if params.get("prefix") == "invalid":\n'
+              b'        raise ValueError("filtered takeoff failed")\n'
+              b'    context = intake.get("drawing_context", intake)\n'
+              b'    return {"count": len(context.get("polylines") or [])}, None\n')
+    digest = "sha256:" + hashlib.sha256(source).hexdigest()
+    (tmp_path / "list_layers.py").write_bytes(source)
+    seed = deps.load_seed_catalog_tools()
+    tool = next(row for row in seed if row["name"] == "instant-list-layers")
+    tool = {**tool, "entry": "list_layers.py", "entrypoint": "list_layers:run",
+            "code_digest": digest, "artifact_digest": digest}
+    monkeypatch.setattr(
+        deps, "load_seed_catalog_tools",
+        lambda: [tool if row["name"] == tool["name"] else row for row in seed],
+    )
+    monkeypatch.setattr(
+        instant_execution, "ARTIFACT_REGISTRY", FilesystemTrustedPlatformArtifactRegistry(tmp_path),
+    )
+    headers = {"X-Org-Id": str(O1), "X-Project-Id": str(P1), "Prefer": "respond-async"}
+    failed = request(lane, tool=tool, params={"prefix": "invalid"},
+                     headers={**headers, "Idempotency-Key": "failed-attempt"})
+    retry = request(lane, tool=tool,
+                    headers={**headers, "Idempotency-Key": "new-attempt"})
+    assert failed.status_code == retry.status_code == 202, (failed.text, retry.text)
+    assert "filtered takeoff failed" in failed.json()["result"]["error"]["message"]
+    assert retry.json()["result"]["ok"] is True, retry.text
+    board_jobs = [job.to_dict() for job in store.list_jobs(O1, P1)]
+    assert sorted(job["status"] for job in board_jobs) == ["failed", "succeeded"]
+    for job in board_jobs:
+        assert job["input_version_id"] == str(V2)
+        assert job["revision_run"] == {
+            "drawing_id": str(D1), "catalog_digest": deps.catalog_tool_digest(tool),
+            "executable_identity": {"kind": "instant-artifact", "digest": digest},
+        }
 
 
 def test_selected_executable_identity_tracks_published_body(lane, tmp_path, monkeypatch):

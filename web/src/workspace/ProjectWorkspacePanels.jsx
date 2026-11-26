@@ -217,9 +217,75 @@ function JobDetail({ job, projectId }) {
   )
 }
 
+const REVISION_RUN_STATUS = {
+  succeeded: 'Completed',
+  failed: 'Failed',
+  running: 'In progress',
+  queued: 'In progress',
+}
+
+function RevisionRunList({
+  versions, project, jobs, tool, loadIdentity, onOpenVersion, onOpenJob,
+}) {
+  const toolName = tool?.name
+  const catalogDigest = tool?.catalog_digest
+  const showRuns = !!loadIdentity && !!project?.org_id && !!project?.project_id && !!toolName && !!catalogDigest
+    && tool.capabilities?.length === 1 && tool.capabilities[0] === 'drawing.read'
+  const requestKey = showRuns
+    ? JSON.stringify([project?.org_id, project?.project_id, toolName, catalogDigest])
+    : null
+  const [resolved, setResolved] = useState(null)
+
+  useEffect(() => {
+    if (!requestKey) return undefined
+    const request = new AbortController()
+    loadIdentity(toolName, catalogDigest, request.signal).then((identity) => {
+      if (!request.signal.aborted) setResolved({ requestKey, jobs, identity })
+    }, () => {
+      if (!request.signal.aborted) setResolved({ requestKey, jobs, identity: null })
+    })
+    return () => request.abort()
+  }, [requestKey, jobs, loadIdentity, toolName, catalogDigest])
+
+  const current = resolved?.requestKey === requestKey && resolved.jobs === jobs ? resolved : null
+  const identity = current?.identity
+  const latest = new Map()
+  if (identity) {
+    // The workspace supplies jobs newest first, with a stable tie break.
+    for (const job of jobs || []) {
+      const run = job.revision_run
+      if (job.org_id !== project.org_id || job.project_id !== project.project_id
+          || job.tool_name !== toolName || run?.catalog_digest !== catalogDigest
+          || run.executable_identity?.kind !== identity.kind
+          || run.executable_identity?.digest !== identity.digest) continue
+      const key = JSON.stringify([run.drawing_id, job.input_version_id])
+      if (!latest.has(key)) latest.set(key, job)
+    }
+  }
+
+  if (!versions.length) return <p>No versions yet.</p>
+  return <>
+    {showRuns && <p>{tool.label || toolName} run status</p>}
+    <ul>{versions.map((version) => {
+      const job = latest.get(JSON.stringify([version.drawing_id, version.version_id]))
+      const status = identity ? (REVISION_RUN_STATUS[job?.status] || 'Needs run')
+        : current ? 'Execution identity unavailable' : 'Checking run status'
+      return <li key={version.version_id}>
+        {onOpenVersion ? <button type="button" className="ground-row-action" onClick={() => onOpenVersion(version)}>v{version.seq} · {version.version_id}</button>
+          : <>v{version.seq} · {version.version_id}</>}
+        {showRuns && <>
+          {' · '}<span>{status}</span>
+          {job && onOpenJob && <> · <button type="button" className="ground-row-action"
+            onClick={() => onOpenJob(job)}>Open job {job.job_id}</button></>}
+        </>}
+      </li>
+    })}</ul>
+  </>
+}
+
 export default function ProjectWorkspacePanels({
   project, workspace, pane, onSelectPane, onBack, receipts, shipReceipts, slots,
-  onOpenVersion, onSelectJob, currentJob, mock,
+  onOpenVersion, onSelectJob, currentJob, mock, selectedTool, loadExecutableIdentity,
 }) {
   const heading = useRef(null)
   const origin = useRef(null)
@@ -247,12 +313,12 @@ export default function ProjectWorkspacePanels({
         artifacts={workspace?.drawing_artifacts || []} mock={mock} />
       break
     case 'versions':
-      content = versions.length ? <ul>{versions.map((version) => (
-        <li key={version.version_id}>
-          {onOpenVersion ? <button type="button" className="ground-row-action" onClick={() => onOpenVersion(version)}>v{version.seq} · {version.version_id}</button>
-            : <>v{version.seq} · {version.version_id}</>}
-        </li>
-      ))}</ul> : <p>No versions yet.</p>
+      content = <RevisionRunList versions={versions} project={project || workspace?.project}
+        jobs={workspace?.jobs} tool={selectedTool} loadIdentity={mock ? null : loadExecutableIdentity}
+        onOpenVersion={onOpenVersion} onOpenJob={onSelectJob && onSelectPane ? (job) => {
+          onSelectJob(job)
+          onSelectPane('jobs')
+        } : null} />
       break
     case 'tools':
       content = tools.length ? <ul>{tools.map((tool, index) => (

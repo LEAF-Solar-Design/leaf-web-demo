@@ -11,6 +11,87 @@ const settingsContext = {
   settingsDestination: 'settings-destination',
 }
 
+const takeoffProject = { org_id: 'org-a', project_id: 'project-a' }
+const takeoffTool = { name: 'beam-takeoff', catalog_digest: 'catalog-a', capabilities: ['drawing.read'] }
+const deployedIdentity = { kind: 'instant-artifact', digest: 'deployed-source' }
+const takeoffVersions = [
+  { drawing_id: 'drawing-a', version_id: 'historic', seq: 1 },
+  { drawing_id: 'drawing-a', version_id: 'current', seq: 2 },
+]
+
+function takeoffJob(jobId, versionId, status, changes = {}) {
+  return {
+    ...takeoffProject, job_id: jobId, input_version_id: versionId, status,
+    tool_name: takeoffTool.name,
+    revision_run: {
+      drawing_id: 'drawing-a', catalog_digest: takeoffTool.catalog_digest,
+      executable_identity: deployedIdentity,
+    },
+    ...changes,
+  }
+}
+
+it('shows a completed historical takeoff and a current revision that needs a run', async () => {
+  const historical = takeoffJob('historical-job', 'historic', 'succeeded')
+  const loadIdentity = vi.fn().mockResolvedValue(deployedIdentity)
+  const onSelectJob = vi.fn()
+  const onSelectPane = vi.fn()
+  const onOpenVersion = vi.fn()
+  render(<ProjectWorkspacePanels pane="versions" project={takeoffProject} selectedTool={takeoffTool}
+    workspace={{ drawing_versions: takeoffVersions, jobs: [historical] }}
+    loadExecutableIdentity={loadIdentity} onOpenVersion={onOpenVersion}
+    onSelectJob={onSelectJob} onSelectPane={onSelectPane} />)
+
+  const openJob = await screen.findByRole('button', { name: 'Open job historical-job' })
+  expect(openJob.closest('li').textContent).toContain('Completed')
+  expect(screen.getByRole('button', { name: 'v2 · current' }).closest('li').textContent).toContain('Needs run')
+  expect(loadIdentity).toHaveBeenCalledWith('beam-takeoff', 'catalog-a', expect.any(AbortSignal))
+  fireEvent.click(screen.getByRole('button', { name: 'v1 · historic' }))
+  expect(onOpenVersion).toHaveBeenCalledWith(takeoffVersions[0])
+  fireEvent.click(openJob)
+  expect(onSelectJob).toHaveBeenCalledWith(historical)
+  expect(onSelectPane).toHaveBeenCalledWith('jobs')
+})
+
+it('uses the newest matching failure, then picks up a completed retry', async () => {
+  const loadIdentity = vi.fn().mockResolvedValue(deployedIdentity)
+  const failed = takeoffJob('failed-job', 'current', 'failed')
+  const earlier = takeoffJob('earlier-job', 'current', 'succeeded')
+  const retried = takeoffJob('retry-job', 'current', 'succeeded')
+  const props = { pane: 'versions', project: takeoffProject, selectedTool: takeoffTool,
+    loadExecutableIdentity: loadIdentity }
+  const view = render(<ProjectWorkspacePanels {...props}
+    workspace={{ drawing_versions: takeoffVersions, jobs: [failed, earlier] }} />)
+  expect((await screen.findByText('Failed')).closest('li').textContent).toContain('current')
+  view.rerender(<ProjectWorkspacePanels {...props}
+    workspace={{ drawing_versions: takeoffVersions, jobs: [retried, failed, earlier] }} />)
+  expect((await screen.findByText('Completed')).closest('li').textContent).toContain('current')
+})
+
+it('leaves stale, legacy and unrelated saved results out of the current revision status', async () => {
+  const template = takeoffJob('template', 'historic', 'succeeded')
+  const jobs = [
+    takeoffJob('old-body', 'historic', 'succeeded', { revision_run: {
+      ...template.revision_run, executable_identity: { ...deployedIdentity, digest: 'old-source' },
+    } }),
+    takeoffJob('legacy', 'historic', 'succeeded', { revision_run: undefined }),
+    takeoffJob('other-tool', 'historic', 'succeeded', { tool_name: 'panel-takeoff' }),
+    takeoffJob('other-tenant', 'historic', 'succeeded', { org_id: 'org-b' }),
+    takeoffJob('other-project', 'historic', 'succeeded', { project_id: 'project-b' }),
+    takeoffJob('other-drawing', 'historic', 'succeeded', { revision_run: {
+      ...template.revision_run, drawing_id: 'drawing-b',
+    } }),
+    takeoffJob('other-definition', 'historic', 'succeeded', { revision_run: {
+      ...template.revision_run, catalog_digest: 'old-definition',
+    } }),
+  ]
+  render(<ProjectWorkspacePanels pane="versions" project={takeoffProject} selectedTool={takeoffTool}
+    workspace={{ drawing_versions: takeoffVersions, jobs }}
+    loadExecutableIdentity={vi.fn().mockResolvedValue(deployedIdentity)} />)
+  expect(await screen.findAllByText('Needs run')).toHaveLength(2)
+  expect(screen.queryByText('Completed')).toBeNull()
+})
+
 it('BI03-05 Settings eligibility fails closed with exact reasons', () => {
   const failures = [
     [{ lifecycleEnabled: false, mock: true, signedIn: false, sessionStatus: 'idle', projectId: null }, 'Project settings are unavailable in this build.'],

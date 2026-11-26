@@ -11,6 +11,7 @@ Tier / status vocabularies mirror the orchestration platform's tenancy prior art
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -273,6 +274,7 @@ class Job:
     deleted_at: Optional[datetime] = None
     purge_requested_at: Optional[datetime] = None
     purge_completed_at: Optional[datetime] = None
+    revision_run: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_row(cls, r: Dict[str, Any]) -> "Job":
@@ -285,6 +287,7 @@ class Job:
             deleted_at=r.get("deleted_at"),
             purge_requested_at=r.get("purge_requested_at"),
             purge_completed_at=r.get("purge_completed_at"),
+            revision_run=_project_read_revision(r),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -300,7 +303,46 @@ class Job:
             "deleted_at": _iso(self.deleted_at),
             "purge_requested_at": _iso(self.purge_requested_at),
             "purge_completed_at": _iso(self.purge_completed_at),
+            **({"revision_run": self.revision_run} if self.revision_run else {}),
         }
+
+
+def _project_read_revision(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Project only the identity needed to compare a saved read with the catalog."""
+    context = row.get("execution_context")
+    if row["kind"] != "run" or not isinstance(context, dict):
+        return None
+
+    from .canonical_jobs import PROJECT_READ_JOB_SCHEMA
+
+    if (context.get("schema") != PROJECT_READ_JOB_SCHEMA
+            or context.get("organization_id") != str(row["org_id"])
+            or context.get("project_id") != str(row["project_id"])
+            or not row.get("input_version_id")
+            or context.get("input_version_id") != str(row["input_version_id"])):
+        return None
+    catalog_digest = context.get("catalog_digest")
+    drawing_id = context.get("drawing_id")
+    if (not isinstance(drawing_id, str) or not drawing_id
+            or not isinstance(catalog_digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", catalog_digest)):
+        return None
+
+    result = row.get("result")
+    if not isinstance(result, dict):
+        return None
+    artifact_digest = result.get("executed_code_digest")
+    receipt = result.get("execution_provenance")
+    if isinstance(artifact_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
+        identity = {"kind": "instant-artifact", "digest": artifact_digest}
+    elif (isinstance(receipt, dict) and receipt.get("contract") == "leaf.tool-execution.v1"
+          and receipt.get("provider") == "e2b" and receipt.get("isolation") == "microvm"
+          and receipt.get("passed") is True and isinstance(receipt.get("source_sha256"), str)
+          and re.fullmatch(r"[0-9a-f]{64}", receipt["source_sha256"])):
+        identity = {"kind": "published-source", "digest": receipt["source_sha256"]}
+    else:
+        identity = None
+    return {"drawing_id": drawing_id, "catalog_digest": catalog_digest, "executable_identity": identity}
 
 
 @dataclass

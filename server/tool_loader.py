@@ -1393,9 +1393,12 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
             assert local is not None
             kind, payload = _run_in_sandbox(local, intake, params)
         if kind == "tool_error":
-            return err_envelope(ErrorCode.INTERNAL,
-                                f"tool {name!r} raised {payload}",
-                                retryable=False, tool=name, version=version, timing_ms=_ms())
+            env = err_envelope(ErrorCode.INTERNAL,
+                               f"tool {name!r} raised {payload}",
+                               retryable=False, tool=name, version=version, timing_ms=_ms())
+            if artifact is not None:
+                env["executed_code_digest"] = artifact.code_digest
+            return env
         if kind == "infra_error":
             return err_envelope(ErrorCode.INTERNAL,
                                 f"sandbox execution failed for tool {name!r}: {payload}",

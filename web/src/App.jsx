@@ -215,6 +215,7 @@ import DrawingUploadControl from './components/DrawingUploadControl.jsx'
 import LocalCadConnect from './localCad/LocalCadConnect.jsx'
 import { createLocalCadBridge } from './localCad/localCadBridge.js'
 import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
+import { getToolExecutableIdentity } from './workspace/revisionRunIdentity.js'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
 import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
@@ -6020,6 +6021,8 @@ export default function App() {
                 onOpenVersion={(version) => selectCanonicalVersion(version.version_id)}
                 onSelectJob={setBoardJob}
                 currentJob={boardJob}
+                selectedTool={selectedTool && tools.find((tool) => tool.name === selectedTool.name)}
+                loadExecutableIdentity={signedIn ? getToolExecutableIdentity : null}
                 mock={mock}
               />
               {standaloneMounted && <StandaloneMaterialUpload

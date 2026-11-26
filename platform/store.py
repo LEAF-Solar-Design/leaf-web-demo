@@ -1575,10 +1575,10 @@ def list_jobs(org_id: uuid.UUID, project_id: uuid.UUID) -> List[Job]:
         cur.execute(
             "SELECT job_id, project_id, org_id, kind, tool_name, status, spine_ref, params, "
             "result, input_version_id, output_version_id, cost_usd, created_at, updated_at, "
-            "deleted_at, purge_requested_at, purge_completed_at "
+            "deleted_at, purge_requested_at, purge_completed_at, execution_context "
             "FROM jobs WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
             "AND deleted_at IS NULL "
-            "ORDER BY created_at DESC",
+            "ORDER BY created_at DESC, job_id DESC",
             {"org_id": org_id, "project_id": project_id},
         )
         return [Job.from_row(r) for r in cur.fetchall()]
