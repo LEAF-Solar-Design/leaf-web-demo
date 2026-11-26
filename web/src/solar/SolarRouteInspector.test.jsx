@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import SolarRouteInspector from './SolarRouteInspector.jsx'
 import { solarGraphOverlay } from './solarGraphOverlay.js'
 
@@ -62,5 +62,36 @@ describe('SolarRouteInspector', () => {
   it('hides the panel when the active overlay has no drawable cable routes', () => {
     render(<SolarRouteInspector overlay={project([route('a', 'feeder', [[0, 0]])])} />)
     expect(screen.queryByText('Cable routes')).toBeNull()
+  })
+
+  it('shares the route selection with the Viewer and resets point navigation on a new pick', () => {
+    const overlay = project([
+      route('start', 'start homerun', [[0, 0], [0, 3], [2, 3]]),
+      route('end', 'end homerun', [[-4, 1], [-2, 1], [-2, -3]]),
+      route('feeder', 'feeder', [[4, 0], [4, 2], [8, 2]]),
+    ])
+    const onRouteSelect = vi.fn()
+    const inspector = selectedRouteId => (
+      <SolarRouteInspector overlay={overlay} selectedRouteId={selectedRouteId} onRouteSelect={onRouteSelect} />
+    )
+    const view = render(inspector(null))
+    fireEvent.click(screen.getByText('Cable routes'))
+    const select = screen.getByLabelText('Route')
+    fireEvent.change(select, { target: { value: 'feeder' } })
+    expect(onRouteSelect).toHaveBeenLastCalledWith('feeder')
+    view.rerender(inspector('feeder'))
+    expect(select.value).toBe('feeder')
+    fireEvent.click(screen.getByRole('button', { name: 'Next point' }))
+    expect(screen.getByRole('status').textContent).toContain('X 4, Y 2')
+    for (const [id, firstPoint] of [['start', 'X 0, Y 0'], ['end', 'X -4, Y 1']]) {
+      view.rerender(inspector(id))
+      expect(select.value).toBe(id)
+      expect(screen.getByRole('status').textContent).toContain('Point 1 of 3')
+      expect(screen.getByRole('status').textContent).toContain(firstPoint)
+    }
+    fireEvent.change(select, { target: { value: '' } })
+    expect(onRouteSelect).toHaveBeenLastCalledWith(null)
+    view.rerender(inspector(null))
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })
