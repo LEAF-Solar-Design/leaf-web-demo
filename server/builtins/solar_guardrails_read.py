@@ -109,26 +109,26 @@ def rows_for_intake(intake):
 
 
 def _cold_module_voltage(graph):
-    """Use verified global sizing evidence for conventional, uniform modules."""
-    evidence = solar_sizing_client.require_sizing(graph)
-    if evidence["mode"] != "global" or len(evidence["records"]) != 1:
-        raise GraphValidationError("GLOBAL_MODULE_VOLTAGE_REQUIRED")
-    record = next(iter(evidence["records"].values()))
-    response = solar_sizing_client.SizingResponse.model_validate(record["response"])
-    voltage = solar_sizing_client.compute_voc_cold(response.voc, response.bvoc,
-                                                   response.min_temp)
+    """Return module voltage, design temperature, and any evidence gap."""
+    try:
+        evidence = solar_sizing_client.require_sizing(graph)
+        if evidence["mode"] != "global" or len(evidence["records"]) != 1:
+            return None, None, "global_module_voltage_required"
+        record = next(iter(evidence["records"].values()))
+        response = solar_sizing_client.SizingResponse.model_validate(record["response"])
+        voltage = solar_sizing_client.compute_voc_cold(response.voc, response.bvoc,
+                                                       response.min_temp)
+    except GraphValidationError as error:
+        return None, None, error.code.lower()
+    except ValueError:
+        return None, None, "invalid_module_voltage"
     if not math.isfinite(voltage) or voltage <= 0:
-        raise GraphValidationError("INVALID_MODULE_VOLTAGE")
-    return voltage, response.min_temp
+        return None, None, "invalid_module_voltage"
+    return voltage, response.min_temp, None
 
 
 def string_voltage_report(graph, window):
-    try:
-        module_voc, min_temp = _cold_module_voltage(graph)
-        sizing_reason = None
-    except (GraphValidationError, ValueError) as error:
-        module_voc, min_temp = None, None
-        sizing_reason = getattr(error, "code", "INVALID_MODULE_VOLTAGE").lower()
+    module_voc, min_temp, sizing_reason = _cold_module_voltage(graph)
 
     devices = {device["id"]: device for device in graph["inverters"]}
     settings = graph["settings"]
