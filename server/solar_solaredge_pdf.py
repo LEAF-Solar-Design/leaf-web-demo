@@ -464,6 +464,10 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             total += len(stream.get_data())
             if total > MAX_CONTENT_BYTES:
                 raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
+        if len(self.counter) > 1:
+            self.counter[1] += total
+            if self.counter[1] > MAX_CONTENT_BYTES:
+                raise SolarEdgePdfError("CONTENT_TOO_LARGE", str(MAX_CONTENT_BYTES))
         try:
             parser = PDFContentParser(streams)
         except PSEOF:
@@ -664,7 +668,16 @@ def _count_pages(doc):
 
 
 def extract_primitives(pdf_bytes):
-    """Read page one of ``pdf_bytes`` into :class:`PagePrimitives`. Fails closed."""
+    """Read page one of the report for callers using the original extractor."""
+    return next(_iter_primitives(pdf_bytes, first_only=True))
+
+
+def iter_page_primitives(pdf_bytes):
+    """Read each physical page independently with shared report limits."""
+    return _iter_primitives(pdf_bytes, first_only=False)
+
+
+def _iter_primitives(pdf_bytes, *, first_only):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -678,30 +691,42 @@ def extract_primitives(pdf_bytes):
             raise SolarEdgePdfError("NO_PAGES")
         if pages > MAX_PAGES:
             raise SolarEdgePdfError("TOO_MANY_PAGES", str(MAX_PAGES))
-        page = next(PDFPage.create_pages(doc))
-        # Raw-coordinate parity is proven only for default units. Never silently scale labels.
-        unit = page.attrs.get("UserUnit", 1)
-        if type(unit) not in (int, float) or unit != 1:
-            raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
-        x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
-        crop = tuple(_num(v) for v in page.cropbox)
-        if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):
-            raise SolarEdgePdfError("PAGE_BOX_UNSUPPORTED", f"{page.mediabox} {page.cropbox}")
-        if page.rotate % 360 != 0:
-            raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
-        out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
+        page_objects = PDFPage.create_pages(doc)
+        if first_only:
+            page_objects = itertools.islice(page_objects, 1)
         rsrcmgr = _ResourceManager(caching=True)
-        device = _PrimitiveDevice(rsrcmgr, out)
-        interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, [0])
-        interpreter.render_contents(resolve1(page.resources) or {}, page.contents,
-                                    ctm=(1, 0, 0, 1, 0, 0))
+        counter = [0] if first_only else [0, 0]
+        paths = segments = letters = text_characters = 0
+        for page in page_objects:
+            # Raw-coordinate parity is proven only for default units. Never silently scale labels.
+            unit = page.attrs.get("UserUnit", 1)
+            if type(unit) not in (int, float) or unit != 1:
+                raise SolarEdgePdfError("PAGE_UNIT_UNSUPPORTED")
+            x0, y0, x1, y1 = (_num(v) for v in page.mediabox)
+            crop = tuple(_num(v) for v in page.cropbox)
+            if (x0, y0) != (0.0, 0.0) or crop != (x0, y0, x1, y1):
+                raise SolarEdgePdfError("PAGE_BOX_UNSUPPORTED", f"{page.mediabox} {page.cropbox}")
+            if page.rotate % 360 != 0:
+                raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
+            out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
+            device = _PrimitiveDevice(rsrcmgr, out)
+            interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter)
+            interpreter.render_contents(resolve1(page.resources) or {}, page.contents,
+                                        ctm=(1, 0, 0, 1, 0, 0))
+            paths += len(out.paths)
+            segments += device.segments
+            letters += len(out.letters)
+            text_characters += device.text_characters
+            if (paths > MAX_PATHS or segments > MAX_SEGMENTS or letters > MAX_LETTERS
+                    or text_characters > MAX_TEXT_CHARACTERS):
+                raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "report primitives")
+            yield out
     except SolarEdgePdfError:
         raise
     except (RecursionError, MemoryError) as exc:
         raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", type(exc).__name__) from exc
     except Exception as exc:  # pdfminer raises many unrelated types on malformed input
         raise SolarEdgePdfError("MALFORMED_PDF", f"{type(exc).__name__}: {exc}"[:200]) from exc
-    return out
 
 
 def extract_primitives_from_file(path):

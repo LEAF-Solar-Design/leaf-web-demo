@@ -231,7 +231,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [corpusMaterial, setCorpusMaterial] = useState('')
   const [corpusSuite, setCorpusSuite] = useState('')
   const [corpusMessage, setCorpusMessage] = useState('')
-  const [corpusLoading, setCorpusLoading] = useState(false)
+  const [corpusFailure, setCorpusFailure] = useState(null)
+  const savedCorpusBlock = (restored.graph || initialDocument)?.blocks?.find(block => block.registry.id === 'corpus-evaluator')
   const corpusRequest = useRef(0)
   const toolsRequest = useRef(null)
   const toolsActive = useRef(true)
@@ -268,7 +269,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     const generation = logoutGeneration.current
     const requestAuthority = authHeaders().Authorization
     setCorpusOptions(previous => previous ? { ...previous, materials: [] } : null)
-    setCorpusLoading(true)
+    setCorpusFailure(null)
     setCorpusMessage('Loading project reference files…')
     try {
       const query = new URLSearchParams(project ? { project_id: project } : {})
@@ -279,13 +280,15 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       const options = await response.json()
       if (request !== corpusRequest.current || generation !== logoutGeneration.current
           || explicitlySignedOut.current || authHeaders().Authorization !== requestAuthority) return
+      if (!options?.manifest) throw new Error('Corpus evaluation is unavailable for this project.')
       setCorpusOptions(options)
-      setCorpusLoading(false)
       setCorpusMessage(options.limited ? 'Showing the first available projects.' : '')
     } catch (error) {
-      if (request === corpusRequest.current && generation === logoutGeneration.current) {
-        setCorpusOptions(null); setCorpusMessage(error.message)
-        setCorpusLoading(false)
+      if (request === corpusRequest.current && generation === logoutGeneration.current
+          && !explicitlySignedOut.current && authHeaders().Authorization === requestAuthority) {
+        setCorpusOptions(null)
+        setCorpusMessage(error.message)
+        setCorpusFailure({ graph: restored.graph || initialDocument, message: error.message })
       }
     }
   }
@@ -314,13 +317,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     setCorpusMessage('Corpus evaluation added. Save this graph, then run it to evaluate the complete original.')
   }
   useEffect(() => {
-    const graph = restored.graph || initialDocument
-    const block = graph?.blocks?.find(item => item.registry.id === 'corpus-evaluator')
-    if (block && !hidden) {
-      setCorpusProject(block.settings.project_id)
-      setCorpusMaterial(block.settings.corpus.material_id)
-      setCorpusSuite(block.settings.suite.material_id)
-      void loadCorpusOptions(block.settings.project_id, { manifestOnly: !corpusPanel })
+    if (savedCorpusBlock && !hidden) {
+      setCorpusProject(savedCorpusBlock.settings.project_id)
+      setCorpusMaterial(savedCorpusBlock.settings.corpus.material_id)
+      setCorpusSuite(savedCorpusBlock.settings.suite.material_id)
+      void loadCorpusOptions(savedCorpusBlock.settings.project_id, { manifestOnly: !corpusPanel })
     } else if (corpusPanel && !hidden) {
       void loadCorpusOptions(corpusProject)
     }
@@ -382,6 +383,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       explicitlySignedOut.current = true
       corpusRequest.current += 1
       setCorpusOptions(null)
+      setCorpusFailure(null)
       setCorpusPanel(false)
       setCorpusProject(''); setCorpusMaterial(''); setCorpusSuite(''); setCorpusMessage('')
       account.current = null
@@ -612,7 +614,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       setRestored({ graph: client.state.restoredGraph, key: client.state.restoredKey })
     }
   }), [client, restored.key, live.onChange])
-  const validDocument = live.ready ? live.draft.document : null
+  const activeGraph = live.draft?.document || restored.graph || initialDocument
+  const waitingForCorpusManifest = !corpusOptions?.manifest && savedCorpusBlock
+    && activeGraph.blocks.some(block => block.registry.id === 'corpus-evaluator')
+  const savedCorpusError = corpusFailure?.graph === (restored.graph || initialDocument) ? corpusFailure?.message : null
+  const validDocument = !waitingForCorpusManifest && live.ready ? live.draft.document : null
   const pollers = useRef(new Map())
   const [sources] = useState(() => createStudioSources({
     fetchImpl: (path, init) => fetchWithBudget(globalThis.fetch, `${config.apiBase}${path}`, {
@@ -655,14 +661,16 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     <div className="lab-graph-view" hidden={hidden}>
       {opened ? <>
         <section className="lab-graph-status" aria-label="Graph readiness">
-          <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
-          {!corpusOptions?.manifest && (restored.graph || initialDocument)?.blocks?.some(block => block.registry.id === 'corpus-evaluator') &&
-            <div role={corpusLoading ? 'status' : 'alert'}>
-              <p>{corpusLoading ? 'Loading saved corpus controls…' : `Saved corpus controls are unavailable. ${corpusMessage}`}</p>
-              {!corpusLoading && corpusProject && <button type="button"
-                onClick={() => { void loadCorpusOptions(corpusProject, { manifestOnly: true }) }}>Retry corpus controls</button>}
-            </div>}
-          {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
+          {waitingForCorpusManifest ? (
+            savedCorpusError ? <div role="alert">
+              <p>Saved corpus controls are unavailable. {savedCorpusError}</p>
+              {savedCorpusBlock.settings.project_id && <button type="button"
+                onClick={() => { void loadCorpusOptions(savedCorpusBlock.settings.project_id, { manifestOnly: true }) }}>Retry corpus controls</button>}
+            </div> : <p role="status">Loading saved corpus controls…</p>
+          ) : <>
+            <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
+            {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
+          </>}
           <button type="button" disabled={!validDocument || (!onRun && (explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
