@@ -2201,7 +2201,7 @@ def build_suites() -> List[Suite]:
               ], 1934),
         Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
-                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py", "tests/test_x06_layer_subtotals.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
                   "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
                   "tests/test_x03_joined_spline_author.py",
