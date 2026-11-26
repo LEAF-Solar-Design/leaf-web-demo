@@ -261,6 +261,55 @@ def test_reexport_retains_complete_block_capture_at_limits(nested_tail):
     assert reopened["blocks"]["Panel0"] == intake["blocks"]["Panel0"]
 
 
+def _nested_outline_dxf(vertex_groups, outline_groups=()):
+    pairs = [(0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Module"),
+             (0, "LWPOLYLINE"), (90, 4), (70, 1), *outline_groups, *vertex_groups,
+             (0, "ENDBLK"), (0, "BLOCK"), (2, "Panel"), (0, "INSERT"), (5, "A1"),
+             (2, "Module"), (10, 1), (20, 2), (0, "ENDBLK"), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "A2"), (2, "Panel"),
+             (10, 4), (20, 5), (0, "ENDSEC"), (0, "EOF")]
+    return "".join(f"{code}\n{value}\n" for code, value in pairs).encode()
+
+
+@pytest.mark.parametrize(("bulges", "thickness"), [
+    ([0.5, 0, 0, 0], 0),
+    ([0, -0.25, 0, 0], 0),
+    ([0, 0, 0, 0], 1.25),
+    ([0, 0, -0.625, 0.125], -0.03125),
+    ([0, 0, 0, 0], 0),
+])
+def test_nested_block_polyline_preserves_edge_geometry(bulges, thickness):
+    vertices = []
+    for (x, y), bulge in zip([(0, 0), (3, 0), (3, 2), (0, 2)], bulges, strict=True):
+        vertices.extend([(10, x), (20, y)])
+        if bulge:
+            vertices.append((42, bulge))
+    drawing = parse_dxf_bytes(_nested_outline_dxf(vertices, [(39, thickness)]))
+    exported = intake_to_dxf(drawing)
+    reopened = parse_dxf_bytes(exported)
+    assert reopened["blocks"]["Panel"]["nested_inserts"] == drawing["blocks"]["Panel"]["nested_inserts"]
+    for intake in (drawing, reopened):
+        outline, = intake["blocks"]["Module"]["children"]
+        assert outline.get("bulges", [0] * 4) == bulges
+        assert outline.get("thickness", 0) == thickness
+        assert ("bulges" in outline) == any(bulges)
+        assert ("thickness" in outline) == bool(thickness)
+    outline, = (record for record in _records(_sections(exported)["BLOCKS"])
+                if record[0] == ("0", "LWPOLYLINE"))
+    assert [float(value) for code, value in outline if code == "42"] == [b for b in bulges if b]
+    assert [float(value) for code, value in outline if code == "39"] == ([thickness] if thickness else [])
+
+
+@pytest.mark.parametrize("invalid_groups", [
+    [(39, "nan")], [(42, "nan")], [(42, 1), (42, -1)],
+])
+def test_nested_block_polyline_refuses_malformed_geometry(invalid_groups):
+    vertices = [(10, 0), (20, 0), *invalid_groups, (10, 3), (20, 2)]
+    drawing = parse_dxf_bytes(_nested_outline_dxf(vertices))
+    with pytest.raises(intake_dxf.IntakeDxfError, match="truncated block children"):
+        intake_to_dxf(drawing)
+
+
 def test_case_distinct_block_records_keep_definition_owners():
     intake = {"blocks": {name: {"base": [0, 0, 0], "children": []} for name in ("B", "b")}}
     back = _round_trip_with_resolved_pointers(intake)

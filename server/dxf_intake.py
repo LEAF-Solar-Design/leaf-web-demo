@@ -749,6 +749,25 @@ def _parse_block_child(pairs, i, kind):
                      nrm=[round(v, 6) for v in _group_point(groups, 210, (0, 0, 1))],
                      elev=round(_float(groups.get(38, "0")), 3),
                      pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]])
+        thickness = float(groups.get(39, "0"))
+        if not math.isfinite(thickness):
+            raise ValueError("LWPOLYLINE thickness must be finite")
+        if thickness:
+            child["thickness"] = thickness
+        bulges = []
+        bulge_seen = False
+        for code, value in pairs[i:end]:
+            if code == 10:
+                bulges.append(0.0)
+                bulge_seen = False
+            elif code == 42:
+                bulge = float(value)
+                if not bulges or bulge_seen or not math.isfinite(bulge):
+                    raise ValueError("LWPOLYLINE needs one finite bulge per vertex at most")
+                bulges[-1] = bulge
+                bulge_seen = True
+        if any(bulges):
+            child["bulges"] = bulges
     elif kind in ("CIRCLE", "ARC"):
         entity, end = _parse_circle_or_arc(pairs, i, kind)
         if entity is None or round(entity["r"], 3) <= 0:

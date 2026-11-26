@@ -1105,6 +1105,14 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
                                elev=_number(child.get("elev"), where))
                     if not any(row["nrm"]):
                         _fail(f"{where}: nrm must not be the zero vector")
+                    if "thickness" in child:
+                        row["thickness"] = _number(child["thickness"], f"{where}.thickness")
+                    if "bulges" in child:
+                        bulges = child["bulges"]
+                        if not isinstance(bulges, list) or len(bulges) != len(points):
+                            _fail(f"{where}.bulges: expected one value per vertex")
+                        row["bulges"] = [_number(bulge, f"{where}.bulges[{j}]")
+                                         for j, bulge in enumerate(bulges)]
             elif kind == "POINT":
                 row["pt"] = _vector(child.get("pt"), where)
             elif kind in ("CIRCLE", "ARC"):
@@ -1145,9 +1153,10 @@ def _validated_blocks(blocks, note_layer, real, remaining_entities):
             note_layer(layer)
             references.append((fields, ent["handle"] if handle is not None else None))
         source_count = block.get("count")
-        # Intake captures the first 60 child records and retains nested INSERTs separately.
-        # Count only records the writer can emit, since INSERTs in the prefix are also in that list.
-        if type(source_count) is int and source_count > 60 and source_count > len(rows) + len(references):
+        # Intake can omit malformed or capped children and retains nested INSERTs separately.
+        # Account for separately retained references without double-counting their previews.
+        if (type(source_count) is int and source_count > len(children)
+                and source_count > len(rows) + len(references)):
             _fail(f"blocks[{name}]: cannot export truncated block children")
         result[name] = {"base": base, "children": rows, "nested_inserts": references}
     return result
@@ -1168,8 +1177,13 @@ def _emit_block_child(child, handle, owner):
     elif kind == "LWPOLYLINE":
         out += ["100", "AcDbPolyline", "90", str(len(child["pts"])),
                 "70", "1" if child["closed"] else "0", "38", _num(child["elev"])]
-        for point in child["pts"]:
+        if child.get("thickness"):
+            out += ["39", _num(child["thickness"])]
+        bulges = child.get("bulges")
+        for j, point in enumerate(child["pts"]):
             out += _point_groups(point)
+            if bulges is not None and bulges[j]:
+                out += ["42", _num(bulges[j])]
         out += _point_groups(child["nrm"], 210)
     elif kind in ("CIRCLE", "ARC"):
         out += ["100", "AcDbCircle", *_point_groups(child["c"]), "40", _num(child["r"])]
