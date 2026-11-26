@@ -6,7 +6,7 @@ import { readActiveScope } from '../auth/activeScope.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
-export const MAX_PAGE_ACTIONS = 3
+export const MAX_PAGE_ACTIONS = 12
 
 export function pageActions(document) {
   return document.actions ?? (document.action ? [document.action] : [])
@@ -49,7 +49,7 @@ export function validatePageDocument(document) {
   if (Object.hasOwn(document, 'actions')) {
     const actions = document.actions
     if (Object.hasOwn(document, 'action') || !Array.isArray(actions) || !actions.length || actions.length > MAX_PAGE_ACTIONS) {
-      throw new Error('Use one to three contact links.')
+      throw new Error(`Use 1 to ${MAX_PAGE_ACTIONS} contact links.`)
     }
   }
   if ((Object.hasOwn(document, 'action') && !isValidPageAction(document.action))

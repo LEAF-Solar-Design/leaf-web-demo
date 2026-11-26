@@ -44,6 +44,18 @@ describe('saved Browser contact proposals', () => {
       ...value, edits: [{ id: 'f0110', value: 'https://example.test/wrong' }, ...value.edits.slice(1)],
     })).toThrow(INVALID)
   })
+
+  it('applies the final directory slot after eleven saved contacts', () => {
+    const actions = Array.from({ length: 12 }, (_, index) => ({
+      label: 'Regional office ' + (index + 1),
+      href: 'mailto:office' + (index + 1) + '@example.test',
+    }))
+    const snapshot = { ...saved(), document: { ...page, actions: actions.slice(0, 11) } }
+    const last = actions.at(-1)
+    const value = { ...result(), proposed_document: { ...page, actions },
+      edits: [{ id: 'f0027', value: last.label }, { id: 'f0028', value: last.href }] }
+    expect(validateProjectPageProposal(PROJECT, snapshot, value)).toEqual(value)
+  })
 })
 
 const photoDigest = document => createHash('sha256').update(JSON.stringify(document, (_, value) => value && typeof value === 'object' && !Array.isArray(value)

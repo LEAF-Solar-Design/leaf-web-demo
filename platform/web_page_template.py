@@ -174,7 +174,7 @@ def _canonical_json(value: object) -> bytes:
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-MAX_PAGE_ACTIONS = 3
+MAX_PAGE_ACTIONS = 12
 
 
 def _validate_action(action):
@@ -227,7 +227,7 @@ def validate_document(document: dict) -> dict:
     if 'actions' in document:
         actions = document['actions']
         if 'action' in document or type(actions) is not list or not 1 <= len(actions) <= MAX_PAGE_ACTIONS:
-            raise ValueError("Use one to three contact actions")
+            raise ValueError(f"Use 1 to {MAX_PAGE_ACTIONS} contact actions")
         for action in actions:
             _validate_action(action)
     elif 'action' in document:

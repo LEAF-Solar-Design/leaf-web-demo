@@ -700,8 +700,9 @@ def test_first_page_proposal_catalog_document_and_review_only(client, fresh, mon
         for index, (limit, role) in enumerate([
             (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
             (60, 'contact button label'), (2048, 'contact link'),
-            (60, 'contact button 2 label'), (2048, 'contact link 2'),
-            (60, 'contact button 3 label'), (2048, 'contact link 3')], 1)]
+            *[field for position in range(2, 13) for field in (
+                (60, f'contact button {position} label'), (2048, f'contact link {position}'))],
+        ], 1)]
     assert project_web_page.read(fresh['org'], fresh['project'], fresh['actor']) is None
     assert failure_records(caplog) == []
     applied = client.put(fresh['url'], headers=fresh['auth'], json={
@@ -797,8 +798,9 @@ def test_first_page_service_without_database(monkeypatch):
         for index, (limit, role) in enumerate([
             (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
             (60, 'contact button label'), (2048, 'contact link'),
-            (60, 'contact button 2 label'), (2048, 'contact link 2'),
-            (60, 'contact button 3 label'), (2048, 'contact link 3')], 1)]
+            *[field for position in range(2, 13) for field in (
+                (60, f'contact button {position} label'), (2048, f'contact link {position}'))],
+        ], 1)]
     assert proposal['source'] == {'project_id': str(project), 'revision': 0, 'digest': '0' * 64}
     assert proposal['proposed_document']['action'] == {
         'label': 'Get updates', 'href': 'mailto:hello@example.com'}
@@ -807,6 +809,7 @@ def test_first_page_service_without_database(monkeypatch):
 
 @pytest.mark.parametrize('kind,instruction', [
     ('ordered', 'List wholesale, weddings, and general questions in that order.'),
+    ('regional', 'List the twelve regional offices in numerical order.'),
     ('add', 'Keep the email and add a Book a tasting link.'),
     ('remove', 'Remove the catering link and keep the general inquiries link.'),
 ])
@@ -825,6 +828,16 @@ def test_browser_proposal_uses_ordered_contact_slots(monkeypatch, kind, instruct
                   weddings['label'], weddings['href'], general['label'], general['href']]
         expected = {**document, 'actions': [wholesale, weddings, general]}
         edits = [{'id': f'f{index:04d}', 'value': value} for index, value in enumerate(values, 1)]
+    elif kind == 'regional':
+        initial = None
+        actions = [
+            {'label': f'Office {position}', 'href': f'mailto:office{position}@example.test'}
+            for position in range(1, 13)
+        ]
+        values = ['Bakery', 'Contact', '', ''] + [
+            value for action in actions for value in (action['label'], action['href'])]
+        edits = [{'id': f'f{index:04d}', 'value': value} for index, value in enumerate(values, 1)]
+        expected = {**document, 'actions': actions}
     elif kind == 'add':
         initial = {**document, 'action': general}
         expected = {**document, 'actions': [general, booking]}
