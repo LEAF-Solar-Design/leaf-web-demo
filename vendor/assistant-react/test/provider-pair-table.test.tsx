@@ -12,16 +12,82 @@ const element = { schema_version: 1, id: "capacity-view", title: "Capacity", kin
   dataset_ref: reference, query: { fields: ids, limit: 100 },
   props: { columns: ids, row_limit: 100, row_grouping: { kind: "provider_pairs", pair_key_field: "pair_key",
     provider_field: "provider", providers: ["Alpha", "Beta"] } } };
-const row = (key: string, pair: string | null, provider: string, remaining = 17) => ({ key,
+const row = (key: string, pair: string | null, provider: string, remaining: number | null = 17) => ({ key,
   values: { account: key, pair_key: pair, provider, remaining, reset: "2026-11-12T12:00:00Z" } });
 function read(rows = [row("a", "match", "Alpha"), row("b", "match", "Beta", 29)]): DatasetReadV1 {
   return { schema_version: 1, dataset_ref: reference, status: "ready", next_cursor: null,
     fields: ids.map(id => ({ id, label: id, type: { kind: id === "remaining" ? "number" : id === "reset" ? "instant" : "text" },
-      nullable: id === "pair_key", sensitivity: "internal" })), rows,
+      nullable: id === "pair_key" || id === "remaining", sensitivity: "internal" })), rows,
     query_coverage: { kind: "complete_materialization", matching_rows: rows.length, offset: 0 },
     freshness: { fetched_at: "2026-11-12T12:00:00Z", synced_at: null, source_updated_at: null } };
 }
 const show = (value: unknown, recipe: unknown = element) => render(<DatasetElement element={recipe} read={value} preferences={resolveDisplayPreferences()} />);
+const withMemberFilter = (member_filter: object) => ({ ...element,
+  props: { ...element.props, row_grouping: { ...element.props.row_grouping, member_filter } } });
+
+it.each([
+  [{ field: "remaining", op: "lt", value: 25 }, 24, 25],
+  [{ field: "remaining", op: "lte", value: 0.25 }, 0.25, 0.26],
+  [{ field: "remaining", op: "is_null" }, null, 1],
+  [{ field: "remaining", op: "gt", value: 90 }, 91, 90],
+  [{ field: "remaining", op: "gte", value: 90 }, 90, 89],
+])("matches either account for %j and keeps the complete verified pair", (filter, matching, other) => {
+  show(read([
+    row("healthy", "yes", "Alpha", 80), row("match", "yes", "Beta", matching),
+    row("nonmatch", "no", "Alpha", other), row("healthy-2", "no", "Beta", 81),
+    row("duplicate-a", "ambiguous", "Alpha", matching), row("duplicate-b", "ambiguous", "Alpha", 80),
+    row("duplicate-c", "ambiguous", "Beta", 81),
+  ]), withMemberFilter(filter));
+  const pair = screen.getByRole("row", { name: /^Pair yes\b/ });
+  expect(within(pair).getByText("healthy")).toBeTruthy();
+  expect(within(pair).getByText("match")).toBeTruthy();
+  expect(screen.getAllByRole("row")).toHaveLength(2);
+  expect(screen.getByText(/1 of 2 verified pairs/)).toHaveTextContent("3 account rows without a verified pair are excluded.");
+});
+
+it("treats an omitted nullable value as unknown and preserves its partner", () => {
+  const data = read([row("healthy", "yes", "Alpha", 80), row("unknown", "yes", "Beta"),
+    row("zero", "no", "Alpha", 0), row("other", "no", "Beta", 10)]);
+  Reflect.deleteProperty(data.rows[1]!.values, "remaining");
+  show(data, withMemberFilter({ field: "remaining", op: "is_null" }));
+  const pair = screen.getByRole("row", { name: /^Pair yes\b/ });
+  expect(within(pair).getByText("healthy")).toBeTruthy();
+  expect(within(pair).getByText("Unknown")).toBeTruthy();
+  expect(screen.queryByRole("row", { name: /^Pair no\b/ })).toBeNull();
+});
+
+it.each(["empty", "no match"])("explains the filtered empty state for %s", mode => {
+  const data = mode === "empty" ? { ...read([]), status: "empty" } : read();
+  show(data, withMemberFilter({ field: "remaining", op: "lt", value: 0 }));
+  expect(screen.getByText("No verified pairs match")).toBeTruthy();
+  expect(screen.queryByText(/No data available/)).toBeNull();
+});
+
+it.each(["cursor", "row filter", "hidden field", "unrequested field", "text inequality", "unknown operator", "infinite threshold"])(
+  "rejects a saved pair condition with %s", mode => {
+    const recipe = withMemberFilter({ field: "remaining", op: "lt", value: 25 });
+    if (mode === "cursor") Object.assign(recipe.query = { ...recipe.query }, { cursor: "next" });
+    if (mode === "row filter") Object.assign(recipe.query = { ...recipe.query }, {
+      filters: [{ field: "remaining", op: "lt", value: 25 }],
+    });
+    if (mode === "hidden field") recipe.props.columns = ids.filter(id => id !== "remaining");
+    if (mode === "unrequested field") recipe.query = { ...recipe.query, fields: ids.filter(id => id !== "remaining") };
+    if (mode === "text inequality") recipe.props.row_grouping.member_filter = { field: "account", op: "lt", value: 25 };
+    if (mode === "unknown operator") recipe.props.row_grouping.member_filter = { field: "remaining", op: "eq", value: 25 };
+    if (mode === "infinite threshold") recipe.props.row_grouping.member_filter = { field: "remaining", op: "lt", value: Infinity };
+    show(read(), recipe);
+    expect(screen.getByText("Invalid dataset or binding.")).toBeTruthy();
+    expect(screen.queryByRole("table")).toBeNull();
+  },
+);
+
+it("leaves a saved pair condition unavailable on incomplete coverage", () => {
+  const data = read();
+  show({ ...data, next_cursor: "next", query_coverage: { ...data.query_coverage, matching_rows: 3 } },
+    withMemberFilter({ field: "remaining", op: "lt", value: 25 }));
+  expect(screen.getByText("Pair filtering requires complete dataset results.")).toBeTruthy();
+  expect(screen.queryByRole("table")).toBeNull();
+});
 it("renders one paired row with separate provider cells, original metrics and reset values", () => {
   const value = read(), before = JSON.stringify(value); show(value);
   const pair = screen.getByRole("row", { name: /^Pair match\b/ });
@@ -73,6 +139,17 @@ it.each(["absent", "query-limit", "last-page", "byte-limit", "table-limit", "sta
   expect(screen.queryByRole("row", { name: /^Pair match\b/ })).toBeNull();
   expect(screen.getAllByRole("row")).toHaveLength(mode === "table-limit" ? 2 : 3);
 });
+it.each(["absent", "table-limit", "stale"])("hides filtered rows for %s coverage", mode => {
+  const data = read();
+  const recipe = withMemberFilter({ field: "remaining", op: "lt", value: 25 });
+  if (mode === "absent") delete data.query_coverage;
+  if (mode === "table-limit") recipe.props.row_limit = 1;
+  if (mode === "stale") data.status = "stale";
+  show(data, recipe);
+  expect(screen.getByText("Pair filtering requires complete dataset results.")).toBeTruthy();
+  expect(screen.queryByRole("table")).toBeNull();
+});
+
 it("refuses tampered counts, incompatible grouping fields and changed dataset binding", () => {
   const value = read(); value.query_coverage!.matching_rows = 1; const first = show(value);
   expect(screen.getByText("Invalid dataset or binding.")).toBeTruthy(); first.unmount();
