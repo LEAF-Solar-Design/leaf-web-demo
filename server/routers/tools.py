@@ -131,7 +131,7 @@ def tenant_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
     if not _plugin_builder_visible(tenant):
         return _tenant_missing()
     entries = tenant_catalog.list_versions(os.environ["LEAF_TENANT_TOOLS_DIR"], str(tenant))
-    return JSONResponse({"tools": entries}, headers=_TENANT_CACHE)
+    return JSONResponse({"tools": entries, "workspace_id": str(tenant)}, headers=_TENANT_CACHE)
 
 
 @router.get("/api/tool-envelopes/tenant/revocations")
