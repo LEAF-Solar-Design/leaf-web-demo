@@ -40,7 +40,7 @@ MAX_ABS_INT = 9_007_199_254_740_991
 MAX_COUNTER = 1_000_000_000
 TUPLE_TAG = "$tuple"
 BYTES_TAG = "$bytes"
-UNITS = {"m": 1.0, "ft": 0.3048}
+UNITS = {"m": 1.0, "ft": 0.3048, "in": 0.0254}
 DEFAULT_FRAME = {"coordinate_system": "world",
                  "transform": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
                  "elevation_datum": "unrecorded", "crs": "none"}

@@ -9,9 +9,11 @@ import threading
 import uuid
 from typing import Any
 
+import author_quota
 from customization_models import ChangeState
 from customization_service import (
     CustomizationService, CustomizationServiceError, finish_stage_authority_for_change,
+    refund_unstarted_build,
 )
 
 
@@ -214,14 +216,24 @@ def _run_claimed(service: CustomizationService, change: Any, owner: str, lease_s
                 change.tenant_id, change.change_set_id, exc.code,
                 reason_message or "-",
             )
-            service.store.fail_stage_claim(
+            refund_unstarted = (
+                author_quota.refund_enabled()
+                and getattr(exc, "harness_not_called", False)
+                and change.stage_attempt == 1
+                and exc.code != "stage_grant_exhausted"
+            )
+            failed = service.store.fail_stage_claim(
                 tenant_id=change.tenant_id,
                 change_set_id=change.change_set_id,
                 owner=owner,
                 reason_code=exc.code,
-                retryable=exc.status_code >= 500,
+                retryable=(refund_unstarted and exc.code == "stage_authority_invalid")
+                or exc.status_code >= 500
+                or exc.code in {"stage_grant_expired", "stage_grant_exhausted", "stage_grant_unavailable"},
                 reason_message=reason_message,
             )
+            if refund_unstarted and failed is not None:
+                refund_unstarted_build(change.tenant_id, change.change_set_id, log=_LOG)
         return True
     except Exception:
         guard.close()

@@ -117,11 +117,13 @@ function environment(intake = graphIntake(), scene, binding = B) {
     viewerRef: { current: { getDrawingScene: () => scene ?? { intake, drawingKey: keyOf(binding), ready: true } } },
     activeIntake: legacy, shown: legacy, intake: legacy, standaloneVisibleLayers: {}, setStandaloneVisibleLayers: vi.fn(),
     consoleDrawingKey: 'console:legacy', drawingLoad: { drawingId: 'legacy' }, REQUESTED_DRAWING_ID: 'legacy',
-    useMemo, projectSolarDrawingView, buildDrawingObjectIndex, withHiddenLayerDefaults }
+    useMemo: callback => callback(), projectSolarDrawingView, buildDrawingObjectIndex, withHiddenLayerDefaults }
 }
 function projection(env) {
   const scope = { ...env }
-  for (const name of ['projectScene', 'projectDrawing', 'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
+  for (const name of ['projectScene', 'projectDrawingBinding', 'projectContextView', 'projectContextCurrent',
+    'projectSceneIntake', 'projectSceneKey', 'projectSceneReady', 'projectDrawing',
+    'projectEngineIntake', 'drawingIntake', 'projectDrawingName', 'projectHiddenLayers', 'visibleLayers', 'shownLayers', 'setVisibleLayers'])
     scope[name] = evaluate(decl(name).init, scope)
   return scope
 }
@@ -162,6 +164,31 @@ it('R13G2A-02 project Viewer props exclude standalone overlays and ghosts', () =
   expect(evaluate(prop(viewer, 'marqueeGate'), env)()).toBe(false)
   evaluate(prop(viewer, 'onMarqueeSelect'), env)(['CA'], {})
   expect(env.canvasMarqueeRef.current).not.toHaveBeenCalled()
+})
+
+it('keeps saved overlay identity until its canonical drawing or scene changes', () => {
+  const input = environment()
+  const { rerender, result } = renderHook(env => projection({ ...env, useMemo }).projectDrawing, {
+    initialProps: input,
+  })
+  const overlay = result.current.overlay
+  expect(overlay).not.toBeNull()
+  rerender({ ...input, projectSolarRuntime: { ...input.projectSolarRuntime, visibleLayers: { Panels: false } } })
+  expect(result.current.overlay).toBe(overlay)
+
+  const nextBinding = { ...B, input_version_id: U(5) }
+  const next = environment(graphIntake(), undefined, nextBinding)
+  rerender({ ...next, viewerRef: input.viewerRef })
+  expect(result.current.reason).toBe('SCENE_PENDING')
+  expect(result.current.overlay).toBeNull()
+  rerender(next)
+  expect(result.current.reason).toBe('READY')
+  expect(result.current.overlay).not.toBe(overlay)
+  expect(result.current.overlay.drawingKey).toBe(keyOf(nextBinding))
+
+  rerender({ ...next, projectSolarRuntime: { ...next.projectSolarRuntime, contextCurrent: () => false } })
+  expect(result.current.reason).toBe('SCOPE_STALE')
+  expect(result.current.overlay).toBeNull()
 })
 
 it.each([false, true])('project marquee commits native handles with additive=%s', additive => {

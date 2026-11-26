@@ -75,14 +75,14 @@ def test_tenants_have_independent_versions(client, tmp_path, monkeypatch):
         assert response.status_code == 200
         assert response.json() == {"tools": [{"name": NAME, "version": VERSION,
                                             "package_digest": content_digest(package),
-                                            "signed_at": "2026-11-22T12:00:00Z"}]}
+                                            "signed_at": "2026-11-22T12:00:00Z"}], "workspace_id": tenant}
         assert client.get(BASE + f"/{NAME}/{VERSION}/envelope").content == expected_raw
         assert client.get(BASE + f"/{NAME}/{VERSION}/package").content == package
 
 
 def test_other_tenant_is_hidden_including_crafted_names(client, tmp_path, monkeypatch):
     publish(tmp_path, OTHER)
-    assert client.get(BASE).json() == {"tools": []}
+    assert client.get(BASE).json() == {"tools": [], "workspace_id": TENANT}
     for name in (NAME, f"..%2F{OTHER}%2F{NAME}", f"..%5C{OTHER}%5C{NAME}"):
         for resource in ("envelope", "package"):
             response = client.get(BASE + f"/{name}/{VERSION}/{resource}")
@@ -160,7 +160,7 @@ def test_revocations_are_tenant_local_and_immediate(client, tmp_path, monkeypatc
     assert len(client.get(BASE).json()["tools"]) == 1
     raw = revocations(entry.package_digest)
     catalog.write_revocations(tmp_path, TENANT, raw)
-    assert client.get(BASE).json() == {"tools": []}
+    assert client.get(BASE).json() == {"tools": [], "workspace_id": TENANT}
     assert client.get(BASE + "/revocations").content == raw
     for resource in ("envelope", "package"):
         response = client.get(BASE + f"/{NAME}/{VERSION}/{resource}")
@@ -292,7 +292,7 @@ def test_v1_envelope_remains_valid(tmp_path):
 def test_invalid_revocations_fail_closed(client, tmp_path):
     publish(tmp_path)
     catalog.write_revocations(tmp_path, TENANT, b"{")
-    assert client.get(BASE).json() == {"tools": []}
+    assert client.get(BASE).json() == {"tools": [], "workspace_id": TENANT}
     for suffix in SUFFIXES[1:]:
         assert client.get(BASE + suffix).status_code == 404
 

@@ -71,8 +71,9 @@ describe("converse inline authoring", () => {
     await turn({ text: "Build a tool", contextPacket: {} }, async input => {
       expect(createHash("sha256").update(JSON.stringify(input.tools.list())).digest("hex"))
         .toBe("b3d8b2fd552a673bf12c70e3988f39ab4d8d2ee7b91295acf3f4b5f85a0ebb1a");
+      // Pin moved with the drawing_source data rule added to the base prompt (M3 S2).
       expect(createHash("sha256").update(input.systemPrompt).digest("hex"))
-        .toBe("025636b145f504c6a7a24b58b0ee75a4ceac88d72bc85f11a62a18fcbd3f8a02");
+        .toBe("ba7f794f83b0024c52dd8aaae22a3ca76465a3d82843f4979302af1786f42116");
       const off = await input.tools.execute("propose_plan", { plan });
       expect(off).toMatchObject({ isError: true, content: expect.stringContaining("plan mode is off") });
       expect(check).not.toHaveBeenCalled();

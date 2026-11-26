@@ -1,6 +1,6 @@
 import {it,expect,vi} from "vitest";
 import {createHash} from "node:crypto";
-import {mkdtemp,readFile,writeFile,rm} from "node:fs/promises";
+import {mkdtemp,readFile,realpath,writeFile,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {DurablePrivateNextViews} from "../src/projectBuild/durablePrivateNextViews.js";
@@ -32,7 +32,7 @@ it("ready observation and inert asset depend on the full stored candidate and sc
  const f=fixture();expect((await f.views.observe(a,r)).status).toBe("ready");
  expect(Object.keys((await f.views.observe(a,r)).result!.preview)).not.toContain("repoKey");
  const result=await f.views.asset(a,r,f.witness);expect(result.body_base64).toBe(f.body.toString("base64"));expect(result.path).toBe("/index.html");
- expect(f.loadCandidate).toHaveBeenLastCalledWith(a,r.sourceRequestId,r);
+ expect(f.loadCandidate).toHaveBeenLastCalledWith(a,r.sourceRequestId,r,"read");
  await expect(f.views.observe({...a,projectId:id(99)},r)).rejects.toHaveProperty("code");
  await expect(f.views.observe(a,{...r,version:2})).rejects.toHaveProperty("code");
 });
@@ -64,7 +64,7 @@ it("rechecks authority after a later catalog await",async()=>{
  await expect(f.views.observe(a,r)).rejects.toThrow("revoked");
 });
 it("fresh reader reopens real disk custody without producer job maps",async()=>{
- const f=fixture(),root=await mkdtemp(join(tmpdir(),"b03-durable-view-"));
+ const f=fixture(),root=await realpath(await mkdtemp(join(tmpdir(),"b03-durable-view-")));
  try{
   const artifacts=new DiskPrivateStaticArtifacts({root:join(root,"assets"),bindingId:id(8),isCurrent:async()=>true});
   const stored=await artifacts.put(s,f.manifest,[{path:"/index.html",body:f.body,contentType:"text/html"}]);

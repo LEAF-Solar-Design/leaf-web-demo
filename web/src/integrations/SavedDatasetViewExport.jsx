@@ -41,6 +41,9 @@ export function SavedDatasetViewExport({ projectId, record, dataset, read, prefe
 
   if (record?.element.kind !== 'dataset.table' || !isImportedMaterialDataset(dataset) ||
       !sameReference(dataset.reference, record.element.dataset_ref)) return null
+  if (record.element.props.row_grouping?.member_filter) {
+    return <p>Snapshot download is unavailable for views with a pair condition.</p>
+  }
   // readView binds each completed query to the scope and the exact saved recipe.
   const ready = !unavailable && Boolean(scopeKey) &&
     readIdentity === JSON.stringify([scopeKey, record.revision, record.element]) && completeRead(read, dataset.reference)

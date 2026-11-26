@@ -5,7 +5,7 @@ import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant' }
-const DUMMY_TOKEN = 'sk-ant-oat01-local-e2e-nonsecret-placeholder'
+const DUMMY_TOKEN = 'sk-ant-api03-FAKE-local-e2e-fixture-only'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
 test('trust rail reflects real health, plan, usage, and Claude grant state', async ({ page, request }, testInfo) => {
@@ -106,22 +106,24 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   }
 
   await panel.locator('.claude-trigger').click()
-  await page.getByRole('radio', { name: 'Pro', exact: true }).check()
-  await page.getByLabel('Claude token').fill(DUMMY_TOKEN)
+  await page.getByLabel('Anthropic API key').fill(DUMMY_TOKEN)
   const linkResponse = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === 'POST' && url.pathname === '/api/tenant/claude-grant'
   })
-  await page.getByRole('button', { name: 'Link Claude account' }).click()
-  expect((await linkResponse).status()).toBe(200)
+  await page.getByRole('button', { name: 'Link API key' }).click()
+  const response = await linkResponse
+  expect(response.status()).toBe(200)
+  expect(response.request().postDataJSON()).toMatchObject({ token: DUMMY_TOKEN, kind: 'api_key' })
+  expect(response.request().postDataJSON()).not.toHaveProperty('plan')
   await expect(panel.locator('.claude-trigger')).toContainText('1 linked')
   const accountDialog = page.getByRole('dialog', { name: 'Claude accounts' })
-  await expect(accountDialog).toContainText(/pro subscription/i)
+  await expect(accountDialog.locator('.ca-account-main span').first()).toHaveText('API key')
 
   const linkedRead = await request.get(`${API_BASE}/api/tenant/claude-grant`, { headers: TENANT_HEADERS })
   expect(linkedRead.status()).toBe(200)
   const linkedGrant = await linkedRead.json()
-  expect(linkedGrant).toMatchObject({ linked: true, kind: 'oauth' })
+  expect(linkedGrant).toMatchObject({ linked: true, kind: 'api_key' })
   expect(JSON.stringify(linkedGrant)).not.toContain(DUMMY_TOKEN)
 
   await accountDialog.locator('.chip-danger').click()
@@ -150,7 +152,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
       'the unified Trust rail rendered the real backend health classification',
       'the Trust rail rendered real usage and entitlement-policy values',
       'Refresh re-read health, usage, entitlements, and Claude grant state',
-      'a masked dummy subscription token linked through the real app-to-harness grant path',
+      'a masked fake API key linked through the real app-to-harness grant path',
       'the grant status exposed kind and time but never echoed the token',
       'the destructive two-step unlink returned the unified surface and server to not linked',
     ],

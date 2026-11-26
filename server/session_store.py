@@ -2091,6 +2091,49 @@ def turn_started_data(session_id: str, turn_id: str, tenant_id: str) -> Optional
     return legacy
 
 
+def turn_terminal_events(session_id: str, turn_id: str, tenant_id: str) -> list[dict]:
+    """Read every completion/error for one tenant-bound turn, without a limit."""
+    def legacy_read() -> list:
+        return _query(
+            "SELECT e.type, e.data_json FROM session_events e JOIN sessions s "
+            "ON s.session_id = e.session_id WHERE e.session_id = ? AND e.turn_id = ? "
+            "AND e.type IN ('turn_complete', 'error') AND s.tenant_id = ? ORDER BY e.seq",
+            (session_id, turn_id, tenant_id),
+        )
+
+    def postgres_read() -> list:
+        with _platform_db().cursor() as cur:
+            cur.execute(
+                "SELECT e.type, e.data_json FROM app_session_events e JOIN app_sessions s "
+                "ON s.session_id = e.session_id WHERE e.session_id = %s AND e.turn_id = %s "
+                "AND e.type IN ('turn_complete', 'error') "
+                "AND (s.tenant_id = %s OR (s.org_id::text = %s AND s.project_id IS NOT NULL "
+                "AND s.tenant_id = 'project:' || s.org_id::text || ':' || s.project_id::text)) "
+                "ORDER BY e.seq",
+                (session_id, turn_id, tenant_id, tenant_id),
+            )
+            return cur.fetchall()
+
+    def decode(rows) -> list[dict]:
+        events = []
+        for row in rows:
+            data = row["data_json"]
+            if isinstance(data, str):
+                data = json.loads(data)
+            if not isinstance(data, dict):
+                raise ValueError("turn terminal data must be an object")
+            events.append({"type": row["type"], "data": data})
+        return events
+
+    mode = _store_mode()
+    if mode == "postgres":
+        return decode(postgres_read())
+    result = decode(legacy_read())
+    if mode in _SHADOW_READ_MODES:
+        _shadow_equal("turn terminal events", result, decode(postgres_read()))
+    return result
+
+
 def active_turn_subject(
     session_id: str, turn_id: str, tenant_id: str,
     max_age_s: Optional[float] = None,

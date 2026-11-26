@@ -46,11 +46,15 @@ function resultLabel(report) {
     || (report?.ok === true ? 'passed' : report?.ok === false ? 'refused' : '')
 }
 
-function attemptLabel(attempt) {
+function attemptLabel(attempt, { limit } = {}) {
   const diagnostics = Array.isArray(attempt.diagnostics) ? attempt.diagnostics.map(diagnostic).filter(Boolean) : []
   const status = resultLabel(attempt)
-  const label = ['failed', 'compile_failed'].includes(status) ? 'refused' : status === 'accept' ? 'passed' : status
-  return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}`
+  const label = ['failed', 'compile_failed'].includes(status) ? 'did not compile' : status === 'accept' ? 'passed' : status
+  const shown = limit == null ? diagnostics : diagnostics.slice(0, limit)
+  if (shown.length < diagnostics.length) shown.push(`and ${diagnostics.length - shown.length} more`)
+  const entities = attempt.source_decoded?.entities
+  const decoded = Number.isInteger(entities) && entities >= 1 ? `, Studio decoded HTML escapes in the source (${entities})` : ''
+  return `Attempt ${attempt.attempt}: ${[label || notReported, ...shown].join(', ')}${decoded}`
 }
 
 // The stage read reports the plugin's latest receipt as { last_event, at, plugin_version, diagnostics }.
@@ -74,7 +78,7 @@ function branchSummary(report) {
 function DecisionTime({ at }) {
   const date = new Date(at)
   return at && Number.isFinite(date.getTime()) ? <>, <time dateTime={date.toISOString()}>
-    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></> : null
+    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></> : null
 }
 
 function reviewPlan(stage, proposal) {
@@ -245,6 +249,10 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const publicationState = terminalPublicationStates.includes(reportedPublication) ? reportedPublication
     : decision?.status === 'published' ? 'published' : reportedPublication || decision?.status || stage?.status
   const publication = reportedPublication === 'published' ? stage.publication : decision
+  const packageDigest = string(publication?.package_digest)
+  const packageVersion = string(publication?.version)
+  const validPackage = packageDigest.length === 64 && /^[0-9a-f]{64}$/.test(packageDigest)
+    && packageVersion.trim() === packageVersion && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(packageVersion)
   const failedCompile = ['refused', 'failed', 'compile_failed'].includes(resultLabel(latest))
     || /compile/.test(string(stage?.error?.reason_code))
   const published = publicationState === 'published'
@@ -318,15 +326,18 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   return <section ref={card} className="inline-authoring" aria-label="Tool authoring" data-converse-role="authoring">
     <h4>{plan?.title || 'Tool build'}</h4>
     <dl className="inline-build-rows">
-      <dt>Build</dt><dd>{stage?.status === 'running' ? 'authoring' : string(stage?.status) || notReported}
+      <dt>Build</dt><dd>{stage?.status === 'running' ? <><span className="dot live pulse" aria-hidden="true" /> Building
+        <p>Claude is writing the C# and Studio is compiling it. This usually takes a few minutes.</p></>
+        : stage?.status === 'queued' ? 'Waiting to start' : ['staged', 'published'].includes(stage?.status) ? 'Built'
+          : stage?.status === 'failed' ? 'Failed' : string(stage?.status) || notReported}
         {waiting && <p>{waiting}</p>}
         {stage?.status === 'queued' && stage.withdrawable === true && !withdrawClosed
           && <button type="button" className="chip-neutral" disabled={withdrawing} onClick={withdraw}>Withdraw</button>}
         {withdrawMessage && <p>{withdrawMessage}</p>}
         {stage?.status === 'failed' && <p>{string(stage.error?.message) || string(stage.error?.reason_code)}</p>}</dd>
-      <dt>Compile</dt><dd>{attempts.length > 0 && <ul>{attempts.map(row => <li key={row.attempt}>{attemptLabel(row)}</li>)}</ul>}
+      <dt>Compile</dt><dd>{attempts.length > 0 && <ul>{attempts.map(row => <li key={row.attempt} title={attemptLabel(row)}>{attemptLabel(row, { limit: 3 })}</li>)}</ul>}
         {studioTest && <p>Test run · {resultLabel(studioTest) || notReported}{studioTest.summary && ` · ${studioTest.summary}`}</p>}
-        {!attempts.length && !studioTest && notReported}
+        {!attempts.length && !studioTest && (['queued', 'running'].includes(stage?.status) ? 'Not yet' : notReported)}
         {stage?.status === 'failed' && failedCompile && <div><p>Fixing these errors uses one author run.</p>
           <button type="button" className="chip-neutral" disabled={busy || retried || disabled} onClick={retry}>
             {retried ? 'Retry requested' : 'Fix with these errors'}</button></div>}</dd>
@@ -354,11 +365,15 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
             onChange={e => setComment(e.target.value)} /></label>
             <button type="button" className="chip-act" disabled={busy || !comment.trim()}
               onClick={() => decide('request_changes')}>Send change request</button></div>}
-        </div></> : notReported}</dd>
+        </div></> : ['queued', 'running'].includes(stage?.status) ? 'Not yet' : notReported}</dd>
       <dt>Publish</dt><dd>{published
         ? <>Published to your plugin catalog<DecisionTime at={publication?.published_at ?? decision?.decided_at
-          ?? (stage?.status === 'published' ? stage.updated_at : null)} /></>
-        : publishLabels[publicationState] || notReported}</dd>
+          ?? (stage?.status === 'published' ? stage.updated_at : null)} />
+          {validPackage && <span title={packageDigest}> · v{packageVersion} · {packageDigest.slice(0, 12)}{' '}
+            <button type="button" className="chip-neutral" aria-label="Copy package digest" title={packageDigest}
+              onClick={() => navigator.clipboard?.writeText(packageDigest)?.catch(() => {})}>Copy</button>
+          </span>}</>
+        : publishLabels[publicationState] || (['queued', 'running', 'staged'].includes(stage?.status) ? 'Not yet' : notReported)}</dd>
       <dt>Branch</dt><dd>{branchSummary(stage?.branch) || 'Branch has not reported yet'}</dd>
     </dl>
     {(readError || reviewError) && <p role="alert">{readError || reviewError} <button type="button" className="chip-neutral"

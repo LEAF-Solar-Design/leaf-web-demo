@@ -98,8 +98,8 @@ def params(s, result):
     return {"expected_rev": s.ctx.graph["rev"], "report_artifact_id": result["report"]["artifact_id"]}
 
 
-def accept(s, result):
-    prepared = tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx)
+def accept(s, result, **options):
+    prepared = tools.prepare(s, se.ACCEPT_TOOL, {**params(s, result), **options}, s.ctx)
     output = tools.publish(s, prepared)
     return prepared, output, tools.output(s, output)
 
@@ -730,6 +730,33 @@ def test_explicit_optimizer_measurement_saved_and_read(lane, monkeypatch, varian
         assert [handles[ref] for ref in opt["panel_refs"]] == opt["panel_handles"]
         assert set(opt["panel_refs"]) <= set(record["strings"][opt["string_index"]]["panel_refs"])
     assert read(s, accepted)["output"]["optimizer_measurement"] == measurement
+    assert read(s, accepted, section="optimizers")["output"]["items"] == measurement["optimizers"]
+    reader = se.local_read._load_builtin(se.READ_TOOL)
+    monkeypatch.setattr(reader, "MEASUREMENT_INLINE_BYTES", 1)
+    monkeypatch.setattr(reader, "PAGE_ITEMS", 1)
+
+    def reopen_all(section):
+        rows = []
+        offset = 0
+        while offset is not None:
+            result = read(s, accepted, section=section, offset=offset)
+            output = result["output"]
+            assert result["output_bytes"] <= reads.MAX_OUTPUT_BYTES
+            assert output["page"]["offset"] == offset
+            assert output["page"]["returned"] == 1
+            assert output["optimizer_measurement"] == {
+                **measurement, "optimizers": None, "string_counts": None, "optimizer_rows": expected,
+            }
+            rows.extend(output["items"])
+            offset = output["page"]["next_offset"]
+            assert offset == len(rows) or offset is None
+        return rows
+
+    assert reopen_all("optimizers") == measurement["optimizers"]
+    assert reopen_all("strings") == [
+        {**row, "optimizer_count": count}
+        for row, count in zip(record["strings"], measurement["string_counts"], strict=True)
+    ]
     later_graph = deepcopy(accepted.graph)
     later_graph["rev"] += 1
     later_intake = accepted.intake
@@ -739,6 +766,8 @@ def test_explicit_optimizer_measurement_saved_and_read(lane, monkeypatch, varian
     later = replace(accepted, intake_bytes=later_bytes, intake_sha256=sha256(later_bytes).hexdigest())
     stale = se.read_tracking(s.tenant, later, {})["optimizer_measurement"]
     assert stale["complete"] is False and stale["total_count"] is None and stale["string_counts"] is None
+    assert stale["optimizer_rows"] == expected and stale["optimizers"] is None
+    assert all("optimizer_count" not in row for row in se.read_tracking(s.tenant, later, {})["items"])
 
 
 @pytest.mark.parametrize("negative", ["missing-panel", "duplicate-id", "unmapped", "cross-string"])
@@ -763,6 +792,44 @@ def test_incomplete_optimizer_measurement_never_supplies_counts(lane, monkeypatc
     assert measured["complete"] is False
     assert measured["total_count"] is None and measured["string_counts"] is None
     assert read(lane, accepted)["output"]["optimizer_measurement"]["total_count"] is None
+
+
+def test_matched_only_pages_optimizer_observations_without_counts(review_lane, monkeypatch):
+    lane = review_lane
+    matrices = deepcopy(samples.GRIDS)
+    for index, matrix in enumerate(matrices):
+        matrix["Optimizers"] = [
+            {"id": f"pdf-optimizer-{1 + index * 3 + col}", "vendor_label": None,
+             "cells": [[0, col]]}
+            for col in range(3)
+        ]
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    ref = lane.ctx.graph["frames"][0]["id"]
+    result = report(lane, selection_order="unknown", associations={ref: 1})
+    _, _, accepted = accept(lane, result, accept_matched_only=True)
+    record = accepted.graph["extra"][se.tracking.STORE_KEY]
+    expected = record["optimizer_measurement"]["optimizers"]
+    assert len(expected) > 1
+    reader = se.local_read._load_builtin(se.READ_TOOL)
+    monkeypatch.setattr(reader, "MEASUREMENT_INLINE_BYTES", 1)
+    monkeypatch.setattr(reader, "PAGE_ITEMS", 1)
+
+    rows = []
+    offset = 0
+    while offset is not None:
+        output = read(lane, accepted, section="optimizers", offset=offset)["output"]
+        assert output["page"]["offset"] == offset
+        assert output["page"]["returned"] == 1
+        assert output["acceptance"] == {"mode": "matched-only", "status": "partial",
+                                        "unresolved_groups": 1}
+        measurement = output["optimizer_measurement"]
+        assert measurement["optimizer_rows"] == len(expected)
+        assert not measurement["complete"]
+        assert measurement["total_count"] is None and measurement["string_counts"] is None
+        rows.extend(output["items"])
+        offset = output["page"]["next_offset"]
+        assert offset == len(rows) or offset is None
+    assert rows == expected
 
 
 def _graph_with_saved_string_partition(variant):

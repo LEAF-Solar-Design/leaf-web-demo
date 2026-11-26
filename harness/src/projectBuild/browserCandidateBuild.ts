@@ -4,7 +4,7 @@
  */
 import type { ProjectRepositoryAuthority } from "../ports/index.js";
 import { NextBuildError, nextRequestDigest, staticManifestDigest } from "./genericNextBuild.js";
-import type { GenericNextProducer, NextPreview } from "./genericNextBuild.js";
+import type { CandidateOperation, GenericNextProducer, NextPreview } from "./genericNextBuild.js";
 import { publishStaticNextCustody } from "./staticNextCustody.js";
 
 export type BrowserStaticCustody = Pick<Parameters<typeof publishStaticNextCustody>[0], "store" | "now" | "retentionMs">;
@@ -24,7 +24,7 @@ export interface PublishedBrowserCandidate extends BrowserCandidateWitness {
 }
 export interface BrowserCandidateBuildRequest extends BrowserCandidateWitness { readonly jobId: string }
 export type BrowserCandidateLoader = (authority: ProjectRepositoryAuthority, sourceRequestId: string,
-  request: BrowserCandidateBuildRequest) => Promise<PublishedBrowserCandidate | null>;
+  request: BrowserCandidateBuildRequest, operation: CandidateOperation) => Promise<PublishedBrowserCandidate | null>;
 export interface BrowserCandidatePreview {
   readonly schema: "leaf.browser-candidate-preview.v1";
   readonly candidate: BrowserCandidateWitness;
@@ -76,7 +76,7 @@ export class BrowserCandidateBuildAdapter {
 
   private async current(a: ProjectRepositoryAuthority, w: BrowserCandidateWitness, jobId: string): Promise<void> {
     let row: PublishedBrowserCandidate | null;
-    try { row = await this.deps.loadCandidate(a, w.sourceRequestId, Object.freeze({ ...w, jobId })); }
+    try { row = await this.deps.loadCandidate(a, w.sourceRequestId, Object.freeze({ ...w, jobId }), "write"); }
     catch { throw new NextBuildError("candidate_unavailable"); }
     if (!row || row.schema !== "leaf.browser-project-source.v1" || row.state !== "published" ||
         authorityKey(authorityCopy(row.authority)) !== authorityKey(a) || witnessKey(witnessCopy(row)) !== witnessKey(w)) conflict();

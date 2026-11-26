@@ -7,7 +7,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, parse, resolve } from "node:path";
 import { NextBuildError, nextRequestDigest, staticManifestDigest } from "./genericNextBuild.js";
-import type { NextBuildScope, PrivateStaticArtifacts, StaticFile, StaticManifest } from "./genericNextBuild.js";
+import type { CandidateOperation, NextBuildScope, PrivateStaticArtifacts, StaticFile, StaticManifest } from "./genericNextBuild.js";
 
 const MAX_FILE = 2 * 1024 * 1024;
 const MAX_TOTAL = 32 * 1024 * 1024;
@@ -60,10 +60,10 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
   readonly immutable = true as const;
   readonly bindingId: string;
   private readonly root: string;
-  private readonly isCurrent: (scope: NextBuildScope) => Promise<boolean>;
+  private readonly isCurrent: (scope: NextBuildScope, operation: CandidateOperation) => Promise<boolean>;
 
   constructor(options: {
-    root: string; bindingId: string; isCurrent(scope: NextBuildScope): Promise<boolean>;
+    root: string; bindingId: string; isCurrent(scope: NextBuildScope, operation: CandidateOperation): Promise<boolean>;
   }) {
     if (!options || typeof options.root !== "string" || !isAbsolute(options.root) ||
         resolve(options.root) === parse(resolve(options.root)).root || !uuid(options.bindingId) ||
@@ -73,9 +73,9 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     this.isCurrent = options.isCurrent;
   }
 
-  private async current(scope: NextBuildScope): Promise<void> {
+  private async current(scope: NextBuildScope, operation: CandidateOperation): Promise<void> {
     let allowed: boolean;
-    try { allowed = await this.isCurrent(scope); }
+    try { allowed = await this.isCurrent(scope, operation); }
     catch { throw new NextBuildError("source_unavailable"); }
     if (allowed !== true) throw new NextBuildError("source_stale");
   }
@@ -98,8 +98,8 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
   private location(scope: NextBuildScope): string { return join(this.base(), nextRequestDigest(scope)); }
   private asset(path: string): string { return hash(path) + ".asset"; }
 
-  private async readBytes(scope: NextBuildScope, path: string, maxBytes: number): Promise<Buffer> {
-    await this.current(scope);
+  private async readBytes(scope: NextBuildScope, path: string, maxBytes: number, operation: CandidateOperation): Promise<Buffer> {
+    await this.current(scope, operation);
     const entry = await lstat(path);
     if (entry.isSymbolicLink() || !entry.isFile() || entry.size > maxBytes) conflict();
     const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -118,14 +118,14 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
       if (length !== stat.size || length > maxBytes) conflict();
       body = Buffer.from(buffer.subarray(0, length));
     } finally { await handle.close(); }
-    await this.current(scope);
+    await this.current(scope, operation);
     return body;
   }
 
-  private async stored(scope: NextBuildScope): Promise<StaticManifest> {
+  private async stored(scope: NextBuildScope, operation: CandidateOperation): Promise<StaticManifest> {
     const dir = this.location(scope);
     await this.directory(dir);
-    const raw = await this.readBytes(scope, join(dir, "manifest.json"), MAX_METADATA);
+    const raw = await this.readBytes(scope, join(dir, "manifest.json"), MAX_METADATA, operation);
     let row: { scope: NextBuildScope; bindingId: string; manifest: StaticManifest; manifestSha256: string };
     try { row = JSON.parse(raw.toString("utf8")) as typeof row; }
     catch { return conflict(); }
@@ -137,13 +137,13 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
   }
 
   private async verify(scope: NextBuildScope, expected: StaticManifest): Promise<void> {
-    const manifest = await this.stored(scope);
+    const manifest = await this.stored(scope, "write");
     if (staticManifestDigest(manifest) !== staticManifestDigest(expected)) conflict();
     const names = (await readdir(this.location(scope))).sort();
     const expectedNames = ["manifest.json", ...manifest.files.map(f => this.asset(f.path))].sort();
     if (JSON.stringify(names) !== JSON.stringify(expectedNames)) conflict();
     for (const file of manifest.files) {
-      const body = await this.readBytes(scope, join(this.location(scope), this.asset(file.path)), file.sizeBytes);
+      const body = await this.readBytes(scope, join(this.location(scope), this.asset(file.path)), file.sizeBytes, "write");
       if (body.length !== file.sizeBytes || hash(body) !== file.sha256) conflict();
     }
   }
@@ -184,7 +184,7 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     const identity = artifactId(manifestSha256);
     const envelope = Buffer.from(JSON.stringify({ scope, bindingId: this.bindingId, manifest, manifestSha256 }));
     if (envelope.length > MAX_METADATA) conflict();
-    await this.current(scope);
+    await this.current(scope, "write");
     await this.directory(this.base(), true);
     const destination = this.location(scope);
     let exists = false;
@@ -192,7 +192,7 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     catch (e) { if (code(e) !== "ENOENT") throw e; }
     if (exists) {
       await this.verify(scope, manifest);
-      await this.current(scope);
+      await this.current(scope, "write");
       return { artifactId: identity, manifestSha256 };
     }
 
@@ -200,18 +200,18 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     await mkdir(stage, { mode: 0o700 });
     try {
       for (const file of manifest.files) await this.write(join(stage, this.asset(file.path)), files.get(file.path)!);
-      await this.current(scope);
+      await this.current(scope, "write");
       // The commit record is written only after every immutable asset is synced.
       await this.write(join(stage, "manifest.json"), envelope);
       await this.syncDirectory(stage);
-      await this.current(scope);
+      await this.current(scope, "write");
       try { await rename(stage, destination); }
       catch (e) {
         if (!["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(code(e) ?? "")) throw e;
         await this.verify(scope, manifest);
       }
       await this.syncDirectory(this.base());
-      await this.current(scope);
+      await this.current(scope, "write");
       return { artifactId: identity, manifestSha256 };
     } finally { await rm(stage, { recursive: true, force: true }); }
   }
@@ -222,9 +222,9 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     if (!uuid(id)) throw new NextBuildError("preview_unavailable");
     if (!safePath(assetPath)) throw new NextBuildError("preview_path_invalid");
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > MAX_FILE) conflict();
-    await this.current(scope);
+    await this.current(scope, "read");
     let manifest: StaticManifest;
-    try { manifest = await this.stored(scope); }
+    try { manifest = await this.stored(scope, "read"); }
     catch (e) {
       if (code(e) === "ENOENT") throw new NextBuildError("preview_unavailable");
       throw e;
@@ -233,9 +233,9 @@ export class DiskPrivateStaticArtifacts implements PrivateStaticArtifacts {
     const file = manifest.files.find(f => f.path === assetPath);
     if (!file) throw new NextBuildError("preview_unavailable");
     if (file.sizeBytes > maxBytes) conflict();
-    const body = await this.readBytes(scope, join(this.location(scope), this.asset(file.path)), file.sizeBytes);
+    const body = await this.readBytes(scope, join(this.location(scope), this.asset(file.path)), file.sizeBytes, "read");
     if (body.length !== file.sizeBytes || hash(body) !== file.sha256) conflict();
-    await this.current(scope);
+    await this.current(scope, "read");
     return { body, contentType: file.contentType };
   }
 }

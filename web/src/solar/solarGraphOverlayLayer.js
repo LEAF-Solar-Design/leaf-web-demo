@@ -1,22 +1,38 @@
 import * as THREE from 'three'
 
 // Unattached, disposable rendering resources for already projected geometry.
-export function buildSolarGraphOverlayLayer(polylines) {
+export function buildSolarGraphOverlayLayer(polylines, { x = 0, y = 0 } = {}) {
   const group = new THREE.Group()
   const batches = new Map()
   const resources = []
+  // Size each GPU attribute first so there is no temporary number array or
+  // second copy of every vertex when the next saved group appears.
   for (const { color, pts } of polylines) {
-    if (!batches.has(color)) batches.set(color, [])
-    const positions = batches.get(color)
+    if (!batches.has(color)) batches.set(color, { length: 0, offset: 0 })
+    batches.get(color).length += Math.max(0, pts.length - 1) * 6
+  }
+  for (const batch of batches.values()) {
+    batch.positions = new Float32Array(batch.length)
+  }
+  for (const { color, pts } of polylines) {
+    const batch = batches.get(color)
+    const { positions } = batch
+    let offset = batch.offset
     for (let index = 1; index < pts.length; index += 1) {
       const a = pts[index - 1]
       const b = pts[index]
-      positions.push(a[0], a[1], 1.5, b[0], b[1], 1.5)
+      positions[offset++] = a[0] - x
+      positions[offset++] = a[1] - y
+      positions[offset++] = 1.5
+      positions[offset++] = b[0] - x
+      positions[offset++] = b[1] - y
+      positions[offset++] = 1.5
     }
+    batch.offset = offset
   }
-  for (const [color, positions] of batches) {
+  for (const [color, { positions }] of batches) {
     const geometry = new THREE.BufferGeometry()
-    const attribute = new THREE.Float32BufferAttribute(positions, 3)
+    const attribute = new THREE.BufferAttribute(positions, 3)
     attribute.setUsage(THREE.StaticDrawUsage)
     geometry.setAttribute('position', attribute)
     const material = new THREE.LineBasicMaterial({ color, depthTest: false,

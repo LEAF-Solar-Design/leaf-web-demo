@@ -660,6 +660,18 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls {
     flex: 0 0 auto; height: 23px; padding: 0 3px 0 0; gap: 3px; align-items: center;
   }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line[data-wrapped="true"] {
+    height: auto; min-height: 25px; align-items: flex-start;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] .bar-input {
+    height: auto; min-height: 23px; align-items: flex-start; padding-top: 1px; padding-bottom: 1px;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] :is(.bar-field, .bar-input input) {
+    height: auto; max-height: calc(21px * 6); overflow-y: auto; overflow-x: hidden; white-space: pre-wrap;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] :is(.bar-caret, .bar-controls) {
+    height: 23px; align-self: flex-start;
+  }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls :is(.bar-add, .bar-scope, .bar-proj, .key, .chip-act, .bar-lanes) {
     height: 18px; padding: 0 6px; font: 400 var(--leaf-size-caption)/18px var(--ck-font); border-radius: var(--leaf-radius-key);
     background: transparent; color: var(--leaf-ink-muted); border: 1px solid transparent;
@@ -1124,6 +1136,18 @@
      The phone frame keeps 100px; short landscape's app padding stays below. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --tb-r: calc(68px + var(--tb-h, 32px)); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line { height: var(--tb-h, 32px); }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar.bar-command-line[data-wrapped="true"] {
+    height: auto; min-height: calc(var(--tb-h, 32px)); align-items: flex-start;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] .bar-input {
+    height: auto; min-height: 23px; align-items: flex-start; padding-top: 1px; padding-bottom: 1px;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] :is(.bar-field, .bar-input input) {
+    height: auto; max-height: calc(21px * 6); overflow-y: auto; overflow-x: hidden; white-space: pre-wrap;
+  }
+  .studio-shell .app:is([data-studio-shell="cockpit"][data-surface], [data-surface="cad"], [data-surface="solar"]) .bar-command-line[data-wrapped="true"] :is(.bar-caret, .bar-controls) {
+    height: 23px; align-self: flex-start;
+  }
   #cockpit-engine-status-slot:empty { display: none; }
   .studio-shell .cockpit-engine-status { margin: 0; line-height: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(#cockpit-engine-status-slot:not(:empty)) { --ck-status-rise: 35px; }

@@ -66,8 +66,17 @@ REPORT_COLUMNS = {"dataset_ref", "title", "status", "fields", "freshness", "need
 
 
 def report_columns(description):
+    # Treat a request for the source schema as the "fields" projection. Keep
+    # provider field IDs and labels in their original structured form.
+    schema_term = r"(?:field|column)\s+(?:definitions?|metadata)"
+    description = re.sub(schema_term, "fields", description, flags=re.I)
     clause = re.search(r"\b(?:with|return|show|include)\s+(?:the\s+)?(?:columns|fields)\s*:?\s+([^.!?]+)",
                        description, re.I)
+    schema_request = re.search(
+        r"\b(?:list|show|include|return|enumerate|with)\s+(?:(?:the|their|its|source|dataset)\s+)*"
+        r"fields\b(?=\s+(?:for|of|from|in)\b|\s*[.?!]|\s*$)", description, re.I)
+    if schema_request and (not clause or clause.start() == schema_request.start()):
+        return ("dataset_ref", "fields")
     if not clause:
         return None
     names = re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", clause[1].strip().casefold())

@@ -45,7 +45,7 @@ export class DurablePrivateNextViews {
     return {a:Object.freeze({tenantId:a.tenantId,organizationId:a.organizationId,projectId:a.projectId,repoKey:a.repoKey}),r:Object.freeze({jobId:r.jobId,...candidate(r)})};
   }
   private async current(a:ProjectRepositoryAuthority,r:BrowserCandidateBuildRequest){
-    const row=await this.deps.loadCandidate(a,r.sourceRequestId,r);
+    const row=await this.deps.loadCandidate(a,r.sourceRequestId,r,"read");
     if(!row||row.schema!=="leaf.browser-project-source.v1"||row.state!=="published"||!row.authority||scopeKey(row.authority)!==scopeKey(a)||witnessKey(row)!==witnessKey(r))fail();
   }
   private validate(a:ProjectRepositoryAuthority,r:BrowserCandidateBuildRequest,value:DurableNextViewRecord):NextPreview{

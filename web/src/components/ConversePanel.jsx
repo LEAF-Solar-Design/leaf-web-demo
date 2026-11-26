@@ -716,6 +716,7 @@ export default function ConversePanel({
     let quota = false
     let quotaRetry = null
     let grant = false
+    let grantRefused = null
     const turnOf = (id) => {
       const key = id || `_${turns.length}`
       let t = byId.get(key)
@@ -774,7 +775,7 @@ export default function ConversePanel({
           if (typeof data.text === 'string' && data.text.trim()) t.userText = data.text
           t.images = thumbnailImages(data.images)
           t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
-        quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
+        quota = false; quotaRetry = null; grant = false; grantRefused = null // a fresh turn clears the paused banners
       } else if (type === 'text_delta') {
         const last = t.feed[t.feed.length - 1]
         // A marked machine summary is its own block, so its chip attributes
@@ -850,6 +851,9 @@ export default function ConversePanel({
             ? { seconds, at: Number.isFinite(retryTime) && Math.abs(retryTime) <= 8640000000000000
               ? new Date(retryTime).toISOString() : null }
             : null
+        } else if (code === 'authentication_failed' || code === 'oauth_org_not_allowed') {
+          grantRefused = { code, text: t.userText || null }
+          t.refused = true
         } else if (code === 'grant_required') grant = true
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
         if (typeof data.stop_reason === 'string' && data.stop_reason) {
@@ -877,7 +881,7 @@ export default function ConversePanel({
     // reading, not a per-turn one, so the newest turn_usage is the truth.
     let latestUsage = null
     for (const t of turns) if (t.usage) latestUsage = t.usage
-    return { turns, decisions, plans, completed, quota, quotaRetry, grant, active, latestUsage,
+    return { turns, decisions, plans, completed, quota, quotaRetry, grant, grantRefused, active, latestUsage,
              activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [sessionId, events, stoppedTurns, endedTurns])
 
@@ -1275,11 +1279,12 @@ export default function ConversePanel({
       // it lands, follows it rather than replacing it.
       const object = c.summary
       const rawOutcome = c.result && c.result !== c.summary ? c.result : ''
+      const structuredOutcome = ['{', '['].includes(String(rawOutcome).trim()[0])
       // A failed chip already says Failed: drop the stacked "error: tool
       // error:" wire prefixes so the chip reads as the reason itself.
       const outcome = st.state === 'failed'
         ? String(rawOutcome).replace(/^(?:\s*(?:tool\s+)?error:\s*)+/i, '')
-        : rawOutcome
+        : structuredOutcome ? '' : rawOutcome
       return (
         <li key={i} className="converse-tool-chip converse-step" data-state={st.state} title={c.tool || undefined}>
           <span className={st.dot} aria-hidden="true" />
@@ -1461,6 +1466,12 @@ export default function ConversePanel({
   }
 
   const otherPendingApprovals = pendingApprovals.filter(approval => !model.plans.has(approval.confirmation_id))
+  const showStopNote = (t) => {
+    if (!t.stopReason || !STOP_NOTES[t.stopReason]) return false
+    if (t.stopReason !== 'awaiting_approval') return true
+    const cards = t.feed.filter(item => ['plan', 'confirm', 'proposal'].includes(item.kind))
+    return cards.length === 0 || cards.some(item => !model.decisions.has(item.id) && decidedLocal[item.id] === undefined)
+  }
   const conversation = (
     <>
       {connectionState !== 'connected' && connectionState !== 'connecting' && (
@@ -1482,7 +1493,17 @@ export default function ConversePanel({
           </>}
         </span></div>
       )}
-      {showGrant && (
+      {model.grantRefused ? (
+        <div className="banner" role="status">
+          <span>{model.grantRefused.code === 'authentication_failed'
+            ? 'Claude no longer accepts the linked account. Add a working API key, then resend your message.'
+            : "The linked account's organization does not allow it here. Add a different API key, then resend your message."}</span>
+          <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>
+          {typeof model.grantRefused.text === 'string' && model.grantRefused.text.trim() && !input && !busy && (
+            <button type="button" className="chip-act" onClick={() => { setSecretNotice(null); setInput(model.grantRefused.text); composerRef.current?.focus() }}>Use my message again</button>
+          )}
+        </div>
+      ) : showGrant && (
         <div className="banner">
           <span>Chat needs a linked Claude account.</span>
           <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>
@@ -1559,9 +1580,9 @@ export default function ConversePanel({
                 <span className="dim">thinking…</span>
               </div>
             )}
-            {(t.usage || (t.stopReason && STOP_NOTES[t.stopReason])) && (
+            {(t.usage || showStopNote(t)) && (
               <div className="converse-turnfoot">
-                {t.stopReason && STOP_NOTES[t.stopReason] && (
+                {showStopNote(t) && !(t.refused && t.stopReason === 'error') && (
                   <span className="dim">{humanizeError(STOP_NOTES[t.stopReason])}</span>
                 )}
                 {t.usage && modelBadge(t.usage) && (

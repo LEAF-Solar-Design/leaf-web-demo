@@ -13,6 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
 import { ForgeRemoteAuthority } from "../src/vendor/mushy-author/ports/impl/forgeRemoteAuthority.js";
 import { createHarness } from "../src/server.js";
+import { AuthorLoop } from "../src/agent/authorLoop.js";
+import { AuthorStandardServicesRunner } from "../src/ports/impl/leafStandardServicesResolver.js";
+import type { AgentRunInput } from "../src/ports/index.js";
 import { FakeAgentRunner } from "../src/ports/fakes/fakeAgentRunner.js";
 import { FakeBrokerApsClient } from "../src/ports/fakes/fakeBrokerApsClient.js";
 import { FakeOAuthGrantProvider } from "../src/ports/fakes/fakeOAuthGrant.js";
@@ -356,6 +359,53 @@ describe("customization routes", () => {
     expect(body.receipt.base_commit).toBe(main);
     expect(git(bareDir, ["rev-parse", "refs/heads/main"])).toBe(main);
     expect(git(bareDir, ["rev-parse", `refs/leaf/changes/${CHANGE}`])).toBe(body.receipt.staged_commit);
+  });
+
+  it.each([
+    { target: "studio", services: "none", authority: {} },
+    { target: "branch", services: "none", authority: { "x-authority-session-id": "session-a" } },
+    { target: "branch", services: "none", authority: { "x-authority-turn-id": "turn-a" } },
+    { target: "branch", services: "none", authority: {
+      "x-authority-session-id": "session-a", "x-authority-turn-id": "turn-a" } },
+    { target: "branch", services: "none", authority: { "x-authority-extra": "present" } },
+    { target: "branch", services: "junk", authority: {} },
+  ])("rejects invalid services selection $services for $target with $authority", async ({ target, services, authority }) => {
+    const response = await fetch(`${baseUrl}/author/stage`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": SECRET,
+        "x-author-services": services, ...(authority as Record<string, string>) },
+      body: JSON.stringify({ ...stageBody(), target }),
+    });
+    expect(response.status).toBe(400);
+    expect(coordination.staged).toBeNull();
+  });
+
+  it("runs none plus Branch without service context when services require authority", async () => {
+    const previous = process.env.LEAF_TENANT_MCP_BROKER_URL;
+    process.env.LEAF_TENANT_MCP_BROKER_URL = "https://staging-api.leafdesign.ai";
+    const input = {} as AgentRunInput;
+    const run = vi.fn(async (_input: AgentRunInput) => ({ tool: {} as never, code: "", preview: "", files: [] }));
+    const runner = new AuthorStandardServicesRunner({ run }, true);
+    const stage = vi.spyOn(AuthorLoop.prototype, "stage").mockImplementation(async () => {
+      await runner.run(input);
+      return {} as never;
+    });
+    try {
+      const response = await fetch(`${baseUrl}/author/stage`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-harness-secret": SECRET,
+          "x-author-services": "none" },
+        body: JSON.stringify({ ...stageBody(), target: "branch" }),
+      });
+      expect(response.status).toBe(200);
+      expect(run).toHaveBeenCalledExactlyOnceWith(input);
+      expect(input.standardServicesContext).toBeUndefined();
+      expect(() => runner.run(input)).toThrow("authority_missing");
+    } finally {
+      stage.mockRestore();
+      if (previous === undefined) delete process.env.LEAF_TENANT_MCP_BROKER_URL;
+      else process.env.LEAF_TENANT_MCP_BROKER_URL = previous;
+    }
   });
 
   it("requires a complete app authority tuple when standard services are enabled", async () => {

@@ -1,6 +1,7 @@
 import './structural.css'
 import InviteAccept from './invites/InviteAccept.jsx'
 import { projectEngineObservationBinding } from './lib/projectDrawingObservation.js'
+import { planLabel } from './lib/planLabel.js'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
 import { withHiddenLayerDefaults } from './lib/hiddenLayers.js'
@@ -2606,16 +2607,19 @@ export default function App() {
   // insert/face-only layers (e.g. the ?fixture=edit Blocks/Surfaces layers)
   // stop reading 0 in the legend.
   const projectScene = viewerRef.current?.getDrawingScene?.()
-  const projectDrawing = projectSolarDrawingView({
-    solarBinding: projectSolar.scope.binding,
-    contextView: projectSolarRuntime.contextView,
-    current: projectMode && projectSolarRuntime.contextCurrent(),
-    scene: projectScene ? {
-      intake: projectScene.intake,
-      drawingKey: projectScene.drawingKey,
-      current: projectScene.ready === true,
-    } : null,
-  })
+  const projectDrawingBinding = projectSolar.scope.binding
+  const projectContextView = projectSolarRuntime.contextView
+  const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
+  const projectSceneIntake = projectScene?.intake
+  const projectSceneKey = projectScene?.drawingKey
+  const projectSceneReady = projectScene?.ready === true
+  const projectDrawing = useMemo(() => projectSolarDrawingView({
+    solarBinding: projectDrawingBinding,
+    contextView: projectContextView,
+    current: projectContextCurrent,
+    scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
+  }), [projectDrawingBinding, projectContextView, projectContextCurrent,
+    projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
     projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
@@ -5737,6 +5741,7 @@ export default function App() {
               open={claudeOpen}
               onToggle={setClaudeOpen}
               onLink={onLinkClaude}
+              onRefresh={platformActions.loadGrant}
               onUnlink={onUnlinkClaude}
             />
           )}
@@ -7131,7 +7136,7 @@ export default function App() {
             spend are muted metadata (green is reserved for genuine states). */}
         <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {gateTier}</span>
+        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {planLabel(gateTier) || gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}

@@ -28,7 +28,9 @@ def extrusion_axes(normal):
     return ((ax, ay, az), (ny*az - nz*ay, nz*ax - nx*az, nx*ay - ny*ax), (nx, ny, nz))
 
 
-def insert_frame(parent, insert, base, row=0, column=0):
+def insert_frame(parent, insert, base, row=0, column=0, source_precision=False):
+    if source_precision and insert.get("measurement_placement"):
+        insert = dict(insert, **insert["measurement_placement"])
     x_axis, y_axis, z_axis = extrusion_axes(insert.get("nrm", (0, 0, 1)))
     angle = insert.get("rot", 0)
     cosine, sine = math.cos(angle), math.sin(angle)
