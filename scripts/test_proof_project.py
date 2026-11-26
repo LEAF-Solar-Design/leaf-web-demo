@@ -502,20 +502,38 @@ class TestProjectBoundary:
         with pytest.raises(p.ProofRefused):
             p.prepare_runtime(admitted(c), effects=c.effects, scope=c.scope)
 
-    def test_build_provenance(self):
-        c = case()
-        plan = admitted(c)
-        result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
-        assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
-        assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
-        assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
-        assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
-        build = c.launches[-1]
-        assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
-        assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
-        assert build.cwd == ROOT / "vendor-source"
-        assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
-        assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+    def test_build_provenance(self, monkeypatch):
+        sdk_paths = r"C:\SDK\um\x64;C:\SDK\ucrt\x64"
+        for windows, library_paths, expected in (
+            (True, sdk_paths, sdk_paths),
+            (True, None, None),
+            (True, " ", None),
+            (False, "/sdk/lib", None),
+        ):
+            monkeypatch.setattr(p, "_WINDOWS_RUNTIME_HOST", windows)
+            c = case()
+            environ = {"PATH": "toolchain", "LIBPATH": "unrelated"}
+            if library_paths is not None:
+                environ["LIB"] = library_paths
+            captured = p._host_environment(environ)
+            c.host.facts = replace(c.host.facts, environment=captured,
+                windows_library_paths=p._windows_library_paths(environ))
+            plan = admitted(c)
+            result = p.prepare_runtime(plan, effects=c.effects, scope=c.scope)
+            assert result.requirements == tuple(map(file, ("server/requirements.txt", "platform/requirements.txt", "server/requirements-auth.txt")))
+            assert result.python == "3.fake" and dict(result.toolchain)["wasm-pack"] == "1.fake"
+            assert result.vendor_source == (file("vendor/engine/Cargo.toml"), file("vendor/engine/worker-browser.mjs"))
+            assert result.engine_outputs == (file("engine.js"), file("engine_bg.wasm"))
+            build = c.launches[-1]
+            assert build.argv == ("wasm-pack", "build", "--release", "--target", "web", ".", "--out-dir", str(ROOT / "cad-engine"), "--out-name", "engine")
+            assert build.environment["CARGO_TARGET_DIR"] == str(ROOT / "cargo-target")
+            assert build.cwd == ROOT / "vendor-source"
+            assert result.engine_root == ROOT / "cad-engine" and result.cargo_target_root == ROOT / "cargo-target"
+            assert build.output_path is None and build.deadline > 0 and len(c.scope.cleanups) == 5
+            assert "LIB" not in captured
+            assert all("LIB" not in probe.environment for probe in c.launches[:-1])
+            assert all("LIBPATH" not in process.environment for process in c.launches)
+            assert build.environment.get("LIB") == expected
         for corruption in ({"engine_outputs": (file("engine.js", ""), file("engine_bg.wasm"))},
                            {"requirements": ()}, {"toolchain": ()}):
             c = case()
