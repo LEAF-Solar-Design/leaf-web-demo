@@ -30,20 +30,30 @@ export default function ReportComparison({ jobs, projectId }) {
   const [firstId, setFirstId] = useState('')
   const [secondId, setSecondId] = useState('')
   const reports = new Map()
+  const seenJobIds = new Set()
   for (const job of jobs) {
+    const id = job.job_id
+    if (typeof id !== 'string' || !id) continue
+    if (seenJobIds.has(id)) {
+      reports.delete(id)
+      continue
+    }
+    seenJobIds.add(id)
     const { version } = savedReportBinding(job, projectId)
-    if (!version || typeof job.job_id !== 'string' || !job.job_id) continue
+    if (!version) continue
     const { tool, version: toolVersion } = job.result
-    reports.set(job.job_id, {
-      id: job.job_id,
+    reports.set(id, {
+      id,
       drawingVersion: version,
       tool: typeof tool === 'string' && tool.trim() ? tool : null,
       toolVersion: typeof toolVersion === 'string' && toolVersion.trim() ? toolVersion : null,
     })
   }
-  if (reports.size < 2) return null
   const first = reports.get(firstId)
   const second = reports.get(secondId)
+  if (firstId && !first) setFirstId('')
+  if (secondId && !second) setSecondId('')
+  if (reports.size < 2) return null
   return (
     <section className="ground-job-detail" aria-label="Compare saved reports">
       <h3>Compare saved reports</h3>
