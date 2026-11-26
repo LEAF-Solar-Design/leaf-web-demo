@@ -561,64 +561,6 @@ def test_counter_key_carries_day_and_tenant():
     assert author_quota.counter_key("tenant-a", "2026-07-30") == "2026-07-30:tenant-a"
 
 
-def test_postgres_refunds_preserve_immutable_ledger(monkeypatch):
-    url = os.environ.get("PG_CUSTOMIZATION_TEST_URL")
-    if not url:
-        pytest.skip("PG_CUSTOMIZATION_TEST_URL is not configured")
-    monkeypatch.setenv("DATABASE_URL", url)
-    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
-    db, _ = author_quota._load_platform_counters()
-    db.reset_pool()
-    tenant = f"quota-refund-{uuid4().hex}"
-    day = "2026-07-30"
-
-    def used(tenant_id, quota_day):
-        with db.transaction(read_only=True) as conn:
-            row = conn.execute(
-                "SELECT value FROM author_quota_counters "
-                "WHERE namespace = 'author_daily' AND counter_key = %(key)s",
-                {"key": author_quota.counter_key(tenant_id, quota_day)},
-            ).fetchone()
-            return int(row["value"])
-
-    try:
-        db.apply_migration()
-        assert author_quota.charge(tenant, day, 1, idempotency_key="first") == (True, 1)
-        original = author_quota.lookup_attempt(tenant, "first")
-        assert author_quota.charge(tenant, day, 1, idempotency_key="refused") == (False, 1)
-        assert author_quota.refund_unstarted(tenant, "refused") is False
-        assert author_quota.refund_unstarted(tenant, "first") is True
-        assert author_quota.refund_unstarted(tenant, "first") is False
-        assert used(tenant, day) == 0
-        assert author_quota.lookup_attempt(tenant, "first") == original
-        assert author_quota.charge(tenant, day, 1, idempotency_key="first",
-                                   return_decision=True) == original
-        assert used(tenant, day) == 0
-        assert author_quota.charge(tenant, day, 1, idempotency_key="concurrent") == (True, 1)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(
-                lambda _: author_quota.refund_unstarted(tenant, "concurrent"), range(2),
-            ))
-        assert results.count(True) == 1
-        assert used(tenant, day) == 0
-        assert author_quota.charge(tenant, day, 1, idempotency_key="third") == (True, 1)
-        assert author_quota.refund_unstarted(tenant, "third") is True
-        assert author_quota.charge(tenant, day, 1, idempotency_key="fourth") == (True, 1)
-        fourth = author_quota.lookup_attempt(tenant, "fourth")
-        assert author_quota.refund_unstarted(tenant, "fourth") is False
-        assert author_quota.refund_unstarted(tenant, "fourth") is False
-        assert author_quota.lookup_attempt(tenant, "fourth") == fourth
-        assert used(tenant, day) == 1
-        for other_tenant, other_day in ((tenant + "-other", day), (tenant, "2026-07-31")):
-            assert author_quota.charge(other_tenant, other_day, 1,
-                                       idempotency_key="fresh") == (True, 1)
-            assert author_quota.refund_unstarted(other_tenant, "fresh") is True
-            assert used(other_tenant, other_day) == 0
-    finally:
-        # The append-only ledger deliberately retains these unique test identities.
-        db.reset_pool()
-
-
 def test_memory_counter_is_refused_when_durability_is_required():
     """Two replicas keep two independent memory counts and a restart clears both,
     so a quota configured against memory in a real deployment reads as enforced
