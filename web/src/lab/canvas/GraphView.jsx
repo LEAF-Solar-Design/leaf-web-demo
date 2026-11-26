@@ -4,7 +4,7 @@ import { fetchLabTools } from './toolNodes.js'
 import { addBlock, pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
-import { serviceScope, serviceState } from '../../lib/serviceAuthSession.js'
+import { authorityKey, serviceScope, serviceState } from '../../lib/serviceAuthSession.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { evidenceFor } from '../code/hostEvidence.js'
@@ -226,16 +226,20 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const provider = supplied || local
   const [tools, setTools] = useState([])
   const [corpusPanel, setCorpusPanel] = useState(false)
-  const [corpusOptions, setCorpusOptions] = useState(null)
+  const [corpusCatalog, setCorpusCatalog] = useState(null)
   const [corpusProject, setCorpusProject] = useState('')
   const [corpusMaterial, setCorpusMaterial] = useState('')
   const [corpusSuite, setCorpusSuite] = useState('')
   const [corpusMessage, setCorpusMessage] = useState('')
   const [savedCorpusAdmission, setSavedCorpusAdmission] = useState(null)
+  const catalogAuthority = authorityKey()
+  const catalogAvailable = !serviceState().mode || Boolean(catalogAuthority)
+  const corpusOptions = catalogAvailable && corpusCatalog?.authority === catalogAuthority ? corpusCatalog.options : null
+  const authorizedAdmission = catalogAvailable && savedCorpusAdmission?.authority === catalogAuthority ? savedCorpusAdmission : null
   const savedGraph = restored.graph || initialDocument
   const savedCorpusBlock = savedGraph?.blocks?.find(block => block.registry.id === 'corpus-evaluator')
-  const currentAdmission = savedCorpusAdmission && savedCorpusAdmission.graph === savedGraph && savedCorpusAdmission.key === restored.key
-    ? savedCorpusAdmission : null
+  const currentAdmission = authorizedAdmission?.graph === savedGraph && authorizedAdmission?.key === restored.key
+    ? authorizedAdmission : null
   const savedCorpusAdmitted = !savedCorpusBlock || Boolean(currentAdmission?.manifest)
   const corpusRequest = useRef(0)
   const savedCorpusRequest = useRef(0)
@@ -256,7 +260,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     }
     return toolsRequest.current
   }, [])
-  const corpusManifest = savedCorpusAdmission?.manifest || corpusOptions?.manifest
+  const corpusManifest = authorizedAdmission?.manifest || corpusOptions?.manifest
   const toolEntries = useMemo(() => ({ ...withTools(entries || registry, tools),
     ...(corpusManifest ? { 'corpus-evaluator@1.0.0': corpusManifest } : {}) }), [entries, tools, corpusManifest])
   const live = useLiveGraph({ provider, registry: toolEntries, revision: supplied ? revision : localRevision, artifacts: client })
@@ -270,19 +274,24 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const submissionIntent = useRef(null)
   const logoutGeneration = useRef(0)
   const explicitlySignedOut = useRef(false)
+  const isCatalogAuthorityCurrent = () => !explicitlySignedOut.current && catalogAvailable
+    && catalogAuthority === authorityKey() && (!serviceState().mode || Boolean(catalogAuthority))
   const loadCorpusOptions = async (project = '', graph = null) => {
+    if (!isCatalogAuthorityCurrent()) return
     const requests = graph ? savedCorpusRequest : corpusRequest
     const request = ++requests.current
     const generation = logoutGeneration.current
-    const requestAuthority = authHeaders().Authorization
+    const admission = { graph, key: restored.key, authority: catalogAuthority }
     if (graph) {
-      setSavedCorpusAdmission(previous => previous?.graph === graph && previous.key === restored.key && previous.error ? null : previous)
+      setSavedCorpusAdmission(previous => previous?.graph === graph && previous.key === restored.key
+        && previous.authority === catalogAuthority && previous.error ? null : previous)
     } else {
-      setCorpusOptions(previous => previous ? { ...previous, materials: [] } : null)
+      setCorpusCatalog(previous => previous?.authority === catalogAuthority
+        ? { authority: catalogAuthority, options: { ...previous.options, materials: [] } } : null)
       setCorpusMessage('Loading project reference files…')
     }
     const isCurrent = () => request === requests.current && generation === logoutGeneration.current
-      && !explicitlySignedOut.current && authHeaders().Authorization === requestAuthority
+      && isCatalogAuthorityCurrent()
     try {
       const query = new URLSearchParams(project ? { project_id: project } : {})
       if (graph) query.set('manifest_only', 'true')
@@ -293,17 +302,17 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       if (!isCurrent()) return
       if (!options?.manifest) throw new Error('Corpus evaluation is unavailable for this project.')
       if (graph) {
-        setSavedCorpusAdmission({ graph, key: restored.key, manifest: options.manifest })
+        setSavedCorpusAdmission({ ...admission, manifest: options.manifest })
       } else {
-        setCorpusOptions(options)
+        setCorpusCatalog({ authority: catalogAuthority, options })
         setCorpusMessage(options.limited ? 'Showing the first available projects.' : '')
       }
     } catch (error) {
       if (!isCurrent()) return
       if (graph) {
-        setSavedCorpusAdmission({ graph, key: restored.key, error: error.message })
+        setSavedCorpusAdmission({ ...admission, error: error.message })
       } else {
-        setCorpusOptions(null)
+        setCorpusCatalog(null)
         setCorpusMessage(error.message)
       }
     }
@@ -318,6 +327,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     void loadCorpusOptions(project)
   }
   const addCorpus = () => {
+    if (!isCatalogAuthorityCurrent()) return
     const original = live.draft?.document
     const material = corpusOptions?.materials?.find(item => item.material_id === corpusMaterial && item.media_type === 'application/gzip')
     const suite = corpusOptions?.materials?.find(item => item.material_id === corpusSuite && item.media_type === 'application/json')
@@ -333,6 +343,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     setCorpusMessage('Corpus evaluation added. Save this graph, then run it to evaluate the complete original.')
   }
   useEffect(() => {
+    setSavedCorpusAdmission(previous => catalogAvailable && previous?.authority === catalogAuthority ? previous : null)
+    setCorpusCatalog(previous => catalogAvailable && previous?.authority === catalogAuthority ? previous : null)
     if (savedCorpusBlock && !hidden) {
       setCorpusProject(savedCorpusBlock.settings.project_id)
       setCorpusMaterial(savedCorpusBlock.settings.corpus.material_id)
@@ -346,7 +358,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       corpusRequest.current += 1
       savedCorpusRequest.current += 1
     }
-  }, [savedGraph, restored.key, hidden])
+  }, [savedGraph, restored.key, hidden, catalogAuthority, catalogAvailable])
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
   const [recoveredRun, setRecoveredRun] = useState(null)
   // A loaded head does not mean Open has loaded its graph. The default canvas
@@ -403,7 +415,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       explicitlySignedOut.current = true
       corpusRequest.current += 1
       savedCorpusRequest.current += 1
-      setCorpusOptions(null)
+      setCorpusCatalog(null)
       setSavedCorpusAdmission(null)
       setCorpusPanel(false)
       setCorpusProject(''); setCorpusMaterial(''); setCorpusSuite(''); setCorpusMessage('')
@@ -415,11 +427,16 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       setRunMessage('')
       refreshHead(value => value + 1)
     })
-    const offStored = subscribeTokenStored(() => {
-      explicitlySignedOut.current = false
+    const refreshAuthority = () => {
+      if (authorityKey()) explicitlySignedOut.current = false
       refreshHead(value => value + 1)
-    })
-    return () => { offLogout(); offStored() }
+    }
+    const offStored = subscribeTokenStored(refreshAuthority)
+    const onStorage = event => {
+      if (event.key === null || event.key === 'leaf.jwt') refreshAuthority()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => { offLogout(); offStored(); window.removeEventListener('storage', onStorage) }
   }, [])
   useEffect(() => {
     mounted.current = true
@@ -694,7 +711,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           </>}
           <button type="button" disabled={!validDocument || (!onRun && (!savedCorpusAdmitted || explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
-            onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
+            onClick={() => {
+              if (!validDocument || (savedCorpusBlock && !isCatalogAuthorityCurrent())) return
+              if (onRun) onRun(validDocument)
+              else void runSaved()
+            }}>
             {outcomeUnknown || recoveringRun || (receiptScope && recoveryReady !== recoveryKey && !onRun && client.state.head != null) ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
           {(outcomeUnknown || recoveringRun) && <button type="button" disabled={submitting} onClick={() => {
             if (submissionIntent.current) forgetRunReceipt(receiptScope, submissionIntent.current.id)
