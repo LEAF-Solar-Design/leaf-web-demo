@@ -1425,8 +1425,18 @@ export function createHarness(ports: HarnessPorts, opts?: {
           const authority = {tenantId:b.tenant_id as string,organizationId:b.organization_id as string,projectId:b.project_id as string,repoKey:b.repo_key as string};
           const witness = {jobId:b.job_id as string,sourceRequestId:b.source_request_id as string,version:b.version as number,receiptDigest:b.receipt_digest,sourceCommit:b.source_commit,sourceTree:b.source_tree};
           if (path.endsWith("/build") && !authoredExecutionEnabled()) return send(res,503,{error:{code:"authored_execution_disabled"}});
-          // A status request only observes the existing identity. Never build.
-          const result = path.endsWith("/build") ? await builds!.submit(authority,witness) : await (views || builds!).observe(authority,witness);
+          let result;
+          if (path.endsWith("/build")) {
+            result = await builds!.submit(authority, witness, views?.observe.bind(views));
+          } else if (views) {
+            result = await views.observe(authority, witness);
+            if (result.status === "unknown" && builds) {
+              const live = await builds.observe(authority, witness, true);
+              if (live.status === "building" || live.status === "failed") result = live;
+            }
+          } else {
+            result = await builds!.observe(authority, witness);
+          }
           res.setHeader("Cache-Control","private, no-store");
           return send(res,200,result);
         } catch { return send(res,409,{error:{code:"preview_unavailable"}}); }

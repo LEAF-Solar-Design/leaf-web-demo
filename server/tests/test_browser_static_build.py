@@ -33,6 +33,7 @@ def fixture(monkeypatch):
     monkeypatch.setattr(flow, 'scope', current)
     monkeypatch.setattr(flow, 'repository', lambda *a: deepcopy(authority))
     monkeypatch.setattr(flow, 'read', lambda *a: deepcopy(row))
+    monkeypatch.delenv('LEAF_STATIC_NEXT_EXECUTOR', raising=False)
     monkeypatch.setenv('LEAF_AUTHOR_HARNESS_URL', 'https://fixture.invalid')
     monkeypatch.setattr(build.broker_client, 'harness_headers', lambda: {'X-Harness-Secret': 'fixture-only'})
     class Response:
@@ -80,6 +81,36 @@ def test_build_and_status_are_distinct_and_no_bearer_forwarded(fixture):
     assert 'Authorization' not in kwargs['headers'] and not kwargs['allow_redirects']
     assert json.loads(kwargs['data'])==dict(f.authority,source_request_id=f.request,job_id=f.job,**f.witnesses)
     assert f.calls[-1]=='closed'
+
+
+def test_submission_persists_the_original_actor_and_publication_before_dispatch(fixture, monkeypatch):
+    f = fixture
+    admissions = []
+
+    def admit(*args):
+        assert not f.calls
+        admissions.append(args)
+
+    monkeypatch.setenv('LEAF_STATIC_NEXT_EXECUTOR', 'enabled')
+    monkeypatch.setattr(build.admission, 'admit', admit)
+    assert f.exchange()['status'] == 'building'
+    assert not admissions
+    f.calls.clear()
+    assert f.exchange(True)['status'] == 'building'
+    assert admissions == [(f.authority, f.job, f.scope[2], f.request, f.witnesses)]
+    assert f.calls[0][0].endswith('/build')
+
+
+def test_conflicting_admission_stops_submission_before_dispatch(fixture, monkeypatch):
+    def conflict(*args):
+        raise flow.FlowError(409)
+
+    monkeypatch.setenv('LEAF_STATIC_NEXT_EXECUTOR', 'enabled')
+    monkeypatch.setattr(build.admission, 'admit', conflict)
+    with pytest.raises(flow.FlowError) as error:
+        fixture.exchange(True)
+    assert error.value.status == 409
+    assert not fixture.calls
 
 
 def test_ready_manifest_is_verified_before_return(fixture):
