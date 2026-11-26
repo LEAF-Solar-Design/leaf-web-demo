@@ -234,11 +234,15 @@ def bootstrap_child(plan, role, environment, *, modules=None, read=None, stat_ro
     owned = read_private_plan(environment)
     _require(owned.public() == plan.public() and owned.token == plan.token
              and dict(owned.fixture_map) == dict(plan.fixture_map))
-    _require(role in {"app", "broker", "worker", "sizing-worker", "panels-worker", "groups-worker", "canonical"})
+    _require(role in {"app", "broker", "worker", "sizing-worker", "panels-worker", "groups-worker", "canonical",
+                      "canonical-heartbeat"})
     _validate_plan(plan, environment, read=read, stat_root=stat_root, load_manifest=load_manifest)
     child = dict(environment)
     child["DATABASE_URL"] = environment["DATABASE_URL"]  # DROP_PROJECT_DSN
     child["LEAF_AUTH_LIVE"] = "1"
+    if role == "canonical-heartbeat":
+        # Read-only heartbeat queries need pinned-plan validation and no service seams.
+        return child
     production = modules is None
     if production:
         sys.path.insert(0, str(REPO / "server"))

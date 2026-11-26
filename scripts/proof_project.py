@@ -2208,7 +2208,8 @@ def _canonical_child_entry():
             sizing = _sizing_module()
             if sizing.CONFIG_KEY in environment:
                 replay = sizing.read_private_plan(environment)
-                environment = sizing.bootstrap_child(replay, "canonical", environment)
+                role = "canonical-heartbeat" if request.purpose == "heartbeat" else "canonical"
+                environment = sizing.bootstrap_child(replay, role, environment)
             if request.purpose == "heartbeat":
                 with _project_connection(environment, request.deadline) as conn:
                     row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "

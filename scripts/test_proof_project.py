@@ -5836,16 +5836,20 @@ def test_r14f1_canonical_replay_independent(monkeypatch):
 def test_r14f1_canonical_child_bootstrap(monkeypatch, capsys):
     from contextlib import contextmanager
     sizing, called = p._sizing_module(), []
-    replay = object()
+    replay = SimpleNamespace(public=lambda: {}, token="test", fixture_map={})
     monkeypatch.setattr(sizing, "read_private_plan", lambda env: called.append("pins") or replay)
+    real_bootstrap = sizing.bootstrap_child
     def bootstrap(plan, role, environment):
-        assert plan is replay and role == "canonical"
-        called.append("bootstrap")
-        return environment
+        assert plan is replay and role == "canonical-heartbeat"
+        return real_bootstrap(plan, role, environment, modules=object())
+    def validate(plan, environment, **options):
+        assert plan is replay
+        called.append("validate")
     monkeypatch.setattr(sizing, "bootstrap_child", bootstrap)
+    monkeypatch.setattr(sizing, "_validate_plan", validate)
     @contextmanager
     def connection(environment, deadline):
-        assert called == ["pins", "bootstrap"] and environment["DATABASE_URL"] == "fakedb"
+        assert called == ["pins", "pins", "validate"] and environment["DATABASE_URL"] == "fakedb"
         yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: None))
     monkeypatch.setattr(p, "_project_connection", connection)
     request = dict(purpose="heartbeat", tool_name="solar-size-strings", evidence=None,
