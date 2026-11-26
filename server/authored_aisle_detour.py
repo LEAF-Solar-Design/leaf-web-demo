@@ -1,7 +1,67 @@
 """Author a plan-view cable crossing check and shortest drawn-aisle detour."""
 import re
+from fractions import Fraction
 
 from authored_route_crossings import PLANAR_GEOMETRY_BODY
+
+
+_LENGTHS = {
+    alias: Fraction(metres)
+    for metres, aliases in (
+        ("0.001", "mm millimetre millimetres millimeter millimeters"),
+        ("0.01", "cm centimetre centimetres centimeter centimeters"),
+        ("1", "m metre metres meter meters"),
+        ("0.0254", "in inch inches"),
+        ("0.3048", "ft foot feet"),
+    )
+    for alias in aliases.split()
+}
+_LENGTH_UNIT = "(?:" + "|".join(_LENGTHS) + ")"
+_DECIMAL = r"[+-]?(?:\d{1,12}(?:\.\d{1,12})?|\.\d{1,12})"
+_LENGTH = rf"({_DECIMAL})\s*({_LENGTH_UNIT})\b"
+
+
+def requests_clearance(prompt):
+    return bool(re.search(r"\btrays?\b", prompt)
+                and re.search(r"\b(?:clearance|wide|width)\b", prompt)
+                and re.search(r"\b(?:routes?|paths?|runs?|detours?)\b", prompt))
+
+
+def requests_corridor_check(prompt):
+    return bool(re.search(r"\b(?:cables?|wires?|wiring|conduits?)\b", prompt)
+                and re.search(r"\bcorridors?\b", prompt)
+                and (requests_clearance_spans(prompt)
+                     or re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|modules?)\b", prompt))
+                and re.search(r"\b(?:clearance|separation|too close|encroach\w*)\b", prompt)
+                and not re.search(r"\b(?:vertical|elevation|above|below(?!\s+(?:(?:the|required|minimum)\s+)*clearance\b))\b", prompt))
+
+
+def requests_clearance_spans(prompt):
+    return bool(re.search(r"\b(?:parts?|portions?|subsegments?|spans?|intervals?)\b", prompt)
+                or re.search(r"\b(?:start\w*|begin\w*|entr(?:y|ies))\b.*\b(?:end\w*|exit\w*)\b", prompt)
+                or requests_clearance_causes(prompt))
+
+
+def requests_clearance_causes(prompt):
+    return bool(re.search(r"\b(?:obstacles?|keepouts?|arrays?|panels?|causes?) set\b", prompt)
+                or re.search(r"\b(?:per|by) (?:obstacles?|keepouts?|arrays?|panels?|causes?)\b", prompt)
+                or re.search(r"\bwhich (?:obstacles?|keepouts?|arrays?|panels?)\b.*\b(?:station|along)\b", prompt))
+
+
+def clearance_dimensions(prompt):
+    def measure(patterns):
+        values = {Fraction(value) * _LENGTHS[unit]
+                  for pattern in patterns for value, unit in re.findall(pattern, prompt)}
+        return values.pop() if len(values) == 1 else None
+
+    width = measure((rf"\b(?:(?:tray|corridor)\s+)?width\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
+                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)wide\b",
+                     rf"(?<![\d.]){_LENGTH}(?:\s+|-)(?:trays?|corridors?)\b"))
+    side = measure((rf"\b(?:side\s+)?clearance\s*(?:(?:of|is)\s+|[:=]\s*)?{_LENGTH}",
+                    rf"(?<![\d.]){_LENGTH}(?:\s+of)?\s+(?:side\s+)?clearance\b"))
+    if width is None or width <= 0 or side is None or side < 0:
+        return ()
+    return str(width), str(side)
 
 
 def compares_lengths(prompt):
@@ -33,8 +93,74 @@ def equipment_headings(prompt):
     return heading("departure|depart|leave"), heading("arrival|arrive|enter")
 
 
+def compares_ports(prompt):
+    return bool(re.search(r"\b(?:cables?|wires?|conduits?|equipment)\b", prompt)
+                and re.search(r"\b(?:paths?|routes?|runs?|detours?|routing)\b", prompt)
+                and re.search(r"\bports?\b", prompt)
+                and (prefers_fewer_bends(prompt)
+                     or joint_ports(prompt)
+                     or re.search(r"\b(?:equivalent|shortest|best (?:physical )?ports)\b", prompt)))
+
+
+def joint_ports(prompt):
+    return bool(re.search(r"\b(?:joint(?:ly)?|combined|exclusive|shareable|same physical port)\b", prompt))
+
+
+def shareable_ports(prompt):
+    lists = re.findall(r"(?:^|[;.\n])\s*shareable ports\s*:\s*([^;.\n]*)", prompt)
+    if not lists:
+        return ()
+    names = re.split(r"\s*,\s*", lists[0].strip())
+    if len(lists) != 1 or any(not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", name) for name in names):
+        return None
+    return tuple(names)
+
+
+def equipment_ports(description):
+    """Read port lists by saved cable handle, or as one unqualified group."""
+    groups = {}
+    for clause in re.split(r"[;\n]|\.(?=\s|$)", description):
+        match = re.fullmatch(
+            r"\s*(?:(?:cable|wire|conduit)\s+([0-9a-f]{1,16})\s+)?"
+            r"(departure|arrival) ports\s*:\s*(.+?)\s*", clause, re.I)
+        if not match:
+            continue
+        handle, side, entries = match.groups()
+        handle = handle.upper() if handle is not None else None
+        sections = groups.setdefault(handle, {})
+        side = side.lower()
+        if side in sections or len(groups) > 16:
+            return {}
+        options = {}
+        for entry in re.split(r"\s*,(?![^()]*\))\s*|\s+or\s+", entries, flags=re.I):
+            port = re.fullmatch(
+                rf"([a-z0-9][a-z0-9_-]{{0,31}})(?:\s*=\s*|\s+)({_COMPASS})"
+                rf"(?:\s+at\s*\(\s*({_DECIMAL})\s*,\s*({_DECIMAL})\s*\))?", entry, re.I)
+            if not port or len(options) >= 16:
+                return {}
+            name, heading, x, y = port.groups()
+            if name.casefold() in options:
+                return {}
+            point = (x, y) if x is not None else None
+            options[name.casefold()] = (name, _HEADINGS[heading.lower()], point)
+        sections[side] = tuple(options.values())
+    if None in groups and len(groups) > 1:
+        return {}
+    for sections in groups.values():
+        if sections.keys() != {"departure", "arrival"}:
+            return {}
+        located = {point is not None for options in sections.values() for _, _, point in options}
+        if len(located) != 1:
+            return {}
+    return groups
+
+
 def matches(description):
     prompt = description.casefold()
+    if requests_clearance(prompt) or requests_corridor_check(prompt):
+        return True
+    if compares_ports(prompt):
+        return True
     if (prefers_fewer_bends(prompt)
             and re.search(r"\b(?:cables?|wires?|conduits?|aisles?)\b", prompt)
             and re.search(r"\b(?:paths?|routes?|runs?|detours?)\b", prompt)):
@@ -52,17 +178,32 @@ def matches(description):
 
 def build_body(description):
     prompt = description.casefold()
-    fewer_bends = prefers_fewer_bends(prompt)
+    tray_route = requests_clearance(prompt)
+    corridor_check = not tray_route and requests_corridor_check(prompt)
+    dimensions = clearance_dimensions(prompt) if tray_route or corridor_check else None
+    ports = equipment_ports(description) if compares_ports(prompt) else None
+    fewer_bends = ports is not None or prefers_fewer_bends(prompt)
     headings = equipment_headings(prompt)
     equipment = fewer_bends and (any(headings) or bool(re.search(r"\bequipment\b", prompt)))
     body = _BODY.replace("__FEWER_BENDS__", str(fewer_bends))
+    body = body.replace("__EQUIPMENT_PORTS__", repr(ports))
+    body = body.replace("__JOINT_PORTS__", str(ports is not None and joint_ports(prompt)))
+    body = body.replace("__SHAREABLE_PORTS__", repr(shareable_ports(prompt)))
     body = body.replace("__EQUIPMENT_HEADINGS__", repr(headings if equipment else None))
-    return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(fewer_bends or compares_lengths(prompt)))
+    body = body.replace("__TRAY_DIMENSIONS__", repr(dimensions))
+    body = body.replace("__CORRIDOR_CHECK__", str(corridor_check))
+    body = body.replace("__CLEARANCE_SPANS__", str(corridor_check and requests_clearance_spans(prompt)))
+    body = body.replace("__CLEARANCE_CAUSES__", str(corridor_check and requests_clearance_causes(prompt)))
+    compare = dimensions is not None or fewer_bends or compares_lengths(prompt)
+    return PLANAR_GEOMETRY_BODY + body.replace("__COMPARE_LENGTHS__", str(compare))
 
 
 _BODY = r"""
 import math
 from heapq import heappop, heappush
+
+METRES_PER_UNIT = {1: "0.0254", 2: "0.3048", 3: "1609.344", 4: "0.001", 5: "0.01",
+                   6: "1", 7: "1000", 10: "0.9144", 14: "0.1"}
 
 
 def read_geometry(intake):
@@ -73,8 +214,11 @@ def read_geometry(intake):
             continue
         words = set(re.findall(r"[a-z0-9]+", entity.get("layer", "").casefold()))
         if words & {"aisle", "aisles"}:
+            if __CORRIDOR_CHECK__:
+                continue
             role = "aisle"
-        elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"}:
+        elif words & {"cable", "cables", "wire", "wires", "wiring", "conduit", "conduits", "route", "routes"} or (
+                __TRAY_DIMENSIONS__ is not None and words & {"tray", "trays"}):
             role = "cable"
         elif words & {"array", "arrays", "panel", "panels", "module", "modules"}:
             role = "array"
@@ -86,7 +230,7 @@ def read_geometry(intake):
         closed = entity.get("closed", False)
         if any(entity.get("bulges", [])):
             raise ValueError(f"Detours require straight segments on {handle}.")
-        points = [(Fraction(p[0]), Fraction(p[1])) for p in entity["pts"]]
+        points = [(Fraction(str(p[0])), Fraction(str(p[1]))) for p in entity["pts"]]
         if closed and len(points) > 1 and points[0] == points[-1]:
             points.pop()
         if len(points) < (3 if closed else 2):
@@ -102,6 +246,8 @@ def read_geometry(intake):
             collection = arrays if role == "array" else aisles
             collection.append((bounds(points), edges))
             if role == "array":
+                if __CORRIDOR_CHECK__ and not handle:
+                    raise ValueError("Corridor clearance requires obstacle drawing handles.")
                 obstacle_ids.append(handle)
         elif role == "aisle":
             centerlines.extend(edges)
@@ -134,10 +280,57 @@ def enters_array(a, b, arrays):
     return any(location(p, edges) == 1 for p in intervals(a, b, hit) for box, edges in hit)
 
 
+def point_segment_distance_squared(point, a, b):
+    dx, dy = difference(b, a)
+    px, py = difference(point, a)
+    t = max(0, min(1, (px*dx + py*dy) / (dx*dx + dy*dy)))
+    return (px - t*dx)**2 + (py - t*dy)**2
+
+
+def separated_from_edges(a, b, edges, radius_squared):
+    # Once the segments are disjoint, a nearest pair includes an endpoint.
+    return all(min(point_segment_distance_squared(a, p, q),
+                   point_segment_distance_squared(b, p, q),
+                   point_segment_distance_squared(p, a, b),
+                   point_segment_distance_squared(q, a, b)) >= radius_squared for p, q in edges)
+
+
+def violates_clearance(a, b, arrays, radius):
+    x0, y0, x1, y1 = bounds((a, b))
+    extent = (x0-radius, y0-radius, x1+radius, y1+radius)
+    limit = radius**2
+    for box, edges in arrays:
+        if not overlaps(extent, box):
+            continue
+        if location(a, edges) >= 0 or location(b, edges) >= 0:
+            return True
+        cuts = set()
+        split_at_edges(a, difference(b, a), edges, cuts)
+        if cuts:
+            return True
+        if not separated_from_edges(a, b, edges, limit):
+            return True
+    return False
+
+
 def inside_drawn_aisles(a, b, aisles):
     hit = nearby(a, b, aisles)
     return bool(hit) and all(any(location(p, edges) >= 0 for box, edges in hit)
                              for p in intervals(a, b, hit))
+
+
+def certified_straight_aisle_route(a, b, aisles, arrays, radius):
+    # Containment within any one footprint certifies the whole swept segment.
+    # A route that needs a detour or crosses an internal footprint seam needs
+    # an offset-domain solver.
+    for box, edges in nearby(a, b, aisles):
+        if location(a, edges) != 1 or location(b, edges) != 1:
+            continue
+        cuts = set()
+        split_at_edges(a, difference(b, a), edges, cuts)
+        if not cuts and separated_from_edges(a, b, edges, radius**2):
+            return not violates_clearance(a, b, arrays, radius)
+    return False
 
 
 def add_edge(graph, a, b):
@@ -146,7 +339,7 @@ def add_edge(graph, a, b):
     graph.setdefault(b, {})[a] = weight
 
 
-def build_graph(arrays, aisles, centerlines, endpoints):
+def build_graph(arrays, aisles, centerlines, endpoints, radius=None):
     # Split the planar arrangement at every crossing, including T junctions
     # and overlaps. Inside closed aisle footprints a shortest path can turn
     # at boundary vertices; on open centerlines it must follow drawn edges.
@@ -168,7 +361,9 @@ def build_graph(arrays, aisles, centerlines, endpoints):
         vertices.update(pieces)
         if (a, b) in lines:
             for start, end in zip(pieces, pieces[1:]):
-                if not enters_array(start, end, arrays):
+                blocked = (enters_array(start, end, arrays) if radius is None
+                           else violates_clearance(start, end, arrays, radius))
+                if not blocked:
                     add_edge(graph, start, end)
     if aisles:
         # Connect mutually visible vertices in the legal polygonal domain.
@@ -196,70 +391,412 @@ def bend_count(edges, departure, arrival):
     return sum(left != right for left, right in zip(directions, directions[1:]))
 
 
-def shortest(graph, start, end, departure=None, arrival=None):
-    initial = (start, departure or (0, 0))
-    costs = {initial: (0.0, 0)}
+def best_port(options, heading):
+    return min(options, key=lambda option: (option[1] != heading, option[0]))
+
+
+def ports_by_point(options, endpoint):
+    grouped = {}
+    for name, heading, point in options:
+        node = endpoint if point is None else tuple(map(Fraction, point))
+        grouped.setdefault(node, []).append((name, heading))
+    return grouped
+
+
+def shortest(graph, start, end, departure=None, arrival=None, ports=None):
+    if ports:
+        initial = {(point, heading): best_port(options, heading)[0]
+                   for point, options in ports["departure"].items() for _, heading in options}
+        terminals = ports["arrival"]
+    else:
+        initial = {(start, departure or (0, 0)): None}
+        terminals = {end: [(None, arrival)]}
+    costs = {state: (0.0, 0) for state in initial}
     previous = {}
-    queue = [(0.0, 0, initial)]
+    queue = []
+    for state in initial:
+        heappush(queue, (0.0, 0, state))
+    terminal = None
     while queue:
         length, bends, state = heappop(queue)
+        if terminal and length > terminal[0]:
+            break
         if (length, bends) != costs[state]:
             continue
         node, incoming = state
-        if node == end:
-            path = [node]
-            while state != initial:
-                state = previous[state]
-                path.append(state[0])
-            result = {"status": "found", "length": length,
-                      "points": [[float(x), float(y)] for x, y in reversed(path)]}
-            if __FEWER_BENDS__:
-                result["bends"] = bends
-            return result
+        if node in terminals:
+            name, heading = best_port(terminals[node], incoming)
+            candidate = (length, bends + (heading is not None and heading != incoming), state, name)
+            if terminal is None or candidate < terminal:
+                terminal = candidate
+            continue
         for neighbor, weight in graph.get(node, {}).items():
             heading = direction(node, neighbor) if __FEWER_BENDS__ else (0, 0)
             next_state = neighbor, heading
             turn = incoming != (0, 0) and incoming != heading
-            entry_turn = neighbor == end and arrival is not None and heading != arrival
-            candidate = length + weight, bends + turn + entry_turn
+            candidate = length + weight, bends + turn
             if candidate < costs.get(next_state, (math.inf, 0)):
                 costs[next_state] = candidate
                 previous[next_state] = state
                 heappush(queue, (*candidate, next_state))
-    return {"status": "no_legal_detour"}
+    if terminal is None:
+        return {"status": "no_legal_detour"}
+    length, bends, state, name = terminal
+    path = [state[0]]
+    while state not in initial:
+        state = previous[state]
+        path.append(state[0])
+    result = {"status": "found", "length": length,
+              "points": [[float(x), float(y)] for x, y in reversed(path)]}
+    if __FEWER_BENDS__:
+        result["bends"] = bends
+    if ports:
+        result["ports"] = {"departure": initial[state], "arrival": name}
+    return result
+
+
+def joint_port_report(graph, ports, shareable):
+    empty = {"highlight_handles": [], "markers": [], "polylines": []}
+    handles = sorted(ports)
+    positions = {
+        handle: {side: {name: point for point, entries in options.items() for name, _ in entries}
+                 for side, options in ports[handle].items()}
+        for handle in handles
+    }
+    allowed = set()
+    for name in shareable or ():
+        points = {point for sides in positions.values() for options in sides.values()
+                  for label, point in options.items() if label.lower() == name}
+        if len(points) != 1:
+            return ({"status": "needs_unambiguous_shareable_ports", "port": name}, empty)
+        allowed.update(points)
+    if shareable is None:
+        return ({"status": "needs_shareable_port_list",
+                 "message": "List the port names after Shareable ports, separated by commas."}, empty)
+
+    cache = {}
+    queue, seen = [], set()
+
+    def submit(blocked):
+        if blocked in seen:
+            return
+        seen.add(blocked)
+        picks = []
+        for handle, exclusion in zip(handles, blocked):
+            key = handle, exclusion
+            if key not in cache:
+                options = {side: {p: entries for p, entries in group.items() if p not in exclusion}
+                           for side, group in ports[handle].items()}
+                cache[key] = shortest(graph, None, None, ports=options)
+            pick = cache[key]
+            if pick["status"] != "found":
+                return
+            picks.append(pick)
+        length = math.fsum(route["length"] for route in picks)
+        bends = sum(route["bends"] for route in picks)
+        heappush(queue, (length, bends, len(seen), blocked, picks))
+
+    submit((frozenset(), frozenset()))
+    while queue and len(seen) <= 512:
+        length, bends, _, blocked, picks = heappop(queue)
+        used = [{positions[h][side][name] for side, name in route["ports"].items()}
+                for h, route in zip(handles, picks)]
+        conflicts = (used[0] & used[1]) - allowed
+        if not conflicts:
+            choices = dict(zip(handles, picks))
+            return ({"status": "found", "port_choices": choices, "combined_length": length,
+                     "combined_bends": bends, "units": "drawing_units"},
+                    {"highlight_handles": handles, "polylines": [{"pts": r["points"]} for r in picks],
+                     "markers": [{"pt": r["points"][0],
+                                  "label": f"{h}: {r['ports']['departure']} to {r['ports']['arrival']}"}
+                                 for h, r in choices.items()]})
+
+        # Any legal assignment must leave this physical port unused by one cable.
+        point = min(conflicts)
+        submit((blocked[0] | {point}, blocked[1]))
+        submit((blocked[0], blocked[1] | {point}))
+    status = "joint_port_search_limit" if queue else "no_joint_port_assignment"
+    return ({"status": status, "port_choices": {}, "units": "drawing_units"}, empty)
+
+
+def dot(u, v):
+    return u[0]*v[0] + u[1]*v[1]
+
+
+def parameter_band(value, slope, low, high):
+    if slope:
+        return tuple(sorted(((low-value)/slope, (high-value)/slope)))
+    return (0, 1) if low <= value <= high else (0, 0)
+
+
+def clearance_intervals(a, b, outline, radius):
+    # The buffered polygon is its interior plus the capsules of its edges.
+    _, edges = outline
+    axis = difference(b, a)
+    scale = dot(axis, axis)
+    limit = radius**2
+    cuts = {Fraction(0), Fraction(1)}
+    split_at_edges(a, axis, edges, cuts)
+    ordered = sorted(cuts)
+    for lo, hi in zip(ordered, ordered[1:]):
+        if location(at(a, axis, (lo + hi)/2), edges) >= 0:
+            yield float(lo), float(hi)
+
+    # Endpoint disks and edge strips cover each capsule. Fraction arithmetic
+    # distinguishes tangency from penetration before any square root.
+    for p in {point for edge in edges for point in edge}:
+        offset = difference(a, p)
+        centre = -dot(offset, axis)/scale
+        gap = (limit - dot(offset, offset) + centre**2*scale)/scale
+        if gap > 0:
+            spread = math.sqrt(gap)
+            yield max(0, float(centre)-spread), min(1, float(centre)+spread)
+    for p, q in edges:
+        edge = difference(q, p)
+        offset = difference(a, p)
+        size = dot(edge, edge)
+        side, slope = cross(edge, offset), cross(edge, axis)
+        if not slope and side**2 >= limit*size:
+            continue
+        lo, hi = parameter_band(dot(edge, offset), dot(edge, axis), Fraction(0), size)
+        lateral_lo, lateral_hi = 0, 1
+        if slope:
+            centre = -side/slope
+            spread = math.sqrt(limit*size/slope**2)
+            lateral_lo, lateral_hi = float(centre)-spread, float(centre)+spread
+        yield max(0, lo, lateral_lo), min(1, hi, lateral_hi)
+
+
+def obstacle_intervals(spans):
+    events = {}
+    for lo, hi, name in spans:
+        events.setdefault(lo, ([], []))[0].append(name)
+        events.setdefault(hi, ([], []))[1].append(name)
+    intervals, active = [], {}
+    cuts = sorted(events)
+    for lo, hi in zip(cuts, cuts[1:]):
+        starts, ends = events[lo]
+        for name in ends:
+            active[name] -= 1
+            if active[name] == 0:
+                del active[name]
+        continuous = set(active)
+        for name in starts:
+            active[name] = active.get(name, 0) + 1
+        causes = sorted(active)
+        if not causes:
+            continue
+        if intervals and intervals[-1][1] == lo and active.keys() == continuous and intervals[-1][2] == causes:
+            intervals[-1] = (intervals[-1][0], hi, causes)
+        else:
+            intervals.append((lo, hi, causes))
+    return intervals
+
+
+def append_cause_intervals(track, spans, hits, edge, radius, index, stations):
+    a, b = edge
+    distance, length = stations
+    axis = difference(b, a)
+    for lo, hi, causes in obstacle_intervals(spans):
+        points = [[float(x), float(y)] for x, y in (at(a, axis, lo), at(a, axis, hi))]
+        start, finish = distance + length*float(lo), distance + length*float(hi)
+        previous = track[-1] if track else None
+        if (previous and lo == 0 and previous["source_segments"][-1] == index-1
+                and previous["stations"][1] == start and previous["obstacles"] == causes
+                and all(location(a, edges) >= 0 or any(
+                    point_segment_distance_squared(a, p, q) < radius**2 for p, q in edges)
+                        for name, (_, edges) in hits if name in causes)):
+            previous["points"].append(points[1])
+            previous["source_segments"].append(index)
+            previous["stations"][1] = finish
+        else:
+            track.append({"source_segments": [index], "points": points, "stations": [start, finish],
+                          "obstacles": causes})
+
+
+def corridor_clearance(cables, arrays, obstacle_ids, radius):
+    violations, segments, overlays, markers = {}, {}, [], []
+    for handle, edges in cables.items():
+        hit_handles = set()
+        track = []
+        distance = 0.0
+        for index, (a, b) in enumerate(edges, 1):
+            length = math.dist(a, b)
+            start_station = distance
+            distance += length
+            hits = [(name, outline) for name, outline in zip(obstacle_ids, arrays)
+                    if violates_clearance(a, b, [outline], radius)]
+            names = [name for name, _ in hits]
+            hit_handles.update(names)
+            if __CLEARANCE_SPANS__:
+                spans = []
+                for name, outline in hits:
+                    spans.extend((lo, hi, name) for lo, hi in clearance_intervals(a, b, outline, radius)
+                                 if lo < hi)
+                if __CLEARANCE_CAUSES__:
+                    append_cause_intervals(track, spans, hits, (a, b), radius, index, (start_station, length))
+                    continue
+                merged = []
+                for lo, hi, name in sorted(spans):
+                    if merged and lo < merged[-1][1]:
+                        start, end, causes = merged[-1]
+                        merged[-1] = (start, max(end, hi), causes | {name})
+                    else:
+                        merged.append((lo, hi, {name}))
+                for lo, hi, causes in merged:
+                    points = [[float(x), float(y)] for x, y in
+                              (at(a, difference(b, a), lo), at(a, difference(b, a), hi))]
+                    stations = [start_station + length*float(t) for t in (lo, hi)]
+                    segments.setdefault(handle, []).append(
+                        {"source_segment": index, "points": points, "stations": stations,
+                         "obstacles": sorted(causes)})
+                    overlays.append({"pts": points})
+                    markers.extend({"pt": point, "label": f"{handle} clearance {edge} {station:.6g}"}
+                                   for point, station, edge in zip(points, stations, ("start", "end")))
+            elif hits:
+                points = [[float(x), float(y)] for x, y in (a, b)]
+                segments.setdefault(handle, []).append({"points": points, "obstacles": names})
+                overlays.append({"pts": points})
+        if hit_handles:
+            violations[handle] = sorted(hit_handles)
+        if track:
+            segments[handle] = track
+            transitions = {}
+            for interval in track:
+                points = interval["points"]
+                overlays.append({"pts": points})
+                names = ", ".join(interval["obstacles"])
+                for point, station, edge in zip((points[0], points[-1]), interval["stations"], ("start", "end")):
+                    transitions.setdefault((tuple(point), station), []).append(f"{edge} {names}")
+            markers.extend({"pt": list(point), "label": f"{handle} {station:.6g}: {' / '.join(changes)}"}
+                           for (point, station), changes in transitions.items())
+    interval_key = "violating_intervals" if __CLEARANCE_CAUSES__ else "violating_segments"
+    return ({"clearance_violations": violations, interval_key: segments,
+             "swept_half_width": float(radius), "units": "drawing_units"},
+            {"highlight_handles": [] if __CLEARANCE_SPANS__ else list(violations),
+             "markers": markers, "polylines": overlays})
 
 
 def run(intake, params):
     arrays, aisles, centerlines, cables, obstacle_ids = read_geometry(intake)
     if __COMPARE_LENGTHS__:
-        headings = __EQUIPMENT_HEADINGS__
+        dimensions = __TRAY_DIMENSIONS__
+        radius = None
+        closed_aisle = False
+        if dimensions is not None:
+            empty_overlay = {"highlight_handles": [], "markers": [], "polylines": []}
+            if not dimensions:
+                name = "corridor" if __CORRIDOR_CHECK__ else "tray"
+                return ({"status": f"needs_{name}_clearance",
+                         "message": f"Specify one positive {name} width and one nonnegative side clearance, each with a unit."},
+                        empty_overlay)
+            unit = METRES_PER_UNIT.get(intake.get("insunits"))
+            if unit is None:
+                return ({"status": "needs_drawing_units", "message": "Declare drawing insertion units."}, empty_overlay)
+            width, side = map(Fraction, dimensions)
+            radius = (width/2 + side) / Fraction(unit)
+            if __CORRIDOR_CHECK__:
+                return corridor_clearance(cables, arrays, obstacle_ids, radius)
+            closed_aisle = bool(aisles and not centerlines and __EQUIPMENT_PORTS__ is None)
+            if not closed_aisle and (not centerlines or aisles):
+                return ({"status": "needs_aisle_centerlines",
+                         "message": "Swept-clearance routing requires an aisle network drawn as open centerlines."},
+                        empty_overlay)
+        port_groups = __EQUIPMENT_PORTS__
+        headings = __EQUIPMENT_HEADINGS__ if port_groups is None else None
+        if port_groups == {}:
+            return ({"status": "needs_equipment_ports",
+                     "message": "Give both Departure ports and Arrival ports. Use name east at (x, y) for locations in drawing units. For separate cables, prefix both lists with Cable and its drawing handle."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
         if headings is not None and None in headings:
             return ({"status": "needs_equipment_headings",
                      "message": "Specify the cable travel heading at departure and arrival."},
                     {"highlight_handles": [], "markers": [], "polylines": []})
         departure, arrival = headings or (None, None)
+        common_ports = (port_groups or {}).get(None)
+        scoped = bool(port_groups and common_ports is None)
+        if scoped:
+            unknown = sorted(set(port_groups) - set(cables))
+            if unknown:
+                return ({"status": "unknown_cable_port_handles", "handles": unknown,
+                         "message": "Use handles of saved model-space cable routes."},
+                        {"highlight_handles": [], "markers": [], "polylines": []})
+            cables = {handle: edges for handle, edges in cables.items() if handle in port_groups}
+        if common_ports and common_ports["departure"][0][2] is not None and len(cables) != 1:
+            return ({"status": "needs_single_cable_route",
+                     "message": "Prefix each list with Cable and its drawing handle when the drawing contains multiple cables."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
         endpoints = {point for edges in cables.values() for point in (edges[0][0], edges[-1][1])}
-        graph = build_graph(arrays, aisles, centerlines, endpoints)
-        findings, unavailable, crossings, tied = {}, {}, {}, {}
+        located_ports = {}
+        for handle, ports in (port_groups or {}).items():
+            if ports["departure"][0][2] is None:
+                continue
+            bound_ports = {side: ports_by_point(options, None) for side, options in ports.items()}
+            if bound_ports["departure"].keys() & bound_ports["arrival"].keys():
+                return ({"status": "needs_distinct_equipment_port_locations",
+                         "handle": handle,
+                         "message": "Use separate locations for departure and arrival ports."},
+                        {"highlight_handles": [], "markers": [], "polylines": []})
+            located_ports[handle] = bound_ports
+            endpoints.update(point for options in bound_ports.values() for point in options)
+        if __JOINT_PORTS__ and (not scoped or len(located_ports) != 2 or len(cables) != 2):
+            return ({"status": "needs_two_located_port_groups",
+                     "message": "Give located departure and arrival ports for each of two saved cable handles."},
+                    {"highlight_handles": [], "markers": [], "polylines": []})
+        graph = {} if closed_aisle else build_graph(arrays, aisles, centerlines, endpoints, radius)
+        if __JOINT_PORTS__:
+            return joint_port_report(graph, located_ports, __SHAREABLE_PORTS__)
+        findings, unavailable, crossings, tied, choices = {}, {}, {}, {}, {}
+        legal, violations, located_choices = {}, {}, {}
         for handle, edges in cables.items():
+            group = handle if scoped else None
+            ports = (port_groups or {}).get(group)
+            bound_ports = located_ports.get(group)
+            located = bound_ports is not None
             crossed = [name for name, outline in zip(obstacle_ids, arrays)
                        if any(enters_array(a, b, [outline]) for a, b in edges)]
             if crossed:
                 crossings[handle] = crossed
+            if radius is not None:
+                too_close = [name for name, outline in zip(obstacle_ids, arrays)
+                             if any(violates_clearance(a, b, [outline], radius) for a, b in edges)]
+                if too_close:
+                    violations[handle] = too_close
             start, end = edges[0][0], edges[-1][1]
-            if start == end:
+            if start == end and not located:
                 unavailable[handle] = "closed_route"
                 continue
-            route = shortest(graph, start, end, departure, arrival)
+            if ports and not located:
+                bound_ports = {"departure": ports_by_point(ports["departure"], start),
+                               "arrival": ports_by_point(ports["arrival"], end)}
+            if closed_aisle:
+                if not certified_straight_aisle_route(start, end, aisles, arrays, radius):
+                    unavailable[handle] = "closed_aisle_detour_unresolved"
+                    continue
+                graph = {}
+                add_edge(graph, start, end)
+            route = shortest(graph, start, end, departure, arrival, bound_ports if ports else None)
             if route["status"] != "found":
                 unavailable[handle] = route["status"]
+                continue
+            if ports:
+                choices[handle] = route
+            if radius is not None:
+                legal[handle] = route
+            if located:
+                located_choices[handle] = route
                 continue
             drawn = math.fsum(math.dist(a, b) for a, b in edges)
             best = route["length"]
             if best < drawn and not math.isclose(best, drawn, rel_tol=1e-12):
                 findings[handle] = dict(route, drawn_length=drawn, saving=drawn-best)
             elif __FEWER_BENDS__ and math.isclose(best, drawn, rel_tol=1e-12):
-                drawn_bends = bend_count(edges, departure, arrival)
+                if ports:
+                    first = best_port(ports["departure"], direction(*edges[0]))[1]
+                    last = best_port(ports["arrival"], direction(*edges[-1]))[1]
+                else:
+                    first, last = departure, arrival
+                drawn_bends = bend_count(edges, first, last)
                 if route["bends"] < drawn_bends:
                     tied[handle] = dict(route, drawn_bends=drawn_bends,
                                         bends_saved=drawn_bends-route["bends"])
@@ -269,8 +806,24 @@ def run(intake, params):
             report["equal_length_fewer_bends"] = tied
         if headings is not None:
             report["equipment_travel_headings"] = {"departure": list(departure), "arrival": list(arrival)}
-        alternatives = {**findings, **tied}
-        return (report, {"highlight_handles": list(alternatives), "markers": [],
+        if port_groups:
+            report["port_choices"] = choices
+        if radius is not None:
+            report["shortest_legal_routes"] = legal
+            report["clearance_violations"] = violations
+            report["swept_half_width"] = float(radius)
+        alternatives = {**findings, **tied, **located_choices}
+        markers = []
+        if scoped:
+            alternatives.update(choices)
+            for handle, route in choices.items():
+                names = route["ports"]
+                markers.append({"pt": route["points"][0],
+                                "label": f"{handle}: {names['departure']} to {names['arrival']}"})
+        alternatives.update({handle: legal[handle] for handle in violations if handle in legal})
+        if closed_aisle:
+            alternatives.update(legal)
+        return (report, {"highlight_handles": list(alternatives), "markers": markers,
                          "polylines": [{"pts": row["points"]} for row in alternatives.values()]})
     crossings = [h for h, edges in cables.items() if any(enters_array(a, b, arrays) for a, b in edges)]
     endpoints = {h: (cables[h][0][0], cables[h][-1][1]) for h in crossings}

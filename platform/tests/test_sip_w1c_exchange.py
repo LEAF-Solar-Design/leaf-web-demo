@@ -831,6 +831,37 @@ def _completed_piece(s):
         return exchanges.read_completed_piece_exchange(s.scope, conn=conn)
 
 
+def test_running_split_progress_counts_only_exact_durable_pieces(world):
+    parent = world()
+    args = dict(tenant_id=str(parent.org), input_version_id=parent.parent,
+                graph_revision=parent.context.graph["rev"],
+                graph_sha256=pg.local.digest(parent.context.graph))
+
+    def read(**overrides):
+        with pg.db.connection() as conn:
+            return exchanges.read_running_split_progress(
+                parent.scope, conn=conn, **{**args, **overrides})
+
+    _prepare(parent)
+    assert read() is None
+    first, second = [_piece(parent, index) for index in range(2)]
+    for piece in (first, second):
+        _prepare(piece)
+    assert read() is None
+    assert exchanges.begin_send(first.scope, first.attempt)
+    assert _capture(first) == "stored"
+    assert read() is None
+    _complete(first)
+    assert read() == {"completed_pieces": 1, "total_pieces": 2}
+    assert read(tenant_id=str(uuid4())) is None
+    assert read(input_version_id=uuid4()) is None
+    assert read(graph_sha256="0" * 64) is None
+    assert exchanges.begin_send(second.scope, second.attempt)
+    assert _capture(second) == "stored"
+    _complete(second)
+    assert read() == {"completed_pieces": 2, "total_pieces": 2}
+
+
 def test_piece_custody_is_additive_and_replays_independent_pieces(world):
     parent = world()
     legacy = _prepare(parent)

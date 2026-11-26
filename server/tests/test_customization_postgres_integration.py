@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import pytest
 
+import author_quota
+
 from customization_models import (
     ChangeSetConflictError,
     ChangeSetNotFoundError,
@@ -325,6 +327,178 @@ def create(store, tenant: str, key: str):
         workspace_contract_digest=WORKSPACE,
         author_subject="auth0|author",
     )
+
+
+def test_postgres_stage_grant_consume_race_has_one_winner(store):
+    from threading import Barrier
+    from uuid import uuid4
+
+    key = f"grant-race:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    # Prioritize this exact row among unrelated module fixtures, then claim
+    # through the real store operation and its PostgreSQL write fence.
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET created_at = '0000' WHERE change_set_id = ?",
+            (change.change_set_id,),
+        )
+    claimed = store.claim_stage(owner=key)
+    assert claimed.change_set_id == change.change_set_id
+    barrier = Barrier(2)
+
+    def consume(_):
+        repository = PostgresCustomizationStore()
+        barrier.wait()
+        return repository.consume_stage_grant(
+            tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+            owner=key, attempt=1, binding_digest=DIGEST, now_ms=int(time.time() * 1000),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(consume, range(2))) == [False, True]
+    assert store.get_stage_grant(change.tenant_id, change.change_set_id)["dispatches"] == 1
+    store.fail_stage_claim(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, reason_code="test_complete", retryable=False,
+    )
+
+
+def test_postgres_stage_grant_withdraw_loses_to_claim(store):
+    from uuid import uuid4
+
+    key = f"grant-withdraw:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    with store._transaction() as conn:
+        conn.execute(
+            "UPDATE customization_change_sets SET created_at = '0000' WHERE change_set_id = ?",
+            (change.change_set_id,),
+        )
+    claimed = store.claim_stage(owner=key)
+    assert claimed.change_set_id == change.change_set_id
+    assert store.withdraw_stage(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, now_ms=now_ms,
+    ) == {"withdrawn": False, "revoked": True}
+    grant = store.get_stage_grant(change.tenant_id, change.change_set_id)
+    assert grant["revoked_ms"] == now_ms and grant["revoked_reason"] == "withdrawn"
+    assert store.get_change_set(tenant_id=change.tenant_id, change_set_id=change.change_set_id) == claimed
+    assert not store.consume_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, attempt=claimed.stage_attempt, binding_digest=DIGEST, now_ms=now_ms,
+    )
+    store.fail_stage_claim(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        owner=key, reason_code="test_complete", retryable=False,
+    )
+
+
+def test_postgres_withdrawn_build_refund_is_once(store, monkeypatch):
+    from uuid import uuid4
+
+    import author_quota
+    from customization_service import refund_unstarted_build
+
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_REFUND_UNSTARTED", "1")
+    key = f"grant-refund:{uuid4()}"
+    change = create(store, key, key)
+    change = store.transition(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        next_state=ChangeState.STAGING, expected_version=change.version,
+        idempotency_key=f"staging:{key}",
+    )
+    now_ms = int(time.time() * 1000)
+    assert store.insert_stage_grant(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, tier="hosted_pro", binding_digest=DIGEST,
+        authority_session_id="session-a", authority_turn_id="turn-a",
+        issued_ms=now_ms, expires_ms=now_ms + 300000,
+    )
+    day = "2026-11-25"
+    assert author_quota.charge(
+        change.tenant_id, day, 1, idempotency_key=change.change_set_id,
+    ) == (True, 1)
+    original = author_quota.lookup_attempt(change.tenant_id, change.change_set_id)
+
+    def used():
+        with platform_db().transaction(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM author_quota_counters "
+                "WHERE namespace = 'author_daily' AND counter_key = %(key)s",
+                {"key": author_quota.counter_key(change.tenant_id, day)},
+            ).fetchone()
+            return int(row["value"])
+
+    assert used() == 1
+    assert store.withdraw_stage(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+        author_subject=change.author_subject, now_ms=now_ms,
+    ) == {"withdrawn": True, "revoked": True}
+    assert store.get_change_set(
+        tenant_id=change.tenant_id, change_set_id=change.change_set_id,
+    ).state is ChangeState.FAILED
+    refund_unstarted_build(change.tenant_id, change.change_set_id)
+    assert used() == 0
+    refund_unstarted_build(change.tenant_id, change.change_set_id)
+    assert used() == 0
+    assert author_quota.lookup_attempt(change.tenant_id, change.change_set_id) == original
+
+
+def test_postgres_turn_terminal_events_are_turn_and_tenant_bound(store, monkeypatch):
+    from uuid import uuid4
+
+    import customization_stage_grants as grants
+    import session_store
+
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "postgres")
+    tenant = f"grant-turn:{uuid4()}"
+    session = session_store.get_or_create_session(tenant, f"drawing:{uuid4()}")
+    session_id = session["session_id"]
+    try:
+        for turn_id, reason in (("clean", "end_turn"), ("interrupted", "interrupted")):
+            session_store.append_event(session_id, turn_id, "turn_started", {})
+            session_store.append_event(session_id, turn_id, "text_delta", {"text": "working"})
+            session_store.append_event(session_id, turn_id, "turn_complete", {"stop_reason": reason})
+        session_store.append_event(session_id, "interrupted", "error", {"code": "stopped"})
+        assert session_store.turn_terminal_events(session_id, "clean", tenant) == [
+            {"type": "turn_complete", "data": {"stop_reason": "end_turn"}},
+        ]
+        assert session_store.turn_terminal_events(session_id, "interrupted", tenant) == [
+            {"type": "turn_complete", "data": {"stop_reason": "interrupted"}},
+            {"type": "error", "data": {"code": "stopped"}},
+        ]
+        assert grants.turn_ended_cleanly(session_id, "clean", tenant)
+        assert not grants.turn_ended_cleanly(session_id, "interrupted", tenant)
+        assert session_store.turn_terminal_events(session_id, "clean", tenant + "-other") == []
+        assert session_store.turn_terminal_events(session_id, "interrupted", tenant + "-other") == []
+        assert session_store.turn_terminal_events(session_id, "missing", tenant) == []
+    finally:
+        with platform_db().transaction() as conn:
+            conn.execute("DELETE FROM app_sessions WHERE session_id = %s", (session_id,))
 
 
 def stage(store, change, prefix: str):
@@ -826,3 +1000,61 @@ def test_r1_postgres_authority_parity(store, tmp_path, monkeypatch) -> None:
                          (S, row.change_set_id))
             conn.execute("UPDATE customization_change_sets SET request_description = NULL WHERE change_set_id = ?",
                          (sqlite_row.change_set_id,))
+
+
+def test_postgres_refunds_preserve_immutable_ledger(monkeypatch):
+    url = os.environ.get("PG_CUSTOMIZATION_TEST_URL")
+    if not url:
+        pytest.skip("PG_CUSTOMIZATION_TEST_URL is not configured")
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_STORE", "postgres")
+    db, _ = author_quota._load_platform_counters()
+    db.reset_pool()
+    tenant = f"quota-refund-{uuid4().hex}"
+    day = "2026-07-30"
+
+    def used(tenant_id, quota_day):
+        with db.transaction(read_only=True) as conn:
+            row = conn.execute(
+                "SELECT value FROM author_quota_counters "
+                "WHERE namespace = 'author_daily' AND counter_key = %(key)s",
+                {"key": author_quota.counter_key(tenant_id, quota_day)},
+            ).fetchone()
+            return int(row["value"])
+
+    try:
+        db.apply_migration()
+        assert author_quota.charge(tenant, day, 1, idempotency_key="first") == (True, 1)
+        original = author_quota.lookup_attempt(tenant, "first")
+        assert author_quota.charge(tenant, day, 1, idempotency_key="refused") == (False, 1)
+        assert author_quota.refund_unstarted(tenant, "refused") is False
+        assert author_quota.refund_unstarted(tenant, "first") is True
+        assert author_quota.refund_unstarted(tenant, "first") is False
+        assert used(tenant, day) == 0
+        assert author_quota.lookup_attempt(tenant, "first") == original
+        assert author_quota.charge(tenant, day, 1, idempotency_key="first",
+                                   return_decision=True) == original
+        assert used(tenant, day) == 0
+        assert author_quota.charge(tenant, day, 1, idempotency_key="concurrent") == (True, 1)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(
+                lambda _: author_quota.refund_unstarted(tenant, "concurrent"), range(2),
+            ))
+        assert results.count(True) == 1
+        assert used(tenant, day) == 0
+        assert author_quota.charge(tenant, day, 1, idempotency_key="third") == (True, 1)
+        assert author_quota.refund_unstarted(tenant, "third") is True
+        assert author_quota.charge(tenant, day, 1, idempotency_key="fourth") == (True, 1)
+        fourth = author_quota.lookup_attempt(tenant, "fourth")
+        assert author_quota.refund_unstarted(tenant, "fourth") is False
+        assert author_quota.refund_unstarted(tenant, "fourth") is False
+        assert author_quota.lookup_attempt(tenant, "fourth") == fourth
+        assert used(tenant, day) == 1
+        for other_tenant, other_day in ((tenant + "-other", day), (tenant, "2026-07-31")):
+            assert author_quota.charge(other_tenant, other_day, 1,
+                                       idempotency_key="fresh") == (True, 1)
+            assert author_quota.refund_unstarted(other_tenant, "fresh") is True
+            assert used(other_tenant, other_day) == 0
+    finally:
+        # The append-only ledger deliberately retains these unique test identities.
+        db.reset_pool()

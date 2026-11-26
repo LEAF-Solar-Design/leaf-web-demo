@@ -806,3 +806,51 @@ it('author content override distinguishes empty from omitted content', () => {
   view.rerender(<NavRail activeSurface="browser" authorOpen />)
   expect(screen.getByLabelText('What should the tool do?')).toBeInTheDocument()
 })
+
+function comparisonJob(id, drawingVersion = 'drawing-1', toolVersion = '1.0.0', tool = 'layer-report', projectId = 'p1') {
+  return {
+    job_id: id, status: 'succeeded', tool_name: tool, input_version_id: drawingVersion,
+    result: {
+      ok: true, tool, version: toolVersion, result: { layers: [] },
+      project_context: { project_id: projectId, input_version_id: drawingVersion },
+    },
+  }
+}
+
+it.each([
+  ['same versions', comparisonJob('candidate'), 'Same drawing version', 'Same tool version'],
+  ['different drawing', comparisonJob('candidate', 'drawing-2'), 'Different drawing versions', 'Same tool version'],
+  ['different tool version', comparisonJob('candidate', 'drawing-1', '2.0.0'), 'Same drawing version', 'Different tool versions'],
+  ['different tool identity', comparisonJob('candidate', 'drawing-1', '1.0.0', 'area-report'), 'Same drawing version', 'Different tools'],
+  ['missing version', comparisonJob('candidate', 'drawing-1', null), 'Same drawing version', 'Tool version could not be verified'],
+])('Jobs compares %s using the saved report envelope', (_label, candidate, drawing, tool) => {
+  const jobs = [comparisonJob('reference'), candidate]
+  render(<ProjectWorkspacePanels pane="jobs" project={project} workspace={{ jobs }} mock />)
+  const comparison = within(screen.getByRole('region', { name: 'Compare saved reports' }))
+  const first = comparison.getByRole('combobox', { name: 'First report' })
+  const second = comparison.getByRole('combobox', { name: 'Second report' })
+  fireEvent.change(first, { target: { value: 'reference' } })
+  expect(within(second).queryByRole('option', { name: /reference/ })).toBeNull()
+  fireEvent.change(second, { target: { value: 'candidate' } })
+  expect(comparison.getByText(drawing)).toBeVisible()
+  expect(comparison.getByText(tool)).toBeVisible()
+})
+
+it('Jobs excludes unbound reports and clears a comparison when a saved report disappears', () => {
+  const reference = comparisonJob('reference')
+  const candidate = comparisonJob('candidate')
+  const alternate = comparisonJob('alternate')
+  const foreign = comparisonJob('foreign', 'drawing-1', '1.0.0', 'layer-report', 'p2')
+  const unbound = comparisonJob('unbound')
+  unbound.result.project_context.input_version_id = 'drawing-2'
+  const panel = jobs => <ProjectWorkspacePanels pane="jobs" project={project} workspace={{ jobs }} mock />
+  const { rerender } = render(panel([reference, candidate, alternate, foreign, unbound]))
+  const comparison = within(screen.getByRole('region', { name: 'Compare saved reports' }))
+  fireEvent.change(comparison.getByRole('combobox', { name: 'First report' }), { target: { value: 'reference' } })
+  fireEvent.change(comparison.getByRole('combobox', { name: 'Second report' }), { target: { value: 'candidate' } })
+  expect(comparison.queryByRole('option', { name: /foreign|unbound/ })).toBeNull()
+  expect(comparison.getByText('Same drawing version')).toBeVisible()
+  rerender(panel([reference, alternate, foreign, unbound]))
+  expect(comparison.queryByText('Same drawing version')).toBeNull()
+  expect(comparison.getByRole('combobox', { name: 'Second report' })).toHaveValue('')
+})

@@ -386,8 +386,9 @@ def _derive_split(job, context, plan, exchange, *, conn=None, children=None):
     # Validate native restitch/cut semantics and exactly-once coverage before
     # publishing even a proposal. This is a pure graph calculation, no write.
     accepted = kernel.accept_split_candidate(context.graph, candidate, expected_rev=context.graph["rev"])
-    members = set(next(frame for frame in context.graph["frames"]
-                       if frame["id"] == plan["binding"]["frame_ref"])["panel_refs"])
+    frame = next(frame for frame in context.graph["frames"]
+                 if frame["id"] == plan["binding"]["frame_ref"])
+    members = set(kernel._frame_panel_ids(frame))
     summary = []
     for string in accepted["strings"]:
         refs = string["ordered_panel_refs"]

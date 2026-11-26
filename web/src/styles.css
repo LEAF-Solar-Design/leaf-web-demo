@@ -1440,6 +1440,7 @@ footer .warn-txt { color: var(--status-warning); }
 .claude-pop {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: calc(var(--leaf-layer-popover) + 5);
   width: 320px; max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 72px); overflow-y: auto;
   white-space: normal; overflow-wrap: anywhere;
   background: var(--card); border: 1px solid var(--border); border-radius: var(--leaf-radius-control);
   box-shadow: var(--shadow-pop); padding: 12px; text-align: left;
@@ -1469,6 +1470,15 @@ footer .warn-txt { color: var(--status-warning); }
 /* masked credential field without type=password, so no browser offers to save it (rehearsal issue 25) */
 .ca-field input.ca-secret { -webkit-text-security: disc; font-family: var(--leaf-font-mono, monospace); }
 .ca-form-err { margin: 6px 0 0; }
+.claude-pop.vh-pop { max-height: 340px; }
+.ca-success { margin: 0; color: var(--primary); font-size: var(--leaf-size-dense); line-height: 1.5; }
+.ca-refused { color: var(--status-warning); font-size: var(--leaf-size-caption); }
+.ca-refused-why { margin: 0; color: var(--muted); font-size: var(--leaf-size-caption); line-height: 1.5; }
+.claude-pop .ca-account-main { flex-wrap: wrap; }
+.claude-pop .ca-account-main b { flex: 1 1 8em; }
+.ca-cmd { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+.ca-cmd code { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.ca-cmd button { flex: none; }
 /* a trigger near the left edge anchors the card to its left, so it stays on screen (desktop only; phones use the fixed sheet) */
 @media (min-width: 600px) { .claude-pop[data-align="start"] { left: 0; right: auto; } }
 .ca-act { align-self: flex-start; }

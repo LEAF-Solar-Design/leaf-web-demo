@@ -12,7 +12,7 @@ from uuid import uuid4
 import requests
 
 from . import project_lifecycle as lifecycle, project_web_page
-from .web_page_template import document_digest, validate_document
+from .web_page_template import MAX_PAGE_ACTIONS, document_digest, validate_document
 
 MAX_INPUT_BYTES = 32 * 1024
 MAX_REQUEST_BYTES = 256 * 1024
@@ -223,23 +223,46 @@ def _result(raw, source, targets):
     return result
 
 
+def _browser_catalog(document):
+    original = document.get('actions', [document['action']] if 'action' in document else [])
+    slots = copy.deepcopy(original)
+    slots.extend({'label': '', 'href': ''} for _ in range(MAX_PAGE_ACTIONS - len(slots)))
+    entries = [(document, 'label', 120, 'page label'),
+               (document, 'headline', 240, 'headline'),
+               (document, 'description', 1200, 'description'),
+               (document, 'status', 80, 'status line')]
+    for index, action in enumerate(slots):
+        label = 'contact button label' if index == 0 else f'contact button {index + 1} label'
+        link = 'contact link' if index == 0 else f'contact link {index + 1}'
+        entries.extend([(action, 'label', 60, label), (action, 'href', 2048, link)])
+    fields, targets = [], {}
+    for container, key, limit, role in entries:
+        field_id = f'f{len(fields) + 1:04d}'
+        fields.append({'id': field_id, 'value': container[key], 'max_length': limit, 'role': role})
+        targets[field_id] = (container, key, limit)
+    return fields, targets, slots, original
+
+
+def _apply_browser_actions(document, slots, original, *, initial=False):
+    if initial and not (slots[0]['label'] and slots[0]['href']):
+        slots = slots[1:]
+    actions = [action for action in slots if action['label'] or action['href']]
+    if actions == original:
+        return
+    document.pop('action', None)
+    document.pop('actions', None)
+    if len(actions) == 1:
+        document['action'] = actions[0]
+    elif actions:
+        document['actions'] = actions
+
+
 def _propose_first_page(org_id, project_id, actor_id, instruction, correlation_id):
     if project_web_page.read(org_id, project_id, actor_id) is not None:
         raise lifecycle.LifecycleConflict('Portfolio proposal source changed.')
     document = {'label': '', 'headline': '', 'description': '', 'status': '',
                 'theme': 'cream', 'alignment': 'center'}
-    action = {'label': '', 'href': ''}
-    fields, targets = [], {}
-    for container, key, limit, role in [
-            (document, 'label', 120, 'page label'),
-            (document, 'headline', 240, 'headline'),
-            (document, 'description', 1200, 'description'),
-            (document, 'status', 80, 'status line'),
-            (action, 'label', 60, 'contact button label'),
-            (action, 'href', 2048, 'contact link')]:
-        field_id = f'f{len(fields) + 1:04d}'
-        fields.append({'id': field_id, 'value': '', 'max_length': limit, 'role': role})
-        targets[field_id] = (container, key, limit)
+    fields, targets, slots, original = _browser_catalog(document)
     source = {'project_id': str(project_id), 'revision': 0, 'digest64hex': NO_PAGE_DIGEST}
     payload = {'tenant_id': str(org_id), 'source': source, 'instruction': instruction, 'fields': fields}
     try:
@@ -247,8 +270,7 @@ def _propose_first_page(org_id, project_id, actor_id, instruction, correlation_i
         for edit in result['edits']:
             container, key, _ = targets[edit['id']]
             container[key] = edit['value']
-        if action['label'] and action['href']:
-            document['action'] = action
+        _apply_browser_actions(document, slots, original, initial=True)
         try:
             document = validate_document(document)
             digest = document_digest(document)
@@ -284,12 +306,18 @@ def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest,
     if expected_revision == 0:
         return _propose_first_page(org_id, project_id, actor_id, instruction, correlation_id)
     page = project_web_page.read(org_id, project_id, actor_id)
-    if page is None or page['document'].get('schema') != 'leaf.portfolio.v1':
+    if page is None:
         raise ProposalError(422)
     if page['revision'] != expected_revision or page['digest'] != expected_digest:
         raise lifecycle.LifecycleConflict('Portfolio proposal source changed.')
     document = copy.deepcopy(page['document'])
-    fields, targets = _catalog(document)
+    browser = 'schema' not in document
+    if browser:
+        fields, targets, slots, original = _browser_catalog(document)
+    else:
+        if document.get('schema') != 'leaf.portfolio.v1':
+            raise ProposalError(422)
+        fields, targets = _catalog(document)
     source = {'project_id': str(project_id), 'revision': page['revision'], 'digest64hex': page['digest']}
     payload = {'tenant_id': str(org_id), 'source': source, 'instruction': instruction, 'fields': fields}
     if len(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > MAX_REQUEST_BYTES:
@@ -300,6 +328,8 @@ def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest,
         for edit in result['edits']:
             container, key, _ = targets[edit['id']]
             container[key] = edit['value']
+        if browser:
+            _apply_browser_actions(document, slots, original)
         try:
             document = validate_document(document)
             digest = document_digest(document)

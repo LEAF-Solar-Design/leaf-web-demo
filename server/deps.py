@@ -1511,6 +1511,29 @@ def require_active_tenant(tenant: Any = Depends(require_tenant)) -> Any:
     return resolve_active_tenant_context(tenant)
 
 
+def workspace_view(tenant) -> Optional[dict]:
+    """Display only, fails soft, resolved tenant only."""
+    if (not auth_live() or not isinstance(tenant, TenantContext)
+            or not tenant.authority_resolved or tenant.verified_demo):
+        return None
+    import investor_demo  # noqa: PLC0415
+
+    if investor_demo.is_investor_context(tenant):
+        return None
+    name = None
+    try:
+        import uuid  # noqa: PLC0415
+        import platform_link  # noqa: PLC0415
+
+        tenant_id = uuid.UUID(tenant.tenant_id)
+        org = platform_link.platform_store().get_org(tenant_id)
+        if org is not None and isinstance(org.name, str) and org.name.strip():
+            name = org.name.strip()[:120]
+    except Exception:  # noqa: BLE001 - display data must never fail the request
+        pass
+    return {"id": str(tenant.tenant_id), "name": name}
+
+
 def tenant_echo(body: Dict[str, Any], tenant: Any) -> Dict[str, Any]:
     """Additively echo the resolved tenant identity into a success response body
     WHEN auth is live. No-op when off (tenant is a plain str) -> byte-identical

@@ -577,6 +577,39 @@ def read_completed_piece_exchange(scope: PieceExchangeScope, *, conn) -> dict:
     return exchange
 
 
+def read_running_split_progress(scope: ExchangeScope, *, tenant_id: str,
+                                input_version_id: UUID, graph_revision: int,
+                                graph_sha256: str, conn) -> dict | None:
+    """Counts only for one running canonical solve on its saved input."""
+    if (type(scope) is not ExchangeScope or not isinstance(input_version_id, UUID)
+            or type(tenant_id) is not str or not tenant_id
+            or type(graph_revision) is not int or not 0 <= graph_revision <= 2147483647
+            or type(graph_sha256) is not str or _HASH_RE.fullmatch(graph_sha256) is None):
+        raise ExchangeInputError()
+    args = _parameters(scope, JobAttempt("progress-reader", 1))
+    args.update(tenant=tenant_id, input_version_id=input_version_id,
+                graph_revision=graph_revision, graph_sha256=graph_sha256)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS reserved, count(*) FILTER (WHERE e.state='completed') AS completed "
+            "FROM project_solve_piece_exchanges e JOIN jobs j ON j.job_id=e.job_id "
+            "JOIN project_solve_exchanges p ON p.job_id=e.job_id AND p.org_id=e.org_id "
+            "AND p.project_id=e.project_id AND p.drawing_id=e.drawing_id "
+            "AND p.input_version_id=e.input_version_id AND p.graph_revision=e.graph_revision "
+            "AND p.graph_sha256=e.graph_sha256 AND p.parent_intake_sha256=e.parent_intake_sha256 "
+            "WHERE " + SCOPE_SQL + " AND " + JOB_SQL +
+            " AND j.status='running' AND p.state='prepared' "
+            "AND j.input_version_id=%(input_version_id)s AND e.input_version_id=%(input_version_id)s "
+            "AND e.graph_revision=%(graph_revision)s AND e.graph_sha256=%(graph_sha256)s", args)
+        counts = cur.fetchone()
+    completed, reserved = counts["completed"], counts["reserved"]
+    # The worker reserves every piece before calling the first solver. Wait
+    # for a completed piece before treating the reservation count as a total.
+    if not 0 < completed <= reserved <= 64:
+        return None
+    return {"completed_pieces": completed, "total_pieces": reserved}
+
+
 def read_assembly_inputs(scope: ExchangeScope, input_version_id: UUID, piece_count: int, *, conn):
     """Bounded lease-free evidence read for failed-parent attribution only."""
     if (type(scope) is not ExchangeScope or not isinstance(input_version_id, UUID)

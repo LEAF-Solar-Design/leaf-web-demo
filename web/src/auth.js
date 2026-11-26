@@ -15,6 +15,7 @@
 
 import { track, flushNow } from './telemetry.js'
 import { clearComposerDrafts } from './lib/composerDraft.js'
+import { clearAccountIdentity, setAccountEmail } from './auth/accountIdentity.js'
 import { clearInvestorWorkspace, INVESTOR_ORG_KEY, isInvestorSession } from './investorDemo.js'
 import { serviceSession, serviceState, serviceScope, serviceHeaders, authorityStorage } from './lib/serviceAuthSession.js'
 import {
@@ -287,6 +288,12 @@ export async function handleRedirectCallback() {
     if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)
+    if (token) {
+      try {
+        const user = await c.getUser()
+        if (isCurrent()) setAccountEmail(user?.email)
+      } catch { /* account display must not prevent authentication */ }
+    }
     return !!token
   } catch (error) {
     if (!isCurrent()) return false
@@ -338,6 +345,7 @@ export async function logout(hint) {
     } finally { clearTimeout(timer) }
   }
   if (service.mode) {
+    clearAccountIdentity()
     serviceSession().logout()
     try { serviceStorage?.removeItem(INFLIGHT_AUTHOR_KEY) } catch { /* storage unavailable */ }
     clearComposerDrafts(serviceStorage)
@@ -350,6 +358,7 @@ export async function logout(hint) {
     return
   }
   try {
+    clearAccountIdentity()
     localStorage.removeItem(JWT_KEY)
     localStorage.removeItem(INFLIGHT_AUTHOR_KEY)
     if (investor) clearInvestorWorkspace(localStorage)

@@ -577,9 +577,12 @@ _mount_platform_router()
 from routers import project_repository_edit as project_repository_edit_router  # noqa: E402
 
 app.include_router(project_repository_edit_router.router)
+import browser_static_build_recheck  # noqa: E402
 from routers import browser_project  # noqa: E402
 app.middleware("http")(browser_project.no_store_responses)
 app.include_router(browser_project.router)
+if browser_static_build_recheck.enabled():
+    app.include_router(browser_static_build_recheck.router)
 from routers import native_project  # noqa: E402
 app.middleware("http")(native_project.no_store_responses)
 app.include_router(native_project.router)

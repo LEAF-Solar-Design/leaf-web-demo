@@ -15,8 +15,10 @@ from pathlib import Path
 import pytest
 
 import solar_solaredge_parse as sp
+import solar_solaredge_pdf as pdf
 from solar_solaredge_parse import SolarEdgeParseError
 from solar_solaredge_pdf import PagePrimitives, extract_primitives
+from solar_solaredge_parse_worker import verdict_bytes
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -182,3 +184,157 @@ def test_refuses_too_many_optimizers(monkeypatch):
     with pytest.raises(SolarEdgeParseError) as err:
         sp.parse_primitives(_page())
     assert err.value.code == "TOO_MANY_OPTIMIZERS"
+
+
+def _stamp_layout(x, y):
+    return f"""
+    .9 .95 1 rg 0 0 0 RG {x} {y} 30 60 re B
+    1 0 0 RG {x + 10} {y + 25} 10 10 re S
+    {x + 15} {y + 30} m {x + 22} {y + 31} {x + 30} {y + 31} {x + 35} {y + 30} c S
+    0 0 0 rg BT /F1 6 Tf {x + 12} {y + 28} Td (1.1) Tj ET
+    """.encode()
+
+
+def _stamp_report(content, *, stamp=None, rect=b"0 0 1000 1000", matrix=b"", state=False,
+                  flags=4, subtype=b"Stamp"):
+    font = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+    def stream(data, attrs=b""):
+        return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), attrs, data)
+
+    annots = b"/Annots [5 0 R]" if stamp is not None else b""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 4 0 R "
+        b"/Resources << %s >> %s >>" % (font, annots),
+        stream(content),
+    ]
+    if stamp is not None:
+        appearance = b"<< /On 6 0 R /Off 7 0 R >>" if state else b"6 0 R"
+        state_name = b"/AS /On" if state else b""
+        objects.append(b"<< /Type /Annot /Subtype /%s /F %d /Rect [%s] /AP << /N %s >> %s >>"
+                       % (subtype, flags, rect, appearance, state_name))
+        form = b"/Type /XObject /Subtype /Form /BBox [0 0 1000 1000] /Resources << %s >> %s" % (font, matrix)
+        objects.append(stream(stamp, form))
+        if state:
+            objects.append(stream(_stamp_layout(750, 750), form))
+    return _vector_pdf(objects)
+
+
+def _vector_pdf(objects, version=b"1.4"):
+    pdf = bytearray(b"%PDF-" + version + b"\n")
+    offsets = []
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf += b"%d 0 obj\n%s\nendobj\n" % (number, obj)
+    xref = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    for offset in offsets:
+        pdf += b"%010d 00000 n \n" % offset
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(pdf)
+
+
+@pytest.mark.parametrize("rect,matrix,state,offset", [
+    (b"0 0 1000 1000", b"", False, (0, 0)),
+    (b"50 25 1050 1025", b"/Matrix [2 0 0 3 15 -20]", False, (50, 25)),
+    (b"0 0 1000 1000", b"", True, (0, 0)),
+], ids=["direct-normal", "transformed-normal", "chosen-normal-state"])
+def test_printable_stamp_import_matches_flattened_layout(rect, matrix, state, offset):
+    source = _stamp_layout(100, 500) + _stamp_layout(700, 100)
+    flat = _stamp_layout(100 + offset[0], 500 + offset[1]) + _stamp_layout(700 + offset[0], 100 + offset[1])
+    expected = json.loads(verdict_bytes(_stamp_report(flat)))
+    assert len(expected["matrices"]) == 2
+    assert json.loads(verdict_bytes(_stamp_report(b"", stamp=source, rect=rect, matrix=matrix, state=state))) == expected
+
+
+@pytest.mark.parametrize("flags,subtype", [(0, b"Stamp"), (6, b"Stamp"), (4, b"FreeText")])
+def test_nonprinting_hidden_and_other_annotations_do_not_supply_panels(flags, subtype):
+    base = _stamp_layout(100, 500)
+    assert verdict_bytes(_stamp_report(base, stamp=_stamp_layout(700, 100), flags=flags, subtype=subtype)) == (
+        verdict_bytes(_stamp_report(base))
+    )
+
+
+@pytest.mark.parametrize("stamp", [
+    _stamp_layout(1000, 500),
+    b"0 0 10 10 re W n\n" + _stamp_layout(100, 500),
+], ids=["outside-bbox", "clip-operator"])
+def test_stamp_refuses_clipped_layout_instead_of_importing_hidden_panels(stamp):
+    verdict = json.loads(verdict_bytes(_stamp_report(_stamp_layout(100, 500), stamp=stamp)))
+    assert verdict["refusal"] == "REPORT_PDF_UNSUPPORTED"
+
+
+def test_stamp_content_counts_toward_the_page_content_budget(monkeypatch):
+    base = _stamp_layout(100, 500)
+    stamp = _stamp_layout(700, 100)
+    monkeypatch.setattr(pdf, "MAX_CONTENT_BYTES", max(len(base), len(stamp)))
+    assert "matrices" in json.loads(verdict_bytes(_stamp_report(base)))
+    verdict = json.loads(verdict_bytes(_stamp_report(base, stamp=stamp)))
+    assert verdict["refusal"] == "REPORT_RESOURCE_LIMIT"
+
+
+def _layer_report(content, membership=b"5 0 R", *, form=None):
+    font = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+    def stream(data, attrs=b""):
+        return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), attrs, data)
+
+    xobjects = b"/XObject << /Panel 8 0 R >>" if form is not None else b""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] "
+        b"/D << /BaseState /OFF /ON [5 0 R] >> >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000 1000] /Contents 4 0 R "
+        b"/Resources << %s %s /Properties << /Visible %s /Hidden 6 0 R >> >> >>"
+        % (font, xobjects, membership),
+        stream(content),
+        b"<< /Type /OCG /Name (On) >>",
+        b"<< /Type /OCG /Name (Off) >>",
+        b"<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /AnyOn >>",
+    ]
+    if form is not None:
+        objects.append(stream(form, b"/Subtype /Form /BBox [0 0 1000 1000] /Resources << %s >>" % font))
+    return _vector_pdf(objects, version=b"1.5")
+
+
+@pytest.mark.parametrize("membership", [
+    b"5 0 R",
+    b"7 0 R",
+    b"<< /Type /OCMD /VE [/And 5 0 R [/Not 6 0 R]] >>",
+], ids=["registered-group", "membership-policy", "nested-expression"])
+def test_import_uses_visible_layout_and_wiring_from_default_layers(membership):
+    base = _stamp_layout(100, 500)
+    hidden = _stamp_layout(700, 100)
+    layered = b"/OC /Visible BDC\n" + base + b"EMC\n/OC /Hidden BDC\n" + hidden + b"EMC\n"
+    assert verdict_bytes(_layer_report(layered, membership)) == verdict_bytes(_stamp_report(base))
+
+
+def test_reused_layer_form_matches_visible_page_space_wiring():
+    form = _stamp_layout(100, 500)
+    layered = _layer_report(
+        b"/OC /Hidden BDC /Panel Do EMC\n"
+        b"/OC /Visible BDC q 1 0 0 1 400 -100 cm /Panel Do Q EMC", form=form,
+    )
+    assert verdict_bytes(layered) == verdict_bytes(_stamp_report(_stamp_layout(500, 400)))
+
+
+def test_hidden_text_still_advances_the_visible_text_matrix():
+    before = b"BT /F1 10 Tf 100 500 Td "
+    hidden = b"/OC /Hidden BDC (hidden) Tj EMC "
+    after = b"(visible) Tj ET"
+    layered = pdf.extract_primitives(_layer_report(before + hidden + after))
+    control = pdf.extract_primitives(_stamp_report(before + b"(hidden) Tj " + after))
+    assert layered.letters == control.letters[6:]
+
+
+@pytest.mark.parametrize("membership", [
+    b"<< /Type /OCMD /VE [/Or 5 0 R [/Bogus 6 0 R]] >>",
+    b"<< /Type /OCMD /OCGs [5 0 R 7 0 R] /P /AnyOn >>",
+    b"<< /Type /OCMD /VE [/Not 5 0 R 6 0 R] >>",
+    b"<< /Type /OCMD /VE 5 0 R >>",
+])
+def test_invalid_layer_membership_is_refused_even_after_a_visible_operand(membership):
+    report = _layer_report(b"/OC /Visible BDC\n" + _stamp_layout(100, 500) + b"EMC", membership)
+    assert json.loads(verdict_bytes(report))["refusal"] == "REPORT_PDF_UNSUPPORTED"

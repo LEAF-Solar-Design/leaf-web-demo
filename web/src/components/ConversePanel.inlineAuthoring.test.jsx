@@ -32,6 +32,32 @@ const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 const response = (status, value) => ({ status, ok: status < 300, json: async () => value })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
+it.each([true, false])('retires the waiting note after the plan is resolved with approved=%s', async (approved) => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note until every decision card in the turn is resolved', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('plan_proposed', 'plan', { ...proposed, confirmation_id: 'p2' }),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved: true }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p2', approved: false }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note when the turn has no decision card', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+})
+
 it('takes a short prompt through questions, plan approval, two compile attempts and publication inline', async () => {
   vi.useFakeTimers()
   const stagePath = '/api/author/stages/' + id
@@ -84,10 +110,10 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     event('tool_call', 'build', { tool: 'author_tool' }), event('tool_result', 'build', built),
     event('tool_result', 'build', built), event('turn_complete', 'build'))
   const build = screen.getByRole('region', { name: 'Tool authoring' })
-  expect(build).toHaveTextContent('queued')
+  expect(build).toHaveTextContent('Waiting to start')
   expect(build).toHaveTextContent('Branch has not reported yet')
   await tick(1999)
-  expect(build).toHaveTextContent('queued')
+  expect(build).toHaveTextContent('Waiting to start')
   await tick(1)
   expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
   await tick(2000)

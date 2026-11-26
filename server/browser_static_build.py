@@ -8,6 +8,7 @@ from copy import deepcopy
 import requests
 import broker_client
 import browser_project_flow as flow
+import browser_static_build_recheck as admission
 import browser_project_source_export as source_export
 
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -115,6 +116,8 @@ def _checked_publication(tenant, project_id, request_id, job_id, witnesses, *, w
         if flow.scope(tenant, project_id, write=write) != current:
             raise flow.FlowError(403)
 
+        return current[2]
+
     return authority, recheck
 
 
@@ -137,7 +140,10 @@ def exchange(tenant, project_id, request_id, job_id, witnesses, *, submit=False)
     if not url or not headers.get('X-Harness-Secret'):
         raise flow.FlowError(503)
     headers = dict(headers, **{'X-Tenant-Id': authority['tenant_id'], 'Content-Type': 'application/json'})
-    recheck()
+    actor_binding_id = recheck()
+    if submit and admission.enabled():
+        admission.admit(authority, job_id, actor_binding_id, request_id, witnesses)
+        recheck()
     try:
         response = requests.post(url + '/internal/project-static-preview/' + ('build' if submit else 'status'),
             data=flow.canonical(payload), headers=headers, timeout=(5, 20), allow_redirects=False, stream=True)

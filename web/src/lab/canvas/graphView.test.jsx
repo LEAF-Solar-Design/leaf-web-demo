@@ -360,6 +360,80 @@ describe('project corpus evaluation flow', () => {
     expect(client.state.restoredGraph).toEqual(graph)
   })
 
+  it.each(['accepted', 'refused', 'superseded'])('waits for the current saved corpus admission when it is %s', async outcome => {
+    const response = options()
+    const nextProject = '22222222-2222-4333-8444-555555555555'
+    const makeGraph = (projectId, count) => {
+      let graph = emptyGraph()
+      for (let i = 0; i < count; i += 1) graph = addBlock(graph, response.manifest)
+      for (const block of graph.blocks) block.settings = {
+        project_id: projectId,
+        corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+        suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size },
+      }
+      return graph
+    }
+    const first = makeGraph(project, 1)
+    // Opening a different revision needs its own response even within one project.
+    const second = makeGraph(outcome === 'accepted' ? project : nextProject, 3)
+    const client = clientFor(first, {})
+    const pending = []
+    vi.stubGlobal('fetch', vi.fn(async url => {
+      const request = new URL(String(url), 'https://fixture.invalid')
+      if (!request.pathname.endsWith('/corpus-options')) return { ok: true, json: async () => ({ runs: [] }) }
+      expect(request.searchParams.get('manifest_only')).toBe('true')
+      return new Promise(resolve => pending.push({
+        projectId: request.searchParams.get('project_id'),
+        settle: status => resolve({ status, ok: status === 200, json: async () => response }),
+      }))
+    }))
+    const open = (docId, graph) => act(() => {
+      client.setDocId(docId)
+      client.takeGraph(graph)
+    })
+    const onRun = vi.fn()
+    render(<GraphView client={client} onRun={onRun} />)
+    open('warm-first', first)
+    await waitFor(() => expect(pending).toHaveLength(1))
+    await act(async () => { pending[0].settle(200) })
+    const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+    await readiness.findByText('Ready', { exact: true })
+    const run = () => readiness.getByRole('button', { name: 'Run graph' })
+    expect(run()).toBeEnabled()
+
+    open('warm-second', second)
+    await waitFor(() => expect(pending).toHaveLength(2))
+    expect(pending[1].projectId).toBe(second.blocks[0].settings.project_id)
+    expect(readiness.getByRole('status')).toHaveTextContent('Loading saved corpus controls')
+    fireEvent.click(run())
+    expect(run()).toBeDisabled()
+    expect(onRun).not.toHaveBeenCalled()
+
+    if (outcome === 'refused') {
+      await act(async () => { pending[1].settle(403) })
+      expect(await readiness.findByRole('alert')).toHaveTextContent('Saved corpus controls are unavailable')
+      expect(run()).toBeDisabled()
+      expect(client.state.restoredGraph).toEqual(second)
+      return
+    }
+    if (outcome === 'superseded') {
+      const third = makeGraph(project, 2)
+      open('warm-third', third)
+      await waitFor(() => expect(pending).toHaveLength(3))
+      await act(async () => { pending[2].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      await act(async () => { pending[1].settle(403) })
+      expect(readiness.queryByRole('alert')).not.toBeInTheDocument()
+      expect(client.state.restoredGraph).toEqual(third)
+    } else {
+      await act(async () => { pending[1].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      expect(client.state.restoredGraph).toEqual(second)
+    }
+    expect(run()).toBeEnabled()
+    expect(onRun).not.toHaveBeenCalled()
+  })
+
   it('restores ordinary readiness when the last unresolved corpus block is removed from the draft', async () => {
     const { manifest } = options()
     const graph = addBlock(addBlock(emptyGraph(), registry['constant@1.0.0']), manifest)

@@ -445,8 +445,12 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                            + block + '\n'
                            'printf "ENV %s %s %s\\n" "${LEAF_PROCESS_CAPTURE_CONTEXT:-unset}" '
                            '"${LEAF_PROCESS_CAPTURE_OUT:-unset}" "$LEAF_PROOF_TRACING"\n')
-                result = subprocess.run([BASH, "-c", command], env=env,
-                                        capture_output=True, text=True)
+                # Pass the heredoc through a file so Windows Git Bash receives literal LF.
+                with tempfile.TemporaryDirectory() as temporary:
+                    snippet = Path(temporary) / "capture-guard.sh"
+                    snippet.write_text(command, encoding="utf-8", newline="\n")
+                    result = subprocess.run([BASH, snippet.as_posix()], env=env,
+                                            capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 if reason is None:
                     self.assertEqual(result.stdout, "ENV ambient-context ambient-output 1\n")
