@@ -88,4 +88,5 @@ def input_readiness(graph):
     assignment = solar_local_graph._load_builtin("solar-assign-strings")
     if assignment._targets(graph):
         return {"input_ready": True, "input_reason": None}
-    return assignment.input_readiness(graph)
+    # Keep the registered fallback visible to the ribbon's readiness-copy check.
+    return solar_local_graph._load_builtin("solar-assign-strings").input_readiness(graph)
