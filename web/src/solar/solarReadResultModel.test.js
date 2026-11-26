@@ -492,8 +492,9 @@ describe('canonical project read presentation', () => {
     expect(state).toMatchObject({ mode: 'ready', binding: projectBinding, current: true,
       inputIntakeSha256: intakeHash, graphSha256: graphHash })
     expect(state.view.headline).toBe('57.4 A')
-    expect(state.view.details.map(({ label }) => label)).toEqual(['Tool', 'Drawing', 'Version', 'Graph', 'Output', 'Request'])
+    expect(state.view.details.map(({ label }) => label)).toEqual(['Tool', 'Drawing', 'Version', 'Graph', 'Output', 'Request', 'File SHA-256'])
     expect(state.view.details[2].text).toBe(projectBinding.input_version_id)
+    expect(state.view.details.at(-1).text).toBe(bodyHash)
     expect(state.view.artifact).toMatchObject({ state: 'ready', filename: 'ElectricalSchedules.json', sizeText: '2 bytes' })
     expect(state.view.details.some(({ label }) => ['Job', 'Representation'].includes(label))).toBe(false)
     expect(JSON.stringify(state.view.details)).not.toContain('private-graph-project')
@@ -510,6 +511,7 @@ describe('canonical project read presentation', () => {
       const state = projectState(projectResult({ output: { artifact: ref, count: 4 } }))
       expect(state.mode).toBe('ready')
       expect(state.view.artifact).toEqual({ state: 'unverified' })
+      expect(state.view.details.some(({ label }) => label === 'File SHA-256')).toBe(false)
       expect(state.view.fields).toEqual([{ key: 'count', label: 'Count', text: '4' }])
       const downloadArtifact = vi.fn()
       const projectClient = { downloadArtifact, getSnapshot: () => ({ binding: projectBinding, authorityKey: 'a' }),
@@ -567,7 +569,10 @@ describe('canonical project read presentation', () => {
   it('R12-21 refuses historical results under the default current policy', () => {
     const data = projectResult({ is_head: false, head_version_id: projectBinding.organization_id, current_required: false })
     expect(projectState(data)).toEqual({ mode: 'refused', reason: 'SIP_R12_STALE_CURRENT' })
-    expect(projectState(data, { current: false }).mode).toBe('ready')
+    const historical = projectState(data, { current: false })
+    expect(historical.mode).toBe('ready')
+    expect(historical.view.details).toContainEqual({ label: 'Version', text: projectBinding.input_version_id })
+    expect(historical.view.details).toContainEqual({ label: 'File SHA-256', text: bodyHash })
     expect(projectState(projectResult(), { current: false }).reason).toBe('SIP_R12_RESULT_INVALID')
   })
 
@@ -577,6 +582,7 @@ describe('canonical project read presentation', () => {
       const state = projectState(projectResult({ tool, output: { status, reason } }))
       expect(state.mode).toBe('ready')
       expect(state.view.artifact).toBeNull()
+      expect(state.view.details.some(({ label }) => label === 'File SHA-256')).toBe(false)
       expect(state.view.refusal).toBeNull()
       expect(state.view.fields.map(({ text }) => text)).toEqual([status, reason])
     }
