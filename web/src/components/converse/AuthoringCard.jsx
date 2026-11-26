@@ -76,7 +76,7 @@ function branchSummary(report) {
 function DecisionTime({ at }) {
   const date = new Date(at)
   return at && Number.isFinite(date.getTime()) ? <>, <time dateTime={date.toISOString()}>
-    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time></> : null
+    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</time></> : null
 }
 
 function reviewPlan(stage, proposal) {
@@ -247,6 +247,10 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const publicationState = terminalPublicationStates.includes(reportedPublication) ? reportedPublication
     : decision?.status === 'published' ? 'published' : reportedPublication || decision?.status || stage?.status
   const publication = reportedPublication === 'published' ? stage.publication : decision
+  const packageDigest = string(publication?.package_digest)
+  const packageVersion = string(publication?.version)
+  const validPackage = packageDigest.length === 64 && /^[0-9a-f]{64}$/.test(packageDigest)
+    && packageVersion.trim() === packageVersion && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(packageVersion)
   const failedCompile = ['refused', 'failed', 'compile_failed'].includes(resultLabel(latest))
     || /compile/.test(string(stage?.error?.reason_code))
   const published = publicationState === 'published'
@@ -359,7 +363,11 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         </div></> : notReported}</dd>
       <dt>Publish</dt><dd>{published
         ? <>Published to your plugin catalog<DecisionTime at={publication?.published_at ?? decision?.decided_at
-          ?? (stage?.status === 'published' ? stage.updated_at : null)} /></>
+          ?? (stage?.status === 'published' ? stage.updated_at : null)} />
+          {validPackage && <span title={packageDigest}> · v{packageVersion} · {packageDigest.slice(0, 12)}{' '}
+            <button type="button" className="chip-neutral" aria-label="Copy package digest" title={packageDigest}
+              onClick={() => navigator.clipboard?.writeText(packageDigest)?.catch(() => {})}>Copy</button>
+          </span>}</>
         : publishLabels[publicationState] || notReported}</dd>
       <dt>Branch</dt><dd>{branchSummary(stage?.branch) || 'Branch has not reported yet'}</dd>
     </dl>

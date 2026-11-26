@@ -457,3 +457,58 @@ it('discloses the number of HTML escapes Studio decoded in an accepted source', 
   expect(labels.map(label => label.tagName)).toEqual(['LI', 'DD'])
   for (const label of labels) expect(label).toBeVisible()
 })
+
+const packageDigest = '0123456789abcdef'.repeat(4)
+const publishedPackage = { state: 'published', published_at: '2026-11-21T03:15:47Z',
+  name: 'roof', version: '1.2.0', package_digest: packageDigest }
+
+it('shows the signed package version and digest from the server publication and copies the full digest', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  await mount()
+  const row = screen.getByText(/Published to your plugin catalog/)
+  expect(row).toHaveTextContent(' · v1.2.0 · 0123456789ab')
+  expect(button('Copy package digest')).toHaveAttribute('title', packageDigest)
+  await act(async () => fireEvent.click(button('Copy package digest')))
+  expect(writeText).toHaveBeenCalledWith(packageDigest)
+  for (const label of [/Deployed to AutoCAD/, /Published to your plugin catalog/]) {
+    expect(screen.getByText(label).querySelector('time')).toHaveTextContent(/\d+:\d{2}:47/)
+  }
+})
+
+it('can show a package digest supplied with a published review POST result', async () => {
+  postReview.mockResolvedValue({ change_set_id: 'change', ...selfReview, status: 'published',
+    version: '1.2.0', package_digest: packageDigest })
+  await mount()
+  await act(async () => fireEvent.click(button('Deploy to AutoCAD')))
+  expect(screen.getByText(/Published to your plugin catalog/)).toHaveTextContent(' · v1.2.0 · 0123456789ab')
+  expect(button('Copy package digest')).toBeVisible()
+})
+
+it.each([undefined, '', 'a'.repeat(63), 'a'.repeat(65), 'G'.repeat(64), 'A'.repeat(64), `${'a'.repeat(64)}\n`, 42])(
+  'omits package details for an absent or malformed digest %s', async digest => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, package_digest: digest } })
+    await mount()
+    expect(screen.getByText(/Published to your plugin catalog/)).not.toHaveTextContent(' · v')
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })
+
+it.each([undefined, '', '1.2', 'v1.2.0', '1.2.0-beta', '01.2.0', '1.2.0\n', 123])(
+  'omits package details for an absent or malformed version %s', async version => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, version } })
+    await mount()
+    expect(screen.getByText(/Published to your plugin catalog/)).not.toHaveTextContent(packageDigest.slice(0, 12))
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })
+
+it.each(['awaiting_approval', 'publishing', 'denied', 'superseded', 'rolled_back'])(
+  'withholds package details for publication state %s', async state => {
+    getAuthorStage.mockResolvedValue({ ...staged, review: selfReview,
+      publication: { ...publishedPackage, state } })
+    await mount()
+    expect(screen.queryByText(/0123456789ab/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Copy package digest' })).toBeNull()
+  })

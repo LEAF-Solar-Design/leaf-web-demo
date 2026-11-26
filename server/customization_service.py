@@ -2002,6 +2002,14 @@ class CustomizationService:
                 )}
             if change.state is ChangeState.PUBLISHED:
                 result["publication"] = {"state": "published", "published_at": change.updated_at}
+                if change.tool_target == "branch":
+                    try:
+                        published = self._published_branch_result(change)
+                        result["publication"].update({
+                            field: published[field] for field in ("package_digest", "name", "version")
+                        })
+                    except Exception:
+                        _LOG.warning("publication_digest_unavailable: change_set=%s", change.change_set_id)
             elif change.state in (ChangeState.PUBLISHING, ChangeState.SUPERSEDED, ChangeState.ROLLED_BACK):
                 result["publication"] = {"state": change.state.value}
             else:
