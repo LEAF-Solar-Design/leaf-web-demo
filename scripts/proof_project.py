@@ -3106,7 +3106,19 @@ class _RuntimeProcess:
                 self.output = spec.output_path.open("xb")
             if os.name == "nt":
                 self.job = _WindowsJob()
-            process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=dict(spec.environment),
+            argv = spec.argv
+            environment = dict(spec.environment)
+            if (
+                os.name == "nt"
+                and spec.role == "stack-launcher"
+                and argv[0] == sys.executable
+                and sys.prefix != sys.base_prefix
+            ):
+                # The Windows venv executable redirects to a second process.
+                # Preserve the venv while keeping the launcher in the retained process.
+                environment["__PYVENV_LAUNCHER__"] = sys.executable
+                argv = (sys._base_executable, *argv[1:])
+            process = subprocess.Popen(argv, cwd=spec.cwd, env=environment,
                 stdin=subprocess.DEVNULL, stdout=self.output or subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=(0x08000000 | 0x4) if os.name == "nt" else 0,
                 start_new_session=os.name != "nt")
