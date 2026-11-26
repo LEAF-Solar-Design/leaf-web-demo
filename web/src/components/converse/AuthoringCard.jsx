@@ -50,7 +50,9 @@ function attemptLabel(attempt) {
   const diagnostics = Array.isArray(attempt.diagnostics) ? attempt.diagnostics.map(diagnostic).filter(Boolean) : []
   const status = resultLabel(attempt)
   const label = ['failed', 'compile_failed'].includes(status) ? 'refused' : status === 'accept' ? 'passed' : status
-  return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}`
+  const entities = attempt.source_decoded?.entities
+  const decoded = Number.isInteger(entities) && entities >= 1 ? `, Studio decoded HTML escapes in the source (${entities})` : ''
+  return `Attempt ${attempt.attempt}: ${[label || notReported, ...diagnostics].join(', ')}${decoded}`
 }
 
 // The stage read reports the plugin's latest receipt as { last_event, at, plugin_version, diagnostics }.
