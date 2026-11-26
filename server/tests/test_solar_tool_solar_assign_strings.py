@@ -435,8 +435,11 @@ def test_assignment_report_reads_saved_state_without_preview(graph, tmp_path, mo
     assert head_graph(backend) == g
     if case == "A":
         assert solar_local_read._load_builtin("solar-assignment-report").input_readiness(g)["input_ready"]
-        with pytest.raises(GraphValidationError, match="NO_UNASSIGNED_STRINGS"):
-            assignment_report(g)
+        complete = assignment_report(g)
+        assert complete["status"] == "complete"
+        assert complete["commit_refusal_code"] == "NO_UNASSIGNED_STRINGS"
+        assert complete["saved_state"] == saved
+        assert complete["candidate_assignments"] == []
         with pytest.raises(GraphValidationError, match="STALE_GRAPH_REVISION"):
             assignment_report(g, mode="saved", expected_rev=g["rev"] + 1)
 

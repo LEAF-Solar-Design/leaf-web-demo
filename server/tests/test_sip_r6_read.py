@@ -680,6 +680,42 @@ def test_project_assignment_report_uses_real_kernel_without_mutation(lane, monke
     assert lane.calls == calls_before
 
 
+@pytest.mark.parametrize("topology", ["U", "L2", "CB"])
+def test_project_assignment_report_reads_completed_saved_inputs(lane, monkeypatch, graph, topology):
+    import test_solar_tool_solar_assign_strings as assignment_cases
+
+    source = (assignment_cases.four_input_graph(graph) if topology == "U"
+              else assignment_cases.variant(graph, topology))
+    g = assignment_cases.call(source)["graph"]
+    lane.set_parent(tools_cases.embedded(g))
+    before = deepcopy((lane.versions, lane.blobs, lane.writes, lane.head))
+    monkeypatch.setattr(project.graph_store(), "publish_version", blocked)
+    monkeypatch.setattr(read.native, "_canonical_state", blocked)
+
+    tool = "solar-assignment-report"
+    params = {"expected_rev": g["rev"], "accept_excess_capacity": False}
+    result = run(lane, tool, params, version=lane.parent.version_id)["result"]
+    assert result["input_version_id"] == str(lane.parent.version_id)
+    assert result["drawing_changed"] is False
+    report = result["output"]
+    assert report["status"] == "complete"
+    assert report["commit_refusal_code"] == "NO_UNASSIGNED_STRINGS"
+    assert report["candidate_assignments"] == report["remaining_string_refs"] == []
+    assert report["counts"] == {"eligible": 0, "candidate_assigned": 0, "remaining": 0}
+    assignments = report["saved_state"]["assignments"]
+    assert report["saved_state"]["unassigned_string_refs"] == []
+    assert {row["string_ref"]: row["inverter_ref"] for row in assignments} == {
+        string["id"]: string["inverter_ref"] for string in g["strings"]}
+    assert len({(row["inverter_ref"], row["mppt_letter"], row["input_number"])
+                for row in assignments}) == len(g["strings"])
+    assert local._load_builtin(tool).input_readiness(g) == {"input_ready": True, "input_reason": None}
+    with pytest.raises(read.GraphValidationError, match="NO_UNASSIGNED_STRINGS"):
+        assignment_cases.call(g)
+    refused("STALE_GRAPH_REVISION", lambda: run(lane, tool, dict(params, expected_rev=g["rev"] + 1),
+                                               version=lane.parent.version_id))
+    assert (lane.versions, lane.blobs, lane.writes, lane.head) == before
+
+
 def test_project_assignment_report_catalog_has_synchronous_read_authority(catalog_lane, monkeypatch, graph):
     import entitlements
     s = catalog_lane
@@ -711,6 +747,11 @@ def test_project_assignment_report_catalog_has_synchronous_read_authority(catalo
     assert states["solar-assignment-report"]["input_reason"] == "string_collectors_required"
     assert states["solar-assignment-report"]["runnable"] is False
     assert states["solar-settings"] == baseline
+
+    s.s.set_parent(tools_cases.embedded(assignment_cases.variant(graph, "A")))
+    response = s.client.get("/api/capabilities", params=query, headers=catalog_cases.headers(s))
+    state = catalog_cases.states(response)["solar-assignment-report"]
+    assert state["runnable"] is True and state["project_read"] is True
 
 
 def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkeypatch):
