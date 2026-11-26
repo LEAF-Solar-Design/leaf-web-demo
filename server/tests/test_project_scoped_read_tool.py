@@ -1069,7 +1069,8 @@ def test_verified_artifact_failure_and_retry_are_saved_for_the_same_revision(
               b'    if params.get("prefix") == "invalid":\n'
               b'        raise ValueError("filtered takeoff failed")\n'
               b'    context = intake.get("drawing_context", intake)\n'
-              b'    return {"count": len(context.get("polylines") or [])}, None\n')
+              b'    return {"ok": True, "result": {"count": len(context.get("polylines") or [])},\n'
+              b'            "executed_code_digest": "sha256:" + "a" * 64}\n')
     digest = "sha256:" + hashlib.sha256(source).hexdigest()
     (tmp_path / "list_layers.py").write_bytes(source)
     seed = deps.load_seed_catalog_tools()
@@ -1091,6 +1092,7 @@ def test_verified_artifact_failure_and_retry_are_saved_for_the_same_revision(
     assert failed.status_code == retry.status_code == 202, (failed.text, retry.text)
     assert "filtered takeoff failed" in failed.json()["result"]["error"]["message"]
     assert retry.json()["result"]["ok"] is True, retry.text
+    assert retry.json()["result"]["executed_code_digest"] == digest
     board_jobs = [job.to_dict() for job in store.list_jobs(O1, P1)]
     assert sorted(job["status"] for job in board_jobs) == ["failed", "succeeded"]
     for job in board_jobs:
@@ -1160,8 +1162,10 @@ def test_c1a_specialized_contract_not_generic(lane, monkeypatch, special):
     assert lane.memory.reads == []
 
 
-def test_c1a_full_envelope_allowlist(lane, monkeypatch):
+def test_c1a_full_envelope_allowlist(lane, read_job_store, monkeypatch):
     """C1A-26: a tool cannot manufacture job or publication claims."""
+    from leaf_platform import store
+
     fabricated = {
         "ok": True,
         "result": {},
@@ -1178,7 +1182,7 @@ def test_c1a_full_envelope_allowlist(lane, monkeypatch):
         "error": None,
         "unexpected": {"claim": True},
         "execution_provenance": {"forged": True},
-        "executed_code_digest": "a" * 64,
+        "executed_code_digest": "sha256:" + "a" * 64,
     }
     tool = tool_override(monkeypatch)
     install_tool_body(
@@ -1216,6 +1220,19 @@ def test_c1a_full_envelope_allowlist(lane, monkeypatch):
         "unexpected", "execution_provenance",
     } & body.keys()
     assert response.headers["cache-control"] == "no-store"
+
+    headers = {"X-Org-Id": str(O1), "X-Project-Id": str(P1),
+               "Idempotency-Key": "authored-envelope", "Prefer": "respond-async"}
+    saved = request(lane, tool=tool, headers=headers)
+    replay = request(lane, tool=tool, headers=headers)
+    assert saved.status_code == replay.status_code == 202, (saved.text, replay.text)
+    assert saved.json() == replay.json()
+    assert saved.json()["status"] == "complete"
+    assert "executed_code_digest" not in saved.json()["result"]
+    board = [row.to_dict() for row in store.list_jobs(O1, P1)]
+    assert len(board) == 1 and board[0]["job_id"] == saved.json()["job_id"]
+    assert "executed_code_digest" not in board[0]["result"]
+    assert board[0]["revision_run"]["executable_identity"] is None
 
 
 def test_c1a_real_tool_exception(lane, monkeypatch):
