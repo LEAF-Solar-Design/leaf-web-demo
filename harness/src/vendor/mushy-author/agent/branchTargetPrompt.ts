@@ -294,9 +294,8 @@ export async function runBranchTargetSession(
         abortController: abort, mcpServers: { branch_author: server }, allowedTools: allowed,
         hooks: { PostToolUse: [{ matcher: "mcp__branch_author__submitBranchToolProposal",
           hooks: [async () => submitted ? { continue: false, stopReason: "branch package accepted" } : {}] }] },
-        canUseTool: async (name: string, args: Record<string, unknown>) => allowed.includes(name)
-          ? { behavior: "allow", updatedInput: args }
-          : { behavior: "deny", message: "Only branch package submission and read-only repository inspection are permitted." },
+        // The two allowed branch_author tools are approved by allowedTools and never reach this callback; deny every other tool.
+        canUseTool: async () => ({ behavior: "deny", message: "Only branch package submission and read-only repository inspection are permitted." }),
       },
     });
     let result: Record<string, unknown> | null = null;

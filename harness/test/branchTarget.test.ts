@@ -459,9 +459,12 @@ describe("branch stage lifecycle", () => {
     expect(sdk.mounted.map(t => t.name)).toEqual(["fs_tenant_repo", "submitBranchToolProposal"]);
     expect(sdk.options().settingSources).toEqual([]);
     expect(sdk.options().tools).toEqual([]);
+    expect(sdk.options().allowedTools).toEqual([
+      "mcp__branch_author__fs_tenant_repo", "mcp__branch_author__submitBranchToolProposal",
+    ]);
     const permission = sdk.options().canUseTool as (name: string, args: Record<string, unknown>) => Promise<{ behavior: string }>;
     expect(await permission("Bash", {})).toMatchObject({ behavior: "deny" });
-    expect(await permission("mcp__branch_author__submitBranchToolProposal", {})).toMatchObject({ behavior: "allow" });
+    expect(await permission("unknown_tool", {})).toMatchObject({ behavior: "deny" });
     expect(sdk.prompt()).toContain("IToolContext");
     expect(sdk.close).toHaveBeenCalledOnce();
     expect(coordination.recordStaged).toHaveBeenCalledWith(receipt);
