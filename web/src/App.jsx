@@ -1469,11 +1469,14 @@ export default function App() {
     adoptOrgId,
     openProject: onOpenProject,
     createOrg: createWorkspaceOrg,
-    createProject: createWorkspaceProject,
+    createProject: createWorkspaceProjectRequest,
     rehydrate,
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const createWorkspaceProject = useCallback((name) => (
+    createWorkspaceProjectRequest(name, { requireCreated: true })
+  ), [createWorkspaceProjectRequest])
   const deviceRegistry = useDeviceRegistry({ mock: mock || knownGuest, projectId: openProjectId })
   const [linkDeviceOpen, setLinkDeviceOpen] = useState(false)
   useDrawingScopeReset(openProjectId)
@@ -5658,6 +5661,7 @@ export default function App() {
             loading={projectsLoading}
             orgBusy={orgBusy}
             projectBusy={projectBusy}
+            projectDraftError={workspaceController.projectDraftError}
             createRequest={projectCreateRequest}
             onCreateOrg={onCreateOrg}
             onCreateProject={onCreateProject}

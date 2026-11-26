@@ -10,10 +10,50 @@ import { readFileSync } from 'node:fs'
 import { act, cleanup, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import ProjectSwitcher from './ProjectSwitcher.jsx'
 import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
+import { createProject } from '../api.js'
 import { deriveWorkspaceProjectState, WORKSPACE_PROJECT_COPY } from '../site/workspaceProjectState.js'
 import { readProjectPrincipal, readRecentProjects, writeRecentProjects } from '../lib/recentProjects.js'
 
 afterEach(cleanup)
+
+it.each([undefined, 'bound'])('retains the New project draft and shows collision recovery with bootstrap state %s', async (bootstrapState) => {
+  const openProject = vi.fn()
+  const onProjectCreated = vi.fn()
+  const controller = createWorkspaceController({
+    storage: { getItem: () => 'o1' }, services: { createProject, openProject },
+    callbacks: { onProjectCreated },
+  })
+  const props = () => ({ ...controller.getSnapshot(), bootstrapState,
+    unavailable: controller.getSnapshot().projectsError,
+    onCreateProject: (name) => controller.createProject(name, { requireCreated: true }),
+  })
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    project: { project_id: 'existing', name: 'Maple' }, created: false,
+  }), { status: 200 })))
+  try {
+    const view = render(<ProjectSwitcher {...props()} />)
+    fireEvent.click(document.querySelector('.proj-chip'))
+    fireEvent.change(screen.getByLabelText('New project'), { target: { value: 'Maple' } })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create project' })) })
+    view.rerender(<ProjectSwitcher {...props()} />)
+    expect(screen.getByLabelText('New project').value).toBe('Maple')
+    expect(screen.getByRole('alert').textContent).toMatch(/Choose a different name.*open the existing project/)
+    expect(openProject).not.toHaveBeenCalled()
+    expect(onProjectCreated).not.toHaveBeenCalled()
+  } finally { controller.dispose(); vi.unstubAllGlobals() }
+})
+
+it('App and ToolCast route visible creation through fresh-create handlers', () => {
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+  expect(app).toMatch(/createWorkspaceProjectRequest\(name, \{ requireCreated: true \}\)/)
+  expect(app).toMatch(/createProject: createWorkspaceProject, importUpload:/)
+  expect(app).toMatch(/onCreateProject=\{createWorkspaceProject\}/)
+  expect(app).toMatch(/projectDraftError=\{workspaceController.projectDraftError\}/)
+  const toolCast = readFileSync(`${process.cwd()}/src/site/ToolCast.jsx`, 'utf8')
+  expect(toolCast).toMatch(/workspace\.createProject\(name, \{ requireCreated: true \}\)/)
+  expect(toolCast).toMatch(/if \(project\) setLeftView\('workspace'\)\s+return project/)
+  expect(toolCast).toMatch(/projectDraftError=\{workspace.projectDraftError\}/)
+})
 
 it('B1-d row5: the mounted App props show creation after an unbound list response', async () => {
   const controller = createWorkspaceController({ authLive: true,

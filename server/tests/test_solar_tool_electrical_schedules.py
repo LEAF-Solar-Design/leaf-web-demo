@@ -132,8 +132,6 @@ def variant(name, graph, i7=None):
     g = copy.deepcopy(i7 if name.startswith("i7") else graph)
     if name == "stale":
         g["strings"][0]["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
-    elif name == "solaredge":
-        g["inverters"][0]["is_solaredge"] = True
     elif name == "units":
         g["project"]["units"]["meters_per_unit"] *= 2
     elif name == "unverified":
@@ -353,7 +351,6 @@ def test_electrical_schedules_accepts_boundary_records(graph):
 REFUSALS = [
     ("units", "UNRESOLVED_UNITS"),
     ("stale", "SOLAR_OUTPUT_NOT_CURRENT"),
-    ("solaredge", "SCHEDULES_OPTIMIZERS_UNSUPPORTED"),
     ("unverified", "SIZING_CONFIRMATION_REQUIRED"),
 ]
 
@@ -365,6 +362,54 @@ def test_electrical_schedules_graph_refusals(graph, name, code):
     with pytest.raises(GraphValidationError) as error:
         builtin().run(g, {})
     assert error.value.code == code and g == before
+
+
+def solaredge_layout(graph, layout):
+    if layout == "combiner":
+        _, graph = c10_graphs(graph)
+        next(item for item in graph["inverters"] if item["is_l2"])["is_solaredge"] = True
+        return graph
+    graph = copy.deepcopy(graph)
+    graph["inverters"][0]["is_solaredge"] = True
+    if layout == "partial":
+        string = graph["strings"][1]
+        string.update(inverter_ref=None, to_ref=string["ordered_panel_refs"][-1])
+        graph["inverters"][0]["input_assignments"].pop()
+        refs = string["ordered_panel_refs"]
+        for frame in graph["frames"]:
+            records = frame["panel_assignments"] + [item for row in frame["matrix"] for item in row]
+            for item in records:
+                if item["panel_ref"] in refs:
+                    item.update(inverter_id=None, string_input_number=None)
+    return graph
+
+
+@pytest.mark.parametrize("layout", ["direct", "partial", "combiner"])
+def test_solaredge_saved_string_schedule(graph, layout):
+    graph = solaredge_layout(graph, layout)
+    before = copy.deepcopy(graph)
+    out = builtin().run(graph, {"circuit_source": "labels"})
+    document = artifact(out)
+    table, = document["tables"]
+    assert table["title"] == "STRING SCHEDULE"
+    rows = table["cells"][2:]
+    assert len(rows) == len(graph["strings"]) == out.summary["strings"]
+    assert {row[0] for row in rows} == {string["id"] for string in graph["strings"]}
+    for row, string in zip(rows, sorted(graph["strings"], key=lambda item: item["id"])):
+        assert row[:3] == [string["id"], string["circuit_tag"], str(string["module_count"])]
+        if string["inverter_ref"] is None:
+            assert row[3:] == ["Unassigned", "", "", "", "", "", ""]
+            continue
+        inverter = next(item for item in graph["inverters"] if item["id"] == string["inverter_ref"])
+        slot = next(item for item in inverter["input_assignments"] if item["string_ref"] == string["id"])
+        assert row[3:8] == ["Assigned", inverter["id"], str(inverter["number"]),
+                            slot["mppt_letter"], str(slot["input_number"])]
+        if layout == "combiner":
+            upstream = next(item for item in graph["inverters"] if item["id"] == inverter["l2_ref"])
+            assert upstream["is_l2"] and row[8:] == [upstream["id"], str(upstream["number"])]
+        else:
+            assert row[8:] == ["", ""]
+    assert graph == before
 
 
 def test_electrical_schedules_zone_sizing_is_refused(graph, monkeypatch):
@@ -479,7 +524,9 @@ def test_electrical_schedules_numeric_newline_agreement(graph):
 
 def test_electrical_schedules_readiness(graph):
     assert availability.w1_graph_readiness(graph)[TOOL] == {"input_ready": True, "input_reason": None}
-    for name, reason in (("stale", "solar_output_not_current"), ("solaredge", "schedules_optimizers_unsupported"),
+    assert availability.w1_graph_readiness(solaredge_layout(graph, "partial"))[TOOL] == {
+        "input_ready": True, "input_reason": None}
+    for name, reason in (("stale", "solar_output_not_current"),
                          ("unverified", "sizing_confirmation_required")):
         assert availability.w1_graph_readiness(variant(name, graph))[TOOL] == {
             "input_ready": False, "input_reason": reason}
