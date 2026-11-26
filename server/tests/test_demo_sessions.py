@@ -578,6 +578,7 @@ def test_demo_route_allowlist_is_exact():
         "/api/projects/{project_id}/drawing-versions/{input_version_id}/context": ("GET",),
         "/api/projects/{project_id}/drawings/{drawing_id}/checkout": ("GET", "POST", "DELETE"),
         "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads": ("POST",),
+        "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison": ("GET",),
         "/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}": ("GET",),
         "/api/projects/{project_id}/conversations": ("POST", "GET"),
         "/api/projects/{project_id}/conversations/{conversation_id}": ("GET",),
