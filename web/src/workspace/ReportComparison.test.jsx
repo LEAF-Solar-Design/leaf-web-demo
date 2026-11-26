@@ -72,3 +72,54 @@ it.each([
     expect(options.map(option => option.value)).toEqual(['', second.job_id, third.job_id])
   }
 })
+
+function areaReport(base, entries, { drawing = 'site-a', filter = 'roof', exact = true } = {}) {
+  return {
+    ...base,
+    params: { exact_match: exact },
+    result: {
+      ...base.result,
+      project_context: { ...base.result.project_context, drawing_id: drawing },
+      result: { layer_count: entries.length, layer_filter: filter,
+        layers: entries.map(([layer, area]) => ({ layer, area })) },
+    },
+  }
+}
+
+function compare(left, right) {
+  render(<ReportComparison jobs={[left, right]} projectId={projectId} />)
+  fireEvent.change(picker('First report'), { target: { value: left.job_id } })
+  fireEvent.change(picker('Second report'), { target: { value: right.job_id } })
+}
+
+it.each([
+  ['case-distinct roof layers reverse', [['Roof', 16], ['ROOF', 4]], [['ROOF', 25], ['Roof', 9]],
+    'Layer area ranking changed', false, 'Roof', ['1', '2']],
+  ['civil layer areas change with stable ranks', [['Pad', 20], ['Access', 3]], [['Access', 6], ['Pad', 30]],
+    'No rank changes among shared layers', false, 'Pad', ['1', '1']],
+  ['tied ranks stay stable when row order changes', [['North', 8], ['South', 8]], [['South', 12], ['North', 12]],
+    'No rank changes among shared layers', false, 'South', ['1', '1']],
+  ['one electrical layer disappears', [['Feeder', 20], ['Branch', 10]], [['Feeder', 25]],
+    'No rank changes among shared layers', true, 'Branch', ['2', 'Absent']],
+])('%s', (_label, a, b, status, matchesChanged, name, expected) => {
+  compare(areaReport(first, a), areaReport({ ...third, input_version_id: 'drawing-v2',
+    result: { ...third.result, project_context: { project_id: projectId, input_version_id: 'drawing-v2' } } }, b))
+
+  expect(screen.getByText(status)).toBeVisible()
+  expect(Boolean(screen.queryByText('Matching layers changed'))).toBe(matchesChanged)
+  const row = screen.getByRole('rowheader', { name, exact: true }).closest('tr')
+  expect(within(row).getAllByRole('cell').map(cell => cell.textContent)).toEqual(expected)
+})
+
+it.each([
+  ['different drawing', { drawing: 'site-b' }, [['Roof', 4]]],
+  ['different filter', { filter: 'canopy' }, [['Roof', 4]]],
+  ['different filter mode', { exact: false }, [['Roof', 4]]],
+  ['ambiguous layer identity', {}, [['Roof', 4], ['Roof', 8]]],
+  ['unusable area', {}, [['Roof', '4']]],
+])('omits ranking for %s', (_label, options, layers) => {
+  compare(areaReport(first, [['Roof', 16]]), areaReport(third, layers, options))
+
+  expect(screen.getByText('Same tool version')).toBeVisible()
+  expect(screen.queryByRole('table', { name: 'Matching layers by area rank' })).toBeNull()
+})
