@@ -15,6 +15,13 @@ def matches(description):
                  or re.search(r"\b(?:count|list|enumerate|tally|which|how many)\b", description, re.I)))
 
 
+def camera_diagnostics_requested(description):
+    return (re.search(r"\bviewports?\b", description, re.I)
+            and re.search(r"\bcameras?\b", description, re.I)
+            and re.search(r"\b(?:degenerate|invalid|malformed|broken|uncheckable|unreadable|"
+                          r"diagnos(?:e|tic|tics))\b", description, re.I))
+
+
 def viewport_handle(description):
     match = re.search(r"\bviewport\s+(?:handle\s+)?(?:0x)?([a-f0-9]+)\b", description, re.I)
     return match[1].upper() if match else ""
@@ -59,8 +66,8 @@ def parameter_schema(description):
     return {"type": "object", "properties": {field: prop}, "required": [] if bound else [field]}
 
 
-def _crop(fields, boundaries):
-    """Read the paper crop, depth planes, and model-to-paper mapping."""
+def _camera(fields):
+    """Read the camera and model-to-paper mapping."""
     flags = int(fields.get(90, 0))
     direction = tuple(float(fields.get(code, default))
                       for code, default in ((16, 0), (26, 0), (36, 1)))
@@ -87,6 +94,15 @@ def _crop(fields, boundaries):
                 or not math.isclose(direction_length, calibrated_distance, rel_tol=1e-8)):
             raise ValueError("Unsupported perspective viewport calibration.")
         eye_distance = direction_length
+    return {"scale": scale, "paper_center": (cx, cy), "view_center": view_center,
+            "target": target, "direction": direction, "twist": twist,
+            "eye_distance": eye_distance}
+
+
+def _crop(fields, boundaries, camera):
+    """Read the depth planes and paper crop for a resolved camera."""
+    flags = int(fields.get(90, 0))
+    eye_distance = camera["eye_distance"]
     if flags & 2 and not flags & 16 and eye_distance is None:
         raise ValueError("Orthographic front clipping requires an explicit plane.")
     front = float(fields[43]) if flags & 2 and flags & 16 else math.inf
@@ -106,16 +122,22 @@ def _crop(fields, boundaries):
             raise ValueError("Invalid or oversized viewport crop boundary.")
         polygon = _outline(boundary)
     else:
+        cx, cy = camera["paper_center"]
+        width, height = (float(fields[code]) for code in (40, 41))
         polygon = [(cx + x * width / 2, cy + y * height / 2)
                    for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
     if not all(math.isfinite(value) for point in polygon for value in point):
         raise ValueError("Viewport crop exceeds the numeric range.")
-    return {"points": polygon, "inverted": False, "scale": scale,
-            "paper_center": (cx, cy), "view_center": view_center,
-            "target": target, "direction": direction, "twist": twist,
-            "eye_distance": eye_distance,
+    return {**camera, "points": polygon, "inverted": False,
             "front": front if math.isfinite(front) else None,
             "back": back if math.isfinite(back) else None}
+
+
+def _activation_value(fields, code, default):
+    try:
+        return int(fields.get(code, default))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unreadable viewport activation field (DXF group {code}).") from exc
 
 
 def attach_viewports(pairs, out):
@@ -126,6 +148,7 @@ def attach_viewports(pairs, out):
     crop_inputs, boundaries = {}, {}
     hidden = set()
     names = set()
+    activation_error = None
     try:
         for kind, record in _records(pairs):
             fields = dict(record)
@@ -152,22 +175,39 @@ def attach_viewports(pairs, out):
                 handle = fields.get(5, "").upper()
                 if not re.fullmatch("[A-F0-9]+", handle) or handle in viewports:
                     raise ValueError("Missing or duplicate viewport identity.")
-                viewports[handle] = {"layers": [v.upper() for c, v in record if c == 331],
-                                     "enabled": int(fields.get(68, 1)) != 0 and
-                                     not int(fields.get(90, 0)) & 131072 and int(fields.get(69, 0)) != 1}
-                if viewports[handle]["enabled"]:
+                view = {"layout": fields.get(410, ""),
+                        "layers": [v.upper() for c, v in record if c == 331]}
+                viewports[handle] = view
+                try:
+                    view["enabled"] = (_activation_value(fields, 68, 1) != 0
+                                       and not _activation_value(fields, 90, 0) & 131072
+                                       and _activation_value(fields, 69, 0) != 1)
+                except ValueError as exc:
+                    view["activation_error"] = str(exc)
+                    activation_error = activation_error or str(exc.__cause__)
+                    continue
+                if view["enabled"]:
                     crop_inputs[handle] = fields
             elif (kind == "LWPOLYLINE" and section == "ENTITIES"
                   and (fields.get(67) == "1" or fields.get(410, "Model").casefold() != "model")):
                 boundaries.setdefault(fields.get(5, "").upper(), []).append(record)
         for handle, fields in crop_inputs.items():
+            view = viewports[handle]
             try:
-                viewports[handle]["crop"] = _crop(fields, boundaries)
+                camera = _camera(fields)
             except (KeyError, TypeError, ValueError) as exc:
-                viewports[handle]["crop_error"] = "Unresolved viewport crop: " + str(exc)
+                view["camera_error"] = str(exc)
+                view["crop_error"] = "Unresolved viewport crop: " + str(exc)
+                continue
+            try:
+                view["crop"] = _crop(fields, boundaries, camera)
+            except (KeyError, TypeError, ValueError) as exc:
+                view["crop_error"] = "Unresolved viewport crop: " + str(exc)
         out["viewport_layers"] = {"layers": layers, "globally_hidden": sorted(hidden), "views": viewports}
+        if activation_error:
+            out["viewport_layers"]["error"] = activation_error
     except (ValueError, TypeError) as exc:
-        out["viewport_layers"] = {"error": str(exc)}
+        out["viewport_layers"] = {"error": activation_error or str(exc)}
 
 
 def build_body(description):
@@ -182,6 +222,31 @@ def build_body(description):
     else:
         entry = _SINGLE.replace("__HANDLE__", repr(viewport_handle(description)))
     return CLIP_SOURCE + INSTANCE_SOURCE + _GEOMETRY + body + entry
+
+
+CAMERA_DIAGNOSTICS = """
+def run(intake, params):
+    inventory = intake.get("viewport_layers", {})
+    if "views" not in inventory and inventory.get("error"):
+        raise ValueError(inventory["error"])
+    affected, uncheckable = [], []
+    checked = 0
+    for handle, view in sorted(inventory.get("views", {}).items()):
+        if "activation_error" in view:
+            uncheckable.append({"viewport_handle": handle, "layout": view["layout"],
+                                "reason": view["activation_error"]})
+        elif view["enabled"]:
+            checked += 1
+            if "camera_error" in view:
+                affected.append({"viewport_handle": handle, "layout": view["layout"],
+                                 "reason": view["camera_error"]})
+    if not checked and not uncheckable:
+        raise ValueError("No active paper-space viewport cameras found.")
+    return {"affected_cameras": affected,
+            "checked_count": checked, "total": len(affected),
+            "uncheckable_cameras": uncheckable, "uncheckable_count": len(uncheckable),
+            "scope": "active paper-space viewport cameras"}, None
+"""
 
 
 _GEOMETRY = """
