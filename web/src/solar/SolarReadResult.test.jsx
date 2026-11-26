@@ -486,6 +486,22 @@ const clickProject = () => fireEvent.click(projectButton())
 const flushProject = async () => { for (let index = 0; index < 12; index += 1) await Promise.resolve() }
 
 describe('project result downloads', () => {
+  it('shows the workbook file digest alongside the bound version and output digest', () => {
+    const { props } = projectHarness()
+    const artifact = projectRef({
+      media_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: 'CableLengths.xlsx',
+    })
+    const data = projectResult({ tool: 'solar-cable-export', output: { artifact } })
+    render(<SolarReadResult {...props} data={data} />)
+    const summary = screen.getByText('Read details', { selector: 'summary' })
+    fireEvent.click(summary)
+    const details = within(summary.parentElement)
+    expect(details.getByRole('row', { name: `Version ${projectBinding.input_version_id}` })).toBeInTheDocument()
+    expect(details.getByRole('row', { name: `Output ${data.output_sha256}` })).toBeInTheDocument()
+    expect(details.getByRole('row', { name: `File SHA-256 ${bodyHash}` })).toBeInTheDocument()
+  })
+
   it('R12-04 saves exactly one verified file through the R7 project client', async () => {
     installDigest()
     const fetchImpl = vi.fn(async () => new Response('{}', { status: 200, headers: {
