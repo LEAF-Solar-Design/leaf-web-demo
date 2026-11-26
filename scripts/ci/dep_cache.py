@@ -408,6 +408,21 @@ def load_meta(entry, kind, key=None):
         raise Corrupt("missing metadata") from exc
 
 
+def _staging_path(args, destination):
+    default = destination.with_name(destination.name + f".leaf-seed-{os.getpid()}")
+    if args.kind == "nm":
+        git = Path(args.repo) / ".git"
+        try:
+            info = git.lstat()
+            if (stat.S_ISDIR(info.st_mode)
+                    and info.st_dev == destination.parent.lstat().st_dev):
+                # survives SIGKILL: .git is never scanned
+                return git / f"{args.tree}-node_modules.leaf-seed-{os.getpid()}"
+        except OSError:
+            pass
+    return default
+
+
 def seed(args, cache, entry, inputs, report):
     meta = None
     exact_error = None
@@ -450,7 +465,7 @@ def seed(args, cache, entry, inputs, report):
                 report[part] = "present"
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-            temporary = destination.with_name(destination.name + f".leaf-seed-{os.getpid()}")
+            temporary = _staging_path(args, destination)
             temporary.mkdir(mode=0o755)
             staged.append((temporary, destination, part))
             rows = [row[:] for row in meta["files"] if row[0].startswith(part + "/")]

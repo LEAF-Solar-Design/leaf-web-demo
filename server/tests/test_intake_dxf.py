@@ -616,3 +616,91 @@ def test_frozen_and_off_layers_parse_as_hidden_and_round_trip():
     assert again["hidden_layers"] == ["RAILS", "TAGS"]
     shown = dxf_intake.parse_dxf_bytes(intake_dxf.intake_to_dxf({"layers": ["A"], "polylines": []}), source_name="x")
     assert "hidden_layers" not in shown
+
+
+@pytest.mark.parametrize(("first", "second", "base", "length"), [
+    ("Rail", "Rail", 0, 5),
+    ("Tracker", "TRACKER", 3, 1),
+    ("Canopy", "canopy", 4, 6),
+])
+def test_dxf_refuses_ambiguous_block_names_in_either_order(first, second, base, length):
+    def block(name, handle, x, end):
+        return (f"0\nBLOCK\n2\n{name}\n10\n{x}\n20\n0\n"
+                f"0\nLINE\n5\n{handle}\n8\n0\n10\n0\n20\n0\n"
+                f"11\n{end}\n21\n1\n0\nENDBLK\n")
+
+    def drawing(*definitions):
+        return ("0\nSECTION\n2\nBLOCKS\n" + "".join(definitions) +
+                f"0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA1\n"
+                f"8\n0\n2\n{first.upper()}\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n").encode()
+
+    original = block(first, "21", 0, 1)
+    conflict = block(second, "22", base, length)
+    for definitions in ((original, conflict), (conflict, original)):
+        with pytest.raises(dxf_intake.DxfParseError, match="conflicting block definitions"):
+            dxf_intake.parse_dxf_bytes(drawing(*definitions))
+
+    distinct = block(second + "_ALT", "22", base, length)
+    result = dxf_intake.parse_dxf_bytes(drawing(original, distinct))
+    assert list(result["blocks"]) == [first, second + "_ALT"]
+    assert result["inserts"][0]["name"] == first
+    assert result["blocks"][second + "_ALT"]["base"] == [base, 0, 0]
+
+
+@pytest.mark.parametrize("transform", [
+    {"x": 1},
+    {"x": -9, "rot": 1.570796, "scale": [-2, 1, 1]},
+    {"x": 50, "y": -110, "z": 8, "scale": [2, 3, 5]},
+])
+def test_invisible_insert_round_trip_preserves_identity_and_transform(transform):
+    hidden = dict({"handle": "1A", "name": "Rail", "layer": "Equipment",
+                   "y": 0, "z": 0, "invisible": True}, **transform)
+    shown = {**hidden, "handle": "1B", "invisible": False}
+    intake = {"layers": ["Equipment"], "polylines": [],
+              "blocks": {"Rail": {"base": [1, 2, 0], "children": []}},
+              "inserts": [hidden, shown]}
+    first, raw = _roundtrip(intake)
+    assert raw.count(b"60\n1\n") == 1
+    hidden, shown = first["inserts"]
+    assert hidden["handle"] == "1A" and hidden["invisible"] is True
+    assert shown["handle"] == "1B" and "invisible" not in shown
+    assert all(hidden[key] == shown[key] for key in ("name", "x", "y", "z", "rot", "scale"))
+    second, _ = _roundtrip(first)
+    assert second["inserts"] == first["inserts"]
+
+
+def test_invisible_nested_insert_keeps_definition_and_handle():
+    pairs = [
+        0, "SECTION", 2, "BLOCKS",
+        0, "BLOCK", 2, "Frame",
+        0, "INSERT", 5, "1A", 2, "Rail", 60, 1, 10, 2, 20, 3,
+        0, "INSERT", 5, "1B", 2, "Rail", 60, 0, 10, 5, 20, 7,
+        0, "ENDBLK", 0, "BLOCK", 2, "Rail", 0, "ENDBLK",
+        0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    hidden, shown = intake["blocks"]["Frame"]["nested_inserts"]
+    assert (hidden["handle"], hidden["name"], hidden["invisible"]) == ("1A", "Rail", True)
+    assert shown["handle"] == "1B" and "invisible" not in shown
+
+
+@pytest.mark.parametrize(("flags", "suffix", "outline"), [
+    (8, [0, "SEQEND"], {"layer": "Detail", "closed": False, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (9, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (137, [0, "SEQEND"], {"layer": "Detail", "closed": True, "pts": [[1, 2, 3], [4, 5, 7]]}),
+    (73, [0, "SEQEND"], None),
+    (9, [], None),
+])
+def test_block_classic_3d_polyline_has_read_only_outline(flags, suffix, outline):
+    pairs = [
+        0, "SECTION", 2, "BLOCKS", 0, "BLOCK", 2, "Frame",
+        0, "POLYLINE", 8, "Detail", 70, flags, 210, 0, 220, 1, 230, 0,
+        0, "VERTEX", 70, 32, 10, 1, 20, 2, 30, 3,
+        0, "VERTEX", 70, 32, 10, 4, 20, 5, 30, 7,
+        *suffix, 0, "ENDBLK", 0, "ENDSEC", 0, "EOF", "",
+    ]
+    intake = dxf_intake.parse_dxf_bytes("\n".join(map(str, pairs)).encode())
+    block = intake["blocks"]["Frame"]
+    assert block["complete"] is False
+    assert block["children"][0]["kind"] == "OTHER"
+    assert block["children"][0].get("outline") == outline
