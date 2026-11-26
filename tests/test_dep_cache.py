@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,6 +179,120 @@ def test_nm_installed_tree_round_trip(fixture, capsys):
     for name in (".cache", ".vite", ".vitest"):
         assert not (root / name).exists()
     assert invoke(fixture, capsys, kind="nm", writable="0", npm_version="10.9.1")["result"] == "miss"
+
+
+@pytest.mark.parametrize("tree", ["web", "harness"])
+def test_nm_seed_stages_inside_git(fixture, capsys, monkeypatch, tree):
+    repo = fixture[0] / "repo"
+    git = repo / ".git"
+    git.mkdir()
+    root = repo / tree / "node_modules"
+    write(root / "tool/index.js", b"module.exports = 1;")
+    assert invoke(fixture, capsys, "publish", "nm", tree=tree)["result"] == "published"
+    cache.shutil.rmtree(root)
+    copy_file = cache.copy_file
+    copied = []
+
+    def copy(source_root, rel, destination, row, verify):
+        assert destination.is_relative_to(git / f"{tree}-node_modules.leaf-seed-{os.getpid()}")
+        assert not list(root.parent.glob("*.leaf-seed-*"))
+        copied.append(destination)
+        return copy_file(source_root, rel, destination, row, verify)
+
+    monkeypatch.setattr(cache, "copy_file", copy)
+    result = invoke(fixture, capsys, kind="nm", tree=tree, writable="0")
+    assert result["result"] == "exact" and result["node_modules"] == "seeded"
+    assert copied
+    assert (root / "tool/index.js").read_bytes() == b"module.exports = 1;"
+    assert not list(git.glob("*.leaf-seed-*"))
+
+
+def test_nm_interrupted_seed_leaves_no_staging_in_source(fixture, capsys, monkeypatch):
+    repo = fixture[0] / "repo"
+    git = repo / ".git"
+    git.mkdir()
+    root = repo / "web/node_modules"
+    write(root / "tool/index.js")
+    assert invoke(fixture, capsys, "publish", "nm")["result"] == "published"
+    cache.shutil.rmtree(root)
+
+    def fail_copy(source_root, rel, destination, row, verify):
+        write(destination, b"partial")
+        raise OSError("fixture interrupted copy")
+
+    monkeypatch.setattr(cache, "copy_file", fail_copy)
+    monkeypatch.setattr(cache, "_remove_tree", lambda path: None)
+    assert invoke(fixture, capsys, kind="nm", writable="0")["result"] == "error"
+    assert not root.exists()
+    assert not list(root.parent.glob("*.leaf-seed-*"))
+    assert list(git.glob("*.leaf-seed-*"))
+
+
+@pytest.mark.parametrize("git_state", ["absent", "file", "symlink", "different-device", "probe-error"])
+def test_nm_seed_falls_back_to_adjacent_staging(fixture, capsys, monkeypatch, git_state):
+    repo = fixture[0] / "repo"
+    git = repo / ".git"
+    if git_state == "file":
+        git.write_text("gitdir: /worktree/git\n")
+    elif git_state == "symlink":
+        target = fixture[0] / "git-dir"
+        target.mkdir()
+        git.symlink_to(target, target_is_directory=True)
+    elif git_state != "absent":
+        git.mkdir()
+    root = repo / "web/node_modules"
+    write(root / "tool/index.js", b"module.exports = 1;")
+    assert invoke(fixture, capsys, "publish", "nm")["result"] == "published"
+    cache.shutil.rmtree(root)
+    lstat = Path.lstat
+
+    def probe(path):
+        if path == git:
+            if git_state == "probe-error":
+                raise OSError("fixture probe failed")
+            if git_state == "different-device":
+                info = lstat(path)
+                return SimpleNamespace(st_mode=info.st_mode, st_dev=lstat(root.parent).st_dev + 1)
+        return lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", probe)
+    copy_file = cache.copy_file
+    copied = []
+
+    def copy(source_root, rel, destination, row, verify):
+        assert destination.is_relative_to(root.with_name(f"node_modules.leaf-seed-{os.getpid()}"))
+        copied.append(destination)
+        return copy_file(source_root, rel, destination, row, verify)
+
+    monkeypatch.setattr(cache, "copy_file", copy)
+    result = invoke(fixture, capsys, kind="nm", writable="0")
+    assert result["result"] == "exact" and result["node_modules"] == "seeded"
+    assert copied
+    assert (root / "tool/index.js").read_bytes() == b"module.exports = 1;"
+    assert not list(root.parent.glob("*.leaf-seed-*"))
+
+
+def test_dl_seed_stages_beside_destination_with_git_directory(fixture, capsys, monkeypatch):
+    git = fixture[0] / "repo/.git"
+    git.mkdir()
+    sources(fixture)
+    assert invoke(fixture, capsys, "publish")["result"] == "published"
+    root = fixture[0] / "out/pip"
+    copy_file = cache.copy_file
+    copied = []
+
+    def copy(source_root, rel, destination, row, verify):
+        assert destination.is_relative_to(root.with_name(f"pip.leaf-seed-{os.getpid()}"))
+        copied.append(destination)
+        return copy_file(source_root, rel, destination, row, verify)
+
+    monkeypatch.setattr(cache, "copy_file", copy)
+    result = invoke(fixture, capsys, writable="0", pip_cache=root, npm_cache="")
+    assert result["result"] == "exact" and result["pip"] == "seeded"
+    assert copied
+    assert (root / "http/body").read_bytes() == b"wheel"
+    assert not list(root.parent.glob("*.leaf-seed-*"))
+    assert not list(git.glob("*.leaf-seed-*"))
 
 
 def test_nx_key_stable_and_sensitive(fixture, monkeypatch):
