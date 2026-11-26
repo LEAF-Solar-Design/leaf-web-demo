@@ -182,7 +182,7 @@ export default function ProjectSwitcher({
   }
 
   const count = (projects || []).length
-  const projectRow = (p, i) => {
+  const projectRow = (p, i, exposeProjectId = false) => {
     const pid = p.project_id || p.id
     const isOpen = pid === openProjectId
     const isHi = i === hi
@@ -195,6 +195,7 @@ export default function ProjectSwitcher({
           onClick={() => pick(pid)}
           onMouseEnter={() => setHi(i)}
           role="menuitem"
+          data-project-id={exposeProjectId ? pid : undefined}
         >
           <span className="lbar" aria-hidden="true" />
           <span className="label">{p.name}</span>
@@ -279,7 +280,7 @@ export default function ProjectSwitcher({
                     </div>
                   ))}
                 <ul className="proj-list" role="group" aria-label="All projects">
-                  {projects.map((p, i) => projectRow(p, i + groups[0].projects.length + groups[1].projects.length))}
+                  {projects.map((p, i) => projectRow(p, i + groups[0].projects.length + groups[1].projects.length, true))}
                   {projects.length === 0 && !loading && (!hasBootstrapState || projectsLoaded) && (
                     <li className="proj-note-li">No projects yet.</li>
                   )}
