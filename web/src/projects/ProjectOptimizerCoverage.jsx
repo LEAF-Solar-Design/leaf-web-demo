@@ -43,9 +43,14 @@ async function readCoverage(drawing, viewerId, signal) {
       return { ...drawing, state: 'changed' }
     }
     const graph = intake.solar_design_graph
+    const evidence = graph.extra?.solaredge_import?.optimizer_measurement
+    if (evidence == null) return { ...drawing, state: 'missing' }
+    if (Number.isSafeInteger(evidence.graph_rev) && evidence.graph_rev !== graph.rev) {
+      return { ...drawing, state: 'stale' }
+    }
     const measurement = savedOptimizerMeasurement(graph)
-    if (measurement) return { ...drawing, state: 'measured', count: measurement.total_count }
-    return { ...drawing, state: graph.extra?.solaredge_import?.optimizer_measurement == null ? 'missing' : 'invalid' }
+    return measurement ? { ...drawing, state: 'measured', count: measurement.total_count }
+      : { ...drawing, state: 'invalid' }
   } finally {
     client.dispose()
   }
@@ -53,11 +58,12 @@ async function readCoverage(drawing, viewerId, signal) {
 
 const statuses = {
   missing: 'Missing measured optimizer count',
+  stale: 'Saved optimizer measurement is for an earlier or different graph revision',
   invalid: 'Missing verified optimizer count (saved measurement is invalid)',
   unavailable: 'Saved design unavailable',
   changed: 'Saved revision changed. Refresh to check the current revision.',
 }
-const order = ['missing', 'invalid', 'changed', 'unavailable', 'measured']
+const order = ['missing', 'stale', 'invalid', 'changed', 'unavailable', 'measured']
 
 export default function ProjectOptimizerCoverage({ orgId, projectId, viewerId }) {
   const pending = useRef(null)
@@ -78,11 +84,18 @@ export default function ProjectOptimizerCoverage({ orgId, projectId, viewerId })
     }, 30000)
     setView({ ...previous, error: null, loading: true })
     try {
-      const drawings = previous?.drawings ?? currentDrawings(await openProject(projectId, orgId), orgId, projectId)
+      const drawings = currentDrawings(await openProject(projectId, orgId), orgId, projectId)
       if (!current()) return
-      const start = previous?.rows.length ?? 0
-      const selected = drawings.slice(start, start + DRAWING_LIMIT)
-      const rows = [...(previous?.rows ?? [])]
+      const prior = new Map((previous?.rows ?? []).map(row => [row.binding.input_version_id, row]))
+      const rows = [], unchecked = []
+      for (const drawing of drawings) {
+        const row = prior.get(drawing.binding.input_version_id)
+        if (row && row.binding.drawing_id === drawing.binding.drawing_id &&
+          row.seq === drawing.seq && !['changed', 'unavailable'].includes(row.state)) {
+          rows.push({ ...row, name: drawing.name })
+        } else unchecked.push(drawing)
+      }
+      const selected = unchecked.slice(0, DRAWING_LIMIT)
       for (let offset = 0; offset < selected.length && current(); offset += READ_CONCURRENCY) {
         const batch = selected.slice(offset, offset + READ_CONCURRENCY)
         rows.push(...await Promise.all(batch.map(drawing => readCoverage(drawing, viewerId, request.signal))))
@@ -106,7 +119,7 @@ export default function ProjectOptimizerCoverage({ orgId, projectId, viewerId })
     {view?.error && <p role="status">{view.error}</p>}
     {view?.rows?.length === 0 && <p>No saved drawing revisions.</p>}
     {view?.rows?.length > 0 && <>
-      {view.drawings.length > view.rows.length && <p>Checked {view.rows.length} of {view.drawings.length} saved drawings.</p>}
+      <p>Checked {view.rows.length} of {view.drawings.length} saved drawings.</p>
       <table className="ops-table">
         <caption>Optimizer evidence on current saved revisions</caption>
         <thead><tr><th scope="col">Drawing</th><th scope="col">Revision</th><th scope="col">Optimizer count</th></tr></thead>

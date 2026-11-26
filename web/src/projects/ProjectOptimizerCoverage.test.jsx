@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, expect, it, vi } from 'vitest'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 const uuid = n => '00000000-0000-4000-8000-' + String(n).padStart(12, '0')
 const orgId = uuid(1), projectId = uuid(2)
@@ -38,7 +38,7 @@ function design(n, name, status, seq = 1) {
     version: { ...scope, drawing_id: drawingId, version_id: versionId, seq } }
 }
 
-function fixture(designs, beforeWorkspace) {
+function fixture(designs, beforeWorkspace, beforeContext) {
   const calls = []
   vi.stubGlobal('fetch', async (target, init) => {
     const url = new URL(target, 'http://localhost')
@@ -58,6 +58,7 @@ function fixture(designs, beforeWorkspace) {
     }
     const item = designs.find(({ version }) => url.pathname.endsWith('/' + version.version_id + '/context'))
     if (!item || item.status === 'unreadable') return new Response(null, { status: 503 })
+    await beforeContext?.(item, init?.signal)
     const { version } = item
     const actualDrawing = item.status === 'wrong-scope' ? uuid(777) : version.drawing_id
     const head = item.status === 'changed' ? uuid(888) : version.version_id
@@ -87,12 +88,15 @@ it('checks exact saved heads and distinguishes verified positive and zero from m
 })
 
 it('keeps invalid evidence, changed heads, scope mismatch and failed reads distinct from measured rows', async () => {
+  const malformed = design(6, 'Malformed', 'zero')
+  malformed.graph.extra.solaredge_import.optimizer_measurement.total_count = 1
   fixture([design(1, 'Stale', 'stale'), design(2, 'Changed', 'changed'), design(3, 'Unreadable', 'unreadable'),
-    design(4, 'Wrong scope', 'wrong-scope'), design(5, 'Verified', 'positive')])
+    design(4, 'Wrong scope', 'wrong-scope'), design(5, 'Verified', 'positive'), malformed])
   await screen.findByRole('heading', { name: 'Optimizer measurement coverage' })
   check()
   await table()
-  expect(row('Stale')).toHaveTextContent('Missing verified optimizer count')
+  expect(row('Stale')).toHaveTextContent('Saved optimizer measurement is for an earlier or different graph revision')
+  expect(row('Malformed')).toHaveTextContent('saved measurement is invalid')
   expect(row('Changed')).toHaveTextContent('Saved revision changed')
   expect(row('Unreadable')).toHaveTextContent('Saved design unavailable')
   expect(row('Wrong scope')).toHaveTextContent('Saved design unavailable')
@@ -127,4 +131,53 @@ it('allows all saved drawings to be checked in bounded batches', async () => {
   expect(await screen.findByRole('rowheader', { name: 'Drawing 21' })).toBeVisible()
   expect(within(coverage).getAllByRole('rowheader')).toHaveLength(21)
   expect(calls.filter(({ url }) => url.pathname.endsWith('/context'))).toHaveLength(21)
+})
+
+it('refreshes the inventory before continuing and replaces a superseded row', async () => {
+  const designs = Array.from({ length: 21 }, (_, index) =>
+    design(index + 1, 'Drawing ' + String(index + 1).padStart(2, '0'), 'missing'))
+  fixture(designs)
+  await screen.findByRole('heading', { name: 'Optimizer measurement coverage' })
+  check()
+  await table()
+  expect(screen.getByText('Checked 20 of 21 saved drawings.')).toBeVisible()
+  designs.push(design(1, 'Drawing 01', 'positive', 2), design(22, 'Added before page two', 'zero'))
+  fireEvent.click(screen.getByRole('button', { name: 'Check more drawings' }))
+  expect(await screen.findByText('Checked 22 of 22 saved drawings.')).toBeVisible()
+  expect(row('Drawing 01')).toHaveTextContent('21 measured')
+  expect(row('Added before page two')).toHaveTextContent('0 measured')
+})
+
+it('aborts context reads and ignores late results when the project changes mid-batch', async () => {
+  const signals = []
+  let resolve
+  const response = new Promise(done => { resolve = done })
+  const { rerender } = fixture(Array.from({ length: 6 }, (_, n) =>
+    design(n + 1, 'Drawing ' + n, 'positive')), null, (_, signal) => {
+    signals.push(signal)
+    return response
+  })
+  await screen.findByRole('heading', { name: 'Optimizer measurement coverage' })
+  check()
+  await vi.waitFor(() => expect(signals).toHaveLength(4))
+  rerender(view(uuid(5)))
+  await screen.findByRole('button', { name: 'Check optimizer coverage' })
+  expect(signals.every(signal => signal.aborted)).toBe(true)
+  await act(async () => resolve())
+  expect(signals).toHaveLength(4)
+  expect(screen.queryByText('Drawing 0')).toBeNull()
+})
+
+it('times out a pending workspace read and discards the late result', async () => {
+  let resolve
+  const delayed = new Promise(done => { resolve = done })
+  const { calls } = fixture([design(1, 'North', 'positive')], () => delayed)
+  await screen.findByRole('heading', { name: 'Optimizer measurement coverage' })
+  vi.useFakeTimers()
+  check()
+  await act(async () => vi.advanceTimersByTimeAsync(30000))
+  expect(screen.getByText('Optimizer measurement coverage could not be read. Try again.')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Check optimizer coverage' })).toBeEnabled()
+  await act(async () => resolve())
+  expect(calls.some(({ url }) => url.pathname.endsWith('/context'))).toBe(false)
 })
