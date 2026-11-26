@@ -32,6 +32,48 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.resetAllMocks(); vi.unstubAl
 
 const openDeployDetails = () => fireEvent.click(screen.getByText('What will be deployed'))
 
+it('explains a running build and marks the remaining steps as not yet', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'running' })
+  await mount()
+  const build = screen.getByText('Build').nextElementSibling
+  expect(build).toHaveTextContent('Building')
+  expect(build.querySelector('.dot.live.pulse')).toHaveAttribute('aria-hidden', 'true')
+  expect(screen.getByText('Claude is writing the C# and Studio is compiling it. This usually takes a few minutes.')).toBeVisible()
+  for (const row of ['Compile', 'Review', 'Publish']) {
+    expect(screen.getByText(row).nextElementSibling).toHaveTextContent(/^Not yet$/)
+  }
+})
+
+it('shows a queued build in plain words while retaining its queue and withdrawal', async () => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued',
+    queue: { ahead: 3, estimated_wait_s: 444 }, withdrawable: true })
+  await mount()
+  expect(screen.getByText('Waiting to start')).toBeVisible()
+  expect(screen.getByText('Waiting, 3 ahead · about 8 min')).toBeVisible()
+  expect(button('Withdraw')).toBeEnabled()
+})
+
+it.each(['staged', 'published'])('calls a %s build Built', async status => {
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status })
+  await mount()
+  expect(screen.getByText('Build').nextElementSibling).toHaveTextContent(/^Built$/)
+  expect(screen.queryByText(/\bstaged\b/)).toBeNull()
+  if (status === 'staged') expect(screen.getByText('Publish').nextElementSibling).toHaveTextContent(/^Not yet$/)
+})
+
+it.each(['compile_failed', 'failed'])('shortens %s diagnostics only in the list and keeps the full retry report', async status => {
+  const diagnostics = Array.from({ length: 5 }, (_, i) => ({ code: 'CS1026', file: 'main.csx', line: i + 1 }))
+  getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'failed',
+    compile_attempts: [{ attempt: 1, decision: status, diagnostics }] })
+  await mount()
+  const full = 'Attempt 1: did not compile, ' + diagnostics.map(d => `CS1026 main.csx:${d.line}`).join(', ')
+  const item = screen.getByRole('listitem')
+  expect(item).toHaveTextContent(/^Attempt 1: did not compile, CS1026 main.csx:1, CS1026 main.csx:2, CS1026 main.csx:3, and 2 more$/)
+  expect(item).toHaveAttribute('title', full)
+  await act(async () => fireEvent.click(button('Fix with these errors')))
+  expect(postMessage.mock.calls[0][1].text).toContain(full)
+})
+
 it('shows the staged files, source, compile and plan risks behind a self deploy', async () => {
   postReview.mockResolvedValue({ change_set_id: 'change', decision: 'approve', approval_kind: 'self',
     approver_role: 'owner', decided_at: '2026-11-21T03:14:00Z', status: 'published' })
@@ -306,7 +348,7 @@ it('pauses while offscreen, respects retry_after_ms, and stops after a compile f
   await mount()
   expect(getAuthorStage).not.toHaveBeenCalled()
   await act(async () => visibility([{ isIntersecting: true }]))
-  expect(screen.getByText('queued')).toBeVisible()
+  expect(screen.getByText('Waiting to start')).toBeVisible()
   act(() => visibility([{ isIntersecting: false }]))
   await advance(7000)
   expect(getAuthorStage).toHaveBeenCalledTimes(1)
@@ -345,7 +387,7 @@ it('reads the stage contract: compile attempts by n and the Branch receipt by la
     branch: { last_event: 'synced', at: '2026-11-21T14:46:00Z', plugin_version: '1.4.52.0' } })
   reviewContext.mockResolvedValue({ viewer_may_approve: false, review: { decision: 'approve' } })
   await mount()
-  expect(screen.getByText('Attempt 1: refused, CS1026 main.csx:50')).toBeVisible()
+  expect(screen.getByText('Attempt 1: did not compile, CS1026 main.csx:50')).toBeVisible()
   expect(screen.getByText('Attempt 2: passed')).toBeVisible()
   expect(screen.getByText('Synced')).toBeVisible()
   expect(screen.queryByText('Branch has not reported yet')).toBeNull()
@@ -368,7 +410,7 @@ it.each([
 ])('ignores malformed queue data %j', async queue => {
   getAuthorStage.mockResolvedValue({ change_set_id: 'change', status: 'queued', queue })
   await mount()
-  expect(screen.queryByText(/Waiting/)).toBeNull()
+  expect(screen.queryByText(/Waiting,/)).toBeNull()
 })
 
 it.each([-1, 0, 1.5, '60', null])('ignores malformed estimated wait %j', async estimated_wait_s => {
