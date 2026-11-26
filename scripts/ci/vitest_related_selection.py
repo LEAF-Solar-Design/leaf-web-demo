@@ -6,6 +6,10 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 SOURCE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"}
+NON_IMPORTABLE_SUFFIXES = {".py", ".pyi", ".md", ".rst", ".txt", ".sql", ".sh", ".ps1",
+                           ".bat", ".tf", ".hcl", ".rs", ".go", ".cs", ".java", ".kt",
+                           ".swift", ".rb"}
+OUTSIDE_FULL_PREFIXES = (".codebuild/", ".leaf-ci/", ".github/", "scripts/ci/", "contract/", "vendor/")
 # Vitest adds setupFiles as rerun triggers itself. They execute for every test
 # already, so including them as artificial reader inputs selects the full suite.
 SETUP_FILES = {"web/vitest.setup.js"}
@@ -51,7 +55,7 @@ def select(base, changed, sources, *, error=None):
     """sources maps EVERY tracked web source path to readable text.
 
     Missing inventory or deleted/unsafe inputs must never become a partial
-    graph. Outside-web changes have no proven workspace graph boundary.
+    graph. Non-importable outside-web changes are covered by source readers.
     """
     decision = {"base": base if isinstance(base, str) and SHA.fullmatch(base) else None,
                 "mode": "full", "reason": error or "missing_base",
@@ -71,22 +75,32 @@ def select(base, changed, sources, *, error=None):
                if p not in SETUP_FILES and IO_MARKERS.search(text)}
     decision["reader_count"] = len(readers)
     inputs = set(readers)
+    outside_web_ignored = 0
     for path in changed:
         if not safe_path(path):
             decision["reason"] = "unsafe_path"
             return decision
-        if force_full(path):
-            decision["reason"] = "global_input"
-            return decision
         if path.startswith("web/"):
+            if force_full(path):
+                decision["reason"] = "global_input"
+                return decision
             if path not in sources:
                 decision["reason"] = "missing_source"
                 return decision
             inputs.add(path[4:])
         else:
-            decision["reason"] = "outside_web"
-            return decision
-    decision.update(mode="related", reason="source_graph_and_readers", inputs=sorted(inputs))
+            # Outside-web non-importable files are covered by readers; web-only
+            # global-input rules must not force the full suite for these paths.
+            if ("/" not in path or path.startswith(OUTSIDE_FULL_PREFIXES)
+                    or PurePosixPath(path).suffix.lower() not in NON_IMPORTABLE_SUFFIXES):
+                decision["reason"] = "outside_web"
+                return decision
+            outside_web_ignored += 1
+    if not inputs:
+        decision["reason"] = "no_inputs"
+        return decision
+    decision.update(mode="related", reason="source_graph_and_readers", inputs=sorted(inputs),
+                    outside_web_ignored=outside_web_ignored)
     return decision
 
 
