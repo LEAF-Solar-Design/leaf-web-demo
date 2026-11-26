@@ -1,5 +1,8 @@
 from contextlib import contextmanager
 import copy
+from datetime import datetime, timezone
+from hashlib import sha256
+from uuid import uuid4
 import json
 from pathlib import Path
 import sys
@@ -11,6 +14,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dxf_intake import parse_dxf_bytes
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import deps
+import solar_local_graph as local
+import solar_project_context as project
+from leaf_platform.models import DrawingVersion
+from routers.x07_profile_portfolio import PANEL_GROUP_CHANGE_PREVIEW_PATH, router
+from solar_graph_seed import new_empty_graph
 from test_x07_customer_profile_store import connection
 from x07_role_selection import SelectionError, compare_placement_override, select_modules
 
@@ -537,3 +549,159 @@ class OutlineValidationTests(unittest.TestCase):
             with self.subTest(polylines=polylines), self.assertRaises(SelectionError):
                 select_modules({'inserts': [], 'polylines': polylines}, block='Panel',
                                layer='PV', window={'outline_handle': 'A'})
+
+
+_GROUP_REVIEW_NOW = datetime(2026, 11, 25, tzinfo=timezone.utc)
+_GROUP_REVIEW_UNITS = {"drawing_units": "in", "wcs_to_ucs": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+         "elevation_datum": "unrecorded", "crs": ""}
+
+
+def _panel_review_intake(sizes, gap, offset, swapped):
+    groups = (("A1", "A2", "A3"), ("B1", "B2", "B3"))
+    pairs = [(0, "SECTION"), (2, "ENTITIES")]
+    for family, handles in enumerate(groups):
+        width, height = sizes[family]
+        for index, handle in enumerate(handles):
+            row = 1 - family if swapped and index == 2 else family
+            x, y = offset[0] + index * 78, offset[1] + row * gap
+            pairs += [(0, "LWPOLYLINE"), (5, handle), (8, "Panels"), (90, 4), (70, 1)]
+            for x2, y2 in [(x, y), (x + width, y), (x + width, y + height), (x, y + height)]:
+                pairs += [(10, x2), (20, y2)]
+    pairs += [(0, "ENDSEC"), (0, "EOF")]
+    raw = ("\n".join(str(value) for pair in pairs for value in pair) + "\n").encode()
+    return parse_dxf_bytes(raw, source_name="panel-family-trade.dxf")
+
+
+@pytest.fixture
+def panel_group_review_fixture(monkeypatch):
+    org, project_id, drawing = uuid4(), uuid4(), uuid4()
+    contexts, reads = {}, []
+
+    def access(tenant, requested_project, *, write):
+        assert write is False
+        if (tenant, requested_project) != (org, project_id):
+            project.refuse('CONTEXT_NOT_FOUND')
+        return org, None
+
+    def resolve(tenant, requested_project, version, *, drawing_id, write):
+        assert write is False
+        reads.append(version)
+        context = contexts.get(version)
+        if (context is None or (tenant, requested_project, drawing_id)
+                != (org, project_id, context.binding.drawing_id)):
+            project.refuse('CONTEXT_NOT_FOUND')
+        return context
+
+    def save(sizes, gap, offset, swapped=False, *, units='in', foreign=False, proof=True, groups=True):
+        owner = uuid4() if foreign else drawing
+        intake = _panel_review_intake(sizes, gap, offset, swapped)
+        graph = new_empty_graph(tenant_id=str(org), drawing_id=str(owner),
+                                source_hash=sha256(local.canonical_bytes(intake)).hexdigest(),
+                                units={**_GROUP_REVIEW_UNITS, 'drawing_units': units}, created_at=_GROUP_REVIEW_NOW.isoformat())
+        graph = local._load_builtin('solar-panels-from-drawing').run(
+            graph, {'expected_rev': graph['rev']}, source_intake=intake)
+        if groups:
+            graph = local._load_builtin('solar-panel-groups').run(
+                graph, {'expected_rev': graph['rev'], 'geometry_only': True, 'discover': {
+                    'BranchMaxOffset': 3, 'AlignmentTolerance': 0.5,
+                    'InstallationDesign': 'Roof'}}, source_intake=intake)
+        intake.update(solar_design_graph=graph,
+                      solar_design_graph_sha256=local.digest(graph) if proof else '0' * 64)
+        raw = local.canonical_bytes(intake)
+        version = uuid4()
+        row = DrawingVersion(version, owner, project_id, org, len(contexts) + 1, created_at=_GROUP_REVIEW_NOW,
+                             intake_ref='example.intake.json')
+        binding = project.VersionBinding(org, project_id, owner, version, version, True, row)
+        contexts[version] = project.VerifiedProjectContext(binding, raw, intake, sha256(raw).hexdigest(), row.intake_ref)
+        return version
+
+    monkeypatch.setattr(project, '_access', access)
+    monkeypatch.setattr(project, 'resolve_context', resolve)
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: org
+
+    def compare(previous, current, *, header_org=org):
+        path = PANEL_GROUP_CHANGE_PREVIEW_PATH.format(
+            project_id=project_id, drawing_id=drawing, input_version_id=current)
+        with TestClient(app) as client:
+            result = client.post(path, json={'previous_input_version_id': str(previous)}, headers={
+                'X-Org-Id': str(header_org), 'X-Project-Id': str(project_id)})
+        assert result.headers['cache-control'] == 'no-store'
+        return result
+
+    return save, compare, reads
+
+
+@pytest.mark.parametrize(('sizes', 'gap', 'offset'), [
+    (((77, 38.5), (77.25, 38.5)), 257, (0, 0)),
+    (((77, 38.5), (77, 38.75)), 320, (-730, 920)),
+    (((77, 38.5), (77.25, 38.75)), 630, (800, -360)),
+], ids=['width-family', 'height-family', 'both-dimensions'])
+def test_traded_locations_keep_measured_size_and_change_group_membership(panel_group_review_fixture, sizes, gap, offset):
+    save, compare, reads = panel_group_review_fixture
+    previous, current = save(sizes, gap, offset), save(sizes, gap, offset, True)
+    response = compare(previous, current)
+    assert response.status_code == 200, response.text
+    assert reads == [previous, current]
+    report = response.json()
+    assert (report['previous_input_version_id'], report['input_version_id']) == (str(previous), str(current))
+    assert report['previous_panel_count'] == report['current_panel_count'] == 6
+    assert report['drawing_units'] == 'in'
+    assert [row['handle'] for row in report['changes']] == ['A1', 'A2', 'A3', 'B1', 'B2', 'B3']
+    for row in report['changes']:
+        handle = row['handle']
+        older, newer = row['previous'], row['current']
+        assert row['membership_changed'] is True and row['size_changed'] is False
+        assert older['dimensions'] == newer['dimensions'] == list(sizes[handle.startswith('B')])
+        assert older['group'] == {'name': 'Roof group ' + handle[0] + '1', 'panel_count': 3}
+        assert newer['group'] == ({'name': 'Roof group ' + handle, 'panel_count': 1}
+            if handle.endswith('3') else {'name': 'Roof group ' + handle[0] + '1', 'panel_count': 2})
+
+
+def test_graph_ids_can_change_without_panel_membership_changes(panel_group_review_fixture):
+    save, compare, _ = panel_group_review_fixture
+    sizes = ((77, 38.5), (77.25, 38.75))
+    first = save(sizes, 320, (0, 0))
+    shifted = save(sizes, 320, (800, -350))
+    response = compare(first, shifted)
+    assert response.status_code == 200, response.text
+    assert response.json()['changes'] == []
+
+
+def test_measurement_changes_can_keep_membership(panel_group_review_fixture):
+    save, compare, _ = panel_group_review_fixture
+    first = save(((77, 38.5), (77.25, 38.75)), 320, (0, 0))
+    resized = save(((77.125, 38.5), (77.25, 38.75)), 320, (0, 0))
+    response = compare(first, resized)
+    assert response.status_code == 200, response.text
+    rows = response.json()['changes']
+    assert [row['handle'] for row in rows] == ['A1', 'A2', 'A3']
+    assert all(row['size_changed'] is True and row['membership_changed'] is False for row in rows)
+
+
+@pytest.mark.parametrize(('other', 'reason'), [
+    ({'units': 'ft'}, 'PANEL_GROUP_REVISIONS_INCOMPARABLE'),
+    ({'proof': False}, 'PANEL_GROUP_GRAPH_UNAVAILABLE'),
+    ({'groups': False}, 'PANEL_GROUP_GRAPH_UNAVAILABLE'),
+])
+def test_reject_uncomparable_or_unproved_graphs(panel_group_review_fixture, other, reason):
+    save, compare, _ = panel_group_review_fixture
+    sizes = ((77, 38.5), (77.25, 38.75))
+    first, second = save(sizes, 320, (0, 0)), save(sizes, 320, (0, 0), True, **other)
+    response = compare(first, second)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail']['reason_code'] == reason
+
+
+def test_foreign_scope_and_same_revision_are_rejected(panel_group_review_fixture):
+    save, compare, reads = panel_group_review_fixture
+    sizes = ((77, 38.5), (77.25, 38.75))
+    first, second = save(sizes, 320, (0, 0)), save(sizes, 320, (0, 0), True, foreign=True)
+    assert compare(first, second, header_org=uuid4()).status_code == 404
+    assert reads == []
+    assert compare(second, first).status_code == 404
+    assert reads == [second]
+    response = compare(first, first)
+    assert response.status_code == 409, response.text
+    assert response.json()['detail']['reason_code'] == 'PANEL_GROUP_REVISIONS_INCOMPARABLE'

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { exportRemovedProfileRoles, listProjects, openProject, previewRackPlacementOverrides,
+import { exportRemovedProfileRoles, listProjects, openProject, previewPanelGroupChanges, previewRackPlacementOverrides,
   previewRoofPlacementChanges, reviewRoleProfileReuse } from '../api.js'
 
 const limit = 16
@@ -163,6 +163,68 @@ function RoofPlacementComparison({ organizationId, pair, run }) {
         {[row.added_paths, row.removed_paths].map((paths, index) => <td key={index}>
           {paths.length ? <ul>{paths.map(path => <li key={path}>{path}</li>)}</ul> : 'None'}
         </td>)}
+      </tr>)}</tbody>
+    </table>}
+  </fieldset>
+}
+
+function checkedGroupChanges(data, previous, current) {
+  const validSide = side => side === null || (Array.isArray(side?.dimensions)
+    && side.dimensions.length === 2 && side.dimensions.every(n => Number.isFinite(n) && n > 0)
+    && (side.group === null || (typeof side.group?.name === 'string' && side.group.name
+      && validCount(side.group.panel_count) && side.group.panel_count > 0)))
+  const rows = data?.changes
+  if (data?.previous_input_version_id !== previous || data.input_version_id !== current
+      || typeof data.drawing_units !== 'string' || !data.drawing_units
+      || ![data.previous_panel_count, data.current_panel_count].every(validCount)
+      || !Array.isArray(rows) || rows.length > 256
+      || rows.some(row => typeof row?.handle !== 'string' || !validHandle(row.handle)
+        || !validSide(row.previous) || !validSide(row.current) || (!row.previous && !row.current)
+        || (row.previous && row.current
+          ? typeof row.membership_changed !== 'boolean' || typeof row.size_changed !== 'boolean'
+            || (!row.membership_changed && !row.size_changed)
+          : row.membership_changed !== null || row.size_changed !== null))
+      || new Set(rows.map(row => row.handle)).size !== rows.length) {
+    throw new Error('Invalid panel group comparison')
+  }
+  return data
+}
+
+function PanelGroupComparison({ organizationId, pair, run }) {
+  const [report, setReport] = useState(null)
+  const [previous, current] = pair
+  function compare() {
+    setReport(null)
+    const previousId = previous.revision.input_version_id
+    run(signal => previewPanelGroupChanges(organizationId, current.revision, previousId, { signal }),
+      data => setReport(checkedGroupChanges(data, previousId, current.revision.input_version_id)),
+      'Panel groups could not be compared. Both versions need saved geometry-only groups with matching drawing units.')
+  }
+
+  function group(side) {
+    if (side === null) return 'Absent'
+    return side.group ? side.group.name + ' (' + side.group.panel_count + (side.group.panel_count === 1 ? ' panel)' : ' panels)') : 'Ungrouped'
+  }
+
+  function dimensions(side) {
+    return side === null ? 'Absent' : side.dimensions.join(' × ')
+  }
+
+  return <fieldset>
+    <legend>Measured panel groups</legend>
+    <button type="button" onClick={compare}>Compare panel groups</button>
+    {report && <p role="status">{report.previous_panel_count} previous panels, {report.current_panel_count} current panels.
+      {' '}{report.changes.length === 0 ? 'No membership or size changes.' : 'Matching DXF handles identify the comparison rows.'}</p>}
+    {report?.changes.length > 0 && <table>
+      <caption>Panel group and size changes ({report.drawing_units})</caption>
+      <thead><tr>{['DXF handle', 'Previous group', 'Current group', 'Membership',
+        'Previous size', 'Current size', 'Measured size'].map(column => <th scope="col" key={column}>{column}</th>)}</tr></thead>
+      <tbody>{report.changes.map(row => <tr key={row.handle}>
+        <th scope="row">{row.handle}</th><td>{group(row.previous)}</td><td>{group(row.current)}</td>
+        <td>{row.previous === null ? 'Added' : row.current === null ? 'Removed'
+          : row.membership_changed ? 'Changed' : 'Retained'}</td>
+        <td>{dimensions(row.previous)}</td><td>{dimensions(row.current)}</td>
+        <td>{row.size_changed === null ? 'Not applicable' : row.size_changed ? 'Changed' : 'Retained'}</td>
       </tr>)}</tbody>
     </table>}
   </fieldset>
@@ -487,6 +549,9 @@ function Portfolio({ binding, client, isCurrent, onClose, onConfirmed }) {
       )}</ul>}
       {projects && <button type="button" disabled={!selected.length} onClick={review}>Check profile reuse</button>}
       {comparePair && <RoofPlacementComparison key={comparePair[0].revision.input_version_id
+        + '/' + comparePair[1].revision.input_version_id} organizationId={organizationId} pair={comparePair}
+        run={run} />}
+      {comparePair && <PanelGroupComparison key={'groups/' + comparePair[0].revision.input_version_id
         + '/' + comparePair[1].revision.input_version_id} organizationId={organizationId} pair={comparePair}
         run={run} />}
       {selected.length > 0 && <RackPlacementReview key={selected[0].revision.project_id + '/'

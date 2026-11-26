@@ -45,7 +45,7 @@ const button = name => screen.getByRole('button', { name })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 function mount(getReport = () => response(report), getExport = () => response(removedRoleReport), getRoofReport,
-  { getRackReview, activeBinding = binding, pinned = true, extraVersion } = {}) {
+  { getRackReview, getGroupReport, activeBinding = binding, pinned = true, extraVersion } = {}) {
   const profile = { customer_key: org, project_key: projectA, drawing_key: drawingA,
     input_version_id: activeBinding.input_version_id, expected_version: 1,
     application_record: pinned ? { customer_key: org, project_key: projectA, profile_id: profileId, version: 1,
@@ -64,6 +64,15 @@ function mount(getReport = () => response(report), getExport = () => response(re
       expect(init.method).toBe('POST')
       expect(init.cache).toBe('no-store')
       return getRackReview(JSON.parse(init.body), init.signal, path)
+    }
+    if (path.endsWith('/panel-group-changes/preview')) {
+      expect(path).toBe('/api/projects/' + projectA + '/drawings/' + drawingA + '/versions/'
+        + versions[1].version_id + '/role-profile/panel-group-changes/preview')
+      expect(init.headers['X-Project-Id']).toBe(projectA)
+      expect(init.method).toBe('POST')
+      expect(init.cache).toBe('no-store')
+      expect(JSON.parse(init.body)).toEqual({ previous_input_version_id: versions[0].version_id })
+      return getGroupReport(init)
     }
     if (path.endsWith('/placement-changes/preview')) {
       expect(path).toBe('/api/projects/' + projectA + '/drawings/' + drawingA + '/versions/'
@@ -99,6 +108,36 @@ function mount(getReport = () => response(report), getExport = () => response(re
   const rendered = render(<X07ProjectProfileReview {...props} />)
   return { rendered, fetch, props }
 }
+
+it('reports retained measurements when matching DXF handles change panel groups', async () => {
+  const measurement = [77.25, 38.5]
+  const getGroupReport = () => response({
+    previous_input_version_id: versions[0].version_id, input_version_id: versions[1].version_id,
+    drawing_units: 'in', previous_panel_count: 6, current_panel_count: 6,
+    changes: [{
+      handle: 'B3', previous: { group: { name: 'Roof group B1', panel_count: 3 }, dimensions: measurement },
+      current: { group: { name: 'Roof group B3', panel_count: 1 }, dimensions: measurement },
+      membership_changed: true, size_changed: false,
+    }],
+  })
+  const { props } = mount(undefined, undefined, undefined, { getGroupReport })
+  fireEvent.click(button('Review profile reuse across drawings'))
+  const picker = await screen.findByRole('combobox', { name: 'Project' })
+  fireEvent.change(picker, { target: { value: projectA } })
+  for (const seq of [2, 1]) {
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Canyon / Roof plan / Version ' + seq }))
+  }
+  fireEvent.click(button('Compare panel groups'))
+  const table = await screen.findByRole('table', { name: 'Panel group and size changes (in)' })
+  const row = within(table).getByRole('row', { name: /B3.*Roof group B1/ })
+  expect(within(row).getAllByRole('cell').map(cell => cell.textContent)).toEqual([
+    'Roof group B1 (3 panels)', 'Roof group B3 (1 panel)', 'Changed', '77.25 × 38.5', '77.25 × 38.5', 'Retained',
+  ])
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Canyon / Roof plan / Version 1' }))
+  expect(screen.queryByRole('table', { name: 'Panel group and size changes (in)' })).toBeNull()
+  expect(props.projectClient.saveRoleProfile).not.toHaveBeenCalled()
+  expect(props.projectClient.confirmRoleProfile).not.toHaveBeenCalled()
+})
 
 async function selectPortfolio() {
   fireEvent.click(button('Review profile reuse across drawings'))

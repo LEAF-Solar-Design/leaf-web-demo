@@ -13,6 +13,8 @@ from routers.project_drawings import _dispatch, _headers
 from routers.x07_profile_history import _fields
 from routers.x07_profiles import PATH as ROLE_PROFILE_PATH
 from routers.x07_profiles import PlacementOverride, PlacementWindow
+from solar_design_graph import GraphValidationError
+from x07_panel_group_review import compare_panel_groups
 from x07_customer_profile_store import CustomerProfileStore, MAX_PROFILE_VERSION
 from x07_postgres_profile_store import PostgresProfileStore
 from x07_profile_compatibility import check_compatibility
@@ -25,6 +27,7 @@ PORTFOLIO_PATH = '/api/role-profiles/reuse-review'
 REMOVED_ROLES_EXPORT_PATH = PORTFOLIO_PATH + '/export'
 PLACEMENT_OVERRIDE_PREVIEW_PATH = ROLE_PROFILE_PATH + '/placement-overrides/preview'
 PLACEMENT_CHANGE_PREVIEW_PATH = ROLE_PROFILE_PATH + '/placement-changes/preview'
+PANEL_GROUP_CHANGE_PREVIEW_PATH = ROLE_PROFILE_PATH + '/panel-group-changes/preview'
 MAX_PREVIEW_WINDOWS = 4
 MAX_REPORTED_CHANGES = 256
 _UNAVAILABLE = {
@@ -64,6 +67,11 @@ class PlacementRole(BaseModel):
     model_config = ConfigDict(extra='forbid')
     block: StrictStr = Field(min_length=1, max_length=512)
     layer: StrictStr = Field(min_length=1, max_length=512)
+
+
+class PanelGroupChangeRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    previous_input_version_id: UUID
 
 
 class PlacementPreviewRequest(PlacementRole):
@@ -127,7 +135,7 @@ def _compare_roles(pin, latest):
     ]
 
 
-def _resolve_revision(tenant, revision, customer):
+def _resolve_context(tenant, revision, customer):
     try:
         context = context_service.resolve_context(
             tenant, revision.project_id, revision.input_version_id,
@@ -138,23 +146,54 @@ def _resolve_revision(tenant, revision, customer):
         raise
     if str(context.binding.organization_id) != customer:
         context_service.refuse('CONTEXT_NOT_FOUND')
-    return context.intake, None
+    return context, None
 
 
-def _resolve_preview_intakes(tenant, project_id, drawing_id, previous_id, current_id,
+def _resolve_revision(tenant, revision, customer):
+    context, unavailable = _resolve_context(tenant, revision, customer)
+    return (None if context is None else context.intake), unavailable
+
+
+def _resolve_preview_contexts(tenant, project_id, drawing_id, previous_id, current_id,
                              org_header, project_header):
     revisions = [
         DrawingRevision(project_id=project_id, drawing_id=drawing_id, input_version_id=version)
         for version in dict.fromkeys((previous_id, current_id))
     ]
     customer = _authorized_customer(tenant, revisions, org_header, project_header)
-    intakes = {}
+    contexts = {}
     for revision in revisions:
-        intake, unavailable = _resolve_revision(tenant, revision, customer)
+        context, unavailable = _resolve_context(tenant, revision, customer)
         if unavailable:
             raise HTTPException(409, {'reason_code': unavailable})
-        intakes[revision.input_version_id] = intake
-    return intakes[previous_id], intakes[current_id]
+        contexts[revision.input_version_id] = context
+    return contexts[previous_id], contexts[current_id]
+
+
+def _resolve_preview_intakes(tenant, project_id, drawing_id, previous_id, current_id,
+                             org_header, project_header):
+    previous, current = _resolve_preview_contexts(
+        tenant, project_id, drawing_id, previous_id, current_id, org_header, project_header)
+    return previous.intake, current.intake
+
+
+@router.post(PANEL_GROUP_CHANGE_PREVIEW_PATH)
+def preview_panel_group_changes(project_id: UUID, drawing_id: UUID, input_version_id: UUID,
+                                payload: PanelGroupChangeRequest,
+                                tenant=Depends(deps.require_active_tenant),
+                                x_org_id: Optional[UUID] = Header(None),
+                                x_project_id: Optional[UUID] = Header(None)):
+    def operation():
+        previous, current = _resolve_preview_contexts(
+            tenant, project_id, drawing_id, payload.previous_input_version_id, input_version_id,
+            x_org_id, x_project_id)
+        try:
+            return compare_panel_groups(previous, current)
+        except GraphValidationError as exc:
+            reason = exc.code if exc.code.startswith('PANEL_GROUP_') else 'PANEL_GROUP_GRAPH_UNAVAILABLE'
+            raise HTTPException(409, {'reason_code': reason}) from exc
+
+    return _dispatch(operation)
 
 
 @router.post(PLACEMENT_OVERRIDE_PREVIEW_PATH)

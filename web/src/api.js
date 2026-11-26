@@ -1001,6 +1001,11 @@ export function previewRoofPlacementChanges(orgId, revision, payload, { signal }
   return previewRolePlacements('placement-changes', orgId, revision, payload, signal)
 }
 
+export function previewPanelGroupChanges(orgId, revision, previousId, { signal } = {}) {
+  return previewRolePlacements('panel-group-changes', orgId, revision,
+    { previous_input_version_id: previousId }, signal)
+}
+
 export function previewRackPlacementOverrides(orgId, revision, payload, { signal } = {}) {
   return previewRolePlacements('placement-overrides', orgId, revision, payload, signal)
 }
