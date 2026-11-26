@@ -125,3 +125,27 @@ it('expires undo on edits, reset and explicit version reload', async () => {
   expect(screen.queryByRole('button', { name: 'Undo last restore' })).toBeNull()
   expect(save).toHaveBeenCalledTimes(1)
 })
+
+it('authors tracker type and multiplier, restores the legacy draft and reopens the saved version', async () => {
+  const original = record('a')
+  const save = vi.fn(async (_customer, roles) => ({ ...original, roles, version: 2 }))
+  const renderEditor = profile => render(<X07CustomerProfileEditor customerKey="a"
+    loadProfile={async () => profile} saveProfile={save} />)
+  const editor = renderEditor(original)
+  fireEvent.click(await screen.findByRole('button', { name: 'Add tracker role' }))
+  for (const [label, value] of [['Tracker block', 'T'], ['Tracker layer', 'Posts'],
+    ['Tracker type', 'west-2'], ['Modules per instance', '24']]) {
+    fireEvent.change(screen.getByLabelText(label), { target: { value } })
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Restore loaded trackers value' }))
+  expect(screen.queryByLabelText('Tracker type')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Undo last restore' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Save profile' }))
+  await screen.findByText('Profile saved.')
+  const rows = [{ block: 'T', layer: 'Posts', tracker_type: 'west-2', modules_per_instance: 24 }]
+  expect(save.mock.calls[0][1]).toEqual({ ...original.roles, trackers: rows })
+  editor.unmount()
+  renderEditor(await save.mock.results[0].value)
+  expect(await screen.findByLabelText('Tracker type')).toHaveValue('west-2')
+  expect(screen.getByLabelText('Modules per instance')).toHaveValue(24)
+})

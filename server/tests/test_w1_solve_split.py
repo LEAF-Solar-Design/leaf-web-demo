@@ -678,6 +678,75 @@ def synthetic_response(request):
         "improvement": None, "second_pass_triggered": False}}
 
 
+@pytest.mark.parametrize("panel_count,limits", [
+    (24, (17,)), (294, (17,)), (294, (17, 16)),
+], ids=["unsplit", "split", "replace"])
+def test_compact_ground_commit_matches_expanded_graph(
+        graph, b18, monkeypatch, panel_count, limits):
+    import solar_ground_graph_codec as codec
+
+    compact = ground_graph(graph, b18, 2)
+    frame = compact["frames"][0]
+    table = codec.decode_slots(frame["ground_slots"])
+    centres = [list(table.centres[i:i + 2]) for i in range(0, 2 * panel_count, 2)]
+    frame["ground_slots"] = codec.encode_slots(
+        table.ids[:panel_count], centres, table.angle, table.panel)
+    frame.update(module_columns=panel_count, module_slots=panel_count)
+    frame["tracker"]["module_slots"] = panel_count
+    compact = validate_graph(compact)
+    expanded = validate_graph(codec.expand_graph(compact))
+    frame_ref = frame["id"]
+    other_frame = copy.deepcopy(compact["frames"][1])
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(TENANT, ""))
+    def wire_response(request, *args):
+        return cloud.canonical_bytes(synthetic_response(request))
+
+    monkeypatch.setattr(cloud, "post_stringer", wire_response)
+
+    def commit(saved_graph, maximum):
+        binding_args = dict(expected_rev=saved_graph["rev"], frame_ref=frame_ref,
+                            tenant_id=TENANT, job_id=JOB)
+        if solve_request.needs_split_solve(saved_graph, frame_ref, max_string_length=maximum):
+            pieces = solve_request.build_split_requests(
+                saved_graph, frame_ref, max_string_length=maximum, dwgname=DWG)
+            binding = solve.bind_split_request(
+                saved_graph, pieces, split_state={"depth": 10, "jogs": 1}, **binding_args)
+            proposals = [
+                cloud.piece_proposal({"grant_ref": "receipt-validation", "request": piece["request"]},
+                                     TENANT, solve.piece_job_id(JOB, index))
+                for index, piece in enumerate(pieces)
+            ]
+            candidate = solve.complete_split_search(saved_graph, binding, proposals)
+            return solve.accept_split_candidate(saved_graph, candidate, expected_rev=saved_graph["rev"])
+
+        request = solve_request.build_stringer_request(
+            saved_graph, frame_ref, max_string_length=maximum, dwgname=DWG)
+        binding = solve.bind_request(saved_graph, request, **binding_args)
+        proposal = cloud.proposal({"grant_ref": "receipt-validation", "request": request}, TENANT, JOB)
+        candidate = solve.complete_search(saved_graph, binding, proposal)
+        return solve.accept_candidate(saved_graph, candidate, expected_rev=saved_graph["rev"])
+
+    def published_geometry(saved_graph):
+        return [(s["ordered_panel_refs"], s["route"], s["length_ft"]) for s in saved_graph["strings"]]
+
+    for maximum in limits:
+        previous = copy.deepcopy(compact)
+        committed = commit(compact, maximum)
+        expanded = commit(expanded, maximum)
+        assert compact == previous
+        assert committed["parent_rev"] == compact["rev"]
+        assert committed["frames"][0]["ground_slots"] == frame["ground_slots"]
+        assert committed["frames"][1] == other_frame
+        assert published_geometry(committed) == published_geometry(expanded)
+        memberships = [ref for string in committed["strings"] for ref in string["ordered_panel_refs"]]
+        assert sorted(memberships) == sorted(table.ids[:panel_count])
+        assert all(s["module_count"] <= maximum for s in committed["strings"])
+        if previous["strings"]:
+            assert published_geometry(committed) != published_geometry(previous)
+            assert committed["strings"][0]["id"] == previous["strings"][0]["id"]
+        compact = committed
+
+
 @pytest.fixture
 def sequenced_piece():
     params, _ = real_piece()

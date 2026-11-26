@@ -41,12 +41,13 @@ DECLARATION = {
     "interaction": {"mode": "form"}, "record_store": "registry",
     "record": {
         "name": TOOL, "version": "1.0.0",
-        "description": "Run the plugin's 14 design guardrails on the stored design: verdicts in palette order and the health banner counts.",
+        "description": "Run the saved design guardrails or request per-string cold voltage and operating-window evidence with per_string_voltage.",
         "kind": "script", "family_id": "placement", "engine_op": "solar_guardrails_read",
         "entry": "builtins/solar_guardrails_read.py",
         "params": {
             "type": "object", "properties": {
                 "drawing_id": {"type": "string", "maxLength": 128},
+                "per_string_voltage": {"type": "boolean"},
                 "mppt_voltage_window": {
                     "type": "object", "properties": {
                         "min_v": {"type": "number", "minimum": 0, "maximum": 100000},
@@ -283,8 +284,48 @@ def test_guardrails_read_g1_full_output(builtin, g1):
     assert digest(output) == CANONICAL["G1"][1]
 
 
+def test_per_string_voltage_uses_saved_module_counts_and_inverter_limit(builtin, g1):
+    g1["inverters"][0]["max_dc_voltage"] = 75
+    validate_graph(g1)
+    result = builtin.run(g1, {"per_string_voltage": True})
+    longer, shorter = result["rows"]
+    assert [row["string_ref"] for row in result["rows"]] == [s["id"] for s in g1["strings"]]
+    assert (longer["module_count"], shorter["module_count"]) == (2, 1)
+    assert longer["cold_dc_limit"]["voc_v"] == 2 * shorter["cold_dc_limit"]["voc_v"]
+    assert longer["cold_dc_limit"]["saved_inverter_max_dc_v"] == 75
+    assert longer["cold_dc_limit"]["status"] == "fail"
+    assert shorter["cold_dc_limit"]["status"] == "pass"
+
+
+def test_per_string_voltage_reports_unbound_strings(builtin, graph, passing, service, monkeypatch):
+    g = make_graph(graph, passing, monkeypatch, "G5")
+    validate_graph(g)
+    result = builtin.run(g, {"per_string_voltage": True})
+    assert result["status"] == "incomplete"
+    assert [row["string_ref"] for row in result["rows"]] == [s["id"] for s in g["strings"]]
+    assert all(row["cold_dc_limit"] == {"status": "unverified", "reason": "inverter_binding_required"}
+               for row in result["rows"])
+
+
+def test_per_string_voltage_preserves_caller_window_without_asserting_hot_pass(api):
+    payload = body(api)
+    payload["params"] = {"per_string_voltage": True, **window(40, 600)}
+    response = api[0].post("/api/run?wait=1", json=payload)
+    assert response.status_code == 200, response.text
+    report = response.json()["result"]["output"]
+    assert report["schema"] == "leaf.solar-string-voltage.v1"
+    assert report["status"] == "incomplete"
+    assert report["caller_mppt_window"] == {"min_v": 40, "max_v": 600}
+    assert len(report["rows"]) == 2
+    assert all(row["hot_mppt_window"] == {"status": "unverified",
+                                        "reason": "vmp_temperature_model_required"}
+               for row in report["rows"])
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
 INVALID_REQUESTS = [
     [], None, {"x": 1}, {"drawing_id": "solar"},
+    {"per_string_voltage": 1}, {"per_string_voltage": None},
     {"mppt_voltage_window": None}, {"mppt_voltage_window": []},
     {"mppt_voltage_window": {}}, {"mppt_voltage_window": {"min_v": 1}},
     {"mppt_voltage_window": {"min_v": 1, "max_v": 2, "x": 0}},
