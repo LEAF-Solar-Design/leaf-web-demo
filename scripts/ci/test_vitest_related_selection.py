@@ -217,15 +217,58 @@ def test_unsafe_paths_fall_back(path):
 
 @pytest.mark.parametrize("path", [
     "web/vitest.config.js", "web/vitest.setup.js", "web/package.json",
-    "web/package-lock.json", "pnpm-lock.yaml", "web/src/__fixtures__/a.js",
+    "web/package-lock.json", "web/src/__fixtures__/a.js",
     "web/src/mocks/a.js", "web/src/test-utils/a.js", "web/src/testing/a.js",
     "web/src/generated/input.js", "web/public/engine.wasm", "web/src/vendor/pin.js",
     "web/src/view.css", "web/src/icon.svg", "web/src/testTimeScale.js",
-    "other/library.js", "scripts/test-harness.py",
 ])
 def test_global_inputs_fall_back(path):
-    assert policy.select(BASE, [path], {**SOURCES, path: ""} if path.startswith("web/")
-                         and Path(path).suffix in policy.SOURCE_SUFFIXES else SOURCES)["mode"] == "full"
+    decision = policy.select(BASE, [path], {**SOURCES, path: ""} if path.startswith("web/")
+                             and Path(path).suffix in policy.SOURCE_SUFFIXES else SOURCES)
+    assert decision["mode"] == "full" and decision["reason"] == "global_input"
+
+
+@pytest.mark.parametrize("path", [
+    "server/app.py", "server/tests/test_x.py", "platform/db/x.sql", "docs/a.md",
+    "tools/run.sh", "scripts/test-harness.py", "server/APP.PY",
+])
+def test_non_importable_outside_changes_select_readers(path):
+    sources = {**SOURCES, "web/src/read.js": "require('fs')",
+               "web/tools/shared.cjs": "require('child_process')"}
+    decision = policy.select(BASE, [path], sources)
+    assert decision["mode"] == "related"
+    assert decision["reason"] == "source_graph_and_readers"
+    assert decision["outside_web_ignored"] == 1
+    assert decision["inputs"] == ["src/read.js", "tools/shared.cjs"]
+    assert policy.valid_related_result(decision, 5)
+
+
+@pytest.mark.parametrize("outside", [["server/app.py"], ["server/app.py", "docs/a.md"]])
+def test_mixed_web_and_non_importable_outside_changes_select_sources_and_readers(outside):
+    sources = {**SOURCES, "web/src/read.js": "require('fs')"}
+    decision = policy.select(BASE, ["web/src/view.jsx", *outside], sources)
+    assert decision["mode"] == "related"
+    assert decision["reason"] == "source_graph_and_readers"
+    assert decision["inputs"] == ["src/read.js", "src/view.jsx"]
+    assert decision["outside_web_ignored"] == len(outside)
+    assert policy.valid_related_result(decision, 5)
+
+
+@pytest.mark.parametrize("path", [
+    "other/library.js", "scripts/shared.js", "contract/x.json", "vendor/a.py",
+    "scripts/ci/x.py", ".codebuild/ci.sh", ".leaf-ci/ci.sh", ".github/ci.sh",
+    "Makefile", "pyproject.toml", "pnpm-lock.yaml", "harness/src/a.ts",
+    "server/data.json", "server/style.css",
+])
+def test_importable_or_protected_outside_changes_fall_back(path):
+    decision = policy.select(BASE, [path], SOURCES)
+    assert decision["mode"] == "full" and decision["reason"] == "outside_web"
+
+
+@pytest.mark.parametrize("changed", [[], ["server/app.py"], ["server/app.py", "docs/a.md"]])
+def test_no_readers_or_changed_web_sources_fall_back(changed):
+    decision = policy.select(BASE, changed, SOURCES)
+    assert decision["mode"] == "full" and decision["reason"] == "no_inputs"
 
 
 def test_missing_deleted_source_and_inventory_fall_back():
@@ -272,7 +315,8 @@ def test_related_command_preserves_fixed_tests_flags_and_reporters():
 
 
 def test_empty_result_requires_explicit_valid_evidence():
-    decision = policy.select(BASE, [], SOURCES)
+    decision = policy.select(BASE, [], {**SOURCES, "web/src/read.js": "require('fs')"})
+    assert decision["outside_web_ignored"] == 0
     decision.pop("inputs")
     assert policy.valid_related_result(decision, 1)
     assert not policy.valid_related_result(decision, 0)

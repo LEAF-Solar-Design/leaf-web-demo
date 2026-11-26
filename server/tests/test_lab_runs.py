@@ -358,6 +358,11 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
     from lab_evaluate import evaluate_graph
     lane = corpus_join
     run_id, body = corpus_admit(lane)
+    jobs_url = f'/api/lab/runs/{run_id}/corpus-jobs'
+    before = lane.http.get(jobs_url)
+    assert before.status_code == 200, before.text
+    assert before.json()['blocks'][0]['status'] == 'not submitted'
+    assert before.json()['blocks'][0]['job_id'] is None
     body['reconcile_only'] = True
     assert lane.http.post('/api/lab/runs', json=body).json()['run_id'] == run_id
     row, lease, adapter = corpus_adapter(lane, run_id)
@@ -398,6 +403,18 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
     assert policy['parent_suite_sha256'] == lane.context['suite']['sha256']
     assert policy['lineage'] == {key: authority[key] for key in
         ('tenant_id', 'project_id', 'doc_id', 'graph_revision', 'graph_sha256')}
+    jobs = lane.http.get(jobs_url)
+    assert jobs.status_code == 200, jobs.text
+    assert jobs.headers['cache-control'] == 'no-store'
+    assert jobs.json()['source'] == {
+        'run_id': run_id, 'graph_revision': lane.artifact['revision'],
+        'graph_sha256': lane.artifact['sha256'], 'input_digest': row['input_digest'],
+    }
+    job = jobs.json()['blocks'][0]
+    assert job['block_id'] == 'corpus-evaluator-1'
+    assert (job['job_id'], job['status'], job['attempt']) == (projected['job_id'], 'completed', projected['attempt'])
+    assert job['inputs']['corpus_sha256'] == lane.context['corpus']['sha256']
+    assert job['inputs']['suite_sha256'] == lane.context['suite']['sha256']
     durable = lane.jobs.get_job(projected['job_id'])['result']['result']
     assert projected['evaluation'] == durable['result']
     assert projected['reasons'] == durable['result']['reasons']

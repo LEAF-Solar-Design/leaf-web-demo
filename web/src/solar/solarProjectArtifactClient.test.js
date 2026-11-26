@@ -138,6 +138,7 @@ describe('verified project artifacts', () => {
     expect(accessor).not.toHaveBeenCalled()
     for (const [media_type, extension] of [['text/csv', 'csv'], ['application/json', 'json'],
       ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
+      ['application/vnd.leaf.solar-route-bundle+zip', 'zip'],
       ['application/vnd.google-earth.kml+xml', 'kml'], ['application/xml', 'xml'], ['application/pdf', 'pdf']]) {
       expect(validateSolarProjectArtifactRef(projectRef({ media_type, filename: 'File.' + extension }), projectBinding, sourceHashes)).toBe(true)
     }

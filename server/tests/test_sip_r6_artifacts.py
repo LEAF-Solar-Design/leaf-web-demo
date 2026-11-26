@@ -86,6 +86,55 @@ def blob_key(prepared):
     return artifacts._key(prepared.meta, prepared.meta["content_sha256"], blob=True)
 
 
+@pytest.mark.parametrize("damage", ["truncated", "replaced", "missing"])
+def test_repair_refuses_shared_blob_damage_during_publication(lane, monkeypatch, damage):
+    string_source(lane)
+
+    def export(version):
+        return reads.output(lane, "solar-string-data", {}, version=version)["artifact"]
+
+    first_version = lane.head
+    first = export(first_version)
+    _, _, lane.ctx = reads.tools_cases.commit(lane, "solar-settings", {
+        "expected_rev": lane.ctx.graph["rev"],
+        "project_changes": {"name": "Edited roof"},
+    }, lane.ctx)
+    second = export(lane.head)
+    assert first["artifact_id"] != second["artifact_id"]
+    assert first["content_sha256"] == second["content_sha256"]
+    blob = artifacts._key(first, first["content_sha256"], blob=True)
+    repaired_meta = artifacts._key(first, first["artifact_id"])
+    original = dict(lane.blobs)
+    content = original[blob]
+    del lane.blobs[repaired_meta]
+    store_write = lane.put_if_absent_or_verify
+
+    def publish_then_damage(key, data):
+        store_write(key, data)
+        if key != repaired_meta:
+            return
+        if damage == "missing":
+            del lane.blobs[blob]
+        elif damage == "truncated":
+            lane.blobs[blob] = content[:-1]
+        else:
+            lane.blobs[blob] = bytes([content[0] ^ 1]) + content[1:]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lane, "put_if_absent_or_verify", publish_then_damage)
+        reads.refused("ARTIFACT_CORRUPT", lambda: export(first_version))
+    for ref in (first, second):
+        reads.refused("ARTIFACT_CORRUPT", lambda: download(lane, ref["artifact_id"]))
+    for key in original.keys() - {blob}:
+        assert lane.blobs[key] == original[key]
+
+    lane.blobs[blob] = content
+    assert export(first_version) == first
+    assert lane.blobs == original
+    for ref in (first, second):
+        assert download(lane, ref["artifact_id"])[1] == content
+
+
 def test_sip_r6_artifact_uuid_binding(lane):
     sink, prepared = make(lane)
     assert set(sink.binding) == {"schema", "organization_id", "project_id", "drawing_id",

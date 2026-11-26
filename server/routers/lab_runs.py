@@ -268,6 +268,16 @@ def get(run_id: str, tenant=Depends(deps.require_tenant)):
     return {key: value for key, value in row.items() if key not in {"lease_owner", "lease_fence", 'corpus_authority_json'}}
 
 
+@router.get("/{run_id}/corpus-jobs")
+def corpus_jobs(run_id: str, response: Response, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    import lab_corpus_recovery
+    result = _call(lab_corpus_recovery.inspect_jobs, str(tenant), run_id,
+                   authorize=lambda row: _authorize_corpus_run(tenant, row))
+    response.headers['Cache-Control'] = 'no-store'
+    return result
+
+
 @router.get("/{run_id}/recovery-plan")
 def recovery_plan(run_id: str, response: Response, include_cleanup: bool = Query(False),
                   tenant=Depends(deps.require_tenant)):

@@ -194,6 +194,34 @@ function Disclosure({ title, initiallyOpen = false, reviewRequest, children }) {
   </details>
 }
 
+function focusEditorField(node) {
+  if (!node || node.disabled || node.closest('fieldset[disabled]')) return
+  for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === 'DETAILS') parent.open = true
+  }
+  // The inspector's sticky Save row uses scroll margins on these existing inputs.
+  node.scrollIntoView?.({ block: 'center' })
+  node.focus({ preventScroll: true })
+}
+
+function descriptionIssues(gallery, galleryIndex) {
+  const issues = []
+  if (!gallery.description?.trim()) {
+    issues.push({ key: `description:${galleryIndex}`, label: 'Missing gallery description' })
+  }
+  gallery.images.forEach((photo, photoIndex) => {
+    const alt = photo.alt?.trim()
+    if (!photo.title?.trim()) {
+      issues.push({ key: `caption:${galleryIndex}:${photoIndex}`, label: `Missing caption for photo ${photoIndex + 1}` })
+    }
+    const filenameOnly = alt && /^[\p{L}\p{N}_(.\-][\p{L}\p{M}\p{N}_ .()-]*\.(?:avif|bmp|gif|heic|heif|jfif|jpe?g|png|svg|tiff?|webp)$/iu.test(alt)
+    if (!alt || /^Photograph$/i.test(alt) || filenameOnly) {
+      issues.push({ key: `alt:${galleryIndex}:${photoIndex}`, label: `Review alt text for photo ${photoIndex + 1}` })
+    }
+  })
+  return issues
+}
+
 export default function PortfolioEditor(props) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
   return <ScopedPortfolioEditor key={`${scope}:${props.projectId}`} {...props} scope={scope} />
@@ -201,7 +229,8 @@ export default function PortfolioEditor(props) {
 
 function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, selectedField, onSelectElement, scope }) {
   const [showIntake, setShowIntake] = useState(false)
-  const { photos, error, loading, loadPhotos } = useProjectPhotos(projectId, scope)
+  const { photos, error, loading, loadPhotos, pageNumber, hasNext, previousPage, nextPage } = useProjectPhotos(projectId, scope)
+  const paginated = pageNumber > 1 || hasNext
   const latest = useRef(null), alive = useRef(false)
   latest.current = { document, photos }
   useEffect(() => {
@@ -210,8 +239,13 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     return () => { alive.current = false; logout() }
   }, [])
   const fields = useRef(new Map())
-  const target = descriptor => node => {
+  const descriptionFields = useRef(new Map())
+  const target = (descriptor, descriptionKey) => node => {
     const key = selectionKey(portfolioField(document, descriptor))
+    if (descriptionKey) {
+      if (node) descriptionFields.current.set(descriptionKey, node)
+      else descriptionFields.current.delete(descriptionKey)
+    }
     if (node) {
       fields.current.set(key, node)
       const gallery = document.categories.find(item => item.slug === descriptor.gallery)
@@ -221,14 +255,7 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     else fields.current.delete(key)
   }
   useEffect(() => {
-    const node = fields.current.get(selectionKey(selectedField?.field))
-    if (!node || node.disabled || node.closest('fieldset[disabled]')) return
-    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
-      if (parent.tagName === 'DETAILS') parent.open = true
-    }
-    // The inspector's sticky Save row uses scroll margins on these existing inputs.
-    node.scrollIntoView?.({ block: 'center' })
-    node.focus({ preventScroll: true })
+    focusEditorField(fields.current.get(selectionKey(selectedField?.field)))
   }, [selectedField])
   // Editor-only identities survive the document clone, without entering the saved schema.
   const identities = useRef(new WeakMap()), serial = useRef(0), added = useRef(new Set())
@@ -267,6 +294,8 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     const hero = next.images[next.hero]
     next.images.splice(ii, 1); next.hero = Math.max(0, next.images.indexOf(hero))
   })
+  const descriptions = document.categories.map(descriptionIssues)
+  const descriptionCount = descriptions.reduce((sum, issues) => sum + issues.length, 0)
   return <div className="portfolio-editor" onFocus={event => { if (event.target.dataset.element) onSelectElement?.(event.target.dataset.element) }}>
     { [['name', 'Name', 120], ['headline', 'Headline', 240], ['introduction', 'Introduction', 2400]].map(([key, label, limit]) => <Field key={key} inputRef={target({ field: key })} label={label} value={document[key]} limit={limit} multiline={key === 'introduction'} onChange={value => update(next => { next[key] = value })} />) }
     <Disclosure key={`${scope}:${projectId}:about`} title="About / Contact" reviewRequest={reviewRequest}>
@@ -275,18 +304,31 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
     <Field inputRef={target({ field: 'contact.location' })} label="Location" value={document.contact.location} limit={160} onChange={value => update(next => { next.contact.location = value })} />
     </Disclosure>
     <h3>Galleries</h3><p>Add photos from this project. Empty galleries can be saved; add their first photo whenever you are ready.</p>
+    {descriptionCount > 0 && <Disclosure title={`Review gallery descriptions (${descriptionCount})`}>
+      {descriptions.map((issues, ci) => issues.length > 0 && <div key={identity(document.categories[ci])}>
+        <h4>{document.categories[ci].title || `Gallery ${ci + 1}`}</h4>
+        <ul>{issues.map(({ key, label }) => <li key={key}>
+          <button type="button" onClick={() => focusEditorField(descriptionFields.current.get(key))}>{label}</button>
+        </li>)}</ul>
+      </div>)}
+    </Disclosure>}
     <label><span>Photo layout</span><select value={document.galleryLayout || 'grid'} onChange={event => update(next => {
       if (event.target.value === 'single') next.galleryLayout = 'single'
       else delete next.galleryLayout
     })}><option value="grid">Grid</option><option value="single">Single column</option></select></label>
     <button type="button" disabled={loading || !scope} onClick={loadPhotos}>{loading ? 'Loading photos…' : 'Load project photos'}</button>
+    {paginated && <div role="group" aria-label="Project photo pages">
+      <button type="button" aria-disabled={loading || pageNumber === 1} onClick={previousPage}>Previous photo page</button>
+      <span role="status">Photo page {pageNumber}</span>
+      <button type="button" aria-disabled={loading || !hasNext} onClick={nextPage}>Next photo page</button>
+    </div>}
     <details onToggle={event => setShowIntake(event.currentTarget.open)}><summary>Upload project photos</summary>{showIntake && <PhotoMaterialIntake projectId={projectId} onUploaded={loadPhotos} />}</details>
     {error && <p role="alert">{error}</p>}
     {document.categories.map((item, ci) => <section className="portfolio-editor__category" key={`${scope}:${projectId}:${identity(item)}`} aria-label={`Gallery ${ci + 1}`}>
       <Disclosure title={`${item.title || `Gallery ${ci + 1}`} · ${item.images.length} ${item.images.length === 1 ? 'photo' : 'photos'}`} initiallyOpen={added.current.has(identity(item)) || !item.images.length} reviewRequest={reviewRequest}>
       <Field inputRef={target({ field: 'gallery.title', gallery: item.slug })} label="Category title" value={item.title} limit={120} onChange={value => category(ci, next => { next.title = value })} />
       <Field inputRef={target({ field: 'gallery.slug', gallery: item.slug })} label="Category slug" value={item.slug} limit={48} onChange={value => category(ci, next => { next.slug = value })} />
-      <Field inputRef={target({ field: 'gallery.description', gallery: item.slug })} label="Category description" value={item.description} limit={1200} multiline onChange={value => category(ci, next => { next.description = value })} />
+      <Field inputRef={target({ field: 'gallery.description', gallery: item.slug }, `description:${ci}`)} label="Category description" value={item.description} limit={1200} multiline onChange={value => category(ci, next => { next.description = value })} />
       <label><span>Hero image</span><select value={item.hero} disabled={!item.images.length} onChange={event => category(ci, next => { next.hero = Number(event.target.value) })}>{item.images.map((entry, ii) => <option key={ii} value={ii}>{entry.title || entry.alt || `Image ${ii + 1}`}</option>)}</select></label>
       <label><span>Add project photo to {item.title || `gallery ${ci + 1}`}</span><select value="" disabled={count >= 200 || !scope} onChange={event => addPhoto(item, event.target.value, event.currentTarget)}><option value="">Choose an uploaded photo</option>{photos.filter(photo => !item.images.some(entry => entry.material_id === photo.material_id)).map(photo => <option key={photo.material_id} value={photo.material_id}>{photo.name}</option>)}</select></label>
       {photos.length > 0 && <div className="portfolio-editor__photo-picker" role="group" aria-label={`Choose photos for ${item.title || `gallery ${ci + 1}`}`}>
@@ -294,14 +336,16 @@ function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, s
           <Photo image={photoReference(photo)} projectId={projectId} scope={scope} />
           <span>{photo.name}</span>
         </button>)}
-        {photos.every(photo => item.images.some(entry => entry.material_id === photo.material_id)) && <p>All project photos are already in this gallery.</p>}
+        {photos.every(photo => item.images.some(entry => entry.material_id === photo.material_id)) && <p>
+          {paginated ? 'All photos on this page are already in this gallery.' : 'All project photos are already in this gallery.'}
+        </p>}
       </div>}
       {count >= 200 && <p role="status">The portfolio has reached its 200 photo limit. Remove a photo before adding another.</p>}
       {!loading && !photos.length && <p>Use Load project photos after uploading in Photos.</p>}
       {item.images.map((entry, ii) => <section key={entry.material_id} aria-label={`Image ${ii + 1}`}>
         <Disclosure title={`Photo ${ii + 1}: ${entry.title || entry.alt || 'Untitled photo'}`} initiallyOpen={added.current.has(`${identity(item)}:${entry.material_id}`)} reviewRequest={reviewRequest}>
-        <Field inputRef={target({ field: 'caption', gallery: item.slug, material: entry.material_id })} label={`Caption ${ii + 1}`} value={entry.title} limit={200} onChange={value => image(ci, ii, next => { next.title = value })} />
-        <Field inputRef={target({ field: 'alt', gallery: item.slug, material: entry.material_id })} label={`Alt text ${ii + 1}`} value={entry.alt} limit={400} onChange={value => image(ci, ii, next => { next.alt = value })} />
+        <Field inputRef={target({ field: 'caption', gallery: item.slug, material: entry.material_id }, `caption:${ci}:${ii}`)} label={`Caption ${ii + 1}`} value={entry.title} limit={200} onChange={value => image(ci, ii, next => { next.title = value })} />
+        <Field inputRef={target({ field: 'alt', gallery: item.slug, material: entry.material_id }, `alt:${ci}:${ii}`)} label={`Alt text ${ii + 1}`} value={entry.alt} limit={400} onChange={value => image(ci, ii, next => { next.alt = value })} />
         <div className="project-page-editor__actions">
           <button type="button" disabled={ii === 0} onClick={() => move(ci, ii, -1)}>Move image {ii + 1} up</button>
           <button type="button" disabled={ii === item.images.length - 1} onClick={() => move(ci, ii, 1)}>Move image {ii + 1} down</button>

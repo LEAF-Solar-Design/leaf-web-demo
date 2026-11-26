@@ -4,10 +4,11 @@ export const SOLAR_PROJECT_ARTIFACT_MAX_BYTES = 16_777_216
 export const SOLAR_PROJECT_ARTIFACT_TIMEOUT_MS = 60_000
 
 const HEX = new RegExp('^[0-9a-f]{64}$')
-const NAME = new RegExp('^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.(csv|json|xlsx|kml|xml|pdf)$')
+const NAME = new RegExp('^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\\.(csv|json|xlsx|kml|xml|pdf|zip)$')
 const MEDIA = Object.freeze({
   'text/csv': 'csv', 'application/json': 'json',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.leaf.solar-route-bundle+zip': 'zip',
   'application/vnd.google-earth.kml+xml': 'kml', 'application/xml': 'xml', 'application/pdf': 'pdf',
 })
 const KEYS = ['organization_id', 'project_id', 'drawing_id', 'source_version_id',

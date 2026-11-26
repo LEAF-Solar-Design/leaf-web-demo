@@ -37,7 +37,9 @@ import re
 
 import solar_artifacts
 import solar_electrical_route_bridge as bridge
+import solar_route_export
 import solar_sizing_client
+from intake_dxf import IntakeDxfError
 from solar_design_graph import GraphValidationError, _bounded_json
 from solar_solve_results import require_current_export
 from solar_sizing_client import units_resolved
@@ -55,7 +57,7 @@ NUMBER_FIELDS = ("maxDCPower", "maxDCVoltage", "minDCVoltageFeed", "mpptVoltageR
                  "mpptVoltageRangeMax", "numMpptTrackers", "DCInputers", "maxACPower",
                  "nominalACVoltage", "maxACCurrent")
 REQUEST_KEYS = frozenset(("circuit_source", "inverter_record", "suggested_inverter_count", "design_min_temp_c",
-                          "project_location"))
+                          "project_location", "export_format"))
 MAX_TEXT = 128
 MAX_LOCATION = 128
 MAX_INVERTER_COUNT = 10_000
@@ -81,12 +83,14 @@ def _refuse():
 
 
 def _request(params):
-    """(circuit source, inverter record or None, inverter count or None, design low, location or None)."""
     _bounded_json(params)
     if type(params) is not dict or not set(params) <= REQUEST_KEYS:
         _refuse()
     source = params.get("circuit_source", "topology")
     if type(source) is not str or source not in CIRCUIT_SOURCES:
+        _refuse()
+    export_format = params.get("export_format", "workbook")
+    if type(export_format) is not str or export_format not in ("workbook", "route_bundle"):
         _refuse()
     record = None
     if "inverter_record" in params:
@@ -119,7 +123,7 @@ def _request(params):
         location = params["project_location"]
         if type(location) is not str or not 1 <= len(location) <= MAX_LOCATION or CONTROL.search(location):
             _refuse()
-    return source, record, count, float(low), location
+    return source, record, count, float(low), location, export_format
 
 
 def _sizer(graph):
@@ -174,7 +178,7 @@ def export_state(graph, source):
 
 
 def run(graph, params):
-    source, record, count, low, location = _request(params)
+    source, record, count, low, location, export_format = _request(params)
     if not units_resolved(graph):
         raise GraphValidationError("UNRESOLVED_UNITS")
     graph = require_current_export(graph)
@@ -187,7 +191,8 @@ def run(graph, params):
             "SessionCableIndexHasFeeders": True, "SuggestedInverterCount": count,
             "DesignMinTempC": low, "ProjectLocation": location}
     try:
-        _, _, workbook = kernel.cable_export(state, host, FORM)
+        options = {"include_route_rows": True} if export_format == "route_bundle" else {}
+        _, _, workbook = kernel.cable_export(state, host, FORM, **options)
         records = kernel.string_records(state, host)
     except kernel.InverterOutputError:
         raise GraphValidationError("SCHEDULES_KERNEL_REFUSED") from None
@@ -199,6 +204,14 @@ def run(graph, params):
         return {"status": "no-export", "reason": "no-homeruns", **summary}
     summary = {"status": "written", "sheets": [name for name, _ in workbook["sheets"]],
                "rows": [len(grid) for _, grid in workbook["sheets"]], **summary}
+    if export_format == "route_bundle":
+        try:
+            content, missing = solar_route_export.build(graph, workbook)
+        except IntakeDxfError:
+            raise GraphValidationError("SCHEDULES_KERNEL_REFUSED") from None
+        summary["missing_schedule_rows"] = missing
+        return solar_artifacts.ArtifactOutput(summary, solar_route_export.MEDIA_TYPE, solar_route_export.FILENAME,
+                                            content)
     return solar_artifacts.ArtifactOutput(summary, MEDIA_TYPE, FILENAME, workbook["bytes"])
 
 

@@ -119,7 +119,7 @@ def test_declaration_pins_the_local_graph_commit_adapter():
     assert callable(module.run)
     record = solar_tools.trusted_record(TOOL)
     assert deps.catalog_tool_digest(record) == (
-        "sha256:0872050b6d4aec9ac3145ba9893ded785943097bc8b60d57c8a857e6699b24d7")
+        "sha256:6205d9b7429d9de81755761cff65befe0f53776cc25b2b443a6e3ce6485e50d2")
     view = solar_tools.catalog_view(record)
     assert view["adapter"] == "local-graph-commit"
     assert view["engine"] == "server-builtin"
@@ -361,6 +361,147 @@ def test_api_run_commits_homeruns_through_the_rail(assigned_api):
     assert job["provenance"] == env["execution_provenance"]
     assert store.load_manifest(assigned_api[1], TENANT, "solar")["head"] == 2
     assert_leads(resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"])
+
+
+def route_constraints():
+    return {
+        "keep_outs": [{"name": "Equipment pad", "min_xy": [3.25, 0], "max_xy": [4.25, .25]}],
+        "aisles": [
+            {"name": "North aisle", "points": [[3, 1, 0], [4.5, 1, 0]], "lead_capacity": 2},
+            {"name": "South aisle", "points": [[3, -2, 0], [4.5, -2, 0]], "lead_capacity": 2},
+        ],
+    }
+
+
+@pytest.mark.parametrize("variant", ["shared", "reversed", "direct"])
+def test_api_joint_routing_commits_complete_capacity_allocation(assigned_api, variant):
+    constraints = route_constraints()
+    if variant == "reversed":
+        constraints["aisles"].reverse()
+        for aisle in constraints["aisles"]:
+            aisle["points"].reverse()
+    elif variant == "direct":
+        constraints["keep_outs"][0]["min_xy"][1] = .125
+    params = {"expected_rev": 1, "routing_constraints": constraints}
+    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["new_version"]["version"] == 2
+    stored = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]
+    routes = stored["routes"]
+    assert [route["id"] for route in routes] == ROUTE_IDS
+    assert all(route["wire_gauge"] == "10 AWG" for route in routes)
+    assert [route["extra"]["routing_policy"] for route in routes] == ["shared-aisle-terminal-lead-v1"] * 4
+    if variant == "direct":
+        assert all(len(route["points"]) == 2 for route in routes)
+        assert all(route["extra"]["routing"] == {"aisle": None, "direct_keep_outs": []}
+                   for route in routes)
+        return
+
+    # Both aisles are feasible for every lead. The scarce shorter aisle saves
+    # more for the two x=3 leads than for the x=1 and x=2 leads seen first.
+    assert [route["extra"]["routing"]["aisle"] for route in routes] == [
+        "South aisle", "South aisle", "North aisle", "North aisle"]
+    for index, route in enumerate(routes):
+        info = route["extra"]["routing"]
+        assert info["direct_keep_outs"] == ["Equipment pad"]
+        assert info["aisle_leads"] == info["aisle_capacity"] == 2
+        y = -2 if index < 2 else 1
+        assert route["points"] == [[min(index + 1, 3), 0, 0], [3, y, 0], [4.5, y, 0], [5, 0, 0]]
+        if index < 2:
+            assert info["shorter_aisle_at_capacity"]["name"] == "North aisle"
+            assert info["shorter_aisle_at_capacity"]["length_m"] < route["length_ft"] * .3048
+        else:
+            assert "shorter_aisle_at_capacity" not in info
+
+
+@pytest.mark.parametrize("centerline,overlaps_direct", [
+    ([[3, 0, 0], [4, 0, 0]], True),
+    ([[3, 0, 0], [3, 1, 0], [4.5, 1, 0]], False),
+    ([[3, 0, 0], [4.25, 0, 0], [5, 0, 0]], True),
+], ids=["collinear", "bend", "at-inverter"])
+def test_api_joint_routing_at_aisle_endpoint(assigned_api, centerline, overlaps_direct):
+    constraints = {
+        "keep_outs": [] if overlaps_direct else route_constraints()["keep_outs"],
+        "aisles": [{"name": "North aisle", "points": centerline, "lead_capacity": 4}],
+    }
+    params = {"expected_rev": 1, "routing_constraints": constraints}
+    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
+    assert response.status_code == 200, response.text
+    routes = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]["routes"]
+    assert [route["id"] for route in routes] == ROUTE_IDS
+    inverter = [5, 0, 0]
+    tail = centerline if centerline[-1] == inverter else [*centerline, inverter]
+    assert [route["points"] for route in routes] == [
+        [[1, 0, 0], *tail],
+        [[2, 0, 0], *tail],
+        tail,
+        tail,
+    ]
+    assert all(route["extra"]["routing"] == {
+        "aisle": "North aisle",
+        "direct_keep_outs": [] if overlaps_direct else ["Equipment pad"],
+        "aisle_leads": 4,
+        "aisle_capacity": 4,
+    } for route in routes)
+
+
+@pytest.mark.parametrize("variant,reason", [
+    ("capacity", "JOINT_ROUTING_INFEASIBLE"),
+    ("overlapping_alias", "INVALID_ROUTING_CONSTRAINTS"),
+    ("direct_overlap_at_capacity", "JOINT_ROUTING_INFEASIBLE"),
+])
+def test_api_joint_routing_refusal_preserves_saved_version(assigned_api, variant, reason):
+    constraints = route_constraints()
+    if variant == "capacity":
+        constraints["aisles"][0]["lead_capacity"] = 1
+    elif variant == "direct_overlap_at_capacity":
+        constraints = {
+            "keep_outs": [],
+            "aisles": [{"name": "Shared aisle", "points": [[3, 0, 0], [4, 0, 0]],
+                        "lead_capacity": 3}],
+        }
+    else:
+        constraints["aisles"][1]["points"] = [[3, 1, 0], [4, 1, 0]]
+    params = {"expected_rev": 1, "routing_constraints": constraints}
+    original = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]
+    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
+    assert response.status_code == 400, response.text
+    assert response.json()["reason_code"] == reason, response.text
+    assert store.load_manifest(assigned_api[1], TENANT, "solar")["head"] == 1
+    assert resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"] == original
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(original, params)
+    assert error.value.code == reason
+    if variant in {"capacity", "direct_overlap_at_capacity"}:
+        string_ref, kind = error.value.path.rsplit("/", 1)
+        assert string_ref in {S1, S2} and kind in {"start homerun", "end homerun"}
+
+
+@pytest.mark.parametrize("centerline", [
+    [[3, 1, 0], [4.5, 1, 0]],
+    [[3, -1, 0], [4.5, -1, 0]],
+    [[3, 2, 0], [3.25, 1, 0], [3.5, 2, 0]],
+    [[3, 2, 0], [3.25, 1, 0]],
+], ids=["north-side", "south-side", "corner", "endpoint"])
+def test_api_joint_routing_refuses_aisle_touching_closed_keep_out(assigned_api, centerline):
+    constraints = {
+        "keep_outs": [{"name": "Equipment pad", "min_xy": [3.25, -1], "max_xy": [4.25, 1]}],
+        "aisles": [{"name": "Only aisle", "points": centerline, "lead_capacity": 4}],
+    }
+    params = {"expected_rev": 1, "routing_constraints": constraints}
+    original = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]
+    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
+    assert response.status_code == 400, response.text
+    assert response.json()["reason_code"] == "JOINT_ROUTING_INFEASIBLE", response.text
+    assert store.load_manifest(assigned_api[1], TENANT, "solar")["head"] == 1
+    assert resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"] == original
+    with pytest.raises(GraphValidationError) as error:
+        builtin().run(original, params)
+    assert error.value.code == "JOINT_ROUTING_INFEASIBLE"
+    assert set(error.value.path.split(", ")) == {
+        f"{string_ref}/{kind}" for string_ref in (S1, S2)
+        for kind in ("start homerun", "end homerun")
+    }
 
 
 def test_api_run_refuses_until_equipment_is_assigned(api):

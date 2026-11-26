@@ -738,6 +738,42 @@ def test_dxf_refuses_ambiguous_block_names_in_either_order(first, second, base, 
     assert result["blocks"][second + "_ALT"]["base"] == [base, 0, 0]
 
 
+def _dxf_with_format_headers(versions, codepages, encoding):
+    header = "".join(f"9\n$ACADVER\n1\n{version}\n" for version in versions)
+    header += "".join(f"9\n$DWGCODEPAGE\n3\n{page}\n" for page in codepages)
+    return (
+        f"0\nSECTION\n2\nHEADER\n{header}0\nENDSEC\n"
+        "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nRóof\n10\n0\n20\n0\n"
+        "0\nLINE\n5\n21\n8\nPánel\n10\n0\n20\n0\n11\n1\n21\n1\n0\nENDBLK\n"
+        "0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n5\nA1\n"
+        "8\nPánel\n2\nRóof\n10\n0\n20\n0\n0\nENDSEC\n0\nEOF\n"
+    ).encode(encoding)
+
+
+@pytest.mark.parametrize(("versions", "codepages", "fields"), [
+    (("AC1015", "AC1024"), ("ANSI_1252",), "$ACADVER"),
+    (("AC1015",), ("ANSI_1252", "ANSI_1251"), "$DWGCODEPAGE"),
+    (("AC1015", "AC1024"), ("ANSI_1252", "ANSI_1250"), "$ACADVER, $DWGCODEPAGE"),
+], ids=["version", "codepage", "both"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["original", "reversed"])
+def test_conflicting_dxf_header_refuses_ambiguous_symbol_identity(versions, codepages, fields, reverse):
+    if reverse:
+        versions, codepages = versions[::-1], codepages[::-1]
+    raw = _dxf_with_format_headers(versions, codepages, "cp1252")
+    with pytest.raises(dxf_intake.DxfParseError) as exc:
+        dxf_intake.parse_dxf_bytes(raw)
+    assert str(exc.value) == f"conflicting DXF header declarations: {fields}"
+
+
+@pytest.mark.parametrize("copies", [1, 2])
+def test_matching_dxf_header_declarations_preserve_symbol_identity(copies):
+    raw = _dxf_with_format_headers(("AC1024",) * copies, ("ANSI_1252",) * copies, "utf-8")
+    result = dxf_intake.parse_dxf_bytes(raw)
+    assert list(result["blocks"]) == ["Róof"]
+    assert result["inserts"][0]["name"] == "Róof"
+    assert result["inserts"][0]["layer"] == "Pánel"
+
+
 @pytest.mark.parametrize("transform", [
     {"x": 1},
     {"x": -9, "rot": 1.570796, "scale": [-2, 1, 1]},

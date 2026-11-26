@@ -73,6 +73,16 @@ def rig(monkeypatch):
             pass
 
         def execute(self, sql, params):
+            if sql.startswith('SELECT job_id, tenant_id, org_id, project_id, tool, idempotency_key, status, attempt '):
+                assert 'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s ' in sql
+                assert sql.endswith('AND idempotency_key = ANY(%s)')
+                assert params[:3] == (TENANT, TENANT, PROJECT)
+                state.sql_calls.append((sql, params))
+                self.rows = [copy.deepcopy(state.jobs[match['job_id']])
+                             for intent in params[3] for match in state.matches.get(intent, [])]
+                self.batched = True
+                return
+            self.batched = False
             assert sql.startswith('SELECT job_id,status,attempt,corpus_cancel_json,corpus_cleanup_json ')
             assert 'FROM async_jobs WHERE tenant_id=%s AND org_id=%s AND project_id=%s ' in sql
             assert 'AND idempotency_key=%s' in sql and sql.endswith('LIMIT 2')
@@ -81,7 +91,7 @@ def rig(monkeypatch):
             self.rows = copy.deepcopy(state.matches.get(params[3], []))
 
         def fetchall(self):
-            assert len(self.rows) <= 2
+            assert self.batched or len(self.rows) <= 2
             return self.rows
 
     monkeypatch.setattr(recovery.platform_link, 'platform_db', lambda: SimpleNamespace(cursor=Cursor))
@@ -600,3 +610,77 @@ def test_v1_default_and_false_remain_identical_and_v2_digest_covers_cleanup(rig)
     changed = cleanup_plan(rig)
     assert changed['digest'] != v2['digest']
     assert changed['blocks'][0]['cleanup_evidence']['state'] == 'confirmed_reaped'
+
+
+JOBS_URL = '/api/lab/runs/source-run/corpus-jobs'
+
+
+@pytest.mark.parametrize('run_state,job_states,expected', [
+    ('queued', ['submitted', None], ['queued', 'not submitted']),
+    ('running', ['submitted', 'running', 'failed'], ['queued', 'running', 'failed']),
+    ('finished', ['complete', 'failed', None], ['completed', 'failed', 'unavailable']),
+])
+def test_corpus_jobs_projects_status_and_pinned_inputs(rig, run_state, job_states, expected):
+    rig.configure(job_states)
+    rig.source['state'] = run_state
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200, response.text
+    assert response.headers['Cache-Control'] == 'no-store'
+    result = response.json()
+    assert result['corpus'] is True
+    assert result['source'] == {key: rig.source[key] for key in
+                                ('run_id', 'graph_revision', 'graph_sha256', 'input_digest')}
+    assert [block['status'] for block in result['blocks']] == expected
+    for i, item in enumerate(result['blocks']):
+        block = rig.graph['blocks'][i]
+        assert item['block_id'] == block['id']
+        assert item['job_id'] == (None if job_states[i] is None else f'original-producer-{i}')
+        assert item['inputs'] == {
+            'corpus_sha256': block['settings']['corpus']['sha256'],
+            'suite_sha256': block['settings']['suite']['sha256'],
+            'settings_sha256': graph_digest(block['settings']),
+        }
+    assert str(ACTOR) not in response.text and PRIVATE not in response.text
+    assert len(rig.sql_calls) == 1 and not rig.job_calls
+    assert rig.authorizations == 2
+
+
+def test_corpus_jobs_withholds_mismatched_and_ambiguous_jobs(rig):
+    rig.configure(['failed', 'complete', 'running'])
+    rig.jobs['original-producer-0']['project_id'] = 'other-project'
+    rig.jobs['original-producer-1']['tool'] = 'other-operation'
+    intent = 'lab:source-run:corpus-2:corpus:v1'
+    rig.matches[intent].append(rig.matches[intent][0])
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200, response.text
+    assert all(item['status'] == 'unavailable' and item['job_id'] is None and item['attempt'] is None
+               for item in response.json()['blocks'])
+    assert 'original-producer' not in response.text
+
+
+@pytest.mark.parametrize('revoke_at', [1, 2])
+def test_corpus_jobs_enforces_live_access_before_read_and_return(rig, revoke_at):
+    rig.revoke_at = revoke_at
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 422
+    assert response.json() == {'detail': 'lab_corpus_project_refused'}
+    assert len(rig.sql_calls) == revoke_at - 1
+
+
+def test_corpus_jobs_ignores_non_corpus_runs_without_reading_private_inputs(rig):
+    rig.source['corpus_authority_json'] = None
+    response = rig.http.get(JOBS_URL)
+    assert response.status_code == 200
+    assert response.json() == {'corpus': False}
+    assert not rig.ledger_calls and not rig.sql_calls
+
+
+def test_corpus_jobs_include_piped_corpus_blocks_in_mixed_graphs(rig):
+    rig.configure(['failed', 'complete'], ['oak-volatility', 'birch-trend'])
+    rig.graph['blocks'][1]['registry']['id'] = 'other-operation'
+    rig.graph['pipes'] = [{'from': {'node': 'oak-volatility', 'port': 'result'},
+                           'to': {'node': 'birch-trend', 'port': 'result'}}]
+    rig.pin()
+    reply = rig.http.get(JOBS_URL)
+    assert reply.status_code == 200, reply.text
+    assert [item['block_id'] for item in reply.json()['blocks']] == ['oak-volatility']
