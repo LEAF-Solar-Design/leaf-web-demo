@@ -589,6 +589,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             summary = "counts model-space panel placements by viewport layer visibility"
         drawing_body = authored_viewport_panels.build_body(description)
         drawing_params = authored_viewport_panels.parameter_schema(description)
+    elif authored_viewport_panels.camera_diagnostics_requested(description):
+        verb, engine_op = "report", "viewport_camera_diagnostics"
+        summary = "reports unresolved camera geometry by paper-space viewport"
+        drawing_body = authored_viewport_panels.CAMERA_DIAGNOSTICS
+        drawing_params = {"type": "object", "properties": {}}
     elif authored_panel_regions.matches(description):
         verb, engine_op = "measure", authored_panel_regions.operation(description)
         drawing_body = authored_panel_regions.build_body(description)
