@@ -131,6 +131,9 @@ def parse_dxf_bytes(
     active_layer = None
     insunits = None
     declared_units = set()
+    format_header_codes = {"$ACADVER": 1, "$DWGCODEPAGE": 3}
+    format_declarations: dict[str, str] = {}
+    conflicting_format_fields: set[str] = set()
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -147,6 +150,13 @@ def parse_dxf_bytes(
         if section == "HEADER" and code == 9 and value == "$CLAYER":
             if i + 1 < n and pairs[i + 1][0] == 8 and pairs[i + 1][1]:
                 active_layer = pairs[i + 1][1]
+        if section == "HEADER" and code == 9 and i + 1 < n:
+            field = value.upper()
+            value_code, declaration = pairs[i + 1]
+            if format_header_codes.get(field) == value_code and declaration:
+                declaration = declaration.upper()
+                if format_declarations.setdefault(field, declaration) != declaration:
+                    conflicting_format_fields.add(field)
         if section == "HEADER" and (code, value) == (9, "$INSUNITS"):
             if i + 1 < n and pairs[i + 1][0] == 70:
                 try:
@@ -356,6 +366,10 @@ def parse_dxf_bytes(
                 texts.append(entity)
             continue
         i += 1
+
+    if conflicting_format_fields:
+        fields = ", ".join(sorted(conflicting_format_fields))
+        raise DxfParseError(f"conflicting DXF header declarations: {fields}")
 
     resolved_inserts = []
     for entity in inserts:
