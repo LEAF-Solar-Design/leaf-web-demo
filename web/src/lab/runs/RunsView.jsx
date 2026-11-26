@@ -6,7 +6,7 @@ import { canonicalJSON } from '../contract.js'
 import { sha256Hex } from '../runtime/sha256.js'
 import { useLabSurfaceStatus } from '../useLabSurfaceStatus.js'
 import { labValueStore, useBlockValue, useRun, useRuns } from './valueStore.js'
-import { cancelRun } from './runStream.js'
+import { cancelRun, readCorpusJobs } from './runStream.js'
 import './corpusEvidence.css'
 import { corpusReportDiagnostics } from './corpusReportDiagnostics.js'
 
@@ -256,6 +256,34 @@ const corpusEvidence = value => {
 function EvidenceField({ label, value }) {
   return <div><h5>{label}</h5><pre>{value == null ? 'Unavailable (not evaluated)' : JSON.stringify(value, null, 2)}</pre></div>
 }
+function ConfirmationGuidance({ confirmation }) {
+  if (confirmation?.verdict !== 'insufficient' && confirmation?.verdict !== 'inconclusive') return null
+
+  const count = value => Number.isSafeInteger(value) && value >= 0
+  const limits = [
+    ['Parent needs', confirmation.parent?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Child needs', confirmation.child?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Confirmation needs', confirmation.splits?.confirm?.groups, confirmation.protocol?.min_confirm_groups, 'expiry group'],
+  ]
+  const shortfalls = limits.filter(([, observed, required]) => count(observed) && count(required) && observed < required)
+  const interval = confirmation.confirm_comparison?.paired_ci95_c
+  const intervalKnown = Array.isArray(interval) && interval.length === 2 &&
+    interval.every(Number.isFinite) && interval[0] <= interval[1]
+
+  return <div>
+    <h5>What would resolve confirmation</h5>
+    {shortfalls.map(([label, observed, required, unit]) => {
+      const missing = required - observed
+      return <p key={label}>{label} {missing} more {unit}{missing === 1 ? '' : 's'} ({observed} of {required}).</p>
+    })}
+    {limits.some(([, observed, required]) => !count(observed) || !count(required)) &&
+      <p>The saved report is missing confirmation counts or thresholds.</p>}
+    {intervalKnown && interval[0] <= 0 && interval[1] >= 0 && <p>The paired 95% interval still crosses or touches zero.</p>}
+    {!intervalKnown && <p>The paired 95% interval is unavailable.</p>}
+    <p>A directional result requires the minimum sample counts and a paired 95% interval entirely above or below zero.</p>
+    <p>Replaying the pinned inputs adds no new confirmation evidence. If additional eligible observations are available, evaluate them under the same saved policy.</p>
+  </div>
+}
 function CorpusEvidence({ evidence }) {
   const report = evidence.evaluation, confirmation = report.confirm_report
   return <section className="lab-corpus-evidence" aria-label="Corpus evaluation evidence">
@@ -267,6 +295,7 @@ function CorpusEvidence({ evidence }) {
     <p>Verdict: {report.verdict}</p>
     <p>Confirmation verdict: {confirmation?.verdict ?? 'Unavailable (not evaluated)'}</p>
     {corpusReportDiagnostics(report).map(message => <p key={message} role="status">{message}</p>)}
+    <ConfirmationGuidance confirmation={confirmation} />
     <EvidenceField label="Reasons" value={report.reasons} />
     <EvidenceField label="Policy and graph lineage" value={evidence.policy} />
     <EvidenceField label="Input identities" value={{ ...evidence.context, row_count: evidence.row_count,
@@ -299,7 +328,101 @@ const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
     })}
   </li>
 })
-const RunResult = memo(function RunResult({ store, runId, fetchImpl, now }) {
+const corpusJobStatuses = {
+  queued: 'Queued', running: 'Running', failed: 'Failed', completed: 'Completed',
+  'not submitted': 'Not submitted', unavailable: 'Unavailable',
+}
+function validCorpusJobs(data, run) {
+  const source = data.source
+  return data.corpus === true && source?.run_id === run.id && source.graph_revision === run.graph_revision
+    && recoveryHash(source.graph_sha256) && recoveryHash(source.input_digest)
+    && (!run.graph_sha256 || run.graph_sha256 === source.graph_sha256)
+    && (!run.input_digest || run.input_digest === source.input_digest)
+    && Array.isArray(data.blocks) && data.blocks.length > 0 && data.blocks.length <= 200
+    && data.blocks.every(block => recoveryText(block?.block_id, 64) && Object.hasOwn(corpusJobStatuses, block.status)
+      && (['not submitted', 'unavailable'].includes(block.status)
+        ? block.job_id === null && block.attempt === null
+        : recoveryText(block.job_id) && Number.isSafeInteger(block.attempt) && block.attempt >= 0)
+      && recoveryHash(block.inputs?.corpus_sha256) && recoveryHash(block.inputs?.suite_sha256)
+      && recoveryHash(block.inputs?.settings_sha256))
+    && new Set(data.blocks.map(block => block.block_id)).size === data.blocks.length
+}
+function CorpusJobField({ label, value }) {
+  return <div><dt>{label}</dt><dd style={{ overflowWrap: 'anywhere' }}><code>{value}</code></dd></div>
+}
+function CorpusJobs({ run, store, fetchImpl }) {
+  const [view, setView] = useState(null)
+  const active = useRef(null)
+  useEffect(() => {
+    const reset = () => {
+      clearTimeout(active.current?.timer)
+      active.current?.controller.abort()
+      active.current = null
+      setView(null)
+    }
+    const unsubscribe = subscribeActiveScope(reset)
+    return () => {
+      unsubscribe()
+      clearTimeout(active.current?.timer)
+      active.current?.controller.abort()
+      active.current = null
+    }
+  }, [store, fetchImpl])
+  const scope = recoveryScope()
+  const currentView = view?.scope === scope && view.store === store && view.fetchImpl === fetchImpl ? view : null
+  async function refresh() {
+    if (active.current) return
+    const controller = new AbortController()
+    const unavailable = 'Corpus job status unavailable. Try refreshing.'
+    const request = { controller }
+    const publish = patch => {
+      if (active.current === request && recoveryScope() === scope
+        && store.getRun(run.id)?.graph_revision === run.graph_revision) {
+        setView({ scope, store, fetchImpl, ...patch })
+      }
+    }
+    active.current = request
+    publish({ pending: true, message: 'Reading corpus jobs...' })
+    request.timer = setTimeout(() => {
+      publish({ message: unavailable })
+      active.current = null
+      controller.abort()
+    }, 10000)
+    const data = await readCorpusJobs({ runId: run.id, fetchImpl, signal: controller.signal })
+    clearTimeout(request.timer)
+    if (controller.signal.aborted) return
+    if (data.ok && validCorpusJobs(data, run)) publish({ data })
+    else publish({ message: data.ok && data.corpus === false ? 'No corpus jobs for this run.' : unavailable })
+    if (active.current === request) active.current = null
+  }
+  const data = currentView?.data
+  return <section aria-label="Corpus jobs">
+    <button type="button" onClick={refresh} disabled={currentView?.pending}>
+      {data ? 'Refresh corpus jobs' : 'Show corpus jobs'}
+    </button>
+    {currentView?.message && <p role="status">{currentView.message}</p>}
+    {data && <>
+      <dl>
+        <CorpusJobField label="Graph revision" value={data.source.graph_revision} />
+        <CorpusJobField label="Graph SHA-256" value={data.source.graph_sha256} />
+        <CorpusJobField label="Run input digest" value={data.source.input_digest} />
+      </dl>
+      <ul>{data.blocks.map(block => <li key={block.block_id}>
+        <strong>{block.block_id}</strong> {corpusJobStatuses[block.status]}
+        <dl>
+          {block.job_id !== null && <>
+            <CorpusJobField label="Job ID" value={block.job_id} />
+            <CorpusJobField label="Attempt" value={block.attempt} />
+          </>}
+          <CorpusJobField label="Corpus SHA-256" value={block.inputs.corpus_sha256} />
+          <CorpusJobField label="Suite SHA-256" value={block.inputs.suite_sha256} />
+          <CorpusJobField label="Block settings digest" value={block.inputs.settings_sha256} />
+        </dl>
+      </li>)}</ul>
+    </>}
+  </section>
+}
+const RunResult = memo(function RunResult({ store, runId, fetchImpl, now, showCorpusJobs }) {
   const run = useRun(store, runId)
   const [cancelling, setCancelling] = useState(false)
   const [message, setMessage] = useState('')
@@ -319,6 +442,8 @@ const RunResult = memo(function RunResult({ store, runId, fetchImpl, now }) {
     {run.gaps.map((gap, index) => <p key={index}>{gap.recovered ? 'Recovered from a snapshot after a gap' : 'Gap detected; recovering snapshot'}</p>)}
     {['queued', 'running'].includes(run.state) && <button type="button" disabled={cancelling} onClick={cancel}>Cancel</button>}
     {message && <p role="status">{message}</p>}
+    {showCorpusJobs && Number.isInteger(run.graph_revision) && run.state !== 'missing' &&
+      <CorpusJobs key={run.graph_revision} run={run} store={store} fetchImpl={fetchImpl} />}
     {recoveryTerminal(run.state) && <RecoveryReview run={run} store={store} fetchImpl={fetchImpl} />}
     <ul>{Object.keys(run.blocks).map(id => <BlockResult key={id} store={store} runId={run.id} blockId={id} now={now} />)}</ul>
   </article>
@@ -365,6 +490,6 @@ export default function RunsView({ hidden = false, store = labValueStore, mock =
     <h2>Runs</h2>
     {!hidden && <WorkerStatus mock={mock} fetchImpl={fetchImpl} />}
     {!runs.length && <p>No runs yet. Run a saved revision from the graph.</p>}
-    {runs.map(run => <RunResult key={run.id} store={store} runId={run.id} fetchImpl={fetchImpl} now={now} />)}
+    {runs.map(run => <RunResult key={run.id} store={store} runId={run.id} fetchImpl={fetchImpl} now={now} showCorpusJobs={!hidden && !mock} />)}
   </div>
 }
