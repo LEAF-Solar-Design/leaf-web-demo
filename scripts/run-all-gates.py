@@ -230,8 +230,8 @@ class Result:
     vitest_selection: dict = field(default_factory=dict)
 
 
-def _py_pytest(target: str) -> List[str]:
-    return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
+def _py_pytest(*targets: str) -> List[str]:
+    return [sys.executable, "-m", "pytest", *targets, "-q", "--color=no",
             "-r", "s", "-p", "no:cacheprovider"]
 
 
@@ -1035,9 +1035,10 @@ def build_suites() -> List[Suite]:
         Suite("server-solar-tool-physical-shade", "server tests/test_solar_tool_physical_shade.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_tool_physical_shade.py"), 22),
         Suite("server-solar-tool-physical-export",
-              "server tests/test_solar_tool_physical_export.py",
+              "server physical export and saved estimate comparison",
               "pytest", SERVER,
-              _py_pytest("tests/test_solar_tool_physical_export.py"), 24),
+              _py_pytest("tests/test_solar_tool_physical_export.py",
+                         "tests/test_project_estimate_comparison.py"), 27),
         Suite("server-solar-guardrails", "server tests/test_solar_guardrails.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_guardrails.py"), 17),  # R31b: two intake/branch cases
         Suite("server-solar-pile-block-mapping", "server tests/test_solar_pile_block_mapping.py",
