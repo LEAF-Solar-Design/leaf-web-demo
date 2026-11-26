@@ -672,6 +672,40 @@ class SQLiteCustomizationStore(CustomizationRepository):
                 raise ChangeSetNotFoundError("change set was not found")
             return self._change_set(row)
 
+    def stage_queue_depth(self) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS depth FROM customization_change_sets "
+                "WHERE state = ? AND NOT EXISTS "
+                "(SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id)",
+                (ChangeState.STAGING.value,),
+            ).fetchone()
+            return int(row["depth"])
+
+    def stage_queue_ahead(self, change: ChangeSet) -> int:
+        self.initialize()
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS ahead FROM customization_change_sets "
+                "WHERE state = ? AND NOT (tenant_id = ? AND change_set_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM customization_removal_requests "
+                "WHERE customization_removal_requests.tenant_id = "
+                "customization_change_sets.tenant_id AND "
+                "customization_removal_requests.change_set_id = "
+                "customization_change_sets.change_set_id) "
+                "AND ((stage_lease_owner IS NOT NULL AND stage_lease_expires_at > ?) "
+                "OR created_at < ? OR (created_at = ? AND change_set_id < ?))",
+                (ChangeState.STAGING.value, change.tenant_id, change.change_set_id,
+                 int(time.time() * 1000), change.created_at, change.created_at,
+                 change.change_set_id),
+            ).fetchone()
+            return int(row["ahead"])
+
     def claim_stage(
         self, *, owner: str, lease_seconds: float = 30.0,
         fair: bool = False, exclude_tenants: Sequence[str] = (),
