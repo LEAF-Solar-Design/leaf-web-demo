@@ -94,15 +94,15 @@ function compare(left, right) {
 
 it.each([
   ['filter only', { filter: null, exact: false }, { filter: 'Panels', exact: false },
-    ['All layers', 'Panels', 'Changed'], ['Pattern match', 'Pattern match', 'Same']],
+    ['All layers', 'Panels', 'Changed'], ['Off', 'Off', 'Same']],
   ['matching mode only', { filter: 'Feeder', exact: false }, { filter: 'Feeder', exact: true },
-    ['Feeder', 'Feeder', 'Same'], ['Pattern match', 'Exact match', 'Changed']],
+    ['Feeder', 'Feeder', 'Same'], ['Off', 'On', 'Changed']],
   ['both options', { filter: 'Roof', exact: true }, { filter: 'Canopy', exact: false },
-    ['Roof', 'Canopy', 'Changed'], ['Exact match', 'Pattern match', 'Changed']],
+    ['Roof', 'Canopy', 'Changed'], ['On', 'Off', 'Changed']],
   ['equal options', { filter: 'Drain', exact: true }, { filter: 'Drain', exact: true },
-    ['Drain', 'Drain', 'Same'], ['Exact match', 'Exact match', 'Same']],
+    ['Drain', 'Drain', 'Same'], ['On', 'On', 'Same']],
   ['invalid options', { filter: 17, exact: 'true' }, { filter: 'Civil', exact: true },
-    ['Unknown', 'Civil', 'Unavailable'], ['Unknown', 'Exact match', 'Unavailable']],
+    ['Unknown', 'Civil', 'Unavailable'], ['Unknown', 'On', 'Unavailable']],
 ])('compares saved options for %s', (_label, a, b, filter, matching) => {
   const left = areaReport(first, [['Example', 10]], a)
   const right = areaReport(third, [['Example', 20]], b)
@@ -111,7 +111,7 @@ it.each([
 
   const options = screen.getByRole('table', { name: 'Saved layer report options' })
   expect(within(options).getByRole('row', { name: /Layer filter/ })).toHaveTextContent(filter.join(''))
-  expect(within(options).getByRole('row', { name: /Layer matching/ })).toHaveTextContent(matching.join(''))
+  expect(within(options).getByRole('row', { name: /Exact match/ })).toHaveTextContent(matching.join(''))
   expect(options).not.toHaveTextContent('unrelated saved value')
 })
 
@@ -125,10 +125,10 @@ it('distinguishes an omitted exact-match option from missing saved params', () =
 
   const options = screen.getByRole('table', { name: 'Saved layer report options' })
   expect(within(options).getByRole('row', { name: /Layer filter/ })).toHaveTextContent('roofUnknownUnavailable')
-  expect(within(options).getByRole('row', { name: /Layer matching/ })).toHaveTextContent('Pattern matchUnknownUnavailable')
+  expect(within(options).getByRole('row', { name: /Exact match/ })).toHaveTextContent('OffUnknownUnavailable')
 })
 
-it('omits the option table when the report tools or versions differ', () => {
+it('omits the option table when the report versions differ', () => {
   compare(areaReport(first, []), areaReport(second, []))
 
   expect(screen.getByText('Different tool versions')).toBeVisible()

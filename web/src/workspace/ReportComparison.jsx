@@ -52,7 +52,7 @@ function LayerOptionsComparison({ first, second }) {
 
   const rows = [
     { name: 'Layer filter', left: a.filter, right: b.filter, display: value => value === null ? 'All layers' : value },
-    { name: 'Layer matching', left: a.exact, right: b.exact, display: value => value ? 'Exact match' : 'Pattern match' },
+    { name: 'Exact match', left: a.exact, right: b.exact, display: value => value ? 'On' : 'Off' },
   ]
   return (
     <table>
