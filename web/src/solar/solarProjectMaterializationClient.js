@@ -7,7 +7,7 @@ const fields = ['mode', 'organization_id', 'project_id', 'drawing_id', 'input_ve
 
 export function initialSolarParameters(boundary, preset, drawing_units) {
   try {
-    if (!['m', 'ft'].includes(drawing_units) || !Array.isArray(boundary) || boundary.length < 3
+    if (!['m', 'ft', 'in'].includes(drawing_units) || !Array.isArray(boundary) || boundary.length < 3
       || !boundary.every(point => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite))
       || !preset || typeof preset !== 'object' || Array.isArray(preset)) return null
     const parameters = { boundary, preset, drawing_units }
