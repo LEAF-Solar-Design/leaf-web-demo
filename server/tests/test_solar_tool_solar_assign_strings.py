@@ -990,13 +990,9 @@ def test_assign_strings_dispatch_replays_and_refuses_stale(graph, tmp_path, monk
     (.3, 100, 2, "proposed", 2, 3),
     (.9, 49, 1, "no_direct_solution", None, 2),
     (.3, 100, 1, "no_direct_solution", None, 2),
-    (.9, 49, 1, "search_limit", None, 1),
 ])
 def test_saved_inverter_rebalance(
-        equipment_case, monkeypatch, sending_kw, receiving_v, inputs, status, minimum, probes):
-    probe_limit = 1 if status == "search_limit" else 64
-    if status == "search_limit":
-        monkeypatch.setattr("solar_equipment_rebalance._MAX_PROBES", probe_limit)
+        equipment_case, sending_kw, receiving_v, inputs, status, minimum, probes):
     graph, params, _ = equipment_case
     first = params["equipment"][0]
     first["max_dc_power_kw"] = sending_kw
@@ -1020,7 +1016,7 @@ def test_saved_inverter_rebalance(
     assert report["source_rev"] == source["rev"]
     assert report["status"] == status
     assert report["minimum_moves"] == minimum
-    assert report["probe_limit"] == probe_limit
+    assert report["probe_limit"] == 64
     assert report["probes_examined"] == probes
     assert source == before
     moves = {row["string_ref"]: row for row in report["moves"]}
@@ -1038,3 +1034,31 @@ def test_saved_inverter_rebalance(
         assert all(item["validity"]["state"] == "valid" for item in reopened["inverters"] + reopened["strings"])
         assert [s["ordered_panel_refs"] for s in reopened["strings"]] == [
             s["ordered_panel_refs"] for s in before["strings"]]
+
+
+@pytest.mark.parametrize(("receiver_count", "status", "probes"), [
+    (6, "no_direct_solution", 48),
+    (7, "no_direct_solution", 63),
+    (8, "search_limit", 64),
+])
+def test_saved_inverter_rebalance_uses_production_probe_budget(equipment_case, receiver_count, status, probes):
+    graph, params, _ = equipment_case
+    sender = params["equipment"][0]
+    sender["max_dc_power_kw"] = .3
+    for number in range(2, receiver_count + 2):
+        params["equipment"].append({
+            **sender, "id": app_id("inverter", number), "number": number,
+            "position": [8 + number, 0, 0], "mppt_inputs": {"A": 2},
+            "total_dc_inputs": 2, "max_dc_voltage": 49, "max_dc_power_kw": 1.2,
+        })
+    source = equipment_candidate(graph, params)
+    before = copy.deepcopy(source)
+    request = {"mode": "saved", "expected_rev": source["rev"], "suggest_minimum_moves": True}
+    output, _ = solar_local_read._read_output("solar-assignment-report", source, request)
+    Draft7Validator(solar_tools.trusted_record("solar-assignment-report")["returns"]).validate(output)
+    assert output["committed"] is False
+    assert output["rebalance"] == {
+        "source_rev": source["rev"], "status": status, "minimum_moves": None,
+        "moves": [], "probe_limit": 64, "probes_examined": probes,
+    }
+    assert source == before
