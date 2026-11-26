@@ -1,11 +1,75 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { expandBulgedPolylines } from './engineIntake.js'
+import { expandBulgedPolylines, intakeDimensionPolylines } from './engineIntake.js'
 
 import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, arcSweepDeg, formatMeasurement, hexHandle, intakeRoundPolylines } from './engineIntake.js'
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
+
+describe('server intake dimension polylines', () => {
+  const dimension = {
+    type: 'LINEAR', handle: '123', layer: 'DIM',
+    p1: [0, 0, 0], p2: [3, 4, 0], dimline: [1.5, 6, 0],
+    rotation_deg: 0, measurement: 3,
+  }
+
+  it.each([
+    ['LINEAR', 30, 4.598],
+    ['ALIGNED', 0, 5],
+  ])('draws %s model dimensions with their original handles and layer', (type, rotation, measurement) => {
+    const source = { ...dimension, type, rotation_deg: rotation, measurement }
+    const expected = engineIntake([{
+      type: 'DIMENSION', dimtype: type, layer: source.layer, id: 291,
+      def1: source.p1, def2: source.p2, dimline: source.dimline, rotationDeg: rotation, measurement,
+    }]).polylines
+    expect(expected.length).toBeGreaterThan(5)
+    expect(intakeDimensionPolylines({ dimensions: [source] }).polylines).toEqual(
+      expected.map(polyline => ({ ...polyline, handle: '123', strokeOnly: true })),
+    )
+  })
+
+  it('projects a vertical dimension at negative coordinates and nonzero elevation', () => {
+    const source = { ...dimension, handle: '2AB', layer: 'Steel Dimensions',
+      p1: [-12, -8, 7], p2: [-10, -2, 7], dimline: [-14, -5, 7],
+      rotation_deg: 90, measurement: 6 }
+    const { polylines, truncated } = intakeDimensionPolylines({ dimensions: [source] })
+    expect(truncated).toBe(0)
+    expect(polylines.length).toBeGreaterThan(5)
+    expect(polylines[2].pts).toEqual([[-14, -8, 7], [-14, -2, 7]])
+    expect(polylines.every(path => path.handle === source.handle && path.layer === source.layer
+      && path.pts.every(([, , z]) => z === 7))).toBe(true)
+  })
+
+  it('reports each dimension omitted by the point limit without drawing a partial batch', () => {
+    const pointsPerDimension = intakeDimensionPolylines({ dimensions: [dimension] }).polylines
+      .reduce((sum, path) => sum + path.pts.length, 0)
+    const fit = Math.floor(MAX_POINTS / pointsPerDimension)
+    const dimensions = Array.from({ length: fit + 2 }, (_, i) => ({ ...dimension, handle: 'D' + i }))
+    const { polylines, truncated } = intakeDimensionPolylines({ dimensions })
+    expect(truncated).toBe(2)
+    expect(new Set(polylines.map(path => path.handle)).size).toBe(fit)
+    expect(polylines.reduce((sum, path) => sum + path.pts.length, 0)).toBe(fit * pointsPerDimension)
+  })
+
+  it('excludes paper-space, malformed and unsupported records', () => {
+    const excluded = [
+      { ...dimension, space: 'paper', layout: 'S-04' },
+      { ...dimension, layout: 'S-04' },
+      { ...dimension, p2: null },
+      { ...dimension, dimline: null },
+      { ...dimension, handle: '' },
+      { ...dimension, type: 'RADIUS' },
+      null,
+    ]
+    expect(intakeDimensionPolylines({ dimensions: excluded })).toEqual({ polylines: [], truncated: 0 })
+  })
+
+  it('leaves already projected engine and legacy intakes alone', () => {
+    expect(intakeDimensionPolylines({ source: 'engine', dimensions: [dimension] }).polylines).toEqual([])
+    expect(intakeDimensionPolylines({ polylines: [] }).polylines).toEqual([])
+  })
+})
 
 describe('source object summary', () => {
   const panel = { type: 'LWPOLYLINE', layer: 'Panels', closed: true, vertices: [[0, 0], [2, 0], [2, 1], [0, 1]] }
