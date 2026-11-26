@@ -1198,19 +1198,23 @@ def _version_delta(parent_intake: Dict[str, Any], child_intake: Dict[str, Any]) 
 
 
 def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
-                    entries: List[Dict[str, Any]]) -> Dict[int, Optional[Dict[str, int]]]:
-    """Per-version delta, keyed by `v`. `None` where a delta cannot be derived:
-    the root version (no parent to diff against) or a payload that fails to
-    parse (`write_loop.read_intake` raises `KeyError`/`ValueError` — a missing
-    blob or a non-JSON one). Ships only what IS derivable from the stored
-    payloads rather than guessing at either end."""
+                    entries: List[Dict[str, Any]]) -> Tuple[
+                        Dict[int, Optional[Dict[str, int]]], Dict[int, str]]:
+    """Return derivable deltas and observed hashes for mismatched versions."""
     cache: Dict[int, Optional[Dict[str, Any]]] = {}
+    expected = {int(e["v"]): e.get("sha256") for e in entries}
+    mismatches: Dict[int, str] = {}
 
     def _load(v: int) -> Optional[Dict[str, Any]]:
         if v not in cache:
             try:
-                _, intake = write_loop.read_intake(backend, tenant_id, drawing_id, v)
+                _, intake = write_loop.read_intake(
+                    backend, tenant_id, drawing_id, v, expected_source_sha256=expected.get(v),
+                )
                 intake = intake if isinstance(intake, dict) else None
+            except write_loop.IntakeSourceDigestMismatch as exc:
+                mismatches[v] = exc.observed_sha256
+                intake = None
             except (KeyError, ValueError, TypeError,
                     write_loop.ProofStateUnreadable):
                 # Unreadable proof state degrades this ROW's delta to null;
@@ -1223,11 +1227,11 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
     for e in entries:
         v = int(e["v"])
         parent = e.get("parent")
+        child_intake = _load(v)
         if parent is None:
             out[v] = None
             continue
         parent_intake = _load(int(parent))
-        child_intake = _load(v)
         if parent_intake is None or child_intake is None:
             out[v] = None
             continue
@@ -1237,7 +1241,7 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
             # Expected malformed-data failures only: a programming defect must
             # surface as a 500, not vanish into a delta:null row.
             out[v] = None
-    return out
+    return out, mismatches
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
@@ -1252,8 +1256,10 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     manifest, read-only — no acquire/release this wave). `delta` is
     `{added, modified, deleted}` computed HERE, at read time, by diffing this
     version's stored payload against its parent's (see `_version_deltas`); it
-    is `null` where that is not derivable (the root version, or an unparseable
-    payload on either side). Same 404 pattern as the intake route for
+    is `null` for the root or an unavailable, unreadable or mismatched source
+    on either side. With `include_deltas=1`, a mismatch also adds
+    `observed_sha256` beside the recorded `sha256` on the affected row.
+    Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
     import store  # da/store.py; importable via write_loop's sys.path setup (imported above)
@@ -1282,10 +1288,12 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # was before this feature.
     rows = []
     if include_deltas:
-        deltas = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+        deltas, mismatches = _version_deltas(backend, str(tenant_id), drawing_id, entries)
         for e in entries:
             row = _version_row(e)
             row["delta"] = deltas.get(row["v"])
+            if row["v"] in mismatches:
+                row["observed_sha256"] = mismatches[row["v"]]
             rows.append(row)
     else:
         rows = [_version_row(e) for e in entries]

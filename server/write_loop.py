@@ -767,14 +767,24 @@ def upload_marker_key(tenant_id: str, drawing_id: str) -> str:
             f"{store.sanitize_id(drawing_id)}/upload.state.json")
 
 
+class IntakeSourceDigestMismatch(ValueError):
+    """The bytes read for a version differ from its recorded hash."""
+
+    def __init__(self, observed_sha256: str):
+        super().__init__("drawing version source digest mismatch")
+        self.observed_sha256 = observed_sha256
+
+
 def read_intake(backend, tenant_id: str, drawing_id: str,
-                version="head") -> Tuple[int, Dict[str, Any]]:
+                version="head", *,
+                expected_source_sha256: Optional[str] = None) -> Tuple[int, Dict[str, Any]]:
     """Resolve `version` and return (version_int, intake_dict).
 
     A JSON-object version blob is its own intake (mock representation). A raw
     DWG version may use a sibling cache only when an upload marker or cache proof
     binds that cache to the exact immutable source bytes. Raises KeyError or
-    ValueError on a missing, corrupt, or unbound representation."""
+    ValueError on a missing, corrupt, or unbound representation. When the
+    caller supplies a manifest digest, check the source before using its intake."""
     import store
     v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
     try:
@@ -782,10 +792,17 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
         entry = next((e for e in manifest["versions"] if int(e["v"]) == v), {})
     except Exception:  # Optional metadata; source/cache proofs still apply below.
         entry = {}
-    if (entry.get("note") or "").startswith("solar-bundle:"):
+    is_bundle = (entry.get("note") or "").startswith("solar-bundle:")
+    if is_bundle and expected_source_sha256 is None:
         return v, store.read_graph_bundle(backend, tenant_id, drawing_id, v)["intake"]
-    ckey = intake_cache_key(tenant_id, drawing_id, v)
     source = backend.get(vkey)
+    source_digest = None
+    if expected_source_sha256 is not None:
+        source_digest = hashlib.sha256(source).hexdigest()
+        if source_digest != expected_source_sha256:
+            raise IntakeSourceDigestMismatch(source_digest)
+    if is_bundle:
+        return v, store.read_graph_bundle(backend, tenant_id, drawing_id, v)["intake"]
     try:
         direct = json.loads(source.decode("utf-8"))
         if isinstance(direct, dict):
@@ -793,10 +810,11 @@ def read_intake(backend, tenant_id: str, drawing_id: str,
     except (UnicodeDecodeError, ValueError):
         pass
 
+    ckey = intake_cache_key(tenant_id, drawing_id, v)
     if not backend.exists(ckey):
         raise ValueError("raw DWG version has no intake cache")
     candidate = backend.get(ckey)
-    source_digest = hashlib.sha256(source).hexdigest()
+    source_digest = source_digest or hashlib.sha256(source).hexdigest()
     intake_digest = hashlib.sha256(candidate).hexdigest()
 
     # Uploaded v1 already has a durable source/cache proof in its marker.

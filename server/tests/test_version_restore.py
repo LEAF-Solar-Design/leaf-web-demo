@@ -23,6 +23,7 @@ Run:  cd server && python -m pytest tests/test_version_restore.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -172,6 +173,39 @@ def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     assert rows[2]["delta"] is None       # its own payload is corrupt
     assert rows[3]["delta"] is None       # its PARENT (v2) is corrupt
     assert body["error"] is None          # the corruption did not fault the whole read
+
+
+@pytest.mark.parametrize("replaced_version", [1, 2, 3], ids=["root", "middle", "head"])
+def test_history_reports_a_replaced_source_and_omits_its_deltas(
+    client, tmp_path, replaced_version,
+):
+    import store
+
+    backend = _seed_chain(tmp_path)
+    key = store.drawing_version_key(TENANT, DRAWING, replaced_version)
+    original = backend.get(key)
+    replacement = original.replace(b'"handle":"A"', b'"handle":"Z"', 1)
+    assert replacement != original and len(replacement) == len(original)
+    backend.put(key, replacement)
+
+    response = client.get(f"/api/drawings/{DRAWING}/versions",
+                          params={"include_deltas": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    history = response.json()
+    assert history["head"] == 3 and history["latest"] == 3
+    rows = {row["v"]: row for row in history["versions"]}
+    marked = [row["v"] for row in rows.values() if "observed_sha256" in row]
+    assert marked == [replaced_version]
+    assert rows[replaced_version]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert rows[replaced_version]["observed_sha256"] == hashlib.sha256(replacement).hexdigest()
+    expected_deltas = {
+        1: None,
+        2: {"added": 1, "modified": 1, "deleted": 1},
+        3: {"added": 1, "modified": 0, "deleted": 0},
+    }
+    for version, row in rows.items():
+        touches_replacement = replaced_version in (version, row["parent"])
+        assert row["delta"] == (None if touches_replacement else expected_deltas[version])
 
 
 def test_default_versions_shape_has_no_delta_key(client, tmp_path):
