@@ -137,3 +137,35 @@ def test_authored_route_aisle_compliance(ask, aisles, route, expected):
         category: ["B1"] if category == expected else []
         for category in ("crosses_array", "stays_in_aisle", "outside_aisle")
     }
+
+
+@pytest.mark.parametrize("ask,expected_op", [
+    ("Show a count of entities within the cable aisle.", "count_by_layer"),
+    ("Show which layers have geometry outside the cable aisle.", "list_layers"),
+    ("Report total area within the cable route aisle.", "measure_area_by_layer"),
+])
+def test_cable_aisle_context_does_not_override_other_author_operations(ask, expected_op):
+    manifest, _, _ = tools_fallback.author_tool(ask)
+    assert manifest["engine_op"] == expected_op
+
+
+@pytest.mark.parametrize("ask", [
+    "Show which cable routes are outside the marked aisles.",
+    "Find all cable routes outside the access aisles.",
+])
+def test_authored_route_compliance_classifies_each_route_at_a_rotated_aisle(ask):
+    geometry = [
+        ("Access Aisles", "C1", True, [(0, 2), (2, 0), (4, 2), (2, 4)]),
+        ("Cable", "B1", False, [(0, 2), (2, 0)]),
+        ("Cable", "B2", False, [(2, 2), (3.75, 3.75)]),
+        ("Cable", "B3", False, [(1, 2), (3, 2)]),
+    ]
+    raw = intake_dxf.intake_to_dxf(dict(layers=["Access Aisles", "Cable"], polylines=[
+        dict(layer=layer, handle=handle, closed=closed, pts=[[x, y, 0] for x, y in points])
+        for layer, handle, closed, points in geometry
+    ]))
+    manifest, source, _ = tools_fallback.author_tool(ask)
+    assert manifest["engine_op"] == "check_route_crossings"
+    status, payload = invoke(source, raw)
+    assert status == "ok", payload
+    assert payload[0] == {"crosses_array": [], "stays_in_aisle": ["B1", "B3"], "outside_aisle": ["B2"]}

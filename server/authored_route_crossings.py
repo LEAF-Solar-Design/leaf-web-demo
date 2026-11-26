@@ -2,21 +2,33 @@
 import re
 
 
+_ROUTE = r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b"
+_ROUTE_SUBJECT = rf"{_ROUTE}(?:\s+(?:paths?|runs?|segments?))?"
+_POSITION = r"(?:inside|within|outside|contained)\b"
+_AISLE_INTENT = re.compile(
+    r"\baisle\s+(?:compliance|violations?)\b"
+    r"|\bcompliant\s+with\b"
+    rf"|{_ROUTE_SUBJECT}\s+(?:stay(?:s|ing)?|remain(?:s|ing)?|follow(?:s|ing)?|leav(?:e|es|ing))\b"
+    rf"|{_ROUTE_SUBJECT}\s+(?:are|is|lie|lies)\s+(?:(?:fully|entirely)\s+)?{_POSITION}"
+    rf"|\b(?:find|show|flag|identify|report|which)\s+(?:(?:the|all)\s+)?"
+    rf"(?:cable\s+)?{_ROUTE_SUBJECT}\s+{_POSITION}"
+)
+
+
 def is_route_crossing_request(description):
     words = description.casefold()
-    if not re.search(r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b", words):
+    if not re.search(_ROUTE, words):
         return False
     if all(re.search(pattern, words) for pattern in (
         r"\b(?:arrays?|panels?|modules?)\b",
         r"\b(?:cross(?:es|ing)?|intersect(?:s|ing)?|enter(?:s|ing)?|cut(?:s|ting)? through)\b",
     )):
         return True
-    return all(re.search(pattern, words) for pattern in (
-        r"\baisles?\b",
-        r"\b(?:check|verify|validate|audit|confirm|whether|which|flag|find|identify|report|show)\b",
-        r"\b(?:stay(?:s|ing)?|remain(?:s|ing)?|follow(?:s|ing)?|leav(?:e|es|ing)|"
-        r"inside|within|outside|contain(?:ed|ment)?|compliance|compliant|violations?)\b",
-    ))
+    return bool(
+        re.search(r"\baisles?\b", words)
+        and re.search(r"\b(?:check|verify|validate|audit|confirm|whether|which|flag|find|identify|report|show)\b", words)
+        and _AISLE_INTENT.search(words)
+    )
 
 
 PLANAR_GEOMETRY_BODY = r"""
