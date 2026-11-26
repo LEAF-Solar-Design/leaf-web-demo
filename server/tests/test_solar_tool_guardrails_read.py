@@ -297,6 +297,31 @@ def test_per_string_voltage_uses_saved_module_counts_and_inverter_limit(builtin,
     assert shorter["cold_dc_limit"]["status"] == "pass"
 
 
+@pytest.mark.parametrize(("case", "reason"), [
+    ("missing", "sizing_confirmation_required"),
+    ("stale", "sizing_confirmation_required"),
+    ("manual", "global_module_voltage_required"),
+])
+def test_per_string_voltage_reports_sizing_evidence_gaps(builtin, g1, case, reason):
+    settings = g1["settings"]
+    if case == "missing":
+        del settings["extra"]["string_sizing"]
+    elif case == "stale":
+        g1["project"]["latitude"] = 42.0
+    else:
+        settings["extra"]["string_sizing"] = solar_sizing_client.manual_sizing_evidence(g1)
+        settings["voc_cold"] = solar_sizing_client.manual_voltage()
+    validate_graph(g1)
+
+    result = builtin.run(g1, {"per_string_voltage": True})
+
+    assert result["status"] == "incomplete"
+    assert result["design_min_temp_c"] is None
+    assert [row["string_ref"] for row in result["rows"]] == [s["id"] for s in g1["strings"]]
+    for row in result["rows"]:
+        assert row["cold_dc_limit"] == {"status": "unverified", "reason": reason}
+
+
 def test_per_string_voltage_reports_unbound_strings(builtin, graph, passing, service, monkeypatch):
     g = make_graph(graph, passing, monkeypatch, "G5")
     validate_graph(g)
