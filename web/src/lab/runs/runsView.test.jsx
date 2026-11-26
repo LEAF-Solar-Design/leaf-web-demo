@@ -558,6 +558,48 @@ describe('Runs view', () => {
     }
     expect(section.queryByText('Verdict: pass')).toBeNull()
   })
+  it('compares three retained values, including two block outputs from the same run and a failed run', async () => {
+    const { store, evidence } = evidenceRun()
+    const add = (run, block, runRevision, state, report) => {
+      const result = { ...evidence, run_id: run, evaluation: report }
+      store.upsertRun(run, { graph_revision: runRevision, state })
+      store.apply(run, { seq: store.getRun(run).lastSeq + 1, kind: 'value', block_id: block,
+        payload: { result: { data: JSON.stringify(result) } } })
+    }
+    add('evaluation', 'second-evaluator', 2, 'finished', { ...evidence.evaluation, confirm_report: null })
+    add('other-run', 'corpus', 3, 'failed', {
+      ...evidence.evaluation, verdict: 'pass', confirm_report: { verdict: 'better', reasons: ['positive interval'],
+        confirm_comparison: { paired_ci95_c: [1, 2], child_minus_parent_mean_c: 1.5 } },
+    })
+    const snapshot = store.getRuns()
+    render(<RunsView store={store} mock />)
+    screen.getByText('Compare corpus evaluations').parentElement.open = true
+    const first = await screen.findByLabelText('Report 1')
+    const second = screen.getByLabelText('Report 2')
+    const third = screen.getByLabelText('Report 3 (optional)')
+    const choose = (select, label) => fireEvent.change(select, {
+      target: { value: within(select).getByRole('option', { name: label }).value },
+    })
+    const original = /· corpus · result · revision 2 · evaluation$/
+    choose(first, original)
+    expect(within(second).getByRole('option', { name: original })).toBeDisabled()
+    expect(screen.queryByRole('table')).toBeNull()
+    choose(second, /second-evaluator.*revision 2/)
+    const table = within(screen.getByRole('table', { name: 'Corpus evaluation comparison' }))
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
+    choose(third, /revision 3 · other-run/)
+    expect(table.getAllByRole('columnheader')).toHaveLength(4)
+    const values = label => within(table.getByRole('rowheader', { name: label }).parentElement)
+      .getAllByRole('cell').map(cell => cell.textContent)
+    expect(values('Run state')).toEqual(['finished', 'finished', 'failed'])
+    expect(values('Confirmation verdict')).toEqual(['insufficient', 'Unavailable', 'better'])
+    expect(values('Paired 95% interval (cents)')).toEqual(['Unavailable', 'Unavailable', '1 to 2'])
+    expect(values('Confirmation reasons')).toEqual(['too few confirmation tickets', 'Unavailable', 'positive interval'])
+    expect(store.getRuns()).toBe(snapshot)
+    act(() => store.resetSnapshot('other-run', { state: 'failed', graph_revision: 3 }))
+    expect(third).toHaveValue('')
+    expect(table.getAllByRole('columnheader')).toHaveLength(3)
+  })
   it('rejects invalid composition edits while retaining the last composition and completed evidence', () => {
     const { store, evidence } = evidenceRun()
     const manifest = registry['constant@1.0.0']
