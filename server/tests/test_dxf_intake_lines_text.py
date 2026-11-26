@@ -49,14 +49,18 @@ def test_model_entity_counts_include_unprojected_entities_and_exclude_children(m
         "0\nPOINT\n5\nA7\n"
     )
     intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf",
-                                        include_measurement_evidence=measurement)
+                                        include_measurement_evidence=measurement,
+                                        include_model_entity_counts=True)
     assert intake["model_entity_counts"] == {"RAFTER_45X145": 2, "0": 3}
 
 
-def test_model_entity_counts_can_be_empty():
+def test_model_entity_counts_can_be_empty(tmp_path):
     raw = _dxf("0\nPOINT\n5\nA1\n8\nPaper\n67\n1\n")
-    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf")
+    path = tmp_path / "t.dxf"
+    path.write_bytes(raw)
+    intake = dxf_intake.parse_dxf_file(path)
     assert intake["model_entity_counts"] == {}
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_bytes(raw)
 
 
 def test_text_and_mtext_land_in_additive_texts_field():
