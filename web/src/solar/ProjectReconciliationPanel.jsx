@@ -1,6 +1,7 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 import { mintCorrelationId } from '../runIntent.js'
+import EngineeringDiscrepancyHistory from './EngineeringDiscrepancyHistory.jsx'
 import { parseReconciliationNumber, parseEngineeringTotalsRecord, savedReconciliationValues, reconciliationRowsFromValues, reconciliationCsv, validReconciliationResponse } from './projectReconciliation.js'
 
 export const RECONCILIATION_READ_TIMEOUT_MS = 20000
@@ -284,5 +285,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
     </div>
     <p>Delta is Studio minus the supplied report/BOM value.</p>
     <button type="button" disabled={!canExport} onClick={download}>Download CSV</button>
+    {live && <EngineeringDiscrepancyHistory key={JSON.stringify([bindingKey, authorityKey])}
+      binding={solarBinding} authorityKey={authorityKey} isCurrent={current} />}
   </section>
 }
