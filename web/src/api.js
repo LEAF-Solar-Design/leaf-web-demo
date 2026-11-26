@@ -498,6 +498,19 @@ export async function getSessionIdentity(mock) {
     workspace: data.workspace && typeof data.workspace === 'object' ? data.workspace : null }
 }
 
+export async function getTenantToolStatus() {
+  try {
+    if (isMockConversation()) return null
+    const data = await http('/api/tool-envelopes/tenant/status', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+    return {
+      workspaceId: typeof data.workspace_id === 'string' ? data.workspace_id : null,
+      workspaceName: typeof data.workspace_name === 'string' ? data.workspace_name : null,
+      lastPluginCheckAt: typeof data.last_plugin_check_at === 'string' ? data.last_plugin_check_at : null,
+    }
+  } catch { return null }
+}
+
 // Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by
 // /api/session when auth is live (deps.tenant_echo adds tenant_id/org_id);
 // null in mock or when auth is off. The UI uses it for the honest tier chip
