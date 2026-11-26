@@ -3111,12 +3111,12 @@ class _RuntimeProcess:
             environment = dict(spec.environment)
             if (
                 os.name == "nt"
-                and spec.role == "stack-launcher"
+                and spec.role in {"stack-launcher", "canonical-child"}
                 and argv[0] == sys.executable
                 and sys.prefix != sys.base_prefix
             ):
                 # The Windows venv executable redirects to a second process.
-                # Preserve the venv while keeping the launcher in the retained process.
+                # Preserve the venv while running Python in the retained process.
                 environment["__PYVENV_LAUNCHER__"] = sys.executable
                 argv = (sys._base_executable, *argv[1:])
             process = subprocess.Popen(argv, cwd=spec.cwd, env=environment,
