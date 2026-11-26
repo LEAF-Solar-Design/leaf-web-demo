@@ -309,7 +309,7 @@ def splice_tags(source, intake, plan):
                  and _one(r, 4, "") == "")
     table_record("APPID", APP, [(70, 0)], lambda r: _float(r, 70) == 0)
 
-    removed, ranges, owned_refs = set(), {}, set()
+    removed, ranges, previous_labels = set(), {}, {}
     for a, b in writer._records(pairs, sections["ENTITIES"]):
         rec = pairs[a:b]
         if not any(p.code == 1001 and p.value.casefold() == APP.casefold() for p in rec):
@@ -320,7 +320,7 @@ def splice_tags(source, intake, plan):
         if (rec[0].value != "TEXT" or len(xdata) != 3 or xdata[:2] != [(1001, APP), (1000, SCHEMA)]
                 or xdata[2][0] != 1000
                 or not re.fullmatch(r"leaf:string:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", xdata[2][1])
-                or xdata[2][1] in owned_refs
+                or xdata[2][1] in previous_labels
                 or any(p.code == 102 or p.code in writer._POINTER_CODES - {330} for p in rec)
                 or _handle(_one(rec, 330)) != owner or _one(rec, 7) != STYLE
                 or _one(rec, 8).casefold() not in tables["LAYER"]["rows"]
@@ -329,7 +329,10 @@ def splice_tags(source, intake, plan):
                 or _float(rec, 72) != 0 or _float(rec, 73) != 0
                 or any(p.code in (60, 67, 410, 210, 220, 230) for p in rec)):
             fail("STRING_TAGS_OWNERSHIP_CONFLICT")
-        owned_refs.add(xdata[2][1])
+        previous_labels[xdata[2][1]] = {
+            "text": _one(rec, 1, ""),
+            "position": [_float(rec, code, 0) for code in (10, 20, 30)],
+        }
         handle = _handle(_one(rec, 5))
         removed.add(handle)
         ranges[a] = b
@@ -397,7 +400,19 @@ def splice_tags(source, intake, plan):
                 or _float(rec, 72) != 0 or _float(rec, 73) != 0
                 or _one(rec, 330) != owner or _one(rec, 7) != STYLE):
             fail("STRING_TAGS_TEXT_VERIFICATION_FAILED")
+    # Compare placements for matching circuit IDs in the immediate source DXF.
+    # New and removed labels have no before/after pair.
+    label_moves = []
+    for row in plan["tags"]:
+        previous = previous_labels.get(row["string_ref"])
+        if previous is not None and previous["position"] != row["position"]:
+            label_moves.append({
+                "string_ref": row["string_ref"],
+                "before": previous,
+                "after": {"text": row["text"], "position": list(row["position"])},
+            })
     metadata = {"schema": SCHEMA, "plan": deepcopy(plan), "handles": new_handles,
+        "label_moves": label_moves,
         "input_source_sha256": hashlib.sha256(source).hexdigest(),
         "output_source_sha256": hashlib.sha256(raw).hexdigest(),
         "graph_sha256": intake["solar_design_graph_sha256"]}
@@ -409,5 +424,7 @@ def annotation_intake(output, intake, metadata, drawing_id):
     parsed = json.loads(editor._parse(output, drawing_id))
     merged = {key: deepcopy(value) for key, value in intake.items() if key not in editor._DXF_FIELDS}
     merged.update(parsed)
-    merged["leaf_string_tags"] = deepcopy(metadata)
+    # The movement report is derived from the two DXFs. Keep the versioned
+    # intake byte-compatible so requests published by earlier builds replay.
+    merged["leaf_string_tags"] = {key: value for key, value in metadata.items() if key != "label_moves"}
     return json.dumps(merged, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
