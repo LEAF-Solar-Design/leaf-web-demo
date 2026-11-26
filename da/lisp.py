@@ -218,15 +218,25 @@ def build_inspect_solar_scr() -> str:
 
 
 def build_scr(out_localname: str = OUT_LOCALNAME, *, quit_form: str = QUIT_DEFAULT,
-              extra_blocks: tuple = ()) -> str:
+              extra_blocks: tuple = (), declared_insunits: int | None = None) -> str:
     """Return the .scr content (CRLF line endings) for the extract Activity.
 
     quit_form defaults to the DWG-proven ending so the existing Activity's
     script is byte-identical to what is live today. DXF input REQUIRES
     QUIT_SAVED (see the table above) or the WorkItem hangs to timeout.
     extra_blocks (one progn per entry, `{OUT}` bound like the rest) are
-    inserted before the quit form; with none given the output is unchanged.
+    inserted before the quit form. A successor caller may supply an INSUNITS
+    declaration verified against the original source bytes. Absent metadata
+    leaves the default script unchanged.
     """
+    if declared_insunits is not None:
+        if type(declared_insunits) is not int or not 0 <= declared_insunits <= 2147483647:
+            raise ValueError("Invalid source insertion unit code")
+        units_row = (
+            '(progn (setq f (open "{OUT}" "a")) '
+            f'(write-line "INSUNITS|1|{declared_insunits}" f) (close f))'
+        )
+        extra_blocks = (*extra_blocks, units_row)
     lisp = _LISP
     if extra_blocks:
         # The IN record keeps its legacy unit (radians, unconverted) in EVERY

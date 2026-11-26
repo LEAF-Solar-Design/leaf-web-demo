@@ -116,7 +116,8 @@
       "0113",
       "0114",
       "0115",
-      "0116"
+      "0116",
+      "0117"
     ],
     "migration_files": [
       "0001_project_job.sql",
@@ -234,6 +235,7 @@
       "0113_project_archive.sql",
       "0114_video_decode_job_functions.sql",
       "0115_sizing_exchange_trigger_search_path.sql",
+      "0116_x07_confirmation_evidence.sql",
       "0117_customization_stage_grants.sql"
     ],
     "completeness": "partial",
