@@ -108,12 +108,16 @@ it.each([
     [['Pad', 20], ['Access', 3]], 'No rank changes among shared layers', true, 'Access', ['3', '2']],
   ['a new larger layer does not hide a reversal', [['Roof', 16], ['Canopy', 4]],
     [['Site', 80], ['Canopy', 25], ['Roof', 9]], 'Layer area ranking changed', true, 'Roof', ['1', '3']],
+  ['each report has a different extra layer', [['Roof', 16], ['Canopy', 4], ['North', 20]],
+    [['Roof', 16], ['Canopy', 4], ['South', 2]],
+    'No rank changes among shared layers', true, 'Roof', ['2', '1']],
 ])('%s', (_label, a, b, status, matchesChanged, name, expected) => {
   compare(areaReport(first, a), areaReport({ ...third, input_version_id: 'drawing-v2',
     result: { ...third.result, project_context: { project_id: projectId, input_version_id: 'drawing-v2' } } }, b))
 
   expect(screen.getByText(status)).toBeVisible()
   expect(Boolean(screen.queryByText('Matching layers changed'))).toBe(matchesChanged)
+  expect(Boolean(screen.queryByText(/Other matching layers can shift/))).toBe(matchesChanged)
   const row = screen.getByRole('rowheader', { name, exact: true }).closest('tr')
   expect(within(row).getAllByRole('cell').map(cell => cell.textContent)).toEqual(expected)
 })

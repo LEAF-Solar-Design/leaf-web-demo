@@ -79,6 +79,9 @@ function LayerAreaComparison({ first, second }) {
     <>
       <p>{summary}</p>
       {matchesChanged && <p>Matching layers changed</p>}
+      {matchesChanged && shared.length > 0 && (
+        <p>Other matching layers can shift a shared layer’s rank within each report.</p>
+      )}
       {layers.size > 0 && (
         <table>
           <caption>Area rank within each report</caption>
