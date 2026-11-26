@@ -1265,6 +1265,16 @@ def request_cancel(tenant_id: Any, session_id: str, turn_id: str) -> str:
         # Not a turn: a restore owns the slot and releases it itself.
         return "not_cancellable"
 
+    try:
+        import customization_stage_grants
+        if customization_stage_grants.ttl_s() is not None:
+            customization_stage_grants.revoke_for_turn(
+                tenant_id, session_id, turn_id, reason="cancelled",
+            )
+    except Exception as exc:
+        print(f"[leaf-agent] stage grant cancel failed: {type(exc).__name__}",
+              file=sys.stderr)
+
     with _cancellers_lock:
         canceller = _cancellers.get(turn_id)
 

@@ -720,6 +720,24 @@ class SQLiteCustomizationStore(CustomizationRepository):
             ).fetchone()
             return dict(row) if row is not None else None
 
+    def revoke_stage_grants_for_turn(
+        self, *, tenant_id: str, authority_session_id: str,
+        authority_turn_id: str, reason: str, now_ms: int,
+    ) -> int:
+        with self._transaction() as conn:
+            rows = conn.execute(
+                "UPDATE customization_stage_grants SET revoked_ms = ?, revoked_reason = ? "
+                "WHERE tenant_id = ? AND authority_session_id = ? "
+                "AND authority_turn_id = ? AND revoked_ms IS NULL RETURNING change_set_id",
+                (now_ms, reason, tenant_id, authority_session_id, authority_turn_id),
+            ).fetchall()
+            for grant in rows:
+                row = self._find_change_set(conn, tenant_id, grant["change_set_id"])
+                self._append_audit(conn, row, row.state, row.state,
+                                   f"stage-grant-cancelled:{row.change_set_id}",
+                                   "stage_grant_cancelled")
+            return len(rows)
+
     def consume_stage_grant(
         self, *, tenant_id: str, change_set_id: str, owner: str,
         attempt: int, binding_digest: str, now_ms: int,

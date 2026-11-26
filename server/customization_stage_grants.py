@@ -42,6 +42,21 @@ def ttl_s() -> int | None:
     return value if 300 <= value <= 14400 else None
 
 
+def revoke_for_turn(tenant_id: str, session_id: str, turn_id: str, *, reason: str) -> None:
+    try:
+        from customization_service import CustomizationService
+
+        if ttl_s() is None:
+            return
+        service = CustomizationService.configured()
+        service.store.revoke_stage_grants_for_turn(
+            tenant_id=tenant_id, authority_session_id=session_id,
+            authority_turn_id=turn_id, reason=reason, now_ms=int(time.time() * 1000),
+        )
+    except Exception as exc:
+        _LOG.warning("stage_grant_revoke exception_type=%s", type(exc).__name__)
+
+
 def binding_digest(change) -> str:
     from customization_service import _stage_request_fingerprint
 
@@ -149,7 +164,7 @@ def admit(service, change, owner) -> None:
         )):
             pass
         elif row["revoked_ms"] is not None:
-            code = "stage_grant_withdrawn"
+            code = "stage_grant_cancelled" if row["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
         elif row["expires_ms"] <= int(time.time() * 1000):
             code = "stage_grant_expired"
         elif row["dispatches"] >= 2:

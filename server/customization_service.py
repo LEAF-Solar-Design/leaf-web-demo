@@ -161,6 +161,7 @@ class CustomizationServiceError(RuntimeError):
     ) -> None:
         super().__init__(code)
         self.code, self.status_code = code, status_code
+        self.harness_not_called = code == "stage_grant_cancelled"
         selected = detail if diagnostic_code is None else diagnostic_code
         self.diagnostic_code = (
             selected if type(selected) is str and selected in _DIAGNOSTIC_CODES
@@ -2198,7 +2199,8 @@ class CustomizationService:
             except Exception as exc:
                 raise CustomizationServiceError("stage_grant_refused", 409) from exc
             if grant is not None and grant["revoked_ms"] is not None:
-                raise CustomizationServiceError("stage_grant_withdrawn", 409)
+                code = "stage_grant_cancelled" if grant["revoked_reason"] == "cancelled" else "stage_grant_withdrawn"
+                raise CustomizationServiceError(code, 409)
         url, secret = _harness_config()
         if not url:
             raise CustomizationServiceError("customization_harness_unavailable", 503)
@@ -2251,6 +2253,13 @@ class CustomizationService:
                     "customization_author_job_failed", 502,
                     diagnostic_code="harness_stage_job_failed", cause=exc,
                 )
+                if without_services:
+                    notice = (
+                        "This build waited in line, so it ran without connected services. "
+                        "If it needs one, ask again when the line is short."
+                    )
+                    prefix = (reason or "")[:500 - len(notice) - 1].rstrip()
+                    reason = f"{prefix} {notice}" if prefix else notice
                 error.harness_reason = reason
                 if getattr(change, "tool_target", None) == "branch" and response.status_code == 422:
                     refusal = response.json().get("error")

@@ -23,6 +23,7 @@ import deps
 import entitlements
 import platform_link
 import session_store
+import turn_runner
 from customization_models import ChangeState
 from customization_service import CustomizationService, CustomizationServiceError
 from customization_store import SQLiteCustomizationStore
@@ -33,6 +34,10 @@ SUBJECT = "auth0|author"
 DESCRIPTION = "Count the selected lines"
 BASE = "a" * 40
 WORKSPACE = "d" * 64
+WAITING_SERVICES_NOTICE = (
+    "This build waited in line, so it ran without connected services. "
+    "If it needs one, ask again when the line is short."
+)
 
 
 @pytest.fixture
@@ -543,7 +548,7 @@ def test_project_write_lost_refuses_at_issue_and_dispatch(lane, monkeypatch):
 def test_setting_off_never_calls_any_grant_store_method(lane, monkeypatch):
     monkeypatch.delenv("LEAF_STAGE_GRANT_TTL_S")
     grant_methods = []
-    for name in ("insert_stage_grant", "get_stage_grant", "consume_stage_grant", "withdraw_stage"):
+    for name in ("insert_stage_grant", "get_stage_grant", "consume_stage_grant", "withdraw_stage", "revoke_stage_grants_for_turn"):
         method = Mock(side_effect=AssertionError(name))
         grant_methods.append(method)
         monkeypatch.setattr(lane.store, name, method)
@@ -806,6 +811,172 @@ def test_dispatched_grant_cannot_be_withdrawn_after_lease_release(lane, monkeypa
     post.assert_not_called()
 
 
+@pytest.mark.parametrize("finish,consumed", [("interrupted", False), ("end_turn", False), ("end_turn", True)])
+def test_cancel_revokes_before_terminal_gap_and_blocks_dispatch(lane, monkeypatch, finish, consumed):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    if consumed:
+        clean(lane)
+        claimed = lane.store.claim_stage(owner="worker-a")
+        grants.admit(lane.service, claimed, "worker-a")
+        lane.store.defer_stage_claim(
+            tenant_id=TENANT, change_set_id=change.change_set_id,
+            owner="worker-a", reason_code="retry", delay_seconds=0,
+        )
+    assert session_store.try_begin_turn(lane.session_id, lane.turn_id, 300.0)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+
+    def cancel():
+        assert lane.store.get_stage_grant(TENANT, change.change_set_id)["revoked_reason"] == "cancelled"
+        if not consumed:
+            clean(lane, reason=finish)
+        session_store.end_turn(lane.session_id, lane.turn_id)
+
+    monkeypatch.setitem(turn_runner._cancellers, lane.turn_id, cancel)
+    assert turn_runner.request_cancel(lane.tenant, lane.session_id, lane.turn_id) == "cancelled"
+    if finish == "end_turn":
+        assert grants.turn_ended_cleanly(lane.session_id, lane.turn_id, TENANT)
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    assert worker.run_once("worker-b", service=lane.service)
+    failed = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
+    assert failed.stage_error_code == "stage_grant_cancelled"
+    assert not failed.stage_error_retryable
+    assert "harness_not_called" not in lane.service.stage_status_change(failed)["error"]
+    post.assert_not_called()
+    events = lane.store.audit_events(tenant_id=TENANT, change_set_id=change.change_set_id)
+    cancelled = [event for event in events if event.reason_code == "stage_grant_cancelled"]
+    assert len(cancelled) == 2
+    assert cancelled[0].prior_state is cancelled[0].next_state is ChangeState.STAGING
+    assert cancelled[1].prior_state is ChangeState.STAGING
+    assert cancelled[1].next_state is ChangeState.FAILED
+
+
+@pytest.mark.parametrize("case", ["off", "failure", "unrelated", "orphan", "wrapper_failure"])
+def test_cancel_grant_is_best_effort_and_bound_to_submitting_turn(lane, monkeypatch, caplog, capsys, case):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    active_turn = "unrelated" if case == "unrelated" else lane.turn_id
+    assert session_store.try_begin_turn(lane.session_id, active_turn, 300.0)
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(lambda cls: lane.service))
+    cancel = Mock(side_effect=lambda: session_store.end_turn(lane.session_id, active_turn))
+    monkeypatch.setitem(turn_runner._cancellers, active_turn, cancel)
+    revoke = Mock(wraps=lane.store.revoke_stage_grants_for_turn)
+    monkeypatch.setattr(lane.store, "revoke_stage_grants_for_turn", revoke)
+    if case == "off":
+        monkeypatch.delenv("LEAF_STAGE_GRANT_TTL_S")
+    elif case == "failure":
+        revoke.side_effect = RuntimeError("private detail")
+    elif case == "wrapper_failure":
+        monkeypatch.setattr(grants, "revoke_for_turn", Mock(side_effect=RuntimeError("private detail")))
+    elif case == "orphan":
+        monkeypatch.delitem(turn_runner._cancellers, active_turn)
+        monkeypatch.setattr(turn_runner, "_auto_confirm_reads", Mock())
+        monkeypatch.setattr(turn_runner, "_kick_queued", Mock())
+    assert turn_runner.request_cancel(lane.tenant, lane.session_id, active_turn) == "cancelled"
+    row = lane.store.get_stage_grant(TENANT, change.change_set_id)
+    assert (row["revoked_ms"] is not None) is (case == "orphan")
+    if case in {"off", "wrapper_failure"}:
+        revoke.assert_not_called()
+    else:
+        revoke.assert_called_once()
+    if case in {"failure", "wrapper_failure"}:
+        logs = caplog.text + capsys.readouterr().err
+        assert "RuntimeError" in logs
+        assert "private detail" not in logs
+
+
+@pytest.mark.parametrize("field", ["tenant_id", "authority_session_id", "authority_turn_id"])
+def test_cancel_store_requires_all_authority_fields(lane, field):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    arguments = dict(tenant_id=TENANT, authority_session_id=lane.session_id,
+                     authority_turn_id=lane.turn_id, reason="cancelled", now_ms=123)
+    assert lane.store.revoke_stage_grants_for_turn(**{**arguments, field: "other"}) == 0
+    assert lane.store.revoke_stage_grants_for_turn(**arguments) == 1
+    assert lane.store.revoke_stage_grants_for_turn(**arguments) == 0
+    assert lane.store.get_stage_grant(TENANT, change.change_set_id)["revoked_ms"] == 123
+
+
+def test_cancel_revokes_each_matching_grant_once(lane):
+    changes = [queue(lane, key=key) for key in ("first", "second")]
+    for change in changes:
+        assert grants.issue(lane.service, change)
+    arguments = dict(tenant_id=TENANT, authority_session_id=lane.session_id,
+                     authority_turn_id=lane.turn_id, reason="cancelled", now_ms=123)
+    assert lane.store.revoke_stage_grants_for_turn(**arguments) == 2
+    assert lane.store.revoke_stage_grants_for_turn(**arguments) == 0
+    for change in changes:
+        events = lane.store.audit_events(tenant_id=TENANT, change_set_id=change.change_set_id)
+        cancelled = [event for event in events if event.reason_code == "stage_grant_cancelled"]
+        assert len(cancelled) == 1
+        assert cancelled[0].prior_state is cancelled[0].next_state is ChangeState.STAGING
+
+
+def test_cancelled_grant_refuses_even_while_turn_still_active(lane, monkeypatch):
+    change = issued_claim(lane)
+    lane.store.revoke_stage_grants_for_turn(
+        tenant_id=TENANT, authority_session_id=lane.session_id,
+        authority_turn_id=lane.turn_id, reason="cancelled", now_ms=123,
+    )
+    refuse(lane, change, "stage_grant_cancelled")
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: SUBJECT)
+    post = Mock()
+    monkeypatch.setattr(requests, "post", post)
+    with pytest.raises(CustomizationServiceError, match="stage_grant_cancelled") as caught:
+        lane.service.dispatch_stage(change)
+    assert caught.value.harness_not_called is True
+    post.assert_not_called()
+
+
+def test_revoke_configured_service_failure_never_raises(lane, monkeypatch, caplog):
+    def unavailable(cls):
+        raise RuntimeError("private configuration")
+
+    monkeypatch.setattr(CustomizationService, "configured", classmethod(unavailable))
+    grants.revoke_for_turn(TENANT, lane.session_id, lane.turn_id, reason="cancelled")
+    assert "RuntimeError" in caplog.text
+    assert "private configuration" not in caplog.text
+
+
+def test_no_services_transport_failure_is_unchanged(lane, monkeypatch):
+    change = issued_claim(lane)
+    monkeypatch.setattr(requests, "post", Mock(side_effect=requests.ConnectionError("offline")))
+    with pytest.raises(CustomizationServiceError) as caught:
+        lane.service.dispatch_stage(change)
+    assert caught.value.code == "customization_harness_unavailable"
+    assert getattr(caught.value, "harness_reason", None) is None
+
+
+@pytest.mark.parametrize("without_services,reason", [
+    (True, None), (True, "Safe reason."), (True, "x" * 600), (False, "Safe reason."),
+])
+def test_job_failure_stage_status_explains_waiting_without_services(lane, monkeypatch, without_services, reason):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    clean(lane)
+    monkeypatch.setattr(deps, "active_stage_author_subject", lambda *_: None if without_services else SUBJECT)
+    response = SimpleNamespace(status_code=500)
+    error = requests.HTTPError(response=response)
+    post = Mock(side_effect=error)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(CustomizationService, "_harness_job_failure", classmethod(lambda cls, _: (True, reason)))
+    assert worker.run_once("worker-a", service=lane.service)
+    failed = lane.store.get_change_set(tenant_id=TENANT, change_set_id=change.change_set_id)
+    status = lane.service.stage_status_change(failed)
+    assert status["error"]["reason_code"] == "customization_author_job_failed"
+    message = status["error"]["message"]
+    assert len(message) <= 500
+    if without_services:
+        assert post.call_args.kwargs["headers"]["X-Author-Services"] == "none"
+        assert message.endswith(WAITING_SERVICES_NOTICE)
+        if reason:
+            assert message.startswith(reason[:20])
+    else:
+        assert message == reason
+        assert WAITING_SERVICES_NOTICE not in message
+
+
 def test_issue_store_failure_leaves_enqueue_successful_and_logs_only_type(lane, monkeypatch, caplog):
     monkeypatch.setattr(lane.store, "insert_stage_grant", Mock(side_effect=RuntimeError("private detail")))
     assert enqueue(lane)["status"] == "queued"
@@ -814,7 +985,8 @@ def test_issue_store_failure_leaves_enqueue_successful_and_logs_only_type(lane, 
 
 
 @pytest.mark.parametrize("code,message", [
-    ("stage_grant_exhausted", "This build was tried twice and could not be finished. Ask for it again."),
+    ("stage_grant_exhausted", "This build was tried twice and could not be finished. Ask for it again. " + WAITING_SERVICES_NOTICE),
+    ("stage_grant_cancelled", "This build was stopped from the conversation before it started."),
     ("stage_grant_turn_open", "The conversation that asked for this build was stopped, so it was not started. Ask for it again."),
     ("stage_grant_unavailable", "This build could not be checked and was not started. Ask for it again."),
 ])
@@ -824,6 +996,9 @@ def test_grant_refusals_have_actionable_route_messages(code, message):
     body = json.loads(response.body)
     assert body["reason_code"] == code
     assert body["error"]["message"] == message
+    if code == "stage_grant_cancelled":
+        assert body["harness_not_called"] is True
+        assert body["error"]["retryable"] is False
 
 
 @pytest.mark.parametrize("case,status,withdrawn,revoked", [

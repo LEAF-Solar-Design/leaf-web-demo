@@ -536,11 +536,16 @@ _CUSTOMIZATION_ERROR_MESSAGES = {
         "The approved request was not executed."
     ),
     "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
-    "stage_grant_exhausted": "This build was tried twice and could not be finished. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
     "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
     "stage_grant_refused": "Your access changed while this request waited. It was not started.",
     "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
     "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
 }
 
 
@@ -705,6 +710,7 @@ def _customization_error(
                         content=with_envelope_fields({
         "error": error_obj("BAD_PARAMS", message, retryable=retryable),
         "reason_code": exc.code,
+        **({"harness_not_called": True} if exc.harness_not_called else {}),
         **({"failures": exc.failures} if exc.code in {"branch_package_invalid", "capability_not_allowed"} else {}),
     }))
 
