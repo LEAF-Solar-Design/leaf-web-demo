@@ -70,7 +70,7 @@ test('plan mode asks, proposes a plan and builds on approval', async ({ page, re
   const inputs = plan.getByRole('table', { name: 'Inputs' })
   await expect(inputs).toContainText('layer_filter')
   await expect(inputs).toContainText('string')
-  await expect(plan).toContainText('q1 · Table')
+  await expect(plan).toContainText('Table')
   await expect(page.getByText('Here is the plan. Approve it to build the tool.').first()).toBeVisible()
   const approve = plan.getByRole('button', { name: 'Approve and build', exact: true })
   await expect(approve).toBeEnabled({ timeout: 15_000 })

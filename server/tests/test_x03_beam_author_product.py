@@ -94,3 +94,35 @@ def test_feet_requested_from_a_metric_drawing():
     result, _ = payload
     assert result["units"] == "ft"
     assert result["lengths_by_layer"]["Roof_Beams"] == pytest.approx(8 / 0.3048)
+
+
+@pytest.mark.parametrize("ask", [
+    "Check beam totals where an annotation block mixes text and independently identified framing.",
+    "Show the combined length of the beams in the detail block.",
+    "Measure the total length of each beam layer in this mixed annotation and framing block.",
+])
+def test_takeoff_in_mixed_block(ask):
+    raw = dxf_pairs(
+        (0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Detail"),
+        (0, "TEXT"), (8, "Notes"), (10, 0), (20, 0), (40, 1), (1, "BEAM 999"),
+        (0, "LINE"), (5, "D1"), (8, "S-Beams"), (10, 0), (20, 0), (11, 3), (21, 4),
+        (0, "LINE"), (5, "D2"), (8, "Notes"), (10, 0), (20, 0), (11, 99), (21, 0),
+        (0, "ENDBLK"), (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
+        (0, "INSERT"), (5, "B1"), (2, "Detail"), (8, "Notes"), (10, 10), (20, 20),
+        (41, 2), (42, 2), (50, 90), (0, "ENDSEC"), (0, "EOF"),
+    ).encode("ascii")
+    _, source, _ = tools_fallback.author_tool(ask)
+    status, payload = tool_loader._run_source_in_sandbox(
+        source, "framing.py", dxf_intake.parse_dxf_bytes(raw), {})
+    assert status == "ok", payload
+    assert payload[0]["lengths_by_layer"] == pytest.approx({"S-Beams": 10})
+
+
+@pytest.mark.parametrize("ask", [
+    "Check beam totals by count for the framing.",
+    "Show beam totals by area for the framing.",
+])
+def test_non_length_totals_keep_their_quantity(ask):
+    from authored_beam_lengths import matches
+
+    assert not matches(ask)

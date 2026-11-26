@@ -1226,9 +1226,9 @@ const Viewer = forwardRef(function Viewer(
     const s = stateRef.current
     if (!s || solarOverlay == null || solarOverlay.polylines.length === 0
       || s.intake !== solarOverlay.intake || s.drawingKey !== solarOverlay.drawingKey) return
-    const layer = buildSolarGraphOverlayLayer(solarOverlay.polylines.filter(polyline => polyline.pts.every(finiteXY)).map(polyline => ({
-      ...polyline, pts: polyline.pts.map(point => [point[0] - s.origin.x, point[1] - s.origin.y, ...point.slice(2)]),
-    })))
+    const layer = buildSolarGraphOverlayLayer(
+      solarOverlay.polylines.filter(polyline => polyline.pts.every(finiteXY)), s.origin,
+    )
     s.solarGroup.add(layer.group)
     s.solarLayer = layer
     return () => {

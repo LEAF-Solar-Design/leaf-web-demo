@@ -32,6 +32,7 @@ import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
+import { setAccountWorkspace } from './auth/accountIdentity.js'
 import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage, rememberServiceResponse, invalidateServiceResponse } from './lib/serviceAuthSession.js'
 
 // A deployed static bundle talks to the app through the same public origin.
@@ -489,10 +490,12 @@ export function isWorkspaceBootstrapRequired(error) {
 // --- Session / intake ---------------------------------------------------
 export async function getSessionIdentity(mock) {
   conversationMock = mock === true
-  if (mock) return { tenant: null, tier: null, org: null }
+  if (mock) return { tenant: null, tier: null, org: null, workspace: null }
   // Identity proof must be fresh, independently of any selected drawing.
   const data = await http('/api/session/identity', { cache: 'no-store' }, STARTUP_FETCH_TIMEOUT_MS)
-  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null }
+  setAccountWorkspace(data.workspace ?? null)
+  return { tenant: data.tenant_id || null, tier: data.tier || null, org: data.org_id || null,
+    workspace: data.workspace && typeof data.workspace === 'object' ? data.workspace : null }
 }
 
 // Returns {intake, tenant}. `tenant` is the resolved tenant id echoed by
@@ -1135,8 +1138,9 @@ export async function fetchInlineAuthoringFlags() {
 // --- Claude account grant (CONCERN 2 — the user's Claude login) ----------
 // This is the SIBLING of the platform JWT (Concern 1), and NEVER the same thing
 // (AUTH.md §0). It answers "whose Anthropic credit runs the authoring agent?" —
-// a per-user Claude OAuth token minted by `claude setup-token`, stored per tenant
-// server-side. The token is WRITE-ONLY from the UI: we POST it once and never
+// an Anthropic API key billed at API rates, stored per tenant server-side.
+// Existing oauth links from `claude setup-token` remain supported.
+// The credential is WRITE-ONLY from the UI: we POST it once and never
 // read it back (GET never returns it), never log it, never echo it.
 //   GET    /api/tenant/claude-grant -> {linked: bool, linked_at: str|null}
 //   POST   /api/tenant/claude-grant {token} -> {linked: true, linked_at}
@@ -1149,9 +1153,9 @@ export async function getClaudeGrant() {
 
 // POST the token ONCE. Callers must clear their field immediately after; this
 // layer keeps no reference to it beyond the request body and logs nothing.
-// `kind` ("oauth" = a Claude subscription token from `claude setup-token`;
-// "api_key" = an Anthropic org API key billed at API rates) is sent explicitly
-// from the user's choice. It is OPTIONAL in the contract (the server auto-detects
+// `kind` ("api_key" = an Anthropic API key billed at API rates) is sent explicitly
+// for new links. Existing "oauth" links from `claude setup-token` remain supported.
+// It is OPTIONAL in the contract (the server auto-detects
 // from the token shape when omitted); we send it so the linked kind is honest
 // even if detection is ambiguous. The token itself is never stored/echoed/logged.
 export async function linkClaudeGrant(token, kind, label, plan) {
@@ -1567,7 +1571,15 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
-    const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
+    let message = body?.error?.message || `POST /api/drawings/upload -> ${res.status}`
+    if (res.status === 429 && typeof body?.quota?.resets_at === 'string') {
+      const reset = new Date(body.quota.resets_at)
+      if (!Number.isNaN(reset.getTime())) {
+        const time = reset.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+        message += ` Resets at ${time}.`
+      }
+    }
+    const error = new Error(message)
     error.status = res.status
     error.body = body
     throw error
@@ -2129,6 +2141,17 @@ export function getAuthorStage(changeSetId, signal) {
   return http(`/api/author/stages/${encodeURIComponent(changeSetId)}`, {
     headers: { 'X-Tenant-Id': TENANT }, signal, cache: 'no-store',
   })
+}
+
+export async function withdrawAuthorStage(changeSetId, signal) {
+  const result = await http(`/api/author/stages/${encodeURIComponent(changeSetId)}/withdraw`, {
+    method: 'POST', headers: { 'X-Tenant-Id': TENANT }, signal,
+  })
+  if (result?.contract !== 'leaf.customization-stage-withdraw.v1'
+    || typeof result.withdrawn !== 'boolean' || typeof result.revoked !== 'boolean') {
+    throw new Error('Invalid build withdrawal response.')
+  }
+  return result
 }
 
 export async function getAuthorStageSource(changeSetId, commit, signal) {

@@ -6,7 +6,9 @@ requires an injected alias. No customer identity is inferred from drawing data.
 import copy
 import math
 import unicodedata
+
 from solar_drawing_roles import discover_roles
+from x07_customer_profile_store import validate_trackers
 
 
 def _label(value):
@@ -31,7 +33,7 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
         return fresh('INVALID_PROFILE')
     roles = profile.get('roles')
     if (not isinstance(roles, dict) or 'module' not in roles
-            or set(roles) - {'module', 'roof', 'obstruction'}):
+            or set(roles) - {'module', 'roof', 'obstruction', 'trackers'}):
         return fresh('INVALID_ROLE_MAP')
     if not isinstance(intake, dict) or not isinstance(intake.get('inserts'), list):
         return fresh('DRAWING_UNREADABLE')
@@ -63,6 +65,15 @@ def check_compatibility(intake, profile, *, customer_key, block_aliases=None, pr
             aliases.setdefault(source.casefold(), set()).update(target.casefold() for target in targets)
     resolved = {}
     for role, wanted in roles.items():
+        if role == 'trackers':
+            try:
+                validate_trackers(wanted)
+            except ValueError:
+                return fresh('INVALID_ROLE_MAP')
+            if any((item['block'], item['layer']) not in pairs for item in wanted):
+                return fresh('ROLE_NOT_FOUND')
+            resolved[role] = copy.deepcopy(wanted)
+            continue
         if (not isinstance(wanted, dict) or not isinstance(wanted.get('layer'), str) or not wanted['layer']
                 or (role == 'module' and not wanted.get('block'))):
             return fresh('INVALID_ROLE_MAP')

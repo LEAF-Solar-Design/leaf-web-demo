@@ -287,6 +287,7 @@ export function deriveProjectReadResultState(options) {
         for (const key of Reflect.ownKeys(ref)) Object.defineProperty(copiedRef, key, { value: ownValue(ref, key), enumerable: true })
         Object.freeze(copiedRef)
         view.artifact = { state: 'ready', ref: copiedRef, filename: copiedRef.filename, sizeText: formatBytes(copiedRef.byte_length) }
+        view.details.push({ label: 'File SHA-256', text: copiedRef.content_sha256 })
       } else view.artifact = { state: 'unverified' }
     }
     return { mode: 'ready', binding, current, inputIntakeSha256: meta.input_intake_sha256, graphSha256: meta.graph_sha256, view }

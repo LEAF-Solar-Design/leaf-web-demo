@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict'), { execFileSync } = require('node:child_process')
 const h = require('./x07_profile_review_dom_harness.cjs')
+// These states settle after the real Python worker responds.
+const adapterWait = { timeout: 15000 }
 async function main() {
   try {
     const Editor = h.component('X07CustomerProfileEditor'), context = h.ctx('selective-restore')
@@ -11,10 +13,10 @@ async function main() {
       applicationRecord: pin, pinnedRoles: pin.roles,
       loadProfile: (customer, options) => rpc('editor_load', customer, options.signal),
       saveProfile: (customer, roles, options) => { saves++; return rpc('editor_save', { customer, roles, expected_version: options.expected_version }, options.signal) } }))
-    await h.screen.findByRole('textbox', { name: 'Module layer' })
+    await h.screen.findByRole('textbox', { name: 'Module layer' }, adapterWait)
     h.fireEvent.click(h.screen.getByRole('button', { name: 'Add roof role' }))
     h.fireEvent.change(h.screen.getByRole('textbox', { name: 'Roof layer' }), { target: { value: 'ROOF' } })
-    h.fireEvent.click(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 2')
+    h.fireEvent.click(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 2', {}, adapterWait)
     h.fireEvent.change(h.screen.getByRole('textbox', { name: 'Module layer' }), { target: { value: 'NEXT' } })
     h.fireEvent.click(h.screen.getByRole('button', { name: 'Remove roof role' }))
     h.fireEvent.click(h.screen.getByRole('button', { name: 'Add obstruction role' }))
@@ -26,7 +28,7 @@ async function main() {
     assert.equal(h.screen.getByRole('textbox', { name: 'Module layer' }).value, 'NEXT')
     assert.equal(h.screen.getByRole('textbox', { name: 'Roof layer' }).value, 'ROOF')
     assert.equal(h.screen.queryByRole('textbox', { name: 'Obstruction layer' }), null)
-    await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 3')
+    await h.enter(h.screen.getByRole('button', { name: 'Save profile' })); await h.screen.findByText('Profile version: 3', {}, adapterWait)
     assert.equal(saves, 2)
     const audit = `import json,sqlite3,sys
 with sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True) as db:

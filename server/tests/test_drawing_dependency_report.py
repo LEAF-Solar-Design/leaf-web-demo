@@ -42,6 +42,55 @@ def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
 
 
+@pytest.mark.parametrize(
+    "section,device,style,expected",
+    [
+        ("OBJECTS", "Office.pc3", "monochrome.ctb",
+         [("plot_device", "Office.pc3"), ("plot_style", "monochrome.ctb")]),
+        ("OBJECTS", r"C:\Plotters\Wide Format.pc3", "../styles/screened.stb",
+         [("plot_device", r"C:\Plotters\Wide Format.pc3"),
+          ("plot_style", "../styles/screened.stb")]),
+        ("OBJECTS", "", "screened.stb", [("plot_style", "screened.stb")]),
+        ("OBJECTS", "Office.pc3", "", [("plot_device", "Office.pc3")]),
+        ("ENTITIES", "Decoy.pc3", "decoy.ctb", []),
+    ],
+)
+def test_normal_intake_reports_plot_resources_without_resolving_them(
+    section, device, style, expected, monkeypatch
+):
+    import builtins
+    import io
+    import os
+
+    line = "0\nLINE\n5\nAA\n8\nDesign\n10\n1\n20\n2\n11\n3\n21\n4\n"
+    settings = (
+        "0\nPLOTSETTINGS\n5\nAB\n100\nAcDbPlotSettings\n"
+        f"1\nSetup name.pc3\n2\n{device}\n4\nMedia name.ctb\n7\n{style}\n"
+    )
+    objects = settings if section == "OBJECTS" else ""
+    entities = line + (settings if section == "ENTITIES" else "")
+    raw = (
+        f"0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n"
+        f"0\nSECTION\n2\nOBJECTS\n{objects}0\nENDSEC\n0\nEOF\n"
+    ).encode()
+
+    def forbidden_open(*args, **kwargs):
+        pytest.fail("Intake attempted to open a plot resource")
+
+    with monkeypatch.context() as guard:
+        for module in (builtins, io, os):
+            guard.setattr(module, "open", forbidden_open)
+        intake = parse_dxf_bytes(raw)
+
+    report = intake["dependency_report"]
+    assert report["scope"] == "local_dxf_records"
+    assert report["external_files_opened"] is False
+    assert report["dependencies"] == [
+        {"kind": kind, "name": name, "disposition": "reported"} for kind, name in expected
+    ]
+    assert intake["polylines"][0]["pts"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
+
+
 @pytest.mark.parametrize("kind", ["MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"])
 def test_inline_font_controls_preserve_chunk_order_and_literal_names(kind):
     pairs = [(0, "SECTION"), (2, "ENTITIES"), (0, kind),

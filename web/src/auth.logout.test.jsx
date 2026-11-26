@@ -257,6 +257,18 @@ async function mountLogout(sdkEnabled) {
   return { auth, sdk, createClient, reload, assertCleared, offThrow, origin: realWindow.location.origin }
 }
 
+it('human logout removes the display-only account email', async () => {
+  const h = await mountLogout(false)
+  const { setAccountEmail } = await import('./auth/accountIdentity.js')
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-a' }))}.signature`)
+  setAccountEmail('a@example.com')
+  expect(JSON.parse(localStorage.getItem('leaf.account_email'))).toEqual({ sub: 'account-a', email: 'a@example.com' })
+  try {
+    await act(async () => { await h.auth.logout() })
+    expect(localStorage.getItem('leaf.account_email')).toBeNull()
+  } finally { h.offThrow(); localStorage.removeItem('leaf.account_email') }
+})
+
 it('a synchronous before-logout listener adds no wait before local authority is cleared', async () => {
   const h = await mountLogout(false)
   const listener = vi.fn()

@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 import unicodedata
 import zlib
@@ -36,6 +37,23 @@ def unique_json_object(pairs):
     if len(result) != len(pairs):
         raise InvalidReference('Duplicate JSON key makes the original material ambiguous.')
     return result
+
+
+_SURROGATE = re.compile(r'[\ud800-\udfff]')
+
+
+def check_json_unicode(value):
+    """The JSON decoder combines valid escaped pairs. A remaining half is invalid."""
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and _SURROGATE.search(item):
+            raise InvalidReference('Material JSON contains an unpaired surrogate.')
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
 
 
 def check_json_depth(raw):
@@ -258,7 +276,9 @@ def validate(name, content_type, raw, *, allow_corpus_members=False):
             if media_type == 'application/json':
                 def invalid_constant(value):
                     raise ValueError('non-finite JSON')
-                json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+                document = json.loads(text, parse_constant=invalid_constant, object_pairs_hook=unique_json_object)
+                if r'\u' in text:
+                    check_json_unicode(document)
         except InvalidReference:
             raise
         except (UnicodeError, ValueError, RecursionError):

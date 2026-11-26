@@ -228,7 +228,7 @@ describe('solar LandXML client', () => {
       expect(hasLine(intake, line)).toBe(true)
     }
     const state = readServer('solar_physical_state.py')
-    for (const line of ['UNITS = {"m": 1.0, "ft": 0.3048}', 'FILENAME = "physical-state.json"']) {
+    for (const line of ['UNITS = {"m": 1.0, "ft": 0.3048, "in": 0.0254}', 'FILENAME = "physical-state.json"']) {
       expect(hasLine(state, line)).toBe(true)
     }
     const head = readServer('solar_physical_head.py')

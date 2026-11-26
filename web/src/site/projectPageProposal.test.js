@@ -23,6 +23,29 @@ const reply = value => new Response(JSON.stringify(value), { headers: { 'content
 const propose = (source = saved(), instruction = 'Shorten the headline', options) => proposeProjectPage(PROJECT, source, instruction, options)
 const INVALID = 'The text proposal could not be verified. Try again.'
 
+describe('saved Browser contact proposals', () => {
+  const page = { label: 'Bakery', headline: 'Contact', description: '', status: '', theme: 'cream', alignment: 'center' }
+  const general = { label: 'General inquiries', href: 'mailto:hello@example.test' }
+  const booking = { label: 'Book a tasting', href: 'https://example.test/book' }
+  const catering = { label: 'Catering', href: 'mailto:catering@example.test' }
+
+  it.each([
+    ['add', { action: general }, { actions: [general, booking] }, [booking.label, booking.href], 7],
+    ['remove', { actions: [catering, general] }, { action: general }, ['', ''], 5],
+  ])('validates %s and refuses an unapproved destination or different field id', (_name, before, after, values, start) => {
+    const snapshot = { ...saved(), document: { ...page, ...before } }
+    const value = { ...result(), proposed_document: { ...page, ...after },
+      edits: values.map((text, index) => ({ id: `f000${start + index}`, value: text })) }
+    expect(validateProjectPageProposal(PROJECT, snapshot, value)).toEqual(value)
+    expect(() => validateProjectPageProposal(PROJECT, snapshot, {
+      ...value, proposed_document: { ...value.proposed_document, theme: 'dark' },
+    })).toThrow(INVALID)
+    expect(() => validateProjectPageProposal(PROJECT, snapshot, {
+      ...value, edits: [{ id: 'f0110', value: 'https://example.test/wrong' }, ...value.edits.slice(1)],
+    })).toThrow(INVALID)
+  })
+})
+
 const photoDigest = document => createHash('sha256').update(JSON.stringify(document, (_, value) => value && typeof value === 'object' && !Array.isArray(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest('hex')
 const photoSaved = () => ({ ...saved(), digest: photoDigest(document()) })

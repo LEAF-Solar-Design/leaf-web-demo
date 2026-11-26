@@ -3,7 +3,9 @@
  */
 import { createHash } from "node:crypto";
 import type { ProjectRepositoryAuthority, TenantRepoProvider } from "../ports/index.js";
+import type { CleanedStaticNextBuild } from "./managedNextRuntime.js";
 
+export type CandidateOperation = "read" | "write";
 export interface NextBuildRequest { jobId: string; sourceCommit: string; sourceTree: string }
 export type NextBuildScope = Readonly<ProjectRepositoryAuthority & NextBuildRequest>;
 export interface StaticFile { readonly path: string; readonly body: Buffer; readonly contentType: string }
@@ -42,6 +44,7 @@ export interface ManagedNextRuntime {
       requestDigest: string; bundleSha256: string; files: readonly StaticFile[];
     }>;
     destroy(): Promise<{ confirmed: boolean }>;
+    cleanedBuild?(): CleanedStaticNextBuild | null;
   }>;
 }
 
@@ -61,12 +64,20 @@ export interface PrivateStaticArtifacts {
   }>;
 }
 
+export interface NextCustodyPublication {
+  readonly witness: string;
+  publish(artifacts: PrivateStaticArtifacts, evidence: CleanedStaticNextBuild): Promise<{
+    artifactId: string; manifestSha256: string;
+  }>;
+}
+
 export class NextBuildError extends Error {
   constructor(readonly code: string) { super(code); }
 }
 type Lease = Awaited<ReturnType<ManagedNextRuntime["create"]>>;
 type Job = {
   scope: NextBuildScope; digest: string; promise: Promise<NextPreview>;
+  custodyWitness?: string;
   lease?: Lease; preview?: NextPreview; released: boolean;
   cleanupPromise?: Promise<void>;
   cleanup: "not-created" | "required" | "pending" | "confirmed";
@@ -102,10 +113,11 @@ export class GenericNextProducer {
     repository: Pick<TenantRepoProvider, "exportProjectSourceBundle">;
     runtime?: ManagedNextRuntime;
     artifacts?: PrivateStaticArtifacts;
-    isCurrent(scope: NextBuildScope): Promise<boolean>;
+    isCurrent(scope: NextBuildScope, operation: CandidateOperation): Promise<boolean>;
   }) {}
 
-  build(authority: ProjectRepositoryAuthority, request: NextBuildRequest): Promise<NextPreview> {
+  build(authority: ProjectRepositoryAuthority, request: NextBuildRequest,
+    publication?: NextCustodyPublication): Promise<NextPreview> {
     this.validateAuthority(authority);
     if (!uuid(request.jobId) || !sha(request.sourceCommit, 40) || !sha(request.sourceTree, 40))
       throw new NextBuildError("source_conflict");
@@ -118,7 +130,8 @@ export class GenericNextProducer {
     const digest = nextRequestDigest(scope);
     const prior = this.jobs.get(key);
     if (prior) {
-      if (prior.digest !== digest) throw new NextBuildError("job_conflict");
+      if (prior.digest !== digest || prior.custodyWitness !== publication?.witness)
+        throw new NextBuildError("job_conflict");
       if (prior.released) throw new NextBuildError("preview_released");
       return prior.promise;
     }
@@ -130,15 +143,17 @@ export class GenericNextProducer {
     if (!artifacts || !uuid(artifacts.bindingId) || artifacts.access !== "private-authenticated" ||
         artifacts.immutable !== true || typeof artifacts.put !== "function" || typeof artifacts.read !== "function")
       throw new NextBuildError("private_artifact_binding_unavailable");
-    const job: Job = { scope, digest, released: false, cleanup: "not-created", promise: undefined! };
+    const job: Job = { scope, digest, custodyWitness: publication?.witness,
+      released: false, cleanup: "not-created", promise: undefined! };
     this.jobs.set(key, job);
-    job.promise = this.execute(job, runtime, artifacts);
+    job.promise = this.execute(job, runtime, artifacts, publication);
     return job.promise;
   }
 
-  private async execute(job: Job, runtime: ManagedNextRuntime, artifacts: PrivateStaticArtifacts): Promise<NextPreview> {
+  private async execute(job: Job, runtime: ManagedNextRuntime, artifacts: PrivateStaticArtifacts,
+    publication?: NextCustodyPublication): Promise<NextPreview> {
     try {
-      await this.current(job.scope);
+      await this.current(job.scope, "write");
       const exporter = this.deps.repository.exportProjectSourceBundle;
       if (!exporter) throw new NextBuildError("source_unavailable");
       const source = await exporter.call(this.deps.repository, {
@@ -150,7 +165,7 @@ export class GenericNextProducer {
           source.sizeBytes !== source.bundle.length || !sha(source.bundleSha256, 64) ||
           hash(source.bundle) !== source.bundleSha256 || !uuid(source.leaseId) ||
           !/^[1-9][0-9]*$/.test(source.leaseGeneration)) throw new NextBuildError("source_conflict");
-      await this.current(job.scope);
+      await this.current(job.scope, "write");
       job.lease = await runtime.create(job.scope);
       job.cleanup = "required";
       const result = await job.lease.build(Buffer.from(source.bundle), source.bundleSha256, NEXT_PLAN);
@@ -165,12 +180,13 @@ export class GenericNextProducer {
         }))),
       });
       const manifestSha256 = staticManifestDigest(manifest);
-      await this.current(job.scope);
-      const stored = await artifacts.put(job.scope, manifest, files);
+      await this.current(job.scope, "write");
+      const stored = publication ? await this.publish(job, artifacts, publication) :
+        await artifacts.put(job.scope, manifest, files);
       if (!uuid(stored.artifactId) || stored.manifestSha256 !== manifestSha256)
         throw new NextBuildError("artifact_conflict");
-      await this.cleanup(job);
-      await this.current(job.scope);
+      if (!publication) await this.cleanup(job);
+      await this.current(job.scope, "write");
       const preview: NextPreview = Object.freeze({
         jobId: job.scope.jobId, sourceCommit: job.scope.sourceCommit, sourceTree: job.scope.sourceTree,
         bundleSha256: source.bundleSha256, bindingId: runtime.bindingId,
@@ -184,6 +200,15 @@ export class GenericNextProducer {
       if (job.lease && job.cleanup === "required") await this.cleanup(job);
       throw error instanceof NextBuildError ? error : new NextBuildError("build_failed");
     }
+  }
+
+  private async publish(job: Job, artifacts: PrivateStaticArtifacts, publication: NextCustodyPublication) {
+    const lease = job.lease!;
+    await this.cleanup(job);
+    await this.current(job.scope, "write");
+    const evidence = lease.cleanedBuild?.();
+    if (!evidence) throw new NextBuildError("producer_conflict");
+    return publication.publish(artifacts, evidence);
   }
 
   private exportedFiles(value: readonly StaticFile[]): StaticFile[] {
@@ -224,9 +249,9 @@ export class GenericNextProducer {
     if (!a || ![a.tenantId, a.organizationId, a.projectId, a.repoKey].every(uuid))
       throw new NextBuildError("authority_conflict");
   }
-  private async current(scope: NextBuildScope): Promise<void> {
+  private async current(scope: NextBuildScope, operation: CandidateOperation): Promise<void> {
     let current: boolean;
-    try { current = await this.deps.isCurrent(scope); }
+    try { current = await this.deps.isCurrent(scope, operation); }
     catch { throw new NextBuildError("source_unavailable"); }
     if (!current) throw new NextBuildError("source_stale");
   }
@@ -246,11 +271,11 @@ export class GenericNextProducer {
     if (!safePath(assetPath)) throw new NextBuildError("preview_path_invalid");
     const file = preview.manifest.files.find(f => f.path === assetPath);
     if (!file) throw new NextBuildError("preview_unavailable");
-    await this.current(job.scope);
+    await this.current(job.scope, "read");
     let response: Awaited<ReturnType<PrivateStaticArtifacts["read"]>>;
     try { response = await this.deps.artifacts!.read(job.scope, preview.artifactId, assetPath, file.sizeBytes); }
     catch { throw new NextBuildError("preview_unavailable"); }
-    await this.current(job.scope);
+    await this.current(job.scope, "read");
     if (job.released) throw new NextBuildError("preview_unavailable");
     if (!Buffer.isBuffer(response.body) || response.body.length !== file.sizeBytes ||
         hash(response.body) !== file.sha256 || response.contentType !== file.contentType)

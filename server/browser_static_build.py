@@ -8,6 +8,7 @@ from copy import deepcopy
 import requests
 import broker_client
 import browser_project_flow as flow
+import browser_static_build_recheck as admission
 import browser_project_source_export as source_export
 
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -30,6 +31,11 @@ def parse_body(raw):
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+def _execution_digest(authority, job_id, witnesses):
+    return _digest([authority[k] for k in flow.AUTHORITY_FIELDS]
+                   + [job_id, witnesses['source_commit'], witnesses['source_tree']])
 
 
 def _uuid(value):
@@ -64,8 +70,7 @@ def _validate(value, authority, request_id, job_id, witnesses):
     m = p['manifest']
     need(type(m) is dict and set(m) == {'requestDigest', 'bundleSha256', 'bindingId', 'toolchainSha256', 'files'})
     need(all(m[k] == p[k] for k in ('bundleSha256', 'bindingId', 'toolchainSha256')))
-    need(m['requestDigest'] == _digest([authority[k] for k in ('tenant_id', 'organization_id', 'project_id', 'repo_key')]
-         + [job_id, witnesses['source_commit'], witnesses['source_tree']]))
+    need(m['requestDigest'] == _execution_digest(authority, job_id, witnesses))
     need(type(m['files']) is list and 1 <= len(m['files']) <= 4096)
     paths, total, files = set(), 0, []
     for f in m['files']:
@@ -85,8 +90,8 @@ def _validate(value, authority, request_id, job_id, witnesses):
     return value
 
 
-def exchange(tenant, project_id, request_id, job_id, witnesses, *, submit=False):
-    current = flow.scope(tenant, project_id, write=submit)
+def _checked_publication(tenant, project_id, request_id, job_id, witnesses, *, write=False):
+    current = flow.scope(tenant, project_id, write=write)
     principal = (str(tenant), tenant.subject)
     try:
         flow._uuid(request_id)
@@ -103,21 +108,42 @@ def exchange(tenant, project_id, request_id, job_id, witnesses, *, submit=False)
         raise flow.FlowError(409)
 
     def recheck():
-        if ((str(tenant), tenant.subject) != principal or flow.scope(tenant, project_id, write=submit) != current
+        if ((str(tenant), tenant.subject) != principal or flow.scope(tenant, project_id, write=write) != current
                 or flow.repository(current) != authority):
             raise flow.FlowError(403)
         if flow.read(tenant, project_id, request_id) != row:
             raise flow.FlowError(409)
-        if flow.scope(tenant, project_id, write=submit) != current:
+        if flow.scope(tenant, project_id, write=write) != current:
             raise flow.FlowError(403)
 
+        return current[2]
+
+    return authority, recheck
+
+
+def readback(tenant, project_id, request_id, job_id, witnesses):
+    """Read the current publication under this caller's existing project access."""
+    authority, recheck = _checked_publication(tenant, project_id, request_id, job_id, witnesses)
+    result = dict(schema='leaf.browser-static-candidate.v1', project_id=project_id,
+                  source_request_id=request_id, job_id=job_id,
+                  execution_id=_execution_digest(authority, job_id, witnesses),
+                  **{key: witnesses[key] for key in source_export._WITNESSES})
+    recheck()
+    return result
+
+
+def exchange(tenant, project_id, request_id, job_id, witnesses, *, submit=False):
+    authority, recheck = _checked_publication(tenant, project_id, request_id, job_id, witnesses, write=submit)
     payload = dict(authority, source_request_id=request_id, job_id=job_id, **witnesses)
     url = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
     headers = broker_client.harness_headers()
     if not url or not headers.get('X-Harness-Secret'):
         raise flow.FlowError(503)
     headers = dict(headers, **{'X-Tenant-Id': authority['tenant_id'], 'Content-Type': 'application/json'})
-    recheck()
+    actor_binding_id = recheck()
+    if submit and admission.enabled():
+        admission.admit(authority, job_id, actor_binding_id, request_id, witnesses)
+        recheck()
     try:
         response = requests.post(url + '/internal/project-static-preview/' + ('build' if submit else 'status'),
             data=flow.canonical(payload), headers=headers, timeout=(5, 20), allow_redirects=False, stream=True)

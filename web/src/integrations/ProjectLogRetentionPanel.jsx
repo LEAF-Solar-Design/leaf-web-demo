@@ -341,6 +341,7 @@ function ScopedRetention({ client, projectId, signal, guard, onForbidden, mode =
       <button type="button" disabled={!run} onClick={() => read('plan', async (ctx, requestSignal) => { clearReviews(); setPreview(await invoke(ctx, 'retentionPlan', [run, {}], requestSignal)) })}>Preview retention</button>
       <button type="button" disabled={!audit} onClick={() => read('audit-export', async (ctx, requestSignal) => { setExportedAudit(await invoke(ctx, 'retentionAudit', [run], requestSignal)) })}>Export audit</button>
     </div>{preview && <section aria-label="Retention preview"><p>Dry run. Active: {preview.active_count}. Retained: {preview.retained_count}. Batch size: {preview.settings.batchSize}. Maximum batches per class: {preview.settings.maxBatchesPerClass}.</p>
+      <p>Retention clock (UTC) <time dateTime={preview.retentionClock}>{preview.retentionClock}</time></p>
       <p>Build eligible: {preview.build.eligible_count}; cutoff {preview.build.retentionCutoff}. Other eligible: {preview.other.eligible_count}; cutoff {preview.other.retentionCutoff}.</p></section>}
     {audit && <section aria-label="Actual run audit"><p>Active {audit.counters.active} of {audit.counters.input}. Deleted build {audit.counters.deletedBuild}; other {audit.counters.deletedOther}. Restored {audit.counters.restored}.</p>
       <p>Admitted {audit.admittedAt}. Parent deadline {audit.parentDeadlineAt}. {audit.expired ? 'Deadline reached.' : 'Deadline is controlled by the server.'} Status: {audit.checkpoint.stop_reason || audit.checkpoint.phase}.</p>

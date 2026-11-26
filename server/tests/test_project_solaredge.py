@@ -21,7 +21,7 @@ import solar_project_solaredge as se
 import solar_tools
 import store
 from leaf_cloud_client import canonical_bytes
-from solar_design_graph import GraphValidationError
+from solar_design_graph import GraphValidationError, validate_graph
 from routers import project_drawings as routes
 import test_sip_r3b_tools as tools
 import test_solar_solaredge_report as samples
@@ -98,8 +98,8 @@ def params(s, result):
     return {"expected_rev": s.ctx.graph["rev"], "report_artifact_id": result["report"]["artifact_id"]}
 
 
-def accept(s, result):
-    prepared = tools.prepare(s, se.ACCEPT_TOOL, params(s, result), s.ctx)
+def accept(s, result, **options):
+    prepared = tools.prepare(s, se.ACCEPT_TOOL, {**params(s, result), **options}, s.ctx)
     output = tools.publish(s, prepared)
     return prepared, output, tools.output(s, output)
 
@@ -730,6 +730,33 @@ def test_explicit_optimizer_measurement_saved_and_read(lane, monkeypatch, varian
         assert [handles[ref] for ref in opt["panel_refs"]] == opt["panel_handles"]
         assert set(opt["panel_refs"]) <= set(record["strings"][opt["string_index"]]["panel_refs"])
     assert read(s, accepted)["output"]["optimizer_measurement"] == measurement
+    assert read(s, accepted, section="optimizers")["output"]["items"] == measurement["optimizers"]
+    reader = se.local_read._load_builtin(se.READ_TOOL)
+    monkeypatch.setattr(reader, "MEASUREMENT_INLINE_BYTES", 1)
+    monkeypatch.setattr(reader, "PAGE_ITEMS", 1)
+
+    def reopen_all(section):
+        rows = []
+        offset = 0
+        while offset is not None:
+            result = read(s, accepted, section=section, offset=offset)
+            output = result["output"]
+            assert result["output_bytes"] <= reads.MAX_OUTPUT_BYTES
+            assert output["page"]["offset"] == offset
+            assert output["page"]["returned"] == 1
+            assert output["optimizer_measurement"] == {
+                **measurement, "optimizers": None, "string_counts": None, "optimizer_rows": expected,
+            }
+            rows.extend(output["items"])
+            offset = output["page"]["next_offset"]
+            assert offset == len(rows) or offset is None
+        return rows
+
+    assert reopen_all("optimizers") == measurement["optimizers"]
+    assert reopen_all("strings") == [
+        {**row, "optimizer_count": count}
+        for row, count in zip(record["strings"], measurement["string_counts"], strict=True)
+    ]
     later_graph = deepcopy(accepted.graph)
     later_graph["rev"] += 1
     later_intake = accepted.intake
@@ -739,6 +766,8 @@ def test_explicit_optimizer_measurement_saved_and_read(lane, monkeypatch, varian
     later = replace(accepted, intake_bytes=later_bytes, intake_sha256=sha256(later_bytes).hexdigest())
     stale = se.read_tracking(s.tenant, later, {})["optimizer_measurement"]
     assert stale["complete"] is False and stale["total_count"] is None and stale["string_counts"] is None
+    assert stale["optimizer_rows"] == expected and stale["optimizers"] is None
+    assert all("optimizer_count" not in row for row in se.read_tracking(s.tenant, later, {})["items"])
 
 
 @pytest.mark.parametrize("negative", ["missing-panel", "duplicate-id", "unmapped", "cross-string"])
@@ -763,6 +792,131 @@ def test_incomplete_optimizer_measurement_never_supplies_counts(lane, monkeypatc
     assert measured["complete"] is False
     assert measured["total_count"] is None and measured["string_counts"] is None
     assert read(lane, accepted)["output"]["optimizer_measurement"]["total_count"] is None
+
+
+def test_matched_only_pages_optimizer_observations_without_counts(review_lane, monkeypatch):
+    lane = review_lane
+    matrices = deepcopy(samples.GRIDS)
+    for index, matrix in enumerate(matrices):
+        matrix["Optimizers"] = [
+            {"id": f"pdf-optimizer-{1 + index * 3 + col}", "vendor_label": None,
+             "cells": [[0, col]]}
+            for col in range(3)
+        ]
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    ref = lane.ctx.graph["frames"][0]["id"]
+    result = report(lane, selection_order="unknown", associations={ref: 1})
+    _, _, accepted = accept(lane, result, accept_matched_only=True)
+    record = accepted.graph["extra"][se.tracking.STORE_KEY]
+    expected = record["optimizer_measurement"]["optimizers"]
+    assert len(expected) > 1
+    reader = se.local_read._load_builtin(se.READ_TOOL)
+    monkeypatch.setattr(reader, "MEASUREMENT_INLINE_BYTES", 1)
+    monkeypatch.setattr(reader, "PAGE_ITEMS", 1)
+
+    rows = []
+    offset = 0
+    while offset is not None:
+        output = read(lane, accepted, section="optimizers", offset=offset)["output"]
+        assert output["page"]["offset"] == offset
+        assert output["page"]["returned"] == 1
+        assert output["acceptance"] == {"mode": "matched-only", "status": "partial",
+                                        "unresolved_groups": 1}
+        measurement = output["optimizer_measurement"]
+        assert measurement["optimizer_rows"] == len(expected)
+        assert not measurement["complete"]
+        assert measurement["total_count"] is None and measurement["string_counts"] is None
+        rows.extend(output["items"])
+        offset = output["page"]["next_offset"]
+        assert offset == len(rows) or offset is None
+    assert rows == expected
+
+
+def _graph_with_saved_string_partition(variant):
+    graph = samples.small_graph()
+    groups = [list(frame["panel_refs"]) for frame in graph["frames"]]
+    if variant == "swap":
+        groups[0][-1], groups[1][-1] = groups[1][-1], groups[0][-1]
+    if variant == "split":
+        groups.append([groups[0].pop()])
+    graph["strings"] = [
+        samples.entity("string", n, circuit_tag=f"DC-{n}", circuit_kind="String",
+            ordered_panel_refs=refs, module_count=len(refs), from_ref=refs[0], to_ref=refs[-1],
+            tag_text_ref=None, wire_gauge="10 AWG", length_ft=10, route=[[0, 0], [1, 0]],
+            inverter_ref=None)
+        for n, refs in enumerate(groups, 1)
+    ]
+    assignments = {
+        ref: {"string_ref": string["id"], "seq": seq}
+        for string in graph["strings"] for seq, ref in enumerate(string["ordered_panel_refs"])
+    }
+    for panel in graph["panels"]:
+        panel["assignment"] = assignments[panel["id"]]
+    for frame in graph["frames"]:
+        frame_refs = set(frame["panel_refs"])
+        frame["sequences"] = []
+        for string in graph["strings"]:
+            refs = [ref for ref in string["ordered_panel_refs"] if ref in frame_refs]
+            if refs:
+                frame["sequences"].append({"string_ref": string["id"], "ordered_panel_refs": refs})
+        for row in frame["matrix"]:
+            for cell in row:
+                if cell["panel_ref"] is not None:
+                    cell["seq"] = assignments[cell["panel_ref"]]["seq"]
+        for assignment in frame["panel_assignments"]:
+            assignment.update(assignments[assignment["panel_ref"]])
+    return validate_graph(graph)
+
+
+@pytest.mark.parametrize("variant,expected,reason", [
+    ("match", [("match", [0]), ("match", [1])], None),
+    ("swap", [("different", [0, 1]), ("different", [0, 1])], None),
+    ("split", [("different", [0]), ("match", [1]), ("different", [0])], None),
+    ("no-measurement", [("unavailable", []), ("unavailable", [])], "missing_optimizer_measurement"),
+    ("incomplete", [("unavailable", []), ("unavailable", [])], "incomplete_optimizer_measurement"),
+    ("stale", [("unavailable", []), ("unavailable", [])], "stale_optimizer_measurement"),
+])
+def test_reconcile_saved_optimizer_string_assignments(lane, monkeypatch, variant, expected, reason):
+    graph = _graph_with_saved_string_partition(variant)
+    lane.set_parent(tools.embedded(graph))
+    lane.ctx = graphs.resolve_project_graph_context(lane.context())
+    matrices = deepcopy(samples.GRIDS)
+    if variant != "no-measurement":
+        for index, matrix in enumerate(matrices):
+            matrix["Optimizers"] = [
+                {"id": f"pdf-optimizer-{1 + index * 3 + col}", "vendor_label": "42", "cells": [[0, col]]}
+                for col in range(3)
+            ]
+        if variant == "incomplete":
+            matrices[0]["Optimizers"].pop()
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    _, _, accepted = accept(lane, report(lane))
+    before = (lane.head, deepcopy(lane.writes), len(lane.versions))
+    section = "optimizer_assignment_changes"
+    if variant == "stale":
+        later_graph = deepcopy(accepted.graph)
+        later_graph["rev"] += 1
+        intake = accepted.intake
+        intake["solar_design_graph"] = later_graph
+        intake["solar_design_graph_sha256"] = graphs.local.digest(later_graph)
+        data = canonical_bytes(intake)
+        later = replace(accepted, intake_bytes=data, intake_sha256=sha256(data).hexdigest())
+        output = se.read_tracking(lane.tenant, later, {"section": section})
+    else:
+        output = read(lane, accepted, section=section)["output"]
+        suffix = read(lane, accepted, section=section, offset=1)["output"]
+        assert suffix["items"] == output["items"][1:]
+    assert output["labels_only"] and output["references"]["current"]
+    assert output["provenance"]["report"]["source_version_id"] == str(lane.ctx.parent_version_id)
+    if reason is None:
+        assert output["optimizer_measurement"]["total_count"] == 6
+        assert output["optimizer_measurement"]["string_counts"] == [3, 3]
+    assert output["items"] == [
+        {"saved_string_id": string["id"], "circuit_tag": string["circuit_tag"],
+         "verdict": verdict, "report_string_indexes": indexes, "reason": reason}
+        for string, (verdict, indexes) in zip(graph["strings"], expected, strict=True)
+    ]
+    assert (lane.head, lane.writes, len(lane.versions)) == before
 
 
 # Synthetic intake-phase diagnostics share this registered producer suite.

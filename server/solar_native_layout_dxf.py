@@ -20,7 +20,7 @@ MAX_PILES = kernels.MAX_PILES
 MAX_DXF_BYTES = 16 * 1024 * 1024
 NAMESPACE = "LEAF_STUDIO_LAYOUT"
 SCHEMA = "leaf.studio-native-layout.v1"
-_INSERTION_UNITS = {"m": 6, "ft": 2}
+_INSERTION_UNITS = {"m": 6, "ft": 2, "in": 1}
 _HEX = re.compile(r"[0-9A-Fa-f]{1,16}")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 

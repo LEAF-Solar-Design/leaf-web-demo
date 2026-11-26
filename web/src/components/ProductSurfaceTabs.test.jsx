@@ -16,6 +16,37 @@ import * as labSurfaceStatus from '../lab/useLabSurfaceStatus.js'
 import * as estimatorSurfaceStatus from '../estimator/useEstimatorSurfaceStatus.js'
 import * as surfaceOverlay from '../site/useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
+import { AccountSignOut } from './ProductSurfaceTabs.jsx'
+import { clearAccountIdentity, setAccountEmail, setAccountWorkspace } from '../auth/accountIdentity.js'
+
+describe('account identity next to Sign out', () => {
+  afterEach(() => { cleanup(); clearAccountIdentity(); localStorage.removeItem('leaf.jwt') })
+
+  it('shows the signed-in account and workspace', () => {
+    clearAccountIdentity()
+    localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-a' }))}.signature`)
+    setAccountEmail('a@example.com')
+    setAccountWorkspace({ id: '1b60bef6-1234', name: 'Leaf Automation' })
+    render(<AccountSignOut signedIn onSignOut={() => {}} />)
+    expect(screen.getByTestId('account-identity').textContent).toBe('a@example.com · Leaf Automation (1b60bef6)')
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  })
+
+  it('keeps Sign out when no account identity is available', () => {
+    clearAccountIdentity()
+    render(<AccountSignOut signedIn onSignOut={() => {}} />)
+    expect(screen.queryByTestId('account-identity')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeVisible()
+  })
+
+  it('renders nothing when signed out even with account identity set', () => {
+    localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-a' }))}.signature`)
+    setAccountEmail('a@example.com')
+    setAccountWorkspace({ id: '1b60bef6-1234', name: 'Leaf Automation' })
+    const { container } = render(<AccountSignOut signedIn={false} onSignOut={() => {}} />)
+    expect(container.innerHTML).toBe('')
+  })
+})
 
 afterEach(cleanup)
 

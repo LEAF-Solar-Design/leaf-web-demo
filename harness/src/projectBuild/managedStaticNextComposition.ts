@@ -2,7 +2,7 @@
  * durable admission and authenticated preview HTTP routes remain host-owned.
  */
 import { GenericNextProducer, nextRequestDigest } from "./genericNextBuild.js";
-import type { NextBuildScope, PrivateStaticArtifacts } from "./genericNextBuild.js";
+import type { CandidateOperation, NextBuildScope, PrivateStaticArtifacts } from "./genericNextBuild.js";
 import { ExecutorManagedNextRuntime } from "./managedNextRuntime.js";
 import type { StaticNextJobExecutor } from "./managedNextRuntime.js";
 import { DiskPrivateStaticArtifacts } from "./privateStaticArtifactStore.js";
@@ -10,18 +10,24 @@ import { DurablePrivateNextViews } from "./durablePrivateNextViews.js";
 import { loadPrivateStaticView } from "./staticNextCustody.js";
 import type { StaticNextObjectStore } from "./codebuildStaticNextExecutor.js";
 
-export function createManagedStaticNextProducer(options: {
+type ProducerOptions = {
   repository: ConstructorParameters<typeof GenericNextProducer>[0]["repository"];
   executor: StaticNextJobExecutor;
   artifactRoot: string;
   artifactBindingId: string;
-  isCurrent(scope: NextBuildScope): Promise<boolean>;
-}): GenericNextProducer {
-  return new GenericNextProducer({ repository: options.repository,
-    runtime: new ExecutorManagedNextRuntime(options.executor),
-    artifacts: new DiskPrivateStaticArtifacts({ root: options.artifactRoot,
-      bindingId: options.artifactBindingId, isCurrent: options.isCurrent }),
-    isCurrent: options.isCurrent });
+  isCurrent(scope: NextBuildScope, operation: CandidateOperation): Promise<boolean>;
+};
+
+export function createManagedStaticNextProducer(options: ProducerOptions): GenericNextProducer {
+  return createManagedStaticNextProducerComposition(options).producer;
+}
+
+export function createManagedStaticNextProducerComposition(options: ProducerOptions) {
+  const artifacts = new DiskPrivateStaticArtifacts({ root: options.artifactRoot,
+    bindingId: options.artifactBindingId, isCurrent: options.isCurrent });
+  const producer = new GenericNextProducer({ repository: options.repository,
+    runtime: new ExecutorManagedNextRuntime(options.executor), artifacts, isCurrent: options.isCurrent });
+  return { producer, artifacts };
 }
 
 /** Compose readback only; the protected caller supplies current candidate access. */

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import ServiceSessionRenew from './ServiceSessionRenew.jsx'
+import { formatAccountLine, useAccountIdentity } from '../auth/accountIdentity.js'
 import { PRODUCT_SURFACES, SHARED_WORKSPACE_CAPABILITIES, productSurface, productSurfaceStates, surfaceContract, surfaceRailState } from '../site/productSurfaces.js'
 import { useLabSurfaceStatus } from '../lab/useLabSurfaceStatus.js'
 import { useEstimatorSurfaceStatus } from '../estimator/useEstimatorSurfaceStatus.js'
@@ -71,10 +72,12 @@ export function ContinuityRail({ activeSurface, workspaceProject = null, catalog
 }
 
 export function AccountSignOut({ signedIn = false, onSignOut = null }) {
+  const line = formatAccountLine(useAccountIdentity())
   if (!signedIn || typeof onSignOut !== 'function') return null
   return (
     <>
       <ServiceSessionRenew />
+      {line && <span className="tc-account-identity" data-testid="account-identity" title="Studio sends tools to this account's workspace. Sign in to AutoCAD with the same account.">{line}</span>}
       <button type="button" className="chip-danger tc-account-signout" onClick={onSignOut}>
         Sign out
       </button>

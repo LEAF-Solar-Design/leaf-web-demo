@@ -1053,6 +1053,40 @@ describe('page preview contact action', () => {
 })
 
 describe('project page editor', () => {
+  it('adds ordered contact links to an existing page and removes a link without losing the others', async () => {
+    const email = { label: 'General questions', href: 'mailto:hello@example.test' }
+    const booking = { label: 'Book a tasting', href: 'https://example.test/book' }
+    const catering = { label: 'Catering', href: 'mailto:catering@example.test' }
+    const stored = page(2, { actions: [email, booking, catering] })
+    loadProjectPage.mockResolvedValueOnce(page(1, { action: email })).mockResolvedValueOnce(stored)
+    saveProjectPage.mockResolvedValueOnce(stored)
+    function EditorAndPreview() {
+      const [preview, setPreview] = useState(null)
+      return <><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={setPreview} />
+        <PagePreview document={preview?.document} /></>
+    }
+    render(<EditorAndPreview />)
+    await openSaved()
+    for (const action of [booking, catering]) {
+      fireEvent.click(button('Add contact link'))
+      const label = screen.getAllByLabelText('Contact link label').at(-1)
+      const url = screen.getAllByLabelText('Contact link URL').at(-1)
+      fireEvent.change(label, { target: { value: action.label } })
+      fireEvent.change(url, { target: { value: action.href } })
+    }
+    expect(screen.getAllByRole('link').map(link => [link.textContent, link.getAttribute('href')]))
+      .toEqual([email, booking, catering].map(({ label, href }) => [label, href]))
+    expect(screen.queryByRole('button', { name: 'Add contact link' })).toBeNull()
+    fireEvent.click(button('Save page'))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalled())
+    await waitFor(() => expect(button('Reload saved page').disabled).toBe(false))
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(loadProjectPage).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(button('Remove contact link 2').disabled).toBe(false))
+    fireEvent.click(button('Remove contact link 2'))
+    expect(screen.getAllByRole('link').map(link => link.textContent)).toEqual([email.label, catering.label])
+  })
+
   it('authors a contact action and preserves it through the saved page and revision export', async () => {
     const client = await vi.importActual('./projectPageClient.js')
     loadProjectPage.mockImplementation(client.loadProjectPage)

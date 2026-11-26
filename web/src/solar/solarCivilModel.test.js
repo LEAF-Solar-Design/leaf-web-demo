@@ -55,6 +55,30 @@ const resultOf = (operation = 'frame-generate', outcome = 'published', base = H)
 })
 const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done }); return { promise, resolve } }
 
+const frameDrafts = (drawingUnits) => ({
+  operation: 'frame-generate', boundary: JSON.stringify(square), preset: JSON.stringify(preset), drawingUnits,
+})
+
+it.each(['m', 'ft'])('accepts %s in Civil frame generation requests and drafts', (drawing_units) => {
+  const fields = { boundary: square, preset, drawing_units }
+  const body = { ...bodyOf(), ...fields }
+  expect(validateCivilBody(body)).toEqual({ ok: true, body })
+  expect(parseCivilDrafts(frameDrafts(drawing_units))).toEqual({ ok: true, fields })
+})
+
+it.each(['in', 'cm'])('rejects %s in Civil frame generation requests and drafts', (drawing_units) => {
+  const code = 'FRAMES_PILES_DRAWING_UNITS_INVALID'
+  expect(validateCivilBody({ ...bodyOf(), drawing_units })).toEqual({ ok: false, code })
+  expect(parseCivilDrafts(frameDrafts(drawing_units))).toEqual({ ok: false, field: 'drawing_units', code })
+})
+
+it.each([['m', 1], ['ft', 0.3048], ['in', 0.0254]])('decodes Civil collision results in %s', (drawing_units, meters_per_unit) => {
+  const request = { drawingId: 'solar', projectId: 'p', body: bodyOf('frame-collision-detect') }
+  const result = { ...resultOf('frame-collision-detect', 'unchanged'), units: { drawing_units, meters_per_unit } }
+  expect(validateCivilOperation(result, request)).toEqual(result)
+  expect(validateCivilOperation({ ...result, units: { drawing_units, meters_per_unit: 0 } }, request)).toBeNull()
+})
+
 it('PC8 request validation', () => {
   expect(CIVIL_OPERATIONS).toEqual(['frame-generate', 'frame-collision-detect', 'piling-generate', 'pile-length-range-check', 'grade-pad'])
   for (const op of CIVIL_OPERATIONS) {

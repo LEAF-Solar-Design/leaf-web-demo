@@ -33,6 +33,16 @@ const P = (n, centre) => ({ ...E('panel', n), centre, frame_ref: null, matrix_ce
 const S = (n, refs, route = []) => ({ ...E('string', n), circuit_tag: 'S' + n,
   circuit_kind: 'String', ordered_panel_refs: refs.map(n => U('panel', n)), module_count: refs.length,
   from_ref: null, to_ref: null, tag_text_ref: null, wire_gauge: '', length_ft: 0, route, inverter_ref: null })
+const importedPanel = (n, centre) => {
+  const panel = P(n, centre)
+  panel.provenance.created_by = 'solar-panels-from-drawing'
+  panel.provenance.source_handle = 'A' + n
+  return panel
+}
+const panelCentreRoute = (refs, route) => ({
+  ...S(1, refs, route),
+  extra: { length_provenance: { source: 'derived', rule: 'panel-centre-path', point_units: 'm' } },
+})
 const I = (n, position, equipment_type = 'string_inverter') => ({ ...E('inverter', n),
   number: n, type_key: 'INV', is_l2: false, position, model: '', mppt_count: 1,
   total_dc_inputs: 1, max_dc_voltage: 1500, max_ac_power_kw: 1, is_solaredge: false,
@@ -123,6 +133,49 @@ describe('solarGraphOverlay', () => {
   it('SGO03 converts metres into feet at double precision', () => {
     expect(solarGraphOverlay(roofAt(.3048), { metersPerUnit: .3048 })).toEqual(OK(footLines))
   })
+  it('centres an inch drawing marker on the saved imported panel', () => {
+    const centre = [222.5, 333.25]
+    const graph = roofAt(.0254)
+    graph.panels = [importedPanel(1, centre)]
+    graph.strings = [panelCentreRoute([1], [centre])]
+    graph.inverters = []
+    graph.routes = []
+    const result = solarGraphOverlay(freeze(graph), { metersPerUnit: .0254 })
+    expect(result.refusal).toBeNull()
+    expect(result.polylines).toHaveLength(1)
+    const [{ pts, color }] = result.polylines
+    expect(color).toBe(green)
+    expect(pts).toHaveLength(5)
+    expect(pts[0]).toEqual(pts[4])
+    for (const [axis, coordinate] of centre.entries()) {
+      expect((pts[0][axis] + pts[2][axis]) / 2).toBeCloseTo(coordinate)
+      expect((pts[2][axis] - pts[0][axis]) * .0254).toBeCloseTo(.5)
+    }
+  })
+  it.each([
+    ['a stored copy of the centres', [[20, -10], [-.6096, 1.2192], [-5, 8]]],
+    ['panel references only', []],
+  ])('projects mixed imported and metric panels from %s', (_name, route) => {
+    const graph = roofAt(.3048)
+    graph.panels = [importedPanel(1, [20, -10]), P(2, [-.6096, 1.2192]), importedPanel(3, [-5, 8])]
+    graph.strings = [panelCentreRoute([1, 2, 3], route)]
+    graph.inverters = []
+    graph.routes = []
+    expect(solarGraphOverlay(freeze(graph), { metersPerUnit: .3048 }))
+      .toEqual(OK([L([[20, -10], [-2, 4], [-5, 8]], green)]))
+  })
+  it.each([
+    ['an authored route', S(1, [1, 2], [[1, 2], [3, 4]])],
+    ['a derived route whose geometry differs from its reference centres',
+      panelCentreRoute([1, 2], [[1, 2], [3, 4]])],
+  ])('honors the stored metric points of %s', (_name, string) => {
+    const graph = G({
+      panels: [importedPanel(1, [1, 2]), importedPanel(2, [9, 10])], strings: [string],
+    })
+    graph.project.units = units(.3048)
+    expect(solarGraphOverlay(freeze(graph), { metersPerUnit: .3048 }))
+      .toEqual(OK([L([[1 / .3048, 2 / .3048], [3 / .3048, 4 / .3048]], green)]))
+  })
   it('SGO04 prefers stored string routes and drops validated Z', () => {
     const g = roof(); g.strings[0].route = [[9, 8, 7], [10, 8, 6]]
     expect(run(g)).toEqual(OK([L([[9, 8], [10, 8]], green), ...metreLines.slice(1)]))
@@ -176,16 +229,17 @@ describe('solarGraphOverlay', () => {
       L([[0, 0], [1, 0]], blue), L([[1, 0], [1, 2]], pink),
     ]))
   })
-  it('SGO14 omits invisible fallback strings and empty conductor routes', () => {
-    expect(run(G({ panels: [P(1, [2, 3])], strings: [S(1, []), S(2, [1])],
+  it('SGO14 omits empty strings and conductor routes', () => {
+    expect(run(G({ panels: [P(1, [2, 3])], strings: [S(1, [])],
       routes: [R(1, 'feeder', [])] }))).toEqual(empty)
   })
-  it('SGO15 draws nothing for a single-panel string and keeps every other line', () => {
-    expect(run(G({ panels: [P(1, [0, 0])], strings: [S(1, [1], [[0, 0]])] }))).toEqual(empty)
+  it('SGO15 marks a single-panel string and keeps every other line', () => {
     const g = roof()
     g.panels.push(P(7, [5, 5]))
     g.strings.push(S(3, [7], [[5, 5]]))
-    expect(run(g)).toEqual(OK(metreLines))
+    const marker = L([[4.75, 4.75], [5.25, 4.75], [5.25, 5.25],
+      [4.75, 5.25], [4.75, 4.75]], green)
+    expect(run(g)).toEqual(OK([...metreLines.slice(0, 2), marker, ...metreLines.slice(2)]))
   })
   it('SGO35 draws the panel-centre line when a multi-panel string stores one route point', () => {
     expect(run(G({ panels: [P(1, [0, 0]), P(2, [1, 0])], strings: [S(1, [1, 2], [[9, 9]])] })))
@@ -208,11 +262,13 @@ describe('solarGraphOverlay', () => {
     expect(run(G({ routes: [big(1), big(2), R(3, 'feeder', [[1, 1]]), R(4, 'feeder', [[2, 2]]),
       R(5, 'feeder', [[3, 3]])] }))).toEqual(NO('overlay_limit'))
   })
-  it('SGO39 draws nothing for a single-panel string on a decoded Ground frame', () => {
+  it('SGO39 marks decoded Ground strings with and without a stored route', () => {
     const g = ground()
-    const centre = decodeGroundFrameSlots(g.frames).frames[0].slots[1].centre
-    g.strings = [S(1, [2], [[centre.x, centre.y]]), S(2, [1])]
-    expect(solarGraphOverlay(g, { metersPerUnit: 2 })).toEqual(empty)
+    g.strings = [S(1, [2], [[2, -2]]), S(2, [1])]
+    expect(solarGraphOverlay(g, { metersPerUnit: 2 })).toEqual(OK([
+      L([[.875, -1.125], [1.125, -1.125], [1.125, -.875], [.875, -.875], [.875, -1.125]], green),
+      L([[.375, -.625], [.625, -.625], [.625, -.375], [.375, -.375], [.375, -.625]], green),
+    ]))
   })
   it('SGO16 includes the 4096-polyline boundary', () => {
     expect(run(lines(4096))).toEqual(OK(Array.from({ length: 4096 }, () => L([[0, 0], [1, 1]], pink))))

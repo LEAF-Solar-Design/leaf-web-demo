@@ -74,7 +74,7 @@ def test_manifest_non_object(tmp_path, value):
 
 
 @pytest.mark.parametrize("key,value", [
-    ("schema", "wrong"), ("schema", None), ("bench", "X11"), ("bench", "x01"),
+    ("schema", "wrong"), ("schema", None), ("bench", "X14"), ("bench", "x01"),
     ("fixtures", {}), ("fixtures", None),
 ])
 def test_manifest_top_level_refusals(tmp_path, key, value):
@@ -334,7 +334,7 @@ def test_write_grade_order_and_fallback(tmp_path):
     assert isinstance(value["steps"][1]["expected"], str)
 
 
-@pytest.mark.parametrize("updates", [dict(bench="X11"), dict(verdict="bad"),
+@pytest.mark.parametrize("updates", [dict(bench="X14"), dict(verdict="bad"),
     dict(source_sha=None), dict(verdict="FAIL", source_sha=None),
     dict(source_sha="A" * 40), dict(source_sha="a" * 39)])
 def test_write_grade_rejects(tmp_path, updates):
@@ -360,7 +360,7 @@ def test_write_readiness(tmp_path):
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value["recorded_at"])
 
 
-@pytest.mark.parametrize("bench,sha", [("X11", SHA), ("X01", "A" * 40), ("X01", None)])
+@pytest.mark.parametrize("bench,sha", [("X14", SHA), ("X01", "A" * 40), ("X01", None)])
 def test_write_readiness_rejects(tmp_path, bench, sha):
     with pytest.raises(ValueError):
         core.write_readiness(tmp_path, bench=bench, sha=sha, receipt="grade.json")
