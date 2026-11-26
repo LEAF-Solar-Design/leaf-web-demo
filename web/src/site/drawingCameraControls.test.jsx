@@ -13,7 +13,7 @@ function viewer(snapshot = initial()) {
       listeners.add(listener); listener(snapshot)
       return () => { off(); listeners.delete(listener) }
     }),
-    setView: vi.fn(() => true), off,
+    setView: vi.fn(() => true), rollDrawing: vi.fn(() => true), off,
     emit: (next) => { snapshot = next; act(() => listeners.forEach((listener) => listener(next))) },
     select: vi.fn(), focus: vi.fn(), applyEdit: vi.fn(), pushView: vi.fn(),
   }
@@ -125,6 +125,25 @@ it('attaches late, replaces subscriptions, ignores stale callbacks and clears re
   expect(second.subscribeCamera).toHaveBeenCalledTimes(1)
   h.unmount()
   expect(second.off).toHaveBeenCalledTimes(1)
+})
+
+it.each([
+  ['Rotate left', 'counterclockwise', 'Drawing rotated 90 degrees counterclockwise'],
+  ['Rotate right', 'clockwise', 'Drawing rotated 90 degrees clockwise'],
+  ['Reset rotation', 'reset', 'Drawing rotation reset'],
+])('sends and announces %s only when the Viewer accepts it', (name, direction, message) => {
+  const h = mount()
+  expect(screen.queryByRole('group', { name: 'Rotate drawing' })).toBeNull()
+  h.api.emit({ ...initial(), canRoll: true })
+  const button = screen.getByRole('button', { name })
+  h.api.rollDrawing.mockReturnValueOnce(false)
+  fireEvent.click(button)
+  expect(h.announce).not.toHaveBeenCalled()
+  fireEvent.click(button)
+  expect(h.api.rollDrawing.mock.calls).toEqual([[direction], [direction]])
+  expect(h.announce).toHaveBeenCalledExactlyOnceWith(message)
+  expect(h.api.setView).not.toHaveBeenCalled()
+  expect(h.api.applyEdit).not.toHaveBeenCalled()
 })
 
 it('does not pan a replaced handle before its subscription has caught up', () => {

@@ -1,6 +1,6 @@
 import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
 import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
-import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
+import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, rollDrawingCamera, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { vertexZ, vertexSegments } from './viewerVertexZ.js'
@@ -253,6 +253,7 @@ const Viewer = forwardRef(function Viewer(
     s.camera.updateMatrixWorld(true)
     const rect = s.renderer.domElement.getBoundingClientRect()
     channel().publish({ pose: cameraPose(s.camera, s.controls.target, rect),
+      canRoll: !s.sculpture && controlsEnabledRef.current && !rotateEnabledRef.current,
       viewport: viewportFromCamera(s.camera, { ...(safeRectRef.current || { left: 0, top: 0, width: rect.width, height: rect.height }),
         canvasWidth: rect.width, canvasHeight: rect.height }) })
   }
@@ -788,6 +789,7 @@ const Viewer = forwardRef(function Viewer(
     }
 
     function fitToBounds() {
+      if (!sculpture) camera.up.set(0, 1, 0)
       const fit = applyFrustum()
       const centerX = fit?.centerX ?? cx, centerY = fit?.centerY ?? cy
       const targetZ = bridge ? bridgeMinZ / 2 + bridgeMaxZ / 2
@@ -1087,6 +1089,7 @@ const Viewer = forwardRef(function Viewer(
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture, bridge,
+      canRoll: () => !candidate && !marquee,
       solarGroup, solarLayer: null,
       observation,
     }
@@ -1326,6 +1329,15 @@ const Viewer = forwardRef(function Viewer(
       publishCamera()
       return changed
     },
+    rollDrawing: (direction) => {
+      const s = stateRef.current
+      if (!sceneReady() || s.sculpture || !controlsEnabledRef.current || rotateEnabledRef.current || !s.canRoll()) return false
+      if (!rollDrawingCamera(s.camera, s.controls.target, direction)) return false
+      fittedRef.current = false
+      s.controls.update()
+      publishCamera()
+      return true
+    },
     // Camera pose as plain data (position/target/zoom/near/far/worldPerPixel)
     // or null before layout — the scale readout's input.
     getPose: () => {
@@ -1400,7 +1412,10 @@ const Viewer = forwardRef(function Viewer(
   // --- controls enable/disable (site stage: static hero) --------------------
   useEffect(() => {
     const s = stateRef.current
-    if (s) configureControls(s.controls, controlsEnabled, rotateEnabled)
+    if (s) {
+      configureControls(s.controls, controlsEnabled, rotateEnabled)
+      publishCamera()
+    }
   }, [controlsEnabled, rotateEnabled, buildTick])
 
   // --- string routes (site stage draw-on animation) --------------------------
