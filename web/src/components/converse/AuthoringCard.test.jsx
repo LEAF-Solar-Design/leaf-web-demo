@@ -8,6 +8,7 @@ import AuthoringCard from './AuthoringCard.jsx'
 vi.mock('../../api.js', () => ({
   getAuthorStage: vi.fn(), getAuthorStageSource: vi.fn(), postReview: vi.fn(), reviewContext: vi.fn(),
   withdrawAuthorStage: vi.fn(),
+  getTenantToolStatus: vi.fn(async () => null),
 }))
 vi.mock('../../converse.js', () => ({ postMessage: vi.fn(), resolveApproval: vi.fn() }))
 vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
@@ -503,6 +504,21 @@ it('discloses the number of HTML escapes Studio decoded in an accepted source', 
 const packageDigest = '0123456789abcdef'.repeat(4)
 const publishedPackage = { state: 'published', published_at: '2026-11-21T03:15:47Z',
   name: 'roof', version: '1.2.0', package_digest: packageDigest }
+
+it('shows the AutoCAD row after the Branch row for a published card', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  await mount()
+  const row = screen.getByText('AutoCAD')
+  expect(row.tagName).toBe('DT')
+  expect(row.previousElementSibling.previousElementSibling).toHaveTextContent('Branch')
+  expect(row.nextElementSibling).toHaveTextContent('Deployed to your workspace.')
+  expect(row.nextElementSibling.nextElementSibling).toBeNull()
+})
+
+it('withholds the AutoCAD row for an unpublished card', async () => {
+  await mount()
+  expect(screen.queryByText('AutoCAD')).toBeNull()
+})
 
 it('shows the signed package version and digest from the server publication and copies the full digest', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined)
