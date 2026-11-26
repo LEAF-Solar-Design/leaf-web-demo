@@ -15,7 +15,8 @@ MAX_KEEP_OUTS = 16
 
 class HomerunRoutingInfeasible(GraphValidationError):
     def __init__(self, affected_leads):
-        super().__init__("JOINT_ROUTING_INFEASIBLE", ", ".join(affected_leads))
+        self.affected_leads = tuple(affected_leads)
+        super().__init__("JOINT_ROUTING_INFEASIBLE", ", ".join(self.affected_leads))
         self.user_message = f"Route these homerun leads manually. {self.path}"
 
 

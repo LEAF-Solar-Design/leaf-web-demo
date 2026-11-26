@@ -51,6 +51,39 @@ function row(changes = {}, flags = {}) {
 const preview = (rows = [row()], changes = {}) => exactProjectSolarGraphPreview({ tool: 'solar-homeruns',
   catalogDigest: digest, outcome: { ok: true, data: { families: [{ capabilities: rows }] } }, ...changes })
 
+const routingReason = 'JOINT_ROUTING_INFEASIBLE'
+const startLead = `${binding.drawing_id}/start homerun`
+const endLead = `${binding.input_version_id}/end homerun`
+
+it.each([
+  { affectedLeads: [startLead] }, { affectedLeads: [endLead] }, { affectedLeads: [startLead, endLead] },
+])('shows the same manual leads for preview and submission', ({ affectedLeads }) => {
+  const error = { reason_code: routingReason, affected_leads: affectedLeads }
+  const denied = row({}, { runnable: false, input_ready: false,
+    admission: { status_code: 409, error }, refusal_reasons: [routingReason] })
+  expect(preview([denied])).toEqual({ accepted: false, reasonCode: routingReason, affectedLeads })
+  expect(preview([denied], { catalogDigest: 'sha256:' + 'e'.repeat(64) })).not.toHaveProperty('affectedLeads')
+  expect(preview([denied, denied])).not.toHaveProperty('affectedLeads')
+  const submission = { ok: false, status: 409, reason: routingReason, envelope: { error } }
+  const feedback = projectSolarGraphFeedback({ tool: 'solar-homeruns', submission })
+  expect(feedback).toMatchObject({ state: 'refused', reasonCode: routingReason, jobId: null })
+  expect(feedback.text).toBe(`Route these homerun leads manually. ${affectedLeads.join(', ')}`)
+  expect(projectSolarGraphFeedback({ tool: 'solar-feeders', submission }).text).not.toContain(affectedLeads[0])
+  expect(projectSolarGraphFeedback({ tool: 'solar-homeruns',
+    submission: { ...submission, status: 422 } }).text).not.toContain(affectedLeads[0])
+})
+
+it.each([[], [startLead, startLead], [`${binding.drawing_id}/feeder`], ['unknown/start homerun']].map(
+  (affectedLeads) => ({ affectedLeads })))('keeps generic refusal feedback for invalid manual leads', ({ affectedLeads }) => {
+  const error = { reason_code: routingReason, affected_leads: affectedLeads }
+  expect(preview([row({}, { runnable: false, admission: { status_code: 409, error } })]))
+    .toEqual({ accepted: false, reasonCode: routingReason })
+  const submission = { ok: false, status: 409, reason: routingReason, envelope: { error } }
+  expect(projectSolarGraphFeedback({ tool: 'solar-homeruns', submission }).text)
+    .toBe(projectSolarGraphFeedback({ tool: 'solar-homeruns',
+      submission: { ok: false, status: 409, reason: routingReason } }).text)
+})
+
 it('G17 graph feedback distinguishes refusal from uncertainty', () => {
   const reason = 'SIP_R4_WORKER_UNAVAILABLE'
   const wire = { ok: false, status: 503, reason, envelope: workerUnavailable }
