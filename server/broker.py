@@ -3864,7 +3864,12 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
             env["degraded_mode"] = False
             return env, 200
         except GraphValidationError as exc:
-            return _graph_commit_refused(exc.code, tool=tool["name"])
+            from solar_combiner_graph import CombinerCapacityError
+
+            env, status = _graph_commit_refused(exc.code, tool=tool["name"])
+            if isinstance(exc, CombinerCapacityError):
+                env["error"]["unplaced_string_refs"] = list(exc.unplaced_string_refs)
+            return env, status
         except OSError:
             return graph_store_unavailable()
 
