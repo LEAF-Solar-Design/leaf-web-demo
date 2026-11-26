@@ -85,7 +85,15 @@ def _optimizer_count(tenant, context):
     except GraphValidationError as exc:
         return None, exc.code
     measurement = tracking.get("optimizer_measurement")
-    if (measurement is None or not measurement["complete"] or
-            tracking.get("acceptance", {}).get("status", "complete") != "complete"):
+    acceptance = tracking.get("acceptance")
+    # Strict acceptance uses the verified top-level flag. Matched-only reads
+    # include additional acceptance details and must be explicitly complete.
+    if (tracking.get("accepted") is not True or
+            ("acceptance" in tracking and
+             (not isinstance(acceptance, dict) or acceptance.get("status") != "complete")) or
+            not isinstance(measurement, dict) or measurement.get("complete") is not True):
         return None, "verified_optimizer_measurement_unavailable"
-    return measurement["total_count"], None
+    count = measurement.get("total_count")
+    if type(count) is not int or count < 0:
+        return None, "verified_optimizer_measurement_unavailable"
+    return count, None

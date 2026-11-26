@@ -934,6 +934,22 @@ def test_both_versions_require_verified_intake_bytes(engineering_lane, graph, co
     assert response.json()["result"] is None
 
 
+def test_engineering_comparison_refuses_oversized_serialized_result(engineering_lane, monkeypatch):
+    lane = engineering_lane
+    response = _engineering_request(lane, lane.head, lane.head)
+    assert response.status_code == 200
+
+    monkeypatch.setattr(routes.output_reads, "MAX_OUTPUT_BYTES", len(response.content))
+    at_limit = _engineering_request(lane, lane.head, lane.head)
+    assert at_limit.status_code == 200
+    monkeypatch.setattr(routes.output_reads, "MAX_OUTPUT_BYTES", len(response.content) - 1)
+    refused = _engineering_request(lane, lane.head, lane.head)
+    assert refused.status_code == 500
+    assert refused.headers["cache-control"] == "no-store"
+    assert refused.json()["error"]["reason_code"] == "READ_OUTPUT_LIMIT_EXCEEDED"
+    assert refused.json()["result"] is None
+
+
 def test_comparison_validates_baseline_scope_and_feature_flag(engineering_lane, monkeypatch):
     lane = engineering_lane
     invalid = _engineering_request(lane, lane.head, "invalid")

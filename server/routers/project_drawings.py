@@ -535,6 +535,13 @@ def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
     return _output_dispatch(operation)
 
 
+def _bounded_comparison_response(result):
+    response = JSONResponse(content=with_envelope_fields({"result": result}), headers=_NO_STORE)
+    if len(response.body) > output_reads.MAX_OUTPUT_BYTES:
+        raise GraphValidationError("READ_OUTPUT_LIMIT_EXCEEDED")
+    return response
+
+
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison")
 def solar_engineering_comparison_route(
         project_id: str, drawing_id: str, input_version_id: str, compare_version_id: str,
@@ -550,7 +557,7 @@ def solar_engineering_comparison_route(
         except ValueError:
             raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
         result = engineering_compare.compare(tenant, proj, drawing, before, after)
-        return with_envelope_fields({"result": result})
+        return _bounded_comparison_response(result)
     return _output_dispatch(operation)
 
 
@@ -572,10 +579,7 @@ def solar_schedule_comparison_route(
         result = schedule_compare.compare_saved_schedules(
             tenant, proj, drawing, before_version_id=before, after_version_id=after,
             before_artifact_id=before_artifact_id, after_artifact_id=after_artifact_id)
-        response = JSONResponse(content=with_envelope_fields({"result": result}), headers=_NO_STORE)
-        if len(response.body) > output_reads.MAX_OUTPUT_BYTES:
-            raise GraphValidationError("READ_OUTPUT_LIMIT_EXCEEDED")
-        return response
+        return _bounded_comparison_response(result)
     return _output_dispatch(operation)
 
 
