@@ -3,7 +3,8 @@ import { resolveApproval } from '../../converse.js'
 import { track } from '../../telemetry.js'
 import './inlineAuthoring.css'
 
-export const capabilityLabel = (value) => value === 'drawing.write' ? 'Changes your drawing' : value
+export const capabilityLabel = (value) => value === 'drawing.write' ? 'Changes your drawing'
+  : value === 'drawing.read' ? 'Reads your drawing' : value
 
 function Items({ title, items, ordered }) {
   const List = ordered ? 'ol' : 'ul'
@@ -66,7 +67,7 @@ export default function PlanCard({ sessionId, proposal, replacedBy, expiresAt, r
     ? (decision ? 'Approved' : 'Denied') : expired ? 'Expired, ask to re-propose' : null
   return <section className="inline-authoring" aria-label="Build plan" data-converse-role="plan">
     <header><small>Plan · Revision {revision}</small><h4>{plan.title}</h4>
-      <p>{plan.target === 'branch' ? 'Branch tool, runs inside AutoCAD' : 'Studio tool'}</p>
+      <p>{plan.target === 'branch' ? 'Runs inside AutoCAD' : 'Runs in Studio'}</p>
       <p>{plan.change_kind === 'revise' ? `Revise ${plan.target_tool_name}` : `New tool ${plan.tool_name}`}</p>
     </header>
     <p>{plan.summary}</p>
@@ -80,8 +81,8 @@ export default function PlanCard({ sessionId, proposal, replacedBy, expiresAt, r
     <div><h5>Undo</h5><p>{plan.undo || 'None specified'}</p></div>
     <Items title="Assumptions" items={plan.assumptions} />
     <Items title="Acceptance checks" items={plan.acceptance} />
-    <Items title="Your answers" items={Object.entries(plan.answers || {}).map(([key, answer]) =>
-      `${key} · ${answer.other ?? answer.labels?.join(', ')}`)} />
+    {Object.keys(plan.answers || {}).length > 0 && <Items title="Your answers" items={Object.values(plan.answers).map(answer =>
+      answer.other ?? answer.labels?.join(', '))} />}
     {state ? <p role="status">{state}</p> : resume
       ? <button type="button" className="chip-act" disabled={busy || disabled}
         onClick={() => decide(resume.approved, resume.feedback)}>Resume {resume.approved ? 'approval' : 'denial'}</button>
