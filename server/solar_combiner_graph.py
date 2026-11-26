@@ -58,7 +58,7 @@ from copy import deepcopy
 import math
 
 import solar_electrical_route_bridge as rb
-from solar_design_graph import validate_graph
+from solar_design_graph import GraphValidationError, validate_graph
 
 legacy = rb.legacy
 st = rb.st
@@ -91,6 +91,14 @@ CODES = ("COMBINER_L2_MODE_REQUIRED", "COMBINER_EXISTING_L1", "COMBINER_INTAKE_I
 
 class CombinerGraphError(ValueError):
     """A refusal of this module; the message is its code alone."""
+
+
+class CombinerCapacityError(GraphValidationError):
+    """The proposed placement exceeds the bound L2 collector capacity."""
+
+    def __init__(self, string_refs):
+        super().__init__("L2_CAPACITY_EXCEEDED")
+        self.unplaced_string_refs = tuple(sorted(string_refs))
 
 
 def _fail(code):
@@ -349,6 +357,21 @@ def _prove(result, binding, after, hardware):
     return l1
 
 
+def _check_collector_capacity(after, binding, capacity):
+    assignments = cab._int_map(after["setting"].get("L1ToL2Assignments"), "L1ToL2Assignments")
+    counts = Counter()
+    overflow = set()
+    # Match the graph bridge, which orders the planned feeds by L1 number.
+    for l1, l2 in sorted(assignments.items()):
+        counts[l2] += 1
+        if counts[l2] > capacity:
+            overflow.add(l1)
+    if overflow:
+        served = after["setting"].get(st.L1_SETTING, {})
+        refs = [ref for number, ref in binding["strings"].items() if served.get(number) in overflow]
+        raise CombinerCapacityError(refs)
+
+
 def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, created_at=None):
     """LEAFCOMBINERAUTO on `graph` with its bound `intake` (see the module docstring); returns the validated
     graph and the placement receipt."""
@@ -373,6 +396,7 @@ def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, creat
         _fail("COMBINER_KERNEL_REFUSED")
     if not cab.levels(after)[0]:
         _fail("COMBINER_NOTHING_PLACED")
+    _check_collector_capacity(after, binding, cap)
     result, _ = rb.graph_from_state(g, after, state_binding, defaults={"combiner_box": values},
                                     new_id=new_id, created_at=created_at,
                                     metres_per_unit=KERNEL_METRES_PER_UNIT)

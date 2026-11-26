@@ -400,6 +400,24 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
       : <p className="result-empty">Completed with no output.</p>
 }
 
+const SOLAR_STRING_REF = /^leaf:string:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function CombinerCapacityDetails({ result }) {
+  const error = result.error
+  if (result.ok !== false || result.tool !== 'solar-combiners' || error?.reason_code !== 'L2_CAPACITY_EXCEEDED') return null
+  const refs = error.unplaced_string_refs
+  if (!Array.isArray(refs) || refs.length === 0 ||
+      !refs.every((ref) => typeof ref === 'string' && SOLAR_STRING_REF.test(ref)) || new Set(refs).size !== refs.length) return null
+  return (
+    <details>
+      <summary>{refs.length} {refs.length === 1 ? 'string' : 'strings'} could not be placed</summary>
+      <ul aria-label="Unplaced strings">
+        {refs.map((ref) => <li key={ref}><code>{ref}</code></li>)}
+      </ul>
+    </details>
+  )
+}
+
 // X1 failed-act row: plain sentence naming what failed (code demoted to a
 // quiet mono suffix), Retry chip carrying its mnemonic keycap (R — bound at
 // the panel level while the row is visible), and an honest fallback note.
@@ -590,6 +608,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
           {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
             projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} navigation={navigation} stale={stale} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
+          <CombinerCapacityDetails result={result} />
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
           {!result.overlay && <ResultObjectLinks result={result} navigation={navigation} announce={announce} />}
 
