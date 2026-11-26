@@ -2261,16 +2261,26 @@ def test_teardown_guardian_process_exits_hard(monkeypatch):
     def exit_hard(code):
         raise HardExit(code)
     flushed = []
+    wire = io.BytesIO()
+    stdout = io.TextIOWrapper(wire, encoding="ascii", newline="\r\n")
+    flush_stdout = stdout.flush
+    def flush():
+        flushed.append("stdout")
+        flush_stdout()
+    stdout.flush = flush
     monkeypatch.setattr(p.os, "_exit", exit_hard)
     monkeypatch.setattr(p, "sys", SimpleNamespace(
-        stdout=SimpleNamespace(flush=lambda: flushed.append("stdout")),
-        stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
+        stdout=stdout, stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
     for result, expected in ((0, 0), (3, 3), (None, 1), (True, 1), (256, 1), (-1, 1)):
-        monkeypatch.setattr(p, "_guardian_entry", lambda: result)
+        def entry():
+            stdout.write("OK\n")
+            return result
+        monkeypatch.setattr(p, "_guardian_entry", entry)
         with pytest.raises(HardExit) as error:
             p._guardian_process_main()
         assert error.value.code == expected
         assert flushed[-2:] == ["stdout", "stderr"]
+    assert wire.getvalue() == b"OK\n" * 6
     def crash():
         raise RuntimeError("entry failed")
     monkeypatch.setattr(p, "_guardian_entry", crash)

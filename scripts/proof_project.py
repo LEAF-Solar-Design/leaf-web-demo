@@ -4983,6 +4983,8 @@ def _guardian_process_main():
     disarm into a failure; os._exit skips finalization after an explicit flush.
     """
     try:
+        # The parent reads a binary pipe and requires an exact LF acknowledgment.
+        sys.stdout.reconfigure(newline="\n")
         result = _guardian_entry()
         code = result if type(result) is int and 0 <= result <= 255 else 1
     except BaseException:
