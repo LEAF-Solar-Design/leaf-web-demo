@@ -54,7 +54,7 @@ def revoke_for_turn(tenant_id: str, session_id: str, turn_id: str, *, reason: st
             authority_turn_id=turn_id, reason=reason, now_ms=int(time.time() * 1000),
         )
     except Exception as exc:
-        _LOG.warning("stage_grant_revoke exception_type=%s", type(exc).__name__)
+        _LOG.error("stage_grant_revoke_failed exception_type=%s", type(exc).__name__)
 
 
 def binding_digest(change) -> str:
