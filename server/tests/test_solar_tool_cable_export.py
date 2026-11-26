@@ -8,11 +8,13 @@ bytes every run; every named refusal; the registry, readiness and the read rail 
 back. Nothing here writes a drawing version."""
 import copy
 import hashlib
+import io
 import importlib.util
 import json
 import math
 from pathlib import Path
 import re
+import zipfile
 
 import pytest
 from jsonschema import Draft7Validator
@@ -20,6 +22,7 @@ from jsonschema import Draft7Validator
 import broker_client
 import catalog
 import deps
+from dxf_intake import parse_dxf_bytes
 import entitlements
 import jobs
 import product_capability_availability as availability
@@ -332,6 +335,43 @@ def test_cable_export_i8_lengths_use_inches(i8, unit, mpu):
     assert homeruns[1] == (2, ["1 - a", "1", "End Homerun", "NA", "29.69", "163.26", "81.63"])
 
 
+@pytest.mark.parametrize("unit,mpu,insunits", [("in", .0254, 1), ("ft", .3048, 2), ("mm", .001, 4)])
+def test_route_bundle_joins_real_drawing_routes_to_workbook_rows(i8, unit, mpu, insunits):
+    g = unsized(i8)
+    g["project"]["units"].update(drawing_units=unit, meters_per_unit=mpu, drawing_unit_is_feet=(unit == "ft"))
+    before = copy.deepcopy(g)
+    workbook = builtin().run(g, I9_PARAMS)
+    bundle = builtin().run(g, {**I9_PARAMS, "export_format": "route_bundle"})
+    assert g == before
+    assert (bundle.media_type, bundle.filename) == ("application/vnd.leaf.solar-route-bundle+zip", "CableRoutes.zip")
+    assert bundle.summary["missing_schedule_rows"] == 0
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+        assert archive.namelist() == ["CableRoutes.dxf", "CableExport.xlsx", "RouteIndex.json"]
+        assert archive.read("CableExport.xlsx") == workbook.content
+        manifest = json.loads(archive.read("RouteIndex.json"))
+        drawing = parse_dxf_bytes(archive.read("CableRoutes.dxf"))
+    assert (manifest["drawing_units"], manifest["meters_per_unit"], drawing["insunits"]) == (unit, mpu, insunits)
+    assert manifest["missing_schedule_rows"] == 0
+    polylines = {polyline["handle"]: polyline for polyline in drawing["polylines"]}
+    rows = dict(dict(reopened(workbook))["Homeruns"])
+    graph_routes = {route["id"]: route for route in g["routes"] if route["route_kind"] != "trench"}
+    assert len(polylines) == len(manifest["routes"]) == len(graph_routes) == 360
+    assert {entry["route_id"] for entry in manifest["routes"]} == set(graph_routes)
+    assert len({entry["homeruns_row"] for entry in manifest["routes"]}) == 360
+    assert len({entry["dxf_handle"] for entry in manifest["routes"]}) == 360
+    kinds = {"start homerun": "Start Homerun", "end homerun": "End Homerun", "feeder": "Feeder"}
+    for entry in manifest["routes"]:
+        route = graph_routes[entry["route_id"]]
+        polyline = polylines[entry["dxf_handle"]]
+        assert (entry["from_ref"], entry["to_ref"], entry["kind"]) == (
+            route["from_ref"], route["to_ref"], route["route_kind"])
+        assert polyline["layer"] == entry["dxf_layer"]
+        assert len(polyline["pts"]) == len(route["points"])
+        for point, (x, y) in zip(polyline["pts"], route["points"]):
+            assert point == pytest.approx([x / mpu, y / mpu, 0])
+        assert rows[entry["homeruns_row"]][2] == kinds[entry["kind"]]
+
+
 def test_cable_export_no_strings_writes_nothing(graph):
     g = bare(copy.deepcopy(graph))
     before = copy.deepcopy(g)
@@ -589,11 +629,12 @@ def test_cable_export_registry_and_catalog(monkeypatch):
 def test_cable_export_params_schema():
     params = solar_tools.trusted_record(TOOL)["params"]
     assert set(params["properties"]) == {"drawing_id", "circuit_source", "inverter_record",
-                                         "suggested_inverter_count", "design_min_temp_c", "project_location"}
+                                         "suggested_inverter_count", "design_min_temp_c", "project_location", "export_format"}
     assert params["properties"]["suggested_inverter_count"] == {"type": "integer", "minimum": 1, "maximum": 10000}
     assert params["properties"]["design_min_temp_c"] == {"type": "number", "minimum": -90, "maximum": 60}
     schema = Draft7Validator(params)
-    for bad in ({"x": 1}, {"drawing_id": "x" * 129}, {"circuit_source": "graph"}, {"inverter_record": {}},
+    assert schema.is_valid({"export_format": "route_bundle"})
+    for bad in ({"export_format": "dxf"}, {"x": 1}, {"drawing_id": "x" * 129}, {"circuit_source": "graph"}, {"inverter_record": {}},
                 {"suggested_inverter_count": 0}, {"suggested_inverter_count": 10001},
                 {"suggested_inverter_count": 2.5}, {"suggested_inverter_count": True},
                 {"design_min_temp_c": -90.5}, {"design_min_temp_c": 61}, {"design_min_temp_c": "-40"},
@@ -746,6 +787,29 @@ def test_cable_export_api_writes_one_artifact(api, graph):
     again = api[0].post("/api/run?wait=1", json=body(api, API_PARAMS)).json()
     assert again["result"]["output"] == output and keys(api[1]) - before == added
     assert len(api[3]) == 2
+    assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
+
+
+def test_route_bundle_api_reopens_the_artifact_at_its_source_version(api):
+    params = {**API_PARAMS, "export_format": "route_bundle"}
+    first = api[0].post("/api/run?wait=1", json=body(api, params))
+    assert first.status_code == 200, first.text
+    output = first.json()["result"]["output"]
+    ref = output["artifact"]
+    assert (ref["media_type"], ref["filename"], ref["source_version"]) == (
+        "application/vnd.leaf.solar-route-bundle+zip", "CableRoutes.zip", 1)
+    meta, content = solar_artifacts.read_artifact(api[1], TENANT, "solar", ref["artifact_id"], require_head=True)
+    assert meta["source_version"] == 1
+    assert hashlib.sha256(content).hexdigest() == ref["content_sha256"]
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        manifest = json.loads(archive.read("RouteIndex.json"))
+        assert [sheet.name for sheet in solar_xlsx.read_workbook(archive.read("CableExport.xlsx"))] == PLUGIN_SHEETS
+        assert len(parse_dxf_bytes(archive.read("CableRoutes.dxf"))["polylines"]) == len(manifest["routes"]) == 1
+    assert manifest["routes"][0]["homeruns_row"] == 2
+    before = keys(api[1])
+    again = api[0].post("/api/run?wait=1", json=body(api, params)).json()
+    assert again["result"]["output"] == output
+    assert keys(api[1]) == before
     assert store.load_manifest(api[1], TENANT, "solar")["head"] == 1
 
 

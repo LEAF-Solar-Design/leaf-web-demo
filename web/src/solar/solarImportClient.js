@@ -121,11 +121,12 @@ const CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
 const DRAWING_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/
 const HEX64_PATTERN = /^[0-9a-f]{64}$/
 // Mirror server/solar_artifacts.py MEDIA_TYPES and _media_filename.
-const FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml|pdf)$/
+const FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml|pdf|zip)$/
 const EXTENSION_OF_MEDIA_TYPE = Object.freeze({
   'text/csv': 'csv',
   'application/json': 'json',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.leaf.solar-route-bundle+zip': 'zip',
   'application/vnd.google-earth.kml+xml': 'kml',
   'application/xml': 'xml',
   'application/pdf': 'pdf',

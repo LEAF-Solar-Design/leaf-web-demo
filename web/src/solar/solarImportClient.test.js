@@ -25,12 +25,15 @@ it('srr13_server_media_types', () => {
     byte_length: 4421, source_version: 1, download: '/api/drawings/solar/artifacts/' + artifactId,
   }
   const xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  const routeBundle = 'application/vnd.leaf.solar-route-bundle+zip'
   for (const [media_type, filename] of [
     ['text/csv', 'a.csv'], ['application/json', 'a.json'], [xlsx, 'a.xlsx'],
     ['application/vnd.google-earth.kml+xml', 'a.kml'], ['application/xml', 'a.xml'], ['application/pdf', 'a.pdf'],
+    [routeBundle, 'CableRoutes.zip'],
   ]) expect(validateSolarArtifactRef({ ...base, media_type, filename }, 'solar')).toBe(true)
   for (const [media_type, filename] of [
     ['text/plain', 'a.txt'], [xlsx, 'a.csv'], [xlsx, 'a..xlsx'], [xlsx, 'a'.repeat(121) + '.xlsx'],
+    ['application/zip', 'CableRoutes.zip'], [routeBundle, 'CableRoutes.xlsx'],
   ]) expect(validateSolarArtifactRef({ ...base, media_type, filename }, 'solar')).toBe(false)
 })
 

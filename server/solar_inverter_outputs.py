@@ -889,11 +889,11 @@ def _cables(state):
         out.append({"kind": STRING_KIND, "circuit": detail.get("circuit"), "panels": detail.get("panel_count"),
                     "segment": None, "source": item["string"],
                     "length": polyline_length(pts) if len(pts) > 1 else 0.0})
-    for item in state["rows"]["cable"]:
+    for route_index, item in enumerate(state["rows"]["cable"]):
         detail = item.get("_detail") or {}
         pts = _points(item["vertices"], "cable vertices")
         out.append({"kind": item["cable_kind"], "circuit": detail.get("circuit"), "panels": None,
-                    "segment": item.get("segment"), "source": item.get("from"),
+                    "segment": item.get("segment"), "source": item.get("from"), "route_index": route_index,
                     "length": polyline_length(pts, item.get("bulges"), bool(detail.get("closed")))})
     return out
 
@@ -1528,7 +1528,7 @@ def _compare_circuit_keys(a, b):
     return (a[0] > b[0]) - (a[0] < b[0])
 
 
-def homeruns_sheet(state):
+def _homerun_rows(state):
     """WriteHomerunsSheet (:1862-1888) over the detailed view PreCalculateViewItems builds (:2457-2552,
     CreateListViewItem :2584-2689): the header, then one row per cable. The rows are built in mCables
     order (StringCalculations.performCalc, :87-88): the cables in SelectAll order (_select_all_order),
@@ -1562,15 +1562,21 @@ def homeruns_sheet(state):
                                               "export name")
             length = cs_fixed(cable["length"] / 12.0, 2)
             if match:
-                items.append((int(match.group(1)),
-                              [f"{device_number_of(circuit)} - {match.group(2)}", match.group(1), which, panels,
-                               length, cs_fixed(total_ft, 2), cs_fixed(total_ft / 2, 2)]))
+                key = int(match.group(1))
+                cells = [f"{device_number_of(circuit)} - {match.group(2)}", match.group(1), which, panels,
+                         length, cs_fixed(total_ft, 2), cs_fixed(total_ft / 2, 2)]
             else:
-                items.append((INT_MAX, ["-", "-", which, panels, length, "N/A", "N/A"]))
+                key = INT_MAX
+                cells = ["-", "-", which, panels, length, "N/A", "N/A"]
+            items.append((key, cells, cable.get("route_index")))
             if len(items) > MAX_SCHEDULE_ROWS:
                 raise InverterOutputError(f"the homerun sheet exceeds {MAX_SCHEDULE_ROWS} rows")
     dotnet_list_sort(items, _compare_circuit_keys)
-    return [list(HOMERUN_HEADERS)] + [row for _, row in items]
+    return items
+
+
+def homeruns_sheet(state):
+    return [list(HOMERUN_HEADERS)] + [cells for _, cells, _ in _homerun_rows(state)]
 
 
 def export_equipment_sheet(inverter, count, low, location):
@@ -1676,7 +1682,7 @@ def export_string_sheet(inverter, records, low):
                    ["Cable sizing per NEC 310.16 (ampacity) + NEC 210.19 FPN (voltage drop ≤ 2% recommended)"]]
 
 
-def cable_export(state, host, form_values):
+def cable_export(state, host, form_values, *, include_route_rows=False):
     """CableExport, Export All (StringExportCmd.cs:33-94, StringHomerunExportForm.cs:318-413; declared, see
     the module docstring): the homerun cables found, the workbook the form writes, in its sheet order:
     Homeruns, Equipment, Inverter and String Schedule, then the Feeder Schedule when L2 collectors are on
@@ -1696,7 +1702,8 @@ def cable_export(state, host, form_values):
     inverter = host.get("InverterCatalogRecord")
     count, low, location = _export_host(host)
     records = string_records(after, host)
-    sheets = [("Homeruns", homeruns_sheet(after))]
+    items = _homerun_rows(after)
+    sheets = [("Homeruns", [list(HOMERUN_HEADERS)] + [cells for _, cells, _ in items])]
     for name, grid in (("Equipment Schedule", export_equipment_sheet(inverter, count, low, location)),
                        ("Inverter Schedule", export_inverter_sheet(inverter, records, low)),
                        ("String Schedule", export_string_sheet(inverter, records, low))):
@@ -1710,5 +1717,9 @@ def cable_export(state, host, form_values):
     if any(len(text) > MAX_CELL_CHARS for _, grid in sheets for row_cells in grid for text in row_cells):
         raise InverterOutputError("a workbook cell exceeds the comparator's string bound")
     data = write_workbook(sheets)
-    return after, [f"CableExport: wrote {len(sheets)} sheet(s)."], \
-        {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}
+    workbook = {"sheets": sheets, "bytes": data, "text": workbook_text(sheets)}
+    if include_route_rows:
+        workbook["route_rows"] = {route_index: row_number
+                                  for row_number, (_, _, route_index) in enumerate(items, 2)
+                                  if route_index is not None}
+    return after, [f"CableExport: wrote {len(sheets)} sheet(s)."], workbook

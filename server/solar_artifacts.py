@@ -2,15 +2,17 @@
 
 Artifacts bind tenant, drawing, project, source version, graph, tool and request.
 Immutable content and metadata make duplicate requests idempotent. Files are
-limited to 16 MiB and a closed CSV, JSON, XLSX, KML, XML and PDF media list. Everything
+limited to 16 MiB and a closed media list that includes solar route bundles. Everything
 lives under the drawing prefix and shares drawing retention. Validation and
 readback fail closed; metadata is written only after its content is durable.
 """
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 import math
 import re
+import zipfile
 
 import write_loop
 import store
@@ -20,6 +22,8 @@ from solar_design_graph import GraphValidationError
 
 MAX_ARTIFACT_BYTES = 16_777_216
 MAX_META_BYTES = 4096
+ROUTE_BUNDLE_MEDIA_TYPE = "application/vnd.leaf.solar-route-bundle+zip"
+ROUTE_BUNDLE_FILES = ("CableRoutes.dxf", "CableExport.xlsx", "RouteIndex.json")
 MEDIA_TYPES = {
     "text/csv": "csv",
     "application/json": "json",
@@ -27,6 +31,7 @@ MEDIA_TYPES = {
     "application/vnd.google-earth.kml+xml": "kml",
     "application/xml": "xml",
     "application/pdf": "pdf",
+    ROUTE_BUNDLE_MEDIA_TYPE: "zip",
 }
 BINDING_SCHEMA = "leaf.solar-artifact-binding.v1"
 ARTIFACT_SCHEMA = "leaf.solar-artifact.v1"
@@ -82,7 +87,7 @@ def _media_filename(media_type, filename):
     if not isinstance(media_type, str) or media_type not in MEDIA_TYPES:
         raise GraphValidationError("ARTIFACT_MEDIA_TYPE_REFUSED")
     if (not isinstance(filename, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml|pdf)", filename)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\.(csv|json|xlsx|kml|xml|pdf|zip)", filename)
             or ".." in filename or filename.rsplit(".", 1)[1] != MEDIA_TYPES[media_type]):
         raise GraphValidationError("ARTIFACT_FILENAME_INVALID")
 
@@ -98,6 +103,13 @@ def _validate(value):
         if extension == "xlsx":
             if value.content[:4] != b"PK\x03\x04":
                 raise ValueError()
+        elif extension == "zip":
+            with zipfile.ZipFile(io.BytesIO(value.content)) as archive:
+                members = archive.infolist()
+                if (sorted(archive.namelist()) != sorted(ROUTE_BUNDLE_FILES)
+                        or sum(member.file_size for member in members) > MAX_ARTIFACT_BYTES
+                        or any(member.file_size < 1 or member.flag_bits & 1 for member in members)):
+                    raise ValueError()
         elif extension == "pdf":
             if not value.content[:1024].lstrip().startswith(b"%PDF-"):
                 raise ValueError()
@@ -108,7 +120,7 @@ def _validate(value):
             elif extension in ("kml", "xml"):
                 if not text.removeprefix("\ufeff").lstrip().startswith("<"):
                     raise ValueError()
-    except (ValueError, RecursionError):
+    except (ValueError, RecursionError, zipfile.BadZipFile):
         raise GraphValidationError("ARTIFACT_CONTENT_MISMATCH") from None
 
 
