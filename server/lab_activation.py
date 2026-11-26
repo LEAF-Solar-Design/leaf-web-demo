@@ -10,6 +10,8 @@ import uuid
 import deps
 import entitlements
 import lab_artifacts
+from lab_evaluate import Budget, GraphRefused, admit_graph, trusted_registry
+from lab_placement import placement
 import lab_registry
 import lab_run_store
 import lab_tool_manifests
@@ -106,26 +108,38 @@ def _cancel_committed(tenant, cancellations):
             logging.getLogger(__name__).warning("lab_activation_cancel_failed class=%s", type(error).__name__)
 
 
+def _admit_schedule_block(block, tenant):
+    ref = block["registry"]
+    if ref["id"] == "corpus-evaluator":
+        raise Refused("lab_activation_corpus_authority_unavailable", block=block["id"])
+    tool = lab_tool_manifests.trusted_for(str(tenant), ref["id"], ref["version"])
+    trusted = lab_registry.lookup(ref["id"], ref["version"])
+    # trusted_for returns the static entry itself when no tenant tool projects.
+    if tool is not None and tool is not trusted:
+        if not lab_tool_nodes.enabled():
+            raise Refused("lab_activation_tools_disabled", block=block["id"])
+        if not lab_tool_nodes.tool_block_admissible(tool, ("compute", "read", "simulate")):
+            raise Refused("lab_activation_effect_refused", block=block["id"])
+        return
+    if trusted is None:
+        builtin = trusted_registry().get(f'{ref["id"]}@{ref["version"]}')
+        if (builtin and builtin["version"]["code_sha256"] == ref["code_sha256"]
+                and builtin["effect"] == "pure" and builtin["residency"] in ("none", "tenant")
+                and placement(builtin) == "here"):
+            return
+    if (trusted is None or trusted.residency == "host"
+            or trusted.effect not in ("pure", "read", "simulate")
+            or lab_registry.total_effect(trusted.capability, trusted.solar_adapter,
+                                         trusted.execution_class, trusted.aps_live)
+            not in ("pure", "read", "simulate")):
+        raise Refused("lab_activation_effect_refused", block=block["id"])
+    if trusted.effect in ("read", "simulate") and not lab_tool_nodes.enabled():
+        raise Refused("lab_activation_tools_disabled", block=block["id"])
+
+
 def _admit_graph(graph, tenant):
     for block in graph["blocks"]:
-        ref = block["registry"]
-        tool = lab_tool_manifests.trusted_for(str(tenant), ref["id"], ref["version"])
-        trusted = lab_registry.lookup(ref["id"], ref["version"])
-        # trusted_for returns the static entry itself when no tenant tool projects.
-        if tool is not None and tool is not trusted:
-            if not lab_tool_nodes.enabled():
-                raise Refused("lab_activation_tools_disabled", block=block["id"])
-            if not lab_tool_nodes.tool_block_admissible(tool, ("compute", "read", "simulate")):
-                raise Refused("lab_activation_effect_refused", block=block["id"])
-            continue
-        if (trusted is None or trusted.residency == "host"
-                or trusted.effect not in ("pure", "read", "simulate")
-                or lab_registry.total_effect(trusted.capability, trusted.solar_adapter,
-                                             trusted.execution_class, trusted.aps_live)
-                not in ("pure", "read", "simulate")):
-            raise Refused("lab_activation_effect_refused", block=block["id"])
-        if trusted.effect in ("read", "simulate") and not lab_tool_nodes.enabled():
-            raise Refused("lab_activation_tools_disabled", block=block["id"])
+        _admit_schedule_block(block, tenant)
 
 
 def readmit(row):
@@ -180,20 +194,69 @@ def _public(sql, row, transitions=None):
     return result
 
 
-def create(tenant, doc_id, interval_s, principal, actor):
-    identifier(doc_id)
+def _validate_interval(interval_s):
     if type(interval_s) is not int or not 60 <= interval_s <= 86400:
         raise Refused("invalid_lab_activation_interval")
+
+
+def published_artifact(tenant, doc_id, expected_revision=None):
+    identifier(doc_id)
+    revision = lab_artifacts.get(tenant, doc_id)["published_revision"]
+    if revision is None:
+        raise Refused("lab_activation_unpublished", 409)
+    if expected_revision is not None and revision != expected_revision:
+        raise Refused("publication_changed", 409)
+    return revision, lab_artifacts.get(tenant, doc_id, revision)
+
+
+def execution_plan(tenant, doc_id, revision, artifact, interval_s):
+    _validate_interval(interval_s)
+    graph = artifact["graph"]
+    blockers = []
+    manifests = {}
+    try:
+        manifests = admit_graph(graph, lab_tool_manifests.registry_for(str(tenant)))
+    except GraphRefused as error:
+        blockers.append({"code": error.code, "block": error.block_id})
+    if not blockers:
+        for block in graph["blocks"]:
+            try:
+                _admit_schedule_block(block, tenant)
+            except Refused as error:
+                blockers.append({"code": error.code, "block": error.block})
+
+    blocks = []
+    for block in graph["blocks"]:
+        ref = block["registry"]
+        trusted = lab_tool_manifests.trusted_for(str(tenant), ref["id"], ref["version"])
+        item = {"id": block["id"], "registry": ref,
+                "settings_sha256": graph_digest(block["settings"]),
+                "effect": trusted.effect if trusted else manifests.get(block["id"], {}).get("effect")}
+        if ref["id"] == "corpus-evaluator" and block["id"] in manifests:
+            item["inputs"] = {name: block["settings"][name] for name in ("corpus", "suite")}
+        blocks.append(item)
+    return {"doc_id": doc_id, "revision": revision, "graph_sha256": artifact["sha256"],
+            "registry_digest": lab_run_store.registry_digest(), "ops_revision": _ops_revision(),
+            "input_digest": graph_digest({}), "interval_s": interval_s,
+            "max_run_wall_s": Budget().run_wall_s, "blocks": blocks, "pipes": graph["pipes"],
+            "outputs": graph["outputs"], "blockers": blockers}
+
+
+def create(tenant, doc_id, interval_s, principal, actor, expected_revision=None):
+    _validate_interval(interval_s)
+    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1):
+        raise Refused("invalid_lab_activation_revision")
     if not isinstance(principal, str) or not principal or len(principal) > 512:
         raise Refused("invalid_lab_activation_principal")
 
     def operation(sql):
-        head = lab_artifacts.get(tenant, doc_id)
-        revision = head["published_revision"]
-        if revision is None:
-            raise Refused("lab_activation_unpublished", 409)
-        artifact = lab_artifacts.get(tenant, doc_id, revision)
+        revision, artifact = published_artifact(tenant, doc_id, expected_revision)
         _admit_graph(artifact["graph"], tenant)
+        if expected_revision is not None:
+            try:
+                admit_graph(artifact["graph"], lab_tool_manifests.registry_for(str(tenant)))
+            except GraphRefused as error:
+                raise Refused(error.code, block=error.block_id) from None
         count = sql.execute("SELECT COUNT(*) AS count FROM lab_activations WHERE tenant_id=?"
                             " AND state IN ('active','paused','expired')", (tenant,)).fetchone()["count"]
         if count >= 10:
