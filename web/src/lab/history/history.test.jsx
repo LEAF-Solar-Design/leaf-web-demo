@@ -22,7 +22,7 @@ const copy = value => JSON.parse(JSON.stringify(value))
 const response = (data, status = 200) => ({ ok: status < 400, status,
   json: async () => copy(data), text: async () => JSON.stringify(data) })
 const hash = value => createHash('sha256').update(canonicalJSON(value)).digest('hex')
-function exportFixture() {
+function exportFixture(configure) {
   const identity = { tenant_id: 'test-tenant', doc_id: 'strategy', revision: 1, parent_revision: null,
     kind: 'graph', author: 'tester', created_at: 1800000001, sha256: hash(first) }
   const report = { candidates: [{ setting: 'price', score: 2 }, { setting: 'size', score: 3 }],
@@ -38,6 +38,7 @@ function exportFixture() {
     evaluations: [{ run, events: Array.from({ length: 1001 }, (_, seq) => ({ tenant_id: identity.tenant_id,
       run_id: run.run_id, seq, kind: seq === 1000 ? 'finished' : 'value', payload: { result: { data: seq } } })),
     complete_results: { 'job-1': { result: report } } }] }
+  configure?.(parts)
   const bundle = { schema: 'leaf.lab-bundle.v1', parts,
     manifest: { algorithm: 'sha256', parts: Object.fromEntries(Object.entries(parts).map(([key, value]) => [key, hash(value)])) } }
   const fetchImpl = vi.fn(async url => {
@@ -144,6 +145,67 @@ describe('Strategy revision ledger', () => {
     act(() => client.takeGraph(edited))
     expect(client.state.restoredGraph.blocks[0].settings.field).toBe('edited after reopen')
     expect(client.state.openedBundle.parts.graph).toEqual(first)
+    const lineage = screen.getByRole('region', { name: 'Stored evaluation lineage' })
+    expect(within(lineage).getByText('Producer job-1')).toBeInTheDocument()
+    expect(within(lineage).getByText(hash(first))).toBeInTheDocument()
+    act(() => client.setDocId('other'))
+    expect(screen.queryByRole('region', { name: 'Stored evaluation lineage' })).not.toBeInTheDocument()
+    expect(fetchImpl.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true)
+  })
+
+  it('explains a complete producer and an incomplete sibling from the same saved graph', async () => {
+    const { bundle, client } = exportFixture(({ evaluations }) => {
+      const complete = evaluations[0]
+      complete.events[0].block_id = 'field-1'
+      complete.events[0].payload.result.data = JSON.stringify({ job_id: 'job-1' })
+      const producer = complete.complete_results['job-1']
+      producer.result.verdict = 'pass'
+      producer.worker_id = 'worker-1'
+      producer.attempt = 2
+      evaluations.push({
+        run: { ...complete.run, run_id: 'evaluation-2', state: 'failed' },
+        events: [{ tenant_id: complete.run.tenant_id, run_id: 'evaluation-2', seq: 1,
+          kind: 'failed', payload: { reason: 'Corpus unavailable' } }],
+        complete_results: {},
+      })
+    })
+    render(<HistoryView client={client} />)
+    fireEvent.change(screen.getByLabelText('Reopen bundle'), {
+      target: { files: [new File([JSON.stringify(bundle)], 'saved.json')] },
+    })
+    const lineage = within(await screen.findByRole('region', { name: 'Stored evaluation lineage' }))
+    const finished = within(lineage.getByText('Run evaluation-1 · finished').parentElement)
+    expect(finished.getByText('Producer job-1 · pass')).toBeInTheDocument()
+    for (const detail of ['field-1', 'complete report', 'worker-1', 'Producer attempt 2']) {
+      expect(finished.getByText(detail)).toBeInTheDocument()
+    }
+    const failed = within(lineage.getByText('Run evaluation-2 · failed').parentElement)
+    expect(failed.getByText('Corpus unavailable')).toBeInTheDocument()
+    expect(failed.getByText('No complete producer result was stored for this run.')).toBeInTheDocument()
+    expect(failed.queryByText(/Producer job/)).not.toBeInTheDocument()
+  })
+
+  it('keeps distinct producer pins bound to their own results', async () => {
+    const { bundle, client } = exportFixture(({ evaluations }) => {
+      const { complete_results: results } = evaluations[0]
+      results['job-1'].context = { corpus: { material_id: 'corpus-1' }, suite: { sha256: 'suite-1-sha' } }
+      results['job-2'] = { context: { corpus: { material_id: 'corpus-2' }, policy: { digest: 'policy-2-sha' } },
+        evaluated_suite_sha256: 'evaluated-2-sha', result_sha256: 'result-2-sha', result: { verdict: 'fail' } }
+    })
+    render(<HistoryView client={client} />)
+    fireEvent.change(screen.getByLabelText('Reopen bundle'), {
+      target: { files: [new File([JSON.stringify(bundle)], 'saved.json')] },
+    })
+    const lineage = within(await screen.findByRole('region', { name: 'Stored evaluation lineage' }))
+    const firstResult = within(lineage.getByText('Producer job-1').parentElement)
+    expect(firstResult.getByText('corpus-1')).toBeInTheDocument()
+    expect(firstResult.getByText('suite-1-sha')).toBeInTheDocument()
+    expect(firstResult.queryByText('corpus-2')).not.toBeInTheDocument()
+    const secondResult = within(lineage.getByText('Producer job-2 · fail').parentElement)
+    for (const pin of ['corpus-2', 'policy-2-sha', 'evaluated-2-sha', 'result-2-sha']) {
+      expect(secondResult.getByText(pin)).toBeInTheDocument()
+    }
+    expect(secondResult.queryByText('suite-1-sha')).not.toBeInTheDocument()
   })
 
   it.each(['identity', 'graph', 'layout', 'policy_reference', 'evaluations'])('visibly refuses a tampered %s part before requests', async part => {
