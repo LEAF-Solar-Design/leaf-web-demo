@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assignment-report",
     "version": "1.0.0",
-    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The default mode previews tentative assignments without committing.",
+    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assignment_report",
@@ -57,12 +57,14 @@
         },
         "rebalance": {
           "type": "object",
-          "required": ["source_rev", "status", "minimum_moves", "moves"],
+          "required": ["source_rev", "status", "minimum_moves", "moves", "probes_examined", "probe_limit"],
           "properties": {
             "source_rev": {"type": "integer", "minimum": 0},
             "status": {"enum": ["already_balanced", "proposed", "no_direct_solution", "unavailable", "search_limit"]},
             "minimum_moves": {"type": ["integer", "null"], "minimum": 0},
-            "moves": {"type": "array", "items": {"type": "object"}}
+            "moves": {"type": "array", "items": {"type": "object"}},
+            "probes_examined": {"type": "integer", "minimum": 0},
+            "probe_limit": {"type": "integer", "minimum": 1}
           },
           "additionalProperties": false
         },

@@ -984,14 +984,19 @@ def test_assign_strings_dispatch_replays_and_refuses_stale(graph, tmp_path, monk
     assert head_graph(backend) == call(variant(graph, "L2"))["graph"]
 
 
-@pytest.mark.parametrize(("sending_kw", "receiving_v", "inputs", "status", "minimum"), [
-    (1.2, 75, 1, "already_balanced", 0),
-    (.9, 75, 1, "proposed", 1),
-    (.3, 100, 2, "proposed", 2),
-    (.9, 49, 1, "no_direct_solution", None),
-    (.3, 100, 1, "no_direct_solution", None),
+@pytest.mark.parametrize(("sending_kw", "receiving_v", "inputs", "status", "minimum", "probes"), [
+    (1.2, 75, 1, "already_balanced", 0, 0),
+    (.9, 75, 1, "proposed", 1, 2),
+    (.3, 100, 2, "proposed", 2, 3),
+    (.9, 49, 1, "no_direct_solution", None, 2),
+    (.3, 100, 1, "no_direct_solution", None, 2),
+    (.9, 49, 1, "search_limit", None, 1),
 ])
-def test_saved_inverter_rebalance(equipment_case, sending_kw, receiving_v, inputs, status, minimum):
+def test_saved_inverter_rebalance(
+        equipment_case, monkeypatch, sending_kw, receiving_v, inputs, status, minimum, probes):
+    probe_limit = 1 if status == "search_limit" else 64
+    if status == "search_limit":
+        monkeypatch.setattr("solar_equipment_rebalance._MAX_PROBES", probe_limit)
     graph, params, _ = equipment_case
     first = params["equipment"][0]
     first["max_dc_power_kw"] = sending_kw
@@ -1015,6 +1020,8 @@ def test_saved_inverter_rebalance(equipment_case, sending_kw, receiving_v, input
     assert report["source_rev"] == source["rev"]
     assert report["status"] == status
     assert report["minimum_moves"] == minimum
+    assert report["probe_limit"] == probe_limit
+    assert report["probes_examined"] == probes
     assert source == before
     moves = {row["string_ref"]: row for row in report["moves"]}
     assert len(moves) == (minimum or 0)

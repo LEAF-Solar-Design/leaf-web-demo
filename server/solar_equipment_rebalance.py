@@ -43,10 +43,12 @@ def minimum_direct_moves(graph):
     overloaded inverter to an initially healthy inverter. The result applies
     to this policy only. Swaps, cascading moves and equipment changes are out
     of scope. A limit hit never yields a feasibility or minimum claim.
+    The probe count includes incomplete sender selections and attempted
+    destination combinations. Structural limits apply before probing.
     """
     source = validate_graph(graph)
     receipt = {"source_rev": source["rev"], "status": "unavailable", "minimum_moves": None,
-               "moves": []}
+               "moves": [], "probes_examined": 0, "probe_limit": _MAX_PROBES}
     strings = source["strings"]
     panel_count = len(source["panels"]) + sum(
         frame["ground_slots"]["count"] for frame in source["frames"] if "ground_slots" in frame)
@@ -81,18 +83,17 @@ def minimum_direct_moves(graph):
     receivers = sorted(ref for ref, slots in free.items() if slots)
     tags = {item["id"]: item["circuit_tag"] for item in strings}
 
-    probes = 0
     for count in range(len(senders), min(len(candidates), sum(map(len, free.values()))) + 1):
         for indices in combinations(candidates, count):
             if {requests[i]["inverter_ref"] for i in indices} != senders:
-                if probes == _MAX_PROBES:
+                if receipt["probes_examined"] == _MAX_PROBES:
                     return {**receipt, "status": "search_limit"}
-                probes += 1
+                receipt["probes_examined"] += 1
                 continue
             for destinations in product(receivers, repeat=count):
-                if probes == _MAX_PROBES:
+                if receipt["probes_examined"] == _MAX_PROBES:
                     return {**receipt, "status": "search_limit"}
-                probes += 1
+                receipt["probes_examined"] += 1
                 next_slot = Counter()
                 replacements = {}
                 for index, receiver in zip(indices, destinations):
