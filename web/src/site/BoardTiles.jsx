@@ -5,6 +5,7 @@ import { formatElementId } from '../lib/elementIdentity.js'
 import { SHARED_WORKSPACE_CAPABILITIES } from './productSurfaces.js'
 import { shortId } from './groundWindow.js'
 import { BOARD_TRANSFER_TYPE, encodeVersionRef } from '../lib/boardTransfer.js'
+import { savedReportBinding, UNVERIFIED_REPORT_VERSION } from '../lib/savedReport.js'
 
 const listCount = (list) => (Array.isArray(list) ? list.length : 0)
 
@@ -88,16 +89,18 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
             <h3>Jobs</h3>
             {jobs.length ? (
               <ul>
-                {jobs.map((job) => (
-                  <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
-                    {action('job', job.job_id, actions?.onOpenJob, job, <>
-                      <strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}
-                      {job.input_version_id
-                        ? <> · Input version <code>{job.input_version_id}</code></>
-                        : job.result?.ok && ' · Input version not recorded'}
-                    </>)}
-                  </li>
-                ))}
+                {jobs.map((job) => {
+                  const report = savedReportBinding(job, workspace?.project?.project_id)
+                  return (
+                    <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
+                      {action('job', job.job_id, actions?.onOpenJob, job, <>
+                        <strong>{job.tool_name || job.kind}</strong> · {job.status || 'pending'}
+                        {report.version && <> · Input version <code>{report.version}</code></>}
+                        {report.unverified && <> · {UNVERIFIED_REPORT_VERSION}</>}
+                      </>)}
+                    </li>
+                  )
+                })}
               </ul>
             ) : <p className="ground-empty">{workspace ? 'No jobs yet' : 'Runs appear here with a project open'}</p>}
           </section>

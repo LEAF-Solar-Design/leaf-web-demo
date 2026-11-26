@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import JobRail from '../components/JobRail.jsx'
 import ResultJsonDownload from '../components/ResultJsonDownload.jsx'
+import { savedReportBinding, UNVERIFIED_REPORT_VERSION } from '../lib/savedReport.js'
 import ReceiptPanel, { deepRedact } from '../projects/ReceiptPanel.jsx'
 import ShipReceipts from '../ios/ShipReceipts.jsx'
 import ProjectMaterialIntake from './ProjectMaterialIntake.jsx'
@@ -165,12 +166,37 @@ function pretty(value) {
   return text.length > 4000 ? `${text.slice(0, 4000)}…` : text
 }
 
-function JobDetail({ job }) {
+const JOB_RESULT_MAX_BYTES = 1024 * 1024
+
+function jobResultJson(value) {
+  // Bound the work before redacting or allocating the serialized result.
+  let remaining = JOB_RESULT_MAX_BYTES
+  function fits(item, depth, key = '') {
+    remaining -= key.length + (typeof item === 'string' ? item.length : 8) + 2 * depth + 8
+    if (remaining < 0 || depth > 64) return false
+    if (item && typeof item === 'object') {
+      for (const name in item) {
+        if (Object.hasOwn(item, name) && !fits(item[name], depth + 1, name)) return false
+      }
+    }
+    return true
+  }
+  try {
+    if (!fits(value, 0)) return { tooLarge: true }
+    const text = JSON.stringify(deepRedact(value), null, 2)
+    if (text && new TextEncoder().encode(text).length > JOB_RESULT_MAX_BYTES) return { tooLarge: true }
+    return { text }
+  } catch {
+    return { error: true }
+  }
+}
+
+function JobDetail({ job, projectId }) {
   const proposal = job.tool_name === 'solar-solve-proposal' && job.status === 'complete' &&
     job.result?.schema === 'leaf.solar-solve-proposal.v1' && !job.output_version_id
-  const reportContext = job.result?.project_context
-  const hasBoundResult = (job.status === 'complete' || job.status === 'succeeded') && job.input_version_id &&
-    (reportContext == null || reportContext.input_version_id === job.input_version_id)
+  const report = savedReportBinding(job, projectId)
+  const result = useMemo(() => report.foreignProject ? {} : jobResultJson(job.result), [report.foreignProject, job.result])
+  const preview = result.text && (result.text.length > 4000 ? `${result.text.slice(0, 4000)}…` : result.text)
   return (
     <section className="ground-job-detail" aria-label="Job detail">
       <h3>{job.tool_name || job.kind || 'Job detail'}</h3>
@@ -179,11 +205,14 @@ function JobDetail({ job }) {
         <dt>Created</dt><dd>{job.created_at || 'Not recorded'}</dd>
         <dt>Updated</dt><dd>{job.updated_at || 'Not recorded'}</dd>
         {job.cost_usd != null && <><dt>Cost (USD)</dt><dd>${job.cost_usd}</dd></>}
-        <dt>Input version</dt><dd>{job.input_version_id || 'Not recorded'}</dd>
+        <dt>{report.version || report.unverified ? 'Input version' : 'Requested input version'}</dt>
+        <dd>{report.version || (report.unverified ? UNVERIFIED_REPORT_VERSION : job.input_version_id || 'Not recorded')}</dd>
         <dt>Output version</dt><dd>{proposal ? 'Proposal ready for review; not published' : job.output_version_id || 'Not recorded'}</dd>
       </dl>
-      <pre>{pretty(job.result)}</pre>
-      {hasBoundResult && <ResultJsonDownload result={job.result} />}
+      {result.tooLarge && <p role="status">This saved result is too large to preview or download here.</p>}
+      {result.error && <p role="status">Result could not be rendered.</p>}
+      {preview && <pre>{preview}</pre>}
+      {report.version && preview && <ResultJsonDownload result={job.result} />}
     </section>
   )
 }
@@ -236,7 +265,7 @@ export default function ProjectWorkspacePanels({
     case 'jobs':
       content = <>
         <JobRail jobs={[...(workspace?.jobs || [])].reverse()} currentJob={currentJob} onSelectJob={onSelectJob} mock={mock} />
-        {currentJob && <JobDetail job={currentJob} />}
+        {currentJob && <JobDetail job={currentJob} projectId={(project || workspace?.project)?.project_id} />}
       </>
       break
     case 'receipts':

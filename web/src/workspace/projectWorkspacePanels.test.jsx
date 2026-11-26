@@ -189,13 +189,13 @@ it('exports the complete retained envelope of the selected report and retires th
     const first = {
       job_id: 'first-report', tool_name: 'Measure', status: 'complete', input_version_id: 'first-version',
       result: {
-        ok: true, project_context: { input_version_id: 'first-version' },
+        ok: true, project_context: { project_id: project.project_id, input_version_id: 'first-version' },
         result: { layers: [{ layer: 'Panels', count: 12 }], details: 'a'.repeat(5000) },
       },
     }
     const second = {
       ...first, job_id: 'second-report', status: 'succeeded', input_version_id: 'second-version',
-      result: { ok: true, project_context: { input_version_id: 'second-version' }, result: { layers: [] } },
+      result: { ok: true, project_context: { project_id: project.project_id, input_version_id: 'second-version' }, result: { layers: [] } },
     }
     const readBlob = (blob) => new Promise((resolve, reject) => {
       const reader = new FileReader()
@@ -220,8 +220,25 @@ it('exports the complete retained envelope of the selected report and retires th
       { ...second, status: 'failed' },
       { ...second, status: 'running' },
       { ...second, input_version_id: null },
+      { ...second, result: { ok: true, result: [] } },
+      { ...second, result: { ...second.result, ok: undefined } },
+      { ...second, result: { ...second.result, result: null } },
     ]) {
       rerender(<ProjectWorkspacePanels {...props} currentJob={job} />)
+      expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+    }
+    const foreign = { ...second, result: { ...second.result, project_context: {
+      ...second.result.project_context, project_id: 'other-project',
+    }, result: { marker: 'foreign report content' } } }
+    rerender(<ProjectWorkspacePanels {...props} currentJob={foreign} />)
+    expect(screen.getByText('Report input version could not be verified')).toBeVisible()
+    expect(screen.queryByText(/foreign report content/)).toBeNull()
+
+    for (const details of ['x'.repeat(1024 * 1024), '界'.repeat(400000)]) {
+      rerender(<ProjectWorkspacePanels {...props} currentJob={{
+        ...second, result: { ...second.result, result: { details } },
+      }} />)
+      expect(screen.getByRole('status')).toHaveTextContent('This saved result is too large to preview or download here.')
       expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
     }
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:report-2')
