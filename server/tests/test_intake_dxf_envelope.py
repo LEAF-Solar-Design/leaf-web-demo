@@ -114,10 +114,11 @@ def _round_trip_with_resolved_pointers(intake):
     ("South Roof", "East Rack", "Manual Override"),
 ])
 def test_reexport_preserves_nested_insert_paths_and_arrays(parent, middle, override):
-    def insert(handle, name, layer, columns):
+    def insert(handle, name, layer, columns, invisible=False):
         return [(0, "INSERT"), (5, handle), (2, name), (8, layer),
                 (10, 5), (20, 10), (30, 2), (41, -2), (42, 3), (50, 90),
-                (210, 0), (220, 1), (230, 0), (70, columns), (71, 2), (44, 4), (45, 7)]
+                (210, 0), (220, 1), (230, 0), (70, columns), (71, 2), (44, 4), (45, 7),
+                (60, int(invisible))]
 
     def block(name, *records):
         return [(0, "BLOCK"), (2, name), *[pair for record in records for pair in record],
@@ -126,7 +127,7 @@ def test_reexport_preserves_nested_insert_paths_and_arrays(parent, middle, overr
     pairs = [(0, "SECTION"), (2, "BLOCKS"),
              *block("Module", [(0, "POINT"), (8, "0"), (10, 0), (20, 0)]),
              *block("Tray", insert("A1", "Module", "0", 2),
-                    insert("A2", "Module", override, 3)),
+                    insert("A2", "Module", override, 3, invisible=True)),
              *block("Rack", insert("B1", "Tray", "0", 1),
                     insert("B2", "Tray", middle, 1)),
              (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"),
@@ -136,6 +137,7 @@ def test_reexport_preserves_nested_insert_paths_and_arrays(parent, middle, overr
     raw = intake_to_dxf(parsed)
     reopened = parse_dxf_bytes(raw)
     assert reopened["inserts"] == parsed["inserts"]
+    assert reopened["blocks"]["Tray"]["nested_inserts"][1]["invisible"] is True
     for name in ("Rack", "Tray"):
         assert reopened["blocks"][name]["nested_inserts"] == parsed["blocks"][name]["nested_inserts"]
     sections = _sections(raw)
