@@ -659,7 +659,7 @@ def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
 
     def execute_read():
         intake = context.intake
-        if tool.get("engine_op") == "revision_panel_moves":
+        if tool.get("engine_op") in {"revision_panel_moves", "viewport_panel_revision_comparison"}:
             from authored_revision_panel_moves import bind_project_parent
             intake = bind_project_parent(tenant, context)
         # The project request also carries the drawing selector for binding and

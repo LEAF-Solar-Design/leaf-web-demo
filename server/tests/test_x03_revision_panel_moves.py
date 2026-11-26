@@ -14,6 +14,7 @@ import tool_loader
 import tools_fallback
 from test_project_scoped_read_tool import lane, real_rules, request, tool_override
 from test_sip_r1_context import memory, O1, P1, P2, D1, V1, V2
+from test_x03_viewport_panel_author import comparison_drawing
 
 
 ASKS = [
@@ -160,7 +161,7 @@ def project_pair(real_rules, lane, monkeypatch):
     return install
 
 
-def post_comparison(lane, monkeypatch, tmp_path, ask):
+def post_comparison(lane, monkeypatch, tmp_path, ask, params=None):
     package, source, _ = tools_fallback.author_tool(ask)
     package["entry"] = "compare-panels.py"
     repo = tmp_path / str(lane.memory.tenant)
@@ -170,7 +171,7 @@ def post_comparison(lane, monkeypatch, tmp_path, ask):
     monkeypatch.delenv("LEAF_TOOL_SANDBOX_PROVIDER", raising=False)
     monkeypatch.setenv("LEAF_SANDBOX", "e2b")
     tool = tool_override(monkeypatch, **package)
-    return request(lane, tool=tool, params={"floors": FLOORS})
+    return request(lane, tool=tool, params={"floors": FLOORS} if params is None else params)
 
 
 @pytest.mark.parametrize("ask,z1,z2,moved", [
@@ -195,5 +196,53 @@ def test_automatic_parent_must_exist_in_same_project(project_pair, lane, monkeyp
     project_pair(dxf(2, 1, 1, "C1"), dxf(12, 1, 1, "C1"),
                  parent=V1 if foreign else uuid4(), parent_project=P2 if foreign else P1)
     response = post_comparison(lane, monkeypatch, tmp_path, PARENT_ASKS[0])
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["reason_code"] == "SIP_R1_CONTEXT_NOT_FOUND"
+
+
+VIEWPORT_ASKS = [
+    "Compare two viewport inventories where both layer freezing and dynamic state overrides change between revisions.",
+    "Compare complete thawed panel footprints in viewports A1 and A2 before and after the drawing revision.",
+    "Compare PV module visibility in two perspective viewports across the parent drawing and current drawing.",
+]
+THAWED_A2 = ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]", "C1[0,0]/B2[0,0]"]
+
+
+@pytest.mark.parametrize("ask,params,before,after,prior_count,current_count,added,removed", [
+    (VIEWPORT_ASKS[0], {"viewport_handles": ["A1", "A2"]}, "distinct", "shared", 1, 4, THAWED_A2, []),
+    (VIEWPORT_ASKS[1], {}, "shared", "distinct", 4, 1, [], THAWED_A2),
+    (VIEWPORT_ASKS[2], {"viewport_handles": ["0xa1", "a2"]}, "shared", "shared", 4, 4, [], []),
+])
+def test_viewport_revision_automatic_parent(
+    project_pair, lane, monkeypatch, tmp_path, ask, params, before, after,
+    prior_count, current_count, added, removed,
+):
+    project_pair(comparison_drawing(before), comparison_drawing(after))
+    response = post_comparison(lane, monkeypatch, tmp_path, ask, params)
+    assert response.status_code == 200 and response.json()["ok"], response.text
+    assert response.json()["result"] == {
+        "viewport_handles": ["A1", "A2"], "prior_version": 1, "current_version": 2,
+        "changes_by_viewport": {
+            "A1": {
+                "prior_count": 3 if ask == VIEWPORT_ASKS[0] else 2,
+                "current_count": 3 if ask == VIEWPORT_ASKS[0] else 2,
+                "added": [], "removed": [],
+            },
+            "A2": {"prior_count": prior_count, "current_count": current_count, "added": added, "removed": removed},
+        },
+        "total": len(added) + len(removed),
+        "scope": {
+            VIEWPORT_ASKS[0]: "panel placement layer visibility",
+            VIEWPORT_ASKS[1]: "complete thawed panel footprints inside the viewport crop",
+            VIEWPORT_ASKS[2]: "thawed panel placement anchors inside the viewport crop",
+        }[ask],
+    }
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_viewport_revision_refuses_unverified_project_parent(project_pair, lane, monkeypatch, tmp_path, foreign):
+    project_pair(comparison_drawing("distinct"), comparison_drawing("shared"),
+                 parent=V1 if foreign else uuid4(), parent_project=P2 if foreign else P1)
+    response = post_comparison(lane, monkeypatch, tmp_path, VIEWPORT_ASKS[1], {})
     assert response.status_code == 404, response.text
     assert response.json()["error"]["reason_code"] == "SIP_R1_CONTEXT_NOT_FOUND"
