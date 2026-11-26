@@ -246,5 +246,34 @@ it.each(retainedBends)('selects archived feeder %s after %s and a layer visibili
   view.layers({})
   expect(dragAcross(-0.01)).toEqual([handle])
   expect(dragAcross(0.01)).toEqual([])
-  if (direction !== 'reset') expect(dragAcross()).toEqual([handle])
+  expect(dragAcross()).toEqual([handle])
+})
+
+it('selects the retained St. Benedict setback corner on the crossing edge after reset', () => {
+  // Native POLYLINE 1B9, flattened to the drawing plane for the Viewer.
+  const pts = [
+    [276535.2362204724, -92438.30708661416],
+    [276535.6299212598, -92437.91338582675],
+    [276535.0393700787, -92210.15748031494],
+    [275123.779527559, -92209.2171276299],
+    [275124.0551181102, -92439.92125984251],
+    [275124.4488188976, -92440.3149606299],
+  ]
+  const [x, y] = pts[1]
+  const handle = '1B9'
+  const view = mountProject(undefined, [{ handle, layer: 'Upper', pts, closed: true }])
+  expect(view.api.setView({ center: { x, y }, zoom: 1.25 })).toBe(true)
+  const dragRightOfCorner = offset => {
+    view.dragBetween(view.api.project(x + 40, y - 20), view.api.project(x + offset, y + 20))
+    expect(view.selected).toHaveBeenLastCalledWith(expect.any(Array), { additive: false, mode: 'crossing' })
+    return view.selected.mock.lastCall[0]
+  }
+  expect(dragRightOfCorner(0)).toEqual([handle])
+  view.layers({ Upper: false })
+  expect(view.api.rollDrawing('clockwise')).toBe(true)
+  expect(view.api.rollDrawing('reset')).toBe(true)
+  expect(dragRightOfCorner(0)).toEqual([])
+  view.layers({})
+  expect(dragRightOfCorner(0)).toEqual([handle])
+  expect(dragRightOfCorner(0.01)).toEqual([])
 })
