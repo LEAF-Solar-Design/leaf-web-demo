@@ -1135,7 +1135,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
                   "tests/test_x07_customer_profile_store.py", "tests/test_x07_role_discovery_failures.py",
-                  "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
+                  "tests/test_x07_tracker_profile.py", "tests/test_x07_profile_compatibility.py", "tests/test_x07_profile_concurrency.py",
                   "tests/test_x07_profile_storage_failures.py", "tests/test_x07_profile_json_roundtrip.py",
                   "tests/test_x07_workflow_recovery.py", "tests/test_x07_workflow_scope_matrix.py",
                   "tests/test_x07_selection_metamorphic.py", "tests/test_x07_adapter_snapshot_isolation.py",
@@ -2201,7 +2201,7 @@ def build_suites() -> List[Suite]:
               ], 1934),
         Suite("server-dxf-intake-lines-text", "server DXF intake and offline drawing authoring",
               "pytest", SERVER, _py_pytest("tests/test_dxf_intake_lines_text.py") + [
-                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py",
+                  "tests/test_x03_offline_drawing_author.py", "tests/test_x03_beam_author_product.py", "tests/test_x06_layer_subtotals.py",
                   "tests/test_x03_route_author_product.py", "tests/test_x03_nested_layer_author.py",
                   "tests/test_x03_nested_beam_author.py", "tests/test_x03_spline_beam_author.py",
                   "tests/test_x03_joined_spline_author.py",

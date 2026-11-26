@@ -197,7 +197,21 @@ def _parse_lines(lines, out, close_pl, cur_bd, cur_pl):
         if tag not in ("PV", "PX", "PXS"):
             close()
         try:
-            if tag == "LAYER":
+            if tag == "INSUNITS":
+                version, _, code = rest.partition("|")
+                if version != "1" or "insunits_error" in out:
+                    continue
+                if not (code.isascii() and code.isdecimal() and len(code) <= 10) or int(code) > 2147483647:
+                    out.pop("insunits", None)
+                    out["insunits_error"] = "Malformed drawing insertion units."
+                    continue
+                units = int(code)
+                if "insunits" in out and out["insunits"] != units:
+                    out.pop("insunits")
+                    out["insunits_error"] = "Conflicting drawing insertion units."
+                else:
+                    out["insunits"] = units
+            elif tag == "LAYER":
                 out["layers"].append(rest)
             elif tag == "PL":
                 layn, cl, el, nrm, hnd = rest.split("|")

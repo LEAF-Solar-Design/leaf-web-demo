@@ -2131,6 +2131,17 @@ export function getAuthorStage(changeSetId, signal) {
   })
 }
 
+export async function withdrawAuthorStage(changeSetId, signal) {
+  const result = await http(`/api/author/stages/${encodeURIComponent(changeSetId)}/withdraw`, {
+    method: 'POST', headers: { 'X-Tenant-Id': TENANT }, signal,
+  })
+  if (result?.contract !== 'leaf.customization-stage-withdraw.v1'
+    || typeof result.withdrawn !== 'boolean' || typeof result.revoked !== 'boolean') {
+    throw new Error('Invalid build withdrawal response.')
+  }
+  return result
+}
+
 export async function getAuthorStageSource(changeSetId, commit, signal) {
   const path = `/api/author/stages/${encodeURIComponent(changeSetId)}?view=source`
   const response = await apiFetch(`${API_BASE}${path}`, {
