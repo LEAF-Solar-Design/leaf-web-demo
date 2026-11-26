@@ -7,6 +7,27 @@ bytes. No string identifiers are added to the payload-free exception envelope.
 import solar_local_graph
 
 
+def _saved_state(graph, targets):
+    strings = {string["id"]: string for string in graph["strings"]}
+    assignments = [
+        {**item, "inverter_ref": inverter["id"], "circuit_tag": strings[item["string_ref"]]["circuit_tag"]}
+        for inverter in graph["inverters"] for item in inverter["input_assignments"]
+    ]
+    collectors = []
+    for inverter in sorted(targets, key=lambda item: item["id"]):
+        if inverter.get("l1_assignments"):
+            continue
+        total = int(inverter["total_dc_inputs"])
+        occupied = len(inverter["input_assignments"])
+        collectors.append({"inverter_ref": inverter["id"], "total_dc_inputs": total,
+                           "occupied_inputs": occupied, "spare_inputs": total - occupied})
+    return {
+        "assignments": sorted(assignments, key=lambda item: item["string_ref"]),
+        "unassigned_string_refs": sorted(ref for ref, string in strings.items() if string["inverter_ref"] is None),
+        "collector_capacity": collectors,
+    }
+
+
 def run(graph, params):
     assignment = solar_local_graph._load_builtin("solar-assign-strings")
     before, binding, state, rows, assigned, remaining, reason, _ = assignment._assignment_plan(graph, params)
@@ -25,6 +46,7 @@ def run(graph, params):
         "status": "partial" if assigned and remaining else "complete" if assigned else "unassigned",
         "committed": False,
         "commit_refusal_code": reason,
+        "saved_state": _saved_state(before, assignment._targets(before)),
         "eligible_string_refs": sorted(assigned_ids + remaining_ids),
         "candidate_assignments": [
             {"string_ref": ref, "inverter_ref": strings[ref]["inverter_ref"],

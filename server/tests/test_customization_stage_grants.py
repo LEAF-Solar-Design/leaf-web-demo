@@ -373,9 +373,51 @@ def test_T10_unreadable_terminal_record_fails_closed(lane, monkeypatch):
     assert not grants.turn_ended_cleanly(lane.session_id, lane.turn_id, TENANT)
 
 
+def test_stage_status_author_can_withdraw_queued_branch_grant(lane):
+    change = queue(lane)
+    assert grants.issue(lane.service, change)
+    status = lane.service.stage_status(tenant=lane.tenant, change_set_id=change.change_set_id)
+    assert status["status"] == "queued"
+    assert status["withdrawable"] is True
+    assert "withdrawable" not in lane.service.stage_status_change(change)
+
+
+@pytest.mark.parametrize("case", ["other_member", "revoked", "running", "off", "no_grant", "non_branch", "read_error"])
+def test_stage_status_omits_withdrawable_when_unavailable(lane, monkeypatch, case):
+    change = queue(lane, target="studio" if case == "non_branch" else "branch")
+    if case not in {"no_grant", "non_branch"}:
+        assert grants.issue(lane.service, change)
+    tenant = lane.tenant
+    if case == "other_member":
+        tenant = deps.TenantContext(TENANT, tier="hosted_pro", subject="auth0|other")
+    elif case == "revoked":
+        lane.store.revoke_stage_grants_for_turn(
+            tenant_id=TENANT, authority_session_id=lane.session_id,
+            authority_turn_id=lane.turn_id, reason="cancelled", now_ms=123,
+        )
+    elif case == "running":
+        assert lane.store.claim_stage(owner="worker-a") is not None
+    elif case == "off":
+        monkeypatch.delenv("LEAF_STAGE_GRANT_TTL_S")
+    read = Mock(wraps=lane.store.get_stage_grant)
+    if case in {"other_member", "running", "off", "non_branch", "read_error"}:
+        read = Mock(side_effect=RuntimeError("grant read unavailable"))
+    monkeypatch.setattr(lane.store, "get_stage_grant", read)
+    status = lane.service.stage_status(tenant=tenant, change_set_id=change.change_set_id)
+    assert status["status"] == ("running" if case == "running" else "queued")
+    assert "withdrawable" not in status
+    if case in {"other_member", "running", "off", "non_branch"}:
+        read.assert_not_called()
+    else:
+        read.assert_called_once_with(TENANT, change.change_set_id)
+
+
 def test_withdraw_before_claim_fails_change_and_revokes_grant(lane):
     change = queue(lane)
     assert grants.issue(lane.service, change)
+    assert lane.service.stage_status(
+        tenant=lane.tenant, change_set_id=change.change_set_id,
+    )["withdrawable"] is True
     assert lane.store.withdraw_stage(
         tenant_id=TENANT, change_set_id=change.change_set_id,
         author_subject="auth0|other", now_ms=int(time.time() * 1000),
@@ -388,6 +430,9 @@ def test_withdraw_before_claim_fails_change_and_revokes_grant(lane):
     assert failed.state is ChangeState.FAILED
     assert failed.stage_error_code == "stage_grant_withdrawn"
     assert not failed.stage_error_retryable
+    assert "withdrawable" not in lane.service.stage_status(
+        tenant=lane.tenant, change_set_id=change.change_set_id,
+    )
     assert lane.store.claim_stage(owner="late-worker") is None
     refuse(lane, change, "stage_grant_withdrawn")
     assert lane.store.withdraw_stage(

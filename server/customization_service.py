@@ -1819,7 +1819,20 @@ class CustomizationService:
             )
         except ToolRecordFieldError as exc:
             raise CustomizationServiceError("record_fields_invalid", 503) from exc
-        return self.stage_status_change(change)
+        result = self.stage_status_change(change)
+        import customization_stage_grants
+
+        if (customization_stage_grants.ttl_s() is not None
+                and result["status"] == "queued"
+                and change.tool_target == "branch"
+                and getattr(tenant, "subject", None) == change.author_subject):
+            try:
+                grant = self.store.get_stage_grant(change.tenant_id, change.change_set_id)
+                if grant is not None and grant["revoked_ms"] is None:
+                    result["withdrawable"] = True
+            except Exception:
+                pass
+        return result
 
     def stage_source(self, *, tenant: Any, change_set_id: str) -> tuple[bytes, dict[str, str]]:
         """Read only the original author's active, receipt-bound tool source."""
