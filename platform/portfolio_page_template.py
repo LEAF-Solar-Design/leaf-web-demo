@@ -125,7 +125,7 @@ def image_references(document):
 
 
 PORTFOLIO_CSS = """*{box-sizing:border-box}body{margin:0}.portfolio{background:white;color:#202020;font:16px/1.6 Arial,sans-serif;min-height:100%;padding:clamp(20px,4vw,64px);overflow-wrap:anywhere}.portfolio nav{display:flex;flex-wrap:wrap;gap:12px 24px;margin-bottom:48px}.portfolio button,.portfolio a{color:inherit;font:inherit}.portfolio nav button{background:none;border:0;padding:4px;cursor:pointer}.portfolio h1{font:400 clamp(32px,5vw,64px)/1.15 Georgia,serif}.portfolio p{white-space:pre-wrap;max-width:70ch}.portfolio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:32px}.portfolio-grid button,.portfolio-grid a{display:block;min-width:0;background:none;border:0;text-align:left;padding:0;text-decoration:none;cursor:pointer}.portfolio img{display:block;width:100%;height:auto;max-height:75vh;object-fit:contain}.portfolio figure{margin:0;min-width:0}.portfolio-viewer{position:fixed;inset:0;z-index:200;background:white;overflow:auto;padding:24px}.portfolio-viewer img{max-height:80vh}.portfolio-viewer button{margin-bottom:16px}.portfolio :focus-visible{outline:2px solid #202020;outline-offset:4px}@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}.portfolio nav{margin-bottom:24px}}
-.portfolio-viewer{scroll-padding-block-start:5em}.portfolio-viewer>button:first-child{position:sticky;top:0;z-index:1}
+.portfolio-viewer{scroll-padding-block-start:5em}.portfolio-viewer>button:first-child{position:sticky;top:0;z-index:1}.portfolio-viewer[data-visual-zoom]>button:first-child{line-height:1.15}
 .portfolio-viewer:has(> [role="status"]:focus-within){scroll-padding-block:6px}
 .portfolio-viewer:has(> [role="status"]:focus-within)>button:first-child{position:static}
 """
@@ -297,11 +297,37 @@ export default function Gallery({page,category}){
    }
   };
   const viewport=window.visualViewport;
+  const panel=dialog.current;
+  const fitVisualViewport=()=>{
+   if(!viewport||!panel)return;
+   if(viewport.scale===1){
+    panel.removeAttribute('data-visual-zoom');
+    panel.style.inset='';
+    panel.style.width='';
+    panel.style.height='';
+    panel.style.padding='';
+    return;
+   }
+   const zoom=panel.currentCSSZoom||1;
+   const width=viewport.width/zoom;
+   const height=viewport.height/zoom;
+   // Leave room for the focus outline while the localized label wraps.
+   const padding=Math.max(6,Math.min(24,width/12,height/12));
+   panel.setAttribute('data-visual-zoom','');
+   panel.style.inset=`${viewport.offsetTop/zoom}px auto auto ${viewport.offsetLeft/zoom}px`;
+   panel.style.width=`${width}px`;
+   panel.style.height=`${height}px`;
+   panel.style.padding=`${padding}px`;
+  };
   let resizeFrame=null;
-  const handleResize=()=>{
+  let keepFocus=false;
+  const updateViewport=()=>{
    if(resizeFrame!==null)return;
    resizeFrame=window.requestAnimationFrame(()=>{
     resizeFrame=null;
+    fitVisualViewport();
+    if(!keepFocus)return;
+    keepFocus=false;
     const active=document.activeElement;
     if(active===document.body||active===document.documentElement||active===dialog.current){
      closeButton.current?.focus();
@@ -310,12 +336,19 @@ export default function Gallery({page,category}){
     }
    });
   };
+  const handleResize=()=>{
+   keepFocus=true;
+   updateViewport();
+  };
+  fitVisualViewport();
   window.addEventListener('resize',handleResize);
   viewport?.addEventListener('resize',handleResize);
+  viewport?.addEventListener('scroll',updateViewport);
   window.addEventListener('keydown',key);
   return()=>{
    window.removeEventListener('resize',handleResize);
    viewport?.removeEventListener('resize',handleResize);
+   viewport?.removeEventListener('scroll',updateViewport);
    if(resizeFrame!==null)window.cancelAnimationFrame(resizeFrame);
    window.removeEventListener('keydown',key);
    restore();

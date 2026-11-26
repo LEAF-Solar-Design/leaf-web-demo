@@ -229,7 +229,9 @@ describe('actual exported portfolio image failure recovery', () => {
   })
 
   it('keeps viewer Retry reachable through keyboard navigation and viewport changes', async () => {
-    const viewport = new EventTarget()
+    const viewport = Object.assign(new EventTarget(), {
+      scale: 1, width: 320, height: 568, offsetTop: 0, offsetLeft: 0,
+    })
     vi.stubGlobal('visualViewport', viewport)
     const nextFrame = () => new Promise(resolve => window.requestAnimationFrame(resolve))
     render(<Gallery page={{}} category={category(first)} />)
@@ -253,6 +255,19 @@ describe('actual exported portfolio image failure recovery', () => {
     viewport.dispatchEvent(new Event('resize'))
     await nextFrame()
     expect(retry.scrollIntoView).toHaveBeenCalledTimes(3)
+    Object.assign(viewport, { scale: 2, width: 160, height: 284, offsetTop: 48, offsetLeft: 24 })
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextFrame()
+    expect(dialog.style.inset).toBe('48px auto auto 24px')
+    expect(dialog.style.width).toBe('160px')
+    expect(dialog.style.height).toBe('284px')
+    expect(document.activeElement).toBe(retry)
+    expect(retry.scrollIntoView).toHaveBeenCalledTimes(3)
+    Object.assign(viewport, { scale: 1, width: 320, height: 568, offsetTop: 0, offsetLeft: 0 })
+    viewport.dispatchEvent(new Event('scroll'))
+    await nextFrame()
+    expect(dialog.style.inset).toBe('')
+    expect(dialog.style.width).toBe('')
     fireEvent.keyDown(window, { key: 'Tab' })
     expect(document.activeElement).toBe(close)
     close.scrollIntoView = vi.fn()
@@ -283,8 +298,10 @@ describe('actual exported portfolio image failure recovery', () => {
     trigger.scrollIntoView = vi.fn()
     fireEvent.resize(window)
     viewport.dispatchEvent(new Event('resize'))
+    viewport.dispatchEvent(new Event('scroll'))
     await nextFrame()
     expect(trigger.scrollIntoView).not.toHaveBeenCalled()
+    expect(dialog.style.width).toBe('')
     expect(document.activeElement).toBe(trigger)
   })
 
