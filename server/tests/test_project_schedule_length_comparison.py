@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 
 import solar_project_schedule_compare as comparison
-from test_sip_r6_routes import http, save_schedule_graph, schedule_artifact  # noqa: F401
+from test_sip_r6_routes import compare_schedules, http, refusal, save_schedule_graph, schedule_artifact  # noqa: F401
 from test_solar_tool_electrical_schedules import c10_graphs
 from test_w1_design_graph import graph  # noqa: F401
 
@@ -13,13 +13,10 @@ def _artifact(http, source):
     return schedule_artifact(http, save_schedule_graph(http, source))
 
 
-def _compare(http, before, after, **scope):
-    s = http.s
-    return comparison.compare_saved_schedules(
-        s.tenant, s.project, s.drawing, before_version_id=before["source_version_id"],
-        after_version_id=after["source_version_id"], before_artifact_id=before["artifact_id"],
-        after_artifact_id=after["artifact_id"], **scope,
-    )
+def _compare(http, before, after, **params):
+    response = compare_schedules(http, before, after, **params)
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
 
 
 def _detour(route):
@@ -62,3 +59,10 @@ def test_length_comparison_pages_added_and_removed_routes(http, graph, monkeypat
     assert removed == {"route_id": added["route_id"], "change": "removed",
                        "before": added["after"], "after": None}
     assert same["changes"] == [] and same["total_changes"] == 0
+    assert _compare(http, before, after)["schema"] == comparison.SCHEMA
+
+
+def test_length_comparison_refuses_bad_offsets(http, graph):
+    before, after = (_artifact(http, source) for source in c10_graphs(graph))
+    for offset in ("", "-1", "1.5", "12345678901"):
+        refusal(compare_schedules(http, before, after, cable_offset=offset), "SIP_R6_INVALID_REQUEST", 400)
