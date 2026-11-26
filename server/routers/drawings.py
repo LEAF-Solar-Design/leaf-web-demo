@@ -1177,30 +1177,44 @@ def _entity_map(intake: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
     return out
 
 
-def _version_delta(parent_intake: Dict[str, Any], child_intake: Dict[str, Any]) -> Dict[str, int]:
-    """`{added, modified, deleted}` entity counts between two STORED intake
-    payloads (parent vs child), computed fresh on every read — never stamped at
-    write time (CONTRACT-ADDENDUM: the write path is owned elsewhere and is not
-    touched by this route)."""
+def _version_comparison(parent_intake: Dict[str, Any], child_intake: Dict[str, Any],
+                        include_layer_changes: bool) -> Dict[str, Any]:
+    """Compare stored intake entities by stable identity, preserving layer names."""
     parent_map = _entity_map(parent_intake or {})
     child_map = _entity_map(child_intake or {})
     added = modified = deleted = 0
+    layer_changes = []
     for ident, entity in child_map.items():
         prior = parent_map.get(ident)
         if prior is None:
             added += 1
         elif prior != entity:
             modified += 1
+            if include_layer_changes and ident[1] == "handle":
+                from_layer = prior.get("layer")
+                to_layer = entity.get("layer")
+                if (isinstance(from_layer, str) and isinstance(to_layer, str)
+                        and from_layer != to_layer):
+                    layer_changes.append({
+                        "kind": ident[0], "handle": ident[2],
+                        "from_layer": from_layer, "to_layer": to_layer,
+                    })
     for ident in parent_map:
         if ident not in child_map:
             deleted += 1
-    return {"added": added, "modified": modified, "deleted": deleted}
+    comparison: Dict[str, Any] = {
+        "delta": {"added": added, "modified": modified, "deleted": deleted},
+    }
+    if include_layer_changes:
+        comparison["layer_changes"] = layer_changes
+    return comparison
 
 
-def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
-                    entries: List[Dict[str, Any]]) -> Tuple[
-                        Dict[int, Optional[Dict[str, int]]], Dict[int, str]]:
-    """Return derivable deltas and observed hashes for mismatched versions."""
+def _version_comparisons(
+    backend: Any, tenant_id: str, drawing_id: str,
+    entries: List[Dict[str, Any]], include_layer_changes: bool,
+) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, str]]:
+    """Return available comparisons and observed hashes for mismatched versions."""
     cache: Dict[int, Optional[Dict[str, Any]]] = {}
     expected = {int(e["v"]): e.get("sha256") for e in entries}
     mismatches: Dict[int, str] = {}
@@ -1223,29 +1237,28 @@ def _version_deltas(backend: Any, tenant_id: str, drawing_id: str,
             cache[v] = intake
         return cache[v]
 
-    out: Dict[int, Optional[Dict[str, int]]] = {}
+    out: Dict[int, Dict[str, Any]] = {}
     for e in entries:
         v = int(e["v"])
         parent = e.get("parent")
         child_intake = _load(v)
         if parent is None:
-            out[v] = None
             continue
         parent_intake = _load(int(parent))
         if parent_intake is None or child_intake is None:
-            out[v] = None
             continue
         try:
-            out[v] = _version_delta(parent_intake, child_intake)
+            out[v] = _version_comparison(parent_intake, child_intake, include_layer_changes)
         except (KeyError, ValueError, TypeError):
             # Expected malformed-data failures only: a programming defect must
             # surface as a 500, not vanish into a delta:null row.
-            out[v] = None
+            continue
     return out, mismatches
 
 
 @router.get("/api/drawings/{drawing_id}/versions")
 def get_versions(drawing_id: str, include_deltas: bool = False,
+                 include_layer_changes: bool = False,
                  tenant_id: str = Depends(deps.require_active_tenant)) -> Dict[str, Any]:
     """Full version-history chain straight from the store manifest — the read the
     UI's version-chain popover needs (undo/redo only stepped head one hop).
@@ -1255,10 +1268,14 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     expires}|null}` (§14: `checkout` is the single-writer lock from the
     manifest, read-only — no acquire/release this wave). `delta` is
     `{added, modified, deleted}` computed HERE, at read time, by diffing this
-    version's stored payload against its parent's (see `_version_deltas`); it
+    version's stored payload against its parent's (see `_version_comparisons`); it
     is `null` for the root or an unavailable, unreadable or mismatched source
     on either side. With `include_deltas=1`, a mismatch also adds
     `observed_sha256` beside the recorded `sha256` on the affected row.
+    `include_layer_changes=1` requests the delta plus `layer_changes`, a list of
+    stable entity handles, kinds and exact before/after layer names for this
+    parent comparison. An available comparison with no moves has an empty
+    list. The root and unavailable comparisons have `layer_changes: null`.
     Same 404 pattern as the intake route for
     an unknown drawing (the well-known `demo` bootstraps on first read at
     APS_LIVE=0; any other unknown drawing → BAD_PARAMS 404)."""
@@ -1287,11 +1304,16 @@ def get_versions(drawing_id: str, include_deltas: bool = False,
     # tab, slice 6a), and the default response shape stays exactly what it
     # was before this feature.
     rows = []
-    if include_deltas:
-        deltas, mismatches = _version_deltas(backend, str(tenant_id), drawing_id, entries)
+    if include_deltas or include_layer_changes:
+        comparisons, mismatches = _version_comparisons(
+            backend, str(tenant_id), drawing_id, entries, include_layer_changes,
+        )
+        unavailable: Dict[str, Any] = {"delta": None}
+        if include_layer_changes:
+            unavailable["layer_changes"] = None
         for e in entries:
             row = _version_row(e)
-            row["delta"] = deltas.get(row["v"])
+            row.update(comparisons.get(row["v"], unavailable))
             if row["v"] in mismatches:
                 row["observed_sha256"] = mismatches[row["v"]]
             rows.append(row)

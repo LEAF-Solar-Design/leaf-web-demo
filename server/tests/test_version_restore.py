@@ -156,6 +156,55 @@ def test_delta_correct_on_a_three_version_chain(client, tmp_path):
     assert rows[3]["delta"] == {"added": 1, "modified": 0, "deleted": 0}
 
 
+@pytest.mark.parametrize(("kind", "old", "new"), [
+    ("polylines", "Caf\u00e9", "Cafe\u0301"),
+    ("inserts", "A\u030a-Roof", "\u00c5-Roof"),
+    ("faces3d", "PV-\u6771", "\uff30\uff36-\u6771"),
+])
+def test_history_lists_exact_layer_reference_moves(client, tmp_path, kind, old, new):
+    import store  # noqa: PLC0415
+
+    before = _intake([])
+    before["layers"] = [old, new, "Control"]
+    before[kind] = [
+        {"handle": "20", "layer": old},
+        {"handle": "21", "layer": "Control", "xdata": "before"},
+        {"handle": "22", "layer": old},
+        {"layer": old},
+    ]
+    after = {**before, kind: [
+        {"handle": "20", "layer": new},
+        {"handle": "21", "layer": "Control", "xdata": "after"},
+        {"handle": "23", "layer": new},
+        {"layer": new},
+    ]}
+    source = tmp_path / "layer-rename.json"
+    source.write_bytes(json.dumps(before, ensure_ascii=False).encode("utf-8"))
+    backend = _backend(tmp_path)
+    store.ingest_drawing(backend, TENANT, str(source), drawing_id=DRAWING)
+    for parent, intake in ((1, after), (2, after)):
+        assert write_loop._put_bytes_version(
+            backend, TENANT, DRAWING,
+            json.dumps(intake, ensure_ascii=False).encode("utf-8"),
+            parent_version=parent, meta={"tool": "test-layer-rename"},
+        ) == parent + 1
+
+    url = f"/api/drawings/{DRAWING}/versions"
+    response = client.get(url, params={"include_layer_changes": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    rows = {row["v"]: row for row in response.json()["versions"]}
+    assert rows[1]["layer_changes"] is None
+    assert rows[2]["layer_changes"] == [
+        {"kind": kind, "handle": "20", "from_layer": old, "to_layer": new},
+    ]
+    assert rows[2]["delta"] == {"added": 2, "modified": 2, "deleted": 2}
+    assert rows[3]["layer_changes"] == []
+
+    counts = client.get(url, params={"include_deltas": 1}, headers=_h(TENANT))
+    assert counts.status_code == 200, counts.text
+    assert all("layer_changes" not in row for row in counts.json()["versions"])
+
+
 def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     """A version blob that fails to parse as JSON must not 500 the whole chain
     -- its own delta (and its child's, since the child's parent-side read also
@@ -206,6 +255,15 @@ def test_history_reports_a_replaced_source_and_omits_its_deltas(
     for version, row in rows.items():
         touches_replacement = replaced_version in (version, row["parent"])
         assert row["delta"] == (None if touches_replacement else expected_deltas[version])
+
+    detailed = client.get(f"/api/drawings/{DRAWING}/versions",
+                          params={"include_layer_changes": 1}, headers=_h(TENANT))
+    assert detailed.status_code == 200, detailed.text
+    for row in detailed.json()["versions"]:
+        counts_row = rows[row["v"]]
+        assert row.get("observed_sha256") == counts_row.get("observed_sha256")
+        if counts_row["delta"] is None:
+            assert row["layer_changes"] is None
 
 
 def test_default_versions_shape_has_no_delta_key(client, tmp_path):
