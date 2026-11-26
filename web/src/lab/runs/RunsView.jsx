@@ -256,6 +256,34 @@ const corpusEvidence = value => {
 function EvidenceField({ label, value }) {
   return <div><h5>{label}</h5><pre>{value == null ? 'Unavailable (not evaluated)' : JSON.stringify(value, null, 2)}</pre></div>
 }
+function ConfirmationGuidance({ confirmation }) {
+  if (confirmation?.verdict !== 'insufficient' && confirmation?.verdict !== 'inconclusive') return null
+
+  const count = value => Number.isSafeInteger(value) && value >= 0
+  const limits = [
+    ['Parent needs', confirmation.parent?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Child needs', confirmation.child?.confirm?.n_tickets, confirmation.protocol?.min_confirm_tickets, 'qualifying confirmation ticket'],
+    ['Confirmation needs', confirmation.splits?.confirm?.groups, confirmation.protocol?.min_confirm_groups, 'expiry group'],
+  ]
+  const shortfalls = limits.filter(([, observed, required]) => count(observed) && count(required) && observed < required)
+  const interval = confirmation.confirm_comparison?.paired_ci95_c
+  const intervalKnown = Array.isArray(interval) && interval.length === 2 &&
+    interval.every(Number.isFinite) && interval[0] <= interval[1]
+
+  return <div>
+    <h5>What would resolve confirmation</h5>
+    {shortfalls.map(([label, observed, required, unit]) => {
+      const missing = required - observed
+      return <p key={label}>{label} {missing} more {unit}{missing === 1 ? '' : 's'} ({observed} of {required}).</p>
+    })}
+    {limits.some(([, observed, required]) => !count(observed) || !count(required)) &&
+      <p>The saved report is missing confirmation counts or thresholds.</p>}
+    {intervalKnown && interval[0] <= 0 && interval[1] >= 0 && <p>The paired 95% interval still crosses or touches zero.</p>}
+    {!intervalKnown && <p>The paired 95% interval is unavailable.</p>}
+    <p>A directional result requires the minimum sample counts and a paired 95% interval entirely above or below zero.</p>
+    <p>Replaying the pinned inputs adds no new confirmation evidence. If additional eligible observations are available, evaluate them under the same saved policy.</p>
+  </div>
+}
 function CorpusEvidence({ evidence }) {
   const report = evidence.evaluation, confirmation = report.confirm_report
   return <section className="lab-corpus-evidence" aria-label="Corpus evaluation evidence">
@@ -267,6 +295,7 @@ function CorpusEvidence({ evidence }) {
     <p>Verdict: {report.verdict}</p>
     <p>Confirmation verdict: {confirmation?.verdict ?? 'Unavailable (not evaluated)'}</p>
     {corpusReportDiagnostics(report).map(message => <p key={message} role="status">{message}</p>)}
+    <ConfirmationGuidance confirmation={confirmation} />
     <EvidenceField label="Reasons" value={report.reasons} />
     <EvidenceField label="Policy and graph lineage" value={evidence.policy} />
     <EvidenceField label="Input identities" value={{ ...evidence.context, row_count: evidence.row_count,

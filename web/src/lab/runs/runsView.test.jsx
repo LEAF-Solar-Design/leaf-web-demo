@@ -26,7 +26,7 @@ const seed = () => {
   store.apply('r', { seq: 0, kind: 'value', block_id: 'count', payload: { result: { data: 3, as_of: Date.now() - 120000 } } })
   return store
 }
-const evidenceRun = (confirmation = true) => {
+const evidenceRun = (confirmation = true, confirmationOverrides = {}) => {
   const store = createValueStore()
   const digest = 'a'.repeat(64), parent = 'b'.repeat(64), rows = 'c'.repeat(64)
   const report = { schema: 'leafhft.block-suite-result.v1', suite_sha256: 'd'.repeat(64), rows_sha256: rows,
@@ -40,7 +40,8 @@ const evidenceRun = (confirmation = true) => {
         child: { n: 2, mean_claimed_prob: 0.5000000000000001, win_rate: 0 } },
       confirm_comparison: { paired_ci95_c: [null, null], child_minus_parent_mean_c: -0.0000000000001 },
       confirm_tickets: { parent: [], child: [{ market_id: 'synthetic-final-ticket' }] },
-      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } } } : null }
+      protocol: { draws: 10, seed: 7 }, splits: { select: { rows: 30 }, confirm: { rows: 20 } },
+      ...confirmationOverrides } : null }
   const evidence = { policy: { schema: 'leaf.lab-corpus-policy.v1', version: 1, digest,
     parent_suite_sha256: parent, parameters: { min_select_tickets: 0 },
     lineage: { doc_id: 'saved-composition', graph_revision: 2, graph_sha256: 'e'.repeat(64) } },
@@ -497,6 +498,33 @@ describe('Runs recovery options preview', () => {
 })
 
 describe('Runs view', () => {
+  it.each([
+    ['parent ticket shortfall', 'insufficient', 19, 37, 8, ['Parent needs 1 more qualifying confirmation ticket (19 of 20).']],
+    ['child and group shortfalls', 'insufficient', 26, 17, 1, [
+      'Child needs 3 more qualifying confirmation tickets (17 of 20).',
+      'Confirmation needs 1 more expiry group (1 of 2).',
+    ]],
+    ['interval crossing zero', 'inconclusive', 30, 37, 8, ['The paired 95% interval still crosses or touches zero.']],
+  ])('explains the evidence needed for %s while retaining the saved policy', (_, verdict, parent, child, groups, messages) => {
+    const { store, evidence } = evidenceRun(true, {
+      verdict, parent: { confirm: { n_tickets: parent } }, child: { confirm: { n_tickets: child } },
+      protocol: { min_confirm_tickets: 20, min_confirm_groups: 2 },
+      splits: { confirm: { groups } },
+      confirm_comparison: { paired_ci95_c: [-5, 8], child_minus_parent_mean_c: 1 },
+    })
+    render(<RunsView store={store} mock />)
+    const section = within(screen.getByRole('region', { name: 'Corpus evaluation evidence' }))
+    expect(section.getByRole('heading', { name: 'What would resolve confirmation' })).toBeVisible()
+    for (const message of messages) expect(section.getByText(message)).toBeVisible()
+    expect(section.getByText(/Replaying the pinned inputs adds no new confirmation evidence/)).toBeVisible()
+    expect(section.getByText(/same saved policy/)).toBeVisible()
+    expect(section.getByText(`Policy digest: ${evidence.policy_digest}`)).toBeVisible()
+  })
+  it('leaves conclusive confirmation outcomes without resolution guidance', () => {
+    const { store } = evidenceRun(true, { verdict: 'worse' })
+    render(<RunsView store={store} mock />)
+    expect(screen.queryByRole('heading', { name: 'What would resolve confirmation' })).toBeNull()
+  })
   it('displays complete policy and evaluation evidence without rounding an insufficient outcome into success', () => {
     const { store, evidence } = evidenceRun()
     render(<RunsView store={store} mock />)
