@@ -32,6 +32,32 @@ const tick = (ms) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 const response = (status, value) => ({ status, ok: status < 300, json: async () => value })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks() })
 
+it.each([true, false])('retires the waiting note after the plan is resolved with approved=%s', async (approved) => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note until every decision card in the turn is resolved', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('plan_proposed', 'plan', proposed),
+    event('plan_proposed', 'plan', { ...proposed, confirmation_id: 'p2' }),
+    event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p1', approved: true }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+  await push(event('confirmation_resolved', 'plan', { confirmation_id: 'p2', approved: false }))
+  expect(screen.queryByText('Waiting on your decision above.')).toBeNull()
+})
+
+it('keeps the waiting note when the turn has no decision card', async () => {
+  render(<ConversePanel sessionId="session" />)
+  await push(event('turn_started', 'plan'), event('turn_complete', 'plan', { stop_reason: 'awaiting_approval' }))
+  expect(screen.getByText('Waiting on your decision above.')).toBeVisible()
+})
+
 it('takes a short prompt through questions, plan approval, two compile attempts and publication inline', async () => {
   vi.useFakeTimers()
   const stagePath = '/api/author/stages/' + id
