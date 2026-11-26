@@ -78,7 +78,7 @@ export function validateCivilBody(body) {
     if (Object.hasOwn(body, 'boundary') && !boundaryValid(body.boundary)) return bad('FRAMES_PILES_BOUNDARY_INVALID')
     if (Object.hasOwn(body, 'preset') && !objectValid(body.preset, true)) return bad('FRAMES_PILES_PRESET_INVALID')
     if (Object.hasOwn(body, 'pile_template') && !objectValid(body.pile_template, false)) return bad('FRAMES_PILES_PILE_TEMPLATE_INVALID')
-    if (operation === 'frame-generate' && !METERS_PER_UNIT.has(body.drawing_units)) return bad('FRAMES_PILES_DRAWING_UNITS_INVALID')
+    if (operation === 'frame-generate' && !['m', 'ft'].includes(body.drawing_units)) return bad('FRAMES_PILES_DRAWING_UNITS_INVALID')
     if (operation === 'grade-pad') {
       const mode = Object.hasOwn(body, 'mode') ? body.mode : 'Auto'
       const value = Object.hasOwn(body, 'value_du') ? body.value_du : null
