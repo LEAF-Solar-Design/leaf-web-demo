@@ -1571,7 +1571,15 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   const res = await apiFetch(`${API_BASE}/api/drawings/upload`, { method: 'POST', headers, body: form }, '/api/drawings/upload')
   const body = await res.json().catch(() => null)
   if (!res.ok) {
-    const error = new Error(body?.error?.message || `POST /api/drawings/upload -> ${res.status}`)
+    let message = body?.error?.message || `POST /api/drawings/upload -> ${res.status}`
+    if (res.status === 429 && typeof body?.quota?.resets_at === 'string') {
+      const reset = new Date(body.quota.resets_at)
+      if (!Number.isNaN(reset.getTime())) {
+        const time = reset.toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+        message += ` Resets at ${time}.`
+      }
+    }
+    const error = new Error(message)
     error.status = res.status
     error.body = body
     throw error
