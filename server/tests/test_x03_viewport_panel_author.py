@@ -304,3 +304,44 @@ def test_bound_viewport_comparison_refuses_conflicting_selection():
         "Compare whole thawed panels within the crop of viewports A1 and A2.")
     status, payload = invoke(source, comparison_drawing("distinct"), {"viewport_handles": ["A2", "A1"]})
     assert status == "tool_error" and "conflicting viewport identities" in str(payload).lower(), payload
+
+
+@pytest.mark.parametrize("ask,handle,edit,replacement,checked_count,reason", [
+    ("Report the affected camera when a drawing has both valid and degenerate viewports.",
+     "A1", b"36\n100\n", b"36\n0\n", 2, "finite view direction and twist"),
+    ("Find the invalid cameras in the drawing's paper-space viewports.",
+     "A2", b"42\n50\n", b"42\n0\n", 2, "perspective viewport calibration"),
+    ("Diagnose broken viewport cameras on the sheet.",
+     "A2", b"90\n23\n", b"90\n65559\n", 2, None),
+    ("List the malformed cameras in active viewports.",
+     "A2", b"90\n23\n36\n100\n", b"90\n131095\n36\n0\n", 1, None),
+])
+def test_viewport_camera_diagnostics(ask, handle, edit, replacement, checked_count, reason):
+    raw = comparison_drawing("distinct")
+    prefix = f"0\nVIEWPORT\n5\n{handle}\n".encode()
+    start = raw.index(prefix)
+    pairs = raw[start:].splitlines(keepends=True)
+    end = start + sum(map(len, pairs[:next(i for i in range(2, len(pairs), 2) if pairs[i] == b"0\n")]))
+    viewport = raw[start:end]
+    assert viewport.count(edit) == 1
+    raw = raw[:start] + viewport.replace(edit, replacement) + raw[end:]
+
+    manifest, source, _ = tools_fallback.author_tool(ask)
+    assert manifest["engine_op"] == "viewport_camera_diagnostics"
+    status, payload = invoke(source, raw, {})
+    assert status == "ok", payload
+    report = payload[0]
+    assert report["checked_count"] == checked_count
+    assert report["total"] == int(reason is not None)
+    if reason is None:
+        assert report["affected_cameras"] == []
+    else:
+        [affected] = report["affected_cameras"]
+        assert affected["viewport_handle"] == handle
+        assert affected["layout"] == "Sheet"
+        assert reason in affected["reason"].lower()
+    if reason is None and checked_count == 2:
+        _, source, _ = tools_fallback.author_tool(
+            "List complete thawed panel footprints in perspective viewport A2's crop.")
+        status, payload = invoke(source, raw, {})
+        assert status == "tool_error" and "viewport crop boundary" in str(payload).lower(), payload
