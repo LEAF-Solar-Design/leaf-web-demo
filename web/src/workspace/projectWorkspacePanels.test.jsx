@@ -177,6 +177,78 @@ it('W1C5 shows a completed solve proposal as ready for review without a publishe
   expect(screen.queryByText('Proposal ready for review; not published')).toBeNull()
 })
 
+it('exports the complete retained envelope of the selected report and retires the previous link', async () => {
+  const blobs = []
+  const createObjectURL = vi.fn((blob) => {
+    blobs.push(blob)
+    return `blob:report-${blobs.length}`
+  })
+  const revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }))
+  try {
+    const first = {
+      job_id: 'first-report', tool_name: 'Measure', status: 'complete', input_version_id: 'first-version',
+      result: {
+        ok: true, project_context: { project_id: project.project_id, input_version_id: 'first-version' },
+        result: { layers: [{ layer: 'Panels', count: 12 }], details: 'a'.repeat(5000) },
+      },
+    }
+    const second = {
+      ...first, job_id: 'second-report', status: 'succeeded', input_version_id: 'second-version',
+      result: { ok: true, project_context: { project_id: project.project_id, input_version_id: 'second-version' }, result: { layers: [] } },
+    }
+    const readBlob = (blob) => new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(JSON.parse(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsText(blob)
+    })
+    const props = { project, pane: 'jobs', workspace: { jobs: [first, second] } }
+    const { rerender } = render(<ProjectWorkspacePanels {...props} currentJob={first} />)
+    const link = () => screen.getByRole('link', { name: 'Download result JSON' })
+    expect(link()).toHaveAttribute('href', 'blob:report-1')
+    expect(link()).toHaveAttribute('download', 'result.json')
+    expect(await readBlob(blobs[0])).toEqual(first.result)
+
+    rerender(<ProjectWorkspacePanels {...props} currentJob={second} />)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:report-1')
+    expect(link()).toHaveAttribute('href', 'blob:report-2')
+    expect(await readBlob(blobs[1])).toEqual(second.result)
+
+    for (const job of [
+      { ...second, result: first.result },
+      { ...second, status: 'failed' },
+      { ...second, status: 'running' },
+      { ...second, input_version_id: null },
+      { ...second, result: { ok: true, result: [] } },
+      { ...second, result: { ...second.result, ok: undefined } },
+      { ...second, result: { ...second.result, result: null } },
+    ]) {
+      rerender(<ProjectWorkspacePanels {...props} currentJob={job} />)
+      expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+    }
+    const foreign = { ...second, result: { ...second.result, project_context: {
+      ...second.result.project_context, project_id: 'other-project',
+    }, result: { marker: 'foreign report content' } } }
+    rerender(<ProjectWorkspacePanels {...props} currentJob={foreign} />)
+    expect(screen.getByText('Report input version could not be verified')).toBeVisible()
+    expect(screen.queryByText(/foreign report content/)).toBeNull()
+
+    for (const details of ['x'.repeat(1024 * 1024), '界'.repeat(400000)]) {
+      rerender(<ProjectWorkspacePanels {...props} currentJob={{
+        ...second, result: { ...second.result, result: { details } },
+      }} />)
+      expect(screen.getByRole('status')).toHaveTextContent('This saved result is too large to preview or download here.')
+      expect(screen.queryByRole('link', { name: 'Download result JSON' })).toBeNull()
+    }
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:report-2')
+    expect(createObjectURL).toHaveBeenCalledTimes(2)
+  } finally {
+    cleanup()
+    vi.unstubAllGlobals()
+  }
+})
+
 it('B2 row6 orders versions and preserves honest material and tool empties', () => {
   const old = { version_id: 'old', seq: 1, created_at: '2026-09-01' }
   const recent = { version_id: 'recent', seq: 2, created_at: '2026-09-02' }
