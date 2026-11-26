@@ -235,3 +235,48 @@ def test_execute_only_role_has_no_table_access(jobs):
         assert jobs.call('fail', {'code': 'video_changed'}, job_id=second) == 'failed'
     finally:
         jobs.execute('RESET ROLE')
+
+
+def test_execute_only_role_claim_survives_deferred_sizing_check(jobs):
+    role = 'decoder_test_' + uuid.uuid4().hex
+    try:
+        with jobs.conn.transaction():
+            jobs.execute(sql.SQL('CREATE ROLE {} NOLOGIN').format(sql.Identifier(role)))
+    except psycopg.errors.InsufficientPrivilege:
+        pytest.skip('test database does not permit CREATE ROLE')
+    schema = jobs.execute('SELECT current_schema() AS schema').fetchone()['schema']
+    jobs.execute(sql.SQL('GRANT USAGE ON SCHEMA {} TO {}').format(sql.Identifier(schema), sql.Identifier(role)))
+    for signature in SIGNATURES:
+        jobs.execute(sql.SQL('GRANT EXECUTE ON FUNCTION {}.{} TO {}').format(
+            sql.Identifier(schema), sql.SQL(signature), sql.Identifier(role)))
+    jobs.execute(sql.SQL('SET LOCAL ROLE {}').format(sql.Identifier(role)))
+    try:
+        claimed = jobs.claim()
+        assert claimed['job_id'] == jobs.job_id and claimed['attempt'] == 1
+        jobs.execute('SET CONSTRAINTS ALL IMMEDIATE')
+        for table in ('jobs', 'project_sizing_exchanges'):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with jobs.conn.transaction():
+                    jobs.execute(sql.SQL('SELECT * FROM {}').format(sql.Identifier(table))).fetchall()
+    finally:
+        jobs.execute('RESET ROLE')
+    row = jobs.execute('SELECT status,attempt,lease_owner FROM jobs WHERE job_id=%s', (jobs.job_id,)).fetchone()
+    assert row == dict(status='running', attempt=1, lease_owner='decoder-test')
+
+
+def test_sizing_check_runs_as_owner_without_public_execute(jobs):
+    migration = Path(__file__).parents[1] / 'migrations' / '0116_sizing_exchange_check_security_definer.sql'
+    for rerun in (False, True):
+        if rerun:
+            jobs.conn.execute(migration.read_text(encoding='utf-8'))
+        # OID zero denotes PUBLIC, which is an ACL grantee rather than a pg_roles row.
+        row = jobs.execute(
+            "SELECT p.prosecdef, p.proconfig, "
+            "pg_catalog.has_function_privilege(0::oid, p.oid, 'EXECUTE') AS public_execute "
+            "FROM pg_catalog.pg_proc p WHERE p.oid=pg_catalog.to_regprocedure("
+            "pg_catalog.quote_ident(current_schema()) || '.check_project_sizing_exchange_completion()')"
+        ).fetchone()
+        assert row['prosecdef'] is True
+        assert row['public_execute'] is False
+        assert any(setting.startswith('search_path=') and setting.endswith('pg_catalog, pg_temp')
+                   for setting in row['proconfig'])
