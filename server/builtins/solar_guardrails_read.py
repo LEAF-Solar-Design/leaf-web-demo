@@ -15,13 +15,15 @@ from solar_design_graph import GraphValidationError
 SCHEMA = "leaf.solar-guardrails.v1"
 LIST_MODE = "drawing"
 WINDOW_KEY = "mppt_voltage_window"
+STRING_VOLTAGE_KEY = "per_string_voltage"
 WINDOW_FIELDS = frozenset(("min_v", "max_v"))
 WINDOW_MAX_V = 100000
 INVERTER_CONFIG = ("model", "mppt_count", "total_dc_inputs", "max_dc_voltage", "max_ac_power_kw", "is_solaredge")
 
 
 def _window(params):
-    if type(params) is not dict or set(params) - {WINDOW_KEY}:
+    if (type(params) is not dict or set(params) - {WINDOW_KEY, STRING_VOLTAGE_KEY}
+            or type(params.get(STRING_VOLTAGE_KEY, False)) is not bool):
         raise GraphValidationError("INVALID_GUARDRAILS_REQUEST")
     if WINDOW_KEY not in params:
         return None
@@ -106,8 +108,72 @@ def rows_for_intake(intake):
     return rows
 
 
+def _cold_module_voltage(graph):
+    """Use verified global sizing evidence for conventional, uniform modules."""
+    evidence = solar_sizing_client.require_sizing(graph)
+    if evidence["mode"] != "global" or len(evidence["records"]) != 1:
+        raise GraphValidationError("GLOBAL_MODULE_VOLTAGE_REQUIRED")
+    record = next(iter(evidence["records"].values()))
+    response = solar_sizing_client.SizingResponse.model_validate(record["response"])
+    voltage = solar_sizing_client.compute_voc_cold(response.voc, response.bvoc,
+                                                   response.min_temp)
+    if not math.isfinite(voltage) or voltage <= 0:
+        raise GraphValidationError("INVALID_MODULE_VOLTAGE")
+    return voltage, response.min_temp
+
+
+def string_voltage_report(graph, window):
+    try:
+        module_voc, min_temp = _cold_module_voltage(graph)
+        sizing_reason = None
+    except (GraphValidationError, ValueError) as error:
+        module_voc, min_temp = None, None
+        sizing_reason = getattr(error, "code", "INVALID_MODULE_VOLTAGE").lower()
+
+    devices = {device["id"]: device for device in graph["inverters"]}
+    settings = graph["settings"]
+    rows = []
+    for string in graph["strings"]:
+        device = devices.get(string["inverter_ref"])
+        reason = sizing_reason
+        if device is None:
+            reason = "inverter_binding_required"
+        elif (string["validity"]["state"] != "valid"
+                or device["validity"]["state"] != "valid"):
+            reason = "valid_circuit_and_inverter_required"
+        elif (device["is_solaredge"] or device["is_l2"] or settings["use_l2_collectors"]
+              or settings["optimizer_ratio"] != 1 or string["circuit_kind"] != "String"):
+            reason = "conventional_direct_string_required"
+        elif device["max_dc_voltage"] <= 0:
+            reason = "inverter_dc_voltage_limit_required"
+
+        cold = {"status": "unverified", "reason": reason}
+        if reason is None:
+            voltage = module_voc * string["module_count"]
+            limit = device["max_dc_voltage"]
+            cold = {"status": "pass" if voltage <= limit else "fail",
+                    "voc_v": voltage, "saved_inverter_max_dc_v": limit}
+        rows.append({
+            "string_ref": string["id"],
+            "inverter_ref": string["inverter_ref"],
+            "module_count": string["module_count"],
+            "cold_dc_limit": cold,
+            "hot_mppt_window": {"status": "unverified",
+                                "reason": "vmp_temperature_model_required"},
+        })
+    return {
+        "schema": "leaf.solar-string-voltage.v1",
+        "status": "incomplete",
+        "design_min_temp_c": min_temp,
+        "caller_mppt_window": window,
+        "rows": rows,
+    }
+
+
 def run(graph, params):
     window = _window(params)
+    if params.get(STRING_VOLTAGE_KEY):
+        return string_voltage_report(graph, window)
     intake, mode = graph_intake(graph, window)
     try:
         snapshot = solar_guardrails.build_snapshot(intake, LIST_MODE)
