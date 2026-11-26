@@ -56,6 +56,7 @@ DEMO_ROUTE_ALLOWLIST = frozenset({
     ("DELETE", "/api/projects/{project_id}/drawings/{drawing_id}/checkout"),
     ("POST", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads"),
     ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison"),
+    ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison"),
     ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}"),
     ("POST", "/api/projects/{project_id}/conversations"),
     ("GET", "/api/projects/{project_id}/conversations"),

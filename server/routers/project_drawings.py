@@ -19,7 +19,8 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|solar-schedule-comparison|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:physical|solar-reads|solar-schedule-comparison|"
+    r"solar-engineering-comparison|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -403,6 +404,7 @@ import solar_project_artifacts as output_artifacts
 import solar_project_read as output_reads
 import solar_project_schedule_compare as schedule_compare
 import solar_project_solaredge as project_solaredge
+import solar_saved_engineering_comparison as engineering_compare
 from solar_design_graph import GraphValidationError
 
 _OUTPUT_FAILURES = {
@@ -530,6 +532,25 @@ def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
             x_org_id, x_project_id, input_version_id)
         return output_reads.run_project_read(tenant, proj, drawing, version, body["tool"],
             body.get("params", {}), catalog_digest=body["catalog_digest"], current=body.get("current", False))
+    return _output_dispatch(operation)
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison")
+def solar_engineering_comparison_route(
+        project_id: str, drawing_id: str, input_version_id: str, compare_version_id: str,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    def operation():
+        if not output_policy.project_runs_enabled():
+            raise GraphValidationError("project_execution_disabled")
+        proj, drawing, before = _output_scope(tenant, project_id, drawing_id,
+            x_org_id, x_project_id, input_version_id)
+        try:
+            after = UUID(compare_version_id)
+        except ValueError:
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
+        result = engineering_compare.compare(tenant, proj, drawing, before, after)
+        return with_envelope_fields({"result": result})
     return _output_dispatch(operation)
 
 

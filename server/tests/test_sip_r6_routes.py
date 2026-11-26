@@ -26,6 +26,12 @@ import test_sip_r6_read as reads
 import test_sip_r6_artifacts as files
 import test_sip_r5_routes as admission_cases
 import test_project_scoped_read_tool as generic_cases
+from test_project_solaredge import accept, lane as tracking_lane, report, samples
+from test_sip_r3b_tools import INTAKE, embedded
+from test_sip_r6_read import lane as engineering_lane
+from test_solar_ground_graph_codec import b18, ground_graph
+from test_solar_ground_topology import topology_of
+from test_w1_design_graph import graph
 
 _FIND_TOOL = deps.find_tool
 _ENGINE_TOOLS = deps.load_engine_registry_tools
@@ -109,6 +115,7 @@ def test_sip_r6_routes_mounted_and_flagged(http, monkeypatch):
     expected = {
         ("POST", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-reads"),
         ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison"),
+        ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-engineering-comparison"),
         ("GET", "/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}")}
     counts = dict.fromkeys(expected, 0)
     for path, route in iter_leaf_routes(http.app.routes):
@@ -754,3 +761,151 @@ def test_project_artifact_range_limits(http):
     denied = http.client.get(path, headers={"Range": "bytes=0-1", "If-None-Match": "*"})
     refusal(denied, "SIP_R1_PROJECT_FORBIDDEN", 403)
     assert "content-range" not in denied.headers and "etag" not in denied.headers
+
+
+def _engineering_save(lane, intake):
+    lane.parent = deepcopy(lane.parent)
+    lane.parent.version_id = uuid4()
+    lane.head = lane.parent.version_id
+    lane.set_parent(intake)
+    return lane.head
+
+
+def _engineering_save_graph(lane, graph):
+    return _engineering_save(lane, embedded(validate_graph(graph)))
+
+
+def _engineering_request(lane, before, after, headers=None):
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: lane.tenant
+    with TestClient(app) as client:
+        return client.get(
+            f"/api/projects/{lane.project}/drawings/{lane.drawing}/versions/{before}/solar-engineering-comparison",
+            params={"compare_version_id": str(after)},
+            headers=headers,
+        )
+
+
+def _engineering_compare(lane, before, after):
+    writes = list(lane.writes)
+    head = lane.head
+    response = _engineering_request(lane, before, after)
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    result = response.json()["result"]
+    assert lane.writes == writes
+    assert lane.head == head
+    assert result["before"]["input_version_id"] == str(before)
+    assert result["after"]["input_version_id"] == str(after)
+    return result, {entry["metric"]: entry for entry in result["metrics"]}
+
+
+def _engineering_amounts(entry):
+    return entry["before"], entry["after"], entry["delta"]
+
+
+def test_exact_roof_versions_preserve_fractional_power_and_signed_delta(engineering_lane, graph):
+    lane = engineering_lane
+    graph = topology_of(graph)
+    graph["frames"][0]["module_power_watts"] = 400.125
+    before = _engineering_save_graph(lane, graph)
+    graph["frames"][0]["module_power_watts"] = 500.25
+    after = _engineering_save_graph(lane, graph)
+
+    result, totals = _engineering_compare(lane, before, after)
+    assert result["before"]["graph_sha256"] != result["after"]["graph_sha256"]
+    assert result["before"]["intake_sha256"] != result["after"]["intake_sha256"]
+    assert list(totals) == ["panels", "optimizers", "inverters", "strings", "kw_dc"]
+    assert _engineering_amounts(totals["kw_dc"]) == ("1.200375", "1.50075", "0.300375")
+    assert _engineering_amounts(totals["panels"]) == ("3", "3", "0")
+    assert _engineering_amounts(totals["strings"]) == ("2", "2", "0")
+    assert _engineering_amounts(totals["inverters"]) == ("1", "1", "0")
+    assert _engineering_amounts(totals["optimizers"]) == (None, None, None)
+    _, backwards = _engineering_compare(lane, after, before)
+    assert backwards["kw_dc"]["delta"] == "-0.300375"
+    _, same = _engineering_compare(lane, after, after)
+    assert same["kw_dc"]["delta"] == "0"
+
+
+def test_counts_compact_ground_modules_without_counting_an_absent_device(engineering_lane, graph, b18):
+    lane = engineering_lane
+    before = _engineering_save_graph(lane, ground_graph(graph, b18, 1))
+    after = _engineering_save_graph(lane, ground_graph(graph, b18, 2))
+    _, totals = _engineering_compare(lane, before, after)
+    assert _engineering_amounts(totals["panels"]) == ("294", "588", "294")
+    assert _engineering_amounts(totals["kw_dc"]) == ("117.6", "235.2", "117.6")
+    assert _engineering_amounts(totals["inverters"]) == ("0", "0", "0")
+    assert _engineering_amounts(totals["strings"]) == ("0", "0", "0")
+
+
+def test_missing_graph_and_legacy_equipment_keep_each_metric_unavailable(engineering_lane, graph):
+    lane = engineering_lane
+    before = _engineering_save(lane, deepcopy(INTAKE))
+    graph["frames"][0]["module_power_watts"] = 0
+    after = _engineering_save_graph(lane, graph)
+    result, totals = _engineering_compare(lane, before, after)
+    assert result["before"]["graph_sha256"] is None
+    assert all(entry["before_reason"] == "saved_graph_unavailable" for entry in totals.values())
+    assert _engineering_amounts(totals["panels"]) == (None, "3", None)
+    assert totals["inverters"]["after_reason"] == "saved_equipment_type_unavailable"
+    assert totals["kw_dc"]["after_reason"] == "complete_module_power_unavailable"
+
+
+def test_uses_only_revision_bound_measured_optimizers(tracking_lane, monkeypatch):
+    lane = tracking_lane
+    matrices = deepcopy(samples.GRIDS)
+    marker = 0
+    for matrix in matrices:
+        matrix["Optimizers"] = []
+        for row, record in enumerate(matrix["Rows"]):
+            for column, cell in enumerate(record["Panels"]):
+                if cell["Code"] == 1:
+                    marker += 1
+                    matrix["Optimizers"].append({
+                        "id": f"pdf-optimizer-{marker}", "vendor_label": str(marker),
+                        "cells": [[row, column]],
+                    })
+    monkeypatch.setattr("solar_project_solaredge.reports.parse_source", lambda data: deepcopy(matrices))
+    _, _, accepted = accept(lane, report(lane))
+
+    _, totals = _engineering_compare(lane, lane.ctx.parent_version_id, accepted.parent_version_id)
+    assert _engineering_amounts(totals["optimizers"]) == (None, "6", None)
+    assert totals["optimizers"]["before_reason"]
+    assert totals["optimizers"]["after_reason"] is None
+
+
+@pytest.mark.parametrize("missing_side", ["before", "after"])
+def test_missing_version_refuses_whole_comparison(engineering_lane, missing_side):
+    lane = engineering_lane
+    versions = dict.fromkeys(("before", "after"), lane.head)
+    versions[missing_side] = uuid4()
+    response = _engineering_request(lane, versions["before"], versions["after"])
+    assert response.status_code == 404
+    assert response.json()["error"]["reason_code"] == "SIP_R1_CONTEXT_NOT_FOUND"
+
+
+@pytest.mark.parametrize("corrupt_side", ["before", "after"])
+def test_both_versions_require_verified_intake_bytes(engineering_lane, graph, corrupt_side):
+    lane = engineering_lane
+    versions = {side: _engineering_save_graph(lane, graph) for side in ("before", "after")}
+    key = lane.versions[versions[corrupt_side]].intake_ref
+    lane.blobs[key] = b"corrupt"
+    response = _engineering_request(lane, versions["before"], versions["after"])
+    assert response.status_code == 500
+    assert response.json()["error"]["reason_code"] == "SIP_R1_INTAKE_DIGEST_MISMATCH"
+    assert response.json()["result"] is None
+
+
+def test_comparison_validates_baseline_scope_and_feature_flag(engineering_lane, monkeypatch):
+    lane = engineering_lane
+    invalid = _engineering_request(lane, lane.head, "invalid")
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["reason_code"] == "SIP_R6_INVALID_REQUEST"
+    wrong_org = _engineering_request(lane, lane.head, lane.head, {"X-Org-Id": str(uuid4())})
+    assert wrong_org.status_code == 404
+    assert wrong_org.json()["error"]["reason_code"] == "SIP_R1_CONTEXT_NOT_FOUND"
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "0")
+    disabled = _engineering_request(lane, lane.head, lane.head)
+    assert disabled.status_code == 409
+    assert disabled.json()["error"]["reason_code"] == "project_execution_disabled"
