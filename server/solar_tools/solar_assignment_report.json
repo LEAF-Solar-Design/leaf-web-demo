@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assignment-report",
     "version": "1.0.0",
-    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing.",
+    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Supply inverter_refs to compare selected inverters by occupied input share and review per-string voltage evidence. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assignment_report",
@@ -27,11 +27,15 @@
         "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
         "accept_excess_capacity": {"type": "boolean"},
         "mode": {"type": "string", "enum": ["saved"]},
-        "suggest_minimum_moves": {"type": "boolean"}
+        "suggest_minimum_moves": {"type": "boolean"},
+        "inverter_refs": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
       },
       "required": ["expected_rev"],
       "if": {"required": ["mode"]},
-      "else": {"required": ["accept_excess_capacity"], "not": {"required": ["suggest_minimum_moves"]}},
+      "else": {
+        "required": ["accept_excess_capacity"],
+        "not": {"anyOf": [{"required": ["suggest_minimum_moves"]}, {"required": ["inverter_refs"]}]}
+      },
       "additionalProperties": false
     },
     "returns": {
@@ -65,6 +69,64 @@
             "moves": {"type": "array", "items": {"type": "object"}},
             "probes_examined": {"type": "integer", "minimum": 0},
             "probe_limit": {"type": "integer", "minimum": 1}
+          },
+          "additionalProperties": false
+        },
+        "inverter_comparison": {
+          "type": "object",
+          "required": ["design_min_temp_c", "least_utilized_inverter_refs", "groups"],
+          "properties": {
+            "design_min_temp_c": {"type": ["number", "null"]},
+            "least_utilized_inverter_refs": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+            "groups": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "type": "object",
+                "required": ["capacity", "strings"],
+                "properties": {
+                  "capacity": {"$ref": "#/properties/saved_state/properties/collector_capacity/items"},
+                  "strings": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["string_ref", "inverter_ref", "circuit_tag", "module_count", "cold_dc_limit", "hot_mppt_window"],
+                      "properties": {
+                        "string_ref": {"type": "string"},
+                        "inverter_ref": {"type": "string"},
+                        "circuit_tag": {"type": "string"},
+                        "module_count": {"type": "integer", "minimum": 0},
+                        "cold_dc_limit": {
+                          "type": "object",
+                          "required": ["status"],
+                          "properties": {
+                            "status": {"enum": ["pass", "fail", "unverified"]},
+                            "reason": {"type": "string"},
+                            "voc_v": {"type": "number"},
+                            "saved_inverter_max_dc_v": {"type": "number"}
+                          },
+                          "if": {"properties": {"status": {"const": "unverified"}}},
+                          "then": {"required": ["reason"]},
+                          "else": {"required": ["voc_v", "saved_inverter_max_dc_v"]},
+                          "additionalProperties": false
+                        },
+                        "hot_mppt_window": {
+                          "type": "object",
+                          "required": ["status", "reason"],
+                          "properties": {
+                            "status": {"const": "unverified"},
+                            "reason": {"const": "vmp_temperature_model_required"}
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
           },
           "additionalProperties": false
         },

@@ -40,6 +40,7 @@ from test_w1_solve_commit import seed
 from test_solar_w2_registration import dispatch, head_graph, latest
 import test_solar_ground_topology as topo
 import test_solar_pvcase_solve as pv_tests
+from test_solar_tool_guardrails_read import g1, passing, service  # noqa: F401
 
 TOOL = "solar-assign-strings"
 TENANT = "fixture-tenant"
@@ -496,6 +497,82 @@ def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainde
     assert report["remaining_string_refs"] == sorted(string["id"] for string in g["strings"])
     assert report["commit_refusal_code"] == "EXCESS_CAPACITY_DECLINED"
     assert g == before
+
+
+@pytest.mark.parametrize(("second_capacity", "limits", "cold_status", "least"), [
+    (4, (600, 600), ("pass", "pass"), (1, 2)),
+    (8, (600, 600), ("pass", "pass"), (2,)),
+    (4, (75, 600), ("fail", "unverified"), (1, 2)),
+])
+def test_saved_inverter_comparison_uses_pinned_capacity_and_voltage(
+        g1, tmp_path, monkeypatch, second_capacity, limits, cold_status, least):
+    first = g1["inverters"][0]
+    second_ref = app_id("inverter", 2)
+    sending, moving = first["input_assignments"]
+    first.update(input_assignments=[sending], total_dc_inputs=4, max_dc_voltage=limits[0])
+    g1["inverters"].append({
+        **copy.deepcopy(first), "id": second_ref, "number": 2, "position": [10.0, 0.0],
+        "input_assignments": [moving], "total_dc_inputs": second_capacity, "max_dc_voltage": limits[1],
+    })
+    moved = next(string for string in g1["strings"] if string["id"] == moving["string_ref"])
+    moved.update(to_ref=second_ref, inverter_ref=second_ref)
+    if cold_status[1] == "unverified":
+        moved["validity"] = {"state": "stale", "reasons": ["source_changed"]}
+    sync_assignments(g1)
+    graph = validate_graph(g1)
+    backend, _ = seed(tmp_path, monkeypatch, graph)
+    before = store.load_manifest(backend, TENANT, "solar")
+    name = "solar-assignment-report"
+    base_params = {"mode": "saved", "expected_rev": graph["rev"]}
+    params = {**base_params, "inverter_refs": [second_ref, INV1]}
+    record = solar_tools.trusted_record(name)
+    Draft7Validator(record["params"]).validate(params)
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, name, params, drawing_id="solar", source_version=1, job_id="saved-inverter-comparison")
+    output = result["output"]
+    Draft7Validator(record["returns"]).validate(output)
+    report = output["inverter_comparison"]
+    assert report["least_utilized_inverter_refs"] == [app_id("inverter", n) for n in least]
+    assert report["design_min_temp_c"] == pytest.approx(-2.7)
+    groups = {item["capacity"]["inverter_ref"]: item for item in report["groups"]}
+    assert list(groups) == ([second_ref, INV1] if least == (2,) else [INV1, second_ref])
+    for ref, total, assignment, status in zip((INV1, second_ref), (4, second_capacity), (sending, moving), cold_status):
+        group = groups[ref]
+        assert group["capacity"] == {
+            "inverter_ref": ref, "total_dc_inputs": total, "occupied_inputs": 1, "spare_inputs": total - 1,
+        }
+        (voltage,) = group["strings"]
+        assert voltage["string_ref"] == assignment["string_ref"]
+        assert voltage["circuit_tag"] == next(
+            row["circuit_tag"] for row in output["saved_state"]["assignments"] if row["string_ref"] == voltage["string_ref"]
+        )
+        assert voltage["cold_dc_limit"]["status"] == status
+        assert voltage["hot_mppt_window"] == {"status": "unverified", "reason": "vmp_temperature_model_required"}
+    if cold_status[1] == "unverified":
+        assert groups[second_ref]["strings"][0]["cold_dc_limit"] == {
+            "status": "unverified", "reason": "valid_circuit_and_inverter_required",
+        }
+    assert {key: value for key, value in output.items() if key != "inverter_comparison"} == assignment_report(
+        graph, **base_params,
+    )
+    assert result["drawing_changed"] is False and result["source_version"] == 1
+    assert result["graph_sha256"] == sha(graph)
+    assert store.load_manifest(backend, TENANT, "solar") == before and head_graph(backend) == graph
+
+
+@pytest.mark.parametrize("refs", [[], [INV1, INV1], [INV1, app_id("inverter", 50)], [INV1, {}]])
+def test_saved_inverter_comparison_rejects_invalid_selections(graph, refs):
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        assignment_report(graph, mode="saved", inverter_refs=refs)
+
+
+def test_saved_inverter_comparison_is_saved_mode_only(graph):
+    refs = [INV1, app_id("inverter", 2)]
+    params = {"expected_rev": graph["rev"], "accept_excess_capacity": True, "inverter_refs": refs}
+    record = solar_tools.trusted_record("solar-assignment-report")
+    assert not Draft7Validator(record["params"]).is_valid(params)
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        assignment_report(graph, inverter_refs=refs)
 
 
 @pytest.mark.parametrize("patch", [{"unexpected": 1}, {"accept_excess_capacity": "Yes"},
