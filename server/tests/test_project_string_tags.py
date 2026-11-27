@@ -20,6 +20,7 @@ import test_project_drawing_editor as editor_cases
 import test_project_drawing_write as writer_cases
 from test_lab_corpus_executor import private_pg  # noqa: F401
 from test_project_drawing_editor import checkout, lane, versions  # noqa: F401
+from test_w1_design_graph import graph as equipped_graph  # noqa: F401
 from test_w2_string_add import solved
 
 TOOL = next(row for row in json.loads((Path(__file__).resolve().parents[1] / "write_tools.json")
@@ -405,6 +406,7 @@ def test_real_builtin_splice_and_upsert(solved, unit, scale, newline):
     assert overlay is None and result["tag_count"] == len(graph["strings"])
     plan = result["string_tag_plan"]
     output, metadata = tags.splice_tags(raw, intake, plan)
+    assert metadata["label_moves"] == []
     assert raw == original and intake == original_intake
     assert tags.splice_tags(raw, intake, plan) == (output, metadata)
     source_pairs, _ = writer._pairs(source(unit))
@@ -450,10 +452,58 @@ def test_real_builtin_splice_and_upsert(solved, unit, scale, newline):
     assert merged["solar_design_graph"] == graph
     assert merged["solar_design_graph_sha256"] == digest(graph)
     assert merged["project_material"] == intake["project_material"]
-    child, _ = tags.splice_tags(output, merged, BUILTIN.run(merged, params)[0]["string_tag_plan"])
+    child, child_metadata = tags.splice_tags(output, merged, BUILTIN.run(merged, params)[0]["string_tag_plan"])
+    assert child_metadata["label_moves"] == []
     assert len(owned(child)) == len(labels)
     assert NOTE.replace(b"\n", newline) in child
     assert not ({value(r, 5) for r in owned(child)} & {value(r, 5) for r in text_records})
+
+
+@pytest.mark.parametrize("anchors,old_names,new_names,old_xy,new_xy", [
+    ([(1, 1), (2, 1)], ["A", "B"], ["NW", "SE"],
+     [[0.5, 0.5], [0.5, 3.5]], [[0.5, 0.5], [0.5, 3.5]]),
+    ([(1, 1), (7, 1)], ["A", "B"], ["WEST-LONG", "NE"],
+     [[0.5, 0.5], [7.3, 0.5]], [[0.5, 0.5], [7.3, 3.5]]),
+    ([(-7, -2), (-2, -2)], ["WEST-LONG", "NE"], ["W", "E"],
+     [[-9.7, -2.5], [-2.9, 0.5]], [[-9.7, -2.5], [-2.9, -2.5]]),
+], ids=["same-cell", "growing-footprint", "shrinking-footprint"])
+def test_reports_moved_labels_after_rename(equipped_graph, anchors, old_names, new_names, old_xy, new_xy):
+    solved = equipped_graph
+    solved["project"]["units"].update(drawing_units="m", meters_per_unit=1,
+                                      source="explicit", drawing_unit_is_feet=False)
+    inverter, = solved["inverters"]
+    inverter["position"] = [anchors[0][0], anchors[0][1] - 1]
+    circuit_rows = sorted(solved["strings"], key=lambda row: row["id"])
+    assert len(circuit_rows) == 2
+    for row, name, anchor in zip(circuit_rows, old_names, anchors):
+        row.update(circuit_tag=name, route=[[0, 0], list(anchor), inverter["position"]])
+
+    drawing_id = uuid4()
+    source_bytes = source(6)
+    intake = companion(source_bytes, solved)
+    params = prepared(solved, paper_mm_per_drawing_unit=1)
+    original_plan = BUILTIN.run(intake, params)[0]["string_tag_plan"]
+    original, original_metadata = tags.splice_tags(source_bytes, intake, original_plan)
+    reopened = json.loads(tags.annotation_intake(original, intake, original_metadata, drawing_id))
+    assert original_metadata["label_moves"] == []
+
+    edited = deepcopy(solved)
+    edited["parent_rev"], edited["rev"] = solved["rev"], solved["rev"] + 1
+    for row, name in zip(sorted(edited["strings"], key=lambda row: row["id"]), new_names):
+        row["circuit_tag"] = name
+    reopened.update(solar_design_graph=edited, solar_design_graph_sha256=digest(edited))
+    renamed_plan = BUILTIN.run(reopened, prepared(edited, paper_mm_per_drawing_unit=1))[0]["string_tag_plan"]
+    renamed, metadata = tags.splice_tags(original, reopened, renamed_plan)
+    final_intake = json.loads(tags.annotation_intake(renamed, reopened, metadata, drawing_id))
+    expected = [
+        {"string_ref": row["id"],
+         "before": {"text": old_name, "position": [*before, 0]},
+         "after": {"text": new_name, "position": [*after, 0]}}
+        for row, old_name, new_name, before, after in zip(circuit_rows, old_names, new_names, old_xy, new_xy)
+        if before != after
+    ]
+    assert metadata["label_moves"] == expected
+    assert "label_moves" not in final_intake["leaf_string_tags"]
 
 
 def test_producer_registration_is_exact():
@@ -619,6 +669,8 @@ def test_normal_run_export_graph_fidelity_and_replay(source_lane, run):
     response = run(TOOL, params=params, cap=s.cap, key=key)
     assert response.status_code == 200, response.text
     body = response.json()
+    assert body["result"]["label_moves"] == []
+    assert body["result"]["moved_label_count"] == 0
     child = body["version"]
     assert len(versions(s)) == count + 1 and child["seq"] == 3
     assert body["producer"]["source_mutation"] == "string-tag-splice"
@@ -631,12 +683,14 @@ def test_normal_run_export_graph_fidelity_and_replay(source_lane, run):
     assert after.intake["solar_design_graph"] == before.intake["solar_design_graph"]
     assert after.intake["solar_design_graph_sha256"] == before.intake["solar_design_graph_sha256"]
     assert after.intake["project_material"] == before.intake["project_material"]
+    assert "label_moves" not in after.intake["leaf_string_tags"]
     assert body["producer"]["output_intake_sha256"] == after.intake_sha256
     assert s.http.get(s.base + f"/versions/{s.parent.version_id}/dxf").content == s.raw
     assert body["producer"]["input_intake_sha256"] == before.intake_sha256
     assert body["producer"]["input_source_sha256"] == hashlib.sha256(s.raw).hexdigest()
     replay = run(TOOL, params=params, cap=s.cap, key=key)
     assert replay.status_code == 200 and replay.json()["version"] == child
+    assert replay.json()["result"]["label_moves"] == body["result"]["label_moves"]
     assert run(TOOL, params={**params, "paper_height_mm": 2.1}, cap=s.cap, key=key).status_code == 409
     # Even a newly explicit default, producing identical CAD, changes the
     # confirmation and must be fenced by the internally bound params digest.
