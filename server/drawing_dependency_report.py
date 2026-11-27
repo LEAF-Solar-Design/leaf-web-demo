@@ -57,9 +57,26 @@ def _material_texture_maps(pairs, start, end):
         previous = code, value
 
 
+def _light_web_path(pairs, start, end):
+    boolean_count = None
+    for index in range(start, end):
+        code, value = pairs[index]
+        if code == 100:
+            boolean_count = 0 if value == "AcDbLight" else None
+        elif code == 290 and boolean_count is not None:
+            boolean_count += 1
+            # AcDbLight writes status first, then the photometric web flag.
+            if boolean_count == 2:
+                if value == "1" and index + 1 < end and pairs[index + 1][0] == 300:
+                    return pairs[index + 1][1]
+                return None
+    return None
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
     texture_maps = {}
+    web_lights = {}
     plot_setups = {}
     plot_layouts = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
@@ -72,7 +89,7 @@ def from_pairs(pairs, *, literal_text=None):
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
     inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
-    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities | {"TOLERANCE"}})
+    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities | {"TOLERANCE", "LIGHT"}})
 
     def add(kind, name, disposition, **details):
         if name:
@@ -149,6 +166,13 @@ def from_pairs(pairs, *, literal_text=None):
             for channel, path in _material_texture_maps(pairs, i + 1, end):
                 add("material_texture", path, "texture omitted")
                 texture_maps.setdefault(path, set()).add((handle, channel))
+        elif kind == "LIGHT":
+            path = _light_web_path(pairs, i + 1, end)
+            if path:
+                add("photometric_web", path, "reported")
+                handles = web_lights.setdefault(path, set())
+                if handle := groups.get(5):
+                    handles.add(handle)
         elif kind == "PLOTSETTINGS":
             settings = subclasses.get("AcDbPlotSettings")
             resources = plot_resources(groups if settings is None else settings)
@@ -177,6 +201,8 @@ def from_pairs(pairs, *, literal_text=None):
             {"material_handle": handle or None, "channel": channel}
             for handle, channel in sorted(references)
         ]
+    for path, handles in web_lights.items():
+        dependencies["photometric_web", path]["light_handles"] = sorted(handles)
     report = {"schema": "leaf.drawing-dependencies.v1",
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],

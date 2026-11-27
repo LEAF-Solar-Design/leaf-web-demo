@@ -261,7 +261,10 @@ def test_dependency_paths_are_reported_without_any_filesystem_access(path, monke
     pairs = [(0, "BLOCK"), (70, "4"), (1, path),
              (0, "STYLE"), (3, path), (4, path),
              (0, "IMAGEDEF"), (1, path),
-             (0, "DGNDEFINITION"), (1, path)]
+             (0, "DGNDEFINITION"), (1, path),
+             (0, "MATERIAL"), (5, "AA"), (100, "AcDbMaterial"), (72, "1"), (3, path),
+             (0, "LIGHT"), (5, "BB"), (100, "AcDbLight"), (290, "0"), (280, "1"),
+             (290, "1"), (300, path)]
     with monkeypatch.context() as guard:
         guard.setattr(builtins, "open", forbidden_open)
         guard.setattr(io, "open", forbidden_open)
@@ -272,7 +275,34 @@ def test_dependency_paths_are_reported_without_any_filesystem_access(path, monke
             for row in report["dependencies"]} == {
         ("xref", path, "detached"), ("font", path, "font remapped"),
         ("shape_font", path, "font remapped"), ("image", path, "image omitted"),
-        ("underlay", path, "underlay omitted")}
+        ("underlay", path, "underlay omitted"), ("material_texture", path, "texture omitted"),
+        ("photometric_web", path, "reported")}
+
+
+def test_light_web_requires_its_subclass_and_an_enabled_web_flag():
+    def light(handle, *tags):
+        return [(0, "LIGHT"), (5, handle), *tags]
+
+    path = (300, "fixtures/shared.ies")
+    light_subclass = (100, "AcDbLight")
+    status = (290, "1")
+    enabled = (290, "1")
+    disabled = (290, "0")
+    pairs = [(0, "SECTION"), (2, "ENTITIES")]
+    pairs += light("A", light_subclass, status, path)
+    pairs += light("B", light_subclass, status, disabled, path)
+    pairs += light("C", light_subclass, status, (100, "AcDbEntity"), enabled, path)
+    pairs += light("D", status, enabled, path)
+    pairs += light("E", light_subclass, disabled, (280, "1"), enabled, path)
+    pairs += light("E", light_subclass, status, (1, "1"), (295, "0"), enabled, path)
+    pairs += light("F", light_subclass, status, enabled, (300, ""))
+    pairs += [(0, "ENDSEC"), (0, "SECTION"), (2, "OBJECTS")]
+    pairs += light("G", light_subclass, status, enabled, path)
+    pairs += [(0, "ENDSEC"), (0, "EOF")]
+    assert from_pairs(pairs)["dependencies"] == [{
+        "kind": "photometric_web", "name": path[1], "disposition": "reported",
+        "light_handles": ["E"],
+    }]
 
 
 def test_unicode_records_reorder_stably_deduplicate_by_kind_and_preserve_input():
