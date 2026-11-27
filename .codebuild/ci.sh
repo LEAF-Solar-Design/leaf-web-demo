@@ -326,7 +326,9 @@ LEAF_DOCS_ONLY
       exit 1
     fi
   fi
-  echo "LEAF_PR_MERGE state=$pr_merge_state head=$HEAD_SHA base=$TRUSTED_SHA tree=$(git rev-parse 'HEAD^{tree}')"
+  if [[ "$pr_merge_state" != not_pr ]]; then
+    echo "LEAF_PR_MERGE state=$pr_merge_state head=$HEAD_SHA base=$TRUSTED_SHA tree=$(git rev-parse 'HEAD^{tree}')"
+  fi
   # LEAF_PR_MERGE_END
   if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" && "$TRUSTED_SHA" != "$LEAF_LOADER_TRUSTED_SHA" ]]; then
     loader_check=loader_sha_mismatch

@@ -115,17 +115,20 @@ class TestPrMerge(unittest.TestCase):
         for event in (None, "PUSH"):
             with self.subTest(event=event):
                 result = self.run_block(event=event)
-                self.assert_receipt(result, "not_pr")
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
                 self.assertEqual(self.git("rev-parse", "HEAD"), self.head)
 
     def test_trusted_sha_override_leaves_head_unchanged(self):
         result = self.run_block(trusted_sha_override="1")
-        self.assert_receipt(result, "not_pr")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.head)
 
     def test_disabled_merge_leaves_head_unchanged(self):
         result = self.run_block(LEAF_PR_MERGE="0")
-        self.assert_receipt(result, "not_pr")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.head)
 
     def test_conflict_aborts_merge_and_fails(self):
