@@ -18,7 +18,7 @@ import solar_project_context as project
 import solar_project_graph as graphs
 import solar_project_read as reads
 import solar_project_solaredge as se
-from solar_solaredge_revision_compare import PAGE_ITEMS, compare
+from solar_solaredge_revision_compare import PAGE_ITEMS, compare, compare_frame_history
 import solar_tools
 import store
 from leaf_cloud_client import canonical_bytes
@@ -1102,6 +1102,90 @@ def _post_tracking_comparison(http, version, **params):
         f"/api/projects/{s.project}/drawings/{s.drawing}/versions/{version}/solar-reads",
         json={"tool": se.READ_TOOL, "catalog_digest": tools.manifest(se.READ_TOOL), "params": params},
     )
+
+
+def test_frame_history_resolves_three_pinned_versions_over_a_later_head(http):
+    s = http.s
+    _, _, baseline = accept(s, report(s))
+    _, _, intermediate = tools.commit(s, "solar-settings", {
+        "expected_rev": baseline.graph["rev"], "project_changes": {"name": "Intermediate"},
+    }, baseline)
+    _, _, current = tools.commit(s, "solar-settings", {
+        "expected_rev": intermediate.graph["rev"], "project_changes": {"name": "Current"},
+    }, intermediate)
+    tools.commit(s, "solar-settings", {
+        "expected_rev": current.graph["rev"], "project_changes": {"name": "Latest"},
+    }, current)
+    before, middle, after = (str(saved.parent_version_id) for saved in (baseline, intermediate, current))
+
+    def history(first, second):
+        return _post_tracking_comparison(http, after, section="saved_frame_history",
+                                        compare_to_version_id=first, intermediate_version_id=second)
+
+    response = history(before, middle)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["is_head"] is False and result["drawing_changed"] is False
+    output = result["output"]
+    assert output["version_ids"] == [before, middle, after]
+    assert output["counts"] == dict(changed_panels=0, moved_once=0, moved_twice=0, returned_to_original_frame=0)
+    assert output["items"] == []
+    reversed_order = history(middle, before)
+    assert reversed_order.status_code == 409 and "SOLAREDGE_TRACKING_HISTORY_VERSION_ORDER" in reversed_order.text
+    repeated_version = history(before, before)
+    assert repeated_version.status_code == 409 and "INVALID_SOLAREDGE_TRACKING_READ_REQUEST" in repeated_version.text
+    assert history(before, str(uuid4())).status_code == 404
+
+
+@pytest.mark.parametrize("last_frame,moves,returned", [("a", 2, True), ("c", 2, False), ("b", 1, False)])
+def test_compare_frame_history_counts_both_saved_intervals(last_frame, moves, returned):
+    record = {"strings": [{"panel_refs": ["assigned"]}], "unassigned_panel_refs": ["unassigned"]}
+    before, middle, after = (
+        {"panels": [{"id": panel, "frame_ref": frame} for panel in ("assigned", "unassigned", "other")]}
+        for frame in ("a", "b", last_frame)
+    )
+    result = compare_frame_history(record, before, middle, after, 1)
+    assert result["counts"] == dict(changed_panels=2, moved_once=2 * (moves == 1),
+                                    moved_twice=2 * (moves == 2), returned_to_original_frame=2 * returned)
+    assert result["items"] == [{
+        "panel_ref": "unassigned", "move_count": moves, "returned_to_original_frame": returned,
+        "states": [{"present": True, "frame_ref": frame} for frame in ("a", "b", last_frame)],
+    }]
+    assert result["page"] == {"offset": 1, "total": 2, "returned": 1, "next_offset": None}
+
+
+def test_compare_frame_history_distinguishes_presence_from_frame_moves():
+    def present(frame):
+        return {"present": True, "frame_ref": frame}
+
+    missing = {"present": False, "frame_ref": None}
+    cases = [
+        ("absent-in-middle", [present("a"), missing, present("a")], 0, False),
+        ("missing-to-unframed", [missing, present(None), present(None)], 0, False),
+        ("return", [present("a"), present("b"), present("a")], 2, True),
+        ("stable", [present("a"), present("a"), present("a")], 0, False),
+        ("stay-on-new-frame", [present("a"), present("b"), present("b")], 1, False),
+        ("two-moves", [present("a"), present("b"), present("c")], 2, False),
+        ("unframed-in-middle", [present("a"), present(None), present("b")], 0, False),
+    ]
+    record = {
+        "strings": [{"panel_refs": [panel for panel, *_ in cases[:-1]]}],
+        "unassigned_panel_refs": ["unframed-in-middle"],
+    }
+    snapshots = [
+        {"panels": [{"id": panel, "frame_ref": states[index]["frame_ref"]}
+                    for panel, states, *_ in cases if states[index]["present"]]}
+        for index in range(3)
+    ]
+
+    result = compare_frame_history(record, *snapshots, 0)
+
+    assert result["counts"] == dict(changed_panels=6, moved_once=1, moved_twice=2, returned_to_original_frame=1)
+    assert result["items"] == [
+        {"panel_ref": panel, "states": states, "move_count": moves, "returned_to_original_frame": returned}
+        for panel, states, moves, returned in cases if panel != "stable"
+    ]
+    assert result["page"] == {"offset": 0, "total": 6, "returned": 6, "next_offset": None}
 
 
 def test_compare_two_pinned_saved_versions_with_independent_report_downloads(http):
