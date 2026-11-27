@@ -1,11 +1,8 @@
-"""Read-only recovery preparation for independent, pinned corpus nodes.
-
-This is not execution admission. A future executor must obtain confirmation of
-the current plan digest and create a new document/run with this source lineage.
-"""
+"""Review and confirm recovery lineage for independent, pinned corpus nodes."""
 from __future__ import annotations
 
 import copy
+import re
 
 import jobs
 import lab_artifacts as ledger
@@ -195,6 +192,66 @@ def inspect_jobs(tenant, run_id, *, authorize):
 
 def prepare(tenant, run_id, *, authorize, include_cleanup=False):
     """Resolve immutable source and authoritative jobs, then recheck live access."""
+    plan, _, _, _, _ = _prepare(tenant, run_id, authorize=authorize, include_cleanup=include_cleanup)
+    return plan
+
+
+def confirmation_lineage(tenant, run_id, reviewed_digest, *, authorize_write, include_cleanup=False):
+    """Recheck the reviewed plan and return the server-owned inputs for admission."""
+    if not _is_digest(reviewed_digest):
+        raise GraphRefused('lab_recovery_confirmation_digest_invalid')
+    plan, source, authority, graph, bound_jobs = _prepare(
+        tenant, run_id, authorize=authorize_write, include_cleanup=include_cleanup)
+    if plan['digest'] != reviewed_digest:
+        raise GraphRefused('lab_recovery_plan_changed')
+    if plan['draft_graph'] is None:
+        raise GraphRefused('lab_recovery_plan_ineligible')
+
+    selected, retained = [], []
+    for block, item in zip(graph['blocks'], plan['blocks']):
+        binding = _producer_binding(authority, block, bound_jobs[block['id']])
+        producer = {**item, **binding}
+        (selected if item['disposition'] == 'selected' else retained).append(producer)
+    authorize_write(source)
+    return {'source': {**plan['source'], 'input_digest': source['input_digest']},
+            'project_id': authority['project_id'], 'reviewed_digest': reviewed_digest,
+            'draft_graph': plan['draft_graph'], 'selected': selected, 'retained': retained}
+
+
+def _is_digest(value):
+    return isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value) is not None
+
+
+def _producer_binding(authority, block, job):
+    settings = block['settings']
+    attempt = job.get('attempt')
+    try:
+        context = corpus.validate_context(job.get('lab_corpus'))
+        policy = corpus.compile_policy(authority, block['id'], settings)
+    except ValueError:
+        raise GraphRefused('lab_recovery_producer_binding_invalid') from None
+    if (type(attempt) is not int or attempt < 0 or context.get('policy') != policy
+            or context['actor_id'] != authority['actor_id']
+            or any(context[key] != settings[key] for key in ('project_id', 'corpus', 'suite'))):
+        raise GraphRefused('lab_recovery_producer_binding_invalid')
+    binding = {'attempt': attempt, 'source_policy': policy,
+               'corpus_sha256': settings['corpus']['sha256'],
+               'settings_sha256': graph_digest(settings)}
+    if job['status'] == 'complete':
+        envelope = job.get('result')
+        result = envelope.get('result') if isinstance(envelope, dict) else None
+        if (not isinstance(result, dict) or result.get('schema') != corpus.RESULT_SCHEMA
+                or result.get('job_id') != job['job_id'] or result.get('context') != context
+                or type(result.get('attempt')) is not int or result['attempt'] != attempt
+                or not _is_digest(result.get('result_sha256'))
+                or not _is_digest(result.get('evaluated_suite_sha256'))):
+            raise GraphRefused('lab_recovery_producer_result_invalid')
+        binding.update(result_sha256=result['result_sha256'],
+                       evaluated_suite_sha256=result['evaluated_suite_sha256'])
+    return binding
+
+
+def _prepare(tenant, run_id, *, authorize, include_cleanup):
     source = store.get(tenant, run_id)
     if source['tenant_id'] != tenant or source['run_id'] != run_id:
         raise GraphRefused('lab_recovery_source_mismatch')
@@ -216,6 +273,7 @@ def prepare(tenant, run_id, *, authorize, include_cleanup=False):
         raise GraphRefused('lab_recovery_project_mismatch')
 
     blocks, selected, retained, unresolved = [], [], [], []
+    bound_jobs = {}
     for block in graph['blocks']:
         intent = f'lab:{run_id}:{block["id"]}:corpus:v1'
         receipt = copy.deepcopy(lookup_job(tenant, authority['project_id'], intent))
@@ -229,6 +287,7 @@ def prepare(tenant, run_id, *, authorize, include_cleanup=False):
             disposition, reason = 'unresolved', 'job_binding_mismatch'
         else:
             disposition, reason = _disposition(job, receipt, source)
+            bound_jobs[block['id']] = job
             item.update(job_id=job['job_id'], status=job['status'],
                 receipt_sha256=graph_digest({
                     'job': {key: job.get(key) for key in (
@@ -265,4 +324,4 @@ def prepare(tenant, run_id, *, authorize, include_cleanup=False):
             'confirmation_required': True}
     plan['digest'] = graph_digest(plan)
     authorize(source)
-    return plan
+    return plan, source, authority, graph, bound_jobs

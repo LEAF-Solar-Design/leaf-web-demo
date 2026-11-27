@@ -247,6 +247,85 @@ def test_v3_concurrent_reads_are_equal_and_receipt_changes_invalidate_confirmati
     assert len(rig.sql_calls) == len(rig.job_calls) == 27
 
 
+def bind_producers(rig):
+    authority = store.corpus_authority(rig.source)
+    for block in rig.graph['blocks']:
+        intent = f'lab:source-run:{block["id"]}:corpus:v1'
+        if intent not in rig.matches:
+            continue
+        job = rig.jobs[rig.matches[intent][0]['job_id']]
+        settings = block['settings']
+        context = corpus.validate_context({'schema': corpus.SCHEMA, 'tenant_id': TENANT,
+            'org_id': TENANT, 'project_id': PROJECT, 'actor_id': ACTOR,
+            'capability_sha256': corpus.ARCHIVE_SHA256, 'corpus': settings['corpus'],
+            'suite': settings['suite'],
+            'policy': corpus.compile_policy(authority, block['id'], settings)})
+        job['lab_corpus'] = context
+        if job['status'] == 'complete':
+            job['result']['result'].update(schema=corpus.RESULT_SCHEMA,
+                context=copy.deepcopy(context), evaluated_suite_sha256='e' * 64)
+
+
+def confirm(rig, review, *, revoke_at=None):
+    checks = []
+
+    def authorize_write(source):
+        assert source == rig.source
+        checks.append(source['run_id'])
+        if len(checks) == revoke_at:
+            raise recovery.GraphRefused('write_authority_revoked')
+
+    lineage = recovery.confirmation_lineage(TENANT, 'source-run', review['digest'],
+        authorize_write=authorize_write, include_cleanup=review['schema'] == recovery.SCHEMA_V2)
+    assert len(checks) == 3
+    return lineage
+
+
+@pytest.mark.parametrize('include_cleanup', [False, True])
+def test_confirmation_binds_failed_subset_and_original_retained_producers(rig, include_cleanup):
+    bind_producers(rig)
+    review = cleanup_plan(rig) if include_cleanup else plan(rig)
+    before = copy.deepcopy((rig.source, rig.artifact, rig.jobs, rig.matches))
+    lineage = confirm(rig, review)
+    assert lineage['source'] == {**review['source'], 'input_digest': rig.source['input_digest']}
+    assert lineage['project_id'] == PROJECT
+    assert lineage['reviewed_digest'] == review['digest']
+    assert lineage['draft_graph'] == review['draft_graph']
+    assert [entry['block_id'] for entry in lineage['selected']] == ['oak-volatility']
+    assert [(entry['block_id'], entry['job_id'], entry['attempt'], entry['result_sha256'])
+            for entry in lineage['retained']] == [
+        ('birch-trend', 'original-producer-1', 1, 'c' * 64),
+        ('maple-holdout', 'original-producer-2', 1, 'c' * 64)]
+    for entry in lineage['selected'] + lineage['retained']:
+        assert entry['source_policy'] == rig.jobs[entry['job_id']]['lab_corpus']['policy']
+    assert (rig.source, rig.artifact, rig.jobs, rig.matches) == before
+
+
+@pytest.mark.parametrize('mode,error', [
+    ('stale', 'lab_recovery_plan_changed'),
+    ('unresolved', 'lab_recovery_plan_ineligible'),
+    ('complete-only', 'lab_recovery_plan_ineligible'),
+    ('foreign-actor', 'lab_recovery_producer_binding_invalid'),
+    ('wrong-attempt', 'lab_recovery_producer_result_invalid'),
+    ('revoked', 'write_authority_revoked'),
+])
+def test_confirmation_refuses_changed_or_unproven_lineage(rig, mode, error):
+    if mode == 'unresolved':
+        rig.configure(['failed', 'complete', None] * 4)
+    if mode == 'complete-only':
+        rig.configure(['complete', 'complete'])
+    bind_producers(rig)
+    if mode == 'foreign-actor':
+        rig.jobs['original-producer-0']['lab_corpus']['actor_id'] = PROJECT
+    if mode == 'wrong-attempt':
+        rig.jobs['original-producer-1']['result']['result']['attempt'] = 2
+    review = plan(rig)
+    if mode == 'stale':
+        rig.jobs['original-producer-1']['result']['result']['result_sha256'] = 'd' * 64
+    with pytest.raises(recovery.GraphRefused, match=error):
+        confirm(rig, review, revoke_at=3 if mode == 'revoked' else None)
+
+
 @pytest.mark.parametrize('field,value', [
     ('tenant_id', 'foreign-tenant'), ('org_id', 'foreign-org'), ('project_id', 'foreign-project'),
     ('idempotency_key', 'foreign-intent'), ('tool', 'effectful-other-operation'),
