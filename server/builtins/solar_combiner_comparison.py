@@ -1,8 +1,8 @@
 """Compare nominal combiner input counts on the same bound drawing capture."""
 
 import solar_combiner_graph as cg
+import solar_local_graph
 from solar_design_graph import GraphValidationError, _bounded_json
-from solar_local_graph import _load_builtin
 from solar_sizing_client import checked_graph
 
 INVALID = "INVALID_COMBINER_REQUEST"
@@ -10,7 +10,7 @@ OPTION_KEYS = cg.HARDWARE_KEYS | {"total_dc_inputs"}
 
 
 def input_readiness(graph):
-    return _load_builtin("solar-combiners").input_readiness(graph)
+    return solar_local_graph._load_builtin("solar-combiners").input_readiness(graph)
 
 
 def run(graph, params, *, source_intake=None):
@@ -19,7 +19,7 @@ def run(graph, params, *, source_intake=None):
             or type(params["expected_rev"]) is not int or type(params["options"]) is not list
             or not 2 <= len(params["options"]) <= 4):
         raise GraphValidationError(INVALID)
-    placement = _load_builtin("solar-combiners")
+    placement = solar_local_graph._load_builtin("solar-combiners")
     candidates = []
     models = set()
     for option in params["options"]:
