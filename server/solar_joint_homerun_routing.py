@@ -12,6 +12,18 @@ MAX_DRAWING_LEADS = 512
 MAX_AISLE_LEADS = 64
 
 
+class JointRoutingInfeasible(GraphValidationError):
+    def __init__(self, routes):
+        self.unassigned_leads = [
+            {"string_ref": route["from_ref"], "route_kind": route["route_kind"]}
+            for route in routes
+        ]
+        labels = ", ".join(
+            f"{lead['string_ref']}/{lead['route_kind']}" for lead in self.unassigned_leads
+        )
+        super().__init__("JOINT_ROUTING_INFEASIBLE", labels)
+
+
 @dataclass(frozen=True)
 class Aisle:
     name: str
@@ -233,9 +245,7 @@ def route_together(routes, constraints):
     for index, selected in zip(pending, _allocate([candidates[i][0] for i in pending], capacities)):
         allocation[index] = selected
     if None in allocation:
-        affected = [f"{route['from_ref']}/{route['route_kind']}" for route, path in zip(routes, allocation)
-                    if path is None]
-        raise GraphValidationError("JOINT_ROUTING_INFEASIBLE", ", ".join(affected))
+        raise JointRoutingInfeasible(route for route, path in zip(routes, allocation) if path is None)
 
     use = Counter(path.aisle for path in allocation)
     for route, (paths, blocked), selected in zip(routes, candidates, allocation):
