@@ -23,14 +23,13 @@ function coldVoltageEvaluated(report) {
   return verdicts.length > 0 && verdicts.every(row => ['pass', 'warning', 'critical'].includes(row.status))
 }
 
-function currentElectricalReport(jobs, projectId, versionId) {
-  if (!projectId || !versionId) return null
-  const job = jobs.find(job => {
+function currentElectricalReports(jobs, projectId, versionId) {
+  if (!projectId || !versionId) return []
+  return jobs.filter(job => {
     const schema = job.result?.result?.schema
     return (schema === 'leaf.solar-guardrails.v1' || schema === 'leaf.solar-string-voltage.v1')
       && savedReportBinding(job, projectId).version === versionId
-  })
-  return job?.result.result ?? null
+  }).map(job => job.result.result)
 }
 
 // ---------------------------------------------------------------------------
@@ -63,9 +62,9 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
   const savedJobs = [...(workspace?.jobs || [])].reverse() // newest first
   const jobs = savedJobs.slice(0, 5)
   const projectId = workspace?.project?.project_id
-  const electricalReport = currentElectricalReport(savedJobs, projectId, drawing?.version_id)
-  const electricalReviewIncomplete = projectId && drawing?.version_id && (drawing.solar || electricalReport)
-    && !coldVoltageEvaluated(electricalReport)
+  const electricalReports = currentElectricalReports(savedJobs, projectId, drawing?.version_id)
+  const electricalReviewIncomplete = projectId && drawing?.version_id && (drawing.solar || electricalReports.length > 0)
+    && (electricalReports.length === 0 || electricalReports.some(report => !coldVoltageEvaluated(report)))
   const tools = workspace?.built_tools || []
   const families = catalog?.families || []
   const tiles = (

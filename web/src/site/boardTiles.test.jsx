@@ -81,6 +81,26 @@ it.each([
   expect(screen.queryByRole('status')).toBeNull()
 })
 
+it.each([
+  ['a newer guardrails verdict', [stringVoltage('unverified'), guardrails(coldVerdict('pass'))]],
+  ['a newer string result', [guardrails(coldVerdict('info')), stringVoltage('pass')]],
+  ['an older guardrails verdict', [guardrails(coldVerdict('warning')), stringVoltage('unverified')]],
+])('flags incomplete evidence alongside %s', (_, reports) => {
+  const jobs = reports.map((report, index) => savedElectricalReport(`report-${index}`, report))
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.getByRole('status')).toHaveTextContent('Electrical review incomplete')
+})
+
+it('counts both evaluated reports and ignores a prior revision of the same project', () => {
+  const jobs = [
+    savedElectricalReport('summary', guardrails(coldVerdict('critical'))),
+    savedElectricalReport('strings', stringVoltage('pass', 'fail')),
+    savedElectricalReport('older', stringVoltage('unverified'), 'old-version'),
+  ]
+  render(<BoardTiles {...props} drawing={solarDrawing} workspace={reportWorkspace(jobs)} />)
+  expect(screen.queryByRole('status')).toBeNull()
+})
+
 it('leaves an ordinary project drawing without an electrical review status', () => {
   render(<BoardTiles {...props} drawing={{ ...props.drawing, version_id: version.version_id }} workspace={reportWorkspace([])} />)
   expect(screen.queryByRole('status')).toBeNull()
