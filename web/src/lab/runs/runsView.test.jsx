@@ -115,7 +115,7 @@ const reviewRecovery = () => fireEvent.click(screen.getByRole('button', { name: 
 const expectRecoveryGets = fetchImpl => {
   expect(fetchImpl.mock.calls.length).toBeGreaterThan(0)
   for (const [url, options] of fetchImpl.mock.calls) {
-    expect(url).toMatch(/\/recovery-plan\?include_cleanup=true$/)
+    expect(url).toMatch(/\/recovery-plan\?include_cleanup=true&include_confirmation=true$/)
     expect(options.method).toBe('GET')
     expect(options.body).toBeUndefined()
   }
@@ -138,6 +138,90 @@ const cleanupFixture = (state = 'confirmed_reaped') => {
   }
   return signPlan(plan)
 }
+
+describe('Runs selective retry confirmation', () => {
+  const plan = freezePlan(signPlan({ ...smallRecoveryPlan, schema: 'leaf.lab-corpus-recovery-plan.v2',
+    blocks: smallRecoveryPlan.blocks.map(block => ({ ...block, cleanup_evidence: {
+      schema: 'leaf.lab-corpus-cleanup-evidence.v1', job_id: block.job_id,
+      attempt: 1, state: 'unconfirmed', cancel: null, receipt: null,
+    } })) }))
+  const receipt = { schema: 'leaf.lab-corpus-recovery-confirmation.v1', source_run_id: plan.source.run_id,
+    plan_digest: plan.digest, successor_run_id: 'd'.repeat(32) }
+  const preview = () => recoveryResponse({ plan, confirmation_available: true })
+  const confirm = () => screen.getByRole('button', { name: 'Confirm retry of failed nodes' })
+  const mount = fetchImpl => {
+    const store = recoveryStore(plan)
+    render(<RunsView store={store} fetchImpl={fetchImpl} mock />)
+    reviewRecovery()
+    return store
+  }
+
+  it.each([
+    ['raw v2', plan],
+    ['explicitly unavailable', { plan, confirmation_available: false }],
+    ['v1', { plan: smallRecoveryPlan, confirmation_available: true }],
+    ['unresolved nodes', { plan: cleanupFixture(), confirmation_available: true }],
+  ])('keeps %s read-only', async (_, payload) => {
+    const fetchImpl = vi.fn().mockResolvedValue(recoveryResponse(payload))
+    mount(fetchImpl)
+    await screen.findByRole('region', { name: 'Recovery options preview' })
+    expect(screen.queryByRole('button', { name: 'Confirm retry of failed nodes' })).toBeNull()
+    expectRecoveryGets(fetchImpl)
+  })
+
+  it('submits the reviewed digest once and shows the original and successor separately', async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(preview()).mockResolvedValueOnce(recoveryResponse(receipt))
+    mount(fetchImpl)
+    await screen.findByRole('button', { name: 'Confirm retry of failed nodes' })
+    fireEvent.click(confirm())
+    expect(confirm()).toBeDisabled()
+    fireEvent.click(confirm())
+    await screen.findByText('Successor run: ' + receipt.successor_run_id)
+    expect(screen.getByText('Source run: ' + plan.source.run_id + ' · finished')).toBeVisible()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    const [url, options] = fetchImpl.mock.calls[1]
+    expect(url).toBe(config.apiBase + '/api/lab/runs/' + encodeURIComponent(plan.source.run_id) + '/recovery-confirmation')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({ plan_digest: plan.digest })
+  })
+
+  it.each([401, 403, 409])('retires the reviewed plan after %s', async status => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(preview())
+      .mockResolvedValueOnce(recoveryResponse(null, { status }))
+    mount(fetchImpl)
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm retry of failed nodes' }))
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Recovery options preview' })).toBeNull())
+    expect(screen.queryByText(/Successor run/)).toBeNull()
+  })
+
+  it.each(['lost response', 'wrong digest', 'source run as successor'])('replays the reviewed digest after %s', async failure => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(preview())
+    if (failure === 'lost response') fetchImpl.mockRejectedValueOnce(new Error('connection closed'))
+    else fetchImpl.mockResolvedValueOnce(recoveryResponse({ ...receipt, ...(failure === 'wrong digest'
+      ? { plan_digest: 'f'.repeat(64) } : { successor_run_id: plan.source.run_id }) }))
+    fetchImpl.mockResolvedValueOnce(recoveryResponse(receipt))
+    mount(fetchImpl)
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm retry of failed nodes' }))
+    await screen.findByText(/Confirm again to recover the same request/)
+    expect(screen.queryByText(/Successor run/)).toBeNull()
+    fireEvent.click(confirm())
+    await screen.findByText('Successor run: ' + receipt.successor_run_id)
+    expect(fetchImpl.mock.calls[1][1].body).toBe(fetchImpl.mock.calls[2][1].body)
+  })
+
+  it('discards the confirmation body when the run revision changes', async () => {
+    const gate = deferred()
+    const response = recoveryResponse(receipt, { gate })
+    const fetchImpl = vi.fn().mockResolvedValueOnce(preview()).mockResolvedValueOnce(response)
+    const store = mount(fetchImpl)
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm retry of failed nodes' }))
+    await waitFor(() => expect(response.reader.read).toHaveBeenCalled())
+    act(() => store.upsertRun(plan.source.run_id, { graph_revision: 8 }))
+    await act(async () => gate.resolve())
+    expect(screen.queryByText(/Successor run/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Confirm retry of failed nodes' })).toBeNull()
+  })
+})
 
 describe('Runs factual cleanup evidence', () => {
   it.each([
@@ -245,7 +329,7 @@ describe('Runs recovery options preview', () => {
     const preview = within(await screen.findByRole('region', { name: 'Recovery options preview' }))
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     const [url, options] = fetchImpl.mock.calls[0]
-    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan?include_cleanup=true`)
+    expect(url).toBe(`${config.apiBase}/api/lab/runs/${encodeURIComponent(smallRecoveryPlan.source.run_id)}/recovery-plan?include_cleanup=true&include_confirmation=true`)
     expect(options).toMatchObject({ method: 'GET', credentials: 'same-origin', redirect: 'error', cache: 'no-store',
       headers: { Authorization: 'one', 'X-Tenant-Id': config.tenant, accept: 'application/json' } })
     expect(preview.getByText('Source document: original-document · revision 7')).toBeVisible()

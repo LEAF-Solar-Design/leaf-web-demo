@@ -115,7 +115,24 @@ function verifyRecoveryPlan(plan, run) {
   if (sha256Hex(canonicalJSON(unsigned)) !== digest) refuse()
   return plan
 }
-async function readRecoveryPlan(response, signal) {
+function verifyRecoveryReview(value, run) {
+  if (!recoveryKeys(value, ['plan', 'confirmation_available'])) {
+    return { plan: verifyRecoveryPlan(value, run) }
+  }
+  if (typeof value.confirmation_available !== 'boolean') throw new Error(recoveryUnavailable)
+  const plan = verifyRecoveryPlan(value.plan, run)
+  return { plan, canConfirm: value.confirmation_available
+    && plan.schema === 'leaf.lab-corpus-recovery-plan.v2' && plan.draft_graph !== null }
+}
+function verifyRecoveryReceipt(value, plan) {
+  if (!recoveryKeys(value, ['schema', 'source_run_id', 'plan_digest', 'successor_run_id'])
+    || value.schema !== 'leaf.lab-corpus-recovery-confirmation.v1'
+    || value.source_run_id !== plan.source.run_id || value.plan_digest !== plan.digest
+    || typeof value.successor_run_id !== 'string' || !/^[a-f0-9]{32}$/.test(value.successor_run_id)
+    || value.successor_run_id === value.source_run_id) throw new Error(recoveryUnavailable)
+  return value.successor_run_id
+}
+async function readRecoveryResponse(response, signal) {
   const media = response.headers?.get('content-type')?.split(';')[0].trim().toLowerCase()
   const reader = response.body?.getReader()
   if (media !== 'application/json' || !reader) {
@@ -144,16 +161,16 @@ async function readRecoveryPlan(response, signal) {
     reader.releaseLock()
   }
 }
-function RecoveryPlan({ plan }) {
+function RecoveryPlan({ plan, canConfirm, children }) {
   return <section className="lab-corpus-evidence" aria-label="Recovery options preview" style={{ overflowWrap: 'anywhere' }}>
-    <h4>Recovery options · read-only preview</h4>
+    <h4>{canConfirm ? 'Recovery options' : 'Recovery options · read-only preview'}</h4>
     <p>Source document: {plan.source.doc_id} · revision {plan.source.graph_revision}</p>
     <p>Source run: {plan.source.run_id} · {plan.source.state}</p>
     <p>Graph digest: {plan.source.graph_sha256}</p>
     <p>Plan digest: {plan.digest}</p>
     <p>{plan.unresolved_block_ids.length ? 'Preparation blocked: unresolved nodes need review.'
       : plan.selected_failed_block_ids.length ? 'Preparation available for the selected failed nodes.' : 'No eligible failed nodes to prepare.'}</p>
-    <p>Execution is unavailable in this preview. A later execution stage requires confirmation.</p>
+    {!canConfirm && <p>Execution is unavailable in this preview. A later execution stage requires confirmation.</p>}
     <p>Completed evaluations are retained, including verdict fail; a failed verdict is not an execution failure.</p>
     {[['selected', 'Selected failed nodes'], ['retained', 'Retained completed nodes'], ['unresolved', 'Unresolved nodes']].map(([disposition, label]) =>
       <section key={disposition} aria-label={label}><h5>{label}</h5>
@@ -165,6 +182,7 @@ function RecoveryPlan({ plan }) {
             <p>{recoveryReasons[block.reason_category]} ({block.reason_category})</p>
           </li>)}</ul> : <p>None</p>}
       </section>)}
+    {children}
   </section>
 }
 function RecoveryReview({ run, store, fetchImpl }) {
@@ -180,7 +198,8 @@ function RecoveryReview({ run, store, fetchImpl }) {
       request.current = null
     }
     setReview(previous => previous.scope === nextScope ? previous : { ...previous, scope: nextScope,
-      pending: false, plan: null, message: previous.plan || previous.pending ? recoveryChanged : previous.message })
+      pending: false, plan: null, canConfirm: false, successorId: null,
+      message: previous.plan || previous.pending ? recoveryChanged : previous.message })
   }), [])
   useEffect(() => {
     setReview(previous => ({ scope, identity, pending: false, plan: null,
@@ -191,12 +210,22 @@ function RecoveryReview({ run, store, fetchImpl }) {
       request.current = null
     }
   }, [scope, identity, store, fetchImpl])
-  async function reviewOptions() {
+  const visible = review.scope === scope && review.identity === identity
+  async function requestRecovery(plan = null) {
     if (request.current) return
-    const controller = new AbortController(), capturedScope = recoveryScope()
+    const confirming = plan !== null
+    if (confirming && (!visible || !review.canConfirm || review.successorId || plan !== review.plan)) return
+    const reviewed = confirming ? { plan, canConfirm: true } : {}
+    const unavailable = confirming
+      ? 'Retry confirmation could not be verified. Confirm again to recover the same request.'
+      : recoveryUnavailable
+    const capturedScope = recoveryScope()
+    if (capturedScope !== scope || recoveryIdentity(store.getRun(run.id)) !== identity) return
+    const controller = new AbortController()
     const token = { controller, scope: capturedScope }
     request.current = token
-    setReview({ scope: capturedScope, identity, pending: true, plan: null, message: 'Reviewing recovery options…' })
+    setReview({ scope: capturedScope, identity, pending: true, plan: null, ...reviewed,
+      message: confirming ? 'Confirming retry…' : 'Reviewing recovery options…' })
     const current = () => request.current === token && !controller.signal.aborted
       && latest.current.identity === identity && latest.current.store === store && latest.current.fetchImpl === fetchImpl
       && recoveryIdentity(store.getRun(run.id)) === identity
@@ -208,40 +237,55 @@ function RecoveryReview({ run, store, fetchImpl }) {
     }
     // fetchWithBudget bounds headers; this lifetime also bounds a stalled body.
     token.timer = setTimeout(() => {
-      finish({ message: recoveryUnavailable })
+      finish({ ...reviewed, message: unavailable })
       controller.abort()
       if (request.current === token) request.current = null
     }, 10000)
     const headers = { accept: 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() }
+    const endpoint = confirming ? 'recovery-confirmation' : 'recovery-plan?include_cleanup=true&include_confirmation=true'
+    const url = `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/${endpoint}`
+    if (confirming) headers['Content-Type'] = 'application/json'
     try {
-      const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/runs/${encodeURIComponent(run.id)}/recovery-plan?include_cleanup=true`, {
-        method: 'GET', headers, signal: controller.signal, credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+      const response = await fetchWithBudget(fetchImpl, url, {
+        method: confirming ? 'POST' : 'GET', headers, signal: controller.signal,
+        credentials: 'same-origin', redirect: 'error', cache: 'no-store',
+        ...(confirming ? { body: JSON.stringify({ plan_digest: plan.digest }) } : {}),
       })
       if (!current()) { void response.body?.cancel?.().catch(() => {}); return }
       if (!response.ok || response.status !== 200 || response.redirected) {
         void response.body?.cancel?.().catch(() => {})
-        finish({ message: response.status === 401 ? 'Sign in again to review recovery options.'
-          : response.status === 403 ? 'You no longer have access to these recovery options.' : recoveryUnavailable })
+        const messages = {
+          401: 'Sign in again to review recovery options.',
+          403: 'You no longer have access to these recovery options.',
+          ...(confirming ? { 409: 'Recovery options changed. Review them again before confirming.' } : {}),
+        }
+        const message = messages[response.status]
+        finish(message ? { message } : { ...reviewed, message: unavailable })
         noteUnauthorized(response, 'lab-runs', headers.Authorization)
         return
       }
-      const plan = await readRecoveryPlan(response, controller.signal)
+      const value = await readRecoveryResponse(response, controller.signal)
       // Body completion is a separate authority boundary from response headers.
       if (!current()) return
       if (capturedScope !== recoveryScope()) { finish({ message: recoveryChanged }); return }
-      finish({ plan: verifyRecoveryPlan(plan, run) })
-    } catch { finish({ message: recoveryUnavailable }) }
+      finish(confirming
+        ? { ...reviewed, successorId: verifyRecoveryReceipt(value, plan) }
+        : verifyRecoveryReview(value, run))
+    } catch { finish({ ...reviewed, message: unavailable }) }
     finally {
       clearTimeout(token.timer)
       controller.abort()
       if (request.current === token) request.current = null
     }
   }
-  const visible = review.scope === scope && review.identity === identity
   return <>
-    <button type="button" disabled={visible && review.pending} onClick={reviewOptions}>Review recovery options</button>
+    <button type="button" disabled={visible && review.pending} onClick={() => requestRecovery()}>Review recovery options</button>
     {(visible ? review.message : recoveryChanged) && <p role="status">{visible ? review.message : recoveryChanged}</p>}
-    {visible && review.plan && <RecoveryPlan plan={review.plan} />}
+    {visible && review.plan && <RecoveryPlan plan={review.plan} canConfirm={review.canConfirm}>
+      {review.successorId ? <p role="status">Successor run: {review.successorId}</p>
+        : review.canConfirm && <button type="button" disabled={review.pending}
+          onClick={() => requestRecovery(review.plan)}>Confirm retry of failed nodes</button>}
+    </RecoveryPlan>}
   </>
 }
 const corpusEvidence = value => {
