@@ -18,7 +18,7 @@ function fixture() {
     intake: { solar_design_graph_sha256: 'b'.repeat(64), solar_design_graph: {
       rev: 6, settings: { ...SEED_SETTINGS }, project: { name: 'Saved roof', zip_code: '', latitude: null, longitude: null } } },
     solve_preparation: { available: true, graph_revision: h.revision, graph_sha256: h.digest,
-      frames: h.frames,
+      frames: h.frames, solve_history_available: h.historyAvailable,
       ...(options.solveFrame ? { frame_ref: FRAME, request: REQUEST } : {}) } })
   h.client = { getSnapshot: () => ({ binding: B, authorityKey: 'epoch' }),
     captureCatalogScope: () => () => h.current,
@@ -69,6 +69,27 @@ it('submits only a fresh server-derived frame request without raw request/frame 
     catalogDigest: h.props.catalogDigest, idempotencyKey: 'intent-1',
     solveContext: { frame_ref: FRAME, phase: 'initial', expected_rev: 6 } })
   expect(screen.getByRole('button', { name: 'Run solve' })).toBeDisabled()
+})
+
+it.each([true, false])('shows the latest version-bound solve independently of saved counts (%s)', async (available) => {
+  const h = fixture()
+  h.historyAvailable = available
+  h.frames = [
+    { ...h.frames[0], committed_panel_count: 1, remaining_panel_count: 2,
+      latest_solve: { status: 'failed', reason_code: 'CLOUD_REQUEST_REJECTED', message: 'Upstream details' } },
+    { id: 'east', name: 'East roof', panel_count: 6, committed_panel_count: 0, remaining_panel_count: 6,
+      latest_solve: { status: 'succeeded' } },
+    { id: 'south', name: 'South roof', panel_count: 9, committed_panel_count: 0, remaining_panel_count: 9 },
+  ]
+  h.mount()
+  await screen.findByRole('columnheader', { name: 'Latest solve' })
+  expect(screen.getByRole('row', { name: `West roof 1 2 ${available ? 'Failed (CLOUD_REQUEST_REJECTED)' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.getByRole('row', { name: `East roof 0 6 ${available ? 'Proposal finished' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.getByRole('row', { name: `South roof 0 9 ${available ? 'No matching solve' : 'Unavailable'}` }))
+    .toBeInTheDocument()
+  expect(screen.queryByText('Upstream details')).toBeNull()
 })
 
 it.each([

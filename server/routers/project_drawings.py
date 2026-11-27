@@ -1,6 +1,7 @@
 """Authenticated canonical project drawing context and checkout endpoints."""
 from __future__ import annotations
 
+import logging
 import math
 import re
 from typing import Annotated, Optional
@@ -8,6 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 import deps
@@ -16,6 +18,7 @@ import solar_project_context as service
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
 
 router = APIRouter()
+_LOG = logging.getLogger(__name__)
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
@@ -122,6 +125,24 @@ def _dispatch(operation):
         return _dispatch(lambda: service.refuse("INTERNAL"))
 
 
+def _add_solve_history(context, preparation):
+    from leaf_platform.project_solve_history import latest_by_frame
+
+    frames = preparation["frames"]
+    try:
+        history = latest_by_frame(
+            context.binding, context.intake_sha256, preparation["graph_sha256"],
+            [frame["id"] for frame in frames],
+        )
+    except (PostgresError, RuntimeError) as exc:
+        _LOG.warning("project_solve_history_unavailable exception_type=%s", type(exc).__name__)
+        preparation["solve_history_available"] = False
+        return
+    preparation["solve_history_available"] = True
+    for frame in frames:
+        frame["latest_solve"] = history.get(frame["id"])
+
+
 @router.get("/api/projects/{project_id}/drawing-versions/{input_version_id}/context")
 def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional[UUID] = None,
                   tenant=Depends(deps.require_active_tenant),
@@ -141,7 +162,10 @@ def context_route(project_id: UUID, input_version_id: UUID, drawing_id: Optional
                   "role_discovery": discover_roles(context.intake)}
         if prepare_solve or solve_frame is not None:
             from solar_project_solve_preparation import prepare_solve as prepare
-            result["solve_preparation"] = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            preparation = prepare(context.intake, solve_frame, is_head=binding.is_head)
+            if preparation["available"] and solve_frame is None:
+                _add_solve_history(context, preparation)
+            result["solve_preparation"] = preparation
         return result
     return _dispatch(operation)
 
