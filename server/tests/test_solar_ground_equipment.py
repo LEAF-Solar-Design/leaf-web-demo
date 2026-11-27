@@ -259,7 +259,8 @@ def test_ground_equipment_plain_graph_never_imports_the_codec(graph, monkeypatch
     assert cloud.sizing_basis(w1) == W1_BASIS
     assert cloud.sizing_targets(w1, "global") == {w1["settings"]["id"]: w1["settings"]}
     readiness = reasons(w1)
-    assert len(readiness) == 56
+    assert len(readiness) == 57
+    assert readiness.pop("solar-combiner-comparison") == "valid_settings_required"
     # Saved occupancy is readable even when the electrical zone blocks assignment.
     assert readiness.pop("solar-assignment-report") is None
     assert readiness["solar-assign-strings"] == "electrical_zones_unsupported"

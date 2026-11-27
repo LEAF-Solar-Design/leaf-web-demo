@@ -489,12 +489,33 @@ def test_api_joint_routing_at_aisle_endpoint(assigned_api, centerline, overlaps_
     } for route in routes)
 
 
+def _failed_routing_run(assigned_api, params, wait, reason):
+    client = assigned_api[0]
+    response = client.post(
+        "/api/run", params={"wait": int(wait)}, json=body(assigned_api, TOOL, params),
+    )
+    if wait:
+        assert response.status_code == 400, response.text
+        assert response.json()["reason_code"] == reason, response.text
+    else:
+        assert response.status_code == 202, response.text
+        job_id = response.json()["job_id"]
+        response = client.get(f"/api/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "failed", response.text
+    error = response.json()["error"]
+    if not wait or reason == "JOINT_ROUTING_INFEASIBLE":
+        assert error["reason_code"] == reason
+    return error
+
+
+@pytest.mark.parametrize("wait", [True, False], ids=["wait", "saved-job"])
 @pytest.mark.parametrize("variant,reason", [
     ("capacity", "JOINT_ROUTING_INFEASIBLE"),
     ("overlapping_alias", "INVALID_ROUTING_CONSTRAINTS"),
     ("direct_overlap_at_capacity", "JOINT_ROUTING_INFEASIBLE"),
 ])
-def test_api_joint_routing_refusal_preserves_saved_version(assigned_api, variant, reason):
+def test_api_joint_routing_refusal_preserves_saved_version(assigned_api, variant, reason, wait):
     constraints = route_constraints()
     if variant == "capacity":
         constraints["aisles"][0]["lead_capacity"] = 1
@@ -508,9 +529,7 @@ def test_api_joint_routing_refusal_preserves_saved_version(assigned_api, variant
         constraints["aisles"][1]["points"] = [[3, 1, 0], [4, 1, 0]]
     params = {"expected_rev": 1, "routing_constraints": constraints}
     original = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]
-    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
-    assert response.status_code == 400, response.text
-    assert response.json()["reason_code"] == reason, response.text
+    public_error = _failed_routing_run(assigned_api, params, wait, reason)
     assert store.load_manifest(assigned_api[1], TENANT, "solar")["head"] == 1
     assert resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"] == original
     with pytest.raises(GraphValidationError) as error:
@@ -519,33 +538,38 @@ def test_api_joint_routing_refusal_preserves_saved_version(assigned_api, variant
     if variant in {"capacity", "direct_overlap_at_capacity"}:
         string_ref, kind = error.value.path.rsplit("/", 1)
         assert string_ref in {S1, S2} and kind in {"start homerun", "end homerun"}
+        assert public_error["unassigned_leads"] == [{"string_ref": string_ref, "route_kind": kind}]
+        assert f"{string_ref}/{kind}" in public_error["message"]
+    else:
+        assert "unassigned_leads" not in public_error
 
 
+@pytest.mark.parametrize("wait", [True, False], ids=["wait", "saved-job"])
 @pytest.mark.parametrize("centerline", [
     [[3, 1, 0], [4.5, 1, 0]],
     [[3, -1, 0], [4.5, -1, 0]],
     [[3, 2, 0], [3.25, 1, 0], [3.5, 2, 0]],
     [[3, 2, 0], [3.25, 1, 0]],
 ], ids=["north-side", "south-side", "corner", "endpoint"])
-def test_api_joint_routing_refuses_aisle_touching_closed_keep_out(assigned_api, centerline):
+def test_api_joint_routing_refuses_aisle_touching_closed_keep_out(assigned_api, centerline, wait):
     constraints = {
         "keep_outs": [{"name": "Equipment pad", "min_xy": [3.25, -1], "max_xy": [4.25, 1]}],
         "aisles": [{"name": "Only aisle", "points": centerline, "lead_capacity": 4}],
     }
     params = {"expected_rev": 1, "routing_constraints": constraints}
     original = resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"]
-    response = assigned_api[0].post("/api/run?wait=1", json=body(assigned_api, TOOL, params))
-    assert response.status_code == 400, response.text
-    assert response.json()["reason_code"] == "JOINT_ROUTING_INFEASIBLE", response.text
+    public_error = _failed_routing_run(assigned_api, params, wait, "JOINT_ROUTING_INFEASIBLE")
     assert store.load_manifest(assigned_api[1], TENANT, "solar")["head"] == 1
     assert resolve_graph_context(assigned_api[1], TENANT, "solar")["graph"] == original
     with pytest.raises(GraphValidationError) as error:
         builtin().run(original, params)
     assert error.value.code == "JOINT_ROUTING_INFEASIBLE"
-    assert set(error.value.path.split(", ")) == {
-        f"{string_ref}/{kind}" for string_ref in (S1, S2)
-        for kind in ("start homerun", "end homerun")
-    }
+    expected = [(string_ref, kind) for string_ref in (S1, S2)
+                for kind in ("start homerun", "end homerun")]
+    assert set(error.value.path.split(", ")) == {f"{ref}/{kind}" for ref, kind in expected}
+    leads = [(lead["string_ref"], lead["route_kind"]) for lead in public_error["unassigned_leads"]]
+    assert sorted(leads) == sorted(expected)
+    assert all(f"{ref}/{kind}" in public_error["message"] for ref, kind in expected)
 
 
 def test_api_run_refuses_until_equipment_is_assigned(api):

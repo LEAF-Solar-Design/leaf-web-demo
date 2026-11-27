@@ -40,6 +40,7 @@ READ_SCHEMA = "leaf.solar-project-solaredge-tracking-read.v1"
 READ_TOOL = "solar-solaredge-tracking-read"
 ACCEPT_TOOL = "solar-solaredge-accept"
 ASSIGNMENT_CHANGES = "saved_assignment_changes"
+FRAME_HISTORY = "saved_frame_history"
 
 
 class SolarEdgeGridRefusal(GraphValidationError):
@@ -692,10 +693,41 @@ def _read_tracking_comparison(tenant, context, params, invalid):
                                        after_record, after_source.graph, offset)}
 
 
+def _read_frame_history(tenant, context, params, invalid):
+    offset = params.get("offset", 0)
+    _check(set(params) <= {"section", "compare_to_version_id", "intermediate_version_id", "offset"}
+           and tracking._int(offset, 0, tracking.MAX_PANELS), invalid)
+    try:
+        version_ids = (UUID(params["compare_to_version_id"]),
+                       UUID(params["intermediate_version_id"]), context.parent_version_id)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        _fail(invalid)
+    _check(len(set(version_ids)) == 3, invalid)
+    bindings = [project.resolve_context(tenant, context.project_id, version_id,
+                    drawing_id=context.drawing_id, write=False) for version_id in version_ids]
+    baseline_seq, intermediate_seq, current_seq = (saved.binding.version.seq for saved in bindings)
+    _check(baseline_seq < intermediate_seq < current_seq, "SOLAREDGE_TRACKING_HISTORY_VERSION_ORDER")
+    baseline, intermediate = (graphs.resolve_project_graph_context(saved) for saved in bindings[:2])
+    scope = (context.organization_id, context.project_id, context.drawing_id, context.graph_project_id)
+    for snapshot in (baseline, intermediate):
+        _check(snapshot.graph is not None and
+               (snapshot.organization_id, snapshot.project_id, snapshot.drawing_id,
+                snapshot.graph_project_id) == scope, "SOLAREDGE_TRACKING_COMPARISON_GRAPH_MISMATCH")
+    _check(bindings[2].intake_sha256 == context.intake_sha256, "SOLAREDGE_TRACKING_COMPARISON_GRAPH_MISMATCH")
+    original = _verified_tracking(tenant, baseline)
+    _check(original is not None, "SOLAREDGE_TRACKING_COMPARISON_REQUIRES_SAVED_TRACKING")
+    return {"schema": READ_SCHEMA, "accepted": True, "labels_only": True, "section": FRAME_HISTORY,
+            "version_ids": [str(version_id) for version_id in version_ids],
+            **revision_compare.compare_frame_history(original[0], baseline.graph, intermediate.graph,
+                                                     context.graph, offset)}
+
+
 def read_tracking(tenant, context, params):
     module = local_read._load_builtin(READ_TOOL)
     if type(params) is dict and params.get("section") == ASSIGNMENT_CHANGES:
         return _read_tracking_comparison(tenant, context, params, module.INVALID)
+    if type(params) is dict and params.get("section") == FRAME_HISTORY:
+        return _read_frame_history(tenant, context, params, module.INVALID)
     section, offset = module._request(params)
     verified = _verified_tracking(tenant, context)
     if verified is None:

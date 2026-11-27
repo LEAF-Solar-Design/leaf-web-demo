@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import SolarReadResult from './SolarReadResult.jsx'
 import SolarEdgeTrackingReferences from './SolarEdgeTrackingReferences.jsx'
+import SavedCableLengthComparison from './SavedCableLengthComparison.jsx'
 import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingBinding.js'
 
 export const PROJECT_SOLAR_WORKSPACE_REASONS = Object.freeze({
@@ -308,6 +309,13 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
       if (operation.current === active) operation.current = null
     }
   }
+  const captureComparisonScope = () => {
+    try {
+      const lease = projectClient.captureCatalogScope()
+      return () => !owner.reason && sameOwner(latest.current, owner) &&
+        current(owner.isCurrent) && current(owner.receiptCurrent) && current(lease)
+    } catch { return () => false }
+  }
   const reason = owner.reason || (visible.phase === 'reading' ? 'reading' : busy ? 'busy' :
     !activeForm.valid ? 'parameters_invalid' : visible.phase === 'refused' ? 'read_refused' :
       visible.phase === 'stale' ? 'scope_stale' : visible.phase === 'presented' ? null : 'idle')
@@ -334,6 +342,10 @@ export default function ProjectSolarReadPanel({ tool, solarBinding, authorityKey
         {PROJECT_SOLAR_WORKSPACE_LABELS.read_action}
       </button>
     </form>
+    {!owner.reason && owner.name === 'solar-electrical-schedules' &&
+      typeof projectClient.compareSavedCableLengths === 'function' &&
+      <SavedCableLengthComparison binding={owner.binding} projectClient={projectClient}
+        captureScope={captureComparisonScope} busy={busy} />}
     {!owner.reason && visible.phase === 'presented' && <><SolarReadResult data={visible.data}
       solarBinding={solarBinding} authorityKey={authorityKey} projectClient={projectClient}
       catalogDigest={owner.digest} projectCurrent={owner.name !== 'solar-solaredge-tracking-read'} save={save} />

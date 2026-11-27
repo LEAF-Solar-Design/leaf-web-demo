@@ -89,7 +89,7 @@ const roofPolylines = [
   { color: '#22c55e', pts: [[0, 0], [1, 0], [2, 0]] },
   { color: '#22c55e', pts: [[2, 1], [1, 1], [0, 1]] },
   { color: '#f59e0b', pts: [[2.75, 1.75], [3.25, 1.75], [3.25, 2.25], [2.75, 2.25], [2.75, 1.75]] },
-  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]] },
+  { color: '#38bdf8', pts: [[2, 0], [3, 0], [3, 2]], route: { id: U('route', 1), kind: 'start homerun' } },
 ]
 const groundPolylines = [{ color: '#22c55e', pts: [[1, -1], [.5, -.5]] }]
 const freeze = value => {
@@ -495,7 +495,7 @@ describe('unmounted Solar graph overlay hook', () => {
     calls(1)
     input.shown.solar_design_graph.project.units.meters_per_unit = 2
     const scaled = roofPolylines.map(line => ({
-      color: line.color, pts: line.pts.map(([x, y]) => [x / 2, y / 2]),
+      ...line, pts: line.pts.map(([x, y]) => [x / 2, y / 2]),
     }))
     h.rerender({ ...input })
     ordinary(h.result.current, input, 1, scaled)

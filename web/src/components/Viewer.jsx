@@ -1,5 +1,5 @@
 import { observationDrawingKey } from '../lib/projectDrawingObservation.js'
-import { useEffect, useLayoutEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, insertGlyphScale, nextFitState, pickLineThreshold, resizeCameraAction, rollDrawingCamera, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
@@ -13,6 +13,7 @@ import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { buildSolarGraphOverlayLayer } from '../solar/solarGraphOverlayLayer.js'
+import SolarRouteInspector from '../solar/SolarRouteInspector.jsx'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 
@@ -320,6 +321,20 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => { setInternalIntake(null); onIntakeOverrideRef.current?.(null, intake) }, [intake])
   const activeIntake = internalIntake || intake
   const sceneDrawingKey = activeIntake?.source === 'engine' ? `engine:${activeIntake.documentId}` : drawingKey
+  const { intake: overlayIntake, drawingKey: overlayDrawingKey, polylines: overlayLines } = solarOverlay ?? {}
+  const visibleSolarOverlay = useMemo(() => {
+    if (!overlayLines?.length || overlayIntake !== activeIntake || overlayDrawingKey !== sceneDrawingKey) return null
+    return {
+      intake: overlayIntake, drawingKey: overlayDrawingKey,
+      polylines: overlayLines.filter(line => line.pts.length >= 2 && line.pts.every(finiteXY)),
+    }
+  }, [overlayLines, overlayIntake, overlayDrawingKey, activeIntake, sceneDrawingKey])
+  const [solarRouteLayer, setSolarRouteLayer] = useState(null)
+  const inspectorLayer = solarRouteLayer?.overlay === visibleSolarOverlay ? solarRouteLayer : null
+  function selectSolarRoute(layer, id) {
+    layer.selectRoute(id)
+    setSolarRouteLayer(current => current?.layer === layer && current.id !== id ? { ...current, id } : current)
+  }
   const observationBindingRef = useRef(null)
   observationBindingRef.current = { binding: engineObservationBinding, parentDrawingKey: drawingKey }
   desiredSceneRef.current = { intake: activeIntake, drawingKey: sceneDrawingKey }
@@ -857,6 +872,8 @@ const Viewer = forwardRef(function Viewer(
     const activeTouches = new Set()
     let suppressTouchPick = false
     const stackedPick = createStackedPickCycle()
+    const stackedRoutePick = createStackedPickCycle()
+    let lastRouteLayer = null
     function onPointerDown(e) {
       if (e.button !== 0) return // only left-click selects
       if (e.pointerType === 'touch' && (suppressTouchPick || e.isPrimary === false)) return
@@ -881,8 +898,20 @@ const Viewer = forwardRef(function Viewer(
         ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
       raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
       scene.updateMatrixWorld(true)
-      const hits = raycaster.intersectObjects(pickables, false)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
+      const routeLayer = stateRef.current?.solarLayer ?? null
+      if (routeLayer !== lastRouteLayer || additive) stackedRoutePick.reset()
+      lastRouteLayer = routeLayer
+      if (!additive && routeLayer?.pickObjects.length) {
+        const routeHits = raycaster.intersectObjects(routeLayer.pickObjects, false)
+        const routeId = stackedRoutePick.pick(routeLayer.routesFromHits(routeHits), e.clientX, e.clientY, performance.now())
+        selectSolarRoute(routeLayer, routeId)
+        if (routeId !== null) {
+          stackedPick.reset()
+          return
+        }
+      }
+      const hits = raycaster.intersectObjects(pickables, false)
       let handle
       if (additive) {
         stackedPick.reset()
@@ -900,7 +929,10 @@ const Viewer = forwardRef(function Viewer(
     function onPointerCancel(e) {
       if (down && down.pointerId === e.pointerId) down = null
     }
-    function onPickMove(e) { stackedPick.move(e.clientX, e.clientY) }
+    function onPickMove(e) {
+      stackedPick.move(e.clientX, e.clientY)
+      stackedRoutePick.move(e.clientX, e.clientY)
+    }
     const dom = renderer.domElement
     let candidate = null
     let marquee = null
@@ -1228,18 +1260,20 @@ const Viewer = forwardRef(function Viewer(
 
   useEffect(() => {
     const s = stateRef.current
-    if (!s || solarOverlay == null || solarOverlay.polylines.length === 0
-      || s.intake !== solarOverlay.intake || s.drawingKey !== solarOverlay.drawingKey) return
-    const layer = buildSolarGraphOverlayLayer(
-      solarOverlay.polylines.filter(polyline => polyline.pts.every(finiteXY)), s.origin,
-    )
+    if (!s || !visibleSolarOverlay?.polylines.length || s.intake !== visibleSolarOverlay.intake
+      || s.drawingKey !== visibleSolarOverlay.drawingKey) {
+      setSolarRouteLayer(null)
+      return
+    }
+    const layer = buildSolarGraphOverlayLayer(visibleSolarOverlay.polylines, s.origin)
     s.solarGroup.add(layer.group)
     s.solarLayer = layer
+    setSolarRouteLayer(layer.pickObjects.length ? { layer, overlay: visibleSolarOverlay, id: null } : null)
     return () => {
       layer.dispose()
       if (s.solarLayer === layer) s.solarLayer = null
     }
-  }, [solarOverlay?.polylines, solarOverlay?.intake, solarOverlay?.drawingKey, buildTick])
+  }, [visibleSolarOverlay, buildTick])
 
   useEffect(() => {
     if (paletteRevision === undefined || !stateRef.current) return
@@ -1780,6 +1814,15 @@ const Viewer = forwardRef(function Viewer(
       // selection means no attribute, never a fabricated handle.
       data-element-id={(selectedHandle && formatElementId('entity', selectedHandle)) || undefined}
     >
+      {inspectorLayer && (
+        <div className="selection-readout" style={{
+          left: (safeRect?.left ?? 0) + 14, top: (safeRect?.top ?? 0) + 14,
+          bottom: 'auto', minWidth: 0, width: 'max-content', cursor: 'auto',
+        }}>
+          <SolarRouteInspector overlay={inspectorLayer.overlay} selectedRouteId={inspectorLayer.id}
+            onRouteSelect={id => selectSolarRoute(inspectorLayer.layer, id)} />
+        </div>
+      )}
       {glError && (
         <div className="viewer-fallback">
           3D preview needs WebGL, which is unavailable in this browser.

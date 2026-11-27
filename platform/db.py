@@ -520,7 +520,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
                      "next_seq", "event_count", "created_at", "updated_at", "finished_at",
                      "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
-                     "corpus_authority_json"},
+                     "corpus_authority_json", "attempt_wall_cap_seconds"},
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
         "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
@@ -1443,6 +1443,8 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
             "REFERENCES lab_activations(tenant_id, activation_id)"),
         "lab_runs_pkey": _catalog_contract("lab_runs", "PRIMARY KEY (tenant_id, run_id)"),
         "lab_stream_leases_pkey": _catalog_contract("lab_stream_leases", "PRIMARY KEY (principal, stream_id)"),
+        "lab_runs_attempt_wall_cap_seconds_check": _catalog_contract(
+            "lab_runs", "CHECK", "attempt_wall_cap_seconds > 0"),
         "lab_runs_claimed_color_check": _catalog_contract("lab_runs", "CHECK", "claimed_color", "active", "idle"),
         "lab_worker_status_pkey": _catalog_contract("lab_worker_status", "PRIMARY KEY (worker_id)"),
         "lab_worker_status_color_check": _catalog_contract("lab_worker_status", "CHECK", "color", "active", "idle"),
