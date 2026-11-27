@@ -995,11 +995,17 @@ def test_retry_admission_binds_materials_and_live_writers(corpus_join, scenario)
     'concurrent_replay', 'enqueue_rollback', 'successor_retention',
     'worker_exact', 'worker_policy_drift', 'worker_suite_drift',
 ])
-def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
+def test_durable_recovery_confirmation(corpus_join, monkeypatch, request, scenario):
     from test_lab_runs import corpus_admit, corpus_adapter
 
     lane = corpus_join
     tenant, project = lane.context['tenant_id'], lane.context['project_id']
+
+    def remove_runs():
+        with lane.db.transaction() as conn:
+            conn.execute('DELETE FROM lab_runs WHERE tenant_id=%s', (tenant,))
+
+    request.addfinalizer(remove_runs)
     graph = copy.deepcopy(lane.graph)
     for block_id in ('completed-pass', 'completed-fail'):
         graph['blocks'].append(dict(copy.deepcopy(graph['blocks'][0]), id=block_id))
@@ -1081,7 +1087,8 @@ def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
     assert len(receipt['lineage_json']['retained']) == 2
     if pending is not None:
         assert successor_id == pending['successor_run_id']
-    assert store.get(tenant, successor_id)['state'] == 'queued'
+    successor = store.get(tenant, successor_id)
+    assert successor['state'] == 'queued'
     assert ledger.get(tenant, receipt['successor_doc_id'])['graph'] == plan['draft_graph']
     assert store.get(tenant, source_id) == original
     assert ledger.get(tenant, lane.doc_id) == artifact
@@ -1111,10 +1118,13 @@ def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
         monkeypatch.setitem(lane.jobs._executors, lane.jobs.LANE_SLOW,
                             SimpleNamespace(submit=close_fixture_job))
         monkeypatch.setattr(lab_worker, 'lab_surface_enabled', lambda: True)
-        worker = lab_worker.LabWorker(worker_id='recovery-test')
+        worker = lab_worker.LabWorker(worker_id='recovery-test-' + tenant,
+                                     env={'LEAF_BUILD_REVISION': successor['build_revision']})
         try:
             worker.tick()
-            worker._runs[(tenant, successor_id)].future.result(timeout=15)
+            key = (tenant, successor_id)
+            assert key in worker._runs, store.get(tenant, successor_id)['state']
+            worker._runs[key].future.result(timeout=15)
             jobs = [row for row in lane.jobs.list_jobs(tenant, 200)
                     if (row['idempotency_key'] or '').startswith(f'lab:{successor_id}:')]
             if scenario == 'worker_exact':
