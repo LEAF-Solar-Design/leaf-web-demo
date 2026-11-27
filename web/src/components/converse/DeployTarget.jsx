@@ -39,7 +39,7 @@ export default function DeployTarget({ now = () => Date.now() }) {
     }
   }
 
-  return <><dt>AutoCAD</dt><dd>
+  return <><dt>Target</dt><dd>
     <span>{destination}</span>{' '}<span>{account}</span>
     {mismatch ? <p role="alert">This card's workspace and the signed-in Studio workspace differ. Reload Studio before deploying again.</p> : activity}
   </dd></>
