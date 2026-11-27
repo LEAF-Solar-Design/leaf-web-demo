@@ -281,9 +281,12 @@ def _append(sql, tenant, doc_id, data, author, current, parent, kind="graph"):
     return _revision(sql, tenant, doc_id, revision)
 
 
-def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
+def save(tenant, doc_id, graph, expected_head, author, kind="graph", *, replay_initial=False):
+    """Save a revision, optionally reconciling an exact reserved initial save."""
     identifier(doc_id)
     validate_head(expected_head)
+    if replay_initial and expected_head is not None:
+        raise InvalidGraph("invalid_expected_head")
     if not isinstance(author, str) or not author or len(author) > 200:
         raise InvalidGraph("invalid_author")
 
@@ -304,10 +307,15 @@ def save(tenant, doc_id, graph, expected_head, author, kind="graph"):
         data = validated_data(kind) if empty_local_store else None
 
         def operation(sql):
-            row = sql.execute("SELECT kind FROM lab_documents WHERE tenant_id=? AND doc_id=?",
+            row = sql.execute("SELECT head, kind FROM lab_documents WHERE tenant_id=? AND doc_id=?",
                               (tenant, doc_id)).fetchone()
             if row is not None and row["kind"] != kind:
                 raise KindFixed("lab_document_kind_fixed")
+            if replay_initial and row is not None and row["head"] == 1:
+                saved = _revision(sql, tenant, doc_id, 1)
+                if (saved["parent_revision"] is None and saved["author"] == author
+                        and saved["canonical_text"].encode("utf-8") == validated_data(kind)):
+                    return saved
             current = _check_head(sql, tenant, doc_id, expected_head)
             document_kind = row["kind"] if row is not None else kind
             payload = data if data is not None else validated_data(document_kind)

@@ -219,6 +219,17 @@ def confirmation_lineage(tenant, run_id, reviewed_digest, *, authorize_write, in
             'draft_graph': plan['draft_graph'], 'selected': selected, 'retained': retained}
 
 
+def persist_successor_graph(tenant, doc_id, confirmation, author):
+    """Create or reconcile the first revision under the server's reservation."""
+    if doc_id == confirmation['source']['doc_id']:
+        raise GraphRefused('lab_recovery_successor_document_conflict')
+    try:
+        return ledger.save(tenant, doc_id, confirmation['draft_graph'], None, author,
+                           replay_initial=True)
+    except ledger.Conflict:
+        raise GraphRefused('lab_recovery_successor_document_conflict') from None
+
+
 def verify_retry_inputs(confirmation, authority, block, suite_raw):
     """Bind a selected successor block to the reviewed effective suite bytes."""
     producer = next((item for item in confirmation['selected'] if item['block_id'] == block['id']), None)

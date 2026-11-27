@@ -829,3 +829,85 @@ def test_retry_inputs_refuse_scope_or_effective_input_drift(saved_retry_inputs, 
         row.confirmation['selected'].clear()
     with pytest.raises(recovery.GraphRefused, match='^lab_recovery_successor_inputs_changed$'):
         recovery.verify_retry_inputs(row.confirmation, successor, row.block, row.raw)
+
+
+@pytest.fixture(params=['sqlite', 'postgres'])
+def successor_ledger(request, monkeypatch, tmp_path):
+    from uuid import uuid4
+
+    mode = request.param
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'test')
+    monkeypatch.setenv('LEAF_LAB_STORE', mode)
+    if mode == 'postgres':
+        import os
+
+        if not os.environ.get('LEAF_E364B_PG_PARENT') or not os.environ.get('DATABASE_URL'):
+            pytest.skip('requires a disposable local PostgreSQL cluster')
+        ledger.platform_link.platform_db().apply_migration()
+    else:
+        monkeypatch.setenv('LEAF_LAB_DB', str(tmp_path / 'successor.db'))
+        monkeypatch.setenv('LEAF_PLATFORM_POSTGRES_REQUIRED', '0')
+
+    tenant = str(uuid4())
+    graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [], 'pipes': [], 'outputs': {}}
+    ledger.save(tenant, 'original', graph, None, ACTOR)
+    confirmation = {'source': {'doc_id': 'original'}, 'draft_graph': graph}
+    return tenant, confirmation
+
+
+def test_persist_successor_graph_replays_exact_initial_revision(successor_ledger):
+    tenant, confirmation = successor_ledger
+    first = recovery.persist_successor_graph(tenant, 'reserved', confirmation, ACTOR)
+    replay = recovery.persist_successor_graph(tenant, 'reserved', confirmation, ACTOR)
+
+    assert replay == first
+    assert first['doc_id'] == 'reserved'
+    assert first['revision'] == 1
+    assert first['parent_revision'] is None
+    assert first['author'] == ACTOR
+    assert first['sha256'] == graph_digest(confirmation['draft_graph'])
+    assert len(ledger.list_revisions(tenant, 'reserved')) == 1
+    with pytest.raises(ledger.Conflict):
+        ledger.save(tenant, 'reserved', confirmation['draft_graph'], None, ACTOR)
+
+
+def test_persist_successor_graph_converges_for_two_callers(successor_ledger):
+    from threading import Barrier
+
+    tenant, confirmation = successor_ledger
+    start = Barrier(2)
+
+    def persist(_):
+        start.wait(timeout=10)
+        return recovery.persist_successor_graph(tenant, 'reserved', confirmation, ACTOR)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(persist, range(2))
+
+    assert first == second
+    assert len(ledger.list_revisions(tenant, 'reserved')) == 1
+
+
+@pytest.mark.parametrize('collision', ['source_document', 'author', 'graph', 'advanced_head'])
+def test_persist_successor_graph_refuses_nonidentical_revision(successor_ledger, collision):
+    tenant, confirmation = successor_ledger
+    doc_id = 'original' if collision == 'source_document' else 'reserved'
+    draft = confirmation['draft_graph']
+    if collision != 'source_document':
+        ledger.save(tenant, doc_id, draft, None, ACTOR)
+    author = 'other-actor' if collision == 'author' else ACTOR
+    if collision == 'graph':
+        manifest, _ = lab_tool_manifests.corpus_capability()
+        confirmation['draft_graph'] = dict(draft, blocks=[{
+            'id': 'new-block', 'registry': {
+                'id': manifest['id'], 'version': manifest['version']['semver'],
+                'code_sha256': manifest['version']['code_sha256'],
+            }, 'settings': {},
+        }])
+    if collision == 'advanced_head':
+        ledger.save(tenant, doc_id, draft, 1, ACTOR)
+    before = ledger.get(tenant, doc_id)
+
+    with pytest.raises(recovery.GraphRefused, match='^lab_recovery_successor_document_conflict$'):
+        recovery.persist_successor_graph(tenant, doc_id, confirmation, author)
+    assert ledger.get(tenant, doc_id) == before
