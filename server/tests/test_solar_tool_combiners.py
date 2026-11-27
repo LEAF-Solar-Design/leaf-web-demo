@@ -10,6 +10,8 @@ import math
 import re
 import sys
 from collections import Counter
+from itertools import pairwise
+from math import dist, fsum
 from pathlib import Path
 
 import pytest
@@ -31,8 +33,9 @@ import solar_local_read
 import solar_tools
 import store
 from solar_design_graph import GraphValidationError, validate_graph
+from solar_graph_context import resolve_graph_context
 from solar_sizing_client import digest
-from solar_solve_results import finish_mutation
+from solar_solve_results import HOMERUN_KINDS, finish_mutation
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_local_graph_adapter import held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
@@ -431,7 +434,48 @@ def test_combiners_registry_and_catalog(monkeypatch):
         {"hardware": {"type": "object", "properties": {
             "model": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S"},
             "max_dc_voltage": NUMBER, "max_ac_power_kw": NUMBER},
-            "required": ["model", "max_dc_voltage", "max_ac_power_kw"], "additionalProperties": False}},
+            "required": ["model", "max_dc_voltage", "max_ac_power_kw"], "additionalProperties": False},
+            "routing_constraints": {
+              "type": "object",
+              "description": "Closed planar keep-outs and dedicated aisle centerlines in compute meters. Capacity counts available slots for terminal leads using the centerline, shared in both directions. An aisle that touches a keep-out is unavailable. Direct leads and approach segments must avoid positive-length overlap with dedicated centerlines.",
+              "properties": {
+                "keep_outs": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                      "min_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+                      "max_xy": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}
+                    },
+                    "required": ["name", "min_xy", "max_xy"],
+                    "additionalProperties": False
+                  }
+                },
+                "aisles": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                      "points": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 16,
+                        "items": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number"}}
+                      },
+                      "lead_capacity": {"type": "integer", "minimum": 0, "maximum": 64}
+                    },
+                    "required": ["name", "points", "lead_capacity"],
+                    "additionalProperties": False
+                  }
+                }
+              },
+              "required": ["keep_outs", "aisles"],
+              "additionalProperties": False
+            }},
         ["hardware"])
     expected.update(readiness={"kind": "hook"}, trusted_inputs=["source_intake"])
     assert actual == expected
@@ -764,3 +808,137 @@ def test_combiners_capacity_refusal_reaches_project_admission(monkeypatch):
     assert hashlib.sha256("\n".join(refs).encode()).hexdigest() == (
         "9ad702e77ecbe972f19da1fc4d76e03f8639a52b67840ad6ca288d0fc7f19393")
     assert (graph, intake, groups) == original
+
+
+@pytest.fixture
+def one_string():
+    graph, intake, groups = i4()
+    binding, _ = cg._bind(graph, intake)
+    entry = intake["inputs"]["preBuiltStrings"][0]
+    ref = binding["strings"][str(entry["StringNumber"])]
+    graph["strings"] = [string for string in graph["strings"] if string["id"] == ref]
+    for inverter in graph["inverters"]:
+        inverter["input_assignments"] = [slot for slot in inverter["input_assignments"]
+                                         if slot["string_ref"] == ref]
+    intake["inputs"]["preBuiltStrings"] = [entry]
+    return graph, intake, groups
+
+
+def saved_api(tmp_path, monkeypatch, inputs):
+    graph, intake, groups = inputs
+    backend = stored(tmp_path, monkeypatch, graph, source(intake, groups))
+    yield from _api(backend, tmp_path, monkeypatch)
+
+
+def constraints_for(lead, capacity, reverse=False):
+    (sx, sy), (ex, ey) = lead["points"]
+    mid_x = (sx + ex) / 2
+    aisle = [[mid_x - 2, max(sy, ey) + 2, 0], [mid_x + 2, max(sy, ey) + 2, 0]]
+    if reverse:
+        aisle.reverse()
+    return {
+        "keep_outs": [{"name": "Equipment pad", "min_xy": [mid_x - 1, min(sy, ey) - 1],
+                       "max_xy": [mid_x + 1, max(sy, ey) + 1]}],
+        "aisles": [{"name": "Service aisle", "points": aisle, "lead_capacity": capacity}],
+    }
+
+
+@pytest.fixture
+def bounded_api(isolated_jobs, no_network, tmp_path, monkeypatch, one_string):
+    yield from saved_api(tmp_path, monkeypatch, one_string)
+
+
+@pytest.fixture
+def captured_roof(capacity):
+    graph, intake, groups = i4()
+    intake["commandContext"]["combinerBoxConnections"] = capacity
+    return graph, intake, groups
+
+
+@pytest.fixture
+def captured_api(isolated_jobs, no_network, tmp_path, monkeypatch, captured_roof):
+    yield from saved_api(tmp_path, monkeypatch, captured_roof)
+
+
+@pytest.mark.parametrize("variant", ["clear", "detour", "reversed"])
+def test_combiner_routing_commits_with_placement(bounded_api, one_string, variant):
+    default = place(*one_string)
+    lead = next(route for route in default["routes"] if route["route_kind"] == "end homerun")
+    params = request()
+    params["routing_constraints"] = ({"keep_outs": [], "aisles": []} if variant == "clear"
+                                     else constraints_for(lead, 1, reverse=variant == "reversed"))
+    response = post(bounded_api, params)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["new_version"] == {"drawing_id": "solar", "version": 2, "parent": 1}
+    graph = head_graph(bounded_api[1])
+    for key in ("inverters", "strings", "schedules"):
+        assert graph[key] == default[key]
+    assert [route["id"] for route in graph["routes"]] == [route["id"] for route in default["routes"]]
+    for route, original in zip(graph["routes"], default["routes"], strict=True):
+        if route["route_kind"] not in HOMERUN_KINDS:
+            assert route == original
+            continue
+        assert route["from_ref"] == original["from_ref"] and route["to_ref"] == original["to_ref"]
+        assert route["points"][0] == [*original["points"][0], 0]
+        assert route["points"][-1] == [*original["points"][-1], 0]
+        assert route["length_ft"] * .3048 == pytest.approx(
+            fsum(dist(start, end) for start, end in pairwise(route["points"])))
+        assert route["extra"]["routing_policy"] == "shared-aisle-terminal-lead-v1"
+        if original["id"] == lead["id"] and variant != "clear":
+            assert route["extra"]["routing"] == {"aisle": "Service aisle", "aisle_leads": 1,
+                                                 "aisle_capacity": 1, "direct_keep_outs": ["Equipment pad"]}
+            assert route["points"][1:-1] == sorted(params["routing_constraints"]["aisles"][0]["points"])
+        else:
+            assert len(route["points"]) == 2
+            assert route["extra"]["routing"] == {"aisle": None, "direct_keep_outs": []}
+    assert [job["status"] for job in jobs_now()] == ["complete"]
+
+
+@pytest.mark.parametrize("capacity,combiner_count", [(20, 14), (14, 21), (12, 26)])
+def test_combiner_routing_commits_captured_roof(captured_api, captured_roof, combiner_count):
+    baseline = place(*captured_roof)
+    backend = captured_api[1]
+    original_graph = head_graph(backend)
+    params = request()
+    params["routing_constraints"] = {"keep_outs": [], "aisles": []}
+    response = post(captured_api, params)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["new_version"] == {"drawing_id": "solar", "version": 2, "parent": 1}
+    assert latest(backend) == 2
+    assert resolve_graph_context(backend, TENANT, "solar", 1)["graph"] == original_graph
+    graph = head_graph(backend)
+    assert sum(device["equipment_type"] == "combiner_box" for device in graph["inverters"]) == combiner_count
+    for key in ("inverters", "strings", "schedules"):
+        assert graph[key] == baseline[key]
+
+    terminal_lead_count = 0
+    for route, original in zip(graph["routes"], baseline["routes"], strict=True):
+        if original["route_kind"] not in HOMERUN_KINDS:
+            assert route == original
+            continue
+        terminal_lead_count += 1
+        for key in ("id", "from_ref", "to_ref", "route_kind"):
+            assert route[key] == original[key]
+        assert len(route["points"]) == 2
+        assert route["points"] == [point if len(point) == 3 else [*point, 0] for point in original["points"]]
+        assert route["length_ft"] == pytest.approx(original["length_ft"])
+        assert route["extra"]["routing"] == {"aisle": None, "direct_keep_outs": []}
+    assert terminal_lead_count == 346
+    assert [job["status"] for job in jobs_now()] == ["complete"]
+
+
+def test_combiner_routing_refusal_preserves_saved_version(bounded_api, one_string):
+    backend = bounded_api[1]
+    graph = head_graph(backend)
+    manifest = store.load_manifest(backend, TENANT, "solar")
+    params = request()
+    direct = place(*one_string)
+    lead = next(route for route in direct["routes"] if route["route_kind"] == "end homerun")
+    params["routing_constraints"] = constraints_for(lead, 0)
+    response = post(bounded_api, params)
+    assert response.status_code == 400, response.text
+    assert response.json()["reason_code"] == "JOINT_ROUTING_INFEASIBLE", response.text
+    assert latest(backend) == 1 and head_graph(backend) == graph
+    assert store.load_manifest(backend, TENANT, "solar") == manifest
+    assert [job["status"] for job in jobs_now()] == ["failed"]
