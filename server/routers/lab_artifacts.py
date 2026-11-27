@@ -1,6 +1,8 @@
 """Authenticated graph-only ledger HTTP surface."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -159,7 +161,10 @@ def export_revision(doc_id: str, revision: int, tenant=Depends(deps.require_tena
     bundle = _call(ledger.export_bundle, str(tenant), doc_id, revision,
                    authorize=lambda graph, run: _authorize_export(tenant, graph, run))
     _admit(tenant, "build")
-    return JSONResponse(bundle, headers={
+    # History verifies the literal report embedded in the download against the
+    # producer digest. Use the producer's compact, sorted ASCII JSON encoding.
+    payload = json.dumps(bundle, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+    return Response(payload, media_type="application/json", headers={
         "Content-Disposition": f'attachment; filename="lab-{doc_id}-r{revision}.json"',
         "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
     })
