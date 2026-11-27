@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useId, useRef, useState } from 'react'
 import { authHeaders, config, noteUnauthorized } from '../../api.js'
 import { readActiveScope, subscribeActiveScope } from '../../auth/activeScope.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
@@ -310,6 +310,93 @@ function CorpusEvidence({ evidence }) {
     <details><summary>Complete evaluation evidence</summary><EvidenceField label="Evaluation report" value={report} /></details>
   </section>
 }
+function corpusReports(runs) {
+  const reports = new Map()
+  for (const run of runs) {
+    if (run.id === 'local') continue
+    for (const [blockId, block] of Object.entries(run.blocks)) {
+      for (const [port, value] of Object.entries(block.value || {})) {
+        const evidence = corpusEvidence(value)
+        if (!evidence) continue
+        const key = JSON.stringify([run.id, run.graph_revision, blockId, port, evidence.result_sha256])
+        const corpus = evidence.context?.corpus?.material_id
+        const label = [corpus, blockId, port, `revision ${run.graph_revision ?? 'unknown'}`, run.id].filter(Boolean).join(' · ')
+        reports.set(key, { evidence, run, label })
+      }
+    }
+  }
+  return reports
+}
+const comparisonValue = value => typeof value === 'string' && value.trim() || Number.isFinite(value)
+  ? value : 'Unavailable'
+function comparisonFields({ evidence, run }) {
+  const report = evidence.evaluation
+  const confirmation = report.confirm_report
+  const interval = confirmation?.confirm_comparison?.paired_ci95_c
+  return [
+    run.state, report.verdict, confirmation?.verdict,
+    confirmation?.parent?.confirm?.n_tickets, confirmation?.child?.confirm?.n_tickets,
+    confirmation?.protocol?.min_confirm_tickets, confirmation?.confirm_comparison?.child_minus_parent_mean_c,
+    Array.isArray(interval) && interval.length === 2 && interval.every(Number.isFinite) && interval[0] <= interval[1]
+      ? interval.join(' to ') : null,
+    Array.isArray(confirmation?.reasons) && confirmation.reasons.every(reason => typeof reason === 'string')
+      ? confirmation.reasons.join(' · ') : null,
+    Array.isArray(report.reasons) && report.reasons.every(reason => typeof reason === 'string')
+      ? report.reasons.join(' · ') : null,
+    report.chosen ? JSON.stringify(report.chosen.params ?? report.chosen) : null,
+    report.chosen?.child_min_k, evidence.context?.corpus?.sha256,
+    evidence.policy.parent_suite_sha256, evidence.evaluated_suite_sha256,
+  ].map(comparisonValue)
+}
+const comparisonRows = [
+  'Run state', 'Evaluation verdict', 'Confirmation verdict', 'Parent confirmation tickets',
+  'Child confirmation tickets', 'Required confirmation tickets', 'Child minus parent mean (cents)',
+  'Paired 95% interval (cents)', 'Confirmation reasons', 'Evaluation reasons', 'Selected parameters',
+  'Selected minimum k', 'Corpus digest', 'Parent suite digest', 'Evaluated suite digest',
+]
+const CorpusComparison = memo(function CorpusComparison({ runs }) {
+  const [open, setOpen] = useState(false)
+  const [keys, setKeys] = useState(['', '', ''])
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Compare corpus evaluations</summary>
+    {open && <CorpusComparisonFields runs={runs} keys={keys} setKeys={setKeys} />}
+  </details>
+})
+function CorpusComparisonFields({ runs, keys, setKeys }) {
+  const comparisonId = useId()
+  const reports = corpusReports(runs)
+  const selected = keys.map(key => reports.get(key)).filter(Boolean)
+  const columns = selected.map(comparisonFields)
+  const wrap = { overflowWrap: 'anywhere' }
+  return <>
+    {reports.size < 2 ? <p>Two corpus evaluation reports are required.</p> : keys.map((key, index) =>
+      <div key={index}>
+        <label htmlFor={`${comparisonId}-${index}`}>Report {index + 1}{index === 2 ? ' (optional)' : ''} </label>
+        <select id={`${comparisonId}-${index}`} style={{ maxWidth: '100%' }}
+          value={reports.has(key) ? key : ''} onChange={event => {
+          const value = event.target.value
+          setKeys(previous => previous.map((oldKey, position) => position === index ? value : oldKey))
+        }}>
+          <option value="">Choose a corpus evaluation</option>
+          {[...reports].map(([id, { label }]) =>
+            <option key={id} value={id} disabled={id !== key && keys.includes(id)}>{label}</option>)}
+        </select>
+      </div>)}
+    {columns.length >= 2 && <>
+      <p>Compare the recorded reasons and inputs. Differences in suites or selected parameters can also affect the result.</p>
+      <div role="region" aria-label="Corpus comparison table" tabIndex={0} style={{ overflowX: 'auto' }}>
+        <table style={{ minWidth: columns.length === 3 ? '48rem' : '36rem', tableLayout: 'fixed', width: '100%' }}>
+          <caption>Corpus evaluation comparison</caption>
+          <thead><tr><th scope="col">Evidence</th>{selected.map(({ label }, index) =>
+            <th scope="col" key={index} style={wrap}>{label}</th>)}</tr></thead>
+          <tbody>{comparisonRows.map((label, row) =>
+            <tr key={label}><th scope="row">{label}</th>{columns.map((fields, index) =>
+              <td key={index} style={wrap}>{fields[row]}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    </>}
+  </>
+}
 const BlockResult = memo(function BlockResult({ store, runId, blockId, now }) {
   const block = useBlockValue(store, runId, blockId)
   if (!block) return null
@@ -480,7 +567,8 @@ function WorkerStatus({ mock, fetchImpl }) {
 }
 export default function RunsView({ hidden = false, store = labValueStore, mock = false, fetchImpl = globalThis.fetch }) {
   const [now, setNow] = useState(Date.now)
-  const runs = useRuns(store).filter(run => run.id !== 'local')
+  const allRuns = useRuns(store)
+  const runs = allRuns.filter(run => run.id !== 'local')
   useEffect(() => {
     if (hidden) return undefined
     const timer = setInterval(() => setNow(Date.now()), 1000)
@@ -490,6 +578,7 @@ export default function RunsView({ hidden = false, store = labValueStore, mock =
     <h2>Runs</h2>
     {!hidden && <WorkerStatus mock={mock} fetchImpl={fetchImpl} />}
     {!runs.length && <p>No runs yet. Run a saved revision from the graph.</p>}
+    {!!runs.length && <CorpusComparison runs={allRuns} />}
     {runs.map(run => <RunResult key={run.id} store={store} runId={run.id} fetchImpl={fetchImpl} now={now} showCorpusJobs={!hidden && !mock} />)}
   </div>
 }
