@@ -2265,6 +2265,11 @@ def failed_envelope_from(record: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(refs, list) and refs and all(isinstance(ref, str) for ref in refs):
                 envelope["error"]["reason_code"] = reason_code
                 envelope["error"]["unplaced_string_refs"] = refs
+        if record.get("tool") == "solar-homeruns" and reason_code == "JOINT_ROUTING_INFEASIBLE":
+            leads = err.get("unassigned_leads")
+            if isinstance(leads, list) and leads:
+                envelope["error"]["reason_code"] = reason_code
+                envelope["error"]["unassigned_leads"] = leads
     return envelope
 
 
