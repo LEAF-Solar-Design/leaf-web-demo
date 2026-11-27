@@ -7,9 +7,9 @@ bytes. No string identifiers are added to the payload-free exception envelope.
 from fractions import Fraction
 
 import solar_local_graph
-import solar_local_read
 from solar_equipment_rebalance import minimum_direct_moves
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision
+from solar_string_voltage import string_voltage_report
 
 
 SAVED_REQUEST_KEYS = frozenset({
@@ -48,10 +48,14 @@ def _inverter_comparison(graph, saved, refs):
         raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
 
     selected = set(refs)
-    direct = {device["id"] for device in graph["inverters"]
-              if device["id"] in selected and device.get("equipment_type") != "combiner_box"}
+    devices = {device["id"]: device for device in graph["inverters"]}
+    if not selected <= devices.keys():
+        raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
+    if any(devices[ref].get("equipment_type") == "combiner_box" or devices[ref].get("l1_assignments")
+           for ref in selected):
+        raise GraphValidationError("INVERTER_COMPARISON_REQUIRES_DIRECT_INPUTS")
     capacities = [row for row in saved["collector_capacity"]
-                  if row["inverter_ref"] in direct and row["total_dc_inputs"] > 0]
+                  if row["inverter_ref"] in selected and row["total_dc_inputs"] > 0]
     if len(capacities) != len(selected):
         raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
 
@@ -62,7 +66,7 @@ def _inverter_comparison(graph, saved, refs):
     lowest = utilization(capacities[0])
     string_tags = {row["string_ref"]: row["circuit_tag"] for row in saved["assignments"]}
     by_inverter = {ref: [] for ref in selected}
-    voltage = solar_local_read._load_builtin("solar-guardrails-read").string_voltage_report(graph, None)
+    voltage = string_voltage_report(graph, None)
     for row in sorted(voltage["rows"], key=lambda row: row["string_ref"]):
         if row["inverter_ref"] in by_inverter and row["string_ref"] in string_tags:
             by_inverter[row["inverter_ref"]].append({**row, "circuit_tag": string_tags[row["string_ref"]]})

@@ -14,7 +14,7 @@
   "record_store": "registry",
   "record": {
     "name": "solar-assignment-report",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Supply inverter_refs to compare selected inverters by occupied input share and review per-string voltage evidence. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing.",
     "kind": "script",
     "family_id": "stringing",

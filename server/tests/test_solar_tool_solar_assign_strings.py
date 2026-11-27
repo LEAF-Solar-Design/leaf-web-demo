@@ -566,6 +566,15 @@ def test_saved_inverter_comparison_rejects_invalid_selections(graph, refs):
         assignment_report(graph, mode="saved", inverter_refs=refs)
 
 
+@pytest.mark.parametrize("numbers", [(1, 2), (1, 3), (2, 3)])
+def test_saved_inverter_comparison_refuses_combiner_chains(graph, numbers):
+    source = variant(graph, "CB")
+    request = {"mode": "saved", "expected_rev": source["rev"],
+               "inverter_refs": [app_id("inverter", number) for number in numbers]}
+    with pytest.raises(GraphValidationError, match="INVERTER_COMPARISON_REQUIRES_DIRECT_INPUTS"):
+        solar_local_read._read_output("solar-assignment-report", source, request)
+
+
 def test_saved_inverter_comparison_is_saved_mode_only(graph):
     refs = [INV1, app_id("inverter", 2)]
     params = {"expected_rev": graph["rev"], "accept_excess_capacity": True, "inverter_refs": refs}
