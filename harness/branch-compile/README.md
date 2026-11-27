@@ -4,12 +4,37 @@ Every Branch author submission in staging passes through the pinned Branch2025 S
 
 ## Distribution scope (staging harness image only)
 
-Exactly three Autodesk reference assemblies, from the 2025 entry of `acad-refs.lock.json`, each verified by its `dllSha256`:
+Two locked reference sets ship. The 2025 entry of `acad-refs.lock.json` supplies three Autodesk reference assemblies, each verified by its `dllSha256`:
 `autocad.net.core 25.0.0 lib/net8.0/AcCoreMgd.dll`, `autocad.net.model 25.0.0 lib/net8.0/AcDbMgd.dll`,
-`autocad.net 25.0.1 lib/net8.0/AcMgd.dll`. They are compile-time metadata references for Roslyn only (never loaded for
-execution, never executed), placed only in the leaf-platform harness container image, and not redistributed anywhere else
+`autocad.net 25.0.1 lib/net8.0/AcMgd.dll`. The net48 check adds the 2023 entry's `autocad.net.core`, `autocad.net.model`
+and `autocad.net` 24.2.0 `lib/net47` DLLs with the same three filenames, plus `mscorlib.dll`, `System.dll` and
+`System.Core.dll` from `Microsoft.NETFramework.ReferenceAssemblies.net48` 1.0.3 and `Newtonsoft.Json` 13.0.3
+`lib/net45/Newtonsoft.Json.dll`. All ten files are checked against pinned SHA-256 hashes during the image build.
+They are compile-time metadata references for Roslyn only (never loaded for
+execution, never executed), placed in the staging harness image only, and not redistributed anywhere else
 (no S3 upload, no artifact upload, no other image). The NuGet packages themselves are restored only inside the Docker build
-stage and are not copied into the runtime image; only the three DLL files are.
+stage and are not copied into the runtime image; only the listed DLL files are.
+
+## AutoCAD 2023 and 2024 check
+
+The harness-owned `net48/` checker runs on .NET 8 and compiles against AutoCAD 2023 and .NET Framework 4.8 metadata.
+Its globals project links the vendored Abstractions and ToolBudget sources. ToolBudget supplies the guards inserted
+by the compiler's budget rewrite. MetadataLoadContext resolves target types without executing the reference assemblies.
+The checker scans the original source, rewrites its budgets and emits to memory. It never loads or runs the emitted tool.
+All vendored files and `BRANCH-PIN.json` are unchanged.
+
+| AutoCAD 2025 net8 gate | AutoCAD 2023 net48 check | `hosts.min_release` written |
+| --- | --- | --- |
+| accept | accept | max(declared, 2023) |
+| accept | refused | max(declared, 2025) |
+| accept | unavailable, except not_configured | max(declared, 2025) |
+| accept | not_configured | declared value, while the label checker is not deployed |
+| refused or unavailable | not run | submission fails with V18 |
+
+The net48 result never fails a submission or adds compile attempts or V18 diagnostics. A floor of 2023 covers
+AutoCAD 2023, 2024, 2025 and 2026; a floor of 2025 covers 2025 and 2026. Higher declared floors are preserved.
+AutoCAD 2024-only API members are conservatively labelled 2025. This proves compile compatibility, not CAD execution.
+Both checks share the two-process limit, and each has its own 30-second deadline including queue time.
 
 ## Image build and parity
 

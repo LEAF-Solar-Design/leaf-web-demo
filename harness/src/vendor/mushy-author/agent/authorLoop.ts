@@ -22,7 +22,7 @@ import {
   prepareBoundBranchPackage, submitBranchToolProposal, type BranchSubmissionResult,
 } from "./tools/submitBranchToolProposal.js";
 import { validateBranchPackage, type BranchManifest } from "../registry/branchPackageSchema.js";
-import { branchCompileCheck, branchCompileDecision, branchCompileDisabled } from "./tools/branchCompileCheck.js";
+import { branchCompileCheck, branchCompileDecision, branchCompileDisabled, branchHostFloor } from "./tools/branchCompileCheck.js";
 import { CSHARP_PARSER_ERROR_CODES, decodeOperatorEntities } from "./tools/decodeHtmlEntities.js";
 import { FsTenantRepo } from "./tools/fsTenantRepo.js";
 import { makeApsTestRun } from "./tools/apsTestRun.js";
@@ -621,6 +621,16 @@ export class AuthorLoop {
               }
               throw new BranchCompileRefusal(path, message, { summary: outcome.summary, diagnostics: outcome.structured });
             }
+            const outcome48 = await branchCompileCheck(manifest.name, files, { target: "net48" });
+            const floor = branchHostFloor(outcome48);
+            const hosts = (proposal as BranchManifest).hosts;
+            if (floor !== null && hosts.min_release < floor) {
+              const candidate = { ...(proposal as Record<string, unknown>), hosts: { ...hosts, min_release: floor } };
+              const prepared = prepareBoundBranchPackage(candidate, session, now, request.toolName);
+              proposal = candidate;
+              ({ manifest, files } = prepared);
+            }
+            console.error(`[harness] branch net48 check: decision=${branchCompileDecision(outcome48)} ms=${outcome48.ms} min_release=${(proposal as BranchManifest).hosts.min_release} tenant=${tenantId}`);
           }
           if (!sessionOpen || submission) throw new AuthorLoopError("V16: submission is closed", 422);
           const result = submitBranchToolProposal(repoDir, proposal, {
