@@ -176,18 +176,25 @@ def route_feeders(graph, panel_groups, *, new_id=None, created_at=None):
                                         if created_at is None else created_at,
                                         metres_per_unit=KERNEL_METRES_PER_UNIT)
         _prove(g, result, after)
+        old = {r["from_ref"]: r for r in _feeders(g)}
+        feeders = _feeders(result)
+        redrawn = []
+        for route in feeders:
+            prior = old.get(route["from_ref"])
+            if prior is not None and all(prior[k] == route[k] for k in ("points", "from_ref", "to_ref")):
+                continue
+            redrawn.append(route["id"])
+            # The bridge preserves validity on reused IDs. A changed route resolves
+            # the move's geometry invalidation while leaving other causes in place.
+            validity = route["validity"]
+            if validity["state"] == "stale" and "equipment_moved" in validity["reasons"]:
+                reasons = [reason for reason in validity["reasons"] if reason != "equipment_moved"]
+                route["validity"] = {"state": "stale" if reasons else "valid", "reasons": reasons}
         result = validate_graph(result)
     except FeederGraphError:
         raise
     except ValueError:
         _fail("FEEDER_POSTCONDITION_FAILED")
-    old = {r["from_ref"]: r for r in _feeders(g)}
-    feeders = _feeders(result)
-    redrawn = []
-    for route in feeders:
-        prior = old.get(route["from_ref"])
-        if prior is None or any(prior[k] != route[k] for k in ("points", "from_ref", "to_ref")):
-            redrawn.append(route["id"])
     created = sum(int(match.group(1)) for line in lines if (match := _CREATED.fullmatch(str(line))))
     return result, {"format": RECEIPT_FORMAT, "feeders": len(feeders), "redrawn": redrawn,
                     "unchanged": len(feeders) - len(redrawn), "assignments_created": created,
