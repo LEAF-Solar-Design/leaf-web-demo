@@ -7,6 +7,7 @@ import uuid
 
 from solar_design_graph import GraphValidationError, _bounded_json, entities
 from solar_joint_homerun_routing import MAX_KEEP_OUTS
+from solar_saved_aisle_routing import route_saved_aisles
 from solar_sizing_client import advance, checked_graph
 from solar_solve_results import HOMERUN_KINDS
 from solar_wiring_client import licensed_preview, local_routes
@@ -44,10 +45,16 @@ def _replace_homeruns(graph, routes):
 
 def _validate_request(params):
     _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel", "routing_constraints"}
+    if (type(params) is not dict
+            or set(params) - {"expected_rev", "cancel", "routing_constraints", "saved_aisle_layer"}
             or type(params.get("cancel", False)) is not bool
             or ("routing_constraints" in params and type(params["routing_constraints"]) is not dict)):
         raise GraphValidationError("INVALID_ROUTING_REQUEST")
+    if "saved_aisle_layer" in params:
+        layer = params["saved_aisle_layer"]
+        if (type(layer) is not str or not layer.strip() or len(layer) > 128
+                or "routing_constraints" in params):
+            raise GraphValidationError("INVALID_ROUTING_REQUEST", "saved_aisle_layer")
 
 
 def _routing_constraints(intake, graph, requested):
@@ -96,12 +103,20 @@ def _routing_constraints(intake, graph, requested):
     return {**constraints, "keep_outs": [*constraints["keep_outs"], *saved]}
 
 
+def _routes(graph, source, params):
+    constraints = _routing_constraints(source, graph, params.get("routing_constraints"))
+    if "saved_aisle_layer" not in params:
+        return local_routes(graph, constraints)
+    return route_saved_aisles(local_routes(graph), source, params["saved_aisle_layer"],
+                             graph["project"]["units"]["meters_per_unit"], constraints)
+
+
 def create_homeruns(intake, params, *, licensed_write=None):
     _validate_request(params)
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return {"graph": graph, "cancelled": True}
-    routes = local_routes(graph, _routing_constraints(intake, graph, params.get("routing_constraints")))
+    routes = _routes(graph, intake, params)
     # Replace only the terminal leads (feeders and trenches stay) and invalidate derived tables.
     dropped = _replace_homeruns(graph, routes)
     changed = list(routes)
@@ -129,7 +144,7 @@ def run(intake, params, *, source_intake=None):
     if not readiness["input_ready"]:
         raise GraphValidationError(readiness["input_reason"].upper())
 
-    routes = local_routes(graph, _routing_constraints(source_intake, graph, params.get("routing_constraints")))
+    routes = _routes(graph, source_intake, params)
     prior = {}
     for route in graph["routes"]:
         if route["route_kind"] in HOMERUN_KINDS:

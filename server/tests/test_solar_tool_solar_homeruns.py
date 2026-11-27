@@ -120,7 +120,7 @@ def test_declaration_pins_the_local_graph_commit_adapter():
     assert callable(module.run)
     record = solar_tools.trusted_record(TOOL)
     assert deps.catalog_tool_digest(record) == (
-        "sha256:6205d9b7429d9de81755761cff65befe0f53776cc25b2b443a6e3ce6485e50d2")
+        "sha256:715ba5c397fa342d7b0b8a3be7115126741aa70f88d4bf0f966ae10612f8ce8d")
     view = solar_tools.catalog_view(record)
     assert view["adapter"] == "local-graph-commit"
     assert view["engine"] == "server-builtin"
@@ -711,4 +711,90 @@ def test_saved_curve_refuses_on_api_rail(assigned, isolated_jobs, no_network, mo
         response = api[0].post("/api/run?wait=1", json=body(api, TOOL, {"expected_rev": assigned["rev"]}))
         assert response.status_code == 400, response.text
         assert response.json()["reason_code"] == "INVALID_ROUTING_CONSTRAINTS", response.text
+    assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
+
+
+def _aisles(assigned, lines, layer="Roof Aisles", **properties):
+    scale = assigned["project"]["units"]["meters_per_unit"]
+    return [{"handle": f"A{index}", "layer": layer, "closed": False, **properties,
+             "pts": [[x / scale, y / scale] for x, y in line]}
+            for index, line in enumerate(lines)]
+
+
+@pytest.mark.parametrize("lines,first_points,detour", [
+    ([[(1, 0), (1, 2), (5, 2), (5, 0)], [(2, 0), (2, 3)], [(3, 0), (3, 2)]],
+     [[1, 0, 0], [1, 2, 0], [2, 2, 0], [3, 2, 0], [5, 2, 0], [5, 0, 0]], 4),
+    ([[(1, 0), (5, 0)], [(2, 0), (4, 0), (2, 0)]],
+     [[1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0], [5, 0, 0]], 0),
+    ([[(1, 0), (3, 0)], [(5, 0), (5, -1), (3, -1), (3, 0)]],
+     [[1, 0, 0], [2, 0, 0], [3, 0, 0], [3, -1, 0], [5, -1, 0], [5, 0, 0]], 2),
+], ids=["offset-crossing-and-tee", "aligned-midsegment-and-overlap", "reversed-endpoint-elbows"])
+def test_selected_saved_aisles_persist_exact_terminal_routes(
+        assigned, isolated_jobs, no_network, monkeypatch, tmp_path, lines, first_points, detour):
+    polylines = _aisles(assigned, lines)
+    polylines += _aisles(assigned, [[(1, 0), (5, 0)]], space="paper", bulges=[1])
+    polylines += _aisles(assigned, [[(1, 0), (5, 0)]], layer="Other Aisles")
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(
+            api, TOOL, {"expected_rev": 1, "saved_aisle_layer": "roof aisles"}))
+        assert response.status_code == 200, response.text
+    _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 2)
+    saved = json.loads(backend.get(key))
+    assert saved["polylines"] == polylines
+    result = saved["solar_design_graph"]
+    assert [route["id"] for route in result["routes"]] == ROUTE_IDS
+    assert result["routes"][0]["points"] == first_points
+    for route, terminal in zip(result["routes"], (1, 2, 3, 3)):
+        assert route["points"][0] == [terminal, 0, 0]
+        assert route["points"][-1] == [5, 0, 0]
+        expected = 5 - terminal + detour
+        assert route["length_ft"] == pytest.approx(expected / .3048)
+        assert route["extra"]["routing_policy"] == "saved-aisle-centerline-v1"
+        assert route["extra"]["saved_aisle_layer"] == "roof aisles"
+        assert route["validity"]["state"] == "valid"
+    assert result["schedules"][0]["validity"]["state"] == "stale"
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["disconnected", "saved-keepout"])
+def test_selected_saved_aisles_refuse_atomically(
+        assigned, isolated_jobs, no_network, monkeypatch, tmp_path, blocked):
+    lines = [[(1, 0), (2, 0), (2, 2), (5, 2), (5, 0)]]
+    if blocked:
+        lines.append([(3, 0), (3, 2)])
+    polylines = _aisles(assigned, lines)
+    if blocked:
+        polylines.append(_box(assigned, 2.75, 3.25))
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    parent = backend.get(key)
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(
+            api, TOOL, {"expected_rev": 1, "saved_aisle_layer": "roof aisles"}))
+        assert response.status_code == 400, response.text
+        envelope = response.json()
+        assert envelope["reason_code"] == "JOINT_ROUTING_INFEASIBLE"
+        assert envelope["error"]["unassigned_leads"] == [
+            {"string_ref": S2, "route_kind": "start homerun"},
+            {"string_ref": S2, "route_kind": "end homerun"},
+        ]
+        message = envelope["error"]["message"].removeprefix("Route these homerun leads manually. ")
+        assert message.split(", ") == [f"{S2}/start homerun", f"{S2}/end homerun"]
+    assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
+    assert backend.get(key) == parent
+
+
+@pytest.mark.parametrize("layer,properties,reason", [
+    ("Missing", {}, "SAVED_AISLE_LAYER_EMPTY"),
+    ("Roof Aisles", {"bulges": [1, 0]}, "INVALID_SAVED_AISLE_GEOMETRY"),
+])
+def test_selected_saved_aisle_geometry_errors(
+        assigned, isolated_jobs, no_network, monkeypatch, tmp_path, layer, properties, reason):
+    polylines = _aisles(assigned, [[(1, 0), (5, 0)]], **properties)
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(
+            api, TOOL, {"expected_rev": 1, "saved_aisle_layer": layer}))
+        assert response.status_code == 400, response.text
+        assert response.json()["reason_code"] == reason
     assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
