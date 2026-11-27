@@ -86,7 +86,8 @@ def test_real_intake_binds_layout_plot_settings_in_object_subclasses(
 
     named = ("0\nPLOTSETTINGS\n5\nAB\n100\nAcDbPlotSettings\n"
              "1\nOffice\n2\nShared.pc3\n7\nShared.ctb\n")
-    objects = layout("Roof", layout_device, setup, "A1") + named
+    unused = named.replace("AB\n", "AD\n").replace("Office\n", "Reserve\n")
+    objects = layout("Roof", layout_device, setup, "A1") + named + unused
     objects += layout("Model", "ModelOnly.pc3", setup, "A2")
     if duplicates:
         objects += named.replace("AB\n", "AC\n").replace("Shared.pc3", "Other.pc3")
@@ -104,7 +105,11 @@ def test_real_intake_binds_layout_plot_settings_in_object_subclasses(
     expected = {layout_device, "Local.stb", "Shared.pc3", "Shared.ctb"}
     if duplicates:
         expected.add("Other.pc3")
-    assert {row["name"] for row in report["dependencies"]} == expected
+    by_name = {row["name"]: row for row in report["dependencies"]}
+    assert set(by_name) == expected
+    assert by_name["Shared.pc3"]["page_setups"] == ["Office", "Reserve"]
+    assert by_name["Shared.ctb"]["page_setups"] == ["Office", "Reserve"]
+    assert "page_setups" not in by_name["Local.stb"]
     assert report["external_files_opened"] is False
 
 
@@ -152,7 +157,8 @@ def test_normal_intake_reports_plot_resources_without_resolving_them(
     assert report["scope"] == "local_dxf_records"
     assert report["external_files_opened"] is False
     assert report["dependencies"] == [
-        {"kind": kind, "name": name, "disposition": "reported"} for kind, name in expected
+        {"kind": kind, "name": name, "disposition": "reported",
+         "page_setups": ["Setup name.pc3"]} for kind, name in expected
     ]
     assert intake["polylines"][0]["pts"] == [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]
 

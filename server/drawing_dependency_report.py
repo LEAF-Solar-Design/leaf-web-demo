@@ -78,6 +78,7 @@ def from_pairs(pairs, *, literal_text=None):
     texture_maps = {}
     web_lights = {}
     plot_setups = {}
+    plot_resource_setups = {}
     plot_layouts = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
@@ -178,6 +179,9 @@ def from_pairs(pairs, *, literal_text=None):
             resources = plot_resources(groups if settings is None else settings)
             if section == "OBJECTS" and settings and settings.get(1):
                 plot_setups.setdefault(settings[1].casefold(), []).append(resources)
+                for resource_kind, name in resources.items():
+                    if name:
+                        plot_resource_setups.setdefault((resource_kind, name), set()).add(settings[1])
         elif kind == "LAYOUT" and section == "OBJECTS":
             layout = subclasses.get("AcDbLayout", {}).get(1)
             settings = subclasses.get("AcDbPlotSettings")
@@ -203,6 +207,8 @@ def from_pairs(pairs, *, literal_text=None):
         ]
     for path, handles in web_lights.items():
         dependencies["photometric_web", path]["light_handles"] = sorted(handles)
+    for key, setup_names in plot_resource_setups.items():
+        dependencies[key]["page_setups"] = sorted(setup_names)
     report = {"schema": "leaf.drawing-dependencies.v1",
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
