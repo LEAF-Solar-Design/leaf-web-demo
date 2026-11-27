@@ -930,6 +930,66 @@ def records(capfd):
             if '"event":"solar_pdf_intake_phase"' in line]
 
 
+@pytest.mark.parametrize(
+    "variant,expected",
+    [("mixed", [1, 3]), ("single", [2, 3]), ("paged", [1, 3]),
+     ("missing", None), ("repeated-id", None), ("orphan-marker", None),
+     ("matched-only", None), ("stale", None)],
+)
+def test_reopen_optimizer_counts_with_unassigned_panel(lane, monkeypatch, variant, expected):
+    matrices = deepcopy(samples.GRIDS)
+    matrices[0]["Rows"][0]["Panels"][2]["Seq"] = 0
+    matrices[0]["Sequences"] = [2]
+    first_cells = [[0, 0], [0, 1]]
+    first_groups = [[cell] for cell in first_cells] if variant == "single" else [first_cells]
+    second_groups = [[[0, col]] for col in range(3)]
+    for matrix_index, groups in enumerate((first_groups, second_groups)):
+        matrices[matrix_index]["Optimizers"] = [
+            {"id": f"pdf-optimizer-{matrix_index * 10 + index}", "vendor_label": "42", "cells": cells}
+            for index, cells in enumerate(groups)
+        ]
+    if variant == "missing":
+        matrices[1]["Optimizers"].pop()
+    elif variant == "repeated-id":
+        matrices[1]["Optimizers"][0]["id"] = matrices[0]["Optimizers"][0]["id"]
+    elif variant == "orphan-marker":
+        matrices[0]["Optimizers"].append(
+            {"id": "pdf-optimizer-99", "vendor_label": None, "cells": [[0, 2]]})
+
+    monkeypatch.setattr(se.reports, "parse_source", lambda data: deepcopy(matrices))
+    _, _, accepted = accept(lane, report(lane), accept_matched_only=variant == "matched-only")
+    saved = deepcopy(accepted.graph["extra"][se.tracking.STORE_KEY])
+    assert len(saved["unassigned_panel_refs"]) == 1
+    assert len(saved["strings"]) == 2 and not any(row["partial"] for row in saved["strings"])
+    reader = se.local_read._load_builtin(se.READ_TOOL)
+    if variant == "paged":
+        monkeypatch.setattr(reader, "MEASUREMENT_INLINE_BYTES", 1)
+        monkeypatch.setattr(reader, "PAGE_ITEMS", 1)
+    if variant == "stale":
+        _, _, accepted = tools.commit(lane, "solar-settings", {
+            "expected_rev": accepted.graph["rev"],
+            "changes": {"panel_layer_contains": "Later panel layer"},
+        }, accepted)
+
+    offset, rows = 0, []
+    while offset is not None:
+        result = read(lane, accepted, section="strings", offset=offset)
+        assert result["output_bytes"] <= reads.MAX_OUTPUT_BYTES
+        output = result["output"]
+        summary = output["optimizer_measurement"]
+        assert output["counts"]["unassigned_panels"] == 1
+        assert summary["complete"] is False
+        assert summary["total_count"] is None and summary["string_counts"] is None
+        rows.extend(output["items"])
+        offset = output["page"]["next_offset"]
+
+    assert rows == (saved["strings"] if expected is None else [
+        {**row, "optimizer_count": count}
+        for row, count in zip(saved["strings"], expected, strict=True)
+    ])
+    assert accepted.graph["extra"][se.tracking.STORE_KEY] == saved
+
+
 def test_source_phase_sequence_is_correlated_and_contains_no_request_data(lane, capfd):
     before = lane.head, len(lane.versions), len(lane.calls)
     result = upload(lane)

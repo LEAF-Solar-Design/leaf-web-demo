@@ -233,21 +233,47 @@ def _section(graph, record, section):
     return items, references
 
 
+def _covered_string_optimizer_counts(record, optimizers):
+    """Count markers only when they partition all assigned panels by saved string."""
+    strings = record["strings"]
+    if not strings or any(row["partial"] for row in strings):
+        return None
+    remaining = {ref: row["index"] for row in strings for ref in row["panel_refs"]}
+    counts = [0] * len(strings)
+    seen_ids = set()
+    for optimizer in optimizers:
+        index = optimizer["string_index"]
+        refs = optimizer["panel_refs"]
+        if (not _int(index, 0, len(strings) - 1) or not refs or optimizer["id"] in seen_ids
+                or optimizer["pdf_matrix"] != strings[index]["pdf_matrix"]
+                or any(remaining.pop(ref, None) != index for ref in refs)):
+            return None
+        seen_ids.add(optimizer["id"])
+        counts[index] += 1
+    return None if remaining else counts
+
+
 def project_page(graph, record, section, offset):
     """Page the verified project record and bound duplicated measurement detail."""
     rows, references = _section(graph, record, section)
     measurement = record.get("optimizer_measurement")
     if measurement is not None:
         measurement = dict(measurement)
+        counts = None
         if measurement["graph_rev"] != graph["rev"] or not references["current"]:
             measurement.update(complete=False, total_count=None, string_counts=None)
+        elif (section == "strings" and not measurement["complete"]
+              and record.get("acceptance") is None and record["unassigned_panel_refs"]
+              and len(record["frames"]) == len(graph["frames"])):
+            counts = _covered_string_optimizer_counts(record, measurement["optimizers"])
         if len(canonical_bytes(measurement)) > MEASUREMENT_INLINE_BYTES:
-            counts = measurement["string_counts"]
+            if measurement["complete"]:
+                counts = measurement["string_counts"]
             measurement.update(optimizers=None, string_counts=None,
                                optimizer_rows=len(measurement["optimizers"]))
-            if section == "strings" and counts is not None:
-                rows = [{**row, "optimizer_count": count}
-                        for row, count in zip(rows, counts, strict=True)]
+        if section == "strings" and counts is not None:
+            rows = [{**row, "optimizer_count": count}
+                    for row, count in zip(rows, counts, strict=True)]
     items, page = _page(rows, offset)
     return items, page, references, measurement
 
