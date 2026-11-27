@@ -537,3 +537,26 @@ def test_legacy_faces_and_explicit_model_faces_keep_their_bounds(monkeypatch):
             "width": 4, "height": 4, "area": 16, "geometry_count": 2,
         }],
     }
+
+
+@pytest.mark.parametrize("layer", [" Roof Edge", "Roof Edge ", " Roof Edge "])
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
+def test_padded_layer_references_follow_the_table(layer, declared):
+    extra_layer = f"0\nLAYER\n2\n{layer}\n70\n0\n62\n -7 \n" if declared else ""
+    dxf = (
+        f" 0\n SECTION \n 2\nHEADER\n9\n$CLAYER\n8\n{layer}\n0\nENDSEC\n"
+        "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n"
+        f"0\nLAYER\n2\nRoof Edge\n70\n0\n62\n7\n{extra_layer}"
+        "0\nENDTAB\n0\nENDSEC\n"
+        f"0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n{layer}\n10\n 0 \n20\n0\n"
+        "11\n 1 \n21\n0\n0\nENDSEC\n0\nEOF\n"
+    ).encode("ascii")
+
+    intake = dxf_intake.parse_dxf_bytes(dxf)
+    expected = layer if declared else "Roof Edge"
+
+    assert intake["layers"] == (["Roof Edge", layer] if declared else ["Roof Edge"])
+    assert intake.get("hidden_layers", []) == ([layer] if declared else [])
+    assert intake["active_layer"] == expected
+    assert intake["polylines"][0]["layer"] == expected
+    assert intake["polylines"][0]["pts"] == [[0, 0, 0], [1, 0, 0]]
