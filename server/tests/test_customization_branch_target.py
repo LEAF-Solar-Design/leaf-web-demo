@@ -503,6 +503,40 @@ def test_http_routes_forward_only_branch_target(lane, monkeypatch, route, target
         assert "target" not in calls[0]
 
 
+@pytest.mark.parametrize("route", ["/api/author", "/api/author/stage"])
+def test_http_author_status_guidance_is_only_on_tool_route(lane, monkeypatch, route):
+    result = {"contract": "leaf.customization-stage-job.v1", "status": "queued"}
+
+    monkeypatch.setattr(author_router.CustomizationService, "configured", classmethod(lambda _: lane.service))
+    monkeypatch.setattr(lane.service, "enqueue_stage", lambda **kwargs: result)
+    monkeypatch.setattr(author_router, "customization_enabled", lambda *_: True)
+    monkeypatch.setattr(author_router, "_customization_gate", lambda *_: None)
+    monkeypatch.setattr(author_router, "_emit_author_event", lambda *_: None)
+    monkeypatch.setattr(deps, "stage_author_identity", lambda tenant, *_: tenant)
+    app = FastAPI()
+    app.include_router(author_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: lane.tenant
+    body = {"description": DESCRIPTION, "mode": "build"}
+    if route.endswith("/stage"):
+        body["idempotency_key"] = "route-request"
+    response = TestClient(app).post(route, json=body, headers={"Idempotency-Key": "route-request"})
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["contract"] == result["contract"]
+    assert payload["status"] == result["status"]
+    if route == "/api/author":
+        assert payload["guidance"] == author_router.AUTHOR_STATUS_GUIDANCE
+    else:
+        assert "guidance" not in payload
+
+
+def test_shipped_author_tool_policy_leaves_status_to_build_card():
+    policy = json.loads((Path(__file__).resolve().parents[1] / "agent_policy.json").read_text())
+    assert policy["actions"]["author_tool"]["description"].endswith(
+        "Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later."
+    )
+
+
 def test_legacy_branch_target_is_unavailable(lane):
     response = author_router._legacy_author(author_router.AuthorRequest(
         description=DESCRIPTION, target="branch",

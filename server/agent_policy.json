@@ -1377,7 +1377,7 @@
       "rate_limit_category": "high"
     },
     "author_tool": {
-      "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6).",
+      "description": "Author a new tool, or revise one explicitly named authored tool, in the design-time sandbox (R5; nothing registered until R6). Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later.",
       "rung": 5,
       "required_capability": "build",
       "policy": "confirm-once",

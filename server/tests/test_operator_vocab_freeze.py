@@ -318,8 +318,10 @@ def test_roles_file_gained_no_operator_role():
 # that entry restores the preceding a4292136 pin.
 # PR3593 adds the contract-defined optional table row_grouping schema.
 # Removing that member restores the preceding a90f8637 policy digest.
+# F3 appends only a build-card status sentence to author_tool's description; reverting
+# that sentence restores the preceding 46cb1b1e pin. Actions, routes and policies unchanged.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "46cb1b1ebbfc81bcd7ba948789fe2a1ca72ab5a9879d966cdebbfcfb5f946edc")
+    "89a24b84c47a6c8c0de7a955fd44b6075b0808f4d88ce6323935deaaa0a39c79")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",

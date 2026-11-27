@@ -71,6 +71,7 @@ ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
 # the validation layer before any harness/template work runs.
 MAX_AUTHOR_DESCRIPTION = 8_000
 DEFAULT_AUTHOR_TIMEOUT_S = 120.0
+AUTHOR_STATUS_GUIDANCE = "Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later."
 
 
 class _AuthorFields(BaseModel):
@@ -925,7 +926,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
-            return JSONResponse(status_code=202, content=result)
+            return JSONResponse(status_code=202, content={**result, "guidance": AUTHOR_STATUS_GUIDANCE})
         return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.
