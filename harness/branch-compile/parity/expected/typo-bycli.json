@@ -8,7 +8,7 @@
       "main.csx(11,99): CS0117: 'ColorMethod' does not contain a definition for 'ByAcli'"
     ],
     "package_digest": "8174903465737d13668fe708f3274eb0e759b551a380037074ae3a4ed75e4f37",
-    "allowlist_sha256": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
+    "allowlist_sha256": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285",
     "framework": "<framework>"
   },
   "source": "Windows tools/tool-check (net8.0-windows) at Branch2025 59c81299, LeafAcadRefSource=nuget, 2026-11-20"

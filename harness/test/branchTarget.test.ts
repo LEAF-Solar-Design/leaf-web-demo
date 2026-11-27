@@ -38,7 +38,7 @@ const TENANT = "branch-author-tenant";
 const CHANGE = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
 const NOW = new Date("2026-11-20T00:00:00.000Z");
-const ALLOWLIST_SHA = "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd";
+const ALLOWLIST_SHA = "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285";
 const COMPILE_CONFIGURED = Boolean(process.env.LEAF_BRANCH_COMPILE_BIN && process.env.LEAF_BRANCH_COMPILE_REFS);
 const dirs: string[] = [];
 const servers: Server[] = [];
@@ -141,6 +141,12 @@ describe("branch package proposals", () => {
     expect(prompt).toContain("Branch's ScriptHost compiler against AutoCAD 2025");
     expect(prompt).toContain("V18 diagnostics");
     expect(prompt).toContain("Write C# operators literally (&&, <, >); never HTML entities.");
+  });
+
+  it("omits text style font path members from the authoring prompt", () => {
+    const prompt = branchTargetPrompt();
+    expect(prompt).not.toContain("TextStyleTableRecord.FileName");
+    expect(prompt).not.toContain("TextStyleTableRecord.BigFontFileName");
   });
 
   it("includes the area-marks source verbatim and documents types and members outside the allowlist", () => {
