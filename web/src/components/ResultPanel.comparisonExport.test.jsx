@@ -3,9 +3,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import ResultPanel from './ResultPanel.jsx'
 
-const resultWithRows = (layers, tool = 'count-modules') => ({
+const resultWithRows = (layers) => ({
   ok: true,
-  tool,
+  tool: 'count-modules',
   result: { layer_rank_change: { layers }, warnings: ['Partial snapshot'] },
 })
 const csvLink = () => screen.getByRole('link', { name: /Download Layer rank change \/ Layers CSV/i })
@@ -75,16 +75,44 @@ it('jumps across pages to the exact Unicode layer and leaves its surrounding cel
   expect(screen.getByRole('row', { name: 'Layer 101 101' })).toBeVisible()
 })
 
-it('keeps scalar lists and results from other tools on their existing export paths', () => {
-  const rows = [{ layer: 'East roof', movement: 1 }]
-  const view = render(<ResultPanel result={resultWithRows(rows, 'another-tool')} />)
-  expect(screen.queryByRole('link', { name: /CSV$/ })).toBeNull()
-  expect(jsonLink()).toBeVisible()
+it('exports assignment capacities and keeps scalar string references on the JSON path', async () => {
+  const result = {
+    ok: true,
+    tool: 'solar-assignment-report',
+    result: {
+      saved_state: {
+        collector_capacity: [{ inverter_ref: 'INV-1', total_dc_inputs: 4, occupied_inputs: 3, spare_inputs: 1 }],
+        unassigned_string_refs: ['STR-4', 'STR-5'],
+      },
+    },
+  }
+  render(<ResultPanel result={result} />)
+  const csv = screen.getByRole('link', { name: /^Download Saved state \/ Collector capacity CSV$/i })
+  expect(await readDownload(csv)).toContain('"INV-1","4","3","1"')
+  expect(screen.getAllByRole('link', { name: /CSV$/ })).toEqual([csv])
+  expect(screen.queryByRole('button', { name: 'Jump to layer' })).toBeNull()
+  expect(JSON.parse(await readDownload(jsonLink()))).toEqual(result)
+})
 
-  const withScalarList = resultWithRows(rows)
-  withScalarList.result.notes = ['Counted', 'Compared']
-  view.rerender(<ResultPanel result={withScalarList} />)
-  expect(screen.getAllByRole('link', { name: /CSV$/ })).toEqual([csvLink()])
+it('exports preset list rows without attaching a layer jump to a preset name', async () => {
+  render(<ResultPanel result={{
+    ok: true,
+    tool: 'solar-design-presets-list',
+    result: { list_rows: [{ prefix: 'A', name: 'East roof' }] },
+  }} />)
+  const csv = screen.getByRole('link', { name: /^Download List rows CSV$/i })
+  expect(await readDownload(csv)).toBe('"prefix","name"\r\n"A","East roof"\r\n')
+  expect(screen.queryByRole('button', { name: 'Jump to layer' })).toBeNull()
+})
+
+it('omits CSV when a table is beneath a redacted result field', async () => {
+  render(<ResultPanel result={{
+    ok: true,
+    tool: 'solar-design-presets-list',
+    result: { secret: { rows: [{ name: 'placeholder' }] } },
+  }} />)
+  expect(screen.queryByRole('link', { name: /CSV$/ })).toBeNull()
+  expect(JSON.parse(await readDownload(jsonLink())).result.secret).toBe('[redacted]')
 })
 
 const redactedLink = () => screen.getByRole('link', { name: 'Download Pooled shares with layer names redacted CSV' })
@@ -110,12 +138,12 @@ it.each(['count-modules', 'another-comparison-tool'])('exports an explicit total
   expect(JSON.parse(await readDownload(jsonLink())).result.pooled_cumulative_shares.layers).toEqual(layers)
 })
 
-it('clears the prior redacted export, reports invalid measures, and omits undefined comparisons', () => {
+it.each([Infinity, NaN, '100', undefined])('clears the redacted export for an invalid measure (%s)', (percentage) => {
   const layer = { layer: 'Roof', increment_numerator: 1, numerator: 1, denominator: 1, percentage: 100 }
   const view = render(<ResultPanel result={pooledResult({ defined: true, layers: [layer] })} />)
   const prior = redactedLink().getAttribute('href')
   const name = 'Download Pooled shares with layer names redacted CSV'
-  view.rerender(<ResultPanel result={pooledResult({ defined: true, layers: [{ ...layer, percentage: Infinity }] })} />)
+  view.rerender(<ResultPanel result={pooledResult({ defined: true, layers: [{ ...layer, percentage }] })} />)
   expect(screen.queryByRole('link', { name })).toBeNull()
   expect(screen.getByText('Pooled shares with layer names redacted CSV download is unavailable.'))
     .toHaveAttribute('role', 'status')

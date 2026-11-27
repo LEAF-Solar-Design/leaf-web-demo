@@ -4,6 +4,7 @@ import './resultObjectLinks.css'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
+import { isRedactedField } from '../projects/ReceiptPanel.jsx'
 import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
@@ -231,13 +232,13 @@ function RowFieldDetails({ row, label }) {
   </>
 }
 
-function RowArrayResults({ entries, density, csvExport = false }) {
+function RowArrayResults({ entries, density }) {
   return entries.map((entry) => Object.hasOwn(entry, 'rows')
-    ? <RowArrayTable key={JSON.stringify(entry.path)} {...entry} density={density} csvExport={csvExport && !entry.scalarList} />
+    ? <RowArrayTable key={JSON.stringify(entry.path)} {...entry} density={density} />
     : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
 }
 
-function RowArrayTable({ path, rows, ancestors, density, csvExport }) {
+function RowArrayTable({ path, rows, ancestors, density, scalarList }) {
   const [page, setPage] = useState(0)
   const [layerName, setLayerName] = useState('')
   const [jump, setJump] = useState(null)
@@ -253,7 +254,7 @@ function RowArrayTable({ path, rows, ancestors, density, csvExport }) {
   const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
   const start = currentPage * pageSize
   const visibleRows = rows.slice(start, start + pageSize)
-  const canJumpToLayer = csvExport && rows.length > 0 && rows.every(row => typeof row.layer === 'string')
+  const canJumpToLayer = !scalarList && rows.every(row => typeof row.layer === 'string')
   const targetIndex = jump?.rows === rows ? jump.index : null
 
   function jumpToLayer() {
@@ -329,7 +330,7 @@ function RowArrayTable({ path, rows, ancestors, density, csvExport }) {
             onClick={() => movePage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
         </nav>
       )}
-      {csvExport && <ResultTableCsvDownload rows={rows} label={label} />}
+      {!scalarList && !path.some(key => isRedactedField(key)) && <ResultTableCsvDownload rows={rows} label={label} />}
       <RowArrayResults entries={childArrays} density={density} />
     </section>
   )
@@ -406,7 +407,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   </>
   const rowArrays = findRowArrays(data)
   const rowTables = <>
-    <RowArrayResults entries={rowArrays} density={density} csvExport={result.tool === 'count-modules'} />
+    <RowArrayResults entries={rowArrays} density={density} />
     <RedactedPooledSharesDownload report={data.pooled_cumulative_shares} />
     {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
   </>
