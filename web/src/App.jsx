@@ -89,6 +89,7 @@ import { requiresReconciliation } from './errorPresentation.js'
 import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
+import { BUILD_TOOL_STARTER } from './lib/starterPrompts.js'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -5540,6 +5541,7 @@ export default function App() {
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
           liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          starter={signedIn && !mock && !knownGuest && !signedOut ? BUILD_TOOL_STARTER : null}
           mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
