@@ -378,6 +378,48 @@ def test_unselected_unknown_definition_does_not_block_region():
     assert result["count"] == 1 and overlay["highlight_handles"] == ["A"]
 
 
+def _nested_region_dxf(curve_type, child_name="curve", child_x="2.0004", weight=1):
+    from dxf_intake import parse_dxf_bytes
+
+    curve = [(0, curve_type), (100, "AcDbEntity"), (100, "AcDbSpline"),
+             (70, 4), (71, 1), (72, 4), (73, 2),
+             (40, 0), (40, 0), (40, 1), (40, 1), (41, 1), (41, weight),
+             (10, 0), (20, 0), (30, 0), (10, 1), (20, 1), (30, 1)]
+    if curve_type == "HELIX":
+        curve.extend([(100, "AcDbHelix"), (40, 1.25)])
+    records = [(0, "SECTION"), (2, "BLOCKS"), (0, "BLOCK"), (2, "Curve"), *curve,
+               (0, "ENDBLK"), (0, "BLOCK"), (2, "Panel"), (0, "INSERT"),
+               (2, child_name), (10, child_x), (20, 1), (0, "ENDBLK"), (0, "ENDSEC"),
+               (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "A"),
+               (2, "Panel"), (10, 5.0004), (20, 6), (41, 2), (42, 0.5),
+               (0, "INSERT"), (5, "B"), (2, "Panel"), (10, 99), (20, 6),
+               (0, "ENDSEC"), (0, "EOF")]
+    return parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in records).encode())
+
+
+@pytest.mark.parametrize("curve_type", ["HELIX", "SPLINE"])
+def test_region_counts_nested_curve_with_source_placement_and_casefolded_reference(curve_type):
+    intake = _nested_region_dxf(curve_type)
+    result, overlay = run_region(intake, [9.001, 6, 11.002, 8])
+    assert result["count"] == 1 and overlay["highlight_handles"] == ["A"]
+    with pytest.raises(ValueError, match="Ambiguous region"):
+        run_region(intake, [9.001, 6, 11.001, 8])
+
+
+@pytest.mark.parametrize("inputs,match", [
+    ({"child_name": "panel"}, "nested block reference"),
+    ({"child_name": "missing"}, "complete block definition"),
+    ({"child_x": "invalid"}, "valid instance transform"),
+    ({"weight": -1}, "complete block definition|complete curve control net"),
+])
+def test_region_refuses_incomplete_nested_curve_geometry(inputs, match):
+    intake = _nested_region_dxf("HELIX", **inputs)
+    with pytest.raises(ValueError, match=match):
+        run_region(intake, [0, 0, 20, 20])
+    set_id = module.run(intake, {})[0]["sets"][0]["set_id"]
+    assert module.run(intake, {"set_id": set_id})[0]["count"] == 2
+
+
 def test_region_legacy_alias_and_conflicting_aliases_are_explicit():
     intake = region_intake()
     identity = module.run(intake, {})[0]["sets"][0]["set_id"]
@@ -426,9 +468,9 @@ def test_region_definition_points_cache_is_call_local(monkeypatch):
     intake["inserts"].append({**intake["inserts"][0], "handle": "B", "x": 5})
     original = module._definition_points
     calls = []
-    def observed(definition):
-        calls.append(definition)
-        return original(definition)
+    def observed(name, definitions, cache, ancestors):
+        calls.append(name)
+        return original(name, definitions, cache, ancestors)
     monkeypatch.setattr(module, "_definition_points", observed)
     assert run_region(intake, [0, 0, 10, 10])[0]["count"] == 2
     assert len(calls) == 1

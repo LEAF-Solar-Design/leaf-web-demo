@@ -72,40 +72,94 @@ def _unit_normal(value):
     return [v / magnitude for v in scaled]
 
 
-def _definition_points(definition):
+def _definition_points(name, definitions, cache, ancestors):
     from dxf_intake import _ocs_to_wcs
 
-    if not isinstance(definition, dict) or definition.get("complete") is not True:
+    definition = definitions.get(name)
+    if (not isinstance(definition, dict) or definition.get("nested_inserts_incomplete")
+            or not (definition.get("complete") is True or definition.get("region_curve_controls")
+                    or definition.get("nested_inserts"))):
         raise ValueError("Region containment requires a complete block definition. Re-import the drawing.")
     children = definition.get("children")
     if (not isinstance(children, list) or not children
             or definition.get("count", len(children)) != len(children)):
         raise ValueError("Region containment requires all block children. Re-import the drawing.")
-    base = _point3(definition.get("base"))
+    nested_inserts = definition.get("nested_inserts", [])
+    curve_controls = definition.get("region_curve_controls", {})
+    if not isinstance(nested_inserts, list) or not isinstance(curve_controls, dict):
+        raise ValueError("Region containment requires valid block evidence. Re-import the drawing.")
+    advanced_geometry = bool(nested_inserts or curve_controls)
+    base = _point3(definition.get("measurement_base", definition.get("base"))
+                   if advanced_geometry or len(ancestors) > 1 else definition.get("base"))
+    refs = iter(nested_inserts)
     points = []
-    for child in children:
-        if not isinstance(child, dict) or child.get("kind") not in ("POINT", "LINE", "LWPOLYLINE"):
-            raise ValueError("Region containment requires complete straight-edge block geometry.")
-        raw = [child.get("pt")] if child["kind"] == "POINT" else child.get("pts")
-        if not isinstance(raw, list) or len(raw) < (1 if child["kind"] == "POINT" else 2):
+    for index, child in enumerate(children):
+        if not isinstance(child, dict):
             raise ValueError("Region containment requires complete finite instance geometry.")
-        child_points = [_point3(point) for point in raw]
-        if child["kind"] == "LWPOLYLINE":
+        kind = child.get("kind")
+        if kind == "OTHER" and child.get("type") == "INSERT":
+            insert = next(refs, None)
+            if (not isinstance(insert, dict)
+                    or any(type(insert.get(key, 1)) is not int or insert.get(key, 1) != 1
+                           for key in ("rows", "columns"))):
+                raise ValueError("Region containment requires individual nested INSERT references.")
+            child_points = _insert_points(insert, definitions, cache, ancestors)
+        elif kind == "OTHER" and child.get("type") in ("HELIX", "SPLINE"):
+            # An affine image of a positive-weight spline lies inside the
+            # convex hull of the transformed control points.
+            raw = curve_controls.get(str(index))
+            if not isinstance(raw, list) or not 2 <= len(raw) <= 10000:
+                raise ValueError("Region containment requires a complete curve control net. Re-import the drawing.")
+            child_points = [_point3(point) for point in raw]
+        elif kind in ("POINT", "LINE", "LWPOLYLINE"):
+            raw = [child.get("pt")] if kind == "POINT" else child.get("pts")
+            if not isinstance(raw, list) or len(raw) < (1 if kind == "POINT" else 2):
+                raise ValueError("Region containment requires complete finite instance geometry.")
+            child_points = [_point3(point) for point in raw]
+        else:
+            raise ValueError("Region containment requires complete straight-edge block geometry.")
+        if kind == "LWPOLYLINE":
             normal = _unit_normal(child.get("nrm", [0, 0, 1]))
             elevation = _point3([child.get("elev", 0), 0, 0])[0]
             if child.get("thickness", 0) != 0 or any(child.get("bulges", [])):
                 raise ValueError("Region containment requires complete straight-edge block geometry.")
             child_points = [_ocs_to_wcs([p[0], p[1], elevation], normal) for p in child_points]
+        if (advanced_geometry or len(ancestors) > 1) and len(points) + len(child_points) > 10000:
+            raise ValueError("Region containment exceeded the block geometry limit.")
         points.extend(tuple(p[i] - base[i] for i in range(3)) for p in child_points)
-    return points
+    exhausted = object()
+    if next(refs, exhausted) is not exhausted:
+        raise ValueError("Region containment requires consistent nested INSERT evidence. Re-import the drawing.")
+    return points, advanced_geometry
 
 
-def _insert_points(entity, definitions, cache):
+def _insert_points(entity, definitions, cache, ancestors=(), source_placements=None):
     from dxf_intake import _ocs_to_wcs
 
     name = entity.get("name")
-    if name not in cache:
-        cache[name] = _definition_points(definitions.get(name))
+    if not isinstance(name, str):
+        raise ValueError("Region containment requires a named block reference.")
+    if name not in definitions and ancestors:
+        name = next((key for key in definitions
+                     if isinstance(key, str) and key.casefold() == name.casefold()), name)
+    if name in ancestors or len(ancestors) >= 32:
+        raise ValueError("Region containment found an invalid or too deeply nested block reference.")
+    cache_key = (name, bool(ancestors))
+    if cache_key not in cache:
+        cache[cache_key] = _definition_points(name, definitions, cache, (*ancestors, name))
+    definition_points, advanced_geometry = cache[cache_key]
+    if advanced_geometry or ancestors:
+        if entity.get("measurement_placement_invalid"):
+            raise ValueError("Region containment requires a valid instance transform. Re-import the drawing.")
+        placement = entity.get("measurement_placement")
+        if source_placements is not None:
+            matches = source_placements.get(entity.get("handle"), [])
+            if len(matches) > 1:
+                raise ValueError("Region containment requires an unambiguous instance transform.")
+            if matches:
+                placement = matches[0]
+        if isinstance(placement, dict):
+            entity = dict(entity, **placement)
     origin = _point3([entity.get("x"), entity.get("y"), entity.get("z", 0)])
     scale = _point3(entity.get("scale", [1, 1, 1]))
     normal = _unit_normal(entity.get("nrm", [0, 0, 1]))
@@ -114,7 +168,7 @@ def _insert_points(entity, definitions, cache):
         raise ValueError("Region containment requires a finite instance transform.")
     cosine, sine = math.cos(rotation), math.sin(rotation)
     points = []
-    for point in cache[name]:
+    for point in definition_points:
         x, y, z = (point[i] * scale[i] for i in range(3))
         rotated = [x * cosine - y * sine, x * sine + y * cosine, z]
         world = _ocs_to_wcs(rotated, normal)
@@ -122,11 +176,11 @@ def _insert_points(entity, definitions, cache):
     return points
 
 
-def _within_region(entity, key, bounds, dimensions, definitions, cache):
+def _within_region(entity, key, bounds, dimensions, definitions, cache, source_placements):
     if key == "inserts":
         if dimensions != (1, 1):
             raise ValueError("Design windows require individual INSERT references. Count an INSERT array as a whole set.")
-        points = _insert_points(entity, definitions, cache)
+        points = _insert_points(entity, definitions, cache, source_placements=source_placements)
     else:
         points = [_point3(point) for point in entity["pts"]]
     left, bottom = min(p[0] for p in points), min(p[1] for p in points)
@@ -438,6 +492,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
     if window is not None and not selected_ids:
         raise ValueError("Select module sets before applying a design window region.")
     definitions = intake.get("blocks", {})
+    source_placements = intake.get("beam_insert_placements", {})
     if window is not None and not isinstance(definitions, dict):
         raise ValueError("Region containment requires a block-definition map. Re-import the drawing.")
     geometry_cache = {}
@@ -459,7 +514,8 @@ def _run(intake, params, *, allow_absent_in_window=False):
                 raise InputValidationError("INSERT has invalid array multiplicity; rows and columns must be positive UInt16 integers.")
             selected = json.dumps(identity, ensure_ascii=True, separators=(",", ":")) in selected_ids
             if (window is not None and selected
-                    and not _within_region(entity, key, window, dimensions, definitions, geometry_cache)):
+                    and not _within_region(entity, key, window, dimensions, definitions, geometry_cache,
+                                           source_placements)):
                 continue
             group = groups.setdefault(identity, {"entity_type": entity_type,
                 "layer": layer, "block": block, "count": 0, "handles": [], "_keys": set()})
