@@ -229,8 +229,9 @@ export function createWorkspaceController({
     }
   }
 
-  function openProject(projectId) {
-    if (!projectId) return Promise.resolve(null)
+  function openProject(projectId, revision = null) {
+    if (!projectId || (revision && (revision.organization_id !== state.orgId ||
+      revision.project_id !== projectId))) return Promise.resolve(null)
     resumeAttempted = true
     const request = nextGeneration('workspace')
     const orgId = state.orgId
@@ -265,9 +266,15 @@ export function createWorkspaceController({
         if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
         const settledOrgId = state.orgId
         if (!state.mock) writeStoredProjectId(settledOrgId, projectId, storage)
-        publish({ workspace, workspaceLoading: false })
+        const selected = revision && workspace?.project?.project_id === projectId &&
+          workspace.project.org_id === settledOrgId && workspace.drawing_versions?.some(row =>
+            row.org_id === settledOrgId && row.project_id === projectId &&
+            row.drawing_id === revision.drawing_id && row.version_id === revision.input_version_id)
+        const versionId = selected ? revision.input_version_id : null
+        publish({ workspace, workspaceLoading: false, ...(revision && { canonicalVersionId: versionId }) })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId: settledOrgId, workspace })
-        return workspace
+        if (versionId) invoke(callbacks.onCanonicalVersionSelected, versionId)
+        return revision && !selected ? null : workspace
       } catch {
         if (!isCurrentWorkspace(request, projectId, orgId)) return null
         publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
