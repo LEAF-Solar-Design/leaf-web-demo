@@ -52,6 +52,36 @@ def _reserve(tmp_path, **fields):
     return CustomizationService(store), change
 
 
+@pytest.mark.parametrize("code, stored, expected", [
+    ("stage_grant_expired", None, customization_service.CUSTOMIZATION_ERROR_MESSAGES["stage_grant_expired"]),
+    ("stage_authority_invalid", "", "Studio could not confirm this build came from your current conversation, so it was not started. Ask for it again."),
+    ("stage_grant_expired", "Stored harness message", "Stored harness message"),
+    ("unknown_error", None, None),
+])
+def test_failed_stage_message_fallback(tmp_path, code, stored, expected):
+    service, change = _reserve(tmp_path)
+    change = replace(change, state=ChangeState.FAILED, stage_error_code=code,
+                     stage_error_message=stored, stage_error_retryable=True)
+    error = service.stage_status_change(change)["error"]
+    assert error["reason_code"] == code
+    assert error["retryable"] is True
+    if expected is None:
+        assert "message" not in error
+    else:
+        assert error["message"] == expected
+
+
+@pytest.mark.parametrize("started_at", [None, "", "2026-11-27T12:00:00Z"])
+@pytest.mark.parametrize("state", [ChangeState.STAGING, ChangeState.FAILED])
+def test_stage_started_at_is_additive(tmp_path, started_at, state):
+    service, change = _reserve(tmp_path)
+    status = service.stage_status_change(replace(change, state=state, stage_started_at=started_at))
+    if started_at:
+        assert status["stage_started_at"] == started_at
+    else:
+        assert "stage_started_at" not in status
+
+
 @pytest.mark.parametrize("callback_first", [False, True])
 def test_completed_branch_attempts_survive_worker_and_callback(lane, monkeypatch, callback_first):
     post = requests.post

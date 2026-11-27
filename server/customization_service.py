@@ -72,6 +72,55 @@ from solar_authored_graph import reads_graph
 
 
 CONTRACT = "leaf.customization.v1"
+CUSTOMIZATION_ERROR_MESSAGES = {
+    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
+    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
+    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
+    "invalid_stage_source_request": "Invalid staged source request.",
+    "stage_source_not_available": "Staged source is not available.",
+    "stage_source_failed": "Staged source could not be read.",
+    "customization_stage_disabled": (
+        "Tool authoring is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "customization_publish_disabled": (
+        "Tool publication is not enabled for this workspace in this environment. "
+        "The approved request was not executed."
+    ),
+    "invalid_stage_request": (
+        "The requested authoring mode is not supported by the protected authoring path. "
+        "Use build mode."
+    ),
+    "builder_entitlement_missing": (
+        "This workspace does not have the builder entitlement required for tool authoring."
+    ),
+    "customization_harness_unavailable": (
+        "Protected tool authoring is temporarily unavailable. "
+        "The approved request was not executed."
+    ),
+    "idempotency_key_required": (
+        "Tool authoring requires a request identity. The approved request was not executed."
+    ),
+    "tenant_identity_binding_unavailable": (
+        "Tool authoring requires a verified workspace identity for the requester. "
+        "The approved request was not executed."
+    ),
+    "stage_authority_invalid": (
+        "Studio could not confirm this build came from your current conversation, so it was not started. Ask for it again."
+    ),
+    "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
+    "stage_grant_exhausted": (
+        "This build was tried twice and could not be finished. Ask for it again. "
+        "This build waited in line, so it ran without connected services. "
+        "If it needs one, ask again when the line is short."
+    ),
+    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
+    "stage_grant_refused": "Your access changed while this request waited. It was not started.",
+    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
+    "stage_grant_withdrawn": "This build was withdrawn before it started.",
+    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
+}
+
 MAX_STAGED_SOURCE_BYTES = 256 * 1024
 DEFAULT_DB = Path(__file__).resolve().parent / "customization.db"
 _configured_lock = threading.Lock()
@@ -2000,6 +2049,8 @@ class CustomizationService:
             "poll_url": f"/api/author/stages/{change.change_set_id}",
             "retry_after_ms": 1000,
         }
+        if isinstance(change.stage_started_at, str) and change.stage_started_at:
+            result["stage_started_at"] = change.stage_started_at
         if (_stage_queue_status_enabled() and status == "queued"
                 and change.state is ChangeState.STAGING):
             # FIFO-order hint: retries or fair queuing can start in another order.
@@ -2072,14 +2123,14 @@ class CustomizationService:
             else:
                 result["result"] = {"tool": self._decorate_stage_tool(change, self._staged_tool(change))}
         elif status == "failed":
+            reason_code = change.stage_error_code or "customization_stage_failed"
+            message = change.stage_error_message
+            if not isinstance(message, str) or not message:
+                message = CUSTOMIZATION_ERROR_MESSAGES.get(reason_code)
             result["error"] = {
-                "reason_code": change.stage_error_code or "customization_stage_failed",
+                "reason_code": reason_code,
                 "retryable": bool(change.stage_error_retryable),
-                # The terminal reason a tenant can act on ("Agent SDK auth
-                # failure: ..."), persisted from the harness's own error body.
-                # Additive: absent when no reason was captured.
-                **({"message": change.stage_error_message}
-                   if change.stage_error_message else {}),
+                **({"message": message} if isinstance(message, str) and message else {}),
             }
         return result
 

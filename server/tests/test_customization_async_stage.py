@@ -1346,11 +1346,10 @@ def test_author_job_failure_fails_first_attempt_and_status_carries_reason(
     }
 
 
-def test_transport_exhaustion_fails_without_inventing_a_message(
+def test_transport_exhaustion_fills_the_plain_message_from_the_map(
     store, monkeypatch
 ):
-    """The unreachable-harness lane keeps its defer/retry shape, and its
-    terminal status stays additive: no message key when none was captured."""
+    """Transport exhaustion reads a plain fallback without storing a message."""
     change = queued(store)
     service = CustomizationService(store)
     service.dispatch_stage = lambda _change: (_ for _ in ()).throw(
@@ -1375,6 +1374,7 @@ def test_transport_exhaustion_fails_without_inventing_a_message(
     assert status["error"] == {
         "reason_code": "customization_harness_unavailable",
         "retryable": True,
+        "message": customization_service.CUSTOMIZATION_ERROR_MESSAGES["customization_harness_unavailable"],
     }
 
 
