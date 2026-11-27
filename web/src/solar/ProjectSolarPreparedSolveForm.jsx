@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { useSubmission, Feedback } from './ProjectSolveReview.jsx'
 import { deriveProjectSolarGraphFormState } from './solarProjectGraphFormModel.js'
 
@@ -28,12 +28,35 @@ function latestSolveLabel(history, available) {
   return reason ? `${label} (${reason})` : label
 }
 
+const recommendationReasons = [
+  'Review the finished proposal.',
+  'Check why the last solve failed.',
+  'Continue the partly covered group.',
+  'Start the group with no saved strings.',
+]
+
+function recommendGroups(frames) {
+  const recommendations = []
+  for (const frame of frames) {
+    if (!hasSavedCoverage(frame) || frame.remaining_panel_count === 0) continue
+    const status = frame.latest_solve?.status
+    if (status === 'queued' || status === 'running') continue
+    let priority = frame.committed_panel_count > 0 ? 2 : 3
+    if (status === 'succeeded') priority = 0
+    if (status === 'failed') priority = 1
+    recommendations.push({ frame, priority })
+  }
+  return recommendations.sort((left, right) =>
+    left.priority - right.priority || right.frame.remaining_panel_count - left.frame.remaining_panel_count)
+}
+
 export function ProjectSolarPreparedSolveForm(props) {
   const { projectClient, solarBinding, authorityKey, isCurrent, onClose, draft, onDraftChange } = props
   const [connection, setConnection] = useState(draft?.params?.grant_ref ?? '')
   const [frame, setFrame] = useState(draft?.context?.frame_ref ?? '')
   const [phase, setPhase] = useState(draft?.context?.phase ?? 'initial')
   const [loaded, setLoaded] = useState(null)
+  const recommendationsId = useId()
   const run = useSubmission(props, 'solar-solve-proposal')
   useEffect(() => {
     const controller = new AbortController()
@@ -54,6 +77,8 @@ export function ProjectSolarPreparedSolveForm(props) {
     loaded.authorityKey === authorityKey && loaded.isCurrent === isCurrent && current(isCurrent) ? loaded.value : null
   const frames = preparation?.available ? preparation.frames : []
   const showHistory = typeof preparation?.solve_history_available === 'boolean'
+  const historyAvailable = preparation?.solve_history_available === true
+  const recommendations = historyAvailable ? recommendGroups(frames) : []
   const save = (nextConnection, nextFrame, nextPhase) => onDraftChange?.({
     params: { grant_ref: nextConnection }, context: { frame_ref: nextFrame, phase: nextPhase } })
   const ready = /^[a-zA-Z0-9_-]{1,64}$/.test(connection) && frames.some((item) => item.id === frame)
@@ -78,6 +103,19 @@ export function ProjectSolarPreparedSolveForm(props) {
           {showHistory && <td>{latestSolveLabel(item.latest_solve, preparation.solve_history_available)}</td>}</tr>
       })}</tbody>
     </table></div>}
+    {recommendations.length > 0 && <>
+      <h4 id={recommendationsId}>Recommended panel groups</h4>
+      <ol aria-labelledby={recommendationsId}>
+        {recommendations.map(({ frame, priority }) => <li key={frame.id}>
+          <strong>{frame.name}.</strong> {recommendationReasons[priority]}
+        </li>)}
+      </ol>
+    </>}
+    {historyAvailable && frames.some((item) => !hasSavedCoverage(item)) &&
+      <p>Some groups have no recommendation because their saved coverage is unavailable.</p>}
+    {preparation?.solve_history_available === false &&
+      frames.some((item) => !hasSavedCoverage(item) || item.remaining_panel_count > 0) &&
+      <p>Recommendations are unavailable because solve history is unavailable.</p>}
     <fieldset disabled={run.locked}>
       <label>Solver connection<input value={connection} autoComplete="off" onChange={(event) => {
         setConnection(event.target.value); save(event.target.value, frame, phase)

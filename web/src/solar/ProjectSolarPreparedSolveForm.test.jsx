@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ProjectSolarPreparedSolveForm } from './ProjectSolarPreparedSolveForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { readProjectSolarCompletion } from './solarProjectCompletion.js'
@@ -90,6 +90,63 @@ it.each([true, false])('shows the latest version-bound solve independently of sa
   expect(screen.getByRole('row', { name: `South roof 0 9 ${available ? 'No matching solve' : 'Unavailable'}` }))
     .toBeInTheDocument()
   expect(screen.queryByText('Upstream details')).toBeNull()
+})
+
+it('recommends review, diagnosis, continued work and new work in that order', async () => {
+  const h = fixture()
+  h.historyAvailable = true
+  h.frames = [
+    { id: 'start', name: 'South roof', panel_count: 30, committed_panel_count: 0, remaining_panel_count: 30 },
+    { id: 'partial', name: 'West roof', panel_count: 12, committed_panel_count: 4, remaining_panel_count: 8 },
+    { id: 'active', name: 'Garage', panel_count: 8, committed_panel_count: 0, remaining_panel_count: 8,
+      latest_solve: { status: 'running' } },
+    { id: 'failed', name: 'North roof', panel_count: 5, committed_panel_count: 0, remaining_panel_count: 5,
+      latest_solve: { status: 'failed' } },
+    { id: 'finished', name: 'East roof', panel_count: 4, committed_panel_count: 0, remaining_panel_count: 4,
+      latest_solve: { status: 'succeeded' } },
+    { id: 'complete', name: 'Porch', panel_count: 6, committed_panel_count: 6, remaining_panel_count: 0,
+      latest_solve: { status: 'succeeded' } },
+    { id: 'queued', name: 'Shed', panel_count: 6, committed_panel_count: 0, remaining_panel_count: 6,
+      latest_solve: { status: 'queued' } },
+  ]
+  h.mount()
+  const list = await screen.findByRole('list', { name: 'Recommended panel groups' })
+  expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+    'East roof. Review the finished proposal.',
+    'North roof. Check why the last solve failed.',
+    'West roof. Continue the partly covered group.',
+    'South roof. Start the group with no saved strings.',
+  ])
+})
+
+it('sorts each action by remaining coverage and keeps saved order for ties', async () => {
+  const h = fixture()
+  h.historyAvailable = true
+  h.frames = [
+    { id: 'small', name: 'Small roof', panel_count: 12, committed_panel_count: 11, remaining_panel_count: 1 },
+    { id: 'first', name: 'First roof', panel_count: 7, committed_panel_count: 2, remaining_panel_count: 5 },
+    { id: 'second', name: 'Second roof', panel_count: 6, committed_panel_count: 1, remaining_panel_count: 5 },
+    { id: 'invalid', name: 'Unknown roof', panel_count: 9, committed_panel_count: 0, remaining_panel_count: 7 },
+  ]
+  h.mount()
+  const list = await screen.findByRole('list', { name: 'Recommended panel groups' })
+  expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+    'First roof. Continue the partly covered group.',
+    'Second roof. Continue the partly covered group.',
+    'Small roof. Continue the partly covered group.',
+  ])
+  expect(screen.getByRole('row', { name: 'Unknown roof Unavailable Unavailable No matching solve' })).toBeInTheDocument()
+  expect(screen.getByText('Some groups have no recommendation because their saved coverage is unavailable.')).toBeInTheDocument()
+})
+
+it('keeps saved coverage visible when solve history cannot support recommendations', async () => {
+  const h = fixture()
+  h.historyAvailable = false
+  h.frames = [{ ...h.frames[0], committed_panel_count: 1, remaining_panel_count: 2 }]
+  h.mount()
+  expect(await screen.findByRole('row', { name: 'West roof 1 2 Unavailable' })).toBeInTheDocument()
+  expect(screen.queryByRole('list', { name: 'Recommended panel groups' })).toBeNull()
+  expect(screen.getByText('Recommendations are unavailable because solve history is unavailable.')).toBeInTheDocument()
 })
 
 it.each([
