@@ -2208,7 +2208,8 @@ def _canonical_child_entry():
             sizing = _sizing_module()
             if sizing.CONFIG_KEY in environment:
                 replay = sizing.read_private_plan(environment)
-                environment = sizing.bootstrap_child(replay, "canonical", environment)
+                role = "canonical-heartbeat" if request.purpose == "heartbeat" else "canonical"
+                environment = sizing.bootstrap_child(replay, role, environment)
             if request.purpose == "heartbeat":
                 with _project_connection(environment, request.deadline) as conn:
                     row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
@@ -3075,6 +3076,15 @@ def _group_empty(pgid, deadline):
         time.sleep(min(0.05, remaining))
 
 
+def _retained_python_command(argv, environment):
+    # A Windows venv launcher creates another process. Use CPython directly
+    # while preserving the venv so identity and handles stay with the child.
+    if _PLATFORM == "win32" and argv[0] == sys.executable and sys.prefix != sys.base_prefix:
+        environment["__PYVENV_LAUNCHER__"] = sys.executable
+        return (sys._base_executable, *argv[1:])
+    return argv
+
+
 class _RuntimeProcess:
     def __init__(self, spec):
         self.spec = spec
@@ -3106,7 +3116,11 @@ class _RuntimeProcess:
                 self.output = spec.output_path.open("xb")
             if os.name == "nt":
                 self.job = _WindowsJob()
-            process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=dict(spec.environment),
+            argv = spec.argv
+            environment = dict(spec.environment)
+            if spec.role in {"stack-launcher", "canonical-child"}:
+                argv = _retained_python_command(argv, environment)
+            process = subprocess.Popen(argv, cwd=spec.cwd, env=environment,
                 stdin=subprocess.DEVNULL, stdout=self.output or subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=(0x08000000 | 0x4) if os.name == "nt" else 0,
                 start_new_session=os.name != "nt")
@@ -4847,7 +4861,9 @@ class _GuardianLease:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         options = ({"creationflags": 0x08000000} if _PLATFORM == "win32"
                    else {"start_new_session": True})
-        self.process = subprocess.Popen((sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")),
+        argv = _retained_python_command(
+            (sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")), environment)
+        self.process = subprocess.Popen(argv,
             cwd=REPO.parent, env=dict(environment), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, **options)
         def read():

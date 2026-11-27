@@ -2268,6 +2268,25 @@ def g_arm(monkeypatch, platform):
     return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
 
 
+@pytest.mark.parametrize(("platform", "venv", "direct"), [
+    ("win32", True, True),
+    ("win32", False, False),
+    ("darwin", True, False),
+])
+def test_guardian_launch_retains_python_process(monkeypatch, platform, venv, direct):
+    python = "venv/python" if venv else "base/python"
+    monkeypatch.setattr(p, "sys", SimpleNamespace(
+        executable=python, _base_executable="base/python",
+        prefix="venv" if venv else "base", base_prefix="base",
+        modules=p.sys.modules,
+    ))
+    case = g_arm(monkeypatch, platform)
+    argv, kwargs = case.calls[0]
+    assert argv[0] == ("base/python" if direct else python)
+    assert argv[1:3] == ("-B", "-c")
+    assert kwargs["env"].get("__PYVENV_LAUNCHER__") == (python if direct else None)
+
+
 def test_teardown_guardian_process_exits_hard(monkeypatch):
     c = g_arm(monkeypatch, "darwin")
     code = c.calls[0][0][3]
@@ -5836,16 +5855,20 @@ def test_r14f1_canonical_replay_independent(monkeypatch):
 def test_r14f1_canonical_child_bootstrap(monkeypatch, capsys):
     from contextlib import contextmanager
     sizing, called = p._sizing_module(), []
-    replay = object()
+    replay = SimpleNamespace(public=lambda: {}, token="test", fixture_map={})
     monkeypatch.setattr(sizing, "read_private_plan", lambda env: called.append("pins") or replay)
+    real_bootstrap = sizing.bootstrap_child
     def bootstrap(plan, role, environment):
-        assert plan is replay and role == "canonical"
-        called.append("bootstrap")
-        return environment
+        assert plan is replay and role == "canonical-heartbeat"
+        return real_bootstrap(plan, role, environment, modules=object())
+    def validate(plan, environment, **options):
+        assert plan is replay
+        called.append("validate")
     monkeypatch.setattr(sizing, "bootstrap_child", bootstrap)
+    monkeypatch.setattr(sizing, "_validate_plan", validate)
     @contextmanager
     def connection(environment, deadline):
-        assert called == ["pins", "bootstrap"] and environment["DATABASE_URL"] == "fakedb"
+        assert called == ["pins", "pins", "validate"] and environment["DATABASE_URL"] == "fakedb"
         yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: None))
     monkeypatch.setattr(p, "_project_connection", connection)
     request = dict(purpose="heartbeat", tool_name="solar-size-strings", evidence=None,
