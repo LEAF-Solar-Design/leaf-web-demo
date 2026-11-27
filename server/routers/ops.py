@@ -45,7 +45,7 @@ from typing import Any, Dict, Literal, Optional, Set
 from uuid import uuid4
 
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
@@ -55,6 +55,8 @@ import agent_policy
 import broker_client
 import deps
 import operator_deps
+import tool_envelopes
+from branch_tools import run_receipts, tenant_catalog
 from operator_deps import OperatorContext
 from customization_service import CustomizationService, CustomizationServiceError
 from envelopes import ErrorCode, error_response, with_envelope_fields
@@ -392,6 +394,28 @@ def operator_tenants(
     _operator: OperatorContext = Depends(operator_deps.require_operator),
 ) -> Any:
     return _tenant_listing()
+
+
+@operator_router.get("/api/operator/tenants/{tenant_id}/tool-receipts")
+def operator_tool_receipts(
+    tenant_id: str, name: Optional[str] = None, limit: int = Query(default=50, ge=1, le=100),
+    _operator: OperatorContext = Depends(operator_deps.require_operator),
+) -> Any:
+    headers = {"Cache-Control": "no-store"}
+    try:
+        tenant_id = str(UUID(tenant_id))
+    except ValueError:
+        return JSONResponse({"detail": "tenant_not_found"}, status_code=404, headers=headers)
+    if name is not None and not tool_envelopes.valid_identity(name, "0.0.0"):
+        return JSONResponse({"detail": "invalid_tool_identity"}, status_code=422, headers=headers)
+    try:
+        rows = run_receipts.support_rows(CustomizationService.configured().store, tenant_id, name, limit)
+        root = os.environ.get("LEAF_TENANT_TOOLS_DIR")
+        checked = tenant_catalog.plugin_check_at(root, tenant_id) if root else None
+        return JSONResponse({"tenant_id": tenant_id, "last_plugin_check_at": checked, "receipts": rows},
+                            headers=headers)
+    except Exception:
+        return JSONResponse({"detail": "receipt_store_unavailable"}, status_code=503, headers=headers)
 
 
 @router.get("/api/ops/unit-economics")

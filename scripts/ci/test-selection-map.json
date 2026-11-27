@@ -704,6 +704,7 @@
     "server-branch-package-check",
     "server-branch-dev-catalog",
     "server-branch-sync-receipts",
+    "server-branch-run-receipts",
     "server-tenant-catalog",
     "server-workspace-identity-echo",
     "server-tenant-plugin-check",
