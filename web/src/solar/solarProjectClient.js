@@ -24,6 +24,32 @@ const utf8 = (value) => new TextEncoder().encode(value).byteLength
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
 const assert = (condition) => { if (!condition) throw new TypeError('Invalid Solar request') }
 
+function validSavedCablePage(data, binding, before, after, offset) {
+  const page = data?.result
+  if (page?.schema !== 'leaf.solar-project-saved-cable-length-comparison.v1' ||
+      page.organization_id !== binding.organization_id || page.project_id !== binding.project_id ||
+      page.drawing_id !== binding.drawing_id || page.offset !== offset) return false
+  const source = (receipt, version) => receipt?.source_version_id === version &&
+    edgeHash(receipt.source_intake_sha256) && edgeHash(receipt.graph_sha256)
+  const { total_changes: total, next_offset: next, changes } = page
+  const end = offset + 250
+  if (!source(page.before, before) || !source(page.after, after) ||
+      !Number.isSafeInteger(total) || total < 0 || next !== (end < total ? end : null) ||
+      !Array.isArray(changes) || changes.length !== Math.max(0, Math.min(total, end) - offset)) return false
+  const readable = (row) => row && ['feeder', 'start homerun', 'end homerun'].includes(row.route_kind) &&
+    typeof row.schedule_label === 'string' && !!row.schedule_label &&
+    Number.isFinite(row.length_ft) && row.length_ft >= 0
+  const routes = new Set()
+  return changes.every((row) => {
+    if (typeof row?.route_id !== 'string' || !row.route_id || routes.has(row.route_id)) return false
+    routes.add(row.route_id)
+    if (row.change === 'added') return row.before === null && readable(row.after)
+    if (row.change === 'removed') return readable(row.before) && row.after === null
+    return row.change === 'changed' && readable(row.before) && readable(row.after) &&
+      row.before.length_ft !== row.after.length_ft
+  })
+}
+
 async function engineeringContentHash(content) {
   // Integrity is mandatory, including on browsers without SubtleCrypto.
   assert(typeof globalThis.crypto?.subtle?.digest === 'function')
@@ -802,6 +828,18 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       }
       return local('SIP_R7_SCOPE_STALE')
     },
+    compareSavedCableLengths: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { beforeVersionId, afterVersionId, offset = 0, signal } = options
+      assert(typeof beforeVersionId === 'string' && UUID.test(beforeVersionId) &&
+        typeof afterVersionId === 'string' && UUID.test(afterVersionId) &&
+        Number.isSafeInteger(offset) && offset >= 0 && offset <= 9999999999)
+      const b = scope.binding
+      const path = `/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${beforeVersionId}/solar-schedule-comparison`
+      const query = new URLSearchParams({ compare_version_id: afterVersionId, cable_offset: offset })
+      return request(`${path}?${query}`, { scope, signal,
+        validate: (data) => validSavedCablePage(data, b, beforeVersionId, afterVersionId, offset) })
+    }),
     readSolar: (options = {}) => guarded((scope) => {
       assert(plain(options))
       const { tool, params = {}, catalogDigest, current: required = false, signal } = options

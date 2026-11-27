@@ -168,6 +168,52 @@ def compare_schedules(http, before, after, **params):
     })
 
 
+def compare_saved_cables(http, before, after, **params):
+    s = http.s
+    path = f"/api/projects/{s.project}/drawings/{s.drawing}/versions/{before}"
+    return http.client.get(f"{path}/solar-schedule-comparison", params={
+        "compare_version_id": after, "cable_offset": 0, **params,
+    })
+
+
+def test_sip_r6_compares_saved_cables_without_artifacts(http):
+    graph = files.schedules_cases.solaredge_layout(files.design_cases.graph.__wrapped__(), "direct")
+    before = save_schedule_graph(http, graph)
+    revised = deepcopy(graph)
+    route = revised["routes"][0]
+    route["points"].insert(1, [0, 12])
+    after = save_schedule_graph(http, revised)
+    s = http.s
+    custody = dict(s.blobs), s.head, list(s.writes)
+    lengths = (16.40, 82.02)  # 5 m and 25 m, rounded to workbook precision.
+
+    for first, second, expected in ((before, after, lengths), (after, before, lengths[::-1]),
+                                    (before, before, ())):
+        response = compare_saved_cables(http, first, second)
+        assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "no-store"
+        result = response.json()["result"]
+        assert result["schema"] == "leaf.solar-project-saved-cable-length-comparison.v1"
+        assert (result["organization_id"], result["project_id"], result["drawing_id"]) == (
+            str(s.org), str(s.project), str(s.drawing))
+        assert result["before"]["source_version_id"] == str(first)
+        assert result["after"]["source_version_id"] == str(second)
+        assert result["offset"] == 0 and result["next_offset"] is None
+        if expected:
+            change, = result["changes"]
+            assert result["total_changes"] == 1 and change["change"] == "changed"
+            assert change["route_id"] == route["id"]
+            assert tuple(change[side]["length_ft"] for side in ("before", "after")) == expected
+            label = next(row["circuit_tag"] for row in graph["strings"] if row["id"] == route["from_ref"])
+            assert all(change[side]["schedule_label"] == label for side in ("before", "after"))
+        else:
+            assert result["total_changes"] == 0 and result["changes"] == []
+
+    assert compare_saved_cables(http, before, uuid4()).status_code == 404
+    assert compare_saved_cables(http, before, after, before_artifact_id="a" * 64).status_code == 400
+    assert (s.blobs, s.head, s.writes) == custody
+
+
 @pytest.mark.parametrize("variant", ["relabel", "unassign", "input-swap"])
 def test_sip_r6_schedule_comparison_direct(http, variant):
     make_graph = files.design_cases.graph.__wrapped__
