@@ -259,3 +259,59 @@ describe('author immediate-turn contract', () => {
     expect(postMessage).toHaveBeenCalledTimes(1)
   })
 })
+
+it.each(['clear', 'project round trip', 'drawing round trip'])(
+  'rejects a late turn after %s even when the same session id reattaches',
+  async (change) => {
+    let finish
+    postMessage.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const hook = renderHook(({ drawingId }) => useConverseSessionController({ drawingId }), {
+      initialProps: { drawingId: 'drawing-a' },
+    })
+    act(() => hook.result.current.setProjectContext('project-a'))
+    let pending
+    await act(async () => {
+      pending = hook.result.current.startTurn('old request').catch((error) => error)
+    })
+    if (change === 'clear') act(() => hook.result.current.clear())
+    if (change === 'project round trip') {
+      act(() => hook.result.current.setProjectContext('project-b'))
+      act(() => hook.result.current.setProjectContext('project-a'))
+    }
+    if (change === 'drawing round trip') {
+      hook.rerender({ drawingId: 'drawing-b' })
+      hook.rerender({ drawingId: 'drawing-a' })
+    }
+    await act(async () => { await hook.result.current.attach() })
+    await act(async () => {
+      finish({ turn_id: 'old-turn', status: 'started', active_requests: { total: 1 } })
+      expect(await pending).toBeInstanceOf(Error)
+    })
+    expect(hook.result.current.sessionId).toBe('session-a')
+    expect(hook.result.current.turns).toEqual([])
+    expect(hook.result.current.requestStatus).toBeNull()
+    expect(hook.result.current.activeRequests.total).toBe(0)
+  },
+)
+
+it('does not retry a late not-found response over a replacement session', async () => {
+  let fail
+  classifyAgentError.mockReturnValue('not_found')
+  postMessage.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+  const { result } = projectController()
+  let pending
+  await act(async () => {
+    pending = result.current.startTurn('old request').catch((error) => error)
+  })
+  act(() => result.current.clear())
+  ensureSession.mockResolvedValueOnce({ session_id: 'replacement' })
+  await act(async () => { await result.current.attach() })
+  await act(async () => {
+    fail(new Error('old session missing'))
+    expect(await pending).toBeInstanceOf(Error)
+  })
+  expect(postMessage).toHaveBeenCalledTimes(1)
+  expect(ensureSession).toHaveBeenCalledTimes(2)
+  expect(result.current.sessionId).toBe('replacement')
+  expect(result.current.turns).toEqual([])
+})
