@@ -1,10 +1,7 @@
 // THE BUILD QUEUE CARD (standardization slice 11a). Renders ONE build record
 // (web/src/lib/buildQueue.js) as a ledger row, whatever lane ran it. JobRail
-// hosts it on the right spine: for a broker job the row is byte-for-byte the
-// row JobRail rendered before this slice (same dot grammar, same status
-// words, same cost text, same clock column, same `current` mark), plus the
-// two-stage terminal marks on terminal rows and a meta line only when the
-// record actually carries a requester, receipts or an action the host wired.
+// hosts it on the right spine with status, cost, timing and verification.
+// The host can supply a measured queue wait from the job summary.
 //
 // The card never decides a state. It reads `record.state`, `record.status`
 // and `record.terminal` as facts the mapper established, and it renders an
@@ -52,7 +49,7 @@ function Stage({ on, name, yes, no, glyph }) {
   )
 }
 
-export default function BuildQueueCard({ record, current = false, onSelect, actions = null }) {
+export default function BuildQueueCard({ record, current = false, onSelect, actions = null, queueWaitMs = null }) {
   if (!record) return null
   const terminal = isTerminalBuild(record)
   const when = fmtWhen(record.started)
@@ -82,7 +79,8 @@ export default function BuildQueueCard({ record, current = false, onSelect, acti
   // it is a fact about this record, not an external artifact, so it is
   // counted separately from the "N receipts" a person can actually open.
   const visibleReceipts = record.receipts.filter((r) => r.ref !== `${record.id}#verified_at`)
-  const hasMeta = !!record.requested_by || visibleReceipts.length > 0 || !!record.estimate_ms || !!cost
+  const hasMeta = !!record.requested_by || visibleReceipts.length > 0
+    || !!record.estimate_ms || !!cost || queueWaitMs != null
   const rowClass = ['rail-row', 'build-queue-card', current ? 'current' : ''].filter(Boolean).join(' ')
 
   const inner = (
@@ -136,6 +134,7 @@ export default function BuildQueueCard({ record, current = false, onSelect, acti
       {row}
       {hasMeta && (
         <div className="bq-meta">
+          {queueWaitMs != null && <span>Queue wait {elapsedText(queueWaitMs)}</span>}
           <span className="bq-lane">{LANE_WORD[record.lane]}</span>
           {record.requested_by && (
             <span className="bq-requested" title="Who asked for this build">

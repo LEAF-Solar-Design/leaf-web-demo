@@ -22,6 +22,32 @@ const terminalRecord = fromBrokerJob({
   receipts: [{ kind: 'terminal', ref: 'receipts/job-verified/receipt.json', at: 1725400001 }],
 })
 
+describe('JobRail queue wait', () => {
+  it('shows a measured wait alongside the running elapsed time', () => {
+    const job = { ...doneJob, status: 'running', started_at: doneJob.created_at + 0.513, elapsed_ms: 2000 }
+    const { getByText } = render(<JobRail mock jobs={[job]} />)
+    expect(getByText('Queue wait 0.5s')).toBeVisible()
+    expect(getByText('2.0s')).toBeVisible()
+  })
+
+  it('keeps the measured wait when the build feed supplies the terminal record', () => {
+    const job = { ...doneJob, started_at: '2024-09-03T21:46:40.000Z' }
+    const { getByText } = render(<JobRail mock jobs={[job]} builds={[terminalRecord]} />)
+    expect(getByText('Queue wait 0.0s')).toBeVisible()
+  })
+
+  it.each([
+    ['pending', { status: 'submitted' }],
+    ['legacy', {}],
+    ['reversed timestamps', { started_at: doneJob.created_at - 1 }],
+    ['malformed timestamp', { started_at: 'unknown' }],
+  ])('omits queue wait for %s jobs', (_label, changes) => {
+    const job = { ...doneJob, ...changes }
+    const { queryByText } = render(<JobRail mock jobs={[job]} />)
+    expect(queryByText(/Queue wait/)).toBeNull()
+  })
+})
+
 describe('JobRail failed-job retry', () => {
   it('ellipsizes long titles and exposes the full title on hover', () => {
     const title = 'String every panel across the entire north and south roof areas'
