@@ -132,6 +132,9 @@ def crop_drawing(service_x, viewport_tags=(), boundary=()):
     ("Count only thawed panels that also lie inside the viewport crop polygon.",
      crop_drawing(1000, boundary=((-10, -10), (10, -10), (10, 10), (-10, 10))),
      ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
+    ("Count only thawed panels that also lie inside the viewport crop polygon.",
+     crop_drawing(1000, ((340, "0"),)),
+     ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
     ("Which PV modules on unfrozen layers are inside the viewport A1 clipping boundary?",
      crop_drawing(3, boundary=((-1, -1), (4, -1), (4, -.5), (1, -.5), (1, 1), (-1, 1))),
      ["C1[0,0]/B1[0,0]"]),
@@ -149,6 +152,7 @@ def test_crop_and_thaw_composition(ask, raw, expected):
 
 @pytest.mark.parametrize("tags,expected", [
     (((340, "FF"),), "missing or ambiguous"),
+    (((340, "0"), (90, 65536)), "missing or ambiguous"),
     (((90, 1),), "unsupported perspective viewport calibration"),
     (((36, 0),), "finite view direction"),
     (((90, 22), (43, -2), (44, 2)), "invalid viewport depth planes"),
