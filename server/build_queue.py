@@ -401,6 +401,13 @@ def from_broker_job(job: Any, session_id: str = "this-session") -> Optional[Dict
     title = _clip(tool if isinstance(tool, str) else None)
     if rec_id is None or title is None:
         return None
+    if tool == "internal.native-preview":
+        preview = job.get("native_preview")
+        source = preview.get("source") if _is_obj(preview) else None
+        if _is_obj(source) and source.get("schema") == "leaf.project-preview-source.v1":
+            revision = source.get("revision")
+            if type(revision) is int and 0 < revision <= 2**53 - 1:
+                title = f"iOS preview · Saved revision {revision}"
     tag = broker_state_tag(job)
     status = job.get("status")
     if status == "running":

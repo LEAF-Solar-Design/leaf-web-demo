@@ -508,6 +508,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const nativeStatus = native?.job?.status
   const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
     : ({ queued: 'Queued', running: 'Building', failed: 'Failed', cancelled: 'Cancelled' })[nativeStatus]
+  const nativeExpired = native?.job?.failure_disposition?.reason === 'execution_budget_expired'
 
   return <section className="project-page-editor" aria-label="Page editor" ref={editor} onFocusCapture={event => {
     const row = actionRow.current
@@ -614,7 +615,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
             if (prior) void buildNative(prior)
           }}>Recover original iOS preview</button>
         {dirty && <p className="project-page-editor__note">Save changes before building a new preview.</p>}
-        {native && <p role="status" aria-live="polite">{nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision {native.revision}</p>}
+        {native && <p role="status" aria-live="polite">{nativeExpired
+          ? `This iOS preview exceeded its build time limit. Saved revision ${native.revision} is still available.`
+          : `${nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision ${native.revision}`}</p>}
         {native?.message && <p className="project-page-editor__note" role="status">{native.message}</p>}
         {native?.url && <img className="project-page-editor__native-image" src={native.url} alt={`iOS simulator preview of saved portfolio revision ${native.job.revision}`} />}
       </section>}

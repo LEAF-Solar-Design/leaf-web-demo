@@ -230,7 +230,10 @@ export function savedReconciliationValues(graph) {
   values[4] = dcValid && covered.size === panels.size ? available(total)
     : unavailable('DC needs complete, unique frame coverage and positive supported module watts for every panel.')
   const optimizers = savedOptimizerMeasurement(graph)
-  if (optimizers) values[1] = available(BigInt(optimizers.total_count) * SCALE)
+  if (optimizers) values[1] = {
+    ...available(BigInt(optimizers.total_count) * SCALE),
+    reportDigest: graph.extra.solaredge_import.report.content_sha256,
+  }
   return values
 }
 

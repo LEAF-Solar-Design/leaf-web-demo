@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -40,10 +41,10 @@ NEC = {
 CALC = "solar-nec-ampacity-correction"
 
 
-def setup(monkeypatch):
+def setup(monkeypatch, *, through=chain_cases.through_equipment):
     monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
     s = tools_cases.memory.__wrapped__(monkeypatch)
-    s.ctx = chain_cases.through_equipment(s)[-1][2]
+    s.ctx = through(s)[-1][2]
     s.tenant = deps.TenantContext(str(s.org), org_id=str(s.org), tier="hosted_pro", subject="reader")
     monkeypatch.setattr(deps, "find_tool", lambda name, tenant: solar_tools.trusted_record(name))
     monkeypatch.setattr(read.stored, "stored_job_entitlement_verdict", lambda org, kind: (None, None))
@@ -770,3 +771,71 @@ def test_assignment_report_catalog_refuses_missing_version_metadata(lane, monkey
     assert state["runnable"] is False and state["input_ready"] is False
     assert state["input_reason"] == "invalid_drawing_context"
     assert state["refusal_reasons"] == ["invalid_drawing_context"]
+
+def test_sip_r6_string_continuity_read(lane):
+    params = {"format": "continuity-json", "max_panel_pitch_m": 0.001}
+    response = run(lane, "solar-string-data", params)["result"]
+    result = response["output"]
+    assert result["summary"]["max_panel_pitch_m"] == params["max_panel_pitch_m"]
+    assert result["summary"]["strings"] == 1
+    assert result["artifact"]["filename"] == "StringContinuity.json"
+    assert response["input_version_id"] == str(lane.head)
+    assert response["drawing_changed"] is False
+    assert response["graph_sha256"] == lane.ctx.graph_sha256
+
+
+def clearance_lane(monkeypatch, variant):
+    intake = tools_cases.panel_intake()
+    for index, panel in enumerate(intake["polylines"]):
+        points = panel["pts"]
+        if variant == "rotated":
+            panel["pts"] = [[-y, x + (23 if x > 100 * index else 0)] for x, y in points]
+        elif variant == "resized" and index < 2:
+            panel["pts"] = [[x + (-11.5 if x == 100 * index else 11.5), y] for x, y in points]
+        elif variant == "curved" and index == 0:
+            panel["bulges"] = [0.1, 0, 0, 0]
+    monkeypatch.setattr(tools_cases, "panel_intake", lambda: intake)
+
+    def through(s):
+        ctx = tools_cases.chain(s)[-1][2]
+        panels = sorted(ctx.graph["panels"], key=lambda panel: panel["provenance"]["source_handle"])
+        refs = [panel["id"] for panel in panels]
+        params = {"expected_rev": ctx.graph["rev"], "operation": "add-string", "ordered_panel_refs": refs}
+        return [tools_cases.commit(s, "solar-string-add", params, ctx)]
+
+    return setup(monkeypatch, through=through)
+
+
+@pytest.mark.parametrize(("variant", "expected_drawing_gaps"), [
+    ("separated", [23, 23]),
+    ("rotated", []),
+    ("resized", [11.5]),
+])
+def test_sip_r6_string_edge_clearance(monkeypatch, variant, expected_drawing_gaps):
+    s = clearance_lane(monkeypatch, variant)
+    scale = s.ctx.graph["project"]["units"]["meters_per_unit"]
+    params = {"format": "edge-clearance-json", "max_panel_edge_gap_m": 5 * scale}
+    response = run(s, "solar-string-data", params)["result"]
+    result = response["output"]
+    assert response["input_version_id"] == str(s.head)
+    assert response["drawing_changed"] is False
+    assert result["summary"]["gap_count"] == len(expected_drawing_gaps)
+    ref = result["artifact"]
+    assert ref["filename"] == "StringEdgeClearance.json"
+    _, content = read.artifacts.read_project_artifact(s.tenant, s.project, s.drawing, ref["artifact_id"])
+    report = json.loads(content)
+    assert report["schema"] == "leaf.solar-string-edge-clearance.v1"
+    string, = report["strings"]
+    assert [gap["distance_m"] for gap in string["gaps"]] == pytest.approx(
+        [gap * scale for gap in expected_drawing_gaps])
+    assert sum(piece["panel_count"] for piece in string["ordered_runs"]) == 3
+    center = output(s, "solar-string-data", {"format": "continuity-json", "max_panel_pitch_m": 5 * scale})
+    assert center["summary"]["gap_count"] == 2
+
+
+def test_sip_r6_string_edge_clearance_refuses_unverified_outline(monkeypatch):
+    s = clearance_lane(monkeypatch, "curved")
+    before = list(s.writes)
+    refused("STRING_EDGE_OUTLINE_UNAVAILABLE", lambda: run(s, "solar-string-data",
+        {"format": "edge-clearance-json", "max_panel_edge_gap_m": 0}))
+    assert s.writes == before

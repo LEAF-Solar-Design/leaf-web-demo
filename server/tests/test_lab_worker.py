@@ -81,6 +81,7 @@ def test_finishes_values_pins_and_status(rig):
     assert all("data" in value for event in values for value in event["payload"].values())
     row = store.get(rig.tenant, "run")
     assert row["claimed_build_revision"] == "abc1234" and row["claimed_color"] == "active"
+    assert row["attempt_wall_cap_seconds"] == 600
     status = next(row for row in store.worker_status() if row["worker_id"] == rig.tenant)
     assert status["build_revision"] == "abc1234" and status["color"] == "active"
     assert any(kind == "age" for kind, value in rig.metrics)
@@ -549,6 +550,7 @@ def test_run_cap_uses_injected_clock(rig, monkeypatch):
     rig.make(clock=lambda: current[0]).tick()
     terminal(rig, "failed")
     assert events(rig)[-1]["payload"] == {"reason": "run_wall_cap"}
+    assert store.get(rig.tenant, "run")["attempt_wall_cap_seconds"] == 600
 
 
 @pytest.mark.parametrize("read_s", [600, 601])
@@ -902,7 +904,7 @@ def test_worker_fences_all_primed_intents_and_retains_terminal_cause(monkeypatch
         corpus_authority=lambda row: rig.authority, owns_corpus_run=lambda *args: rig.owned,
         cancel_requested=lambda *args: rig.requested, append_events=append,
         cancel_corpus_job=lambda *args, deadline: rig.options['corpus_cancel'](args[-2], args[-1], deadline),
-        finish=lambda *args: finished.append(args[-1]) or True)
+        finish=lambda *args, **kwargs: finished.append(args[-1]) or True)
     instance = worker.LabWorker(store=fake_store,
         artifacts=SimpleNamespace(get=lambda *args: {'graph': rig.graph, 'sha256': 'a' * 64}),
         clock=lambda: rig.now, lease_s=10000, env={},
@@ -978,7 +980,7 @@ def test_worker_priming_preserves_shared_budget_and_fresh_cancellation(monkeypat
     fake_store = SimpleNamespace(paused=lambda: False, registry_digest=lambda: 'registry',
         corpus_authority=lambda row: rig.authority, owns_corpus_run=lambda *args: True,
         cancel_requested=lambda *args: rig.requested, append_events=lambda *args: True,
-        finish=lambda *args: finished.append(args[-1]) or True)
+        finish=lambda *args, **kwargs: finished.append(args[-1]) or True)
     observed = []
     evaluate = worker.evaluate_graph
     def check_budget(*args, budget, tool_adapter, **kwargs):

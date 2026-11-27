@@ -156,6 +156,10 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
         data = canonical_bytes(output)
         if len(data) > MAX_OUTPUT_BYTES:
             _fail("READ_OUTPUT_LIMIT_EXCEEDED")
+    elif tool_name == "solar-string-data" and normalized.get("format") == "edge-clearance-json":
+        source = None if native.KEY in verified.intake else graph_adapter._canonical_source_intake(context)
+        output, data = local._read_output(tool_name, context.graph, normalized, sink,
+            source_intake=source)
     elif tool_name == "solar-takeoff":
         physical = None
         if native.KEY in verified.intake:
