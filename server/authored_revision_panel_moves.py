@@ -23,7 +23,8 @@ PARAMS = {
 
 
 def matches(description):
-    return floor_comparison_requested(description) or group_comparison_requested(description)
+    return (floor_comparison_requested(description) or layer_comparison_requested(description)
+            or group_comparison_requested(description))
 
 
 def floor_comparison_requested(description):
@@ -31,6 +32,13 @@ def floor_comparison_requested(description):
     return all(re.search(pattern, prompt) for pattern in (
         r"\b(?:panels?|modules?)\b", r"\b(?:revisions?|versions?|parent drawing)\b",
         r"\b(?:floors?|levels?|storeys?|story|stories)\b", r"\b(?:mov\w*|chang\w*|relocat\w*)\b",
+    ))
+
+
+def layer_comparison_requested(description):
+    return all(re.search(pattern, description.casefold()) for pattern in (
+        r"\b(?:panels?|modules?)\b", r"\b(?:revisions?|versions?|parent drawing)\b",
+        r"\blayers?\b", r"\b(?:mov\w*|relocat\w*)\b",
     ))
 
 
@@ -45,11 +53,11 @@ def group_comparison_requested(description):
 
 
 def parameter_schema(description):
-    if not group_comparison_requested(description):
-        return PARAMS
     schema = PARAMS if floor_comparison_requested(description) else {
         "type": "object", "properties": {}, "required": [], "additionalProperties": False,
     }
+    if not group_comparison_requested(description):
+        return schema
     return {**schema, "properties": {**schema["properties"], "group_name": {
         "type": "string", "minLength": 1,
         "description": "Compare a single saved DXF group by name. Omit to report all changed groups.",
@@ -116,13 +124,16 @@ def _bind_snapshots(artifact_id, prior_version, current_version, prior_bytes, cu
 def build_body(description):
     groups = group_comparison_requested(description)
     floors = floor_comparison_requested(description)
-    physical_totals = floors or bool(re.search(
+    layer_moves = layer_comparison_requested(description)
+    layers = layer_moves or (floors and bool(re.search(r"\blayers?\b", description.casefold())))
+    physical_totals = floors or layer_moves or bool(re.search(
         r"\b(?:physical totals|(?:panel|module) (?:counts?|totals?)|"
         r"(?:count|how many)(?: \w+){0,3} (?:panels|modules))\b", description.casefold(),
     ))
     return (
         "import math\nimport re\n"
-        f"COMPARE_GROUPS = {groups}\nCOMPARE_FLOORS = {floors}\nCOUNT_PANELS = {physical_totals}\n"
+        f"COMPARE_GROUPS = {groups}\nCOMPARE_FLOORS = {floors}\nINCLUDE_LAYERS = {layers}\n"
+        f"COMPARE_LAYER_MOVES = {layer_moves}\nCOUNT_PANELS = {physical_totals}\n"
         + TRANSFORM_SOURCE + _BODY
     )
 
@@ -197,6 +208,8 @@ def collect(drawing, drawing_id, version, floors):
                         raise ValueError("Panel falls below the lowest supplied floor.")
                     records[path] = {"drawing_id": drawing_id, "version": version, "path": path,
                                      "floor": floor, "position": list(point)}
+                    if INCLUDE_LAYERS:
+                        records[path]["layer"] = insert.get("layer") or "0"
                 else:
                     if len(stack) + len(children) > remaining:
                         raise ValueError("Panel comparison exceeds the placement limit.")
@@ -262,7 +275,9 @@ def run(intake, params):
     old = collect(prior, drawing_id, previous, floors)
     new = collect(intake, drawing_id, current, floors)
     moved = [{"prior": old[path], "current": new[path]} for path in sorted(old.keys() & new.keys())
-             if old[path]["floor"] != new[path]["floor"]]
+             if old[path]["floor"] != new[path]["floor"] or (
+                 COMPARE_LAYER_MOVES and old[path]["layer"] != new[path]["layer"]
+                 and old[path]["position"] != new[path]["position"])]
     result.update({"counts": {"prior": len(old), "current": len(new)}, "moved": moved,
                    "added": [new[p] for p in sorted(new.keys() - old.keys())],
                    "removed": [old[p] for p in sorted(old.keys() - new.keys())]})
