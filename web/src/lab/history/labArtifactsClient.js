@@ -108,6 +108,24 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       if (current(token)) update({ requestTimes: [...state.requestTimes, Math.max(0, now() - started)].slice(-20) })
     }
   }
+  async function readBundle(id, revision, token, { preserveText = false } = {}) {
+    const scope = authority()
+    let text
+    const readBody = preserveText ? async response => {
+      text = await response.text()
+      return JSON.parse(text)
+    } : null
+    const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`,
+      undefined, false, token, 'GET', readBody)
+    if (!result.ok) return result
+    if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
+    try {
+      const { ok: unused, ...bundle } = result
+      verifyLabBundle(bundle)
+      if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
+      return preserveText ? { ok: true, bundle, text } : { ok: true, bundle }
+    } catch { return { ok: false, detail: bundleError } }
+  }
   async function getLayout(id, sha256) {
     try {
       const result = await request(id, `layout/${encodeURIComponent(sha256)}`, undefined, false)
@@ -161,6 +179,30 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return { state: 'ready', docId: remembered, revision: head.revision, graph: row.graph, token }
     },
     currentGeneration: () => generation,
+    captureBundleScope() {
+      const token = capture(docId), scope = authority()
+      return () => current(token) && scope === authority()
+    },
+    async inspectBundle(bytes, isCurrent) {
+      const stale = { ok: false, detail: 'Document or account changed. Choose the file again.' }
+      if (!isCurrent()) return stale
+      if (bytes.byteLength > 64 * 1024 * 1024) return { ok: false, detail: 'Bundle is too large.' }
+      let bundle
+      try {
+        bundle = verifyLabBundle(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)))
+      } catch { return { ok: false, detail: 'Bundle integrity check failed.' } }
+      const identity = bundle.parts.identity
+      const allowed = await readBundle(identity.doc_id, identity.revision, capture(docId))
+      if (!isCurrent()) return stale
+      if (!allowed.ok) return allowed
+      if (canonicalJSON(allowed.bundle.parts.identity) !== canonicalJSON(identity)) {
+        return { ok: false, detail: 'Bundle identity does not match the saved revision.' }
+      }
+      const digest = await crypto.subtle.digest('SHA-256', bytes)
+      if (!isCurrent()) return stale
+      const fileDigest = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+      return { ok: true, bundle, fileDigest, authorizedEvaluations: allowed.bundle.parts.evaluations }
+    },
     beginGraphOperation: () => ({ ...capture(docId), operation: ++operation }),
     isCurrentOperation: token => current(token) && token.operation === operation,
     captureMine(graph) { if (state.conflict && !state.conflict.captured) update({ conflict: { ...state.conflict, mine: JSON.parse(JSON.stringify(graph)), captured: true } }) },
@@ -203,24 +245,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       return result
     },
     revision: (id, n) => request(id, `revisions/${encodeURIComponent(n)}`),
-    async exportBundle(id, revision, { preserveText = false } = {}) {
-      const token = capture(id), scope = authority()
-      let text
-      const readBody = preserveText ? async response => {
-        text = await response.text()
-        return JSON.parse(text)
-      } : null
-      const result = await request(id, `revisions/${encodeURIComponent(revision)}/export`,
-        undefined, false, token, 'GET', readBody)
-      if (!result.ok) return result
-      if (!current(token) || scope !== authority()) return { ok: false, detail: 'Document or account changed. Try exporting again.' }
-      try {
-        const { ok: unused, ...bundle } = result
-        verifyLabBundle(bundle)
-        if (bundle.parts.identity.doc_id !== id || bundle.parts.identity.revision !== Number(revision)) throw new Error(bundleError)
-        return preserveText ? { ok: true, bundle, text } : { ok: true, bundle }
-      } catch { return { ok: false, detail: bundleError } }
-    },
+    exportBundle: (id, revision, options) => readBundle(id, revision, capture(id), options),
     async reopenBundle(text) {
       const token = this.beginGraphOperation(), scope = authority()
       let bundle
