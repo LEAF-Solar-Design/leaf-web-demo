@@ -634,6 +634,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
                 </div>
               )}
               <ResultObjectLinks result={result} navigation={navigation} announce={announce} />
+              <ResultJsonDownload result={result} selection />
               {result.overlay.markers?.length > 0 && (
                 <div className="ov-row">
                   <span className="ov-dot mk" />
