@@ -9,6 +9,8 @@ import zipfile
 from branch_tools import online_signer, tenant_catalog
 from branch_tools.package_check import check_branch_package
 
+TENANT_TIMEOUT_CAP_MS = 60_000  # tenant tools may block AutoCAD's UI thread for at most 60 s
+
 
 class TenantPublishError(RuntimeError):
     def __init__(self, code, status_code=503, failures=None):
@@ -33,7 +35,7 @@ def timestamp(now):
     return now.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def reviewed_package(files, name):
+def reviewed_package(files, name, *, timeout_cap_ms=TENANT_TIMEOUT_CAP_MS):
     checked = check_branch_package(files, name)
     capabilities = (checked.manifest or {}).get("capabilities", [])
     if not isinstance(capabilities, list):
@@ -48,6 +50,10 @@ def reviewed_package(files, name):
         raise TenantPublishError("branch_package_invalid", 422, checked.failures)
     manifest = dict(checked.manifest)
     manifest["review"] = {"status": "reviewed"}
+    timeout = manifest.get("timeout_ms")
+    if (timeout_cap_ms is not None and isinstance(timeout, int) and not isinstance(timeout, bool)
+            and timeout > timeout_cap_ms):
+        manifest["timeout_ms"] = timeout_cap_ms
     files = dict(files)
     files["tool.json"] = online_signer.canonical_json(manifest)
     checked = check_branch_package(files, name)

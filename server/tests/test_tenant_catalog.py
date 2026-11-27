@@ -80,6 +80,71 @@ def test_tenants_have_independent_versions(client, tmp_path, monkeypatch):
         assert client.get(BASE + f"/{NAME}/{VERSION}/package").content == package
 
 
+def test_tenant_list_names_only_the_newest_version_after_the_eleventh_revision(client, tmp_path):
+    for i in range(11):
+        publish(tmp_path, package=PACKAGE + bytes([i]), version=f"1.0.{i}")
+    assert client.get(BASE).json()["tools"] == [{
+        "name": NAME, "version": "1.0.10", "package_digest": content_digest(PACKAGE + bytes([10])),
+        "signed_at": envelope()["signed_at"],
+    }]
+
+
+def test_tenant_list_orders_by_semver_not_string(client, tmp_path):
+    for version in ("1.0.9", "1.1.0", "1.0.18", "2.0.0", "10.0.0"):
+        publish(tmp_path, version=version)
+    for version in ("1.0.9", "1.1.0"):
+        publish(tmp_path, name="another-tool", version=version)
+    tools = client.get(BASE).json()["tools"]
+    assert [(item["name"], item["version"]) for item in tools] == [
+        ("another-tool", "1.1.0"), (NAME, "10.0.0"),
+    ]
+
+
+def test_tenant_list_falls_back_when_the_newest_is_revoked(client, tmp_path):
+    old, _ = publish(tmp_path, version="1.0.0")
+    newest, _ = publish(tmp_path, package=PACKAGE + b"new", version="1.0.1")
+    value = json.loads(revocations(newest.package_digest))
+    value["entries"][0]["version"] = "1.0.1"
+    catalog.write_revocations(tmp_path, TENANT, json.dumps(value).encode())
+    assert [item["version"] for item in client.get(BASE).json()["tools"]] == ["1.0.0"]
+    value["entries"].append({**value["entries"][0], "version": "1.0.0",
+                             "package_digest": old.package_digest})
+    catalog.write_revocations(tmp_path, TENANT, json.dumps(value).encode())
+    assert client.get(BASE).json()["tools"] == []
+
+
+def test_tenant_list_skips_an_unverifiable_newest_version(client, tmp_path):
+    publish(tmp_path, version="1.0.0")
+    newest, _ = publish(tmp_path, version="1.0.1")
+    (newest.path / "package.sha256").write_text("0" * 64)
+    assert [item["version"] for item in client.get(BASE).json()["tools"]] == ["1.0.0"]
+
+
+def test_tenant_list_ignores_invalid_version_directory_names(client, tmp_path):
+    entry, _ = publish(tmp_path, version="1.0.0")
+    for version in ("latest", "9.9"):
+        (entry.path.parent / version).mkdir()
+    assert [item["version"] for item in client.get(BASE).json()["tools"]] == ["1.0.0"]
+
+
+def test_list_latest_versions_scan_is_bounded(tmp_path, monkeypatch):
+    for i in range(5):
+        publish(tmp_path, version=f"1.0.{i}")
+    monkeypatch.setattr(catalog, "VERSION_SCAN_LIMIT", 3)
+    directories = tool_envelopes._directories
+    scanned = []
+
+    def bounded(path, limit):
+        names = list(directories(path, limit))
+        if path == tmp_path / TENANT / NAME:
+            scanned.append((limit, len(names)))
+        return names
+
+    monkeypatch.setattr(tool_envelopes, "_directories", bounded)
+    assert len(catalog.list_latest_versions(tmp_path, TENANT)) == 1
+    assert scanned == [(3, 3)]
+
+
 def test_other_tenant_is_hidden_including_crafted_names(client, tmp_path, monkeypatch):
     publish(tmp_path, OTHER)
     assert client.get(BASE).json() == {"tools": [], "workspace_id": TENANT}
