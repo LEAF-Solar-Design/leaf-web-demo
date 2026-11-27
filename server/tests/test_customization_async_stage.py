@@ -1916,19 +1916,30 @@ def test_stage_worker_count(value, expected, monkeypatch, caplog):
 
 def test_fair_claims_invalid_worker_count_never_logs(monkeypatch, caplog):
     monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", "invalid-secret-value")
-    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_FAIR", "0")
     for _ in range(100):
         assert customization_stage_worker.fair_claims() is False
+    assert caplog.records == []
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    for _ in range(100):
+        assert customization_stage_worker.fair_claims() is True
     assert caplog.records == []
 
 
 @pytest.mark.parametrize("count, setting, expected", [
-    ("1", "", False), ("1", " 1 ", True), ("1", "true", False), ("2", "0", True),
+    ("1", "", True), ("1", " 1 ", True), ("1", "true", True),
+    ("1", "0", False), ("1", " 0 ", False), ("2", "0", True),
 ])
 def test_stage_fair_claims_configuration(monkeypatch, count, setting, expected):
     monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", count)
     monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_FAIR", setting)
     assert customization_stage_worker.fair_claims() is expected
+
+
+def test_stage_fair_claims_unset_defaults_to_fair(monkeypatch):
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", "1")
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    assert customization_stage_worker.fair_claims() is True
 
 
 def test_fair_claim_skips_live_tenant_until_expiry(store, monkeypatch):
@@ -1978,7 +1989,41 @@ def test_run_once_default_claim_kwargs(monkeypatch):
     calls = []
     service = SimpleNamespace(store=SimpleNamespace(claim_stage=lambda **kwargs: calls.append(kwargs)))
     assert not customization_stage_worker.run_once("owner", service=service, lease_seconds=12)
+    assert calls == [{"owner": "owner", "lease_seconds": 12, "fair": True, "exclude_tenants": ()}]
+
+
+def test_run_once_opt_out_claim_kwargs(monkeypatch):
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", raising=False)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STAGE_FAIR", "0")
+    calls = []
+    service = SimpleNamespace(store=SimpleNamespace(claim_stage=lambda **kwargs: calls.append(kwargs)))
+    assert not customization_stage_worker.run_once("owner", service=service, lease_seconds=12)
     assert calls == [{"owner": "owner", "lease_seconds": 12}]
+
+
+def test_default_worker_never_runs_two_builds_for_one_tenant(store, monkeypatch):
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_WORKERS", raising=False)
+    monkeypatch.delenv("LEAF_CUSTOMIZATION_STAGE_FAIR", raising=False)
+    queued(store, tenant="a", key="default-a1")
+    queued(store, tenant="a", key="default-a2")
+    assert store.claim_stage(owner="w1", fair=True).tenant_id == "a"
+    service = CustomizationService(store)
+    seen = []
+    monkeypatch.setattr(service, "dispatch_stage", lambda change: seen.append(change.tenant_id) or {})
+
+    def reconcile(change, body, **kwargs):
+        with store._transaction() as conn:
+            conn.execute("UPDATE customization_change_sets SET state = 'failed', "
+                         "stage_lease_owner = NULL, stage_lease_expires_at = NULL "
+                         "WHERE change_set_id = ?", (change.change_set_id,))
+
+    monkeypatch.setattr(service, "reconcile_stage_worker", reconcile)
+    assert customization_stage_worker.run_once("w2", service=service) is False
+    assert seen == []
+    queued(store, tenant="b", key="default-b")
+    assert customization_stage_worker.run_once("w2", service=service) is True
+    assert seen == ["b"]
+    assert customization_stage_worker._active_tenants == set()
 
 
 @pytest.mark.parametrize("raises", [False, True])
