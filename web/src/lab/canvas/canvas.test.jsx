@@ -698,16 +698,20 @@ describe('canvas authoring', () => {
   })
 
   it.each([
-    ['forward cycle', 1, 1, false, 'Cycles are refused'],
+    ['forward cycle', 1, 1, false, 'Cycles are refused', null, 'adjust-none-2'],
     ['occupied input', 3, 2, false, 'Input already connected; disconnect it first'],
-    ['reverse cycle', 1, 1, true, 'Cycles are refused'],
-    ['typed mismatch', 1, 2, false, 'Scalar and stream modes differ'],
+    ['reverse cycle', 1, 1, true, 'Cycles are refused', null, 'adjust-none-2'],
+    ['typed mismatch', 1, 2, false, 'Scalar and stream modes differ', null, 'stream-source-1'],
     ['output-to-output', 1, 2, false, 'Connect an output to an input', 'source'],
     ['input-to-input', 1, 2, false, 'Connect an output to an input', 'target'],
-  ])('explains a refused %s drop without editing the graph', (variant, from, to, reverse, reason, sameType) => {
-    const initial = variant === 'occupied input' ? connectPipe(documentOf(3), edge(1, 2)) : documentOf(3)
+  ])('offers a safe recovery from a refused %s drop when a source exists', (variant, from, to, reverse, reason, sameType, alternative) => {
+    let initial = variant === 'occupied input' ? connectPipe(documentOf(3), edge(1, 2)) : documentOf(3)
     const incompatible = { ...manifest, inputs: { ...manifest.inputs, value: { ...manifest.inputs.value, mode: 'stream' } } }
-    const entries = entriesOf(variant === 'typed mismatch' ? incompatible : manifest)
+    const streamSource = { ...manifest, id: 'stream-source',
+      outputs: { result: { ...manifest.outputs.result, mode: 'stream' } } }
+    const entries = variant === 'typed mismatch' ? entriesOf(incompatible, streamSource) : entriesOf(manifest)
+    if (variant === 'typed mismatch') initial = addBlock(initial, streamSource)
+    initial = setOutput(initial, 'existing', edge(3, 2).from, entries)
     const changed = vi.fn()
     const { container } = render(<LabCanvas initialDocument={initial} entries={entries} onChange={changed} />)
     changed.mockClear()
@@ -724,6 +728,23 @@ describe('canvas authoring', () => {
     expect(container.querySelector('footer [role="status"]')).toHaveTextContent(reason)
     expect(screen.getByTestId('pipe-count')).toHaveTextContent(String(initial.pipes.length))
     expect(changed).not.toHaveBeenCalled()
+    const picker = screen.queryByRole('combobox', { name: `Compatible sources for ${pipe.to.node} / ${pipe.to.port}` })
+    if (!alternative) {
+      expect(picker).not.toBeInTheDocument()
+      return
+    }
+    expect([...picker.options].map(option => option.text)).toEqual(variant === 'typed mismatch'
+      ? ['Choose output', 'stream-source-1 / result']
+      : ['Choose output', 'adjust-none-2 / result', 'adjust-none-3 / result'])
+    const apply = screen.getByRole('button', { name: 'Connect pipe' })
+    expect(apply).toBeDisabled()
+    const replacement = { from: { node: alternative, port: 'result' }, to: pipe.to }
+    fireEvent.change(picker, { target: { value: JSON.stringify(replacement.from) } })
+    expect(changed).not.toHaveBeenCalled()
+    fireEvent.click(apply)
+    expect(changed).toHaveBeenCalledTimes(1)
+    expect(changed.mock.calls[0][0].document).toEqual({ ...initial, pipes: [...initial.pipes, replacement] })
+    expect(picker).not.toBeInTheDocument()
   })
 
   it.each(['React Flow', 'inspector'])('delivers the latest not-ready draft after a required pipe is disconnected through %s', path => {
