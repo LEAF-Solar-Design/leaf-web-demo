@@ -80,12 +80,13 @@ function tagged(res, body, fallback) {
   return e
 }
 
-async function post(path, payload) {
+async function post(path, payload, { rejectRedirect = false } = {}) {
   const headers = { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...authHeaders() }
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
+    ...(rejectRedirect ? { redirect: 'error' } : {}),
   })
   const body = await res.json().catch(() => null)
   const code = String(body?.error?.error_code || '').toLowerCase()
@@ -324,7 +325,7 @@ export async function postMessage(sessionId, {
   // never forwarded onto the wire, and nothing stores it: the next call starts
   // from refused again. See lib/secretGuardTransport.js.
   allowSecretOnce = false,
-} = {}) {
+} = {}, { rejectRedirect = false } = {}) {
   // GUARDED TRANSPORT. This endpoint is where user text becomes model context,
   // and it has FOUR client callers: the assistant reply box, the catalog
   // controller's agent turn, the Author-a-tool authority mint on both shells,
@@ -368,7 +369,7 @@ export async function postMessage(sessionId, {
     payload.answers = answers
   }
   const { res, body } = await post(
-    `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload,
+    `/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload, { rejectRedirect },
   )
   if (res.status === 202 && body && (body.turn_id || body.status === 'queued')) return body
   // The stored completed answer of this journaled request is its answer,

@@ -217,6 +217,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     if (owner.locked || owner.exportLocked || !current()) return
     clearDownload()
     owner.locked = true // Click fencing must precede React's next render.
+    const existingSessionOnly = action === 'stage' && owner.sourceContext === 'native'
     let sent = false, minting = false, requestId, refusalExpected = null
     publish({ busy: true, error: null, secretRefusal: null })
     try {
@@ -257,7 +258,9 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       }
       if (owner.sourceContext === 'native') hint = { ...hint, source_profile: 'ios-swiftui-xcodegen-v1' }
       minting = true
-      const authority = await owner.startAgentTurn(text, hint, { allowSecretOnce, requireImmediateTurn: true })
+      const authority = await owner.startAgentTurn(text, hint, {
+        allowSecretOnce, requireImmediateTurn: true, ...(existingSessionOnly ? { existingSessionOnly } : {}),
+      })
       minting = false
       if (!current()) return
       if (!authority?.session_id || !authority?.turn_id) throw new Error('Could not start this source action. Wait for the current conversation turn to finish.')
@@ -293,8 +296,11 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
         publish({ unknown: true, candidate: null, error: sourceInitializationMessage(error, requestId)
           + 'Publication outcome unknown. Refresh the original request; do not stage it again.' })
         try { await readBack(requestId) } catch { /* No repeat POST or editor on an unknown outcome. */ }
-      } else publish({ error: minting ? 'Could not start this source action. Wait for the current conversation turn to finish.'
-        : error?.message || 'This source action is unavailable.' })
+      } else if (minting) {
+        publish({ error: existingSessionOnly
+          ? 'Could not start native Stage. Check the project conversation before trying again.'
+          : 'Could not start this source action. Wait for the current conversation turn to finish.' })
+      } else publish({ error: error?.message || 'This source action is unavailable.' })
     } finally {
       owner.locked = false
       publish({ busy: false })
