@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PDF = (REPO_ROOT / "data" / "solaredge_1to1_demo.pdf").read_bytes()
 INTAKE = json.loads((REPO_ROOT / "docs/parity/evidence/solaredge/se-pg-intake.json").read_text(encoding="utf-8"))
 URL = "/api/drawings/solar/imports/solaredge-pdf/report"
+SCHEDULE_URL = "/api/drawings/solar/imports/solaredge-pdf/schedule-audit"
 A = row_panels("A", 3)
 B = row_panels("B", 3, x0=500.0)
 GRIDS = [plain_grid([1, 2, 3]), plain_grid([3, 2, 1], inv=2)]
@@ -250,6 +251,177 @@ def post(client, payload, media="application/json", url=URL):
         headers["Content-Type"] = media
     return client.post(url, content=payload if isinstance(payload, bytes) else json.dumps(payload).encode(),
                        headers=headers)
+
+
+@pytest.mark.parametrize("approved, page_results", [
+    ([[]], [(1, [], [], True)]),
+    ([["S01"]], [(1, ["S01"], [], False)]),
+    ([[], ["S02"]], [(1, [], [], True), (2, ["S02"], None, False)]),
+])
+def test_schedule_audit_reads_only_the_stored_source(tmp_path, monkeypatch, client, approved, page_results):
+    backend, source = seed_small(tmp_path, monkeypatch)
+    before = written(backend)
+    monkeypatch.setattr(write_loop, "drawing_mutations_refusal", lambda: "drained")
+    response = post(client, {"source_artifact_id": source["artifact_id"], "approved_pages": approved},
+                    url=SCHEDULE_URL)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["schema"] == report.SCHEDULE_RESULT_SCHEMA
+    assert result["project_id"] == PROJECT
+    assert result["source_artifact_id"] == source["artifact_id"]
+    assert result["source_content_sha256"] == hashlib.sha256(pdf(1)).hexdigest()
+    assert result["pages"] == [{"page": page, "expected": expected, "observed": observed,
+                                "matches": matches}
+                               for page, expected, observed, matches in page_results]
+    assert written(backend) == before
+
+
+@pytest.mark.parametrize("include_placements", [True, False])
+def test_schedule_audit_opt_in_placements(tmp_path, monkeypatch, client, include_placements):
+    from test_solar_solaredge_pdf import HELVETICA, _pdf
+
+    backend, _ = seed_small(tmp_path, monkeypatch)
+    data = _pdf(b"BT /F1 10 Tf 5 20 Td (S02) Tj 0 60 Td (S01) Tj ET", resources=HELVETICA)
+    source = sources.import_solaredge_source(backend, TENANT, "solar", data)["source"]
+    before = written(backend)
+    payload = {"source_artifact_id": source["artifact_id"], "approved_pages": [["S01", "S02"], ["S02"]],
+               "include_placements": include_placements}
+    response = post(client, payload, url=SCHEDULE_URL)
+    assert response.status_code == 200, response.text
+    first, missing = response.json()["pages"]
+    assert first["observed"] == ["S01", "S02"] and first["matches"]
+    assert missing["observed"] is None and not missing["matches"]
+    if include_placements:
+        assert first["placements"] == [{"tag": "S02", "x": 5, "y": 20}, {"tag": "S01", "x": 5, "y": 80}]
+        assert missing["placements"] is None
+    else:
+        assert "placements" not in first and "placements" not in missing
+    assert written(backend) == before
+
+
+def _paper_origin(tag, x, y):
+    return {"tag": tag, "x": x, "y": y}
+
+
+@pytest.mark.parametrize("second_origin, expected_movement", [(18, []), (17, [
+    {"tag": "S01", "occurrence": 2, "expected": [17, 20], "observed": [20, 20], "distance_points": 3},
+])])
+def test_schedule_position_tolerance(tmp_path, monkeypatch, client, second_origin, expected_movement):
+    from test_solar_solaredge_pdf import HELVETICA, _pdf
+
+    backend, _ = seed_small(tmp_path, monkeypatch)
+    data = _pdf(b"BT /F1 10 Tf 5 20 Td (S01) Tj 15 0 Td (S01) Tj ET", resources=HELVETICA)
+    source = sources.import_solaredge_source(backend, TENANT, "solar", data)["source"]
+    before = written(backend)
+    payload = {
+        "source_artifact_id": source["artifact_id"],
+        "approved_pages": [["S01", "S01"]],
+        "include_placements": True,
+        "position_check": {
+            "tolerance_points": 2,
+            "approved_origins": [[_paper_origin("S01", 5, 20), _paper_origin("S01", second_origin, 20)]],
+        },
+    }
+    response = post(client, payload, url=SCHEDULE_URL)
+    assert response.status_code == 200, response.text
+    page, = response.json()["pages"]
+    assert page["matches"]
+    assert page["placements"] == [_paper_origin("S01", 5, 20), _paper_origin("S01", 20, 20)]
+    assert page["position_check"] == {"moved": expected_movement, "count_mismatches": []}
+    assert written(backend) == before
+
+
+@pytest.mark.parametrize("pdf_tag, expected_tag, expected_counts", [
+    ("S01", "S01", [{"tag": "S01", "expected": 2, "observed": 1}]),
+    ("S01", "S02", [
+        {"tag": "S02", "expected": 2, "observed": 0},
+        {"tag": "S01", "expected": 0, "observed": 1},
+    ]),
+])
+def test_schedule_position_inventory_mismatch(
+        tmp_path, monkeypatch, client, pdf_tag, expected_tag, expected_counts):
+    from test_solar_solaredge_pdf import HELVETICA, _pdf
+
+    backend, _ = seed_small(tmp_path, monkeypatch)
+    data = _pdf(f"BT /F1 10 Tf 5 20 Td ({pdf_tag}) Tj ET".encode(), resources=HELVETICA)
+    source = sources.import_solaredge_source(backend, TENANT, "solar", data)["source"]
+    before = written(backend)
+    payload = {
+        "source_artifact_id": source["artifact_id"],
+        "approved_pages": [[expected_tag, expected_tag], ["S01"]],
+        "position_check": {
+            "tolerance_points": 0,
+            "approved_origins": [
+                [_paper_origin(expected_tag, 100, 100), _paper_origin(expected_tag, 150, 150)],
+                [_paper_origin("S01", 5, 20)],
+            ],
+        },
+    }
+    response = post(client, payload, url=SCHEDULE_URL)
+    assert response.status_code == 200, response.text
+    page, missing = response.json()["pages"]
+    assert "placements" not in page
+    assert page["position_check"]["moved"] == []
+    assert page["position_check"]["count_mismatches"] == expected_counts
+    assert missing["observed"] is None
+    assert missing["position_check"] == {
+        "moved": [], "count_mismatches": [{"tag": "S01", "expected": 1, "observed": 0}],
+    }
+    assert written(backend) == before
+
+
+@pytest.mark.parametrize("position", [
+    None,
+    {"tolerance_points": True, "approved_origins": [[_paper_origin("S01", 0, 0)]]},
+    {"tolerance_points": -1, "approved_origins": [[_paper_origin("S01", 0, 0)]]},
+    {"tolerance_points": 2, "approved_origins": [[_paper_origin("S01", float("inf"), 0)]]},
+    {"tolerance_points": 2, "approved_origins": [[_paper_origin("S02", 0, 0)]]},
+    {"tolerance_points": 2, "approved_origins": [[_paper_origin("S01", 0, 0)] * 2]},
+    {"tolerance_points": 2, "approved_origins": []},
+])
+def test_schedule_rejects_invalid_position_check_before_parse(
+        tmp_path, monkeypatch, client, position):
+    backend, source = seed_small(tmp_path, monkeypatch)
+    before = written(backend)
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("invalid position request launched a parser")
+
+    monkeypatch.setattr(report, "_run_parse_worker", unexpected_parse)
+    response = post(client, {
+        "source_artifact_id": source["artifact_id"],
+        "approved_pages": [["S01"]],
+        "position_check": position,
+    }, url=SCHEDULE_URL)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["reason_code"] == "REPORT_REQUEST_INVALID"
+    assert written(backend) == before
+
+@pytest.mark.parametrize("changes, status, reason", [
+    ({"include_placements": 1}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": ["S01"]}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": [["S01\n"]]}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": [[]] * 51}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": [["X"] * 4097]}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": [["x" * 129]]}, 400, "REPORT_REQUEST_INVALID"),
+    ({"approved_pages": [["x" * 128] * 600]}, 413, "REPORT_REQUEST_TOO_LARGE"),
+    ({"source_artifact_id": "f" * 64}, 404, "IMPORT_SOURCE_NOT_FOUND"),
+    ({"project_id": "leaf:project:00000000-0000-4000-8000-000000000002"},
+     409, "REPORT_PROJECT_MISMATCH"),
+])
+def test_schedule_audit_rejects_invalid_input_before_parse(tmp_path, monkeypatch, client, changes, status, reason):
+    backend, source = seed_small(tmp_path, monkeypatch)
+    before = written(backend)
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("refused audit launched a parser")
+
+    monkeypatch.setattr(report, "_run_parse_worker", unexpected_parse)
+    response = post(client, {"source_artifact_id": source["artifact_id"], "approved_pages": [[]], **changes},
+                    url=SCHEDULE_URL)
+    assert response.status_code == status, response.text
+    assert response.json()["error"]["reason_code"] == reason
+    assert written(backend) == before
 
 
 class Proxy:

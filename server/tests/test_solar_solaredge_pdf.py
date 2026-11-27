@@ -108,6 +108,83 @@ def test_page_schedule_uses_painted_glyph_order_and_preserves_repeats():
     result, = pdf.audit_page_schedule(data, [wrong_order])
     assert result.observed == expected
     assert not result.matches
+    assert list(pdf.iter_page_placements(data, [wrong_order])) == [(
+        pdf.PageTagPlacement("S02", 5, 20),
+        pdf.PageTagPlacement("S02", 40, 80),
+        pdf.PageTagPlacement("S01(A)", 5, 80),
+    )]
+
+
+@pytest.mark.parametrize(("first_matrix", "second_matrix", "between", "observed"), [
+    (b"1 0 0 1 5 80", b"1 0 0 1 11.67 80", b"", ("S01",)),
+    (b"0 1 -1 0 5 50", b"0 1 -1 0 5 56.67", b"", ("S01",)),
+    (b"-1 0 0 -1 50 80", b"-1 0 0 -1 43.33 80", b"", ("S01",)),
+    (b"1 0 0 1 5 80", b"1 0 0 1 12 80", b"", ()),
+    (b"1 0 0 1 5 80", b"1 0 0 1 11.67 81", b"", ()),
+    (b"1 0 0 1 5 80", b"-1 0 0 -1 11.67 80", b"", ()),
+    (b"1 0 0 1 5 80", b"1 0 0 1 11.67 80",
+     b"q BT /F1 10 Tf 3 Tr (hidden) Tj ET Q ", ()),
+])
+def test_page_schedule_joins_only_contiguous_painted_runs(first_matrix, second_matrix, between, observed):
+    data = _pdf(
+        b"q BT /F1 10 Tf " + first_matrix + b" Tm (S) Tj ET Q " + between
+        + b"q BT /F2 10 Tf " + second_matrix + b" Tm (01) Tj ET Q",
+        resources=HELVETICA[:-2] + b"/F2 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >>",
+    )
+    result, = pdf.audit_page_schedule(data, [("S01",)])
+    assert result.observed == observed
+
+
+def test_page_schedule_does_not_join_distinct_approved_labels():
+    data = _pdf(b"BT /F1 10 Tf 5 80 Td (S) Tj (01) Tj ET", resources=HELVETICA)
+    result, = pdf.audit_page_schedule(data, [("S", "01", "S01")])
+    assert result.observed == ("S", "01")
+
+
+def test_page_schedule_does_not_join_parent_and_form_text():
+    form_content = b"BT /F1 10 Tf 11.67 80 Td (01) Tj ET"
+    form = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Resources << "
+            + HELVETICA + b" >> /Length " + str(len(form_content)).encode()
+            + b" >>\nstream\n" + form_content + b"\nendstream")
+    data = _pdf(
+        b"BT /F1 10 Tf 5 80 Td (S) Tj ET /Detail Do",
+        resources=HELVETICA + b" /XObject << /Detail 5 0 R >>",
+        indirect_objects=[form],
+    )
+    result, = pdf.audit_page_schedule(data, [("S01",)])
+    assert result.observed == ()
+
+
+def test_page_schedule_tracks_fill_stroke_and_partial_opacity():
+    data = _pdf(
+        b"q /NoFill gs BT /F1 10 Tf 5 80 Td (S01) Tj "
+        b"0 -10 Td 2 Tr (S02) Tj ET "
+        b"/NoStroke gs BT /F1 10 Tf 5 60 Td 2 Tr (S03) Tj ET Q "
+        b"q /NoStroke gs BT /F1 10 Tf 5 50 Td 1 Tr (S04) Tj "
+        b"0 -10 Td 6 Tr (S05) Tj ET Q "
+        b"BT /F1 10 Tf 5 30 Td (S06) Tj ET",
+        resources=HELVETICA + b" /ExtGState << /NoFill << /ca 0 >> /NoStroke << /CA 0 >> >>",
+    )
+    expected = ("S02", "S05", "S06")
+    assert pdf.audit_page_schedule(data, [expected]) == [pdf.PageScheduleMatch(1, expected, expected)]
+    assert len(pdf.extract_primitives(data).letters) == 18
+
+
+def test_page_schedule_inherits_opacity_in_forms_and_restores_parent():
+    form_content = (b"BT /F1 10 Tf 5 10 Td (S01) Tj ET "
+                    b"/Fade gs BT /F1 10 Tf 5 5 Td (S02) Tj ET")
+    form = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 100 20] "
+            b"/Matrix [1 0 0 1 20 60] /Resources << " + HELVETICA
+            + b" /ExtGState << /Fade << /ca 0.5 >> >> >> /Length "
+            + str(len(form_content)).encode() + b" >>\nstream\n" + form_content + b"\nendstream")
+    data = _pdf(
+        b"q /NoFill gs /Detail Do BT /F1 10 Tf 5 50 Td (S03) Tj ET Q "
+        b"BT /F1 10 Tf 5 40 Td (S04) Tj ET",
+        resources=HELVETICA + b" /XObject << /Detail 5 0 R >> /ExtGState << /NoFill 6 0 R >>",
+        indirect_objects=[form, b"<< /ca 0 >>"],
+    )
+    expected = ("S02", "S04")
+    assert pdf.audit_page_schedule(data, [expected]) == [pdf.PageScheduleMatch(1, expected, expected)]
 
 
 def test_page_schedule_distinguishes_absent_and_empty_pages():
@@ -154,6 +231,16 @@ def test_copy_text_audit_enforces_replacement_byte_budget(monkeypatch):
     assert pdf.extract_primitives(data).letters == []
     with pytest.raises(SolarEdgePdfError, match="PDF_RESOURCE_LIMIT: replacement text bytes"):
         pdf.audit_copy_text(data, ["A104"])
+
+
+def test_copy_text_audit_excludes_transparent_replacement():
+    data = _pdf(
+        b"q /Fade gs /Span << /ActualText (hidden) >> BDC "
+        b"BT /F1 10 Tf 5 80 Td (A104) Tj ET EMC Q "
+        b"/Span << /ActualText (shown) >> BDC BT /F1 10 Tf 5 70 Td (A104) Tj ET EMC",
+        resources=HELVETICA + b" /ExtGState << /Fade << /ca 0 /CA 0 >> >>",
+    )
+    assert pdf.audit_copy_text(data, ["A104"]) == [pdf.CopyTextMismatch(1, "A104", "shown", 5, 70)]
 
 
 def _spot_resources(colorant):
