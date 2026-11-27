@@ -36,7 +36,8 @@ def worker_count() -> int:
 
 
 def fair_claims() -> bool:
-    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_FAIR", "").strip() == "1" or worker_count() > 1
+    """Fair (one live build per tenant, across processes) unless LEAF_CUSTOMIZATION_STAGE_FAIR is exactly 0 after strip; more than one in-process worker always forces fair."""
+    return os.environ.get("LEAF_CUSTOMIZATION_STAGE_FAIR", "").strip() != "0" or worker_count() > 1
 
 
 def queue_log_interval() -> float | None:

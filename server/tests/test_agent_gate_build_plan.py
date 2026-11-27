@@ -166,6 +166,73 @@ def test_concurrent_redemptions_authorize_once_without_a_grant_or_second_card():
     assert len(list(agent_gate.approvals_dir().glob("*.json"))) == 1
 
 
+@pytest.fixture
+def drawing_plan_gate(monkeypatch):
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "test-secret")
+    sessions = agent_router.session_store
+    monkeypatch.setattr(sessions, "turn_started_data", lambda *_: {})
+    monkeypatch.setattr(sessions, "active_turn_tier", lambda *_: "hosted_pro")
+    monkeypatch.setattr(sessions, "active_turn_subject", lambda *_: SUBJECT)
+
+    def gate(plan, session):
+        monkeypatch.setattr(sessions, "get_session", lambda _: session)
+        request = agent_router.GateRequest(
+            tenant_id=TENANT, session_id="loop-session", turn_id="loop-proposal-turn",
+            authority_session_id=SESSION, authority_turn_id="app-proposal-turn",
+            action="propose_build_plan", args={"plan": plan},
+        )
+        return agent_router.internal_gate(request, x_dispatch_secret="test-secret")
+
+    return gate
+
+
+@pytest.mark.parametrize("drawing_id", ["rooftop_demo", "rooftop-demo", "demo"])
+def test_branch_plan_on_the_sample_drawing_is_refused(drawing_plan_gate, drawing_id):
+    result = drawing_plan_gate(
+        dict(create_plan(), target="branch"), {"tenant_id": TENANT, "drawing_id": drawing_id},
+    )
+    assert result["decision"] == "deny"
+    assert result["reason"] == agent_router.SAMPLE_DRAWING_BRANCH_REFUSAL
+    assert agent_gate.list_pending() == []
+
+
+def test_studio_plan_on_the_sample_drawing_is_allowed(drawing_plan_gate):
+    result = drawing_plan_gate(create_plan(), {"tenant_id": TENANT, "drawing_id": "demo"})
+    assert result["decision"] == "awaiting_approval"
+
+
+def test_branch_plan_on_a_user_drawing_is_allowed(drawing_plan_gate):
+    result = drawing_plan_gate(
+        dict(create_plan(), target="branch"), {"tenant_id": TENANT, "drawing_id": "d-3f2a9c"},
+    )
+    assert result["decision"] == "awaiting_approval"
+
+
+@pytest.mark.parametrize("session", [{"tenant_id": TENANT}, None])
+def test_branch_plan_without_a_session_drawing_is_allowed(drawing_plan_gate, session):
+    result = drawing_plan_gate(dict(create_plan(), target="branch"), session)
+    assert result["decision"] == "awaiting_approval"
+
+
+def test_sample_drawing_plan_refusal_never_raises():
+    branch_args = {"plan": {"target": "branch"}}
+    sample = {"drawing_id": "rooftop_demo"}
+    for action, args, session in [
+        ("propose_build_plan", None, sample),
+        ("propose_build_plan", {}, sample),
+        ("propose_build_plan", {"plan": "x"}, sample),
+        ("propose_build_plan", {"plan": {}}, sample),
+        ("propose_build_plan", branch_args, None),
+        ("propose_build_plan", branch_args, "x"),
+        ("propose_build_plan", branch_args, {"drawing_id": 7}),
+        ("author_tool", branch_args, sample),
+    ]:
+        assert agent_router.sample_drawing_plan_refusal(action, args, session) is None
+    assert agent_router.sample_drawing_plan_refusal(
+        "propose_build_plan", branch_args, sample,
+    ) == agent_router.SAMPLE_DRAWING_BRANCH_REFUSAL
+
+
 def test_plan_registers_the_app_authority_tuple(monkeypatch):
     monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "test-secret")
     sessions = agent_router.session_store
