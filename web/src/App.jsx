@@ -551,6 +551,7 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
     || binding.drawing_id !== selectedVersion.drawing_id) return null
   const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
     name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  if (projectIntake?.solar_design_graph) facts.solar = true
   return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
     ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
     : { ...facts, pending: true }
