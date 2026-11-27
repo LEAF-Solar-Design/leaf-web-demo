@@ -870,6 +870,36 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     const nativeDownload = await nativeEvent
     expect((await readFile(await nativeDownload.path())).equals(backend.downloads[1].bytes)).toBe(true)
     expect(backend.downloads[1]).toMatchObject({ revision: 1, target: 'ios' })
+
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    const galleryTab = preview.getByRole('button', { name: 'Cakes', exact: true })
+    await galleryTab.focus()
+    await page.keyboard.press('Enter')
+    await expect(preview.getByRole('heading', { name: 'Cakes', exact: true })).toBeVisible()
+
+    for (const name of ['About / Contact', 'Resume']) {
+      await page.keyboard.press('Tab')
+      await expect(preview.getByRole('button', { name, exact: true })).toBeFocused()
+    }
+    for (const { name, openKey, closeKey } of [
+      { name: 'Bread.jpg', openKey: 'Enter', closeKey: 'Escape' },
+      { name: 'Cake.jpg', openKey: 'Space', closeKey: 'Enter' },
+    ]) {
+      await page.keyboard.press('Tab')
+      const thumbnail = preview.getByRole('button', { name: `View ${name}`, exact: true })
+      await expect(thumbnail).toBeFocused()
+      await page.keyboard.press(openKey)
+      const dialog = preview.getByRole('dialog', { name, exact: true })
+      await expect(dialog).toBeVisible()
+      await expect(dialog.getByRole('button', { name: 'Close image', exact: true })).toBeFocused()
+      const image = dialog.getByRole('img', { name, exact: true })
+      await expect.poll(() => image.evaluate(img => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0)).toBe(true)
+      await page.screenshot({ path: testInfo.outputPath(`portfolio-keyboard-${size}-${name}.png`) })
+      await page.keyboard.press(closeKey)
+      await expect(dialog).toHaveCount(0)
+      await expect(thumbnail).toBeFocused()
+    }
+
     for (const call of backend.photoCalls) expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
     expect(backend.foreign).toEqual([])
     await page.evaluate(() => { localStorage.removeItem('leaf.jwt'); window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })) })
