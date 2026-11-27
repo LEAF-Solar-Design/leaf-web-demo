@@ -1,5 +1,6 @@
 """Route terminal leads along connected centerlines in the saved drawing."""
 from collections import defaultdict
+from fractions import Fraction
 from heapq import heappop, heappush
 from itertools import combinations, pairwise
 from math import dist, fsum, isfinite
@@ -94,7 +95,7 @@ def _segments(intake, layer, scale):
     return segments
 
 
-def _network(segments, terminals, boxes):
+def _network(segments, terminals, boxes, elevation):
     cuts = {segment: set(segment) for segment in segments}
     for first, second in combinations(cuts, 2):
         shared = _intersections(first, second)
@@ -105,8 +106,10 @@ def _network(segments, terminals, boxes):
     for segment, split_points in cuts.items():
         split_points.update(p for p in terminals if _contains(segment, p))
         edges.update(pairwise(sorted(split_points)))
+    # Retain exact XY intersections and attach the plane's exact elevation.
+    z = Fraction(str(elevation))
     for a, b in sorted(edges):
-        if any(_touches_box((a, b), box) for box in boxes):
+        if any(_touches_box(((*a, z), (*b, z)), box) for box in boxes):
             continue
         length = dist(a, b)
         adj[a].append((b, length))
@@ -129,17 +132,17 @@ def _toward_destination(network, target):
     return successor
 
 
-def route_saved_aisles(routes, intake, layer, scale, keepout_constraints):
+def route_saved_aisles(routes, intake, layer, scale, drawing_keepouts):
     if len(routes) > MAX_AISLE_LEADS:
         raise _invalid()
     segments = _segments(intake, layer, scale)
-    boxes = _constraints(keepout_constraints)[0].values() if keepout_constraints else ()
+    boxes = _constraints(None, drawing_keepouts)[0].values() if drawing_keepouts else ()
     terminals = defaultdict(set)
     for route in routes:
         for terminal in route["points"]:
             xy, elevation = _coordinates(terminal)
             terminals[elevation].add(xy)
-    networks = {z: _network(lines, terminals[z], boxes) for z, lines in segments.items()
+    networks = {z: _network(lines, terminals[z], boxes, z) for z, lines in segments.items()
                 if z in terminals}
     missing, paths, destinations = [], [], {}
     for route in routes:

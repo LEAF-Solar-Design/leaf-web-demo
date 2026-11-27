@@ -57,9 +57,9 @@ def _validate_request(params):
             raise GraphValidationError("INVALID_ROUTING_REQUEST", "saved_aisle_layer")
 
 
-def _routing_constraints(intake, graph, requested):
+def _drawing_keepouts(intake, graph):
     if type(intake) is not dict:
-        return requested
+        return []
     saved = []
     scale = graph["project"]["units"]["meters_per_unit"]
     for polyline in intake.get("polylines", []):
@@ -75,40 +75,27 @@ def _routing_constraints(intake, graph, requested):
         if (polyline.get("closed") is not True or polyline.get("width")
                 or type(bulges) is not list or any(bulges)
                 or type(points) is not list or len(points) < 3
-                or any(type(point) is not list or len(point) < 2 or any(
+                or any(type(point) is not list or len(point) not in (2, 3) or any(
                     type(value) not in (int, float) or abs(value) > 1e15 or not math.isfinite(value)
-                    for value in point[:2]) for point in points)):
+                    for value in point) for point in points)
+                or any(len(point) != len(points[0]) for point in points)):
             raise invalid
-        # The router accepts planar boxes. The envelope of a straight outline
-        # keeps every segment outside the drawn area, including rotated outlines.
-        x_coords, y_coords = zip(*(point[:2] for point in points))
-        saved.append({"min_xy": [min(x_coords) * scale, min(y_coords) * scale],
-                      "max_xy": [max(x_coords) * scale, max(y_coords) * scale]})
+        # Use the enclosing bounds of the outline, including its elevation range
+        # when the saved points carry Z. Legacy XY outlines span all elevations.
+        axes = list(zip(*points))
+        saved.append(([min(axis) * scale for axis in axes],
+                      [max(axis) * scale for axis in axes]))
         if len(saved) > MAX_KEEP_OUTS:
             raise invalid
-    if not saved:
-        return requested
-    constraints = {"keep_outs": [], "aisles": []} if requested is None else requested
-    if (set(constraints) != {"keep_outs", "aisles"}
-            or any(type(items) is not list for items in constraints.values())):
-        raise GraphValidationError("INVALID_ROUTING_CONSTRAINTS", "routing_constraints")
-    names = {item["name"] for items in constraints.values() for item in items
-             if type(item) is dict and type(item.get("name")) is str}
-    ordinal = 0
-    for box in saved:
-        ordinal += 1
-        while f"Drawing keepout {ordinal}" in names:
-            ordinal += 1
-        box["name"] = f"Drawing keepout {ordinal}"
-    return {**constraints, "keep_outs": [*constraints["keep_outs"], *saved]}
+    return saved
 
 
 def _routes(graph, source, params):
-    constraints = _routing_constraints(source, graph, params.get("routing_constraints"))
+    keepouts = _drawing_keepouts(source, graph)
     if "saved_aisle_layer" not in params:
-        return local_routes(graph, constraints)
+        return local_routes(graph, params.get("routing_constraints"), drawing_keepouts=keepouts)
     return route_saved_aisles(local_routes(graph), source, params["saved_aisle_layer"],
-                             graph["project"]["units"]["meters_per_unit"], constraints)
+                             graph["project"]["units"]["meters_per_unit"], keepouts)
 
 
 def create_homeruns(intake, params, *, licensed_write=None):

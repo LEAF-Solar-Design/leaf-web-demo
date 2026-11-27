@@ -714,6 +714,107 @@ def test_saved_curve_refuses_on_api_rail(assigned, isolated_jobs, no_network, mo
     assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
 
 
+@pytest.mark.parametrize("height,barrier,expected", [
+    (3.0, "upper", [(S2, "start homerun"), (S2, "end homerun")]),
+    (8.0, "upper", [(S2, "start homerun"), (S2, "end homerun")]),
+    (15.0, "upper", [(S2, "start homerun"), (S2, "end homerun")]),
+    (3.0, "clear", []), (8.0, "clear", []), (15.0, "clear", []),
+    (8.0, "slope", [(S1, "start homerun")]),
+    (8.0, "tangent", [(S2, "start homerun"), (S2, "end homerun")]),
+    (8.0, "legacy", [
+        (S1, "start homerun"), (S1, "end homerun"),
+        (S2, "start homerun"), (S2, "end homerun"),
+    ]),
+])
+def test_saved_keepouts_intersect_at_the_route_elevation(
+        case, isolated_jobs, no_network, monkeypatch, tmp_path, height, barrier, expected):
+    from dxf_intake import parse_dxf_bytes
+    from test_w1_equipment import sizing_basis
+
+    source, params, intake = case
+    for panel in source["panels"]:
+        x, y = panel["centre"][:2]
+        panel["centre"] = [x, y, height if x == 3 else 0]
+    source["settings"]["extra"]["string_sizing"]["basis_sha256"] = sizing_basis(source)
+    position = params["equipment"][0]["position"]
+    params["equipment"][0]["position"] = [*position[:2], height]
+    assigned = equipment.assign_equipment(
+        source, params, drawing_intake=intake, licensed_equipment=licensed)["graph"]
+    left, right = (2.9, 3.1) if barrier == "slope" else (3.5, 4.0)
+    outline = _box(assigned, left, right, "Upper Roof Keepouts")
+    polylines = []
+    if barrier == "legacy":
+        polylines = [outline]
+    elif barrier != "clear":
+        scale = assigned["project"]["units"]["meters_per_unit"]
+        elevation = (height / 2 if barrier == "slope" else height) / scale
+        pairs = [(0, "SECTION"), (2, "ENTITIES"), (0, "LWPOLYLINE"),
+                 (5, outline["handle"]), (8, outline["layer"]), (90, 4), (70, 1),
+                 (38, elevation)]
+        for x, y in outline["pts"]:
+            pairs.extend(((10, x), (20, max(y, 0) if barrier == "tangent" else y)))
+        pairs.extend(((0, "ENDSEC"), (0, "EOF")))
+        raw_dxf = "".join(f"{group}\n{value}\n" for group, value in pairs).encode("ascii")
+        polylines = parse_dxf_bytes(raw_dxf)["polylines"]
+        assert len(polylines) == 1
+        assert all(point[2] == elevation for point in polylines[0]["pts"])
+
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    _, parent_key, _ = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    parent = backend.get(parent_key)
+    for client in _api(backend, tmp_path, monkeypatch):
+        response = client[0].post("/api/run?wait=1",
+                                  json=body(client, TOOL, {"expected_rev": assigned["rev"]}))
+        if expected:
+            assert response.status_code == 400, response.text
+            payload = response.json()
+            assert payload["reason_code"] == "JOINT_ROUTING_INFEASIBLE"
+            assert payload["error"]["unassigned_leads"] == [
+                {"string_ref": ref, "route_kind": kind} for ref, kind in expected
+            ]
+            assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
+        else:
+            assert response.status_code == 200, response.text
+            _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 2)
+            routes = json.loads(backend.get(key))["solar_design_graph"]["routes"]
+            assert [(route["from_ref"], route["points"][0][2], route["points"][-1][2])
+                    for route in routes] == [
+                (S1, 0, height), (S1, 0, height), (S2, height, height), (S2, height, height),
+            ]
+        assert backend.get(parent_key) == parent
+
+
+@pytest.mark.parametrize("elevation", [0, 8], ids=["same-plane", "above-aisle"])
+def test_saved_aisle_and_keepout_use_the_same_coordinate_plane(
+        assigned, isolated_jobs, no_network, monkeypatch, tmp_path, elevation):
+    outline = _box(assigned, 3.5, 4.0)
+    scale = assigned["project"]["units"]["meters_per_unit"]
+    outline["pts"] = [[*xy, elevation / scale] for xy in outline["pts"]]
+    polylines = [outline, *_aisles(assigned, [[(1, 0), (5, 0)]])]
+    backend = _save(assigned, monkeypatch, tmp_path, polylines)
+    _, parent_key, _ = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    parent = backend.get(parent_key)
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = api[0].post("/api/run?wait=1", json=body(
+            api, TOOL, {"expected_rev": 1, "saved_aisle_layer": "roof aisles"}))
+        if elevation == 0:
+            assert response.status_code == 400, response.text
+            payload = response.json()
+            assert payload["reason_code"] == "JOINT_ROUTING_INFEASIBLE"
+            assert payload["error"]["unassigned_leads"] == [
+                {"string_ref": ref, "route_kind": kind}
+                for ref in (S1, S2) for kind in ("start homerun", "end homerun")
+            ]
+            assert store.load_manifest(backend, TENANT, "solar")["head"] == 1
+        else:
+            assert response.status_code == 200, response.text
+            _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 2)
+            routes = json.loads(backend.get(key))["solar_design_graph"]["routes"]
+            assert [route["id"] for route in routes] == ROUTE_IDS
+            assert all(point[2] == 0 for route in routes for point in route["points"])
+        assert backend.get(parent_key) == parent
+
+
 def _aisles(assigned, lines, layer="Roof Aisles", **properties):
     scale = assigned["project"]["units"]["meters_per_unit"]
     return [{"handle": f"A{index}", "layer": layer, "closed": False, **properties,
