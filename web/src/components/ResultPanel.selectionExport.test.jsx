@@ -70,6 +70,15 @@ it('exports an explicit empty selection even when the tool has no result body', 
   })
 })
 
+it('shows an unavailable selection download without adding a navigation announcement', () => {
+  URL.createObjectURL.mockImplementationOnce(() => { throw new Error('Blob URL unavailable') })
+  render(<ResultPanel result={{ ...selection('1.0.0', ['A']), result: null }} />)
+
+  expect(screen.getByText('Selection download is unavailable.')).toBeVisible()
+  expect(screen.queryByRole('link', { name: linkName })).toBeNull()
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+})
+
 it('keeps the selection file limited to its handles and tool version when a row report is also available', async () => {
   const result = {
     ...selection('1.0.1', ['A']),

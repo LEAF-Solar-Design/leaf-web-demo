@@ -31,7 +31,11 @@ export default function ResultJsonDownload({ result, selection = false }) {
 
   // A new result must never briefly offer the previous report's download.
   if (!download || download.result !== result || download.selection !== selection) return null
-  if (download.error) return <p role="status">{selection ? 'Selection' : 'Result'} download is unavailable.</p>
+  if (download.error) {
+    return selection
+      ? <p>Selection download is unavailable.</p>
+      : <p role="status">Result download is unavailable.</p>
+  }
   if (selection) return <a className="btn ghost" href={download.href} download="selection.json">Download selection JSON</a>
   return <a className="btn ghost" href={download.href} download="result.json">Download result JSON</a>
 }
