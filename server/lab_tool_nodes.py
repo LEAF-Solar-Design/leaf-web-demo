@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -130,13 +131,18 @@ class ToolNodeAdapter:
         if deadline is not None and self.monotonic() >= deadline:
             raise RunBudgetExceeded()
 
-    def prime_corpus(self, graph, registry, *, deadline):
+    def prime_corpus(self, graph, registry, *, deadline, recovery_admission=None):
         """Admit independent native intents, leaving observation to the evaluator."""
         if (not isinstance(graph, dict) or graph.get('pipes') != []
                 or not graph.get('blocks') or any(
                     block.get('registry', {}).get('id') != 'corpus-evaluator'
                     for block in graph['blocks'])):
+            if recovery_admission is not None:
+                raise GraphRefused('lab_recovery_successor_inputs_changed')
             return False
+        if (recovery_admission is not None and
+                set(recovery_admission) != {block['id'] for block in graph['blocks']}):
+            raise GraphRefused('lab_recovery_successor_inputs_changed')
         manifests = admit_graph(graph, registry)
         from lab_doc_validators import validate_graph
         validate_graph(graph)
@@ -154,7 +160,12 @@ class ToolNodeAdapter:
             context = self._corpus_context(block['id'], block['settings'])
             # Custody and policy validity for every material precede any submission.
             sources = corpus.read_sources(context)
-            corpus.compiled_suite(sources['suite'], context['policy'])
+            suite = corpus.compiled_suite(sources['suite'], context['policy'])
+            if recovery_admission is not None:
+                evidence = recovery_admission[block['id']]
+                if (evidence['successor_policy_digest'] != context['policy']['digest']
+                        or evidence['evaluated_suite_sha256'] != hashlib.sha256(suite).hexdigest()):
+                    raise GraphRefused('lab_recovery_successor_inputs_changed', block['id'])
             key = f"lab:{self.run_id}:{block['id']}:corpus:v1"
             if len(key) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in key):
                 raise ValueError('Invalid corpus intent key.')

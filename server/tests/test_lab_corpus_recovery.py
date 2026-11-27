@@ -991,7 +991,10 @@ def test_retry_admission_binds_materials_and_live_writers(corpus_join, scenario)
 @pytest.mark.skipif(not (canonical_ci_pg() or (
     os.environ.get('LEAF_E364B_PG_PARENT') and os.environ.get('DATABASE_URL'))),
     reason='requires selected PostgreSQL authority')
-@pytest.mark.parametrize('scenario', ['concurrent_replay', 'enqueue_rollback', 'successor_retention'])
+@pytest.mark.parametrize('scenario', [
+    'concurrent_replay', 'enqueue_rollback', 'successor_retention',
+    'worker_exact', 'worker_policy_drift', 'worker_suite_drift',
+])
 def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
     from test_lab_runs import corpus_admit, corpus_adapter
 
@@ -1082,6 +1085,49 @@ def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
     assert ledger.get(tenant, receipt['successor_doc_id'])['graph'] == plan['draft_graph']
     assert store.get(tenant, source_id) == original
     assert ledger.get(tenant, lane.doc_id) == artifact
+
+    if scenario.startswith('worker_'):
+        import lab_worker
+
+        assert all(row['run_id'] != successor_id
+                   for row in store.claimable(2, ops_revisions={lab_worker.OPS_REVISION}))
+        if scenario != 'worker_exact':
+            field = ('successor_policy_digest' if scenario == 'worker_policy_drift'
+                     else 'evaluated_suite_sha256')
+            evidence = receipt['admission_json']
+            evidence[selected][field] = '0' * 64
+            with lane.db.transaction() as conn:
+                conn.execute('UPDATE lab_recovery_confirmations SET admission_json=%s::jsonb '
+                             'WHERE tenant_id=%s AND successor_run_id=%s',
+                             (json.dumps(evidence), tenant, successor_id))
+
+        # Let the real worker persist an intent. The fixture executor closes it
+        # without launching the native evaluator or changing the source jobs.
+        def close_fixture_job(_execute, job_id):
+            with lane.db.transaction() as conn:
+                conn.execute("UPDATE async_jobs SET status='failed', attempt=1, error_json=%s::jsonb "
+                             "WHERE job_id=%s", (json.dumps({'error_code': 'TIMEOUT'}), job_id))
+
+        monkeypatch.setitem(lane.jobs._executors, lane.jobs.LANE_SLOW,
+                            SimpleNamespace(submit=close_fixture_job))
+        monkeypatch.setattr(lab_worker, 'lab_surface_enabled', lambda: True)
+        worker = lab_worker.LabWorker(worker_id='recovery-test')
+        try:
+            worker.tick()
+            worker._runs[(tenant, successor_id)].future.result(timeout=15)
+            jobs = [row for row in lane.jobs.list_jobs(tenant, 200)
+                    if (row['idempotency_key'] or '').startswith(f'lab:{successor_id}:')]
+            if scenario == 'worker_exact':
+                assert [row['idempotency_key'] for row in jobs] == [f'lab:{successor_id}:{selected}:corpus:v1']
+                execution = lane.jobs._pg_store.execution(jobs[0]['job_id'])
+                assert execution['lab_corpus']['policy']['digest'] == (
+                    receipt['admission_json'][selected]['successor_policy_digest'])
+            else:
+                assert jobs == []
+                events = store.list_events(tenant, successor_id, after_seq=-1, limit=100)
+                assert events[-1]['payload']['reason'] == 'lab_recovery_successor_inputs_changed'
+        finally:
+            worker.stop()
 
     monkeypatch.setenv('LEAF_BUILD_REVISION', 'corpus-join-redeployed')
     assert confirm().json() == first.json()

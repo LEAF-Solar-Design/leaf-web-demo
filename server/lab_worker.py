@@ -152,8 +152,9 @@ class LabWorker:
                 # run merely because its submitting build is no longer live.
                 # Idle workers still leave new work and activations alone.
                 recovering_only = color != "active" and self.env.get("LEAF_LAB_WORKER_IDLE_CLAIMS") != "1"
-                for row in self.store.claimable(free, ops_revisions={OPS_REVISION},
-                                                recovering_only=recovering_only):
+                for row in self.store.claimable(
+                        free, ops_revisions={OPS_REVISION, lab_run_store.RECOVERY_OPS_REVISION},
+                        recovering_only=recovering_only):
                     key = (row["tenant_id"], row["run_id"])
                     if key in self._runs:
                         continue
@@ -303,6 +304,13 @@ class LabWorker:
                             raise RunCancelled()
 
             tool_options = {}
+            if row.get("ops_revision") == lab_run_store.RECOVERY_OPS_REVISION:
+                recovery_admission = self.store.recovery_admission_for_run(row["tenant_id"], row["run_id"])
+                if (not recovery_admission or not lab_tool_nodes.enabled()
+                        or row.get("corpus_authority_json") is None):
+                    raise GraphRefused("lab_recovery_successor_inputs_changed")
+            else:
+                recovery_admission = None
             if lab_tool_nodes.enabled():
                 effects = ({"effects": ("compute", "read", "simulate")}
                            if row["adapter_revision"] == "lab-activation.v1" else {})
@@ -330,7 +338,12 @@ class LabWorker:
             registry = lab_tool_manifests.registry_for(str(row['tenant_id']))
             if adapter is not None and corpus_options:
                 corpus_adapter = adapter
-                adapter.prime_corpus(artifact['graph'], registry, deadline=started + ATTEMPT_WALL_CAP_SECONDS)
+                deadline = started + ATTEMPT_WALL_CAP_SECONDS
+                if recovery_admission is None:
+                    adapter.prime_corpus(artifact['graph'], registry, deadline=deadline)
+                else:
+                    adapter.prime_corpus(artifact['graph'], registry, deadline=deadline,
+                                         recovery_admission=recovery_admission)
             elapsed = max(0, self.clock() - started)
             if elapsed >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()

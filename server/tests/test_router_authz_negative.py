@@ -50,6 +50,8 @@ TENANT_RUN_CASES = [
     ("POST", "/private-run/cancel", None),
     pytest.param("GET", f"?doc_id={DOC}", None, id="recent-runs"),
     pytest.param("GET", "/private-run/recovery-plan", None, id="recovery-plan"),
+    pytest.param("POST", "/private-run/recovery-confirmation", {"plan_digest": "a" * 64},
+                 id="recovery-confirmation"),
     pytest.param("GET", "/private-run/corpus-jobs", None, id="corpus-jobs"),
 ]
 RUN_CASES = TENANT_RUN_CASES + [
@@ -226,6 +228,7 @@ def test_route_inventory_is_complete():
         ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
         ("GET", "/api/lab/runs/{run_id}/recovery-plan"),
+        ("POST", "/api/lab/runs/{run_id}/recovery-confirmation"),
         ("GET", "/api/lab/runs/{run_id}/corpus-jobs"),
         ("GET", "/api/lab/runs/{run_id}/events"),
         ("POST", "/api/lab/runs/{run_id}/cancel"),

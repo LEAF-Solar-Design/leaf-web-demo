@@ -18,6 +18,7 @@ from lab_doc_validators import InvalidGraph, TooLarge
 MAX_EVENTS = 10000
 MAX_QUEUED_PER_TENANT = 16
 MAX_ACTIVE_PER_TENANT = 4
+RECOVERY_OPS_REVISION = "lab-ops.recovery.v1"
 _PIN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 _SUBMISSION = re.compile(r"v1\.([0-9]{13})\.[0-9a-f]{32}")
 SUBMISSION_TTL = timedelta(hours=24)
@@ -347,7 +348,18 @@ def reserve_recovery(tenant, confirmation, actor, graph_sha256):
     return _run(tenant, operation, write=True)
 
 
-def admit_recovery(tenant, reservation, authority, evidence, ops_revision, build_revision):
+def recovery_admission_for_run(tenant, run_id):
+    def operation(sql):
+        row = sql.execute(
+            "SELECT admission_json FROM lab_recovery_confirmations "
+            "WHERE tenant_id=? AND successor_run_id=? AND admitted_at IS NOT NULL",
+            (tenant, run_id)).fetchone()
+        return row["admission_json"] if row is not None else None
+
+    return _run(tenant, operation)
+
+
+def admit_recovery(tenant, reservation, authority, evidence, build_revision):
     from lab_canonical import graph_digest
 
     authority = validate_corpus_authority(authority)
@@ -376,7 +388,7 @@ def admit_recovery(tenant, reservation, authority, evidence, ops_revision, build
         if _row(sql, tenant, run_id) is not None:
             raise SubmissionConflict("lab_recovery_successor_unavailable")
         _enqueue(sql, tenant, doc_id, run_id, 1, graph_sha256, registry_digest(),
-                 _pin(ops_revision), graph_digest(authority), "lab-worker.v1", _pin(build_revision),
+                 RECOVERY_OPS_REVISION, graph_digest(authority), "lab-worker.v1", _pin(build_revision),
                  corpus_authority=authority)
         sql.execute(
             "UPDATE lab_recovery_confirmations SET admitted_at=now(), admission_json=?::jsonb "

@@ -389,7 +389,7 @@ def _confirm_recovery(tenant, run_id, reviewed_digest):
             successor, evidence = _admit_run_graph(
                 tenant, artifact, doc_id, 1, recovery_confirmation=confirmation,
                 reserved_actor=receipt["actor"])
-            store.admit_recovery(tenant_id, receipt, successor, evidence, OPS_REVISION,
+            store.admit_recovery(tenant_id, receipt, successor, evidence,
                                  _source_revision(os.environ) or "unknown")
 
     _authorize_corpus_run(tenant, store.get(tenant_id, run_id))
