@@ -1,5 +1,16 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { deepRedact } from '../projects/ReceiptPanel.jsx'
+
+function SizedDownloadLink({ download, filename, label }) {
+  const sizeId = useId()
+  const size = `${download.bytes.toLocaleString()} ${download.bytes === 1 ? 'byte' : 'bytes'}`
+
+  return (
+    <a className="btn ghost" href={download.href} download={filename} aria-label={label} aria-describedby={sizeId}>
+      {label}{' '}<span id={sizeId}>({size})</span>
+    </a>
+  )
+}
 
 function csvCell(value) {
   if (value == null) return ''
@@ -21,8 +32,9 @@ export function ResultTableCsvDownload({ rows, label }) {
         columns.map(csvCell).join(','),
         ...safeRows.map(row => columns.map(key => csvCell(Object.hasOwn(row, key) ? row[key] : undefined)).join(',')),
       ]
-      const href = URL.createObjectURL(new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }))
-      setDownload({ rows, href })
+      const blob = new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' })
+      const href = URL.createObjectURL(blob)
+      setDownload({ rows, href, bytes: blob.size })
       return () => URL.revokeObjectURL(href)
     } catch {
       setDownload({ rows, error: true })
@@ -33,7 +45,7 @@ export function ResultTableCsvDownload({ rows, label }) {
   if (!download || download.rows !== rows) return null
   if (download.error) return <p role="status">{label} CSV download is unavailable.</p>
   const filename = label.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'result'
-  return <a className="btn ghost" href={download.href} download={filename + '.csv'}>Download {label} CSV</a>
+  return <SizedDownloadLink download={download} filename={filename + '.csv'} label={`Download ${label} CSV`} />
 }
 
 const POOLED_SHARE_FIELDS = ['increment_numerator', 'numerator', 'denominator', 'percentage']
@@ -81,9 +93,10 @@ export default function ResultJsonDownload({ result, selection = false }) {
     }
     try {
       const text = JSON.stringify(deepRedact(payload), null, 2)
-      const href = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+      const blob = new Blob([text], { type: 'application/json' })
+      const href = URL.createObjectURL(blob)
       const revoke = URL.revokeObjectURL.bind(URL)
-      setDownload({ result, selection, href })
+      setDownload({ result, selection, href, bytes: blob.size })
       return () => revoke(href)
     } catch {
       setDownload({ result, selection, error: true })
@@ -98,6 +111,6 @@ export default function ResultJsonDownload({ result, selection = false }) {
       ? <p>Selection download is unavailable.</p>
       : <p role="status">Result download is unavailable.</p>
   }
-  if (selection) return <a className="btn ghost" href={download.href} download="selection.json">Download selection JSON</a>
-  return <a className="btn ghost" href={download.href} download="result.json">Download result JSON</a>
+  if (selection) return <SizedDownloadLink download={download} filename="selection.json" label="Download selection JSON" />
+  return <SizedDownloadLink download={download} filename="result.json" label="Download result JSON" />
 }
