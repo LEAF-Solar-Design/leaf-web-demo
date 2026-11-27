@@ -33,6 +33,37 @@ def test_line_becomes_two_point_open_polyline():
     assert "texts" not in intake
 
 
+@pytest.mark.parametrize("measurement", [False, True])
+def test_model_entity_counts_include_unprojected_entities_and_exclude_children(measurement):
+    raw = _dxf(
+        "0\nELLIPSE\n5\nA1\n8\nRAFTER_45X145\n410\nmOdEl\n"
+        "0\nHATCH\n5\nA2\n8\nRAFTER_45X145\n"
+        "0\nINSERT\n5\nA3\n8\n0\n2\nExample\n66\n1\n"
+        "0\nATTRIB\n8\nCompoundChild\n0\nSEQEND\n8\nCompoundChild\n"
+        "0\nPOLYLINE\n5\nA4\n8\n0\n"
+        "0\nVERTEX\n8\nCompoundChild\n10\n0\n20\n0\n"
+        "0\nVERTEX\n8\nCompoundChild\n10\n1\n20\n1\n"
+        "0\nSEQEND\n8\nCompoundChild\n"
+        "0\nPOINT\n5\nA5\n8\nPaperByFlag\n67\n1\n"
+        "0\nHATCH\n5\nA6\n8\nPaperByLayout\n410\nSheet 1\n"
+        "0\nPOINT\n5\nA7\n"
+    )
+    intake = dxf_intake.parse_dxf_bytes(raw, source_name="t.dxf",
+                                        include_measurement_evidence=measurement,
+                                        include_model_entity_counts=True)
+    assert intake["model_entity_counts"] == {"RAFTER_45X145": 2, "0": 3}
+
+
+def test_model_entity_counts_can_be_empty(tmp_path):
+    raw = _dxf("0\nPOINT\n5\nA1\n8\nPaper\n67\n1\n")
+    path = tmp_path / "t.dxf"
+    path.write_bytes(raw)
+    intake = dxf_intake.parse_dxf_file(path, include_model_entity_counts=True)
+    assert intake["model_entity_counts"] == {}
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_file(path)
+    assert "model_entity_counts" not in dxf_intake.parse_dxf_bytes(raw)
+
+
 def test_text_and_mtext_land_in_additive_texts_field():
     raw = _dxf(
         "0\nTEXT\n5\nB1\n8\n0\n10\n100\n20\n200\n1\nNORTH ELEVATION\n"

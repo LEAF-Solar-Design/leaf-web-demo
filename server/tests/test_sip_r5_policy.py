@@ -663,6 +663,29 @@ def test_all_layer_counts_are_unchanged(params):
         {"counts": {"A": 3, "B": 1}, "total": 4}, None)
 
 
+@pytest.mark.parametrize("params,counts", [
+    ({}, {"A": 3, "B": 2}),
+    ({"layer": "B"}, {"B": 2}),
+    ({"layer": "Paper"}, {"Paper": 0}),
+])
+def test_model_entity_census_drives_layer_count(params, counts):
+    intake = {"layers": ["A", "Paper"], "model_entity_counts": {"A": 3, "B": 2},
+              "polylines": [{"layer": "A"}, {"layer": "Paper", "space": "paper"}]}
+    assert fallback.op_count_by_layer(intake, params) == (
+        {"counts": counts, "total": sum(counts.values())}, None)
+
+
+def test_empty_model_entity_census_is_authoritative():
+    intake = {"model_entity_counts": {}, "polylines": [{"layer": "Paper"}]}
+    assert fallback.op_count_by_layer(intake, {}) == ({"counts": {}, "total": 0}, None)
+
+
+def test_legacy_projected_layer_count_excludes_paper_space():
+    intake = {"inserts": [{"layer": "A"}, {"layer": "A", "space": "paper"}]}
+    assert fallback.op_count_by_layer(intake, {}) == (
+        {"counts": {"A": 1}, "total": 1}, None)
+
+
 def test_builtin_loader_preserves_named_error(monkeypatch):
     monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "off")
     tool = deepcopy(fallback.DEFAULT_TOOLS[0])

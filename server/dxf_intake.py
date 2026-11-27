@@ -60,13 +60,19 @@ def _mleader_number(value, integer=False):
         raise DxfParseError("malformed MLEADER numeric value") from exc
 
 
-def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
+def parse_dxf_file(
+    path: Path, *, source_name: str = "", include_model_entity_counts: bool = False,
+) -> Dict[str, Any]:
     raw = Path(path).read_bytes()
-    return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
+    return parse_dxf_bytes(
+        raw, source_name=source_name or Path(path).name,
+        include_model_entity_counts=include_model_entity_counts,
+    )
 
 
 def parse_dxf_bytes(
-    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True
+    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True,
+    include_model_entity_counts: bool = False,
 ) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
@@ -126,6 +132,7 @@ def parse_dxf_bytes(
     objects = {}
     elevation_evidence = []
     model_records = {}
+    model_entity_counts: Dict[str, int] = {}
     textstyles = {}
     text_style_catalogue = {}
     mleader_records = []
@@ -270,6 +277,10 @@ def parse_dxf_bytes(
                 space_info["space"] = "paper"
             if not space_info.get("space"):
                 space_info.clear()
+                # Compound children belong to their INSERT or POLYLINE parent.
+                if include_model_entity_counts and value not in ("ATTRIB", "VERTEX", "SEQEND"):
+                    layer = next((v for c, v in record if c == 8), "0") or "0"
+                    model_entity_counts[layer] = model_entity_counts.get(layer, 0) + 1
             elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
                 # Keep paper classification without exporting an invalid name or inventing a tab.
                 space_info.pop("layout", None)
@@ -403,6 +414,8 @@ def parse_dxf_bytes(
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if include_model_entity_counts:
+        out["model_entity_counts"] = model_entity_counts
     if beam_polyline3d_handles:
         out["beam_polyline3d_handles"] = beam_polyline3d_handles
     if beam_insert_placements:

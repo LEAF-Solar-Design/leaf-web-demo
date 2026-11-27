@@ -1591,7 +1591,9 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
             "version a payload that differs from what was edited",
             retryable=False, status_code=400)
     try:
-        intake = dxf_intake.parse_dxf_bytes(data, source_name=file.filename or "edited.dxf")
+        intake = dxf_intake.parse_dxf_bytes(
+            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True
+        )
     except dxf_intake.DxfParseError as exc:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"edited document does not parse: {exc}",
