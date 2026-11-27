@@ -478,9 +478,20 @@ export function validateNativePreview(value, expected = {}) {
       || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
       || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
   }
+  const identity = Object.fromEntries(identityFields.map(field => [field, value[field]]))
+  const disposition = value.failure_disposition
+  const failureDisposition = !repository && value.status === 'failed'
+    && disposition?.schema === 'leaf.native-preview.failed-disposition.v1'
+    && disposition.job_id === value.job_id && disposition.status === 'failed'
+    && disposition.reason === 'execution_budget_expired' && disposition.lease_cleared === true
+    && validDigest(disposition.disposition_sha256)
+    && pageIdentity.every(field => disposition.source?.[field] === value[field])
+    ? { ...disposition, source: { ...disposition.source } }
+    : null
   return { job_id: value.job_id, status: value.status,
-    ...Object.fromEntries(identityFields.map(field => [field, value[field]])),
-    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
+    ...identity,
+    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}),
+    ...(failureDisposition ? { failure_disposition: failureDisposition } : {}) }
 }
 
 export async function submitProjectSourceNativePreview(projectId, source, idempotencyKey, { signal, expectedScope } = {}) {
