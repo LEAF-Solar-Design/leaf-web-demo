@@ -386,8 +386,11 @@ def run(intake, params):
     ids = [s["set_id"] for s in base["selected_sets"]]
     ranks = []
     for bounds in windows:
-        scoped, _ = _run(intake, {"region": bounds, "set_ids": ids, "group_by": "layer"},
-                         allow_absent_in_window=True)
+        scoped, _ = _run(
+            intake, {"region": bounds, "set_ids": ids, "group_by": "layer",
+                     "visible_layers_only": params.get("visible_layers_only", False)},
+            allow_absent_in_window=True,
+        )
         counts = scoped.get("counts", {})
         if excluded_tiers is not None:
             excluded_counts = set(sorted(set(counts.values()), reverse=True)[:excluded_tiers])
@@ -444,6 +447,13 @@ def _run(intake, params, *, allow_absent_in_window=False):
     window = _selection_region(params)
     if not isinstance(intake, dict):
         raise InputValidationError("Saved intake must be an object; re-import the drawing.")
+    visible_only = params.get("visible_layers_only", False)
+    if type(visible_only) is not bool:
+        raise InputValidationError("Choose whether to count visible layers only.")
+    hidden_names = intake.get("hidden_layers", []) if visible_only else []
+    if not isinstance(hidden_names, list) or any(not isinstance(name, str) for name in hidden_names):
+        raise InputValidationError("Saved drawing layer visibility is incompatible; re-import the drawing.")
+    hidden_layers = {name.casefold() for name in hidden_names}
     for key in ("inserts", "polylines"):
         if key in intake and not isinstance(intake[key], list):
             raise InputValidationError(f"Saved intake {key} must be an array; re-import the drawing.")
@@ -468,7 +478,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
         raise InputValidationError("Choose named panel layers or explicit module sets.")
     auto_shares = shares and "panel_scope" in params and not selected_ids
     if auto_shares:
-        listing, _ = run(intake, {})
+        listing, _ = run(intake, {"visible_layers_only": visible_only})
         candidates = listing["sets"]
         if names is not None:
             available = {group["layer"] for group in candidates}
@@ -503,6 +513,8 @@ def _run(intake, params, *, allow_absent_in_window=False):
             if not _model(entity) or (key == "polylines" and not _four_corners(entity)):
                 continue
             layer = entity.get("layer") or "0"
+            if hidden_layers and layer.casefold() in hidden_layers:
+                continue
             block = (entity.get("name") or "") if key == "inserts" else ""
             identity = (entity_type, layer, block)
             handle = str(entity.get("handle") or "").strip().upper().removeprefix("0X")
@@ -540,6 +552,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
             raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
         raise ValueError("Selected module set is absent from this drawing; list the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
+    visible_selection_empty = visible_only and not sets and not selected_ids
     breakdown = {}
     if selected_sets and (params.get("group_by") == "layer" or top is not None):
         counts = _selected_layer_counts(selected_sets, multiplicities)
@@ -585,11 +598,12 @@ def _run(intake, params, *, allow_absent_in_window=False):
     return ({"sets": [public_set(s) for s in sets],
              **({"region": list(window)} if window is not None else {}),
              "original_bytes_integrity": "unverified",
-             "selection_required": not selected_sets,
+             "selection_required": not selected_sets and not visible_selection_empty,
              **breakdown,
              "selected_sets": [public_set(s) for s in selected_sets],
              "selected_set": public_set(selected) if selected else None,
              "count": _module_total(multiplicities[key][0] * multiplicities[key][1]
-                          for key in set().union(*(s["_keys"] for s in selected_sets))) if selected_sets else None},
+                          for key in set().union(*(s["_keys"] for s in selected_sets)))
+                 if selected_sets or visible_selection_empty else None},
             {"highlight_handles": list(dict.fromkeys(h for s in highlighted_sets for h in s["handles"]))}
             if selected_sets else None)

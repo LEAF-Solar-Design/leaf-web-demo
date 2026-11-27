@@ -942,3 +942,45 @@ def test_minimum_coverage_excludes_named_layers(prompt, excluded, solutions):
     result, _ = module.run(intake, route["params"])
     assert result["counts"] == counts
     assert result["coverage"] == {"reachable": True, "solutions": solutions}
+
+
+@pytest.mark.parametrize("hide_every_layer", [False, True])
+def test_visible_panel_count_uses_saved_layer_state(hide_every_layer):
+    from io import StringIO
+
+    import ezdxf
+    from dxf_intake import parse_dxf_bytes
+    from nl_router import classify
+    from tool_loader import run_tool_dynamic
+
+    drawing = ezdxf.new("R2018")
+    panel = drawing.blocks.new("Solar Panel")
+    panel.add_lwpolyline([(0, 0), (2, 0), (2, 1), (0, 1)], close=True)
+    for name in ("Roof", "Alternate", "Frozen"):
+        drawing.layers.new(name)
+    drawing.layers.get("Alternate").off()
+    drawing.layers.get("Frozen").freeze()
+    if hide_every_layer:
+        drawing.layers.get("Roof").off()
+    handles = [
+        drawing.modelspace().add_blockref(panel.name, (i * 3, 0), dxfattribs={"layer": layer}).dxf.handle
+        for i, layer in enumerate(("Roof", "Alternate", "Frozen"))
+    ]
+    stream = StringIO()
+    drawing.write(stream)
+    intake = parse_dxf_bytes(stream.getvalue().encode())
+
+    catalog = json.loads((PATH.parents[2] / "engine" / "registry.json").read_text())["tools"]
+    tool = next(t for t in catalog if t["name"] == "count-modules")
+    route = classify("Count solar panels on visible layers only.", catalog)
+    assert route["tool"] == "count-modules"
+    assert route["params"]["visible_layers_only"] is True
+    envelope = run_tool_dynamic(tool, intake, route["params"], aps_live=False)
+    assert envelope["error"] is None
+    assert envelope["result"]["count"] == (0 if hide_every_layer else 1)
+    assert envelope["result"]["selection_required"] is False
+    assert (envelope["overlay"] or {}).get("highlight_handles", []) == ([] if hide_every_layer else handles[:1])
+
+    all_panels = run_tool_dynamic(tool, intake, {"group_by": "layer", "panel_scope": "all_layers"}, aps_live=False)
+    assert all_panels["result"]["count"] == 3
+    assert set(all_panels["overlay"]["highlight_handles"]) == set(handles)
