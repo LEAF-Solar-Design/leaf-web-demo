@@ -63,6 +63,8 @@ function project(graph, options) {
 
   const ids = new Set()
   const panels = new Map()
+  const frameByPanel = options?.completedPreview ? new Map() : null
+  const frameIds = frameByPanel ? new Set() : null
   const drawingCentres = new Map()
   // Plans retain copied geometry only. No viewer output is allocated until every
   // entity and the aggregate read-point bound have been checked.
@@ -96,7 +98,9 @@ function project(graph, options) {
   const frames = []
   for (let index = 0; index < lists.frames.length; index += 1) {
     const frame = lists.frames.list[index]
-    if (entityId(frame) === null) return refused('invalid_graph')
+    const id = entityId(frame)
+    if (id === null) return refused('invalid_graph')
+    frameIds?.add(id)
     frames.push(frame)
   }
   const decoded = decodeGroundFrameSlots(frames)
@@ -106,6 +110,7 @@ function project(graph, options) {
       if (ids.has(slot.panelId)) return refused('invalid_graph')
       ids.add(slot.panelId)
       panels.set(slot.panelId, [slot.centre.x, slot.centre.y])
+      frameByPanel?.set(slot.panelId, frame.frameId)
     }
   }
   for (let index = 0; index < lists.panels.length; index += 1) {
@@ -113,6 +118,7 @@ function project(graph, options) {
     const id = entityId(panel)
     if (id === null) return refused('invalid_graph')
     const centre = pointOf(panel.centre)
+    frameByPanel?.set(id, own(panel, 'frame_ref'))
     if (centre === null) return refused('invalid_graph')
     // The drawing importer stores its source outline centres in drawing units.
     // Canonical panels and decoded Ground slots already use compute metres.
@@ -178,6 +184,23 @@ function project(graph, options) {
     }
   }
 
+  if (frameByPanel) {
+    const { frame_id: frame, groups } = options.completedPreview
+    if (!frameIds.has(frame) ||
+        !Array.isArray(groups) || groups.length < 1 || groups.length > 256) return refused('invalid_graph')
+    const seen = new Set()
+    for (const group of groups) {
+      if (!Array.isArray(group) || !group.length || seen.size + group.length > 4096) return refused('invalid_graph')
+      const refs = []
+      for (const ref of group) {
+        if (frameByPanel.get(ref) !== frame || seen.has(ref)) return refused('invalid_graph')
+        seen.add(ref)
+        refs.push(ref)
+      }
+      const color = '#60a5fa'
+      plans.push(refs.length === 1 ? planOf({ marker: panels.get(refs[0]), color }) : planOf({ refs, color }))
+    }
+  }
   const polylines = []
   let emittedPoints = 0
   for (const plan of plans) {
