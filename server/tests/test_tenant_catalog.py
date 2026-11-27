@@ -127,6 +127,18 @@ def test_tenant_list_ignores_invalid_version_directory_names(client, tmp_path):
     assert [item["version"] for item in client.get(BASE).json()["tools"]] == ["1.0.0"]
 
 
+def test_version_count_is_bounded(tmp_path):
+    for i in range(5):
+        (tmp_path / TENANT / NAME / f"1.0.{i}").mkdir(parents=True)
+    assert catalog.version_count(tmp_path, TENANT, NAME, 3) == 3
+    assert catalog.version_count(tmp_path, TENANT, NAME, 10) == 5
+    assert catalog.version_count(tmp_path, TENANT, "unknown-tool", 10) == 0
+    with pytest.raises(catalog.TenantCatalogError, match="^invalid_tenant$"):
+        catalog.version_count(tmp_path, "../escape", NAME, 10)
+    with pytest.raises(catalog.TenantCatalogError, match="^invalid_identity$"):
+        catalog.version_count(tmp_path, TENANT, "../escape", 10)
+
+
 def test_list_latest_versions_scan_is_bounded(tmp_path, monkeypatch):
     for i in range(5):
         publish(tmp_path, version=f"1.0.{i}")

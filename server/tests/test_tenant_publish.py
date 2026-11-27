@@ -173,6 +173,51 @@ def test_reviewed_package_cap_is_deterministic():
     assert json.loads(files["tool.json"])["timeout_ms"] == 120000
 
 
+def test_interrupted_legacy_publication_recovers_after_the_cap(publishing, signer, monkeypatch):
+    state = publishing
+    manifest = json.loads(state.files["tool.json"])
+    manifest["timeout_ms"] = 120000
+    state.files["tool.json"] = json.dumps(manifest, indent=2).encode()
+    reviewed_package = tenant_publish.reviewed_package
+    with monkeypatch.context() as patch:
+        patch.setattr(tenant_publish, "reviewed_package",
+                      lambda files, name: reviewed_package(files, name, timeout_cap_ms=None))
+        legacy = tenant_publish.publish_tenant_tool(
+            state.files, NAME, TENANT, signer, state.root, NOW)
+    result = tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW)
+    assert result.package_digest == legacy.package_digest
+    assert result.package_digest != reviewed_package(state.files, NAME)[1].package_digest
+
+
+def test_conflicting_existing_version_still_conflicts(publishing, signer):
+    state = publishing
+    tenant_publish.publish_tenant_tool(state.files, NAME, TENANT, signer, state.root, NOW)
+    files = dict(state.files)
+    files["main.csx"] += b"\n// different content\n"
+    with pytest.raises(tenant_publish.TenantPublishError) as error:
+        tenant_publish.publish_tenant_tool(files, NAME, TENANT, signer, state.root, NOW)
+    assert error.value.code == "branch_version_conflict"
+
+
+def test_publish_refuses_past_the_version_scan_limit(publishing, signer, monkeypatch):
+    state = publishing
+    monkeypatch.setattr(tenant_catalog, "VERSION_SCAN_LIMIT", 2)
+    first = tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW)
+    (state.root / TENANT / NAME / "1.2.1").mkdir()
+    files = dict(state.files)
+    manifest = json.loads(files["tool.json"])
+    manifest["version"] = "1.2.2"
+    files["tool.json"] = json.dumps(manifest).encode()
+    with pytest.raises(tenant_publish.TenantPublishError) as error:
+        tenant_publish.publish_tenant_tool(files, NAME, TENANT, signer, state.root, NOW)
+    assert (error.value.code, error.value.status_code) == ("tenant_version_limit", 409)
+    assert not (state.root / TENANT / NAME / "1.2.2").exists()
+    assert tenant_publish.publish_tenant_tool(
+        state.files, NAME, TENANT, signer, state.root, NOW) == first
+
+
 def test_legacy_uncapped_publication_still_resolves(publishing, signer, monkeypatch):
     state = publishing
     manifest = json.loads(state.files["tool.json"])

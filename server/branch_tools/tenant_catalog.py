@@ -148,6 +148,14 @@ def list_versions(root: str | Path, tenant_id: str, *, include_revoked: bool = F
         return []
 
 
+def version_count(root, tenant_id, name, limit) -> int:
+    if not tool_envelopes.valid_identity(name, "0.0.0"):
+        raise TenantCatalogError("invalid_identity")
+    path = _tenant(root, tenant_id) / name
+    _safe_path(path)
+    return sum(1 for _ in tool_envelopes._directories(path, limit))
+
+
 def _semver(version: str) -> tuple[int, int, int]:
     major, minor, patch = version.split(".")
     return int(major), int(minor), int(patch)
