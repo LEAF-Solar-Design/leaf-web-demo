@@ -192,3 +192,153 @@ def test_invalid_run_does_not_create(tmp_path, run):
     with pytest.raises(ValueError):
         store.observe(PAIR, result(), run)
     assert store.items() == []
+
+
+@pytest.mark.parametrize(("seen", "expected"), [
+    (
+        [("1", "night-03"), ("1", "night-01"), ("1", "night-02")],
+        {"1": ("night-03", "night-02", 3)},
+    ),
+    (
+        [("1", "night-01"), ("2", "night-02"), ("1", "night-03")],
+        {"1": ("night-01", "night-03", 2), "2": ("night-02", None, 1)},
+    ),
+    (
+        [("1", "night-01"), ("1", "night-02"), ("1", "night-01")],
+        {"1": ("night-01", "night-02", 2)},
+    ),
+], ids=["recorded-order", "independent-revisions", "replayed-first"])
+def test_report_identifies_first_failure_and_latest_distinct_repeat(tmp_path, seen, expected):
+    path = tmp_path / "ledger.db"
+    store = FailureStore(path)
+    for version, run_id in seen:
+        store.observe(dict(PAIR, version=version), result(), run_id)
+
+    reopened = FailureStore(path)
+    report_path = tmp_path / "failures.md"
+    reopened.export_markdown(report_path)
+    sections = report_path.read_text(encoding="utf-8").split("\n## ")
+    rows = reopened.items()
+    assert {row["version"] for row in rows} == set(expected)
+    for row in rows:
+        first, repeat, count = expected[row["version"]]
+        first_hash = hashlib.sha256(first.encode()).hexdigest()
+        repeat_hash = hashlib.sha256(repeat.encode()).hexdigest() if repeat else None
+        assert row["first_failure_run_sha256"] == first_hash
+        assert row["latest_repeat_run_sha256"] == repeat_hash
+        assert row["count"] == count
+        section = next(section for section in sections if section.startswith(row["key"] + "\n"))
+        assert f"- First recorded failure run: sha256:{first_hash}" in section
+        latest = f"sha256:{repeat_hash}" if repeat_hash else "None recorded"
+        assert f"- Latest distinct repeat run: {latest}" in section
+        assert first not in section and (repeat is None or repeat not in section)
+
+
+def test_execution_bounds_follow_time_across_out_of_order_receipts(tmp_path):
+    path = tmp_path / "ledger.db"
+    store = FailureStore(path)
+    for run, time in [
+        ("night-03", "2026-11-03T08:00:00+08:00"),
+        ("night-01", "2026-10-31T21:00:00-03:00"),
+        ("night-02", "2026-11-02T00:00:00.125Z"),
+    ]:
+        store.observe(PAIR, result(), run, executed_at=time)
+
+    store = FailureStore(path)
+    row, = store.items()
+    first = hashlib.sha256(b"night-01").hexdigest()
+    latest = hashlib.sha256(b"night-03").hexdigest()
+    assert row["first_failure_run_sha256"] == latest
+    assert row["latest_repeat_run_sha256"] == hashlib.sha256(b"night-02").hexdigest()
+    assert row["earliest_execution_run_sha256"] == first
+    assert row["earliest_executed_at"] == "2026-11-01T00:00:00.000000Z"
+    assert row["latest_repeat_execution_run_sha256"] == latest
+    assert row["latest_repeat_executed_at"] == "2026-11-03T00:00:00.000000Z"
+    report = tmp_path / "failures.md"
+    store.export_markdown(report)
+    output = report.read_text(encoding="utf-8")
+    assert f"Earliest failure execution: sha256:{first} at {row['earliest_executed_at']}" in output
+    assert f"Latest repeat execution: sha256:{latest} at {row['latest_repeat_executed_at']}" in output
+
+
+def test_execution_ties_are_stable_and_revision_scoped(tmp_path):
+    timestamp = "2026-11-01T00:00:00Z"
+    first, last = sorted(hashlib.sha256(run).hexdigest() for run in (b"one", b"two"))
+    for index, runs in enumerate((("one", "two"), ("two", "one"))):
+        store = FailureStore(tmp_path / f"ledger-{index}.db")
+        for run in runs:
+            store.observe(PAIR, result(), run, executed_at=timestamp)
+        store.observe(PAIR, result(), "one", executed_at="2026-10-31T21:00:00-03:00")
+        store.observe(dict(PAIR, version="2.0"), result(), "one", executed_at=timestamp)
+        rows = {row["version"]: row for row in store.items()}
+        assert rows["1.0"]["count"] == 2
+        assert rows["1.0"]["earliest_execution_run_sha256"] == first
+        assert rows["1.0"]["latest_repeat_execution_run_sha256"] == last
+        assert rows["2.0"]["earliest_execution_run_sha256"] == hashlib.sha256(b"one").hexdigest()
+        assert rows["2.0"]["latest_repeat_execution_run_sha256"] is None
+
+
+def test_legacy_execution_history_stays_unknown_until_backfilled(tmp_path):
+    path = tmp_path / "ledger.db"
+    FailureStore(path).observe(PAIR, result(), "old")
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE sightings RENAME TO previous_sightings")
+        db.execute("""CREATE TABLE sightings (
+            key TEXT NOT NULL REFERENCES failures(key), run_hash TEXT NOT NULL,
+            PRIMARY KEY(key, run_hash))""")
+        db.execute("INSERT INTO sightings SELECT key, run_hash FROM previous_sightings")
+        db.execute("DROP TABLE previous_sightings")
+    barrier = Barrier(3)
+
+    def open_store(_):
+        barrier.wait(timeout=10)
+        return FailureStore(path)
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        stores = list(executor.map(open_store, range(3)))
+    for store in stores:
+        row, = store.items()
+        assert row["count"] == 1
+        assert row["earliest_execution_run_sha256"] is None
+    with sqlite3.connect(path) as db:
+        columns = db.execute("PRAGMA table_info(sightings)").fetchall()
+        assert [column[1] for column in columns].count("executed_at") == 1
+
+    store = stores[0]
+    store.observe(PAIR, result(), "new", executed_at="2026-11-02T00:00:00Z")
+    row, = store.items()
+    assert row["earliest_execution_run_sha256"] is None
+    assert row["latest_repeat_execution_run_sha256"] is None
+    report = tmp_path / "failures.md"
+    store.export_markdown(report)
+    assert "Earliest failure execution: Unavailable (execution timestamps missing)" in report.read_text()
+
+    store.observe(PAIR, result(), "old", executed_at="2026-11-01T00:00:00Z")
+    row, = FailureStore(path).items()
+    assert row["earliest_execution_run_sha256"] == hashlib.sha256(b"old").hexdigest()
+    assert row["latest_repeat_execution_run_sha256"] == hashlib.sha256(b"new").hexdigest()
+    assert row["count"] == 2
+
+
+@pytest.mark.parametrize("time", ["2026-11-02T00:00:00Z", "2026-11-01T00:00:00", "broken", True])
+def test_bad_or_conflicting_execution_time_preserves_existing_sighting(tmp_path, time):
+    store = FailureStore(tmp_path / "ledger.db")
+    store.observe(PAIR, result(), "one", executed_at="2026-11-01T00:00:00Z")
+    before = store.items()
+    with pytest.raises(ValueError, match="executed_at"):
+        store.observe(PAIR, result(), "one", executed_at=time)
+    assert store.items() == before
+
+
+@pytest.mark.parametrize("time", ["2026-11-01T00:00:00", "broken", True])
+def test_bad_pass_execution_time_leaves_failure_open(tmp_path, time):
+    store = FailureStore(tmp_path / "ledger.db")
+    store.observe(PAIR, result(), "one", executed_at="2026-11-01T00:00:00Z")
+    before = store.items()
+
+    with pytest.raises(ValueError, match="executed_at"):
+        store.observe(PAIR, result("PASS"), "two", executed_at=time)
+    assert store.items() == before
+
+    store.observe(PAIR, result("PASS"), "two", executed_at="2026-11-02T00:00:00Z")
+    assert store.items() == [dict(before[0], status="resolved")]
