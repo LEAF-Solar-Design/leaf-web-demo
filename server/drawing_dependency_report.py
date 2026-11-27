@@ -10,6 +10,14 @@ import re
 
 _INLINE_FONT = re.compile(r"\\[fF]")
 _FONT_DELIMITER = re.compile(r"[|;]")
+_MATERIAL_MAPS = {
+    3: ("diffuse", 72),
+    4: ("specular", 77),
+    6: ("reflection", 171),
+    7: ("opacity", 175),
+    8: ("bump", 179),
+    9: ("refraction", 273),
+}
 
 
 def _inline_fonts(text):
@@ -26,15 +34,39 @@ def _inline_fonts(text):
         position = delimiter.end()
 
 
+def _material_texture_maps(pairs, start, end):
+    in_material = False
+    normal_map = False
+    saw_diffuse_path = False
+    previous = (None, None)
+    for index in range(start, end):
+        code, value = pairs[index]
+        if code == 100:
+            in_material = value == "AcDbMaterial"
+        elif in_material and code in (271, 465):
+            normal_map = True
+        elif in_material and code in _MATERIAL_MAPS:
+            channel, source_code = _MATERIAL_MAPS[code]
+            if code == 3:
+                # The normal map repeats the diffuse groups after its own header.
+                if normal_map or saw_diffuse_path:
+                    channel = "normal"
+                saw_diffuse_path = True
+            if value and (previous[0] != source_code or previous[1] == "1"):
+                yield channel, value
+        previous = code, value
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
+    texture_maps = {}
     plot_setups = {}
     plot_layouts = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
     section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
     owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"},
-              "IMAGEDEF": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
+              "IMAGEDEF": {"OBJECTS"}, "MATERIAL": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
               "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
@@ -112,6 +144,11 @@ def from_pairs(pairs, *, literal_text=None):
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
+        elif kind == "MATERIAL":
+            handle = groups.get(5) or ""
+            for channel, path in _material_texture_maps(pairs, i + 1, end):
+                add("material_texture", path, "texture omitted")
+                texture_maps.setdefault(path, set()).add((handle, channel))
         elif kind == "PLOTSETTINGS":
             settings = subclasses.get("AcDbPlotSettings")
             resources = plot_resources(groups if settings is None else settings)
@@ -135,6 +172,11 @@ def from_pairs(pairs, *, literal_text=None):
             for name in _inline_fonts(text):
                 add("font", name, "font remapped", remapped_to="sans-serif")
         i = end
+    for path, references in texture_maps.items():
+        dependencies["material_texture", path]["material_maps"] = [
+            {"material_handle": handle or None, "channel": channel}
+            for handle, channel in sorted(references)
+        ]
     report = {"schema": "leaf.drawing-dependencies.v1",
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],

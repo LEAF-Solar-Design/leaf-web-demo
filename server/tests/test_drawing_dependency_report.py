@@ -42,6 +42,33 @@ def test_empty_dependencies_are_an_explicit_empty_report():
     assert from_pairs([])["dependencies"] == []
 
 
+def test_material_texture_inventory_uses_full_locator_and_saved_map_source():
+    def material(handle, tags):
+        return f"0\nMATERIAL\n5\n{handle}\n100\nAcDbMaterial\n{tags}"
+
+    shared = "finish/Shared.png"
+    first = material("A1", f"72\n1\n3\n{shared}\n271\n0\n72\n1\n3\nnormal/Shared.png\n")
+    second = material("A2", f"77\n1\n4\n{shared}\n175\n0\n7\nscene.png\n")
+    separate = material("A3", "179\n1\n8\nother/Shared.png\n9\nrefract.png\n273\n0\n")
+    decoy = material("AA", "171\n1\n6\nwrong-section.png\n")
+    raw = (
+        f"0\nSECTION\n2\nENTITIES\n{decoy}0\nENDSEC\n"
+        f"0\nSECTION\n2\nOBJECTS\n{first}{second}{separate}0\nENDSEC\n0\nEOF\n"
+    ).encode()
+    report = parse_dxf_bytes(raw)["dependency_report"]
+    assert report["external_files_opened"] is False
+    rows = report["dependencies"]
+    assert all(row["kind"] == "material_texture" and row["disposition"] == "texture omitted"
+               for row in rows)
+    assert {row["name"]: row["material_maps"] for row in rows} == {
+        shared: [{"material_handle": "A1", "channel": "diffuse"},
+                 {"material_handle": "A2", "channel": "specular"}],
+        "normal/Shared.png": [{"material_handle": "A1", "channel": "normal"}],
+        "other/Shared.png": [{"material_handle": "A3", "channel": "bump"}],
+        "refract.png": [{"material_handle": "A3", "channel": "refraction"}],
+    }
+
+
 @pytest.mark.parametrize("setup, layout_device, duplicates, status", [
     ("office", "Shared.pc3", False, "matched"),
     ("Office", "../local/Override.pc3", False, "matched"),
