@@ -53,6 +53,11 @@ function browserStorage() {
   }
 }
 
+/** Make the next /app boot resume this project for this org (M3 S4 opens a sent copy there). */
+export function rememberOpenProject(orgId, projectId, storage = browserStorage()) {
+  writeStoredProjectId(orgId, projectId, storage)
+}
+
 export function readStoredOrgId(storage = browserStorage()) {
   try { return storage?.getItem(WORKSPACE_ORG_KEY) || null } catch { return null }
 }

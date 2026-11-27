@@ -7,6 +7,7 @@ import useSessionOrgAdoption from '../controllers/workspace/useSessionOrgAdoptio
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
 import BranchToolsPanel from './BranchToolsPanel.jsx'
+import OpenInStudioPanel from './OpenInStudioPanel.jsx'
 import { humanizeError } from '../errorHumanize.js'
 import './leafPlatform.css'
 
@@ -159,6 +160,7 @@ export default function LeafPlatformScene() {
   const grantRequest = useRef(null)
   const grantAttempt = useRef(false)
   const [working, setWorking] = useState(false)
+  const [sending, setSending] = useState(false)
   const [focusConnect, setFocusConnect] = useState(false)
   const headingRef = useRef(null)
   const connectRef = useRef(null)
@@ -391,7 +393,7 @@ export default function LeafPlatformScene() {
 
   async function connect(chosenVersionId) {
     const version = versions.find((item) => item.version_id === chosenVersionId)
-    if (!version || binding || actionInFlight.current || awaitingReady || !signedIn || !isUuid(orgId)) return
+    if (!version || binding || sending || actionInFlight.current || awaitingReady || !signedIn || !isUuid(orgId)) return
     const operation = {}
     actionInFlight.current = operation
     bindingPending.current = true
@@ -484,8 +486,12 @@ export default function LeafPlatformScene() {
         setHelloAttempt((attempt) => attempt + 1)
       }}>Try again</button>}
       {state.status === 'unbound' && <section>
-        <p>Connect this DWG to a drawing version in your workspace.</p>
-        {!signedIn ? <button type="button" disabled={working} onClick={() => runAction(() => login())}>Sign in</button> : <>
+        {!signedIn ? <>
+          <p>Sign in to open this drawing in Studio or connect it to your workspace.</p>
+          <button type="button" disabled={working} onClick={() => runAction(() => login())}>Sign in</button>
+        </> : <>
+          <OpenInStudioPanel key={state.ready?.sessionId} bridge={bridge} disabled={binding || awaitingReady} onBusyChange={setSending} />
+          <h2>Or connect to a drawing version already in Studio</h2>
           {catalogMessage && <p>{catalogMessage}</p>}
           {(!isUuid(orgId) || catalogMessage === 'This workspace has no projects yet.') && <StudioRecovery />}
           {projectsFailed && <button type="button" disabled={binding} onClick={() => setProjectsAttempt((attempt) => attempt + 1)}>Try again</button>}
@@ -510,8 +516,8 @@ export default function LeafPlatformScene() {
               </select>
             </label>
             {chosenVersion && <p className="leaf-platform-summary">Connect this DWG to {typeof chosenProject?.name === 'string' && chosenProject.name.trim() ? chosenProject.name : 'Untitled project'} / {drawingName(chosenVersion, drawings)} / Version {chosenVersion.seq ?? '?'}. You cannot change this from the palette later.</p>}
-            <button ref={connectRef} type="button" disabled={!versionId || binding || awaitingReady} onClick={() => connect(versionId)}>Connect drawing</button>
-            {grantFailed && <button type="button" disabled={binding || awaitingReady} onClick={() => connect(versionId)}>Try again</button>}
+            <button ref={connectRef} type="button" disabled={!versionId || binding || awaitingReady || sending} onClick={() => connect(versionId)}>Connect drawing</button>
+            {grantFailed && <button type="button" disabled={binding || awaitingReady || sending} onClick={() => connect(versionId)}>Try again</button>}
           </>}
         </>}
       </section>}
