@@ -1,6 +1,41 @@
 import { useEffect, useState } from 'react'
 import { deepRedact } from '../projects/ReceiptPanel.jsx'
 
+function csvCell(value) {
+  if (value == null) return ''
+  let text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+  // Preserve numeric negatives, while keeping user-entered text inert in spreadsheets.
+  if (typeof value === 'string' && /^[\s\uFEFF]*[=+\-@]|^[\t\r\n]/u.test(text)) text = "'" + text
+  return '"' + text.replaceAll('"', '""') + '"'
+}
+
+export function ResultTableCsvDownload({ rows, label }) {
+  const [download, setDownload] = useState(null)
+  useEffect(() => {
+    setDownload(null)
+    try {
+      const safeRows = deepRedact(rows)
+      const columns = [...new Set(safeRows.flatMap(Object.keys))]
+      if (!columns.length) return undefined
+      const lines = [
+        columns.map(csvCell).join(','),
+        ...safeRows.map(row => columns.map(key => csvCell(Object.hasOwn(row, key) ? row[key] : undefined)).join(',')),
+      ]
+      const href = URL.createObjectURL(new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }))
+      setDownload({ rows, href })
+      return () => URL.revokeObjectURL(href)
+    } catch {
+      setDownload({ rows, error: true })
+      return undefined
+    }
+  }, [rows])
+
+  if (!download || download.rows !== rows) return null
+  if (download.error) return <p>{label} CSV download is unavailable.</p>
+  const filename = label.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'result'
+  return <a className="btn ghost" href={download.href} download={filename + '.csv'}>Download {label} CSV</a>
+}
+
 // Use returned data so paging, formatting, and viewer state cannot change the export.
 export default function ResultJsonDownload({ result, selection = false }) {
   const [download, setDownload] = useState(null)
