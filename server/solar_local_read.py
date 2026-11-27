@@ -193,7 +193,7 @@ def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256
         trusted_inputs = solar_tools.get(tool)["trusted_inputs"]
         if "pvcase_source" in trusted_inputs:
             extra["pvcase_source"] = copy.deepcopy(pvcase_source)
-        if "source_intake" in trusted_inputs:
+        if "source_intake" in trusted_inputs or tool == "solar-string-data":
             extra["source_intake"] = source_intake
         if _reads_version_history(module):
             extra["version_graph_sha256"] = version_graph_sha256

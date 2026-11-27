@@ -321,11 +321,16 @@ DECLARATIONS = {
     REBUILD: {"order": 76, "code": "INVALID_STRING_REBUILD_REQUEST", "facets": ["strings"],
               "ledger": ["string-rebuild"], "engine_op": "solar_string_rebuild",
               "properties": {"drawing_id": {"type": "string", "maxLength": 128}}},
-    DATA: {"order": 78, "code": "INVALID_STRING_DATA_REQUEST", "facets": ["strings", "frames"],
+    DATA: {"order": 78, "code": "INVALID_STRING_DATA_REQUEST", "facets": ["strings"],
            "ledger": ["string-data"], "engine_op": "solar_string_data",
            "properties": {"drawing_id": {"type": "string", "maxLength": 128},
-                          "format": {"type": "string", "enum": ["string-data", "design-json"],
-                                     "description": "String Data keeps the endpoint report. Full design JSON exports every current panel, group, ordered string, route and design metadata."},
+                          "format": {"type": "string",
+                                     "enum": ["string-data", "design-json", "continuity-json", "edge-clearance-json"],
+                                     "description": "Choose endpoints, complete design, centre spacing, or edge clearance."},
+                          "max_panel_pitch_m": {"type": "number", "exclusiveMinimum": 0,
+                                                "description": "For continuity only. Maximum allowed distance between consecutive panel centres in metres."},
+                          "max_panel_edge_gap_m": {"type": "number", "minimum": 0,
+                                                   "description": "For edge clearance only. Maximum clear distance between consecutive panel outlines in metres. Touching or intersecting outlines have zero clearance."},
                           "string_refs": {"type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": True,
                                           "items": {"type": "string", "minLength": 1, "maxLength": 128}}}},
 }
@@ -390,9 +395,7 @@ def test_string_report_readiness(graph, tool):
         "input_ready": False, "input_reason": "strings_required"}
     frameless = copy.deepcopy(graph)
     frameless["frames"] = []
-    assert availability.w1_local_commit_inputs(frameless)[tool] == (
-        {"input_ready": True, "input_reason": None} if tool == REBUILD
-        else {"input_ready": False, "input_reason": "frames_required"})
+    assert availability.w1_local_commit_inputs(frameless)[tool] == {"input_ready": True, "input_reason": None}
     unresolved = copy.deepcopy(graph)
     unresolved["project"]["units"]["meters_per_unit"] *= 2
     assert availability.w1_local_commit_inputs(unresolved)[tool] == {
@@ -1100,3 +1103,37 @@ def test_companion_budget_preserves_combined_depth_limit(graph):
     model.validate_graph(after)
     with pytest.raises(GraphValidationError, match='GRAPH_LIMIT_EXCEEDED'):
         solve.version_companion({'cad': 'preserve'}, None, after)
+
+@pytest.mark.parametrize("middle,maximum,first_gap,run_counts", [
+    (2, 2, None, [3]),
+    (1, 2, (P2, P3), [2, 1]),
+    (3, 2, (P1, P2), [1, 2]),
+])
+def test_string_continuity_centres(graph, middle, maximum, first_gap, run_counts):
+    graph["frames"] = []
+    for panel, x in zip(graph["panels"], (0, middle, 4)):
+        panel["centre"] = [x, 0]
+    item = graph["strings"][0]
+    item["ordered_panel_refs"] = [P1, P2, P3]
+    before = copy.deepcopy(graph)
+    artifact = builtin(DATA).run(graph, {"format": "continuity-json", "max_panel_pitch_m": maximum,
+                                        "string_refs": [item["id"]]})
+    assert artifact.filename == "StringContinuity.json"
+    report = json.loads(artifact.content)
+    row = report["strings"][0]
+    assert row["string_ref"] == item["id"]
+    assert [run["panel_count"] for run in row["ordered_runs"]] == run_counts
+    actual = [(gap["before"], gap["after"]) for gap in row["gaps"]]
+    assert actual == ([] if first_gap is None else [first_gap])
+    assert report["rule"] == "consecutive-panel-centre-distance"
+    assert graph == before
+
+
+@pytest.mark.parametrize("params", [
+    {"format": "continuity-json"}, {"format": "continuity-json", "max_panel_pitch_m": 0},
+    {"format": "continuity-json", "max_panel_pitch_m": True}, {"max_panel_pitch_m": 2},
+])
+def test_string_continuity_requires_explicit_positive_pitch(graph, params):
+    with pytest.raises(GraphValidationError) as error:
+        builtin(DATA).run(graph, params)
+    assert error.value.code == "INVALID_STRING_DATA_REQUEST"
