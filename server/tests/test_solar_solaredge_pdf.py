@@ -91,6 +91,40 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
 
 
+@pytest.mark.parametrize(("properties", "named", "replacement"), [
+    (b"<< /ActualText (B207) >>", b"", "B207"),
+    (b"/CopyLabel", b" /Properties << /CopyLabel << /ActualText <FEFF00430033> >> >>", "C3"),
+    (b"<< /ActualText <EFBBBF42C3A9> >>", b"", "Bé"),
+    (b"<< /ActualText () >>", b"", ""),
+])
+def test_copy_text_audit_decodes_single_label(properties, named, replacement):
+    label = b"BT /F1 10 Tf 5 6 Td [(A1) 0 (04)] TJ ET"
+    data = _pdf(b"/Span " + properties + b" BDC " + label + b" EMC", resources=HELVETICA + named)
+    assert pdf.audit_copy_text(data, ["A104"]) == [pdf.CopyTextMismatch(1, "A104", replacement, 5, 6)]
+    assert pdf.audit_copy_text(data, ["X01"]) == []
+    assert pdf.extract_primitives(data) == pdf.extract_primitives(_pdf(label, resources=HELVETICA))
+
+
+def test_copy_text_audit_uses_outer_span_and_skips_unpainted_and_exact_labels():
+    data = _pdf(
+        b"/Span << /ActualText (outer) >> BDC /Span << /ActualText (inner) >> BDC "
+        b"BT /F1 10 Tf 5 6 Td (A104) Tj ET EMC EMC "
+        b"/Span << /ActualText (invisible) >> BDC BT /F1 10 Tf 3 Tr (A104) Tj ET EMC "
+        b"/Span << /ActualText (A104) >> BDC BT /F1 10 Tf 0 Tr (A104) Tj ET EMC",
+        resources=HELVETICA,
+    )
+    assert pdf.audit_copy_text(data, ["A104"]) == [pdf.CopyTextMismatch(1, "A104", "outer", 5, 6)]
+
+
+def test_copy_text_audit_enforces_replacement_byte_budget(monkeypatch):
+    data = _pdf(b"/Span << /ActualText (AB) >> BDC EMC "
+                b"/Span << /ActualText (CD) >> BDC EMC")
+    monkeypatch.setattr(pdf, "MAX_COPY_TEXT_BYTES", 3)
+    assert pdf.extract_primitives(data).letters == []
+    with pytest.raises(SolarEdgePdfError, match="PDF_RESOURCE_LIMIT: replacement text bytes"):
+        pdf.audit_copy_text(data, ["A104"])
+
+
 def test_indirect_content_array_matches_single_stream():
     chunks = [b"1 0 0 RG 10 10 m 20 20 l S\n", b"BT /F1 10 Tf 20 20 Td (1.1) Tj ET\n"]
     single = pdf.extract_primitives(_pdf(b"".join(chunks), resources=HELVETICA))

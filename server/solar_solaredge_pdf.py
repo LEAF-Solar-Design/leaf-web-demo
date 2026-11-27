@@ -44,7 +44,7 @@ from pdfminer.pdfpage import PDFPage
 from pdfminer.pdfparser import PDFParser
 from pdfminer.pdftypes import PDFObjRef, PDFStream, resolve1, stream_value
 from pdfminer.psparser import LIT, PSEOF, PSKeyword, PSLiteral, keyword_name, literal_name
-from pdfminer.utils import MATRIX_IDENTITY, apply_matrix_pt, mult_matrix
+from pdfminer.utils import MATRIX_IDENTITY, apply_matrix_pt, decode_text, mult_matrix
 
 
 MAX_PDF_BYTES = 64 * 1024 * 1024
@@ -62,6 +62,7 @@ MAX_CMAP_BYTES = 2 * 1024 * 1024
 MAX_CMAP_ENTRIES = 65536
 MAX_CMAP_REPLACEMENT = 256
 MAX_TEXT_CHARACTERS = 1_000_000
+MAX_COPY_TEXT_BYTES = 1_000_000
 MAX_LAYER_GROUPS = 4096
 MAX_LAYER_DEPTH = 32
 MAX_LAYER_STEPS = 100_000
@@ -551,6 +552,51 @@ _ARG_COUNTS = {"m": 2, "l": 2, "c": 6, "v": 4, "y": 4, "re": 4, "RG": 3, "rg": 3
 _PAINT_OPS = {"S", "s", "f", "F", "f*", "B", "B*", "b", "b*"}
 
 
+@dataclass(frozen=True)
+class CopyTextMismatch:
+    page: int
+    visible_id: str
+    copy_text: str
+    x: float
+    y: float
+
+
+@dataclass
+class _ReplacementSpan:
+    start: int
+    text: str
+    nonpainting: bool = False
+
+
+class _CopyTextAudit:
+    def __init__(self, approved_ids):
+        self.approved_ids = frozenset(approved_ids)
+        self.findings = []
+        self.page = 0
+        self.bytes_read = 0
+
+    def decode(self, value):
+        self.bytes_read += len(value)
+        if self.bytes_read > MAX_COPY_TEXT_BYTES:
+            raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "replacement text bytes")
+        try:
+            if value.startswith(b"\xfe\xff"):
+                return value[2:].decode("utf-16-be")
+            if value.startswith(b"\xef\xbb\xbf"):
+                return value[3:].decode("utf-8")
+            return decode_text(value)
+        except UnicodeDecodeError as exc:
+            raise SolarEdgePdfError("BAD_ACTUAL_TEXT", "invalid text encoding") from exc
+
+    def finish(self, span, letters):
+        if span.nonpainting or span.start == len(letters):
+            return
+        visible_id = "".join(letter[0] for letter in letters[span.start:])
+        if visible_id in self.approved_ids and visible_id != span.text:
+            _, x, y, _ = letters[span.start]
+            self.findings.append(CopyTextMismatch(self.page, visible_id, span.text, x, y))
+
+
 class _PrimitiveInterpreter(PDFPageInterpreter):
     """pdfminer interpreter that also records feed A and tracks colour exactly.
 
@@ -558,14 +604,17 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     with its own q/Q stack: (stroke_space, stroke_components, fill_space, fill_components).
     """
 
-    def __init__(self, rsrcmgr, device, out, counter, layers, depth=0, *, appearance=False):
+    def __init__(self, rsrcmgr, device, out, counter, layers, depth=0, *, appearance=False,
+                 copy_audit=None):
         super().__init__(rsrcmgr, device)
         self.out = out
         self.counter = counter
         self.depth = depth
         self.appearance = appearance
         self.layers = layers
-        self.marked_visibility = []
+        self.marked_content = []
+        self.copy_audit = copy_audit
+        self.replacement_span = None
         self.raw_pending = ([], []) if layers.states else None
         self.records_raw = depth == 0 or (appearance and depth == 1) or bool(layers.states)
         self.color = ("DeviceGray", (0.0,), "DeviceGray", (0.0,))
@@ -578,8 +627,10 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         if self.depth + 1 > MAX_FORM_DEPTH:
             raise SolarEdgePdfError("FORM_TOO_DEEP", str(MAX_FORM_DEPTH))
         child = _PrimitiveInterpreter(self.rsrcmgr, self.device, self.out, self.counter,
-                                      self.layers, self.depth + 1, appearance=self.appearance)
+                                      self.layers, self.depth + 1, appearance=self.appearance,
+                                      copy_audit=self.copy_audit)
         child.color = self.color
+        child.replacement_span = self.replacement_span
         return child
 
     # ---- execution with bounds and strict operands ----
@@ -631,17 +682,33 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             if self.raw_pending is not None and (name in _PAINT_OPS or name == "n"):
                 self._finish_raw_path(name)
             self.argstack = []
-        if self.marked_visibility:
+        if self.marked_content:
             raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unclosed marked content")
 
     @property
     def visible(self):
-        return not self.marked_visibility or self.marked_visibility[-1]
+        return not self.marked_content or self.marked_content[-1][0]
 
-    def _begin_marked_content(self, visible):
-        if len(self.marked_visibility) >= MAX_LAYER_DEPTH:
+    def _begin_marked_content(self, visible, properties=None):
+        if len(self.marked_content) >= MAX_LAYER_DEPTH:
             raise SolarEdgePdfError("PDF_RESOURCE_LIMIT", "marked content depth")
-        self.marked_visibility.append(self.visible and visible)
+        visible = self.visible and visible
+        previous = self.replacement_span
+        if self.copy_audit is not None and visible and previous is None:
+            self.replacement_span = self._open_replacement_span(properties)
+        self.marked_content.append((visible, previous))
+
+    def _open_replacement_span(self, properties):
+        if isinstance(properties, PSLiteral):
+            named = _layer_value(self.resources.get("Properties"))
+            properties = named.get(literal_name(properties)) if isinstance(named, dict) else None
+        properties = _layer_value(properties)
+        if not isinstance(properties, dict) or "ActualText" not in properties:
+            return None
+        replacement = _layer_value(properties["ActualText"])
+        if not isinstance(replacement, bytes):
+            raise SolarEdgePdfError("BAD_ACTUAL_TEXT", "replacement must be a PDF string")
+        return _ReplacementSpan(len(self.out.letters), self.copy_audit.decode(replacement))
 
     def do_BMC(self, tag):
         self._begin_marked_content(True)
@@ -650,14 +717,18 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         if tag is LIT("OC"):
             if isinstance(properties, PSLiteral):
                 properties = _layer_dict(self.resources.get("Properties")).get(literal_name(properties))
-            self._begin_marked_content(self.layers.visible(properties))
+            self._begin_marked_content(self.layers.visible(properties), properties)
         else:
-            self._begin_marked_content(True)
+            self._begin_marked_content(True, properties)
 
     def do_EMC(self):
-        if not self.marked_visibility:
+        if not self.marked_content:
             raise SolarEdgePdfError("BAD_OPTIONAL_CONTENT", "unbalanced marked content")
-        self.marked_visibility.pop()
+        _, previous = self.marked_content.pop()
+        span = self.replacement_span
+        if span is not previous:
+            self.copy_audit.finish(span, self.out.letters)
+        self.replacement_span = previous
 
     # ---- colour tracking (feed B) ----
     def _set_paint_colors(self):
@@ -825,7 +896,11 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
                 for o in seq):
             raise SolarEdgePdfError("BAD_TEXT_OPERAND")
         self.device.visible = self.visible
+        first_letter = len(self.out.letters)
         super().do_TJ(seq)
+        if (self.replacement_span is not None and self.textstate.render in (3, 7)
+                and len(self.out.letters) > first_letter):
+            self.replacement_span.nonpainting = True
 
     def do_Do(self, xobjid):
         if not self.visible:
@@ -952,7 +1027,20 @@ def iter_page_primitives(pdf_bytes):
     return _iter_primitives(pdf_bytes, first_only=False)
 
 
-def _iter_primitives(pdf_bytes, *, first_only):
+def audit_copy_text(pdf_bytes, approved_ids):
+    """Find exact approved glyph IDs with differing PDF ActualText in page content.
+
+    Coordinates are the first glyph's baseline in PDF user space. This follows the
+    default optional-content layers and includes form invocations. Each span must
+    contain one complete ID. Annotation appearances and OCR are outside the audit.
+    """
+    audit = _CopyTextAudit(approved_ids)
+    for _ in _iter_primitives(pdf_bytes, first_only=False, copy_audit=audit):
+        pass
+    return audit.findings
+
+
+def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -973,7 +1061,7 @@ def _iter_primitives(pdf_bytes, *, first_only):
         rsrcmgr = _ResourceManager(caching=True)
         counter = [0, 0, 0]  # operators, decoded content bytes, annotation entries
         paths = segments = letters = text_characters = 0
-        for page in page_objects:
+        for page_number, page in enumerate(page_objects, start=1):
             # Raw-coordinate parity is proven only for default units. Never silently scale labels.
             unit = page.attrs.get("UserUnit", 1)
             if type(unit) not in (int, float) or unit != 1:
@@ -986,7 +1074,10 @@ def _iter_primitives(pdf_bytes, *, first_only):
                 raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
             out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
             device = _PrimitiveDevice(rsrcmgr, out)
-            interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers)
+            if copy_audit is not None:
+                copy_audit.page = page_number
+            interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers,
+                                                copy_audit=copy_audit)
             resources = resolve1(page.resources) or {}
             interpreter.render_contents(resources, page.contents, ctm=MATRIX_IDENTITY)
             _render_printable_stamps(page, resources, interpreter)
