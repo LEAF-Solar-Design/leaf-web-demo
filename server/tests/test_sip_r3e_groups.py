@@ -536,6 +536,7 @@ def test_sip_r3e_readiness(monkeypatch):
         policy.assert_refusal(request(manual_a, parent, groups(parent)), "MODULE_POWER_REQUIRED")
     baseline = w1.graph.__wrapped__()
     reasons = {name: row["input_reason"] for name, row in availability.w1_graph_readiness(baseline).items()}
+    assert reasons.pop("solar-combiner-comparison") == "valid_settings_required"
     assert reasons.pop("solar-add-all-inverters") == "valid_settings_required"
     assert reasons.pop("solar-assignment-report") is None
     assert reasons["solar-assign-strings"] == "electrical_zones_unsupported"

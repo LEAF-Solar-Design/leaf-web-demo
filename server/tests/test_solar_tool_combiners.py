@@ -27,6 +27,7 @@ import jobs
 import product_capability_availability as availability
 import solar_combiner_graph as cg
 import solar_local_graph
+import solar_local_read
 import solar_tools
 import store
 from solar_design_graph import GraphValidationError, validate_graph
@@ -494,6 +495,54 @@ def dispatch(backend, params, *, source_version=1, job_id="combiners-job"):
             source_version=source_version, holder="fixture-owner", fence=fence, job_id=job_id)
 
 
+def test_compare_combiner_models_on_same_saved_roof(tmp_path, monkeypatch):
+    name = "solar-combiner-comparison"
+    g, intake, groups = i4()
+    backend = stored(tmp_path, monkeypatch, g, source(intake, groups))
+    version = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    saved_before = backend.get(version[1])
+    options = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (20, 12, 9, 7)]
+    params = {"drawing_id": "solar", "expected_rev": 0, "options": options}
+    record = solar_tools.trusted_record(name)
+    Draft7Validator(record["params"]).validate(params)
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, name, params, drawing_id="solar", source_version=1, job_id="comparison")
+    report = result["output"]
+    Draft7Validator(record["returns"]).validate(report)
+    assert (result["source_version"], result["graph_sha256"], result["drawing_changed"]) == (1, digest(g), False)
+    assert (report["basis"], report["string_count"]) == ("nominal_input_capacity", 173)
+    refs = {string["id"] for string in g["strings"]}
+    for variant, size, count in zip(report["options"], (20, 12, 9, 7), (0, 0, 38, 73), strict=True):
+        assert (variant["model"], variant["total_dc_inputs"]) == (f"fixture-{size}", size)
+        remainder = variant["unassigned_string_refs"]
+        assert len(remainder) == count and set(remainder) <= refs
+        if count:
+            adjusted = copy.deepcopy(intake)
+            adjusted["commandContext"]["combinerBoxConnections"] = size
+            with pytest.raises(cg.CombinerCapacityError) as error:
+                place(g, adjusted, groups)
+            assert remainder == list(error.value.unplaced_string_refs)
+    proof = solar_local_read.graph_read_provenance(
+        result, params, TENANT, "comparison", name, 1, backend=backend)
+    assert proof["output_sha256"] == result["output_sha256"]
+    assert latest(backend) == 1 and store.resolve_version_entry(backend, TENANT, "solar", 1) == version
+    assert backend.get(version[1]) == saved_before
+
+
+@pytest.mark.parametrize("change", [
+    {"options": [dict(HARDWARE, total_dc_inputs=7)]},
+    {"options": [dict(HARDWARE, total_dc_inputs=7), dict(HARDWARE, total_dc_inputs=20)]},
+    {"options": [dict(HARDWARE, total_dc_inputs=7), dict(HARDWARE, model="Other", total_dc_inputs=True)]},
+    {"source_intake": {}},
+])
+def test_comparison_refuses_invalid_options_or_client_intake(graph, change):
+    valid = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (7, 20)]
+    params = {"expected_rev": graph["rev"], "options": valid}
+    with pytest.raises(GraphValidationError) as error:
+        solar_local_read._load_builtin("solar-combiner-comparison").run(graph, dict(params, **change))
+    assert error.value.code == INVALID
+
+
 def test_combiners_rail_persists_proves_and_refuses_a_second_run(c5, tmp_path, monkeypatch):
     g, intake, groups, out = c5
     backend = stored(tmp_path, monkeypatch, g, source(intake, groups))
@@ -564,6 +613,24 @@ def post(api, params):
 
 def jobs_now():
     return [jobs.get_job(row["job_id"]) for row in jobs._query("SELECT job_id FROM jobs")]
+
+
+def test_comparison_run_rail_reads_one_saved_version(api_c5, monkeypatch):
+    name = "solar-combiner-comparison"
+    api_c5[2][name] = solar_tools.trusted_record(name)
+    monkeypatch.setitem(jobs._executors, jobs.LANE_FAST, jobs._executors[jobs.LANE_SLOW])
+    backend = api_c5[1]
+    manifest = store.load_manifest(backend, TENANT, "solar")
+    options = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (20, 9, 7)]
+    response = api_c5[0].post("/api/run?wait=1", json=body(
+        api_c5, name, {"expected_rev": 0, "options": options}))
+    assert response.status_code == 200, response.text
+    env = response.json()
+    assert env["ok"] is True and env["execution_provenance"]["execution_mode"] == "local_graph_read"
+    assert env["result"]["source_version"] == 1
+    assert [len(row["unassigned_string_refs"]) for row in env["result"]["output"]["options"]] == [0, 38, 73]
+    assert store.load_manifest(backend, TENANT, "solar") == manifest
+    assert [job["status"] for job in jobs_now()] == ["complete"]
 
 
 def test_combiners_run_rail_commits_one_job(api_c5):

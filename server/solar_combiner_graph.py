@@ -372,12 +372,19 @@ def _check_collector_capacity(after, binding, capacity):
         raise CombinerCapacityError(refs)
 
 
-def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, created_at=None):
+def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, created_at=None,
+                    box_dc_inputs=None):
     """LEAFCOMBINERAUTO on `graph` with its bound `intake` (see the module docstring); returns the validated
     graph and the placement receipt."""
     g = validate_graph(graph)
     binding, cap = _bind(g, intake)
     values = _hardware(hardware)
+    if box_dc_inputs is not None:
+        if not _int(box_dc_inputs, 1, MAX_NUMBER):
+            _fail("COMBINER_HARDWARE_INVALID")
+        # Bind the retained capture first. Only the candidate's box rating changes.
+        intake = {**intake, "commandContext": {**intake["commandContext"],
+                                               "combinerBoxConnections": box_dc_inputs}}
     try:
         cab.validate_outlines(panel_groups)
     except (cab.InverterCablingError, OverflowError, TypeError, ValueError):
@@ -396,6 +403,8 @@ def place_combiners(graph, intake, panel_groups, *, hardware, new_id=None, creat
         _fail("COMBINER_KERNEL_REFUSED")
     if not cab.levels(after)[0]:
         _fail("COMBINER_NOTHING_PLACED")
+    if box_dc_inputs is not None and {str(n) for n in after["setting"].get(st.L1_SETTING, {})} != set(binding["strings"]):
+        _fail("COMBINER_POSTCONDITION_FAILED")
     _check_collector_capacity(after, binding, cap)
     result, _ = rb.graph_from_state(g, after, state_binding, defaults={"combiner_box": values},
                                     new_id=new_id, created_at=created_at,
