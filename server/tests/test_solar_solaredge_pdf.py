@@ -92,6 +92,36 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100", indire
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
 
 
+def test_page_schedule_uses_painted_glyph_order_and_preserves_repeats():
+    data = _pdf(
+        b"BT /F1 10 Tf "
+        b"1 0 0 1 5 20 Tm (S02) Tj "
+        b"1 0 0 1 40 80 Tm (S02) Tj "
+        b"1 0 0 1 5 80 Tm [(S01) 0 (\\(A\\))] TJ "
+        b"1 0 0 1 5 90 Tm 3 Tr (S02) Tj "
+        b"1 0 0 1 5 95 Tm 7 Tr (S02) Tj ET",
+        resources=HELVETICA,
+    )
+    expected = ("S01(A)", "S02", "S02")
+    assert pdf.audit_page_schedule(data, [expected]) == [pdf.PageScheduleMatch(1, expected, expected)]
+    wrong_order = ("S02", "S01(A)", "S02")
+    result, = pdf.audit_page_schedule(data, [wrong_order])
+    assert result.observed == expected
+    assert not result.matches
+
+
+def test_page_schedule_distinguishes_absent_and_empty_pages():
+    data = _pdf(b"")
+    present, missing = pdf.audit_page_schedule(data, [(), ()])
+    assert present == pdf.PageScheduleMatch(1, (), ())
+    assert present.matches
+    assert missing == pdf.PageScheduleMatch(2, (), None)
+    assert not missing.matches
+    unexpected, = pdf.audit_page_schedule(data, [])
+    assert unexpected == pdf.PageScheduleMatch(1, None, ())
+    assert not unexpected.matches
+
+
 @pytest.mark.parametrize(("properties", "named", "replacement"), [
     (b"<< /ActualText (B207) >>", b"", "B207"),
     (b"/CopyLabel", b" /Properties << /CopyLabel << /ActualText <FEFF00430033> >> >>", "C3"),

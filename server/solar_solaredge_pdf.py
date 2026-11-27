@@ -621,6 +621,37 @@ class _CopyTextAudit:
             self.findings.append(CopyTextMismatch(self.page, visible_id, span.text, x, y))
 
 
+@dataclass(frozen=True)
+class PageScheduleMatch:
+    page: int
+    expected: tuple[str, ...] | None
+    observed: tuple[str, ...] | None
+
+    @property
+    def matches(self) -> bool:
+        return self.expected == self.observed
+
+
+class _PageScheduleAudit:
+    def __init__(self, approved_pages):
+        self.approved_ids = frozenset(itertools.chain.from_iterable(approved_pages))
+        self.positions: list[tuple[float, float, str]] = []
+
+    def observe(self, letters, start):
+        if start == len(letters):
+            return
+        tag = "".join(letters[index][0] for index in range(start, len(letters)))
+        if tag in self.approved_ids:
+            _, x, y, _ = letters[start]
+            self.positions.append((-y, x, tag))
+
+    def finish_page(self):
+        self.positions.sort(key=lambda position: position[:2])
+        observed = tuple(tag for _, _, tag in self.positions)
+        self.positions.clear()
+        return observed
+
+
 class _PrimitiveInterpreter(PDFPageInterpreter):
     """pdfminer interpreter that also records feed A and tracks colour exactly.
 
@@ -629,7 +660,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
     """
 
     def __init__(self, rsrcmgr, device, out, counter, layers, depth=0, *, appearance=False,
-                 copy_audit=None):
+                 copy_audit=None, schedule_audit=None):
         super().__init__(rsrcmgr, device)
         self.out = out
         self.counter = counter
@@ -638,6 +669,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.layers = layers
         self.marked_content = []
         self.copy_audit = copy_audit
+        self.schedule_audit = schedule_audit
         self.replacement_span = None
         self.raw_pending = ([], []) if layers.states else None
         self.records_raw = depth == 0 or (appearance and depth == 1) or bool(layers.states)
@@ -652,7 +684,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             raise SolarEdgePdfError("FORM_TOO_DEEP", str(MAX_FORM_DEPTH))
         child = _PrimitiveInterpreter(self.rsrcmgr, self.device, self.out, self.counter,
                                       self.layers, self.depth + 1, appearance=self.appearance,
-                                      copy_audit=self.copy_audit)
+                                      copy_audit=self.copy_audit, schedule_audit=self.schedule_audit)
         child.color = self.color
         child.replacement_span = self.replacement_span
         return child
@@ -942,9 +974,11 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.device.visible = self.visible
         first_letter = len(self.out.letters)
         super().do_TJ(seq)
-        if (self.replacement_span is not None and self.textstate.render in (3, 7)
-                and len(self.out.letters) > first_letter):
-            self.replacement_span.nonpainting = True
+        if self.textstate.render in (3, 7):
+            if self.replacement_span is not None and len(self.out.letters) > first_letter:
+                self.replacement_span.nonpainting = True
+        elif self.schedule_audit is not None:
+            self.schedule_audit.observe(self.out.letters, first_letter)
 
     def do_Do(self, xobjid):
         if not self.visible:
@@ -1084,6 +1118,25 @@ def audit_copy_text(pdf_bytes, approved_ids):
     return audit.findings
 
 
+def audit_page_schedule(pdf_bytes, approved_pages):
+    """Compare exact scheduled glyph IDs on each physical PDF page.
+
+    Each ID must occupy one painting text-show operation. Order follows the first
+    glyph baseline, descending Y then ascending X in PDF user space. The audit
+    follows default layers and includes forms in page content. Annotation
+    appearances, clipping and OCR are outside its scope. A missing page or
+    schedule entry is None, while a present empty sequence is ().
+    """
+    expected = tuple(tuple(page) for page in approved_pages)
+    audit = _PageScheduleAudit(expected)
+    observed = [audit.finish_page() for _ in _iter_primitives(
+        pdf_bytes, first_only=False, schedule_audit=audit)]
+    return [
+        PageScheduleMatch(page, approved, painted)
+        for page, (approved, painted) in enumerate(itertools.zip_longest(expected, observed), start=1)
+    ]
+
+
 def audit_stroke_inks(pdf_bytes):
     """Return source colorants and path bounds for strokes on each physical page.
 
@@ -1096,7 +1149,7 @@ def audit_stroke_inks(pdf_bytes):
     return inks
 
 
-def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None):
+def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None, schedule_audit=None):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -1133,7 +1186,7 @@ def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None
             if copy_audit is not None:
                 copy_audit.page = page_number
             interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers,
-                                                copy_audit=copy_audit)
+                                                copy_audit=copy_audit, schedule_audit=schedule_audit)
             resources = resolve1(page.resources) or {}
             interpreter.render_contents(resources, page.contents, ctm=MATRIX_IDENTITY)
             _render_printable_stamps(page, resources, interpreter)
