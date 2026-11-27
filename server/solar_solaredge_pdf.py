@@ -282,6 +282,20 @@ class PagePrimitives:
     paths: list = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class StrokeInk:
+    page: int
+    bounds: tuple[float, float, float, float]
+    space: str
+    colorant: str | None
+    components: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class _Separation:
+    colorant: str
+
+
 def _num(value):
     """A PDF numeric operand as float; anything else is malformed."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -434,11 +448,14 @@ def _cid_truetype_metrics(font):
 class _PrimitiveDevice(PDFTextDevice):
     """Collects painted paths (feed B) and letters (feed C)."""
 
-    def __init__(self, rsrcmgr, out):
+    def __init__(self, rsrcmgr, out, *, page=1, stroke_inks=None):
         super().__init__(rsrcmgr)
         self.out = out
         self.segments = 0
         self.paint_colors = None  # set by the interpreter before each paint
+        self.page = page
+        self.stroke_inks = stroke_inks
+        self.stroke_color = None
         self.visible = True
         self._cid_metrics = {}
         self.text_characters = 0
@@ -496,6 +513,13 @@ class _PrimitiveDevice(PDFTextDevice):
         fill_rgb, stroke_rgb = self.paint_colors
         paths.append((bool(fill), bool(stroke), bbox,
                       fill_rgb if fill else None, stroke_rgb if stroke else None))
+        if stroke and bbox is not None and self.stroke_inks is not None:
+            space, components = self.stroke_color
+            if isinstance(space, _Separation):
+                ink = StrokeInk(self.page, bbox, "Separation", space.colorant, components)
+            else:
+                ink = StrokeInk(self.page, bbox, space, None, components)
+            self.stroke_inks.append(ink)
 
     def render_char(self, matrix, font, fontsize, scaling, rise, cid, ncs, graphicstate):
         letters = self.out.letters
@@ -736,6 +760,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         s_space, s_comp, f_space, f_comp = self.color
         self.device.paint_colors = (f_comp if f_space == "DeviceRGB" else None,
                                     s_comp if s_space == "DeviceRGB" else None)
+        if self.device.stroke_inks is not None:
+            self.device.stroke_color = (s_space, s_comp)
 
     def do_q(self):
         super().do_q()
@@ -773,6 +799,15 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         key = literal_name(name) if isinstance(name, PSLiteral) else None
         if key in _DEVICE_SPACES:
             return key
+        if key is not None and self.device.stroke_inks is not None:
+            spaces = resolve1(self.resources.get("ColorSpace"))
+            definition = resolve1(spaces.get(key)) if isinstance(spaces, dict) else None
+            if (isinstance(definition, list) and definition
+                    and resolve1(definition[0]) is LIT("Separation")):
+                colorant = resolve1(definition[1]) if len(definition) == 4 else None
+                if not isinstance(colorant, PSLiteral):
+                    raise SolarEdgePdfError("BAD_COLORSPACE", str(key))
+                return _Separation(literal_name(colorant))
         space = self.csmap.get(key) if key is not None else None
         if space is None or space.name not in _DEVICE_SPACES:
             raise SolarEdgePdfError("COLORSPACE_UNSUPPORTED", str(key))
@@ -780,13 +815,22 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
 
     def do_CS(self, name):
         space = self._space(name)
-        self.color = (space, _INITIAL[space], self.color[2], self.color[3])
+        components = (1.0,) if isinstance(space, _Separation) else _INITIAL[space]
+        self.color = (space, components, self.color[2], self.color[3])
 
     def do_cs(self, name):
         space = self._space(name)
-        self.color = (self.color[0], self.color[1], space, _INITIAL[space])
+        components = (1.0,) if isinstance(space, _Separation) else _INITIAL[space]
+        self.color = (self.color[0], self.color[1], space, components)
 
     def _components(self, space):
+        if isinstance(space, _Separation):
+            if len(self.argstack) != 1:
+                raise SolarEdgePdfError("BAD_OPERAND", "Separation requires one tint")
+            tint = _num(self.argstack[0])
+            if not 0 <= tint <= 1:
+                raise SolarEdgePdfError("BAD_OPERAND", "Separation tint outside [0, 1]")
+            return (tint,)
         n = _DEVICE_SPACES[space]
         if len(self.argstack) < n:
             raise SolarEdgePdfError("MISSING_OPERANDS", "SC")
@@ -1040,7 +1084,19 @@ def audit_copy_text(pdf_bytes, approved_ids):
     return audit.findings
 
 
-def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None):
+def audit_stroke_inks(pdf_bytes):
+    """Return source colorants and path bounds for strokes on each physical page.
+
+    Bounds are in PDF user space. The diagnostic follows the default layers and
+    does not render color, apply clipping, or infer detail IDs from geometry.
+    """
+    inks: list[StrokeInk] = []
+    for _ in _iter_primitives(pdf_bytes, first_only=False, stroke_inks=inks):
+        pass
+    return inks
+
+
+def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -1073,7 +1129,7 @@ def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None):
             if page.rotate % 360 != 0:
                 raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
             out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
-            device = _PrimitiveDevice(rsrcmgr, out)
+            device = _PrimitiveDevice(rsrcmgr, out, page=page_number, stroke_inks=stroke_inks)
             if copy_audit is not None:
                 copy_audit.page = page_number
             interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers,

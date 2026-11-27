@@ -62,7 +62,7 @@ def test_page_size_equals_golden(fixture_sections, golden):
 
 # ---------------------------------------------------------------- synthetic PDFs
 
-def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
+def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100", indirect_objects=()):
     """A minimal one-page PDF with a correct xref table."""
     chunks = content if isinstance(content, list) else [content]
     contents_ref = (b"[" + b" ".join(f"{i + 4} 0 R".encode() for i in range(len(chunks))) + b"]"
@@ -75,6 +75,7 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
     ]
     objects.extend(b"<< /Length " + str(len(chunk)).encode() + b" >>\nstream\n" + chunk
                    + b"\nendstream" for chunk in chunks)
+    objects.extend(indirect_objects)
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -123,6 +124,53 @@ def test_copy_text_audit_enforces_replacement_byte_budget(monkeypatch):
     assert pdf.extract_primitives(data).letters == []
     with pytest.raises(SolarEdgePdfError, match="PDF_RESOURCE_LIMIT: replacement text bytes"):
         pdf.audit_copy_text(data, ["A104"])
+
+
+def _spot_resources(colorant):
+    return (b"/ColorSpace << /Ink [/Separation /" + colorant + b" /DeviceRGB "
+            b"<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0 0 1] /N 1 >>] >>")
+
+
+def test_stroke_ink_audit_tracks_separation_and_device_colors():
+    data = _pdf(
+        b"/Ink CS /Ink cs 0.25 scn 1 1 2 2 re B "
+        b"q 0 0 1 RG 4 4 2 2 re S Q "
+        b"0.5 SCN 7 7 2 2 re S 10 10 2 2 re f",
+        resources=_spot_resources(b"TagOutline"),
+    )
+    assert pdf.audit_stroke_inks(data) == [
+        pdf.StrokeInk(1, (1, 1, 3, 3), "Separation", "TagOutline", (1.0,)),
+        pdf.StrokeInk(1, (4, 4, 6, 6), "DeviceRGB", None, (0, 0, 1)),
+        pdf.StrokeInk(1, (7, 7, 9, 9), "Separation", "TagOutline", (0.5,)),
+    ]
+    with pytest.raises(SolarEdgePdfError, match="COLORSPACE_UNSUPPORTED: Ink"):
+        pdf.extract_primitives(data)
+
+
+def test_stroke_ink_audit_resolves_form_resources_and_restores_parent():
+    form_content = b"1 1 2 2 re S /Ink CS 0.75 SCN 4 4 2 2 re S"
+    form = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] "
+            b"/Matrix [1 0 0 1 20 30] /Resources << " + _spot_resources(b"OtherInk")
+            + b" >> /Length " + str(len(form_content)).encode()
+            + b" >>\nstream\n" + form_content + b"\nendstream")
+    data = _pdf(
+        b"/Ink CS 0.5 SCN /Detail Do 7 7 2 2 re S",
+        resources=_spot_resources(b"TagOutline") + b" /XObject << /Detail 5 0 R >>",
+        indirect_objects=[form],
+    )
+    assert pdf.audit_stroke_inks(data) == [
+        pdf.StrokeInk(1, (21, 31, 23, 33), "Separation", "TagOutline", (0.5,)),
+        pdf.StrokeInk(1, (24, 34, 26, 36), "Separation", "OtherInk", (0.75,)),
+        pdf.StrokeInk(1, (7, 7, 9, 9), "Separation", "TagOutline", (0.5,)),
+    ]
+
+
+@pytest.mark.parametrize("operands", [b"", b"-0.1", b"1.1", b"0.3 0.5", b"/Named"])
+def test_stroke_ink_audit_rejects_malformed_separation_tints(operands):
+    data = _pdf(b"/Ink CS " + operands + b" SCN 1 1 2 2 re S",
+                resources=_spot_resources(b"TagOutline"))
+    with pytest.raises(SolarEdgePdfError, match="BAD_OPERAND"):
+        pdf.audit_stroke_inks(data)
 
 
 def test_indirect_content_array_matches_single_stream():
