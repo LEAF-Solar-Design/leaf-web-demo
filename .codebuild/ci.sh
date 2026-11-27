@@ -309,6 +309,25 @@ LEAF_DOCS_ONLY
     exit 0
   fi
   # LEAF_DOCS_ONLY_END
+  # LEAF_PR_MERGE_BEGIN
+  # Test a pull request as it would land: merge the trusted base into the checkout.
+  # HEAD_SHA keeps naming the PR head for provenance, receipts and selection; HEAD and the tree become the merge.
+  pr_merge_state=not_pr
+  if [[ "$trusted_sha_override" != 1 && "${CODEBUILD_WEBHOOK_EVENT:-}" == PULL_REQUEST_* && "${LEAF_PR_MERGE:-1}" != 0 ]]; then
+    if git --no-replace-objects merge-base --is-ancestor "$TRUSTED_SHA" "$HEAD_SHA"; then
+      pr_merge_state=up_to_date
+    elif timeout 120 git -c user.name=leaf-ci -c user.email=leaf-ci@invalid -c commit.gpgsign=false \
+        merge --no-ff --no-edit --quiet "$TRUSTED_SHA" >/dev/null 2>&1; then
+      pr_merge_state=merged
+    else
+      git merge --abort >/dev/null 2>&1 || true
+      echo "LEAF_PR_MERGE state=conflict head=$HEAD_SHA base=$TRUSTED_SHA"
+      echo "FATAL: this pull request does not merge cleanly with main $TRUSTED_SHA; merge or rebase main into it" >&2
+      exit 1
+    fi
+  fi
+  echo "LEAF_PR_MERGE state=$pr_merge_state head=$HEAD_SHA base=$TRUSTED_SHA tree=$(git rev-parse 'HEAD^{tree}')"
+  # LEAF_PR_MERGE_END
   if [[ "$trusted_sha_override" != 1 && -n "${LEAF_LOADER_TRUSTED_SHA:-}" && "$TRUSTED_SHA" != "$LEAF_LOADER_TRUSTED_SHA" ]]; then
     loader_check=loader_sha_mismatch
     selection_bootstrap_reason=loader_sha_mismatch
@@ -318,7 +337,7 @@ LEAF_DOCS_ONLY
     chmod 400 "$selection_dir/select_tests.py" "$selection_dir/test-selection-map.json" "$selection_dir/run-all-gates.py"
     if python -I -B "$selection_dir/run-all-gates.py" --list --catalog-root "$CODEBUILD_SRC_DIR" > "$selection_dir/catalog.json"; then
       trusted_runner_blob="$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/run-all-gates.py")"
-      candidate_runner_blob="$(git --no-replace-objects rev-parse "$HEAD_SHA:scripts/run-all-gates.py" 2>/dev/null || true)"
+      candidate_runner_blob="$(git --no-replace-objects rev-parse "HEAD:scripts/run-all-gates.py" 2>/dev/null || true)"
       if [[ "$trusted_runner_blob" != "$candidate_runner_blob" ]]; then
         selection_force_full_reason=runner_changed
       fi
