@@ -799,7 +799,7 @@ def paused():
 
 
 def sweep(now):
-    """Retain fifty newest runs per tenant/document and seven days of events."""
+    """Retain recent runs, active recovery lineage and seven days of events."""
     cutoff = (_date(now) - timedelta(days=7)).isoformat()
     # Discover tenants read-only; each deletion then shares the writers' lock.
     tenants = _run("lab-sweep", lambda sql: [row["tenant_id"] for row in
@@ -808,11 +808,23 @@ def sweep(now):
         def operation(sql):
             rows = sql.execute("SELECT run_id,doc_id,state,created_at FROM lab_runs WHERE tenant_id=?"
                                " ORDER BY created_at DESC,run_id DESC", (tenant,)).fetchall()
+            active_recovery_ids = set()
+            if sql.postgres:
+                # The worker needs the receipt until the successor is terminal.
+                # Deleting the source cascades to the receipt.
+                for receipt in sql.execute(
+                    "SELECT c.source_run_id,c.successor_run_id FROM lab_recovery_confirmations c"
+                    " JOIN lab_runs r ON r.tenant_id=c.tenant_id AND r.run_id=c.successor_run_id"
+                    " WHERE c.tenant_id=? AND c.admitted_at IS NOT NULL AND r.state IN ('queued','running')", (tenant,)
+                ).fetchall():
+                    active_recovery_ids.update((receipt["source_run_id"], receipt["successor_run_id"]))
             counts = {}
             for row in rows:
                 doc = row["doc_id"]
                 counts[doc] = counts.get(doc, 0) + 1
                 if counts[doc] > 50:
+                    if row["run_id"] in active_recovery_ids:
+                        continue
                     if row["run_id"].startswith("s1.") and (
                             row["state"] in {"queued", "running"}
                             or _date(now) - _date(row["created_at"]) < SUBMISSION_TTL + timedelta(minutes=5)):
