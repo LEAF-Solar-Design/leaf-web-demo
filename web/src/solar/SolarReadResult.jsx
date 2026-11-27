@@ -201,7 +201,7 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
           outcome: { ok: false, status: null, reason: 'SIP_R12_CLIENT_UNAVAILABLE', envelope: null } })
         return
       }
-      setDownloadState({ phase: 'downloading', artifact, outcome: null, token })
+      setDownloadState({ phase: 'downloading', reportSide: artifact.side, outcome: null, token })
       const wrapper = createSolarProjectArtifactClient({ projectClient: reportClient })
       const outcome = await wrapper.downloadArtifact({ binding: artifact.sourceBinding ?? state.binding, authorityKey,
         ref: artifact.ref, inputIntakeSha256: artifact.inputIntakeSha256 ?? state.inputIntakeSha256,
@@ -260,7 +260,7 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
       <h4>Saved tracking reports</h4>
       {view.comparisonReports.map((report) => report.state === 'ready'
         ? <button key={report.side} type="button" className="btn ghost" disabled={running} onClick={() => startDownload(report)}>
-          {running && visible.artifact === report ? `Downloading ${report.side} report` : `Download ${report.side} report (${report.sizeText})`}
+          {running && visible.reportSide === report.side ? `Downloading ${report.side} report` : `Download ${report.side} report (${report.sizeText})`}
         </button>
         : <p key={report.side} className="dim">{report.label} report is unavailable.</p>)}
     </section>}

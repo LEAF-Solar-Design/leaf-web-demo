@@ -519,14 +519,24 @@ describe('saved tracking comparison reports', () => {
     ['forward', olderTracking, newerTracking], ['reverse', newerTracking, olderTracking], ['same', newerTracking, newerTracking],
   ])('downloads both verified report files in a %s comparison', async (_label, before, after) => {
     installDigest()
-    const fetchImpl = vi.fn(async (url) => comparisonFile(url))
+    const requests = [deferred(), deferred()]
+    const fetchImpl = vi.fn()
+      .mockReturnValueOnce(requests[0].promise)
+      .mockReturnValueOnce(requests[1].promise)
     const props = comparisonProps(before, after, fetchImpl)
     render(<SolarReadResult {...props} />)
     expect(within(screen.getByRole('region', { name: 'Items' })).getAllByRole('row')).toHaveLength(251)
-    for (const [index, side, revision] of [[1, 'before', before], [2, 'after', after]]) {
+    for (const [index, side, otherSide, revision] of [[0, 'before', 'after', before], [1, 'after', 'before', after]]) {
+      const otherButton = screen.getByRole('button', { name: `Download ${otherSide} report (2 bytes)` })
       fireEvent.click(screen.getByRole('button', { name: `Download ${side} report (2 bytes)` }))
-      await waitFor(() => expect(props.save).toHaveBeenCalledTimes(index))
-      expect(fetchImpl.mock.calls[index - 1][0]).toBe(revision.report.download + '?current=false')
+      expect(screen.getByRole('button', { name: `Downloading ${side} report` })).toBeDisabled()
+      expect(otherButton).toBeDisabled()
+      fireEvent.click(otherButton)
+      await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(index + 1))
+      const [url] = fetchImpl.mock.calls[index]
+      expect(url).toBe(revision.report.download + '?current=false')
+      await act(async () => requests[index].resolve(comparisonFile(url)))
+      expect(props.save).toHaveBeenCalledTimes(index + 1)
     }
     expect(props.save).toHaveBeenLastCalledWith(new Uint8Array([123, 125]), 'application/json', 'solaredge-report.json')
     props.projectClient.dispose()

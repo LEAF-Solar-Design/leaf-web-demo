@@ -6,6 +6,8 @@ export const SOLAR_READ_RESULT_SCHEMA = 'leaf.solar-graph-read.v1'
 export const SOLAR_READ_ADAPTER = 'local-graph-read'
 export const MAX_FIELDS = 200
 export const MAX_TABLE_ROWS = 200
+// Match PAGE_ITEMS in server/solar_solaredge_revision_compare.py.
+const MAX_COMPARISON_PAGE_ROWS = 250
 export const MAX_COLUMNS = 12
 export const MAX_TEXT = 500
 export const MAX_CELL_TEXT = 200
@@ -144,7 +146,7 @@ export function readResultView(data, { comparison = false } = {}) {
   }
   const addEntry = (target, key, value, allowSection) => {
     if (key === 'artifact') return
-    if (Array.isArray(value) && value.length > 0 && value.every(isPlainObject)) target.tables.push(tableOf(key, value, comparison && key === 'items' ? 250 : MAX_TABLE_ROWS))
+    if (Array.isArray(value) && value.length > 0 && value.every(isPlainObject)) target.tables.push(tableOf(key, value, comparison && key === 'items' ? MAX_COMPARISON_PAGE_ROWS : MAX_TABLE_ROWS))
     else if (allowSection && isPlainObject(value)) {
       const section = { key, label: labelOf(key), fields: [], tables: [] }
       for (const child of Object.keys(value)) addEntry(section, child, value[child], false)
