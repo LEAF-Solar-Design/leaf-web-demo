@@ -1755,12 +1755,16 @@ describe('A1b-2 stored Solar graph wiring', () => {
     const solar = effects.find(effect => nodes(effect.arguments[0], node => node.type === 'CallExpression'
       && node.callee.name === 'buildSolarGraphOverlayLayer').length)
     assert.ok(solar)
-    assert.equal(text(solar.arguments[1], viewerSource),
-      '[solarOverlay?.polylines, solarOverlay?.intake, solarOverlay?.drawingKey, buildTick]')
+    const visibleOverlay = nodes(viewerTree, node => node.type === 'VariableDeclarator'
+      && node.id.name === 'visibleSolarOverlay')[0]?.init
+    assert.equal(visibleOverlay?.callee?.name, 'useMemo')
+    assert.equal(text(visibleOverlay.arguments[1], viewerSource),
+      '[overlayLines, overlayIntake, overlayDrawingKey, activeIntake, sceneDrawingKey]')
+    assert.equal(text(solar.arguments[1], viewerSource), '[visibleSolarOverlay, buildTick]')
     const body = text(solar.arguments[0], viewerSource)
-    assert.ok(body.includes('s.intake !== solarOverlay.intake'))
-    assert.ok(body.includes('s.drawingKey !== solarOverlay.drawingKey'))
-    assert.ok(body.includes('solarOverlay.polylines.length === 0'))
+    assert.ok(body.includes('s.intake !== visibleSolarOverlay.intake'))
+    assert.ok(body.includes('s.drawingKey !== visibleSolarOverlay.drawingKey'))
+    assert.ok(body.includes('!visibleSolarOverlay?.polylines.length'))
     assert.ok(body.includes('s.solarGroup.add(layer.group)'))
     assert.ok(body.includes('layer.dispose()'))
     assert.ok(body.includes('if (s.solarLayer === layer) s.solarLayer = null'))
