@@ -54,7 +54,13 @@ function choose(side, value, spacing) {
 const digests = () => screen.getByRole('table', { name: 'Exported revision digests' })
 const partRow = label => within(digests()).getByRole('row', { name: new RegExp('^' + label + ' ') })
 
-beforeEach(() => vi.stubGlobal('crypto', webcrypto))
+beforeEach(() => {
+  // jsdom's FileReader returns an ArrayBuffer from its own realm. Node 20's
+  // Web Crypto accepts a typed array view across that boundary.
+  vi.stubGlobal('crypto', {
+    subtle: { digest: (algorithm, buffer) => webcrypto.subtle.digest(algorithm, new Uint8Array(buffer)) },
+  })
+})
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 it('compares byte hashes and canonical digests separately, with producer lineage', async () => {
