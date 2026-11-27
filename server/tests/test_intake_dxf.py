@@ -831,3 +831,26 @@ def test_block_classic_3d_polyline_has_read_only_outline(flags, suffix, outline)
     assert block["complete"] is False
     assert block["children"][0]["kind"] == "OTHER"
     assert block["children"][0].get("outline") == outline
+
+
+@pytest.mark.parametrize("active", ["West", "ROOF", "Périmètre"])
+def test_roundtrip_preserves_current_layer_with_exact_references(active):
+    hidden = f"{active} Hidden"
+    source = {
+        "layers": ["Roof", active, hidden],
+        "active_layer": active,
+        "hidden_layers": [hidden],
+        "blocks": {"Frame": {"base": [0, 0, 0], "children": [
+            {"kind": "LINE", "layer": hidden, "pts": [[0, 0, 0], [1, 0, 0]]},
+        ]}},
+        "inserts": [{"name": "Frame", "layer": active, "handle": "A1",
+                     "x": 0, "y": 0, "z": 0}],
+    }
+    reopened, _ = _roundtrip(source)
+    assert reopened["active_layer"] == active
+    assert reopened["hidden_layers"] == [hidden]
+    assert [(row["handle"], row["layer"], row["name"]) for row in reopened["inserts"]] == [
+        ("A1", active, "Frame"),
+    ]
+    assert [row["layer"] for row in reopened["blocks"]["Frame"]["children"]] == [hidden]
+    assert set(reopened["layers"]) == {"Roof", active, hidden}

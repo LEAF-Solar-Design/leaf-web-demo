@@ -955,6 +955,11 @@ def _r2000_envelope(lines, fresh_handle, handseed, intake, emit_dimstyle_table):
     insunits = intake.get("insunits")
     if insunits is not None:
         result.extend(["9", "$INSUNITS", "70", str(insunits)])
+    active_layer = intake.get("active_layer")
+    if isinstance(active_layer, str) and any(
+        get(record, 2) == active_layer for record in tables["LAYER"][1]
+    ):
+        result.extend(["9", "$CLAYER", "8", active_layer])
     result.extend(["0", "ENDSEC"])
     for name in ("TABLES", "BLOCKS", "ENTITIES", "OBJECTS"):
         result.extend(["0", "SECTION", "2", name])
