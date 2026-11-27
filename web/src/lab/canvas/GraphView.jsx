@@ -17,6 +17,7 @@ import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
 import { forgetRunReceipt, labValueStore, readRunReceipts, rememberRunReceipt, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
 import { discoverRuns, newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
+import RevisionRunAccounting from '../runs/RevisionRunAccounting.jsx'
 import { formatLabRoute } from '../labRoute.js'
 import { readController } from '../changes/controller.js'
 import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
@@ -39,6 +40,7 @@ function runAccount() {
   } catch { return null }
 }
 const tick = () => performance.now()
+const projectFor = graph => graph?.blocks.map(block => block.settings?.project_id || block.settings?.drawing?.project_id).find(Boolean) || ''
 const summary = value => value.error?.code === 'runs_on_bot' ? sentence('runs_on_bot') : value.error ? `error: ${value.error.code}`
   : value.data === null ? 'null' : Array.isArray(value.data) ? `${value.data.length} rows`
     : typeof value.data === 'number' ? String(value.data) : 'text'
@@ -365,8 +367,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   // can still be ready while the saved revision (and its project) is in flight.
   const runScopeGraph = client.state.lastSaved?.graph || restored.graph || initialDocument
   const runScopeReady = Boolean(runScopeGraph) && restored.key === client.state.restoredKey
-  const graphProject = live.draft?.document.blocks.map(block => block.settings?.project_id || block.settings?.drawing?.project_id).find(Boolean) || ''
-  const projectId = route?.params?.project_id || graphProject
+  const projectId = route?.params?.project_id || projectFor(live.draft?.document)
+  const reportProjectId = route?.params?.project_id || projectFor(runScopeGraph)
   const activeProject = useRef(projectId)
   activeProject.current = projectId
   const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
@@ -376,6 +378,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   if (observedAccount && !explicitlySignedOut.current) account.current = observedAccount
   const receiptScope = account.current ? JSON.stringify([config.apiBase, config.tenant, account.current, projectId, client.currentDocId()]) : null
   const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, projectId, client.currentDocId(), client.state.head, logoutGeneration.current])
+  const reportScope = JSON.stringify([config.apiBase, config.tenant, observedAccount, reportProjectId,
+    client.currentDocId(), client.state.head, logoutGeneration.current, restored.key])
   const recoveryKey = JSON.stringify([displayScope, restored.key])
   const activeRecoveryKey = useRef(recoveryKey)
   activeRecoveryKey.current = recoveryKey
@@ -735,6 +739,9 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           {reopenMessage && <p role="status">{reopenMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
+        {!hidden && !onRun && observedAccount && !explicitlySignedOut.current && runScopeReady && client.state.headLoaded && client.state.head != null &&
+          <RevisionRunAccounting key={reportScope} client={client}
+            docId={client.currentDocId()} projectId={reportProjectId} />}
         <button type="button" onClick={openCorpus}>Evaluate project corpus</button>
         {corpusPanel && <section aria-label="Project corpus evaluation">
           <label>Project<select value={corpusProject} onChange={event => {

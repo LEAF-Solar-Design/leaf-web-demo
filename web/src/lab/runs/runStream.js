@@ -39,9 +39,9 @@ export async function submitRun({ docId, graphRevision, submissionId, reconcileO
   }
   return { ...result, ok: false, outcomeUnknown: result.ok || result.status === 0 || result.status >= 500 }
 }
-export async function discoverRuns({ docId, projectId = '', fetchImpl }) {
+export async function discoverRuns({ docId, projectId = '', fetchImpl, signal }) {
   const query = new URLSearchParams({ doc_id: docId, project_id: projectId })
-  const result = await request(`runs?${query}`, { fetchImpl })
+  const result = await request(`runs?${query}`, { fetchImpl, signal })
   if (!result.ok || !Array.isArray(result.runs) || result.runs.length > 20) return { ...result, ok: false }
   if (result.runs.some(row => !row || row.doc_id !== docId || row.project_id !== projectId
     || !/^v1\.[0-9]{13}\.[0-9a-f]{32}$/.test(row.submission_id)
