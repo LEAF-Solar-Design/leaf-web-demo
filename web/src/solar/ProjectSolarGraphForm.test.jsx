@@ -750,6 +750,33 @@ it('R13C-15 renders equipment assignment refusal', async () => {
       'Homeruns require valid equipment assignments. Review the electrical reasons on the inverter.')
   }
 })
+
+const startHomerun = `${binding.drawing_id}/start homerun`
+const endHomerun = `${binding.input_version_id}/end homerun`
+it.each([
+  { leads: [startHomerun] }, { leads: [endHomerun] }, { leads: [startHomerun, endHomerun] },
+])('shows the affected manual homeruns when preview or submission refuses', async ({ leads }) => {
+  const code = 'JOINT_ROUTING_INFEASIBLE'
+  const sentence = `Route these homerun leads manually. ${leads.join(', ')}`
+  const blocked = harness('solar-homeruns', code)
+  const denied = catalog(blocked.name, code)
+  const error = denied.data.families[0].capabilities[0].availability.admission.error
+  error.affected_leads = leads
+  blocked.previews.push(Promise.resolve(denied))
+  const mounted = render(<ProjectSolarGraphForm {...blocked.props} />)
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(action().disabled).toBe(true)
+  expect(blocked.submit).not.toHaveBeenCalled()
+  mounted.unmount()
+
+  const raced = harness()
+  raced.submissions.push(Promise.resolve({ ok: false, status: 409, reason: code, envelope: { error } }))
+  render(<ProjectSolarGraphForm {...raced.props} />)
+  await submitAndWait(raced)
+  await waitFor(() => expect(feedback()).toContain(sentence))
+  expect(screen.queryByText(published)).toBeNull()
+})
+
 it('R13C-16 renders unknown voltage', async () => {
   await assertRefusal('solar-homeruns', 'EQUIPMENT_VOLTAGE_UNKNOWN', 'The inverter has no verified string voltage.')
 })

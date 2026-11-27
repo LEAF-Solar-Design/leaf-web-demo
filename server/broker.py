@@ -3872,10 +3872,7 @@ def _execute(req: BrokerRunRequest, tool: Dict[str, Any], engine_op: str, t0: fl
                 env["error"]["unplaced_string_refs"] = list(exc.unplaced_string_refs)
             elif isinstance(exc, JointRoutingInfeasible):
                 env["error"]["unassigned_leads"] = exc.unassigned_leads
-                env["error"]["message"] = (
-                    "No complete homerun route fits the keep-outs and shared aisle capacity. "
-                    f"Unassigned leads: {exc.path}."
-                )
+                env["error"]["message"] = exc.user_message
             return env, status
         except OSError:
             return graph_store_unavailable()
