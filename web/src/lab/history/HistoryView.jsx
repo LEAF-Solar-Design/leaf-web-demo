@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import VersionList from '../../components/VersionList.jsx'
 import LabDiffView from './LabDiffView.jsx'
+import ExportedRevisionCompare from './ExportedRevisionCompare.jsx'
 import { labArtifactsClient, SAVED_REVISION_EVENT } from './labArtifactsClient.js'
 
 function StoredResult({ jobId, producer, blockId }) {
@@ -158,6 +159,7 @@ export default function HistoryView({ hidden = false, client = labArtifactsClien
       } finally { if (valid(token)) setPending(false) }
     }}>Compare</button>
     {diff && <LabDiffView {...diff} />}
+    {!hidden && <ExportedRevisionCompare key={`export-compare-${generation}`} client={client} />}
     <label>Export revision<select aria-label="Export revision" value={exportRevision || preview || state.head || ''}
       disabled={busy} onChange={event => setExportRevision(event.target.value)}>
       <option value="">Choose revision</option>{rows.map(row => <option key={row.v} value={row.v}>r{row.v}</option>)}

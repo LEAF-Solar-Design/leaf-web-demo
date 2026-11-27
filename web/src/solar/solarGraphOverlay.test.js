@@ -82,6 +82,7 @@ const points = n => G({ routes: [
   R(2, 'feeder', Array.from({ length: n - 50000 }, () => [1, 1])),
 ] })
 const L = (pts, color) => ({ pts, color })
+const LR = (pts, color, id, kind = 'feeder') => ({ pts, color, route: { id: U('route', id), kind } })
 const OK = polylines => ({ polylines, refusal: null })
 const NO = refusal => ({ polylines: [], refusal })
 const green = '#22c55e', amber = '#f59e0b', purple = '#a855f7', blue = '#38bdf8', pink = '#f472b6'
@@ -90,7 +91,7 @@ const metreLines = [
   L([[0, 0], [1, 0], [2, 0]], green),
   L([[2, 1], [1, 1], [0, 1]], green),
   L([[2.75, 1.75], [3.25, 1.75], [3.25, 2.25], [2.75, 2.25], [2.75, 1.75]], amber),
-  L([[2, 0], [3, 0], [3, 2]], blue),
+  LR([[2, 0], [3, 0], [3, 2]], blue, 1, 'start homerun'),
 ]
 const inchLines = [
   L([[0, 0], [39.37007874015748, 0], [78.74015748031496, 0]], green),
@@ -98,7 +99,7 @@ const inchLines = [
   L([[108.26771653543308, 68.8976377952756], [127.95275590551182, 68.8976377952756],
     [127.95275590551182, 88.58267716535434], [108.26771653543308, 88.58267716535434],
     [108.26771653543308, 68.8976377952756]], amber),
-  L([[78.74015748031496, 0], [118.11023622047244, 0], [118.11023622047244, 78.74015748031496]], blue),
+  LR([[78.74015748031496, 0], [118.11023622047244, 0], [118.11023622047244, 78.74015748031496]], blue, 1, 'start homerun'),
 ]
 const footLines = [
   L([[0, 0], [3.280839895013123, 0], [6.561679790026246, 0]], green),
@@ -106,7 +107,7 @@ const footLines = [
   L([[9.02230971128609, 5.741469816272965], [10.662729658792651, 5.741469816272965],
     [10.662729658792651, 7.381889763779527], [9.02230971128609, 7.381889763779527],
     [9.02230971128609, 5.741469816272965]], amber),
-  L([[6.561679790026246, 0], [9.84251968503937, 0], [9.84251968503937, 6.561679790026246]], blue),
+  LR([[6.561679790026246, 0], [9.84251968503937, 0], [9.84251968503937, 6.561679790026246]], blue, 1, 'start homerun'),
 ]
 const run = graph => solarGraphOverlay(graph, { metersPerUnit: 1 })
 const freeze = value => {
@@ -121,7 +122,6 @@ describe('solarGraphOverlay', () => {
     const result = run(g)
     expect(result).toEqual(OK(metreLines))
     expect(Object.keys(result).sort()).toEqual(['polylines', 'refusal'])
-    for (const line of result.polylines) expect(Object.keys(line).sort()).toEqual(['color', 'pts'])
     result.polylines[0].pts[0][0] = 99
     result.polylines[3].pts[0][0] = 99
     expect(JSON.stringify(g)).toBe(before)
@@ -226,7 +226,7 @@ describe('solarGraphOverlay', () => {
       R(3, 'trench', [[7, 7], [8, 8]]),
     ] }))).toEqual(OK([
       L([[-.25, -.25], [.25, -.25], [.25, .25], [-.25, .25], [-.25, -.25]], purple),
-      L([[0, 0], [1, 0]], blue), L([[1, 0], [1, 2]], pink),
+      LR([[0, 0], [1, 0]], blue, 1, 'end homerun'), LR([[1, 0], [1, 2]], pink, 2),
     ]))
   })
   it('SGO14 omits empty strings and conductor routes', () => {
@@ -247,7 +247,7 @@ describe('solarGraphOverlay', () => {
   })
   it('SGO36 draws nothing for a one-point conductor route and keeps the others', () => {
     expect(run(G({ routes: [R(1, 'feeder', [[3, 3]]), R(2, 'feeder', [[0, 0], [1, 1]]),
-      R(3, 'trench', [[4, 4]])] }))).toEqual(OK([L([[0, 0], [1, 1]], pink)]))
+      R(3, 'trench', [[4, 4]])] }))).toEqual(OK([LR([[0, 0], [1, 1]], pink, 2)]))
   })
   it('SGO37 still refuses a malformed single point', () => {
     for (const point of [['0', 0], [NaN, 0], [1], [0, 0, 'z'], null]) {
@@ -271,15 +271,15 @@ describe('solarGraphOverlay', () => {
     ]))
   })
   it('SGO16 includes the 4096-polyline boundary', () => {
-    expect(run(lines(4096))).toEqual(OK(Array.from({ length: 4096 }, () => L([[0, 0], [1, 1]], pink))))
+    expect(run(lines(4096))).toEqual(OK(Array.from({ length: 4096 }, (_, i) => LR([[0, 0], [1, 1]], pink, i + 1))))
   })
   it('SGO17 refuses 4097 polylines wholesale', () => {
     expect(run(lines(4097))).toEqual(NO('overlay_limit'))
   })
   it('SGO18 includes the aggregate 100000-point boundary', () => {
     expect(run(points(100000))).toEqual(OK([
-      L(Array.from({ length: 50000 }, () => [0, 0]), pink),
-      L(Array.from({ length: 50000 }, () => [1, 1]), pink),
+      LR(Array.from({ length: 50000 }, () => [0, 0]), pink, 1),
+      LR(Array.from({ length: 50000 }, () => [1, 1]), pink, 2),
     ]))
   })
   it('SGO19 refuses 100001 aggregate emitted points wholesale', () => {
@@ -317,7 +317,7 @@ describe('solarGraphOverlay', () => {
     let reads = 0
     const changing = [0, 0]
     Object.defineProperty(changing, 0, { enumerable: true, get: () => { reads += 1; return reads === 1 ? 0 : '7' } })
-    expect(run(G({ routes: [R(1, 'feeder', [changing, [1, 1]])] }))).toEqual(OK([L([[0, 0], [1, 1]], pink)]))
+    expect(run(G({ routes: [R(1, 'feeder', [changing, [1, 1]])] }))).toEqual(OK([LR([[0, 0], [1, 1]], pink, 1)]))
     expect(reads).toBe(1)
     const iterated = G({ routes: [R(1, 'feeder', [[0, 0], [3, true]])] })
     iterated.routes[0].points[Symbol.iterator] = function* () { yield [0, 0]; yield [1, 1] }

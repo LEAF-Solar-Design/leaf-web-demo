@@ -588,7 +588,7 @@ def solar_engineering_comparison_route(
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/solar-schedule-comparison")
 def solar_schedule_comparison_route(
         project_id: str, drawing_id: str, input_version_id: str,
-        compare_version_id: str, before_artifact_id: str, after_artifact_id: str,
+        compare_version_id: str, before_artifact_id: Optional[str] = None, after_artifact_id: Optional[str] = None,
         cable_offset: Optional[str] = None,
         tenant=Depends(deps.require_active_tenant),
         x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
@@ -602,6 +602,12 @@ def solar_schedule_comparison_route(
         except ValueError:
             raise GraphValidationError("SIP_R6_INVALID_REQUEST") from None
         if cable_offset is not None and not re.fullmatch(r"[0-9]{1,10}", cable_offset):
+            raise GraphValidationError("SIP_R6_INVALID_REQUEST")
+        if before_artifact_id is None and after_artifact_id is None and cable_offset is not None:
+            result = schedule_compare.compare_saved_cable_layouts(
+                tenant, proj, drawing, before, after, int(cable_offset))
+            return _bounded_comparison_response(result)
+        if before_artifact_id is None or after_artifact_id is None:
             raise GraphValidationError("SIP_R6_INVALID_REQUEST")
         result = schedule_compare.compare_saved_schedules(
             tenant, proj, drawing, before_version_id=before, after_version_id=after,

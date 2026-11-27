@@ -11,8 +11,7 @@
   "readiness": {
     "kind": "facets",
     "facets": [
-      "strings",
-      "frames"
+      "strings"
     ]
   },
   "engine": "server-builtin",
@@ -23,7 +22,7 @@
   "record": {
     "name": "solar-string-data",
     "version": "1.0.0",
-    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates. Choose design-json for the complete current design, including panel memberships, routes and metadata; it does not certify electrical sizing.",
+    "description": "Write StringData.json: every panel group sorted by name, with the selected strings whose two ends lie in it and their end coordinates. Choose design-json for the complete current design, including panel memberships, routes and metadata. Choose continuity-json for gaps measured between panel centres, or edge-clearance-json for gaps between verified panel outlines in a saved project drawing.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_string_data",
@@ -37,8 +36,18 @@
         },
         "format": {
           "type": "string",
-          "enum": ["string-data", "design-json"],
-          "description": "String Data keeps the endpoint report. Full design JSON exports every current panel, group, ordered string, route and design metadata."
+          "enum": ["string-data", "design-json", "continuity-json", "edge-clearance-json"],
+          "description": "Choose endpoints, complete design, centre spacing, or edge clearance."
+        },
+        "max_panel_pitch_m": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "For continuity only. Maximum allowed distance between consecutive panel centres in metres."
+        },
+        "max_panel_edge_gap_m": {
+          "type": "number",
+          "minimum": 0,
+          "description": "For edge clearance only. Maximum clear distance between consecutive panel outlines in metres. Touching or intersecting outlines have zero clearance."
         },
         "string_refs": {
           "type": "array",

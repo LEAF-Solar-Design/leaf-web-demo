@@ -4,12 +4,13 @@ import './resultObjectLinks.css'
 import ModuleSetPicker from './ModuleSetPicker.jsx'
 import './resultParity.css'
 import { humanKey } from '../labels.js'
+import { isRedactedField } from '../projects/ReceiptPanel.jsx'
 import { compactRefusal, errorActorLabel, errorPresentation, requiresReconciliation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
-import ResultJsonDownload from './ResultJsonDownload.jsx'
+import ResultJsonDownload, { RedactedPooledSharesDownload, ResultTableCsvDownload } from './ResultJsonDownload.jsx'
 import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
 import { stringResultSummary } from '../solar/stringResultOverlay.js'
 
@@ -194,7 +195,7 @@ function findRowArrays(data, path = [], ancestors = new Set(), includeScalarList
   if (isScalarList(data)) {
     if (!includeScalarLists) return []
     const rows = data.map(value => ({ value: value === null || value === '' ? JSON.stringify(value) : value }))
-    return [{ path, rows, ancestors }]
+    return [{ path, rows, ancestors, scalarList: true }]
   }
   if (path.length >= MAX_ROW_DEPTH) return [{ path, value: data }]
   const next = new Set(ancestors).add(data)
@@ -237,14 +238,35 @@ function RowArrayResults({ entries, density }) {
     : <p key={JSON.stringify(entry.path)}>{entry.path.map(humanKey).join(' / ')}: {rowValueText(entry.value)}</p>)
 }
 
-function RowArrayTable({ path, rows, ancestors, density }) {
+function RowArrayTable({ path, rows, ancestors, density, scalarList }) {
   const [page, setPage] = useState(0)
-  useEffect(() => { setPage(0) }, [rows])
+  const [layerName, setLayerName] = useState('')
+  const [jump, setJump] = useState(null)
+  const targetRow = useRef(null)
+  useEffect(() => {
+    setPage(0)
+    setLayerName('')
+    setJump(null)
+  }, [rows])
+  useEffect(() => { targetRow.current?.focus() }, [jump])
   const label = path.map(humanKey).join(' / ') || 'result'
   const pageSize = 100
   const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
   const start = currentPage * pageSize
   const visibleRows = rows.slice(start, start + pageSize)
+  const canJumpToLayer = !scalarList && rows.every(row => typeof row.layer === 'string')
+  const targetIndex = jump?.rows === rows ? jump.index : null
+
+  function jumpToLayer() {
+    const index = rows.findIndex(row => row.layer === layerName)
+    setJump({ rows, index })
+    if (index >= 0) setPage(Math.floor(index / pageSize))
+  }
+
+  function movePage(next) {
+    setJump(null)
+    setPage(next)
+  }
   // The parent row's cells already show scalar lists.
   const childArrays = path.length < MAX_ROW_DEPTH
     ? visibleRows.flatMap((row, index) => findRowArrays(row, [...path, String(start + index)], new Set(ancestors).add(rows), false))
@@ -262,6 +284,19 @@ function RowArrayTable({ path, rows, ancestors, density }) {
   if (rows.length === 0) return <p>{label}: No rows.</p>
   return (
     <section aria-label={`${label} rows`}>
+      {canJumpToLayer && <div>
+        <label>Layer name <input value={layerName} onChange={event => {
+          setLayerName(event.target.value)
+          setJump(null)
+        }} onKeyDown={event => {
+          if (event.key === 'Enter' && layerName !== '' && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            jumpToLayer()
+          }
+        }} /></label>
+        <button type="button" className="btn ghost" disabled={layerName === ''} onClick={jumpToLayer}>Jump to layer</button>
+        {targetIndex === -1 && <p>No layer matches that name.</p>}
+      </div>}
       <div className="table-scroll">
         <table className="counts grid" data-density={density}>
           <caption>{label}</caption>
@@ -270,7 +305,8 @@ function RowArrayTable({ path, rows, ancestors, density }) {
           ))}</tr></thead>
           <tbody>
             {visibleRows.map((row, index) => (
-              <tr key={start + index}>
+              <tr key={start + index} ref={targetIndex === start + index ? targetRow : null}
+                tabIndex={targetIndex === start + index ? -1 : undefined}>
                 {Array.from(columns, ([key, fieldPath], columnIndex) => {
                   const value = rowFieldValue(row, fieldPath)
                   return <td key={key} className={isNumericCell(value) ? 'num dp-number' : ''}>
@@ -289,11 +325,12 @@ function RowArrayTable({ path, rows, ancestors, density }) {
         <nav aria-label={`${label} pages`}>
           <span aria-live="polite">Rows {start + 1} to {Math.min(start + pageSize, rows.length)} of {rows.length}</span>
           <button type="button" className="btn ghost" disabled={currentPage === 0}
-            onClick={() => setPage(currentPage - 1)} aria-label={`Previous ${label} page`}>Previous</button>
+            onClick={() => movePage(currentPage - 1)} aria-label={`Previous ${label} page`}>Previous</button>
           <button type="button" className="btn ghost" disabled={start + pageSize >= rows.length}
-            onClick={() => setPage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
+            onClick={() => movePage(currentPage + 1)} aria-label={`Next ${label} page`}>Next</button>
         </nav>
       )}
+      {!scalarList && !path.some(key => isRedactedField(key)) && <ResultTableCsvDownload rows={rows} label={label} />}
       <RowArrayResults entries={childArrays} density={density} />
     </section>
   )
@@ -371,6 +408,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   const rowArrays = findRowArrays(data)
   const rowTables = <>
     <RowArrayResults entries={rowArrays} density={density} />
+    <RedactedPooledSharesDownload report={data.pooled_cumulative_shares} />
     {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
   </>
   const scalars = isScalarList(data) ? {} :

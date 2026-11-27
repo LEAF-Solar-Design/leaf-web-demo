@@ -6,6 +6,8 @@ export const SOLAR_READ_RESULT_SCHEMA = 'leaf.solar-graph-read.v1'
 export const SOLAR_READ_ADAPTER = 'local-graph-read'
 export const MAX_FIELDS = 200
 export const MAX_TABLE_ROWS = 200
+// Match PAGE_ITEMS in server/solar_solaredge_revision_compare.py.
+const MAX_COMPARISON_PAGE_ROWS = 250
 export const MAX_COLUMNS = 12
 export const MAX_TEXT = 500
 export const MAX_CELL_TEXT = 200
@@ -96,7 +98,7 @@ function withoutPrivate(value, depth) {
   return copy
 }
 
-function tableOf(key, values) {
+function tableOf(key, values, maxRows) {
   const keys = []
   const seen = new Set()
   for (const row of values) {
@@ -107,8 +109,8 @@ function tableOf(key, values) {
   const kept = keys.slice(0, MAX_COLUMNS)
   return {
     key, label: labelOf(key), columns: kept.map((column) => ({ key: column, label: labelOf(column) })),
-    rows: values.slice(0, MAX_TABLE_ROWS).map((row) => kept.map((column) => Object.hasOwn(row, column) ? formatValue(row[column], MAX_CELL_TEXT) : '')),
-    omittedRows: Math.max(0, values.length - MAX_TABLE_ROWS),
+    rows: values.slice(0, maxRows).map((row) => kept.map((column) => Object.hasOwn(row, column) ? formatValue(row[column], MAX_CELL_TEXT) : '')),
+    omittedRows: Math.max(0, values.length - maxRows),
     omittedColumns: Math.max(0, keys.length - MAX_COLUMNS),
   }
 }
@@ -118,7 +120,7 @@ const DETAIL_KEYS = [
   ['graph_sha256', 'Graph'], ['output_sha256', 'Output'], ['request_sha256', 'Request'], ['job_id', 'Job'],
 ]
 
-export function readResultView(data) {
+export function readResultView(data, { comparison = false } = {}) {
   const view = {
     tool: typeof data?.tool === 'string' ? data.tool : null,
     drawingId: typeof data?.drawing_id === 'string' ? data.drawing_id : null,
@@ -144,7 +146,7 @@ export function readResultView(data) {
   }
   const addEntry = (target, key, value, allowSection) => {
     if (key === 'artifact') return
-    if (Array.isArray(value) && value.length > 0 && value.every(isPlainObject)) target.tables.push(tableOf(key, value))
+    if (Array.isArray(value) && value.length > 0 && value.every(isPlainObject)) target.tables.push(tableOf(key, value, comparison && key === 'items' ? MAX_COMPARISON_PAGE_ROWS : MAX_TABLE_ROWS))
     else if (allowSection && isPlainObject(value)) {
       const section = { key, label: labelOf(key), fields: [], tables: [] }
       for (const child of Object.keys(value)) addEntry(section, child, value[child], false)
@@ -246,6 +248,23 @@ function projectOutput(value, budget, depth = 0) {
   return result
 }
 
+function comparisonReports(output, binding) {
+  return [['before', 'Before'], ['after', 'After']].map(([side, label]) => {
+    const revision = output[side]
+    const unavailable = { side, label, state: 'unavailable' }
+    if (!isPlainObject(revision) || typeof revision.version_id !== 'string' ||
+        !PROJECT_UUID.test(revision.version_id) ||
+        revision.report_download_available !== true || !isPlainObject(revision.report)) return unavailable
+    const ref = revision.report
+    const sourceBinding = { ...binding, input_version_id: ref.source_version_id }
+    const hashes = { inputIntakeSha256: ref.source_intake_sha256, graphSha256: ref.graph_sha256 }
+    return ref.media_type === 'application/json' && validateSolarProjectArtifactRef(ref, sourceBinding, hashes)
+      ? { side, label, state: 'ready', ref: Object.freeze({ ...ref }), sourceBinding: Object.freeze(sourceBinding), ...hashes,
+        sizeText: formatBytes(ref.byte_length) }
+      : unavailable
+  })
+}
+
 export function deriveProjectReadResultState(options) {
   const refused = (reason) => ({ mode: 'refused', reason })
   try {
@@ -273,8 +292,15 @@ export function deriveProjectReadResultState(options) {
     if (meta.current_required !== current) return refused('SIP_R12_RESULT_INVALID')
     const output = projectOutput(meta.output, { nodes: 0, bytes: 0 })
     if (new TextEncoder().encode(JSON.stringify(output)).byteLength > 1_048_576) return refused('SIP_R12_RESULT_INVALID')
+    const comparison = meta.tool === 'solar-solaredge-tracking-read' &&
+      output.schema === 'leaf.solar-project-solaredge-tracking-read.v1' && output.section === 'saved_assignment_changes'
+    if (comparison && output.after?.version_id !== binding.input_version_id) return refused('SIP_R12_RESULT_INVALID')
+    const resultOutput = comparison
+      ? Object.fromEntries(Object.entries(output).filter(([key]) => key !== 'before' && key !== 'after'))
+      : output
     const view = readResultView({ schema_version: SOLAR_READ_RESULT_SCHEMA, adapter: SOLAR_READ_ADAPTER,
-      drawing_id: binding.drawing_id, tool: meta.tool, output })
+      drawing_id: binding.drawing_id, tool: meta.tool, output: resultOutput }, { comparison })
+    if (comparison) view.comparisonReports = comparisonReports(meta.output, binding)
     view.details = [['tool', 'Tool'], ['drawing_id', 'Drawing'], ['input_version_id', 'Version'],
       ['graph_sha256', 'Graph'], ['output_sha256', 'Output'], ['request_sha256', 'Request']]
       .map(([key, label]) => ({ label, text: formatValue(meta[key]) }))
