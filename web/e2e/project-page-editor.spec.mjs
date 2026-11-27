@@ -245,6 +245,128 @@ async function expectInsideViewport(locator, viewport) {
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height + 1)
 }
 
+for (const viewport of [{ width: 320, height: 640 }, { width: 360, height: 640 }, { width: 390, height: 700 }]) {
+  test(`Project drawer actions at ${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    test.setTimeout(scaled(90_000))
+    await page.setViewportSize(viewport)
+    const backend = await installBackend(page)
+    await page.goto('/app?surface=browser')
+    const editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Create a page', exact: true }).click({ timeout: scaled(8_000) })
+    await page.locator('.canvas-toolbar').getByRole('button', { name: 'Edit', exact: true }).click()
+    const preview = page.locator('[data-ground="browser-asset"] .project-page')
+    await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
+    const headline = editor.getByRole('textbox', { name: 'Headline', exact: true })
+    await expect(headline).toBeFocused()
+    await headline.fill('Maple and Mill bakery')
+    await editor.getByRole('button', { name: 'Save page', exact: true }).click({ timeout: scaled(8_000) })
+    await expect.poll(() => backend.revisions.length).toBe(1)
+    expect(backend.revisions[0].document.headline).toBe('Maple and Mill bakery')
+    await page.screenshot({ path: testInfo.outputPath(`project-drawer-${viewport.width}.png`) })
+
+    const close = page.getByRole('button', { name: 'Close Project', exact: true })
+    await close.click({ timeout: scaled(8_000) })
+    await expect(preview.getByRole('button', { name: 'Edit headline', exact: true })).toHaveText('Maple and Mill bakery')
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    await expect(headline).toHaveValue('Maple and Mill bakery')
+    expect(backend.foreign).toEqual([])
+  })
+}
+
+test.describe('authored page touch preview', () => {
+  test.use({ hasTouch: true, isMobile: true })
+
+  for (const [width, height] of [[320, 640], [360, 640], [390, 700], [390, 844]]) {
+    test(`expanded tools and contact link are reachable with a stationary caption at ${width}x${height}`, async ({ page }, testInfo) => {
+      test.setTimeout(scaled(120_000))
+      await page.setViewportSize({ width: 390, height: 844 })
+      const backend = await installBackend(page)
+      await page.goto('/app?surface=browser')
+      const editor = await openProject(page)
+      await editor.getByRole('button', { name: 'Create a page', exact: true }).click()
+      const toolbar = page.locator('.canvas-toolbar')
+      await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
+      const preview = page.locator('[data-ground="browser-asset"] .project-page')
+      await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
+      const headline = 'Maple and Mill Heritage Sourdough Bakery, Community Bread School and Neighborhood Wholesale Kitchen'
+      const href = 'mailto:hello@mapleandmill.example'
+      await editor.getByRole('textbox', { name: 'Headline', exact: true }).fill(headline)
+      await editor.getByRole('textbox', { name: 'Description', exact: true }).fill(
+        'We sell naturally leavened bread, baked with care. Visit the bakery for morning pastries and seasonal loaves. We offer wholesale bread and catering for neighborhood events. Email us for the current menu and opening hours.',
+      )
+      await editor.getByRole('textbox', { name: 'Contact link label', exact: true }).fill('Get updates')
+      await editor.getByRole('textbox', { name: 'Contact link URL', exact: true }).fill(href)
+      await editor.getByRole('button', { name: 'Save page', exact: true }).click()
+      await expect(editor.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible()
+      expect(backend.revisions[0].document).toMatchObject({ headline, action: { label: 'Get updates', href } })
+      await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+      await toolbar.getByRole('button', { name: 'View', exact: true }).click()
+      await page.setViewportSize({ width, height })
+
+      await expect(preview.getByRole('heading', { name: headline, exact: true })).toBeVisible()
+      const link = preview.getByRole('link', { name: 'Get updates', exact: true })
+      await expect(link).toHaveAttribute('href', href)
+      const caption = page.locator('.browser-preview-label')
+      await expect(caption).toBeVisible()
+      await preview.evaluate(element => { element.scrollTop = 0 })
+      const initialCaption = await caption.boundingBox()
+      const dock = page.locator('.bar-dock')
+      await expect.poll(async () => {
+        const captionBounds = await caption.boundingBox()
+        const dockBounds = await dock.boundingBox()
+        return captionBounds.y + captionBounds.height <= dockBounds.y + 1
+      }).toBe(true)
+
+      const more = toolbar.getByRole('button', { name: 'More page tools' })
+      await more.tap()
+      await expect(more).toHaveAttribute('aria-expanded', 'true')
+      const settings = toolbar.getByRole('button', { name: 'Settings', exact: true })
+      await settings.scrollIntoViewIfNeeded()
+      expect(await settings.evaluate(element => {
+        const { left, top, width, height } = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(left + width / 2, top + height / 2))
+      })).toBe(true)
+
+      const bounds = await preview.boundingBox()
+      const x = Math.round(bounds.x + bounds.width / 2)
+      const startY = Math.round(bounds.y + bounds.height - 8)
+      const endY = Math.round(bounds.y + 8)
+      expect(startY - endY).toBeGreaterThan(30)
+      expect(await preview.evaluate((element, point) =>
+        element.contains(document.elementFromPoint(point.x, point.y)), { x, y: startY })).toBe(true)
+
+      const reachable = () => link.evaluate(element => {
+        const { left, top, width, height } = element.getBoundingClientRect()
+        return element.contains(document.elementFromPoint(left + width / 2, top + height / 2))
+      })
+      expect(await reachable()).toBe(false)
+      const touch = await page.context().newCDPSession(page)
+      try {
+        for (let swipe = 0; swipe < 24 && !await reachable(); swipe++) {
+          await touch.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: startY }] })
+          for (let step = 1; step <= 8; step++) {
+            const y = Math.round(startY + (endY - startY) * step / 8)
+            await touch.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] })
+          }
+          await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+        }
+      } finally {
+        await touch.detach()
+      }
+
+      await expect.poll(reachable).toBe(true)
+      expect(await preview.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+      expect(await caption.boundingBox()).toEqual(initialCaption)
+      await expect(more).toHaveAttribute('aria-expanded', 'true')
+      await page.screenshot({ path: testInfo.outputPath(`project-touch-${width}x${height}.png`) })
+      await settings.press('Escape')
+      await expect(more).toBeFocused()
+      await expect(more).toHaveAttribute('aria-expanded', 'false')
+      expect(backend.foreign).toEqual([])
+    })
+  }
+})
+
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`persisted portfolio gallery layout at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(scaled(120_000))
