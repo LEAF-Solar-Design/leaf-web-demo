@@ -1,6 +1,7 @@
 """C4 preparation through the real route, with inert authoritative job reads."""
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 import hashlib
 import json
 import os
@@ -994,6 +995,7 @@ def test_retry_admission_binds_materials_and_live_writers(corpus_join, scenario)
 @pytest.mark.parametrize('scenario', [
     'concurrent_replay', 'enqueue_rollback', 'successor_retention',
     'worker_exact', 'worker_policy_drift', 'worker_suite_drift',
+    'retention_queued', 'retention_running', 'retention_terminal',
 ])
 def test_durable_recovery_confirmation(corpus_join, monkeypatch, request, scenario):
     from test_lab_runs import corpus_admit, corpus_adapter
@@ -1141,15 +1143,34 @@ def test_durable_recovery_confirmation(corpus_join, monkeypatch, request, scenar
 
     monkeypatch.setenv('LEAF_BUILD_REVISION', 'corpus-join-redeployed')
     assert confirm().json() == first.json()
-    if scenario == 'successor_retention':
+    if scenario == 'successor_retention' or scenario.startswith('retention_'):
+        aged_ids = (successor_id,) if scenario == 'successor_retention' else (source_id, successor_id)
+        if scenario != 'retention_queued':
+            _, lease, _ = corpus_adapter(lane, successor_id)
+            if scenario != 'retention_running':
+                assert store.finish(tenant, successor_id, 'corpus-worker', lease['fence'], 'finished')
         with lane.db.transaction() as conn:
-            conn.execute('INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256, '
-                'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state, '
-                'created_at,updated_at) SELECT tenant_id,doc_id,run_id || n,graph_revision,graph_sha256, '
-                'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,\'finished\', '
-                'created_at + interval \'1 second\',updated_at FROM lab_runs,generate_series(1,50) n '
-                'WHERE tenant_id=%s AND run_id=%s', (tenant, successor_id))
-        store.sweep(store._now())
+            for aged_id in aged_ids:
+                conn.execute('INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256, '
+                    'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state, '
+                    'created_at,updated_at) SELECT tenant_id,doc_id,run_id || n,graph_revision,graph_sha256, '
+                    'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,\'finished\', '
+                    'created_at + interval \'1 second\',updated_at FROM lab_runs,generate_series(1,50) n '
+                    'WHERE tenant_id=%s AND run_id=%s', (tenant, aged_id))
+        store.sweep(store._now() + store.SUBMISSION_TTL + timedelta(minutes=6))
+        if scenario in {'retention_queued', 'retention_running'}:
+            assert store.recovery_admission_for_run(tenant, successor_id) == receipt['admission_json']
+            assert store.get(tenant, source_id)['state'] == 'failed'
+            assert store.get(tenant, successor_id)['state'] == scenario.removeprefix('retention_')
+            assert confirm().json() == first.json()
+            return
+        if scenario == 'retention_terminal':
+            assert store.recovery_admission_for_run(tenant, successor_id) is None
+            with pytest.raises(store.NotFound):
+                store.get(tenant, source_id)
+            with pytest.raises(store.NotFound):
+                store.get(tenant, successor_id)
+            return
         response = confirm()
         assert response.status_code == 409, response.text
         assert response.json() == {'detail': 'lab_recovery_successor_unavailable'}
