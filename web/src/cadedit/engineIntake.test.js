@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { expandBulgedPolylines, intakeDimensionPolylines } from './engineIntake.js'
+import { expandBulgedPolylines, intakeDimensionPolylines, projectServerBlocks } from './engineIntake.js'
 
 import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, MIN_ARC_POINTS, dimensionSchematic, mleaderSchematic, engineIntake, entityToPolyline, arcSweepDeg, formatMeasurement, hexHandle, intakeRoundPolylines } from './engineIntake.js'
 
@@ -68,6 +68,151 @@ describe('server intake dimension polylines', () => {
   it('leaves already projected engine and legacy intakes alone', () => {
     expect(intakeDimensionPolylines({ source: 'engine', dimensions: [dimension] }).polylines).toEqual([])
     expect(intakeDimensionPolylines({ polylines: [] }).polylines).toEqual([])
+  })
+})
+
+describe('server block clip projection', () => {
+  const outline = { kind: 'LWPOLYLINE', closed: true, layer: '0', pts: [[2, 3], [6, 3], [6, 5], [2, 5]] }
+  const window = [[3, 2], [5, 2], [5, 6], [3, 6]]
+  const clipped = { name: 'Part', handle: 'a1', pt: [20, 30], rot: 90, scale: [-2, 3, 1],
+    layer: 'Equipment', columns: 2, column_spacing: 10 }
+  const peer = { name: 'Part', handle: 'B2', pt: [50, 40], layer: 'Equipment' }
+  const drawing = (clip, children = [outline]) => ({
+    blocks: [{ name: 'Part', base: [2, 3, 0], complete: true, children }],
+    inserts: [clipped, peer], insert_clips: { A1: clip },
+  })
+
+  it.each([[window], [[...window].reverse()]])('clips both array cells in block coordinates with boundary %j', points => {
+    const result = projectServerBlocks(drawing({ points, inverted: false }))
+    expect(result).toMatchObject({ truncated: 0, incompleteInserts: 0 })
+    const actual = result.polylines.map(row => {
+      const x = row.pts.map(point => Math.round(point[0]))
+      const y = row.pts.map(point => Math.round(point[1]))
+      return [row.sourceHandle, row.layer, row.closed, Math.min(...x), Math.min(...y), Math.max(...x), Math.max(...y)]
+    })
+    expect(actual).toEqual([
+      ['a1', 'Equipment', true, 14, 24, 20, 28],
+      ['a1', 'Equipment', true, 14, 34, 20, 38],
+      ['B2', 'Equipment', true, 50, 40, 54, 42],
+    ])
+  })
+
+  it('splits open strokes that leave and re-enter the window', () => {
+    const points = [[2, 4], [4, 4], [6, 4], [6, 5], [4, 5], [2, 5]]
+    const guide = { ...outline, closed: false, pts: points }
+    const intake = drawing({ points: window, inverted: false }, [guide])
+    intake.inserts = [{ ...peer, handle: 'A1' }]
+    const result = projectServerBlocks(intake)
+    expect(result.incompleteInserts).toBe(0)
+    expect(result.polylines).toMatchObject([
+      { closed: false, strokeOnly: true, pts: [[51, 41, 0], [52, 41, 0], [53, 41, 0]] },
+      { closed: false, strokeOnly: true, pts: [[53, 42, 0], [52, 42, 0], [51, 42, 0]] },
+    ])
+  })
+
+  it.each([
+    { left: 12, childHandle: 'c3', expected: [112, 113] },
+    { left: 8, childHandle: undefined, expected: [110, 112] },
+    { left: 13, childHandle: 'c3', expected: [] },
+  ])('intersects nested and parent windows at x=$left', ({ left, childHandle, expected }) => {
+    const intake = {
+      blocks: [
+        { name: 'Part', base: [2, 3, 0], complete: true, children: [outline] },
+        { name: 'Outer', base: [0, 0, 0], complete: true, count: 1,
+          children: [{ kind: 'OTHER', type: 'INSERT' }],
+          nested_inserts: [{ name: 'Part', pt: [10, 0], handle: childHandle }] },
+      ],
+      inserts: [{ name: 'Outer', handle: 'D4', pt: [100, 0], layer: 'Equipment' }, peer],
+      insert_clips: {
+        C3: { points: window, inverted: false },
+        D4: { points: [[left, -1], [left + 4, -1], [left + 4, 3], [left, 3]], inverted: false },
+      },
+    }
+    const result = projectServerBlocks(intake)
+    expect(result).toMatchObject({ truncated: 0, incompleteInserts: 0 })
+    expect(result.polylines.at(-1)).toMatchObject({
+      sourceHandle: 'B2', pts: [[50, 40, 0], [54, 40, 0], [54, 42, 0], [50, 42, 0]],
+    })
+    const nested = result.polylines.slice(0, -1)
+    expect(nested).toHaveLength(expected.length ? 1 : 0)
+    for (const polygon of nested) {
+      expect(polygon).toMatchObject({ sourceHandle: 'D4', layer: 'Equipment', closed: true })
+      const x = polygon.pts.map(point => point[0])
+      expect([Math.min(...x), Math.max(...x)]).toEqual(expected)
+    }
+  })
+
+  it.each([30, 135, 270])('clips a tilted two-dimensional INSERT array rotated %i degrees', rot => {
+    const intake = drawing({ points: window, inverted: false })
+    intake.inserts = [{ ...clipped, rot, nrm: [0, 0.6, 0.8], rows: 2, row_spacing: 7 }, peer]
+    const result = projectServerBlocks(intake)
+    expect(result).toMatchObject({ truncated: 0, incompleteInserts: 0 })
+    expect(result.polylines.map(row => row.sourceHandle)).toEqual(['a1', 'a1', 'a1', 'a1', 'B2'])
+    const angle = rot * Math.PI / 180
+    for (const [cell, polygon] of result.polylines.slice(0, 4).entries()) {
+      const dx = (cell % 2) * 10
+      const dy = Math.floor(cell / 2) * 7
+      for (const [x, y] of [[-2, 0], [-6, 0], [-6, 6], [-2, 6]]) {
+        const u = (x + dx) * Math.cos(angle) - (y + dy) * Math.sin(angle)
+        const v = (x + dx) * Math.sin(angle) + (y + dy) * Math.cos(angle)
+        expect(polygon.pts.some(point =>
+          near(point[0], 20 - u) && near(point[1], 30 - 0.8 * v) && near(point[2], 0.6 * v),
+        )).toBe(true)
+      }
+    }
+  })
+
+  it.each([37, 55, 71])('keeps a straight edge with a sampled point after rotation by %i degrees', rot => {
+    const angle = rot * Math.PI / 180
+    const rotate = ([x, y]) => [x * Math.cos(angle) - y * Math.sin(angle), x * Math.sin(angle) + y * Math.cos(angle)]
+    const points = [[0, 0], [1.3, 0], [4, 0], [4, 3], [0, 3]].map(rotate)
+    const line = { kind: 'LINE', layer: '0', pts: [[-1, 1], [5, 1]].map(rotate) }
+    const intake = drawing({ points, inverted: false }, [line])
+    intake.blocks[0].base = [0, 0, 0]
+    intake.inserts = [{ name: 'Part', handle: 'A1', pt: [0, 0] }]
+    const result = projectServerBlocks(intake)
+    expect(result).toMatchObject({ truncated: 0, incompleteInserts: 0 })
+    expect(result.polylines).toHaveLength(1)
+    for (const [index, expected] of [[0, 1], [4, 1]].map(rotate).entries()) {
+      expect(near(result.polylines[0].pts[index][0], expected[0])).toBe(true)
+      expect(near(result.polylines[0].pts[index][1], expected[1])).toBe(true)
+    }
+  })
+
+  it.each([false, true])('retains an affordable clip with the oversized insert first=%j', oversizedFirst => {
+    const intake = drawing({ points: window, inverted: false })
+    const circle = size => Array.from({ length: size }, (_, index) => {
+      const angle = index * 2 * Math.PI / size
+      return [Math.cos(angle), Math.sin(angle)]
+    })
+    intake.blocks.push({ name: 'Dense', base: [0, 0, 0], complete: true,
+      children: [{ ...outline, pts: circle(2000) }] })
+    const dense = { name: 'Dense', handle: 'E5', pt: [30, 30] }
+    intake.inserts = oversizedFirst ? [dense, clipped, peer] : [clipped, dense, peer]
+    intake.insert_clips.E5 = { points: circle(512), inverted: false }
+    const result = projectServerBlocks(intake)
+    expect(result.incompleteInserts).toBe(1)
+    expect(result.inserts.filter(row => row.incomplete).map(row => row.handle)).toEqual(['E5'])
+    expect(result.polylines.map(row => row.sourceHandle)).toEqual(['a1', 'a1', 'B2'])
+  })
+
+  it('preserves a wholly retained outline of any shape', () => {
+    const concave = { ...outline, pts: [[3, 3], [5, 3], [4, 4], [5, 5], [3, 5]] }
+    const intake = drawing({ points: window, inverted: false }, [concave])
+    const result = projectServerBlocks(intake)
+    expect(result).toEqual(projectServerBlocks({ ...intake, insert_clips: {} }))
+    expect(result.incompleteInserts).toBe(0)
+  })
+
+  it.each([
+    { points: window, inverted: true },
+    { points: [[0, 0], [4, 0], [2, 2], [4, 4], [0, 4]], inverted: false },
+    { points: [[0, 0], [4, 0], [4, 4], [0, 0], [0, 4]], inverted: false },
+  ])('marks only the unsupported filter as incomplete for %j', clip => {
+    const result = projectServerBlocks(drawing(clip))
+    expect(result.incompleteInserts).toBe(1)
+    expect(result.inserts.map(row => row.incomplete)).toEqual([true, false])
+    expect(result.polylines.map(row => row.sourceHandle)).toEqual(['B2'])
   })
 })
 
