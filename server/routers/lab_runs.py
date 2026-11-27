@@ -214,13 +214,7 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
     return _call(operation)
 
 
-def _create(tenant, body):
-    if "submission_id" in body and body["submission_id"] is None:
-        raise InvalidGraph("invalid_lab_submission_id")
-    if (not isinstance(body["doc_id"], str) or not body["doc_id"]
-            or type(body["graph_revision"]) is not int or body["graph_revision"] < 1):
-        raise InvalidGraph("invalid_lab_run_fields")
-    artifact = ledger.get(str(tenant), body["doc_id"], body["graph_revision"])
+def _admit_run_graph(tenant, artifact, doc_id, graph_revision):
     manifests = admit_graph(artifact["graph"], lab_tool_manifests.registry_for(str(tenant)))
     corpus_authority = None
     for block in artifact["graph"]["blocks"]:
@@ -241,7 +235,7 @@ def _create(tenant, body):
                 raise GraphRefused('lab_corpus_material_refused') from None
             authority = {'schema': 'leaf.lab-corpus-authority.v1', 'tenant_id': str(tenant),
                 'project_id': context['project_id'], 'actor_id': actor,
-                'doc_id': body['doc_id'], 'graph_revision': body['graph_revision'],
+                'doc_id': doc_id, 'graph_revision': graph_revision,
                 'graph_sha256': artifact['sha256']}
             if corpus_authority is not None and corpus_authority != authority:
                 raise GraphRefused('lab_corpus_project_conflict')
@@ -257,6 +251,17 @@ def _create(tenant, body):
             continue
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused")
+    return corpus_authority
+
+
+def _create(tenant, body):
+    if "submission_id" in body and body["submission_id"] is None:
+        raise InvalidGraph("invalid_lab_submission_id")
+    if (not isinstance(body["doc_id"], str) or not body["doc_id"]
+            or type(body["graph_revision"]) is not int or body["graph_revision"] < 1):
+        raise InvalidGraph("invalid_lab_run_fields")
+    artifact = ledger.get(str(tenant), body["doc_id"], body["graph_revision"])
+    corpus_authority = _admit_run_graph(tenant, artifact, body["doc_id"], body["graph_revision"])
     project = (_project_scope(tenant, artifact['graph'], body.get('project_id'))
                if body.get('submission_id') is not None or 'project_id' in body else '')
     _remember_submission(tenant, body, project)
