@@ -1,0 +1,94 @@
+{
+  "name": "layer-bounding-boxes",
+  "version": "1.0.1",
+  "description": "Computes the bounding box (min/max X and Y) of each layer's model-space geometry, using polyline and 3D-face vertices, and returns the layers sorted by bounding-box area, largest first.",
+  "kind": "script",
+  "engine_op": "layer_bounding_boxes",
+  "entry": "tools/layer-bounding-boxes/tool.py",
+  "params": {
+    "type": "object",
+    "properties": {
+      "layers": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional layer names to restrict the report to. If omitted, all layers with model-space geometry are included."
+      }
+    },
+    "additionalProperties": false
+  },
+  "returns": {
+    "type": "object",
+    "properties": {
+      "layers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "layer": {
+              "type": "string"
+            },
+            "min_x": {
+              "type": "number"
+            },
+            "max_x": {
+              "type": "number"
+            },
+            "min_y": {
+              "type": "number"
+            },
+            "max_y": {
+              "type": "number"
+            },
+            "width": {
+              "type": "number"
+            },
+            "height": {
+              "type": "number"
+            },
+            "area": {
+              "type": "number"
+            },
+            "geometry_count": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "layer",
+            "min_x",
+            "max_x",
+            "min_y",
+            "max_y",
+            "width",
+            "height",
+            "area",
+            "geometry_count"
+          ]
+        }
+      },
+      "layer_count": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "layers",
+      "layer_count"
+    ]
+  },
+  "capabilities": [
+    "drawing.read"
+  ],
+  "timeout_ms": 30000,
+  "idempotent": true,
+  "review": {
+    "status": "unreviewed"
+  },
+  "provenance": {
+    "author": "agent",
+    "created": "2026-07-18T03:25:11.568Z",
+    "modified": "2026-11-26T20:11:29Z",
+    "session": "agent-sdk",
+    "static_scan": []
+  }
+}
