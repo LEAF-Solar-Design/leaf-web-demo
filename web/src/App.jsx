@@ -231,7 +231,8 @@ import { PROJECT_SOLAR_APP_REASONS, projectSolarAppReason } from './solar/solarP
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
 import { useProjectSolarScope } from './solar/useProjectSolarScope.js'
 import { useAppProjectSolarRuntime } from './solar/useAppProjectSolarRuntime.js'
-import { projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
+import { focusProjectSolarStrings, projectSolarDrawingView } from './solar/solarProjectDrawingModel.js'
+import { ProjectStringFocus } from './solar/SolarConductorForm.jsx'
 import ProjectSolarWorkspace from './solar/ProjectSolarWorkspace.jsx'
 import ProjectSolarGraphForm from './solar/ProjectSolarGraphForm.jsx'
 import { createProjectSolarClient } from './api.js'
@@ -2624,6 +2625,14 @@ export default function App() {
     scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
   }), [projectDrawingBinding, projectContextView, projectContextCurrent,
     projectSceneIntake, projectSceneKey, projectSceneReady])
+  const [projectStringFocus, setProjectStringFocus] = useState(null)
+  const currentStringIds = projectContextCurrent && projectStringFocus
+    && projectStringFocus.authorityKey === projectSolar.scope.authorityKey
+    && projectStringFocus.client === projectSolar.projectClient
+    && sameSolarDrawingBinding(projectStringFocus.binding, projectDrawingBinding)
+    ? projectStringFocus.ids : null
+  const projectStringFocusView = useMemo(() => focusProjectSolarStrings(projectDrawing, currentStringIds),
+    [projectDrawing, currentStringIds])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
     projectMode, scopeKey: projectEditorEngine?.scopeKey, currentScopeKey: projectEditorKey,
@@ -4643,7 +4652,8 @@ export default function App() {
     ? projectSolarRefusal?.reason || solarOverlayStatusOf(projectDrawing.reason === 'INVALID_SCALE' ? 'invalid_scale'
       : projectDrawing.reason === 'OVERLAY_LIMIT' ? 'overlay_limit'
       : ['GRAPH_PAIR_INVALID', 'GRAPH_UNREADABLE', 'INVALID_GRAPH'].includes(projectDrawing.reason) ? 'invalid_graph'
-      : null)
+      : null) || (projectStringFocusView.unavailable && projectDrawing.reason !== 'SCENE_PENDING'
+      ? 'Selected string panel geometry is unavailable for this drawing.' : null)
     : solarOverlayStatusOf(solarOverlayReason)
   const solarFlowSeated = ENV_SOLAR_FLOW_RAIL && ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && drafting && surfaceSlots.toolbar.profile === 'solar'
   const projectSolarHostEnabled = projectMode && solarFlowSeated
@@ -6135,29 +6145,31 @@ export default function App() {
             solarFlowSeated ? (
               <div id="solar-tool-form" ref={projectSolarWorkspaceRef} tabIndex={-1}
                 style={drawerViewport ? { maxHeight: '40dvh', overflowY: 'auto', flexShrink: 0 } : undefined}>
-                <ProjectSolarWorkspace
-                  key={JSON.stringify([projectSolar.scope.authorityKey, projectSolar.scope.binding])}
-                  solarBinding={projectSolar.scope.binding}
-                  authorityKey={projectSolar.scope.authorityKey}
-                  projectClient={projectSolar.projectClient}
-                  projectCatalog={catalogState.projectCatalog}
-                  isCurrent={projectSolar.isCurrent}
-                  FlowRail={SolarFlowRail}
-                  StepEditor={SolarStepEditor}
-                  GraphForm={ProjectSolarGraphForm}
-                  newProjectIntentKey={mintCorrelationId}
-                  onProjectSubmit={projectSolarRuntime.onProjectSubmit}
-                  onEstimatePublished={(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,
-                    () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)}
-                  submissionSignal={projectSolarRuntime.submissionSignal}
-                  openTool={projectSolarRuntime.openTool}
-                  onOpenTool={onOpenProjectSolarTool}
-                  onClose={onCloseProjectSolarTool}
-                  busy={projectSolarRuntime.busy}
-                  projectRunMemory={projectSolarRuntime.projectRunMemory}
-                  projectPending={projectSolarRuntime.projectPending}
-                  projectOutcome={projectSolarRuntime.projectOutcome}
-                />
+                <ProjectStringFocus.Provider value={setProjectStringFocus}>
+                  <ProjectSolarWorkspace
+                    key={JSON.stringify([projectSolar.scope.authorityKey, projectSolar.scope.binding])}
+                    solarBinding={projectSolar.scope.binding}
+                    authorityKey={projectSolar.scope.authorityKey}
+                    projectClient={projectSolar.projectClient}
+                    projectCatalog={catalogState.projectCatalog}
+                    isCurrent={projectSolar.isCurrent}
+                    FlowRail={SolarFlowRail}
+                    StepEditor={SolarStepEditor}
+                    GraphForm={ProjectSolarGraphForm}
+                    newProjectIntentKey={mintCorrelationId}
+                    onProjectSubmit={projectSolarRuntime.onProjectSubmit}
+                    onEstimatePublished={(receipt, captured, isCurrent) => seatProjectDrawingPublication(workspaceController, receipt,
+                      () => isCurrent() && workspaceController.getSnapshot().canonicalVersionId === captured.input_version_id)}
+                    submissionSignal={projectSolarRuntime.submissionSignal}
+                    openTool={projectSolarRuntime.openTool}
+                    onOpenTool={onOpenProjectSolarTool}
+                    onClose={onCloseProjectSolarTool}
+                    busy={projectSolarRuntime.busy}
+                    projectRunMemory={projectSolarRuntime.projectRunMemory}
+                    projectPending={projectSolarRuntime.projectPending}
+                    projectOutcome={projectSolarRuntime.projectOutcome}
+                  />
+                </ProjectStringFocus.Provider>
                 {projectEditorBinding && (
                   <ProjectLayoutPublicationTools
                     drawingId={projectEditorBinding.drawing_id}
@@ -6676,7 +6688,7 @@ export default function App() {
                   intake={projectMode ? projectDrawing.intake : intake ?? SOLAR_STARTER_EMPTY_INTAKE}
                   drawingKey={projectMode ? projectDrawing.drawingKey : consoleDrawingKey}
                   engineObservationBinding={engineObservationBinding}
-                  solarOverlay={projectMode ? projectDrawing.overlay : solarOverlay}
+                  solarOverlay={projectMode ? projectStringFocusView.overlay : solarOverlay}
                   onIntakeOverride={onViewerIntakeOverride}
                   onSceneReady={onDrawingSceneReady}
                   colorForLayer={studioGround ? studioColorForLayer : surfaceColorForLayer}
