@@ -51,7 +51,8 @@ def _queue_log_loop(stop_event: threading.Event, interval: float) -> None:
     while not stop_event.wait(interval):
         try:
             stats = CustomizationService.configured().store.stage_queue_stats()
-            _LOG.info(
+            # WARNING on purpose: the app sets no root handler and Python's last-resort handler drops INFO; the production metric filters read this exact text (leaf-automation-aws-terraform #3590)
+            _LOG.warning(
                 "customization_stage_queue depth=%d running=%d oldest_wait_s=%d",
                 stats["depth"], stats["running"], stats["oldest_wait_s"],
             )
