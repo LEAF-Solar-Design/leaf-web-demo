@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import logging
 import os
@@ -1561,6 +1562,54 @@ def _carry_solar_state(backend, tenant_id: str, drawing_id: str, parent_version:
     return merged, None
 
 
+def _complete_edited_dxf(data: bytes) -> bool:
+    """Check record framing before a parsed upload can become a revision."""
+    section = None
+    awaiting_section_name = False
+    inside_block = False
+    seen_section = False
+    with io.TextIOWrapper(io.BytesIO(data), encoding="utf-8-sig", errors="replace") as lines:
+        for code_line in lines:
+            value_line = next(lines, None)
+            if value_line is None:
+                return False
+            try:
+                code = int(code_line)
+            except ValueError:
+                return False
+            value = value_line.strip()
+            if code == 999:
+                continue
+            if awaiting_section_name:
+                if code != 2 or not value:
+                    return False
+                section = value.upper()
+                awaiting_section_name = False
+                seen_section = True
+            elif (code, value) == (0, "SECTION"):
+                if section is not None:
+                    return False
+                awaiting_section_name = True
+            elif (code, value) == (0, "EOF"):
+                return seen_section and section is None and all(not line.strip() for line in lines)
+            elif section is None:
+                return False
+            elif (code, value) == (0, "ENDSEC"):
+                if inside_block:
+                    return False
+                section = None
+            elif section == "BLOCKS" and code == 0:
+                if value == "BLOCK":
+                    if inside_block:
+                        return False
+                    inside_block = True
+                elif value == "ENDBLK":
+                    if not inside_block:
+                        return False
+                    inside_block = False
+    return False
+
+
 def _receive_edited_dxf(file: UploadFile, source_digest: str):
     """The integrity half every browser-edit save shares (F-3 and the W4g-3
     plan route): read the body under the upload cap, refuse a non-.dxf name,
@@ -1594,6 +1643,10 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
         intake = dxf_intake.parse_dxf_bytes(
             data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True
         )
+        # Intake recovers partial drawings for viewing. A save must not make
+        # recovered geometry the active revision when the upload is incomplete.
+        if not _complete_edited_dxf(data):
+            raise dxf_intake.DxfParseError("incomplete or invalid DXF framing")
     except dxf_intake.DxfParseError as exc:
         return error_response(ErrorCode.BAD_PARAMS,
                               f"edited document does not parse: {exc}",

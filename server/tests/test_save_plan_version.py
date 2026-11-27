@@ -202,6 +202,22 @@ def test_intake_backed_head_takes_the_sidecar_leg_and_says_why(client, tmp_path)
     assert handles == ["1F", "A"]
 
 
+def test_plan_save_retries_require_complete_dxf_before_advancing(client):
+    assert _post(client, DEMO, {}).status_code == 201
+    head = _head(client, DEMO)
+    incomplete = EDITED_DXF.removesuffix(b"0\nEOF\n")
+
+    for _ in range(2):
+        refused = _post(client, DEMO, {}, parent=head, data=incomplete)
+        assert refused.status_code == 422, refused.text
+        assert "DXF framing" in refused.json()["error"]["message"]
+        assert _head(client, DEMO) == head
+
+    repaired = _post(client, DEMO, {}, parent=head)
+    assert repaired.status_code == 201, repaired.text
+    assert _head(client, DEMO) == head + 1
+
+
 def test_dwg_backed_head_takes_the_plan_leg_through_the_mock_writer(client, tmp_path):
     import store  # noqa: PLC0415
     import write_loop  # noqa: PLC0415

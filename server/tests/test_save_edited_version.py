@@ -164,6 +164,47 @@ def test_unparseable_bytes_are_refused_and_write_nothing(client):
     assert after == before
 
 
+@pytest.mark.parametrize("damaged", [
+    pytest.param(
+        EDITED_DXF.replace(b"0\nENDSEC\n0\nEOF\n", b"0\nINSERT\n5\nA2\n2\n"),
+        id="truncated-insert",
+    ),
+    pytest.param(
+        b"0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nPanel\n0\nENDSEC\n" + EDITED_DXF,
+        id="unclosed-block-with-eof",
+    ),
+    pytest.param(
+        EDITED_DXF.replace(b"8\nRoof\n", b"bad-code\nRoof\n"),
+        id="broken-pair-with-eof",
+    ),
+])
+def test_incomplete_framing_retry_keeps_last_good_version(client, tmp_path, damaged):
+    import store  # noqa: PLC0415
+    import write_loop  # noqa: PLC0415
+
+    path = f"/api/drawings/{DRAWING}/versions"
+    headers = {"X-Tenant-Id": TENANT}
+    assert _post(client).status_code == 201
+    before = client.get(path, headers=headers).json()
+    head = before["head"]
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    current_key = write_loop.edited_source_key(TENANT, DRAWING, head)
+    next_key = write_loop.edited_source_key(TENANT, DRAWING, head + 1)
+
+    for _ in range(2):
+        refused = _post(client, data=damaged, parent=head)
+        assert refused.status_code == 422, refused.text
+        assert "DXF framing" in refused.json()["error"]["message"]
+        assert client.get(path, headers=headers).json() == before
+        assert backend.get(current_key) == EDITED_DXF
+        assert not backend.exists(next_key)
+
+    repaired = _post(client, parent=head)
+    assert repaired.status_code == 201, repaired.text
+    assert repaired.json()["head"] == head + 1
+    assert backend.get(next_key) == EDITED_DXF
+
+
 def test_stale_parent_is_a_409_compare_and_set_refusal(client):
     head = client.get(f"/api/drawings/{DRAWING}/versions",
                       headers={"X-Tenant-Id": TENANT}).json()["head"]
