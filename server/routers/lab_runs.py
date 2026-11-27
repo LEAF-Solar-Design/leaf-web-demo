@@ -52,10 +52,13 @@ def _authorize_corpus_run(tenant, row, *, write=False):
     authority = store.corpus_authority(row)
     if authority is None:
         return
-    actor = _corpus_actor(tenant)
+    _require_corpus_project_role(tenant, authority['project_id'], _corpus_actor(tenant), write=write)
+
+
+def _require_corpus_project_role(tenant, project_id, actor, *, write):
     from leaf_platform import project_lifecycle
     try:
-        project_lifecycle.require_project_role(str(tenant), authority['project_id'], actor, write=write)
+        project_lifecycle.require_project_role(str(tenant), project_id, actor, write=write)
     except (project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
         raise GraphRefused('lab_corpus_project_refused') from None
 
@@ -214,9 +217,25 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
     return _call(operation)
 
 
-def _admit_run_graph(tenant, artifact, doc_id, graph_revision):
+def _admit_run_graph(tenant, artifact, doc_id, graph_revision, *, recovery_confirmation=None,
+                     reserved_actor=None):
     manifests = admit_graph(artifact["graph"], lab_tool_manifests.registry_for(str(tenant)))
     corpus_authority = None
+    retry_evidence = {}
+    if recovery_confirmation is not None:
+        import lab_corpus_recovery as recovery
+        selected = recovery_confirmation['selected']
+        if (not selected or len(selected) != len(manifests)
+                or {item['block_id'] for item in selected} != set(manifests)
+                or not reserved_actor or graph_revision != 1 or artifact['revision'] != graph_revision
+                or artifact['doc_id'] != doc_id or doc_id == recovery_confirmation['source']['doc_id']
+                or artifact['sha256'] != graph_digest(recovery_confirmation['draft_graph'])):
+            raise GraphRefused('lab_recovery_successor_inputs_changed')
+        project_id = recovery_confirmation['project_id']
+        caller = _corpus_actor(tenant)
+        _require_corpus_project_role(tenant, project_id, caller, write=True)
+        if reserved_actor != caller:
+            _require_corpus_project_role(tenant, project_id, reserved_actor, write=True)
     for block in artifact["graph"]["blocks"]:
         manifest = manifests[block["id"]]
         ref = block["registry"]
@@ -225,12 +244,14 @@ def _admit_run_graph(tenant, artifact, doc_id, graph_revision):
             if store.store_mode() != 'postgres':
                 raise GraphRefused('lab_corpus_postgres_required')
             import lab_corpus_executor as corpus
-            actor = _corpus_actor(tenant)
+            actor = reserved_actor if recovery_confirmation is not None else _corpus_actor(tenant)
             context = _corpus_context(tenant, actor, block['settings'])
+            if recovery_confirmation is not None and context['project_id'] != project_id:
+                raise GraphRefused('lab_recovery_successor_inputs_changed')
             corpus.require_executor()
             from leaf_platform import project_lifecycle
             try:
-                corpus.read_sources(context)
+                sources = corpus.read_sources(context)
             except (ValueError, project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
                 raise GraphRefused('lab_corpus_material_refused') from None
             authority = {'schema': 'leaf.lab-corpus-authority.v1', 'tenant_id': str(tenant),
@@ -240,7 +261,12 @@ def _admit_run_graph(tenant, artifact, doc_id, graph_revision):
             if corpus_authority is not None and corpus_authority != authority:
                 raise GraphRefused('lab_corpus_project_conflict')
             corpus_authority = authority
+            if recovery_confirmation is not None:
+                retry_evidence[block['id']] = recovery.verify_retry_inputs(
+                    recovery_confirmation, authority, block, sources['suite'])
             continue
+        if recovery_confirmation is not None:
+            raise GraphRefused('lab_recovery_successor_inputs_changed')
         if (manifest["residency"] == "host"
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
                 or (trusted is not None and trusted.residency == "host")):
@@ -251,7 +277,7 @@ def _admit_run_graph(tenant, artifact, doc_id, graph_revision):
             continue
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused")
-    return corpus_authority
+    return corpus_authority, retry_evidence
 
 
 def _create(tenant, body):
@@ -261,7 +287,7 @@ def _create(tenant, body):
             or type(body["graph_revision"]) is not int or body["graph_revision"] < 1):
         raise InvalidGraph("invalid_lab_run_fields")
     artifact = ledger.get(str(tenant), body["doc_id"], body["graph_revision"])
-    corpus_authority = _admit_run_graph(tenant, artifact, body["doc_id"], body["graph_revision"])
+    corpus_authority, _ = _admit_run_graph(tenant, artifact, body["doc_id"], body["graph_revision"])
     project = (_project_scope(tenant, artifact['graph'], body.get('project_id'))
                if body.get('submission_id') is not None or 'project_id' in body else '')
     _remember_submission(tenant, body, project)

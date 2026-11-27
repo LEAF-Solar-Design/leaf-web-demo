@@ -1,7 +1,10 @@
 """C4 preparation through the real route, with inert authoritative job reads."""
 import copy
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import os
 from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +20,8 @@ import lab_run_store as store
 import lab_tool_manifests
 from lab_canonical import graph_digest
 from routers import lab_router, lab_runs
+from test_lab_runs import corpus_join, installed, kernel_filter, private_pg, producer_lane  # noqa: F401
+from test_project_drawing_editor import canonical_ci_pg
 
 TENANT = '11111111-1111-4111-8111-111111111111'
 PROJECT = '22222222-2222-4222-8222-222222222222'
@@ -911,3 +916,72 @@ def test_persist_successor_graph_refuses_nonidentical_revision(successor_ledger,
     with pytest.raises(recovery.GraphRefused, match='^lab_recovery_successor_document_conflict$'):
         recovery.persist_successor_graph(tenant, doc_id, confirmation, author)
     assert ledger.get(tenant, doc_id) == before
+
+
+@pytest.mark.skipif(not (canonical_ci_pg() or (
+    os.environ.get('LEAF_E364B_PG_PARENT') and os.environ.get('DATABASE_URL'))),
+    reason='requires selected PostgreSQL authority')
+@pytest.mark.parametrize('scenario', [
+    'exact', 'different_writer', 'reserved_revoked', 'caller_read_only', 'suite_drift', 'selection_drift',
+])
+def test_retry_admission_binds_materials_and_live_writers(corpus_join, scenario):
+    from leaf_platform import project_lifecycle, store as platform_store
+
+    lane = corpus_join
+    tenant, project, owner = (lane.context[key] for key in ('tenant_id', 'project_id', 'actor_id'))
+    source, _ = lab_runs._admit_run_graph(lane.tenant, lane.artifact, lane.doc_id, 1)
+    block = lane.graph['blocks'][0]
+    settings = block['settings']
+    policy = corpus.compile_policy(source, block['id'], settings)
+    confirmation = {'source': {'doc_id': lane.doc_id}, 'project_id': project,
+                    'draft_graph': lane.artifact['graph'], 'selected': [{
+                        'block_id': block['id'], 'source_policy': policy,
+                        'settings_sha256': graph_digest(settings),
+                        'corpus_sha256': settings['corpus']['sha256'],
+                    }]}
+    reserved = owner
+    caller = lane.tenant
+    if scenario in ('different_writer', 'reserved_revoked', 'caller_read_only'):
+        second = platform_store.create_identity_binding(tenant, 'auth0', str(uuid4()), role='editor')
+        second_actor = str(second.binding_id)
+        role = 'read_only' if scenario == 'caller_read_only' else 'editor'
+        project_lifecycle.invite_project_member(tenant, project, owner,
+            member_binding_id=second_actor, role=role, idempotency_key=str(uuid4()))
+        if scenario == 'caller_read_only':
+            caller = deps.TenantContext(tenant, org_id=tenant, tier='hosted_pro',
+                                        subject=second.external_subject, authority_resolved=True)
+        else:
+            reserved = second_actor
+    artifact = recovery.persist_successor_graph(tenant, 'reserved-retry', confirmation, reserved)
+    if scenario == 'reserved_revoked':
+        with lane.db.transaction() as conn:
+            conn.execute("UPDATE identity_bindings SET status='revoked',revoked_at=NOW() WHERE binding_id=%s",
+                         (reserved,))
+    if scenario == 'suite_drift':
+        other_policy = {key: value for key, value in policy.items() if key != 'digest'}
+        other_policy['parent_suite_sha256'] = '0' * 64
+        other_policy['digest'] = graph_digest(other_policy)
+        confirmation['selected'][0]['source_policy'] = corpus.validate_policy(other_policy)
+    if scenario == 'selection_drift':
+        confirmation['selected'][0]['block_id'] = 'different-evaluation'
+
+    def admit():
+        return lab_runs._admit_run_graph(caller, artifact, artifact['doc_id'], artifact['revision'],
+            recovery_confirmation=confirmation, reserved_actor=reserved)
+
+    if scenario in ('reserved_revoked', 'caller_read_only'):
+        with pytest.raises(recovery.GraphRefused, match='^lab_corpus_project_refused$'):
+            admit()
+    elif scenario in ('suite_drift', 'selection_drift'):
+        with pytest.raises(recovery.GraphRefused, match='^lab_recovery_successor_inputs_changed$'):
+            admit()
+    else:
+        authority, evidence = admit()
+        assert authority['actor_id'] == reserved
+        next_policy = corpus.compile_policy(authority, block['id'], settings)
+        raw = corpus.read_sources(lane.context)['suite']
+        assert next_policy['digest'] != policy['digest']
+        assert evidence == {block['id']: {'source_policy_digest': policy['digest'],
+            'successor_policy_digest': next_policy['digest'],
+            'evaluated_suite_sha256': hashlib.sha256(corpus.compiled_suite(raw, policy)).hexdigest()}}
+    assert not lane.jobs.list_jobs(tenant, 200)
