@@ -146,18 +146,23 @@ def _run(tenant, operation, *, write=False):
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SQLITE_SCHEMA)
-        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         # Upgrade existing local databases to match the run migrations.
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(lab_runs)")}
-        for name, definition in (
+        upgrade_columns = (
             ("claimed_build_revision", "TEXT"),
             ("claimed_color", "TEXT CHECK (claimed_color IN ('active','idle'))"),
             ("cancel_requested_at", "TEXT"), ("cancel_requested_by", "TEXT"),
             ("corpus_authority_json", "TEXT"),
             ("attempt_wall_cap_seconds", "INTEGER CHECK (attempt_wall_cap_seconds > 0)"),
-        ):
-            if name not in columns:
-                conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
+        )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(lab_runs)")}
+        needs_upgrade = any(name not in columns for name, _ in upgrade_columns)
+        conn.execute("BEGIN IMMEDIATE" if write or needs_upgrade else "BEGIN")
+        if needs_upgrade:
+            # Another connection may have upgraded the schema while we waited.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(lab_runs)")}
+            for name, definition in upgrade_columns:
+                if name not in columns:
+                    conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
         result = operation(_SQL(conn, False))
         conn.commit()
         return result

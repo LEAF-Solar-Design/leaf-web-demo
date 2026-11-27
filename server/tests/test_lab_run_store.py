@@ -1,9 +1,11 @@
 """The same lease, tenant, event and retention proofs on both authorities."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import timedelta
 import hashlib
 import json
 import os
+import sqlite3
 import threading
 import uuid
 
@@ -646,6 +648,27 @@ def test_pause_on_and_off(authority):
 
 def test_pause_defaults_to_false_on_empty_local_store(local):
     assert store.paused() is False
+
+
+def test_first_read_upgrades_older_sqlite_run_store_for_concurrent_readers(local):
+    tenant = "older-local-runs"
+    create(tenant)
+    lease = claim(tenant, "run", "worker", 60)
+    assert store.finish(tenant, "run", "worker", lease["fence"], "failed")
+    with closing(sqlite3.connect(os.environ["LEAF_LAB_DB"])) as db:
+        db.execute("ALTER TABLE lab_runs DROP COLUMN attempt_wall_cap_seconds")
+        db.commit()
+
+    ready = threading.Barrier(8, timeout=10)
+
+    def read(_):
+        ready.wait()
+        return store.get(tenant, "run")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        rows = list(pool.map(read, range(8)))
+
+    assert all(row["state"] == "failed" and row["attempt_wall_cap_seconds"] is None for row in rows)
 
 
 def test_latest_build_and_oldest_queue_are_read_only(local, monkeypatch):
