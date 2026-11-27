@@ -22,6 +22,7 @@ from lab_worker import OPS_REVISION
 from routers.lab_artifacts import _actor, _admit, _body
 
 router = APIRouter(prefix="/api/lab/runs", tags=["lab_runs"])
+RECENT_RUN_LIMIT = 20
 
 
 def _corpus_actor(tenant):
@@ -185,16 +186,18 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
         def select(sql):
             _receipt_table(sql)
             return [dict(row) for row in sql.execute(
-                'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id '
+                'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id,'
+                'r.created_at,r.finished_at '
                 'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
                 'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
                 "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"
-                'r.created_at DESC,r.run_id DESC LIMIT 20',
-                (str(tenant), _actor(tenant), project_id, doc_id)).fetchall()]
+                'r.created_at DESC,r.run_id DESC LIMIT ?',
+                (str(tenant), _actor(tenant), project_id, doc_id, RECENT_RUN_LIMIT + 1)).fetchall()]
         rows = store._run(str(tenant), select, write=True)
-        for row in rows:
+        runs = rows[:RECENT_RUN_LIMIT]
+        for row in runs:
             _authorize_corpus_run(tenant, store.get(str(tenant), row['run_id']))
-        return {'runs': rows}
+        return {'runs': runs, 'has_more': len(rows) > RECENT_RUN_LIMIT}
     return _call(operation)
 
 
