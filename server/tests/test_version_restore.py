@@ -23,6 +23,7 @@ Run:  cd server && python -m pytest tests/test_version_restore.py -q
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -38,6 +39,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import write_loop  # noqa: E402
+from test_w1_design_graph import graph  # noqa: E402, F401, fixture
 
 TENANT = "s5-version-restore"
 DRAWING = "chain-demo"
@@ -155,6 +157,124 @@ def test_delta_correct_on_a_three_version_chain(client, tmp_path):
     assert rows[3]["delta"] == {"added": 1, "modified": 0, "deleted": 0}
 
 
+@pytest.mark.parametrize(("kind", "old", "new"), [
+    ("polylines", "Caf\u00e9", "Cafe\u0301"),
+    ("inserts", "A\u030a-Roof", "\u00c5-Roof"),
+    ("faces3d", "PV-\u6771", "\uff30\uff36-\u6771"),
+])
+def test_history_lists_exact_layer_reference_moves(client, tmp_path, kind, old, new):
+    import store  # noqa: PLC0415
+
+    before = _intake([])
+    before["layers"] = [old, new, "Control"]
+    before[kind] = [
+        {"handle": "20", "layer": old},
+        {"handle": "21", "layer": "Control", "xdata": "before"},
+        {"handle": "22", "layer": old},
+        {"layer": old},
+    ]
+    after = {**before, kind: [
+        {"handle": "20", "layer": new},
+        {"handle": "21", "layer": "Control", "xdata": "after"},
+        {"handle": "23", "layer": new},
+        {"layer": new},
+    ]}
+    source = tmp_path / "layer-rename.json"
+    source.write_bytes(json.dumps(before, ensure_ascii=False).encode("utf-8"))
+    backend = _backend(tmp_path)
+    store.ingest_drawing(backend, TENANT, str(source), drawing_id=DRAWING)
+    for parent, intake in ((1, after), (2, after)):
+        assert write_loop._put_bytes_version(
+            backend, TENANT, DRAWING,
+            json.dumps(intake, ensure_ascii=False).encode("utf-8"),
+            parent_version=parent, meta={"tool": "test-layer-rename"},
+        ) == parent + 1
+
+    url = f"/api/drawings/{DRAWING}/versions"
+    response = client.get(url, params={"include_layer_changes": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    rows = {row["v"]: row for row in response.json()["versions"]}
+    assert rows[1]["layer_changes"] is None
+    assert rows[2]["layer_changes"] == [
+        {"kind": kind, "handle": "20", "from_layer": old, "to_layer": new},
+    ]
+    assert rows[2]["delta"] == {"added": 2, "modified": 2, "deleted": 2}
+    assert rows[3]["layer_changes"] == []
+
+    counts = client.get(url, params={"include_deltas": 1}, headers=_h(TENANT))
+    assert counts.status_code == 200, counts.text
+    assert all("layer_changes" not in row for row in counts.json()["versions"])
+
+
+@pytest.mark.parametrize(("prior_layout", "next_layout"), [
+    (None, "Roof Sheet"),
+    ("Roof Sheet", None),
+    ("Roof Sheet", "ROOF SHEET"),
+    ("Roof Sheet", "Roof Sheet"),
+], ids=["model-to-paper", "paper-to-model", "sheet-to-sheet", "unchanged"])
+@pytest.mark.parametrize(("source_kind", "kind", "geometry"), [
+    ("LWPOLYLINE", "polylines", [
+        (90, 3), (70, 1), (10, 0), (20, 0), (10, 4), (20, 0), (10, 4), (20, 4),
+    ]),
+    ("LINE", "polylines", [(10, 0), (20, 0), (11, 4), (21, 0)]),
+    ("CIRCLE", "circles", [(10, 0), (20, 0), (40, 2)]),
+    ("ARC", "arcs", [(10, 0), (20, 0), (40, 2), (50, 0), (51, 90)]),
+    ("TEXT", "texts", [(10, 0), (20, 0), (40, 1), (1, "Label")]),
+])
+def test_history_reports_layout_moves_and_model_space_exclusions(
+    client, tmp_path, prior_layout, next_layout, source_kind, kind, geometry,
+):
+    import store
+    from dxf_intake import parse_dxf_bytes
+
+    def intake(layout):
+        tags = [(0, "SECTION"), (2, "ENTITIES"), (0, source_kind), (5, "20"), (8, "Roof")]
+        if layout is not None:
+            tags.extend([(67, 1), (410, layout)])
+        tags.extend(geometry)
+        for handle in ("21", "22"):
+            tags.extend([
+                (0, "LINE"), (5, handle), (8, "Roof"), (67, 1), (410, "Title Sheet"),
+                (10, 0), (20, 0), (11, 4), (21, 0),
+            ])
+        tags.extend([(0, "ENDSEC"), (0, "EOF")])
+        raw = "".join(f"{code}\n{value}\n" for code, value in tags).encode()
+        return parse_dxf_bytes(raw)
+
+    backend = _backend(tmp_path)
+    source = tmp_path / "original.json"
+    source.write_text(json.dumps(intake(prior_layout)), encoding="utf-8")
+    store.ingest_drawing(backend, TENANT, str(source), drawing_id=DRAWING)
+    assert write_loop._put_bytes_version(
+        backend, TENANT, DRAWING, json.dumps(intake(next_layout)).encode(),
+        parent_version=1, meta={"tool": "layout edit"},
+    ) == 2
+
+    url = f"/api/drawings/{DRAWING}/versions"
+    response = client.get(url, params={"include_layout_changes": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    rows = {row["v"]: row for row in response.json()["versions"]}
+    assert rows[1]["layout_changes"] is None
+    for version, layout in ((1, prior_layout), (2, next_layout)):
+        expected = sorted(["Title Sheet"] + ([layout] if layout is not None else []))
+        assert rows[version]["paper_layouts"] == expected
+    changed = prior_layout != next_layout
+    assert rows[2]["delta"] == {
+        "added": 0, "modified": int(changed and kind == "polylines"), "deleted": 0,
+    }
+    assert rows[2]["layout_changes"] == ([{
+        "kind": kind, "handle": "20",
+        "from_space": "model" if prior_layout is None else "paper",
+        "from_layout": prior_layout,
+        "to_space": "model" if next_layout is None else "paper",
+        "to_layout": next_layout,
+    }] if changed else [])
+
+    counts = client.get(url, params={"include_deltas": 1}, headers=_h(TENANT)).json()
+    assert all("layout_changes" not in row and "paper_layouts" not in row
+               for row in counts["versions"])
+
+
 def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     """A version blob that fails to parse as JSON must not 500 the whole chain
     -- its own delta (and its child's, since the child's parent-side read also
@@ -172,6 +292,122 @@ def test_delta_is_null_when_a_stored_payload_is_unparseable(client, tmp_path):
     assert rows[2]["delta"] is None       # its own payload is corrupt
     assert rows[3]["delta"] is None       # its PARENT (v2) is corrupt
     assert body["error"] is None          # the corruption did not fault the whole read
+
+    history = client.get(f"/api/drawings/{DRAWING}/versions",
+                         params={"include_layout_changes": 1}, headers=_h(TENANT))
+    assert history.status_code == 200, history.text
+    rows = {row["v"]: row for row in history.json()["versions"]}
+    assert all(row["layout_changes"] is None for row in rows.values())
+    assert [rows[v]["paper_layouts"] for v in (1, 2, 3)] == [[], None, []]
+
+
+@pytest.mark.parametrize("replaced_version", [1, 2, 3], ids=["root", "middle", "head"])
+def test_history_reports_a_replaced_source_and_omits_its_deltas(
+    client, tmp_path, replaced_version,
+):
+    import store
+
+    backend = _seed_chain(tmp_path)
+    key = store.drawing_version_key(TENANT, DRAWING, replaced_version)
+    original = backend.get(key)
+    replacement = original.replace(b'"handle":"A"', b'"handle":"Z"', 1)
+    assert replacement != original and len(replacement) == len(original)
+    backend.put(key, replacement)
+
+    response = client.get(f"/api/drawings/{DRAWING}/versions",
+                          params={"include_deltas": 1}, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    history = response.json()
+    assert history["head"] == 3 and history["latest"] == 3
+    rows = {row["v"]: row for row in history["versions"]}
+    marked = [row["v"] for row in rows.values() if "observed_sha256" in row]
+    assert marked == [replaced_version]
+    assert rows[replaced_version]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert rows[replaced_version]["observed_sha256"] == hashlib.sha256(replacement).hexdigest()
+    expected_deltas = {
+        1: None,
+        2: {"added": 1, "modified": 1, "deleted": 1},
+        3: {"added": 1, "modified": 0, "deleted": 0},
+    }
+    for version, row in rows.items():
+        touches_replacement = replaced_version in (version, row["parent"])
+        assert row["delta"] == (None if touches_replacement else expected_deltas[version])
+
+    detailed = client.get(f"/api/drawings/{DRAWING}/versions",
+                          params={"include_layer_changes": 1}, headers=_h(TENANT))
+    assert detailed.status_code == 200, detailed.text
+    for row in detailed.json()["versions"]:
+        counts_row = rows[row["v"]]
+        assert row.get("observed_sha256") == counts_row.get("observed_sha256")
+        if counts_row["delta"] is None:
+            assert row["layer_changes"] is None
+
+
+@pytest.mark.parametrize("representation", ["json", "cached-dwg", "solar-bundle"])
+def test_history_checks_the_published_source_for_each_representation(
+    client, tmp_path, monkeypatch, graph, representation,
+):
+    import store
+
+    monkeypatch.setenv("LEAF_DRAWING_STORE", "legacy")
+    monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "1")
+    monkeypatch.delenv("LEAF_DRAWING_MUTATIONS_FENCE_FILE", raising=False)
+    backend = _backend(tmp_path)
+    original = tmp_path / "original.json"
+    original.write_text(json.dumps(_intake([_poly("A")])), encoding="utf-8")
+    store.ingest_drawing(backend, TENANT, str(original), drawing_id=DRAWING)
+    intake = _intake([_poly("A", "Roof")])
+    source = (json.dumps(intake).encode("utf-8") if representation == "json"
+              else b"AC1032 saved drawing payload")
+    digest = hashlib.sha256(source).hexdigest()
+
+    if representation == "solar-bundle":
+        _, _, parent = store.resolve_version_entry(backend, TENANT, DRAWING)
+        graph.update(rev=0, parent_rev=None, source_hash=digest)
+        request = {
+            "graph": graph, "intake": intake,
+            "mapping": {"application_to_handle": {graph["panels"][0]["id"]: "A"}},
+            "project_id": graph["project"]["id"], "apply_id": "history-digest-test",
+            "source_version": 1, "source_sha256": parent["sha256"], "source_rev": None,
+        }
+        fence = store.acquire_checkout_fence(backend, TENANT, DRAWING, "writer", 300)
+        version = write_loop.apply_graph_version(
+            backend, TENANT, DRAWING, source, request, holder="writer", fence=fence,
+        )
+    else:
+        version = write_loop._put_bytes_version(
+            backend, TENANT, DRAWING, source, parent_version=1, meta={"tool": "test"},
+        )
+        if representation == "cached-dwg":
+            write_loop.publish_intake_cache(backend, TENANT, DRAWING, version, source, intake)
+
+    assert version == 2
+    _, key, entry = store.resolve_version_entry(backend, TENANT, DRAWING, version)
+    assert backend.get(key) == source
+    assert entry["sha256"] == digest
+    endpoint = f"/api/drawings/{DRAWING}/versions"
+    query = {"include_layout_changes": 1}
+    response = client.get(endpoint, params=query, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    saved = next(row for row in response.json()["versions"] if row["v"] == version)
+    assert saved["delta"] == {"added": 0, "modified": 1, "deleted": 0}
+    assert saved["paper_layouts"] == []
+    assert saved["layout_changes"] == []
+    assert "observed_sha256" not in saved
+
+    previous, updated = ((b'"Roof"', b'"Deck"') if representation == "json"
+                         else (b"saved", b"other"))
+    replacement = source.replace(previous, updated, 1)
+    assert replacement != source and len(replacement) == len(source)
+    backend.put(key, replacement)
+    response = client.get(endpoint, params=query, headers=_h(TENANT))
+    assert response.status_code == 200, response.text
+    saved = next(row for row in response.json()["versions"] if row["v"] == version)
+    assert saved["sha256"] == digest
+    assert saved["observed_sha256"] == hashlib.sha256(replacement).hexdigest()
+    assert saved["delta"] is None
+    assert saved["paper_layouts"] is None
+    assert saved["layout_changes"] is None
 
 
 def test_default_versions_shape_has_no_delta_key(client, tmp_path):
