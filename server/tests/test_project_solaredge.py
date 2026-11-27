@@ -38,6 +38,7 @@ def lane(monkeypatch):
     legacy records must remain readable without silently accepting new ambiguous
     review rows.
     """
+    real_project_access = project._access
     s = tools.memory.__wrapped__(monkeypatch)
     s.set_parent(tools.embedded(samples.small_graph()))
     s.ctx = graphs.resolve_project_graph_context(s.context())
@@ -51,6 +52,7 @@ def lane(monkeypatch):
         if str(tenant) != str(s.org) or proj != s.project:
             project.refuse("CONTEXT_NOT_FOUND")
         return s.org, s.actor
+    s.real_project_access = real_project_access
     monkeypatch.setattr(project, "_access", access)
     lock = Lock()
     def put(key, data):
@@ -617,6 +619,116 @@ def test_http_explicit_association_review_reset_and_invalid_choice(http, monkeyp
     assert invalid.json()["error"]["reason_code"] == "REPORT_ASSOCIATIONS_INVALID"
     assert invalid.headers["cache-control"] == "no-store"
     assert (s.head, len(s.versions), s.ctx.graph) == before
+
+
+@pytest.fixture
+def report_membership(http, monkeypatch):
+    s = http.s
+    monkeypatch.setattr(se.reports.si, "run_import", s.current_run_import)
+    monkeypatch.setattr(project, "_access", s.real_project_access)
+    link = project.platform_link
+    link._ensure_platform_package()
+    from leaf_platform import project_lifecycle as lifecycle
+
+    membership = SimpleNamespace(role="editor")
+    binding = SimpleNamespace(platform_tenant_id=s.org, binding_id=s.actor)
+
+    def get_membership(_cursor, org_id, project_id, actor_id):
+        assert (org_id, project_id, actor_id) == (s.org, s.project, s.actor)
+        return membership.role
+
+    class Connection:
+        def cursor(self):
+            return self
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def execute(self, statement):
+            assert statement.startswith("SET LOCAL statement_timeout")
+
+    monkeypatch.setattr(link, "resolve_caller_binding", lambda tenant: binding)
+    monkeypatch.setattr(link.platform_store(), "get_org", lambda org: SimpleNamespace(status="active"))
+    monkeypatch.setattr(link, "resolve_project_authority", lambda org, proj: None)
+    monkeypatch.setattr(lifecycle, "run_transaction", lambda operation, **kw: operation(Connection()))
+    monkeypatch.setattr(lifecycle, "_project_row", lambda *args, **kw: {"status": "active"})
+    monkeypatch.setattr(lifecycle, "_actor_tenant_role", lambda *args, **kw: "editor")
+    monkeypatch.setattr(lifecycle, "_project_membership_role", get_membership)
+    return membership
+
+
+@pytest.mark.parametrize("row_index,grid", [(0, 0), (0, 1), (1, 0)])
+def test_http_reviewer_can_download_saved_reports_but_cannot_rebuild(
+    http, report_membership, monkeypatch, row_index, grid,
+):
+    s = http.s
+    drawing = (s.head, len(s.versions), deepcopy(s.ctx.graph))
+    source = http.client.post(http.prefix, content=samples.PDF, headers={"Content-Type": "application/pdf"})
+    assert source.status_code == 200, source.text
+    request = {"source_artifact_id": source.json()["source"]["artifact_id"],
+               "alignment_tolerance": 1, "selection_order": "unknown"}
+    url = http.prefix + "/report"
+
+    def build(associations):
+        response = http.client.post(url, json={**request, "associations": associations})
+        assert response.status_code == 200, response.text
+        return response.json()["report"]
+
+    def download(ref):
+        response = http.client.get(ref["download"])
+        assert response.status_code == 200, response.text
+        assert sha256(response.content).hexdigest() == ref["content_sha256"]
+        return response
+
+    original = build({})
+    original_download = download(original)
+    frame = original_download.json()["matches"][row_index]["frame_ref"]
+    reviewed = build({frame: grid})
+    reviewed_download = download(reviewed)
+    assert reviewed["artifact_id"] != original["artifact_id"]
+    assert reviewed_download.json()["matches"][row_index]["pdf_grid"] == grid
+    custody = (deepcopy(s.blobs), list(s.writes))
+    replacement = {frame: 1 - grid}
+
+    def assert_forbidden(associations):
+        response = http.client.post(url, json={**request, "associations": associations})
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["reason_code"] == "SIP_R1_PROJECT_FORBIDDEN"
+        assert response.headers["cache-control"] == "no-store"
+        assert (s.blobs, s.writes) == custody
+
+    report_membership.role = "reviewer"
+    assert download(original).content == original_download.content
+    assert download(reviewed).content == reviewed_download.content
+    assert_forbidden(replacement)
+    assert_forbidden({frame: grid})
+
+    report_membership.role = "editor"
+    prepare = se.artifacts.ProjectArtifactSink.prepare
+
+    def prepare_then_downgrade(sink, value):
+        prepared = prepare(sink, value)
+        report_membership.role = "reviewer"
+        return prepared
+
+    with monkeypatch.context() as revoke:
+        revoke.setattr(se.artifacts.ProjectArtifactSink, "prepare", prepare_then_downgrade)
+        assert_forbidden(replacement)
+        assert report_membership.role == "reviewer"
+
+    report_membership.role = "editor"
+    other = build(replacement)
+    assert other["artifact_id"] not in {original["artifact_id"], reviewed["artifact_id"]}
+    assert download(other).json()["matches"][row_index]["pdf_grid"] == 1 - grid
+    updated_custody = (deepcopy(s.blobs), list(s.writes))
+    assert build(replacement) == other
+    assert (s.blobs, s.writes) == updated_custody
+    assert download(original).content == original_download.content
+    assert download(reviewed).content == reviewed_download.content
+    assert (s.head, len(s.versions), s.ctx.graph) == drawing
 
 
 def test_http_current_review_report_download_is_readable_without_acceptance(http, monkeypatch):
