@@ -28,7 +28,7 @@ function savedRevisions(workspace, binding) {
 function CableChanges({ page, compare, loading }) {
   if (page.total_changes === 0) return <p role="status">No cable lengths changed.</p>
   return <>
-    <p role="status">{page.offset + 1}–{page.offset + page.changes.length} of {page.total_changes} cable length changes</p>
+    <p role="status">Showing {page.offset + 1} to {page.offset + page.changes.length} of {page.total_changes} cable length changes</p>
     <div role="region" aria-label="Cable length changes" tabIndex={0} style={{ overflowX: 'auto' }}>
       <table aria-label="Saved cable length comparison">
         <thead><tr>{['Cable', 'Type', 'Before (ft)', 'After (ft)', 'Change'].map(label =>
@@ -38,7 +38,10 @@ function CableChanges({ page, compare, loading }) {
           const oldLabel = before && after && before.schedule_label !== after.schedule_label ? before.schedule_label : null
           return <tr key={id}>
             <th scope="row">{oldLabel ? `${oldLabel} → ${cable.schedule_label}` : cable.schedule_label}</th>
-            <td>{cable.route_kind}</td><td>{before?.length_ft ?? '—'}</td><td>{after?.length_ft ?? '—'}</td><td>{change}</td>
+            <td>{cable.route_kind}</td>
+            <td>{before?.length_ft ?? 'Not present'}</td>
+            <td>{after?.length_ft ?? 'Not present'}</td>
+            <td>{change}</td>
           </tr>
         })}</tbody>
       </table>
