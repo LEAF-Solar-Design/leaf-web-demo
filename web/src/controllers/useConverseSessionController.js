@@ -125,15 +125,18 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
       }
       return startMockStageAuthority(text, classifierHint, { allowSecretOnce })
     }
+    const generation = generationRef.current
     const requestedProjectId = projectRef.current
-    const requestedDrawingId = drawingRef.current
     const requestedProjectContext = projectContextRef.current
       ? { ...projectContextRef.current } : null
     const requestId = requestedProjectId ? createRequestId() : null
-    const send = async (id) => {
-      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
-        throw new Error('Project changed while starting the conversation')
+    const assertCurrent = (id, turnGeneration) => {
+      if (generationRef.current !== turnGeneration || sessionRef.current !== id) {
+        throw new Error('Conversation changed while starting the request')
       }
+    }
+    const send = async (id, turnGeneration) => {
+      assertCurrent(id, turnGeneration)
       const payload = { text, classifier_hint: classifierHint, allowSecretOnce }
       if (requestedProjectContext) payload.projectContext = requestedProjectContext
       if (requestedProjectId) {
@@ -141,9 +144,7 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
         payload.request_id = requestId
       }
       const response = await postMessage(id, payload)
-      if (projectRef.current !== requestedProjectId || drawingRef.current !== requestedDrawingId) {
-        throw new Error('Project changed while starting the conversation')
-      }
+      assertCurrent(id, turnGeneration)
       if (requireImmediateTurn && (!response.turn_id || response.status === 'queued')) {
         throw new Error('The conversation has not started this request. Wait for the current turn to finish, then try again.')
       }
@@ -168,13 +169,15 @@ export default function useConverseSessionController({ drawingId, retryNotFound 
     // never has to race the sessionId state update through a re-render.
     const current = sessionRef.current || (await attach())
     try {
-      return await send(current)
+      return await send(current, generation)
     } catch (error) {
       if (!retryNotFound || classifyAgentError(error) !== 'not_found') throw error
+      assertCurrent(current, generation)
+      const retryGeneration = ++generationRef.current
       resetCached()
       sessionRef.current = null
       setSessionId(null)
-      return await send(await attach())
+      return await send(await attach(), retryGeneration)
     }
   }, [attach, resetCached, retryNotFound])
 
