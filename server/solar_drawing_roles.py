@@ -40,7 +40,8 @@ def _rectangle(block):
 def discover_roles(intake):
     """Count INSERT sets and their insertion-coordinate extents; mutate nothing.
 
-    Naming evidence outranks repeated rectangular geometry. Geometry-only sets
+    Obstruction labels take precedence. Among the remaining groups, a module
+    label identifies panels even on roof layers. Geometry-only sets
     remain visible as competing options. Bounds locate inserts in drawing units;
     they do not claim to be transformed block geometry or a selected design copy.
     """
@@ -69,11 +70,11 @@ def discover_roles(intake):
         row = {'block': name, 'layer': layer, 'count': len(points),
                'insertion_bounds': [min(p[0] for p in points), min(p[1] for p in points),
                                     max(p[0] for p in points), max(p[1] for p in points)]}
-        if module_layer or module_name or (rectangle and len(points) >= 4 and not (roof or obstruction)):
-            roles['module'].append({**row, 'score': score,
-                                    'basis': 'names' if module_layer or module_name else 'repeated rectangular block'})
         if obstruction:
             roles['obstruction'].append(row)
+        elif module_layer or module_name or (rectangle and len(points) >= 4 and not roof):
+            roles['module'].append({**row, 'score': score,
+                                    'basis': 'names' if module_layer or module_name else 'repeated rectangular block'})
         elif roof:
             roles['roof'].append(row)
     for role, rows in roles.items():
