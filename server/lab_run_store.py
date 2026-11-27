@@ -261,22 +261,30 @@ def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
                 return dict(existing)
             if reconcile_only:
                 raise SubmissionConflict("lab_submission_missing")
-        queued = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=? AND state='queued'",
-                             (tenant,)).fetchone()["count"]
-        if queued >= MAX_QUEUED_PER_TENANT:
-            raise TooLarge("lab_run_queue_full")
-        now = _now().isoformat()
-        sql.execute("INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256,"
-                    "registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state,created_at,updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (tenant, doc_id, run_id, graph_revision, graph_sha256, digest, ops_revision,
-                     input_digest, adapter_revision, build_revision, "queued", now, now))
-        if corpus_authority is not None:
-            sql.execute('UPDATE lab_runs SET corpus_authority_json=? WHERE tenant_id=? AND run_id=?',
-                        (json.dumps(corpus_authority, sort_keys=True), tenant, run_id))
-        return dict(_row(sql, tenant, run_id))
+        return _enqueue(sql, tenant, doc_id, run_id, graph_revision, graph_sha256,
+                        digest, ops_revision, input_digest, adapter_revision, build_revision,
+                        corpus_authority=corpus_authority)
 
     return _run(tenant, operation, write=True)
+
+
+def _enqueue(sql, tenant, doc_id, run_id, graph_revision, graph_sha256, digest,
+             ops_revision, input_digest, adapter_revision, build_revision, *, corpus_authority):
+    """Insert a validated run inside the caller's tenant write transaction."""
+    queued = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=? AND state='queued'",
+                         (tenant,)).fetchone()["count"]
+    if queued >= MAX_QUEUED_PER_TENANT:
+        raise TooLarge("lab_run_queue_full")
+    now = _now().isoformat()
+    sql.execute("INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256,"
+                "registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state,created_at,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (tenant, doc_id, run_id, graph_revision, graph_sha256, digest, ops_revision,
+                 input_digest, adapter_revision, build_revision, "queued", now, now))
+    if corpus_authority is not None:
+        sql.execute('UPDATE lab_runs SET corpus_authority_json=? WHERE tenant_id=? AND run_id=?',
+                    (json.dumps(corpus_authority, sort_keys=True), tenant, run_id))
+    return dict(_row(sql, tenant, run_id))
 
 
 def validate_corpus_authority(value):
