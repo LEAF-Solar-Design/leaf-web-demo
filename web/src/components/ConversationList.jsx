@@ -9,7 +9,7 @@
 //   * rows read `scope · title · when`, exactly SessionPanel's compact row
 //     shape (`profile · environment · status`) with this lane's three fields;
 //   * the active row carries `aria-pressed`, exactly SessionPanel's affordance;
-//   * resume is `ensureSession(drawingId, projectId)` (the SAME idempotent attach cache the
+//   * resume uses `ensureSession` (the SAME idempotent attach cache the
 //     composer uses, so resuming never opens a second session for a
 //     conversation already attached) followed by the caller's `onResume`,
 //     which hands the scene a `{sessionId, scope, afterSeq}` it feeds to the
@@ -173,12 +173,17 @@ export default function ConversationList({
       try {
         const scope = normalizeScope(row.scope);
         const drawingId = row.drawing_id ?? (scope?.kind === "drawing" ? scope.handle : null);
-        if (!drawingId) {
+        const hasLegacyScopeIdentity =
+          scope?.kind === "project" || (scope?.kind === "entity" && scope.drawingId);
+        if (!drawingId && !hasLegacyScopeIdentity) {
           setError("Resume failed.");
           return;
         }
-        // Attach by stored identity so reopening preserves the session's focus.
-        const attached = await ensureSession(drawingId, row.project_id ?? null);
+        // Prefer the stored identity. Older scoped rows use the session client's
+        // project default or the drawing carried in the client-side scope.
+        const attached = drawingId
+          ? await ensureSession(drawingId, row.project_id ?? null)
+          : await ensureSession(scope);
         if (generation !== generationRef.current) return;
         // The listed cursor belongs to the listed session.
         if (attached?.session_id !== row.id) {
