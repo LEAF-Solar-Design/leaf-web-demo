@@ -1132,6 +1132,17 @@ def build_suites() -> List[Suite]:
         # 31 tests + 4 more parametrizations = 35.
         Suite("server-solar-design-profiles", "server tests/test_solar_design_profiles.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_design_profiles.py"), 35),
+        Suite("tools-x12-offline", "X12 CAD standards evidence comparisons",
+              "pytest", REPO, [
+                  # Load stdlib before pytest adds the repo root (which has platform/).
+                  sys.executable, "-P", "-m", "pytest", "-o", "pythonpath=.",
+                  "tools/xbench/tests/test_x12_layers.py",
+                  "tools/xbench/tests/test_x12_text_styles.py",
+                  "tools/xbench/tests/test_x12_title_blocks.py",
+                  "tools/xbench/tests/test_x12_plot_styles.py",
+                  "tools/xbench/tests/test_x12_entity_counts.py",
+                  "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider",
+              ], 34),
         Suite("server-x07-offline", "server X07 isolated role and customer profile checks",
               "pytest", SERVER, _py_pytest("tests/test_solar_drawing_roles.py") + [
                   "tests/test_x07_role_selection.py",
