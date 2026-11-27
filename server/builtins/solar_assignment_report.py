@@ -4,12 +4,17 @@ Candidate assignments are tentative, including when the atomic edit would refuse
 The read adapter supplies immutable source and output digests and limits output
 bytes. No string identifiers are added to the payload-free exception envelope.
 """
+from fractions import Fraction
+
 import solar_local_graph
 from solar_equipment_rebalance import minimum_direct_moves
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision
+from solar_string_voltage import string_voltage_report
 
 
-SAVED_REQUEST_KEYS = frozenset({"mode", "expected_rev", "accept_excess_capacity", "suggest_minimum_moves"})
+SAVED_REQUEST_KEYS = frozenset({
+    "mode", "expected_rev", "accept_excess_capacity", "suggest_minimum_moves", "inverter_refs",
+})
 
 
 def _saved_state(graph, targets):
@@ -35,6 +40,42 @@ def _saved_state(graph, targets):
 
 def _fully_assigned(graph):
     return bool(graph["strings"]) and all(string["inverter_ref"] is not None for string in graph["strings"])
+
+
+def _inverter_comparison(graph, saved, refs):
+    if (type(refs) is not list or len(refs) < 2
+            or any(type(ref) is not str or not ref for ref in refs) or len(set(refs)) != len(refs)):
+        raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
+
+    selected = set(refs)
+    devices = {device["id"]: device for device in graph["inverters"]}
+    if not selected <= devices.keys():
+        raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
+    if any(devices[ref].get("equipment_type") == "combiner_box" or devices[ref].get("l1_assignments")
+           for ref in selected):
+        raise GraphValidationError("INVERTER_COMPARISON_REQUIRES_DIRECT_INPUTS")
+    capacities = [row for row in saved["collector_capacity"]
+                  if row["inverter_ref"] in selected and row["total_dc_inputs"] > 0]
+    if len(capacities) != len(selected):
+        raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
+
+    def utilization(row):
+        return Fraction(row["occupied_inputs"], row["total_dc_inputs"])
+
+    capacities.sort(key=lambda row: (utilization(row), row["inverter_ref"]))
+    lowest = utilization(capacities[0])
+    string_tags = {row["string_ref"]: row["circuit_tag"] for row in saved["assignments"]}
+    by_inverter = {ref: [] for ref in selected}
+    voltage = string_voltage_report(graph, None)
+    for row in sorted(voltage["rows"], key=lambda row: row["string_ref"]):
+        if row["inverter_ref"] in by_inverter and row["string_ref"] in string_tags:
+            by_inverter[row["inverter_ref"]].append({**row, "circuit_tag": string_tags[row["string_ref"]]})
+
+    return {
+        "design_min_temp_c": voltage["design_min_temp_c"],
+        "least_utilized_inverter_refs": [row["inverter_ref"] for row in capacities if utilization(row) == lowest],
+        "groups": [{"capacity": row, "strings": by_inverter[row["inverter_ref"]]} for row in capacities],
+    }
 
 
 def _candidate_rows(assignment, before, params):
@@ -76,6 +117,8 @@ def run(graph, params):
             "saved_state": _saved_state(before, targets),
             "electrical_suitability": {"status": "unknown", "reason": "mppt_voltage_current_limits_not_verified"},
         }
+        if "inverter_refs" in params:
+            result["inverter_comparison"] = _inverter_comparison(before, result["saved_state"], params["inverter_refs"])
         if params.get("suggest_minimum_moves", False):
             result["rebalance"] = minimum_direct_moves(before)
         return result

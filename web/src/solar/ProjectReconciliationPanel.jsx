@@ -85,7 +85,9 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
   const live = current()
   const saved = live && view?.scope === scope ? view : null
   const drafts = live && draft?.scope === scope ? draft.values : ['', '', '', '', '']
-  const rows = reconciliationRowsFromValues(saved?.values || unavailableValues, drafts)
+  const studioValues = saved?.values || unavailableValues
+  const rows = reconciliationRowsFromValues(studioValues, drafts)
+  const reportDigest = studioValues[1].reportDigest
   const pending = saved?.pending === true
   const totals = live && report?.scope === scope ? report : null
   const storagePending = !!totals?.pending
@@ -298,6 +300,7 @@ export default function ProjectReconciliationPanel({ solarBinding, authorityKey,
       {confirmed ? `Last confirmed engineering totals revision ${confirmed.revision}.` : 'No confirmed engineering totals revision.'}
       {exportHasDrafts && ' CSV includes unsaved values.'}
     </p>}
+    {canExport && reportDigest && <p>SolarEdge report digest <code>{reportDigest}</code></p>}
     <button type="button" disabled={!canExport} onClick={download}>Download CSV</button>
     {live && <EngineeringDiscrepancyHistory key={JSON.stringify([bindingKey, authorityKey])}
       binding={solarBinding} authorityKey={authorityKey} isCurrent={current} />}

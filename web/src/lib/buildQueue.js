@@ -393,8 +393,15 @@ export function parseBuildRecords(list) {
 export function fromBrokerJob(job, { sessionId = 'this-session' } = {}) {
   if (!isPlainObject(job)) return null
   const id = boundedString(job.job_id == null ? sessionId : String(job.job_id), BUILD_LIMITS.id)
-  const title = clip(typeof job.tool === 'string' ? job.tool : null)
+  let title = clip(typeof job.tool === 'string' ? job.tool : null)
   if (!id || !title) return null
+  if (job.tool === 'internal.native-preview') {
+    const source = job.native_preview?.source
+    if (isPlainObject(source) && source.schema === 'leaf.project-preview-source.v1'
+      && Number.isSafeInteger(source.revision) && source.revision > 0) {
+      title = `iOS preview · Saved revision ${source.revision}`
+    }
+  }
   const tag = brokerStateTag(job)
   let state
   if (job.status === 'running') state = 'running'

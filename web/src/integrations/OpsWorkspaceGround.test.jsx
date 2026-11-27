@@ -108,6 +108,55 @@ function setupAction() {
   })
   return { ...harness, authority }
 }
+
+it.each([
+  ['rename', { title: 'Annual order log' }, {}, /Title changed from/, /Returned rows match in the same order/],
+  ['dataset pin', { dataset_ref: { id: 'other-orders', version: 4, digest: 'b'.repeat(64) } }, {}, /Dataset pin changed from/, /Returned rows match in the same order/],
+  ['row changes', {}, { rows: [{ key: 'one', values: { total: 1250, day: '2026-10-20' } }] }, /Dataset pin unchanged/, /Returned rows or their order differ/],
+  ['page limit', {}, { next_cursor: 'next-page' }, /Query unchanged/, /only the rows returned by the first request/],
+  ['partial data', {}, { status: 'partial' }, /Query unchanged/, /Returned rows could not be compared/],
+  ['projection changed', { query: { fields: ['day'], limit: 100 }, props: { columns: ['day'], row_limit: 100 } },
+    { fields: [fields[0]], rows: [{ key: 'one', values: { day: '2026-10-20' } }] }, /Query changed/, /different fields or field types/],
+])('compares saved recipes and fresh results for %s', async (_name, change, result, recipeMessage, rowMessage) => {
+  const { props, fetchImpl } = setup()
+  const original = fetchImpl.getMockImplementation()
+  const latest = { element: { ...element, ...change }, revision: 3 }
+  const previous = { ...saved, revision: 1 }
+  let queries = 0
+  fetchImpl.mockImplementation(async (url, options) => {
+    if (url.endsWith('/elements/order-view?revision=1')) return response(previous)
+    if (url.endsWith('/elements/order-view')) return response(latest)
+    if (url.endsWith('/query')) {
+      queries += 1
+      return response(queries === 4 ? { ...read, dataset_ref: latest.element.dataset_ref, ...result } : read)
+    }
+    return original(url, options)
+  })
+  render(<OpsWorkspaceGround {...props} />)
+  const openView = await screen.findByRole('button', { name: /Order view.*revision 2/ })
+  fireEvent.click(openView)
+  await screen.findByRole('table')
+  fireEvent.change(screen.getByLabelText('Earlier recipe revision'), { target: { value: '1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Read revision' }))
+  const compare = await screen.findByRole('button', { name: 'Compare with current recipe' })
+  await waitFor(() => expect(compare).toBeEnabled())
+  fireEvent.click(compare)
+
+  const panel = within(await screen.findByRole('region', { name: 'Saved view comparison' }))
+  expect(panel.getByText(/Historical revision 1 and current revision 3.*live data now/)).toBeInTheDocument()
+  expect(panel.getByText(recipeMessage)).toBeInTheDocument()
+  expect(panel.getByRole('status')).toHaveTextContent(rowMessage)
+  const reads = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/query'))
+  expect(reads).toHaveLength(4)
+  expect(reads[2][0]).toContain('/datasets/orders/versions/3/query')
+  expect(reads[3][0]).toContain(`/datasets/${latest.element.dataset_ref.id}/versions/${latest.element.dataset_ref.version}/query`)
+  expect(JSON.parse(reads[2][1].body)).toMatchObject(previous.element.query)
+  expect(JSON.parse(reads[3][1].body)).toMatchObject(latest.element.query)
+  expect(fetchImpl.mock.calls.some(([url, options]) => url.includes('/elements') && options.method !== 'GET')).toBe(false)
+
+  fireEvent.click(openView)
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Saved view comparison' })).not.toBeInTheDocument())
+})
 async function openAction() {
   await loaded()
   fireEvent.click(screen.getByRole('button', { name: 'Send order · revision 4' }))

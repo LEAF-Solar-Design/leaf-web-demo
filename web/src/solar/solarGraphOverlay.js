@@ -35,9 +35,8 @@ const pointOf = value => {
 // Mounted by App in Viewer's matching scene. This is a bounded 2D preview of stored
 // design data, with projection-scoped validation; server/version rails remain
 // authoritative for all other fields, topology, freshness and revisions.
-// Viewer consumes only pts/color, so colours encode kinds. Squares for equipment
-// and single-panel strings are symbolic 0.5-metre markers. Trenches, labels, outlines,
-// selection, layer visibility and automatic framing are excluded.
+// Cable route metadata lets the inspector identify the lines drawn on the canvas.
+// Equipment and single-panel string squares are symbolic 0.5-metre markers.
 function project(graph, options) {
   if (graph === undefined || graph === null) return { polylines: [], refusal: null }
   if (!plain(graph)) return refused('invalid_graph')
@@ -168,13 +167,18 @@ function project(graph, options) {
   }
   for (let index = 0; index < lists.routes.length; index += 1) {
     const route = lists.routes.list[index]
-    if (entityId(route) === null) return refused('invalid_graph')
+    const id = entityId(route)
+    if (id === null) return refused('invalid_graph')
     const kind = route.route_kind
     if (!ROUTES.includes(kind)) return refused('invalid_graph')
     const result = path(route.points)
     if (result.error) return refused(result.error)
     if (kind !== 'trench' && result.pts.length) {
-      plans.push(planOf({ points: result.pts, color: kind === 'feeder' ? '#f472b6' : '#38bdf8' }))
+      plans.push(planOf({
+        points: result.pts,
+        color: kind === 'feeder' ? '#f472b6' : '#38bdf8',
+        route: { id, kind },
+      }))
     }
   }
 
@@ -197,7 +201,9 @@ function project(graph, options) {
       if (!finite(x) || !finite(y) || !finite(Math.fround(x)) || !finite(Math.fround(y))) return refused('invalid_graph')
       pts.push([x === 0 ? 0 : x, y === 0 ? 0 : y])
     }
-    polylines.push({ pts, color: plan.color })
+    const line = { pts, color: plan.color }
+    if (plan.route) line.route = plan.route
+    polylines.push(line)
     emittedPoints += count
   }
   return { polylines, refusal: null }

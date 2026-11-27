@@ -192,12 +192,15 @@ def test_solaredge_tracking_read_declaration():
                 "drawing_id": {"type": "string", "maxLength": 128},
                 "section": {"type": "string", "enum": [
                                 "strings", "frames", "unassigned", "reference_changes",
-                                "saved_assignment_changes", "optimizer_assignment_changes", "optimizers"],
+                                "saved_assignment_changes", "saved_frame_history",
+                                "optimizer_assignment_changes", "optimizers"],
                             "description": (
                                 "reference_changes lists missing frames, missing panels, moved panels with saved "
                                 "and current frame references, and new framed panels. saved_assignment_changes compares "
                                 "accepted tracking in two explicit versions of the same project drawing and returns each "
-                                "report's download reference. optimizer_assignment_changes "
+                                "report's download reference. saved_frame_history shows frame changes across three "
+                                "explicitly selected, ordered project drawing versions, including panels that moved "
+                                "twice or returned to their original frame. optimizer_assignment_changes "
                                 "compares saved electrical string membership with a complete current report by "
                                 "shared panel identity. optimizers pages explicit report measurement rows, including "
                                 "partial observations. When an optimizer measurement summary includes optimizer_rows, "
@@ -206,18 +209,28 @@ def test_solaredge_tracking_read_declaration():
                 "compare_to_version_id": {
                     "type": "string", "minLength": 36, "maxLength": 36,
                     "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
-                    "description": "Baseline saved version UUID for saved_assignment_changes. "
-                                   "The version in the request URL is the other side of the comparison."},
+                    "description": "Baseline saved version UUID for saved_assignment_changes or saved_frame_history. "
+                                   "The version in the request URL is the final version."},
+                "intermediate_version_id": {
+                    "type": "string", "minLength": 36, "maxLength": 36,
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "Intermediate saved version UUID for saved_frame_history. "
+                                   "Choose a version between the baseline and final versions."},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 410000, "default": 0}},
                 "allOf": [
                     {"if": {"required": ["section"], "properties": {
                         "section": {"enum": ["reference_changes", "saved_assignment_changes"]}}},
                      "else": {"properties": {"offset": {"maximum": 200000}}}},
                     {"if": {"required": ["section"], "properties": {
-                        "section": {"const": "saved_assignment_changes"}}},
+                        "section": {"enum": ["saved_assignment_changes", "saved_frame_history"]}}},
                      "then": {"required": ["compare_to_version_id"],
                               "properties": {"offset": {"maximum": 400000}}},
                      "else": {"not": {"required": ["compare_to_version_id"]}}},
+                    {"if": {"required": ["section"], "properties": {
+                        "section": {"const": "saved_frame_history"}}},
+                     "then": {"required": ["intermediate_version_id"],
+                              "properties": {"offset": {"maximum": 200000}}},
+                     "else": {"not": {"required": ["intermediate_version_id"]}}},
                 ],
                 "required": [], "additionalProperties": False},
             "returns": {"type": "object"}, "capabilities": ["drawing.read"],

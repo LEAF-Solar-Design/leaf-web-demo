@@ -121,6 +121,25 @@ const replaceRow = (props, tool) => ({ ...props, tool, projectCatalog: {
 } })
 
 describe('project Solar read ownership', () => {
+  it('discards saved cable revisions if the active drawing changes during load', async () => {
+    const project = deferred()
+    const fetchImpl = vi.fn(() => project.promise)
+    vi.stubGlobal('fetch', fetchImpl)
+    const h = harness({ name: 'solar-electrical-schedules', schema: scheduleSchema })
+    h.projectClient.compareSavedCableLengths = vi.fn()
+    render(<ProjectSolarReadPanel {...h.props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Compare saved cable lengths' }))
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    act(() => h.change({ binding: { ...B, input_version_id: B.drawing_id }, authorityKey }))
+    await settle(project, Response.json({
+      project: { org_id: B.organization_id, project_id: B.project_id },
+      drawing_versions: [{ org_id: B.organization_id, project_id: B.project_id, drawing_id: B.drawing_id,
+        version_id: B.input_version_id, seq: 1 }],
+    }))
+    expect(screen.queryByLabelText('Before revision')).toBeNull()
+    expect(h.projectClient.compareSavedCableLengths).not.toHaveBeenCalled()
+  })
+
   it('reviews paged SolarEdge tracking on the selected historical version without a run', async () => {
     const name = 'solar-solaredge-tracking-read'
     const tracking = { schema: 'leaf.solar-project-solaredge-tracking-read.v1', accepted: true, labels_only: true,
@@ -351,7 +370,8 @@ describe('project Solar read ownership', () => {
     expect(projectSolarWorkspaceReason('__proto__')).toBeNull()
     const source = readFileSync(`${process.cwd()}/src/solar/ProjectSolarReadPanel.jsx`, 'utf8')
     const imports = [...source.matchAll(new RegExp('from [\x27\x22]([^\x27\x22]+)', 'g'))].map((match) => match[1])
-    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx', './SolarEdgeTrackingReferences.jsx', './solarDrawingBinding.js'])
+    expect(imports).toEqual(['react', '../components/SchemaForm.jsx', './SolarReadResult.jsx',
+      './SolarEdgeTrackingReferences.jsx', './SavedCableLengthComparison.jsx', './solarDrawingBinding.js'])
     for (const forbidden of ['prepareRun(', 'submitRun(', 'setScope(', 'dispose(', 'fetch(', 'App.jsx', 'Viewer']) expect(source).not.toContain(forbidden)
   })
 
