@@ -1136,11 +1136,11 @@ def build_suites() -> List[Suite]:
               "pytest", REPO, [
                   # Load stdlib before pytest adds the repo root (which has platform/).
                   sys.executable, "-P", "-m", "pytest", "-o", "pythonpath=.",
-                  "tools/xbench/tests/test_x12_layers.py",
-                  "tools/xbench/tests/test_x12_text_styles.py",
-                  "tools/xbench/tests/test_x12_title_blocks.py",
-                  "tools/xbench/tests/test_x12_plot_styles.py",
-                  "tools/xbench/tests/test_x12_entity_counts.py",
+                  Path("tools", "xbench", "tests", "test_x12_layers.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_text_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_title_blocks.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_plot_styles.py").as_posix(),
+                  Path("tools", "xbench", "tests", "test_x12_entity_counts.py").as_posix(),
                   "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider",
               ], 34),
         Suite("server-x07-offline", "server X07 isolated role and customer profile checks",
