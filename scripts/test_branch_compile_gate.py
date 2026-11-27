@@ -26,6 +26,24 @@ def test_vendored_sources_match_pin_exactly():
     } == pin["files"]
 
 
+def test_allowlist_copies_match_and_drop_font_path_members():
+    compile_dir = VENDOR / "LeafSolarDesign.ScriptHost/Compile"
+    copies = [
+        (compile_dir / "api-allowlist.v2.json").read_bytes(),
+        (ROOT / "harness/src/vendor/mushy-author/registry/api-allowlist.json").read_bytes(),
+        (ROOT / "server/branch_tools/vendor/cad_tool_package/api-allowlist.json").read_bytes(),
+    ]
+    assert copies[0] == copies[1] == copies[2]
+    members = json.loads(copies[0])["allowed_members"]
+    text_style = "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord."
+    assert text_style + "FileName" not in members
+    assert text_style + "BigFontFileName" not in members
+    assert not any(member.startswith(text_style) and member.endswith("FileName")
+                   for member in members)
+    digest = hashlib.sha256(copies[0].replace(b"\r", b"")).hexdigest()
+    assert f'Digest = "{digest}"' in (compile_dir / "ApiAllowlist.cs").read_text(encoding="utf-8")
+
+
 def test_only_three_locked_reference_assemblies_ship():
     records = read_json(VENDOR / "tools/ci/acad-refs.lock.json")["years"]["2025"]
     refs = {

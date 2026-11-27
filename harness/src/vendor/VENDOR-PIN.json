@@ -82,8 +82,8 @@
       "sha256": "54917bcb9e8623634bbb4dc95b7ad494a3772afe662dd2118cbbb3950aa5ac3f"
     },
     "registry/api-allowlist.json": {
-      "reason": "SBT (#3553/#3554): Branch package API allowlist; downstream-only file, retire when upstream includes equivalent behavior.",
-      "sha256": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd"
+      "reason": "SBT (#3553/#3554): Branch package API allowlist; downstream-only file, retire when upstream includes equivalent behavior. SEC-2: TextStyleTableRecord.FileName and BigFontFileName removed (font path network beacon); downstream only.",
+      "sha256": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285"
     },
     "registry/branchPackageSchema.ts": {
       "reason": "SBT (#3553/#3554): Branch package schema; downstream-only file, retire when upstream includes equivalent behavior.",
@@ -169,7 +169,7 @@
     "testing/index.ts": "c2435ab88514485bded5b3422be0b10945e36a3b3e43a96bedb63a4a63c6c3c5",
     "agent/branchTargetPrompt.ts": "a12af8944f00a5701cdebe6688150a3f0bd4c18cd8eb968b0c5447fc4a823f18",
     "agent/tools/submitBranchToolProposal.ts": "54917bcb9e8623634bbb4dc95b7ad494a3772afe662dd2118cbbb3950aa5ac3f",
-    "registry/api-allowlist.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
+    "registry/api-allowlist.json": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285",
     "registry/branchPackageSchema.ts": "b0afcf411df05a70beb99dfe505c7a51bec9f033a0e2c52fe58c706ee7b07090",
     "agent/tools/branchCompileCheck.ts": "c7c9098df0f4a4df3cb065d595e535e4e095b3f163cd9e3d460ecf96ed9a5aca",
     "agent/tools/decodeHtmlEntities.ts": "b6b21d03e6a861feb93efe98c963bdbf875590a7dbc90b7b5d6b4c9d7b9690f2"
