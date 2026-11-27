@@ -3197,3 +3197,44 @@ it('rejects mismatched identity and malformed graphs and disables export for inv
   expect(screen.getByRole('button', { name: 'Download CSV' }).disabled).toBe(true)
   expect(screen.getByRole('button', { name: 'Read saved design' }).disabled).toBe(true)
 })
+
+it.each([['malformed digest', 'd'], ['stale measurement', '1'], ['missing report', '2']])(
+  'attributes CSV optimizer evidence and clears attribution after a read with %s', async (invalidEvidence, digit) => {
+    const h = fixture()
+    const saved = response()
+    const graph = saved.data.intake.solar_design_graph
+    const panelRef = graph.panels[0].id
+    const frameRef = graph.frames[0].id
+    graph.panels[0].provenance = { source_handle: 'A1' }
+    const reportDigest = digit.repeat(64)
+    graph.extra = { solaredge_import: {
+      schema: 'leaf.solar-project-solaredge-import.v1',
+      source: { artifact_id: 'b'.repeat(64), content_sha256: 'c'.repeat(64) },
+      report: { artifact_id: 'f'.repeat(64), content_sha256: reportDigest, graph_sha256: 'e'.repeat(64) },
+      frames: [{ frame_ref: frameRef, pdf_matrix: 0, pdf_grid: 0 }],
+      strings: [{ index: 0, source: 'group', frame_ref: frameRef, pdf_matrix: 0, partial: false, panel_refs: [panelRef] }],
+      unassigned_panel_refs: [],
+      optimizer_measurement: { schema: 'leaf.solaredge-optimizer-measurement.v1', graph_rev: 9,
+        complete: true, total_count: 1, string_counts: [1],
+        optimizers: [{ id: 'pdf-optimizer-0', vendor_label: '42', pdf_matrix: 0, string_index: 0,
+          panel_refs: [panelRef], panel_handles: ['A1'] }] },
+    } }
+    h.client.readContext.mockResolvedValueOnce(saved)
+    canonicalReports(h, { response: totalsResponse(4, ['01', '01', '01', '01', '0.400']) })
+    read(); await reportsLoaded()
+    const download = reconciliationDownload()
+    const csv = await download()
+    expect(csv).toContain('"optimizers","1","01","0","PASS","9","4","saved"')
+    expect(screen.getByText('Last confirmed engineering totals revision 4.')).toBeTruthy()
+    expect(screen.getByText(reportDigest).parentElement.textContent).toBe(`SolarEdge report digest ${reportDigest}`)
+    expect(csv).not.toContain(reportDigest)
+
+    const record = graph.extra.solaredge_import
+    if (invalidEvidence === 'malformed digest') record.report.content_sha256 = 'not-a-digest'
+    if (invalidEvidence === 'stale measurement') record.optimizer_measurement.graph_rev = 8
+    if (invalidEvidence === 'missing report') delete record.report
+    h.client.readContext.mockResolvedValueOnce(saved)
+    read(); await reportsLoaded()
+    expect(screen.queryByText(/SolarEdge report digest/)).toBeNull()
+    expect(await download()).toContain('"optimizers","","01","","UNREADABLE","9","4","saved"')
+  })
