@@ -86,3 +86,42 @@ it('keeps scalar lists and results from other tools on their existing export pat
   view.rerender(<ResultPanel result={withScalarList} />)
   expect(screen.getAllByRole('link', { name: /CSV$/ })).toEqual([csvLink()])
 })
+
+const redactedLink = () => screen.getByRole('link', { name: 'Download Pooled shares with layer names redacted CSV' })
+const pooledResult = (report, tool = 'count-modules') => ({
+  ok: true,
+  tool,
+  result: { pooled_cumulative_shares: report },
+})
+
+it.each(['count-modules', 'another-comparison-tool'])('exports an explicit total and no layer metadata for %s', async (tool) => {
+  const layers = [
+    { layer: 'Private Roof', note: 'Private note', increment_numerator: 3, numerator: 3, denominator: 4, percentage: 75 },
+    { layer: 'Private Annex', increment_numerator: 1, numerator: 4, denominator: 4, percentage: 100 },
+  ]
+  render(<ResultPanel result={pooledResult({ defined: true, layers }, tool)} />)
+  expect(await readDownload(redactedLink())).toBe([
+    '"rank","increment_numerator","numerator","denominator","percentage"',
+    '"1","3","3","4","75"',
+    '"2","1","4","4","100"',
+    '"Total","4","4","4","100"',
+    '',
+  ].join('\r\n'))
+  expect(JSON.parse(await readDownload(jsonLink())).result.pooled_cumulative_shares.layers).toEqual(layers)
+})
+
+it('clears the prior redacted export, reports invalid measures, and omits undefined comparisons', () => {
+  const layer = { layer: 'Roof', increment_numerator: 1, numerator: 1, denominator: 1, percentage: 100 }
+  const view = render(<ResultPanel result={pooledResult({ defined: true, layers: [layer] })} />)
+  const prior = redactedLink().getAttribute('href')
+  const name = 'Download Pooled shares with layer names redacted CSV'
+  view.rerender(<ResultPanel result={pooledResult({ defined: true, layers: [{ ...layer, percentage: Infinity }] })} />)
+  expect(screen.queryByRole('link', { name })).toBeNull()
+  expect(screen.getByText('Pooled shares with layer names redacted CSV download is unavailable.'))
+    .toHaveAttribute('role', 'status')
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith(prior)
+
+  view.rerender(<ResultPanel result={pooledResult({ defined: false, layers: [] })} />)
+  expect(screen.queryByRole('link', { name })).toBeNull()
+  expect(screen.queryByText(/redacted CSV download is unavailable/)).toBeNull()
+})

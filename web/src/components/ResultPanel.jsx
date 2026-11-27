@@ -407,7 +407,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   const rowArrays = findRowArrays(data)
   const rowTables = <>
     <RowArrayResults entries={rowArrays} density={density} csvExport={result.tool === 'count-modules'} />
-    {result.tool === 'count-modules' && <RedactedPooledSharesDownload layers={data.pooled_cumulative_shares?.layers} />}
+    <RedactedPooledSharesDownload report={data.pooled_cumulative_shares} />
     {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
   </>
   const scalars = isScalarList(data) ? {} :

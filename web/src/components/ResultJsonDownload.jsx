@@ -31,23 +31,36 @@ export function ResultTableCsvDownload({ rows, label }) {
   }, [rows])
 
   if (!download || download.rows !== rows) return null
-  if (download.error) return <p>{label} CSV download is unavailable.</p>
+  if (download.error) return <p role="status">{label} CSV download is unavailable.</p>
   const filename = label.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'result'
   return <a className="btn ghost" href={download.href} download={filename + '.csv'}>Download {label} CSV</a>
 }
 
-export function RedactedPooledSharesDownload({ layers }) {
+const POOLED_SHARE_FIELDS = ['increment_numerator', 'numerator', 'denominator', 'percentage']
+const REDACTED_SHARES_LABEL = 'Pooled shares with layer names redacted'
+
+export function RedactedPooledSharesDownload({ report }) {
+  const layers = report?.layers
   const rows = useMemo(() => {
     if (!Array.isArray(layers) || !layers.length) return null
-    const fields = ['increment_numerator', 'numerator', 'denominator', 'percentage']
-    if (!layers.every(row => row && fields.every(field => Number.isFinite(row[field])))) return null
-    // Allowlist the measured columns so free-form result fields cannot enter this download.
-    return layers.map((row, index) => ({
+    if (!layers.every(row => row && POOLED_SHARE_FIELDS.every(field => Number.isFinite(row[field])))) return null
+    // Only rank and measured values enter the CSV, even if the report carries other metadata.
+    const ranked = layers.map((row, index) => ({
       rank: index + 1,
-      ...Object.fromEntries(fields.map(field => [field, row[field]])),
+      ...Object.fromEntries(POOLED_SHARE_FIELDS.map(field => [field, row[field]])),
     }))
+    const last = ranked.at(-1)
+    return [...ranked, {
+      rank: 'Total',
+      increment_numerator: last.numerator,
+      numerator: last.numerator,
+      denominator: last.denominator,
+      percentage: last.percentage,
+    }]
   }, [layers])
-  return rows && <ResultTableCsvDownload rows={rows} label="Pooled shares with layer names redacted" />
+  if (report == null || (report.defined === false && Array.isArray(layers) && !layers.length)) return null
+  if (!rows) return <p role="status">{REDACTED_SHARES_LABEL} CSV download is unavailable.</p>
+  return <ResultTableCsvDownload rows={rows} label={REDACTED_SHARES_LABEL} />
 }
 
 // Use returned data so paging, formatting, and viewer state cannot change the export.
