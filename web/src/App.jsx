@@ -4538,6 +4538,7 @@ export default function App() {
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   const [browserPanel, setBrowserPanel] = useState('none')
+  const [browserHeaderActionsOpen, setBrowserHeaderActionsOpen] = useState(false)
   const transcriptDestination = resolveConversationDestination({
     hasDockHost: Boolean(commandTranscriptHost), agentMode, sessionId: agentSessionId,
   })
@@ -5688,66 +5689,70 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">
-          {/* Header metadata (org · tenant · tier · spend · API base) is demoted
-              behind Details -> the DT2 session drawer, per the standard. */}
-          {canOpenCustomize && (
-            <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
-          )}
-          {!mock && agentSessionId && (
-            <button
-              type="button"
-              className="chip-act"
-              onClick={openAgentMode}
-              aria-label={`Pending approvals ${pendingApprovalCount}`}
-              title={pendingApprovalsUnavailable
-                ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
-                : 'Open pending approvals'}
-            >
-              Approvals
-              {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
-                  items wait; the count lives in the aria-label above. */}
-              {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
-              {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
+          {browserAssetActive && (
+            <button type="button" className="chip-act browser-header-actions-toggle"
+              aria-expanded={browserHeaderActionsOpen} aria-controls="studio-header-actions"
+              onClick={() => setBrowserHeaderActionsOpen(open => !open)}>
+              Workspace actions
             </button>
           )}
-          <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
-          {/* Persistent identity control: before this, sign-out lived only
-              behind Details -> the session drawer, so the header carried no
-              reachable exit for a signed-in operator (2026-09-02
-              reconciliation, row B11). Same signOut path the drawer's action
-              already calls -- never raw logout(). */}
-          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
-          {devControls && (
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={mock}
-                disabled={tourOn}
-                onChange={(e) => setMock(e.target.checked)}
-                aria-label="Use mock data (off = live backend)"
+          <div id="studio-header-actions" className="studio-header-actions">
+            {/* Header metadata (org · tenant · tier · spend · API base) is demoted
+                behind Details -> the DT2 session drawer, per the standard. */}
+            {canOpenCustomize && (
+              <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+            )}
+            {!mock && agentSessionId && (
+              <button
+                type="button"
+                className="chip-act"
+                onClick={openAgentMode}
+                aria-label={`Pending approvals ${pendingApprovalCount}`}
+                title={pendingApprovalsUnavailable
+                  ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
+                  : 'Open pending approvals'}
+              >
+                Approvals
+                {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
+                    items wait; the count lives in the aria-label above. */}
+                {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
+                {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+              </button>
+            )}
+            <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
+            {devControls && (
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={mock}
+                  disabled={tourOn}
+                  onChange={(e) => setMock(e.target.checked)}
+                  aria-label="Use mock data (off = live backend)"
+                />
+                <span>Mock</span>
+              </label>
+            )}
+            {/* Live-only chrome (Claude-account terminal panel) is hidden in the
+                demo — it can't work signed-out. Guarded on !mock. */}
+            {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+            {!mock && headerChrome.accounts && (
+              <ClaudeAccountPanel
+                mock={mock}
+                signedOut={signedOut}
+                grant={grant}
+                loading={grantLoading}
+                busy={grantBusy}
+                error={grantErr}
+                open={claudeOpen}
+                onToggle={setClaudeOpen}
+                onLink={onLinkClaude}
+                onRefresh={platformActions.loadGrant}
+                onUnlink={onUnlinkClaude}
               />
-              <span>Mock</span>
-            </label>
-          )}
-          {/* Live-only chrome (Claude-account terminal panel) is hidden in the
-              demo — it can't work signed-out. Guarded on !mock. */}
-          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
-          {!mock && headerChrome.accounts && (
-            <ClaudeAccountPanel
-              mock={mock}
-              signedOut={signedOut}
-              grant={grant}
-              loading={grantLoading}
-              busy={grantBusy}
-              error={grantErr}
-              open={claudeOpen}
-              onToggle={setClaudeOpen}
-              onLink={onLinkClaude}
-              onRefresh={platformActions.loadGrant}
-              onUnlink={onUnlinkClaude}
-            />
-          )}
-          {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+            )}
+            {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+          </div>
         </div>
       </header>
 
