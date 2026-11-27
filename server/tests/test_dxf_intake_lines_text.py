@@ -68,34 +68,6 @@ def test_model_entity_counts_can_be_empty(tmp_path):
     assert "model_entity_counts" not in dxf_intake.parse_dxf_bytes(raw)
 
 
-@pytest.mark.parametrize("active", ["Roof", "Detail"])
-def test_saved_paper_entity_ownership_survives_active_layout_switch(tmp_path, active):
-    import ezdxf
-
-    doc = ezdxf.new("R2018")
-    roof = doc.layouts.new("Roof")
-    detail = doc.layouts.new("Detail")
-    model_line = doc.modelspace().add_line((0, 0), (3, 4))
-    roof_line = roof.add_line((1, 2), (3, 4))
-    detail_text = detail.add_text("Section detail")
-    detail_polyline = detail.add_polyline2d([(1, 1), (2, 2)])
-    doc.layouts.set_active_layout(active)
-    drawing = tmp_path / "sheets.dxf"
-    doc.saveas(drawing)
-
-    intake = dxf_intake.parse_dxf_file(drawing, include_model_entity_counts=True)
-    paths = {row["handle"]: row for row in intake["polylines"]}
-    assert intake["model_entity_counts"] == {"0": 1}
-    assert set(paths) == {model_line.dxf.handle, roof_line.dxf.handle, detail_polyline.dxf.handle}
-    assert "space" not in paths[model_line.dxf.handle]
-    for entity, layout in [(roof_line, "Roof"), (detail_polyline, "Detail")]:
-        assert paths[entity.dxf.handle]["space"] == "paper"
-        assert paths[entity.dxf.handle]["layout"] == layout
-    assert [(row["handle"], row["space"], row["layout"]) for row in intake["texts"]] == [
-        (detail_text.dxf.handle, "paper", "Detail"),
-    ]
-
-
 def test_text_and_mtext_land_in_additive_texts_field():
     raw = _dxf(
         "0\nTEXT\n5\nB1\n8\n0\n10\n100\n20\n200\n1\nNORTH ELEVATION\n"

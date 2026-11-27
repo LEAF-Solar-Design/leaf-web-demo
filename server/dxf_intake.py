@@ -50,6 +50,59 @@ def _layout_block_name(name: str) -> bool:
     return re.fullmatch(r"\*(?:Model_Space|Paper_Space[0-9]*)", name, re.IGNORECASE) is not None
 
 
+_PAPER_ENTITY_KINDS = {
+    "LINE": "polylines", "LWPOLYLINE": "polylines", "POLYLINE": "polylines",
+    "INSERT": "inserts", "TEXT": "texts", "MTEXT": "texts", "CIRCLE": "circles",
+    "ARC": "arcs", "DIMENSION": "dimensions", "3DFACE": "faces3d",
+    "SPLINE": "splines", "MULTILEADER": "mleaders",
+}
+
+
+def _paper_entity_locations(pairs):
+    """Project reciprocal sheet ownership without adding layout geometry to intake."""
+    from authored_dynamic_visibility import _records
+    from authored_viewport_panels import _paper_layouts_by_owner, _record_owner
+
+    owners = _paper_layouts_by_owner(pairs)
+    if not owners:
+        return {}
+    section = block_owner = ""
+    locations = {}
+    seen_handles = set()
+    for kind, record in _records(pairs):
+        if kind in ("SECTION", "ENDSEC"):
+            section = dict(record).get(2, "") if kind == "SECTION" else ""
+            block_owner = ""
+        elif section == "BLOCKS" and kind == "BLOCK":
+            owner = _record_owner(record)
+            block_name = dict(record).get(2, "").casefold()
+            block_owner = owner if owner in owners and owners[owner][0] == block_name else ""
+        elif kind == "ENDBLK":
+            block_owner = ""
+        elif kind in _PAPER_ENTITY_KINDS and (section == "ENTITIES" or block_owner):
+            fields = dict(record)
+            handle = fields.get(5, "")
+            if not handle:
+                continue
+            handle_key = handle.casefold()
+            if handle_key in seen_handles:
+                locations.pop(handle_key, None)
+                continue
+            seen_handles.add(handle_key)
+            owner = _record_owner(record)
+            if owner not in owners or (block_owner and owner != block_owner):
+                continue
+            layout = owners[owner][1]
+            explicit = fields.get(410, "")
+            if ((explicit and explicit.casefold() != layout.casefold())
+                    or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout)):
+                continue
+            locations[handle_key] = {
+                "kind": _PAPER_ENTITY_KINDS[kind], "handle": handle, "layout": layout,
+            }
+    return locations
+
+
 def _mleader_number(value, integer=False):
     try:
         number = float(value)
@@ -73,6 +126,7 @@ def parse_dxf_file(
 def parse_dxf_bytes(
     raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True,
     include_model_entity_counts: bool = False,
+    include_paper_entity_locations: bool = False,
 ) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
@@ -85,8 +139,6 @@ def parse_dxf_bytes(
 
     literal_text = {}
     pairs = _group_pairs(text, literal_text=literal_text)
-    from authored_viewport_panels import _paper_layouts_by_owner, _record_owner
-    paper_layouts = _paper_layouts_by_owner(pairs) if (0, "LAYOUT") in pairs else {}
     layers: List[str] = []
     # Membership set beside the ordered list. `layers` stays a list because
     # first-seen ORDER is part of the intake shape; the set only answers
@@ -148,19 +200,16 @@ def parse_dxf_bytes(
     format_declarations: dict[str, str] = {}
     conflicting_format_fields: set[str] = set()
     section: Optional[str] = None
-    paper_block_owner = ""
     while i < n:
         code, value = pairs[i]
         if code == 0 and value == "SECTION" and i + 1 < n and pairs[i + 1][0] == 2:
             section = pairs[i + 1][1].upper()
-            paper_block_owner = ""
             if section == "BLOCKS":
                 has_blocks = True
             i += 2
             continue
         if code == 0 and value == "ENDSEC":
             section = None
-            paper_block_owner = ""
             i += 1
             continue
         if section == "HEADER" and code == 9 and value == "$CLAYER":
@@ -241,15 +290,6 @@ def parse_dxf_bytes(
             i = j
             continue
         if section == "BLOCKS" and code == 0 and value == "BLOCK":
-            paper_block_owner = ""
-            if paper_layouts:
-                groups, end = _entity_groups(pairs, i + 1)
-                owner = _record_owner(pairs[i + 1:end])
-                linked_layout = paper_layouts.get(owner)
-                if linked_layout and groups.get(2, "").casefold() == linked_layout[0]:
-                    paper_block_owner = owner
-                    i = end
-                    continue
             name, block, i = _parse_block(pairs, i + 1, parse_errors, include_measurement_evidence)
             if name and not _layout_block_name(name):
                 # Use the same case-insensitive identity as INSERT resolution.
@@ -262,12 +302,7 @@ def parse_dxf_bytes(
                     blocks[name] = block
                     block_names[key] = name
             continue
-        if paper_block_owner and code == 0 and value in ("ENDBLK", "EOF"):
-            paper_block_owner = ""
-        root_entity = section == "ENTITIES" and code == 0
-        paper_member = bool(paper_block_owner) and code == 0
-        drawing_entity = root_entity or paper_member
-        if drawing_entity:
+        if section == "ENTITIES" and code == 0:
             space_info = {}
             j = i + 1
             while j < n and pairs[j][0] != 0:
@@ -278,17 +313,7 @@ def parse_dxf_bytes(
                 j += 1
             record = pairs[i + 1:j]
             handle = next((v for c, v in record if c == 5), None)
-            layout = space_info.get("layout", "")
-            owner = _record_owner(record) if paper_layouts else ""
-            if paper_member and (not handle or owner != paper_block_owner or (
-                layout and layout.casefold() != paper_layouts[paper_block_owner][1].casefold()
-            )):
-                i = j
-                continue
-            if owner in paper_layouts and (paper_member or not layout):
-                layout = paper_layouts[owner][1]
-                space_info.update(space="paper", layout=layout)
-            if root_entity and include_measurement_evidence and handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
+            if include_measurement_evidence and handle and value in ("LINE", "LWPOLYLINE", "POLYLINE"):
                 if _explicit_elevation(pairs, j, value, dict(record)):
                     elevation_evidence.append(handle)
             if handle:
@@ -301,6 +326,7 @@ def parse_dxf_bytes(
                                 record.append(pairs[vertex_end])
                             vertex_end += 1
                 model_records[handle] = (value, record)
+            layout = space_info.get("layout", "")
             if layout and layout.casefold() != "model":
                 space_info["space"] = "paper"
             if not space_info.get("space"):
@@ -312,12 +338,12 @@ def parse_dxf_bytes(
             elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
                 # Keep paper classification without exporting an invalid name or inventing a tab.
                 space_info.pop("layout", None)
-        if drawing_entity and value == "MULTILEADER":
+        if section == "ENTITIES" and code == 0 and value == "MULTILEADER":
             if not space_info:
                 mleader_records.append(record)
             i = j
             continue
-        if drawing_entity and value == "INSERT":
+        if section == "ENTITIES" and code == 0 and value == "INSERT":
             entity, i = _parse_insert(pairs, i + 1, dropped_count, include_measurement_evidence)
             if entity is not None:
                 entity.update(space_info)
@@ -329,7 +355,7 @@ def parse_dxf_bytes(
             if props is not None and entity.get("handle"):
                 insert_properties[entity["handle"]] = props
             continue
-        if include_measurement_evidence and drawing_entity and value in ("SPLINE", "ELLIPSE"):
+        if include_measurement_evidence and section == "ENTITIES" and code == 0 and value in ("SPLINE", "ELLIPSE"):
             if value == "SPLINE":
                 entity = _spline_measurement_path(record)
                 splines.append(entity)
@@ -342,25 +368,25 @@ def parse_dxf_bytes(
                 layers.append(entity["layer"])
             i = j
             continue
-        if drawing_entity and value == "LWPOLYLINE":
+        if section == "ENTITIES" and code == 0 and value == "LWPOLYLINE":
             entity, i = _parse_lwpolyline(pairs, i + 1, dropped_count)
             if entity is not None:
                 if include_measurement_evidence:
                     _retain_short_segment_vectors(entity, record, "LWPOLYLINE")
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
-        if drawing_entity and value == "POLYLINE":
+        if section == "ENTITIES" and code == 0 and value == "POLYLINE":
             entity, i = _parse_polyline(pairs, i + 1, dropped_count, measure=include_measurement_evidence)
             if entity is not None:
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
-            if entity.pop("polyline3d", False) and root_entity and entity["closed"] and len(entity["pts"]) >= 2:
+            if entity.pop("polyline3d", False) and entity["closed"] and len(entity["pts"]) >= 2:
                 beam_polyline3d_handles.append(entity["handle"])
             continue
-        if drawing_entity and value == "LINE":
+        if section == "ENTITIES" and code == 0 and value == "LINE":
             # A LINE is a 2-point open polyline to the viewer and to every tool: no new
             # intake field, the frozen Â§1 shape renders it as-is.
             entity, i = _parse_line(pairs, i + 1, dropped_count)
@@ -368,10 +394,10 @@ def parse_dxf_bytes(
                 if include_measurement_evidence:
                     _retain_short_segment_vectors(entity, record, "LINE")
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             _finish_entity(entity, handle_seq, layers, seen_layers, polylines, properties)
             continue
-        if drawing_entity and value in ("CIRCLE", "ARC"):
+        if section == "ENTITIES" and code == 0 and value in ("CIRCLE", "ARC"):
             # W4g-3: the kinds the browser engine draws besides lines and
             # polylines, as ADDITIVE Â§1 fields `circles` / `arcs` (a viewer
             # or tool that does not know them ignores them). Centre in WCS,
@@ -379,7 +405,7 @@ def parse_dxf_bytes(
             entity, i = _parse_circle_or_arc(pairs, i + 1, value, dropped_count)
             if entity is not None:
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             if entity is not None:
                 props = entity.pop("_properties", None)
                 if not entity["handle"]:
@@ -391,11 +417,11 @@ def parse_dxf_bytes(
                 if props is not None:
                     properties[entity["handle"]] = props
             continue
-        if drawing_entity and value == "DIMENSION":
+        if section == "ENTITIES" and code == 0 and value == "DIMENSION":
             entity, i = _parse_dimension(pairs, i + 1)
             if entity is not None:
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             if entity.get("unsupported"):
                 dimensions_unsupported += 1
             else:
@@ -407,11 +433,11 @@ def parse_dxf_bytes(
                     layers.append(entity["layer"])
                 dimensions.append(entity)
             continue
-        if drawing_entity and value in ("TEXT", "MTEXT"):
+        if section == "ENTITIES" and code == 0 and value in ("TEXT", "MTEXT"):
             entity, i = _parse_text(pairs, i + 1, value)
             if entity is not None:
                 entity.update(space_info)
-            handle_seq += root_entity
+            handle_seq += 1
             if entity["text"]:
                 if not entity["handle"]:
                     entity["handle"] = f"L{handle_seq:X}"
@@ -646,6 +672,10 @@ def parse_dxf_bytes(
         attach_clips(pairs, out)
         attach_footprints(pairs, out)
         attach_visibility(pairs, out)
+    if include_paper_entity_locations:
+        locations = _paper_entity_locations(pairs)
+        if locations:
+            out["paper_entity_locations"] = list(locations.values())
     return out
 
 
