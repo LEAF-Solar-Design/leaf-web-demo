@@ -62,7 +62,7 @@ def test_page_size_equals_golden(fixture_sections, golden):
 
 # ---------------------------------------------------------------- synthetic PDFs
 
-def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
+def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100", indirect_objects=()):
     """A minimal one-page PDF with a correct xref table."""
     chunks = content if isinstance(content, list) else [content]
     contents_ref = (b"[" + b" ".join(f"{i + 4} 0 R".encode() for i in range(len(chunks))) + b"]"
@@ -75,6 +75,7 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
     ]
     objects.extend(b"<< /Length " + str(len(chunk)).encode() + b" >>\nstream\n" + chunk
                    + b"\nendstream" for chunk in chunks)
+    objects.extend(indirect_objects)
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
@@ -89,6 +90,117 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100"):
 
 
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
+
+
+def test_page_schedule_uses_painted_glyph_order_and_preserves_repeats():
+    data = _pdf(
+        b"BT /F1 10 Tf "
+        b"1 0 0 1 5 20 Tm (S02) Tj "
+        b"1 0 0 1 40 80 Tm (S02) Tj "
+        b"1 0 0 1 5 80 Tm [(S01) 0 (\\(A\\))] TJ "
+        b"1 0 0 1 5 90 Tm 3 Tr (S02) Tj "
+        b"1 0 0 1 5 95 Tm 7 Tr (S02) Tj ET",
+        resources=HELVETICA,
+    )
+    expected = ("S01(A)", "S02", "S02")
+    assert pdf.audit_page_schedule(data, [expected]) == [pdf.PageScheduleMatch(1, expected, expected)]
+    wrong_order = ("S02", "S01(A)", "S02")
+    result, = pdf.audit_page_schedule(data, [wrong_order])
+    assert result.observed == expected
+    assert not result.matches
+
+
+def test_page_schedule_distinguishes_absent_and_empty_pages():
+    data = _pdf(b"")
+    present, missing = pdf.audit_page_schedule(data, [(), ()])
+    assert present == pdf.PageScheduleMatch(1, (), ())
+    assert present.matches
+    assert missing == pdf.PageScheduleMatch(2, (), None)
+    assert not missing.matches
+    unexpected, = pdf.audit_page_schedule(data, [])
+    assert unexpected == pdf.PageScheduleMatch(1, None, ())
+    assert not unexpected.matches
+
+
+@pytest.mark.parametrize(("properties", "named", "replacement"), [
+    (b"<< /ActualText (B207) >>", b"", "B207"),
+    (b"/CopyLabel", b" /Properties << /CopyLabel << /ActualText <FEFF00430033> >> >>", "C3"),
+    (b"<< /ActualText <EFBBBF42C3A9> >>", b"", "Bé"),
+    (b"<< /ActualText () >>", b"", ""),
+])
+def test_copy_text_audit_decodes_single_label(properties, named, replacement):
+    label = b"BT /F1 10 Tf 5 6 Td [(A1) 0 (04)] TJ ET"
+    data = _pdf(b"/Span " + properties + b" BDC " + label + b" EMC", resources=HELVETICA + named)
+    assert pdf.audit_copy_text(data, ["A104"]) == [pdf.CopyTextMismatch(1, "A104", replacement, 5, 6)]
+    assert pdf.audit_copy_text(data, ["X01"]) == []
+    assert pdf.extract_primitives(data) == pdf.extract_primitives(_pdf(label, resources=HELVETICA))
+
+
+def test_copy_text_audit_uses_outer_span_and_skips_unpainted_and_exact_labels():
+    data = _pdf(
+        b"/Span << /ActualText (outer) >> BDC /Span << /ActualText (inner) >> BDC "
+        b"BT /F1 10 Tf 5 6 Td (A104) Tj ET EMC EMC "
+        b"/Span << /ActualText (invisible) >> BDC BT /F1 10 Tf 3 Tr (A104) Tj ET EMC "
+        b"/Span << /ActualText (A104) >> BDC BT /F1 10 Tf 0 Tr (A104) Tj ET EMC",
+        resources=HELVETICA,
+    )
+    assert pdf.audit_copy_text(data, ["A104"]) == [pdf.CopyTextMismatch(1, "A104", "outer", 5, 6)]
+
+
+def test_copy_text_audit_enforces_replacement_byte_budget(monkeypatch):
+    data = _pdf(b"/Span << /ActualText (AB) >> BDC EMC "
+                b"/Span << /ActualText (CD) >> BDC EMC")
+    monkeypatch.setattr(pdf, "MAX_COPY_TEXT_BYTES", 3)
+    assert pdf.extract_primitives(data).letters == []
+    with pytest.raises(SolarEdgePdfError, match="PDF_RESOURCE_LIMIT: replacement text bytes"):
+        pdf.audit_copy_text(data, ["A104"])
+
+
+def _spot_resources(colorant):
+    return (b"/ColorSpace << /Ink [/Separation /" + colorant + b" /DeviceRGB "
+            b"<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0 0 1] /N 1 >>] >>")
+
+
+def test_stroke_ink_audit_tracks_separation_and_device_colors():
+    data = _pdf(
+        b"/Ink CS /Ink cs 0.25 scn 1 1 2 2 re B "
+        b"q 0 0 1 RG 4 4 2 2 re S Q "
+        b"0.5 SCN 7 7 2 2 re S 10 10 2 2 re f",
+        resources=_spot_resources(b"TagOutline"),
+    )
+    assert pdf.audit_stroke_inks(data) == [
+        pdf.StrokeInk(1, (1, 1, 3, 3), "Separation", "TagOutline", (1.0,)),
+        pdf.StrokeInk(1, (4, 4, 6, 6), "DeviceRGB", None, (0, 0, 1)),
+        pdf.StrokeInk(1, (7, 7, 9, 9), "Separation", "TagOutline", (0.5,)),
+    ]
+    with pytest.raises(SolarEdgePdfError, match="COLORSPACE_UNSUPPORTED: Ink"):
+        pdf.extract_primitives(data)
+
+
+def test_stroke_ink_audit_resolves_form_resources_and_restores_parent():
+    form_content = b"1 1 2 2 re S /Ink CS 0.75 SCN 4 4 2 2 re S"
+    form = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] "
+            b"/Matrix [1 0 0 1 20 30] /Resources << " + _spot_resources(b"OtherInk")
+            + b" >> /Length " + str(len(form_content)).encode()
+            + b" >>\nstream\n" + form_content + b"\nendstream")
+    data = _pdf(
+        b"/Ink CS 0.5 SCN /Detail Do 7 7 2 2 re S",
+        resources=_spot_resources(b"TagOutline") + b" /XObject << /Detail 5 0 R >>",
+        indirect_objects=[form],
+    )
+    assert pdf.audit_stroke_inks(data) == [
+        pdf.StrokeInk(1, (21, 31, 23, 33), "Separation", "TagOutline", (0.5,)),
+        pdf.StrokeInk(1, (24, 34, 26, 36), "Separation", "OtherInk", (0.75,)),
+        pdf.StrokeInk(1, (7, 7, 9, 9), "Separation", "TagOutline", (0.5,)),
+    ]
+
+
+@pytest.mark.parametrize("operands", [b"", b"-0.1", b"1.1", b"0.3 0.5", b"/Named"])
+def test_stroke_ink_audit_rejects_malformed_separation_tints(operands):
+    data = _pdf(b"/Ink CS " + operands + b" SCN 1 1 2 2 re S",
+                resources=_spot_resources(b"TagOutline"))
+    with pytest.raises(SolarEdgePdfError, match="BAD_OPERAND"):
+        pdf.audit_stroke_inks(data)
 
 
 def test_indirect_content_array_matches_single_stream():
