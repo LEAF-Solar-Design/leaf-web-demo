@@ -1208,6 +1208,22 @@ describe('project Solar transport and lifecycle', () => {
     }
     expect(fetchImpl).not.toHaveBeenCalled()
   })
+  it('comparison report transport is read-only and tied to the original drawing scope', async () => {
+    const { client, fetchImpl } = setup()
+    const sourceBinding = { ...binding, input_version_id: J }
+    expect(client.comparisonReportClient({ ...sourceBinding, drawing_id: J })).toBeNull()
+    const comparison = client.comparisonReportClient(sourceBinding)
+    const report = artifact({ source_version_id: J, media_type: 'application/json', filename: 'solaredge-report.json' })
+    expect((await client.downloadArtifact(report)).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect((await comparison.downloadArtifact(report, { current: true })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect((await comparison.downloadArtifact({ ...report, source_version_id: V }, { current: false })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect((await comparison.downloadArtifact(artifact({ source_version_id: J }), { current: false })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    client.setScope(binding, 'session-2')
+    expect(comparison.captureCatalogScope()()).toBe(false)
+    expect((await comparison.downloadArtifact(report, { current: false })).reason).toBe('SIP_R7_SCOPE_STALE')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
   it('R7-31 artifact 200 returns bounded transport bytes and selected headers', async () => {
     const { client, fetchImpl } = setup()
     fetchImpl.mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), { headers: {
