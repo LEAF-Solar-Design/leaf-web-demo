@@ -5,6 +5,7 @@ import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { EMPTY_WORKSPACE_PROJECT, formatProjectsUnavailable } from '../site/workspaceProjectState.js'
 import { addRecentProject, readProjectPrincipal, readRecentProjects, togglePinnedProject, writeRecentProjects } from '../lib/recentProjects.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import ProjectDiscrepancyRanking from '../projects/ProjectDiscrepancyRanking.jsx'
 
 // The header PROJECT chip, made real: a calm switcher over the canonical
 // org-scoped Project entity (platform/api.py). LIVE only — in mock mode it is a
@@ -91,6 +92,16 @@ export default function ProjectSwitcher({
     triggerRef.current?.focus()
   }
 
+  const openRevision = async (binding) => {
+    const pid = binding.project_id
+    if (binding.organization_id !== orgId || !projects.some(project => (project.project_id || project.id) === pid)) return false
+    if (!await onOpenProject(pid, binding)) return false
+    remember(addRecentProject(history, pid))
+    setOpen(false)
+    triggerRef.current?.focus()
+    return true
+  }
+
   const submit = async (kind, name) => {
     if (!name.trim() || orgBusy || projectBusy || submitting.current) return
     submitting.current = true
@@ -132,7 +143,7 @@ export default function ProjectSwitcher({
     if (!open) return
     const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => {
-      if (isCompositionKey(e)) return
+      if (isCompositionKey(e) || e.target?.closest?.('[data-project-rankings]')) return
       if (e.target?.closest?.('input, textarea, select, [contenteditable="true"]')) {
         if (e.key === 'Enter' && !e.isComposing && e.target.tagName === 'INPUT' && rootRef.current?.contains(e.target)) {
           e.preventDefault()
@@ -286,6 +297,14 @@ export default function ProjectSwitcher({
                   )}
                 </ul>
                 </>
+              )}
+              {open && orgId && principalId && count > 0 && (
+                <div data-project-rankings>
+                  <ProjectDiscrepancyRanking
+                    key={JSON.stringify([orgId, principalId, projects.map(project => project.project_id || project.id)])}
+                    orgId={orgId} principalId={principalId} projects={projects} onOpenRevision={openRevision}
+                  />
+                </div>
               )}
               <form className="proj-create" onSubmit={(event) => {
                 event.preventDefault()

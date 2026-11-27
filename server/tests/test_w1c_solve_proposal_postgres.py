@@ -7,14 +7,19 @@ import sys
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from psycopg import OperationalError
 import pytest
 from psycopg.types.json import Jsonb
 
+import deps
 import leaf_cloud_client as cloud
 import solar_project_jobs as service
 import solar_project_solve as solve
 from leaf_cloud_grants import CloudError
-from leaf_platform import canonical_jobs as jobs, project_solve_store as exchanges
+from leaf_platform import canonical_jobs as jobs, project_solve_history, project_solve_store as exchanges
+from routers import project_drawings
 from test_jobs_callbacks_postgres import postgres_authority  # noqa: F401
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_solve_commit import case  # noqa: F401
@@ -316,3 +321,93 @@ def test_x02_postgres_send_crash_reclaims_unknown_without_second_stub(world, htt
     saved=row(job)
     assert saved["status"]=="failed" and saved["error"]["reason_code"]=="solve_outcome_unknown"
     assert calls==["timeout"] and not s.calls
+
+
+def prepared_group_listing(scope):
+    app = FastAPI()
+    app.include_router(project_drawings.router)
+    app.dependency_overrides[deps.require_active_tenant] = lambda: helpers.principal(scope)
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/projects/{scope.project}/drawing-versions/{scope.parent}/context",
+            params={"drawing_id": str(scope.drawing), "prepare_solve": "true"},
+            headers={"X-Org-Id": str(scope.org), "X-Project-Id": str(scope.project)},
+        )
+    assert response.status_code == 200, response.text
+    result = response.json()["solve_preparation"]
+    assert result["available"], result
+    return result
+
+
+def latest_solve(scope):
+    result = prepared_group_listing(scope)
+    assert result["solve_history_available"]
+    return next(frame["latest_solve"] for frame in result["frames"]
+                if frame["id"] == scope.solve_context["frame_ref"])
+
+
+def test_prepared_history_reports_failure_and_retry_without_publication(world, http, monkeypatch):
+    assert latest_solve(world) is None
+    failed_job = submit(world, http)
+
+    def reject(*args, **kwargs):
+        raise CloudError("cloud_upstream_failure", 502)
+
+    with monkeypatch.context() as upstream:
+        upstream.setattr(cloud, "post_stringer", reject)
+        assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
+    assert row(failed_job)["status"] == "failed"
+    assert latest_solve(world) == {"status": "failed", "reason_code": "CLOUD_UPSTREAM_FAILURE"}
+
+    for saved_code, public_code in (("INVALID_FINAL_GRID_ORDER", "INVALID_FINAL_GRID_ORDER"),
+                                    ("private-code", "GRAPH_JOB_FAILED")):
+        with pg.db.cursor() as cur:
+            cur.execute("UPDATE jobs SET error=%s WHERE job_id=%s",
+                        (Jsonb({"reason_code": saved_code, "message": "private detail"}), failed_job))
+        assert latest_solve(world) == {"status": "failed", "reason_code": public_code}
+
+    retry_job = submit(world, http)
+    assert latest_solve(world) == {"status": "queued"}
+    assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
+    retry = row(retry_job)
+    assert retry["status"] == "succeeded" and retry["output_version_id"] is None
+    assert latest_solve(world) == {"status": "succeeded"}
+    assert pg.store_graph.resolve_version_binding(world.org, world.project, world.parent).is_head
+
+
+def test_prepared_history_filters_newer_mismatched_attempts_before_ranking(world, http):
+    assert submit(world, http)
+    assert service.run_once(uuid4().hex, tool_name=solve.TOOL_NAME, lease_seconds=120)
+    other_job = submit(world, http)
+    context = row(other_job)["execution_context"]
+    for field, value in (
+        ("drawing_id", str(uuid4())),
+        ("parent_intake_sha256", "0" * 64),
+        ("solve_binding.frame_id", "other-frame"),
+        ("solve_binding.graph_sha256", "0" * 64),
+        ("execution_path", "remote"),
+    ):
+        variant = deepcopy(context)
+        parent, _, child = field.partition(".")
+        if child:
+            variant[parent][child] = value
+        else:
+            variant[parent] = value
+        with pg.db.cursor() as cur:
+            cur.execute("UPDATE jobs SET execution_context=%s WHERE job_id=%s", (Jsonb(variant), other_job))
+        assert latest_solve(world) == {"status": "succeeded"}, field
+
+
+def test_prepared_history_retains_saved_coverage_when_job_read_fails(world, monkeypatch):
+    before = prepared_group_listing(world)
+
+    def unavailable():
+        raise OperationalError("private database detail")
+
+    monkeypatch.setattr(project_solve_history, "connection", unavailable)
+    after = prepared_group_listing(world)
+    assert after["solve_history_available"] is False
+    assert after["frames"] == [
+        {key: value for key, value in frame.items() if key != "latest_solve"}
+        for frame in before["frames"]
+    ]

@@ -241,6 +241,7 @@ const LabWidgetsPreview = import.meta.env.DEV
 import { labPreviewEnabled } from './lab/labPreview.js'
 import { checkoutScopeDrawingId, deriveCheckout } from './controllers/checkout/createCheckoutController.js'
 import { useDrawingIdentity, useDrawingScopeReset } from './drawing/DrawingIdentityProvider.jsx'
+import SentCopyLine, { useLandOnQueryDrawing } from './drawing/SentCopyHeader.jsx'
 import { hasDrawingSelection } from './drawing/drawingIdentity.js'
 
 // Calm layer palette, re-derived at higher lightness for the DARK CADViewport
@@ -1606,6 +1607,7 @@ export default function App() {
     orgId, projectId: openProjectId, workspace, versionId: canonicalVersionId })
   const projectEditorKey = projectDrawingEditorScopeKey(projectEditorBinding)
   const projectSelectedDrawingVersion = workspace?.drawing_versions?.find((row) => row.version_id === canonicalVersionId)
+  useLandOnQueryDrawing({ mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion })
   const canUndo = projectMode ? !!projectSelectedDrawingVersion && !!projectEditorTarget?.restoreVersion
     && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
       && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
@@ -6438,6 +6440,7 @@ export default function App() {
               )}
               </>}
             </div>
+            <SentCopyLine mock={mock} workspace={workspace} shownDrawingId={projectMode ? projectSelectedDrawingVersion?.drawing_id : REQUESTED_DRAWING_ID} />
             {studioGround && drafting && shown && (
               <button
                 type="button"

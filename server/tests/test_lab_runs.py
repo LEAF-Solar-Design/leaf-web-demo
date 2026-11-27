@@ -358,6 +358,11 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
     from lab_evaluate import evaluate_graph
     lane = corpus_join
     run_id, body = corpus_admit(lane)
+    jobs_url = f'/api/lab/runs/{run_id}/corpus-jobs'
+    before = lane.http.get(jobs_url)
+    assert before.status_code == 200, before.text
+    assert before.json()['blocks'][0]['status'] == 'not submitted'
+    assert before.json()['blocks'][0]['job_id'] is None
     body['reconcile_only'] = True
     assert lane.http.post('/api/lab/runs', json=body).json()['run_id'] == run_id
     row, lease, adapter = corpus_adapter(lane, run_id)
@@ -398,6 +403,18 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, mo
     assert policy['parent_suite_sha256'] == lane.context['suite']['sha256']
     assert policy['lineage'] == {key: authority[key] for key in
         ('tenant_id', 'project_id', 'doc_id', 'graph_revision', 'graph_sha256')}
+    jobs = lane.http.get(jobs_url)
+    assert jobs.status_code == 200, jobs.text
+    assert jobs.headers['cache-control'] == 'no-store'
+    assert jobs.json()['source'] == {
+        'run_id': run_id, 'graph_revision': lane.artifact['revision'],
+        'graph_sha256': lane.artifact['sha256'], 'input_digest': row['input_digest'],
+    }
+    job = jobs.json()['blocks'][0]
+    assert job['block_id'] == 'corpus-evaluator-1'
+    assert (job['job_id'], job['status'], job['attempt']) == (projected['job_id'], 'completed', projected['attempt'])
+    assert job['inputs']['corpus_sha256'] == lane.context['corpus']['sha256']
+    assert job['inputs']['suite_sha256'] == lane.context['suite']['sha256']
     durable = lane.jobs.get_job(projected['job_id'])['result']['result']
     assert projected['evaluation'] == durable['result']
     assert projected['reasons'] == durable['result']['reasons']
@@ -731,11 +748,14 @@ def durable_history(rig, monkeypatch):
     now = store._now()
     monkeypatch.setattr(store, "_now", lambda: now)
 
-    def seed(age, state, *, context=None, project_id="", doc_id="doc"):
+    def seed(age, state, *, context=None, project_id="", doc_id="doc", attempt_wall_cap_seconds=None):
         context = rig.context if context is None else context
         tenant, actor = str(context), lab_runs._actor(context)
+        created_at = now - age
+        finished_at = ((created_at + timedelta(seconds=30)).isoformat()
+                       if state in {"finished", "failed", "cancelled"} else None)
         with monkeypatch.context() as clock:
-            clock.setattr(store, "_now", lambda: now - age)
+            clock.setattr(store, "_now", lambda: created_at)
             body = {"doc_id": doc_id, "graph_revision": 1, "submission_id": intent_id()}
             lab_runs._remember_submission(context, body, project_id)
             row = store.create(tenant, doc_id, "fixture", 1, rig.artifact["sha256"],
@@ -743,11 +763,12 @@ def durable_history(rig, monkeypatch):
                                submission_id=body["submission_id"], authority=actor)
             # Inert saved metadata only: no worker, evaluator or creating HTTP call.
             store._run(tenant, lambda sql: sql.execute(
-                "UPDATE lab_runs SET state=?,finished_at=? WHERE tenant_id=? AND run_id=?",
-                (state, (now - age).isoformat() if state in {"finished", "failed", "cancelled"}
-                 else None, tenant, row["run_id"])), write=True)
+                "UPDATE lab_runs SET state=?,finished_at=?,attempt_wall_cap_seconds=? WHERE tenant_id=? AND run_id=?",
+                (state, finished_at, attempt_wall_cap_seconds, tenant, row["run_id"])), write=True)
         return {"run_id": row["run_id"], "state": state, "graph_revision": 1,
-                "doc_id": doc_id, "project_id": project_id, "submission_id": body["submission_id"]}
+                "doc_id": doc_id, "project_id": project_id, "submission_id": body["submission_id"],
+                "created_at": created_at.isoformat(), "finished_at": finished_at,
+                "attempt_wall_cap_seconds": attempt_wall_cap_seconds, "wall_cap_hit": False}
 
     return SimpleNamespace(seed=seed, now=now)
 
@@ -758,11 +779,11 @@ def durable_history(rig, monkeypatch):
 ])
 def test_durable_history_retains_terminal_identity(rig, durable_history, state, age):
     saved = durable_history.seed(age, state)
-    recent = durable_history.seed(timedelta(hours=1), "finished")
+    recent = durable_history.seed(timedelta(hours=1), "finished", attempt_wall_cap_seconds=600)
     active = durable_history.seed(timedelta(days=31), "queued")
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text
-    assert response.json() == {"runs": [active, recent, saved]}
+    assert response.json() == {"runs": [active, recent, saved], "has_more": False}
     assert jsonable_encoder(store.get(rig.tenant, saved["run_id"])["created_at"]) == (
         durable_history.now - age).isoformat()
     # Saved history is durable; the same expired identity cannot create or reconcile.
@@ -782,20 +803,52 @@ def test_durable_history_scope_isolation(rig, durable_history):
     ]
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text
-    assert response.json() == {"runs": [saved]}
+    assert response.json() == {"runs": [saved], "has_more": False}
     for control in controls:
         assert control["run_id"] not in response.text
     rig.app.dependency_overrides[deps.require_tenant] = lambda: foreign_actor
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text
-    assert response.json() == {"runs": [controls[0]]}
+    assert response.json() == {"runs": [controls[0]], "has_more": False}
     rig.app.dependency_overrides[deps.require_tenant] = lambda: foreign_tenant
     assert rig.http.get("/api/lab/runs", params={"doc_id": "doc"}).status_code == 404
 
 
-def test_durable_history_active_first_order_and_twenty_row_bound(rig, durable_history):
-    terminals = [durable_history.seed(timedelta(days=2, hours=index // 2), "finished")
-                 for index in range(24)]
+@pytest.mark.parametrize("block_id, reason, expected", [
+    (None, "run_wall_cap", True),
+    (None, "worker_error", False),
+    ("fixture", "run_wall_cap", False),
+])
+def test_durable_history_identifies_only_attempt_wall_failure(rig, block_id, reason, expected):
+    from test_lab_run_store import intent_id
+
+    created = rig.http.post("/api/lab/runs", json={
+        "doc_id": "doc", "graph_revision": 1, "submission_id": intent_id(),
+    })
+    assert created.status_code == 202, created.text
+    run_id = created.json()["run_id"]
+    lease = store.claim(rig.tenant, run_id, "runner", 60, build_revision="abc1234", color="active")
+    assert lease
+    owner = (rig.tenant, run_id, "runner", lease["fence"])
+    assert store.append_events(*owner, [
+        {"kind": "failed", "block_id": block_id, "payload": {"reason": reason}},
+        {"kind": "coalesced", "payload": {"count": 1}},
+    ])
+    assert store.finish(*owner, "failed", attempt_wall_cap_seconds=600)
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    run, = response.json()["runs"]
+    assert run["run_id"] == run_id
+    assert run["wall_cap_hit"] is expected
+    assert "terminal_payload" not in run
+
+
+@pytest.mark.parametrize("terminal_count,has_more", [(18, False), (19, True), (24, True)])
+def test_durable_history_active_first_order_and_twenty_row_bound(
+        rig, durable_history, terminal_count, has_more):
+    terminals = [durable_history.seed(timedelta(days=2, hours=index // 2),
+                                      "failed" if index % 2 else "finished")
+                 for index in range(terminal_count)]
     queued = durable_history.seed(timedelta(days=30), "queued")
     running = durable_history.seed(timedelta(days=31), "running")
     expected = [queued, running]
@@ -804,7 +857,7 @@ def test_durable_history_active_first_order_and_twenty_row_bound(rig, durable_hi
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text
     assert len(response.json()["runs"]) == 20
-    assert response.json() == {"runs": expected}
+    assert response.json() == {"runs": expected, "has_more": has_more}
 
 
 def test_durable_history_rechecks_current_read_admission(rig, durable_history):
@@ -846,7 +899,7 @@ def test_durable_history_rechecks_current_project_read_role(rig, durable_history
     params = {"doc_id": "doc", "project_id": "history-project"}
     response = rig.http.get("/api/lab/runs", params=params)
     assert response.status_code == 200, response.text
-    assert response.json() == {"runs": [saved]}
+    assert response.json() == {"runs": [saved], "has_more": False}
     revoked = True
     response = rig.http.get("/api/lab/runs", params=params)
     assert response.status_code == 422

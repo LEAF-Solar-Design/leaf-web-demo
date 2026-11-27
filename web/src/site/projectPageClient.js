@@ -6,7 +6,7 @@ import { readActiveScope } from '../auth/activeScope.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
-export const MAX_PAGE_ACTIONS = 3
+export const MAX_PAGE_ACTIONS = 12
 
 export function pageActions(document) {
   return document.actions ?? (document.action ? [document.action] : [])
@@ -49,7 +49,7 @@ export function validatePageDocument(document) {
   if (Object.hasOwn(document, 'actions')) {
     const actions = document.actions
     if (Object.hasOwn(document, 'action') || !Array.isArray(actions) || !actions.length || actions.length > MAX_PAGE_ACTIONS) {
-      throw new Error('Use one to three contact links.')
+      throw new Error(`Use 1 to ${MAX_PAGE_ACTIONS} contact links.`)
     }
   }
   if ((Object.hasOwn(document, 'action') && !isValidPageAction(document.action))
@@ -478,9 +478,20 @@ export function validateNativePreview(value, expected = {}) {
       || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
       || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
   }
+  const identity = Object.fromEntries(identityFields.map(field => [field, value[field]]))
+  const disposition = value.failure_disposition
+  const failureDisposition = !repository && value.status === 'failed'
+    && disposition?.schema === 'leaf.native-preview.failed-disposition.v1'
+    && disposition.job_id === value.job_id && disposition.status === 'failed'
+    && disposition.reason === 'execution_budget_expired' && disposition.lease_cleared === true
+    && validDigest(disposition.disposition_sha256)
+    && pageIdentity.every(field => disposition.source?.[field] === value[field])
+    ? { ...disposition, source: { ...disposition.source } }
+    : null
   return { job_id: value.job_id, status: value.status,
-    ...Object.fromEntries(identityFields.map(field => [field, value[field]])),
-    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
+    ...identity,
+    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}),
+    ...(failureDisposition ? { failure_disposition: failureDisposition } : {}) }
 }
 
 export async function submitProjectSourceNativePreview(projectId, source, idempotencyKey, { signal, expectedScope } = {}) {

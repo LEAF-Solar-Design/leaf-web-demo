@@ -8,7 +8,7 @@ import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
 import { contract, resolveManifest, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
-import { connectionStatus } from './portCompat.js'
+import { compatibleSources, connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
 import { pushRecent } from './libraryCategories.js'
 import { graphLayouts } from '../history/labArtifactsClient.js'
@@ -36,7 +36,8 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [selected, setSelected] = useState(null)
   const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
-  const [message, setMessage] = useState('')
+  const [{ message, rejectedInput, repairSource }, setNotice] = useState({ message: '' })
+  const setMessage = useCallback((message, rejectedInput) => setNotice({ message, rejectedInput }), [])
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
   const canvas = useRef(null)
@@ -98,7 +99,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       setPositions(next); setMessage('Layout updated')
     } catch (error) { if (token === request.current) setMessage(humanizeError(error)) }
     finally { if (token === request.current) setLayoutBusy(false) }
-  }, [layoutRunner])
+  }, [layoutRunner, setMessage])
   const relayout = () => {
     setLayoutBusy(true)
     const dimensions = Object.fromEntries(flow.getNodes().map(node => [node.id, node.measured || {}]))
@@ -136,6 +137,8 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     source: pipe.from.node, sourceHandle: pipe.from.port, target: pipe.to.node, targetHandle: pipe.to.port,
     data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: source.problem || target.problem ? null : source.manifest.latency_budget_us, disconnect } }
   })
+  const repairOptions = rejectedInput ? compatibleSources(document, rejectedInput, entries) : []
+  const chosenSource = repairOptions.find(from => JSON.stringify(from) === repairSource)
   return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
     if (event.key === 'Escape') setArmed(null)
     if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
@@ -185,11 +188,12 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
             }
             // React Flow can skip validation for handles disabled during the drag.
             const [source, target] = fromHandle.type === 'source' ? [fromHandle, toHandle] : [toHandle, fromHandle]
-            const status = statusOfPipe({
+            const pipe = {
               from: { node: source.nodeId, port: source.id },
               to: { node: target.nodeId, port: target.id },
-            })
-            if (!status.ok) setMessage(status.reason)
+            }
+            const status = statusOfPipe(pipe)
+            if (!status.ok) setMessage(status.reason, pipe.to)
           }}
           isValidConnection={connection => statusOfPipe(asPipe(connection)).ok}
           onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
@@ -197,7 +201,27 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         </ReactFlow>
       </div>
       {!document.blocks.length && <p>Add a block from the palette to begin.</p>}
-      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p></footer>
+      <footer>
+        <p role="status">{message}</p>
+        {repairOptions.length > 0 && <form onSubmit={event => {
+          event.preventDefault()
+          if (!chosenSource) return
+          try { connect({ from: chosenSource, to: rejectedInput }) }
+          catch (error) { setMessage(humanizeError(error), rejectedInput) }
+        }}>
+          <label>Compatible sources for {rejectedInput.node} / {rejectedInput.port}
+            <select value={chosenSource ? repairSource : ''} onChange={event => {
+              const value = event.target.value
+              setNotice(previous => ({ ...previous, repairSource: value }))
+            }}>
+              <option value="">Choose output</option>
+              {repairOptions.map(from => <option key={`${from.node}/${from.port}`} value={JSON.stringify(from)}>{from.node} / {from.port}</option>)}
+            </select>
+          </label>
+          <button type="submit" disabled={!chosenSource}>Connect pipe</button>
+        </form>}
+        <p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p>
+      </footer>
     </section>
     <OutputActionsContext.Provider value={{ set: (name, endpoint) => commit(setOutput(current.current, name, endpoint, entries)),
       remove: name => commit(removeOutput(current.current, name)) }}>

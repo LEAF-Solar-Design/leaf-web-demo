@@ -8,6 +8,7 @@ import AuthoringCard from './AuthoringCard.jsx'
 vi.mock('../../api.js', () => ({
   getAuthorStage: vi.fn(), getAuthorStageSource: vi.fn(), postReview: vi.fn(), reviewContext: vi.fn(),
   withdrawAuthorStage: vi.fn(),
+  getTenantToolStatus: vi.fn(async () => null),
 }))
 vi.mock('../../converse.js', () => ({ postMessage: vi.fn(), resolveApproval: vi.fn() }))
 vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
@@ -80,7 +81,7 @@ it('shows the staged files, source, compile and plan risks behind a self deploy'
   await mount()
   openDeployDetails()
   for (const text of ['Label every roof', 'Group by roof layer',
-    'Changes your drawing · network.read · Revises the existing tool roof', 'Branch has not reported yet']) {
+    'Changes your drawing · network.read · Revises the existing tool roof', 'Not deployed yet']) {
     expect(screen.getByText(text)).toBeVisible()
   }
   expect(screen.getByText(receipt.package_files.join(', '))).toBeVisible()
@@ -390,7 +391,8 @@ it('reads the stage contract: compile attempts by n and the Branch receipt by la
   expect(screen.getByText('Attempt 1: did not compile, CS1026 main.csx:50')).toBeVisible()
   expect(screen.getByText('Attempt 2: passed')).toBeVisible()
   expect(screen.getByText('Synced')).toBeVisible()
-  expect(screen.queryByText('Branch has not reported yet')).toBeNull()
+  expect(screen.queryByText('Not deployed yet')).toBeNull()
+  expect(screen.queryByText('Waiting for AutoCAD to pick it up')).toBeNull()
 })
 
 it.each([
@@ -503,6 +505,28 @@ it('discloses the number of HTML escapes Studio decoded in an accepted source', 
 const packageDigest = '0123456789abcdef'.repeat(4)
 const publishedPackage = { state: 'published', published_at: '2026-11-21T03:15:47Z',
   name: 'roof', version: '1.2.0', package_digest: packageDigest }
+
+it('shows the Target row after the AutoCAD row for a published card', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  await mount()
+  const row = screen.getByText('Target')
+  expect(row.tagName).toBe('DT')
+  expect(row.previousElementSibling.previousElementSibling).toHaveTextContent('AutoCAD')
+  expect(row.nextElementSibling).toHaveTextContent('Deployed to your workspace.')
+  expect(row.nextElementSibling.nextElementSibling).toBeNull()
+})
+
+it('shows the waiting message and final row labels for a published card without a branch report', async () => {
+  getAuthorStage.mockResolvedValue({ ...staged, review: selfReview, publication: publishedPackage })
+  const { container } = await mount()
+  expect(screen.getByText('AutoCAD').nextElementSibling).toHaveTextContent(/^Waiting for AutoCAD to pick it up$/)
+  expect(Array.from(container.querySelectorAll('dt'), row => row.textContent).slice(-2)).toEqual(['AutoCAD', 'Target'])
+})
+
+it('withholds the Target row for an unpublished card', async () => {
+  await mount()
+  expect(screen.queryByText('Target')).toBeNull()
+})
 
 it('shows the signed package version and digest from the server publication and copies the full digest', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined)

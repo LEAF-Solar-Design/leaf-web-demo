@@ -30,9 +30,10 @@ export function marqueeMapping(camera, bounds, start, end, heightForPolyline = (
     return flatRect && { rect: flatRect }
   }
 
-  // Allow roundoff from camera transforms at an inclusive pixel boundary.
-  const tolerance = 16 * Number.EPSILON * Math.max(1, width, height, Math.abs(left), Math.abs(top))
-  if (rect.maxX > rect.minX && rect.maxY > rect.minY) {
+  // Preserve the window's roundoff allowance. Crossing clips against the
+  // exact client rectangle, with contact included by the geometry tests below.
+  if (marqueeMode(start, end) === 'window' && rect.maxX > rect.minX && rect.maxY > rect.minY) {
+    const tolerance = 16 * Number.EPSILON * Math.max(1, width, height, Math.abs(left), Math.abs(top))
     rect.minX -= tolerance
     rect.maxX += tolerance
     rect.minY -= tolerance
@@ -57,16 +58,17 @@ function intersects(a, b, rect) {
   for (let axis = 0; axis < 2; axis++) {
     const min = axis === 0 ? rect.minX : rect.minY
     const max = axis === 0 ? rect.maxX : rect.maxY
-    const delta = b[axis] - a[axis]
-    if (delta === 0) {
-      if (a[axis] < min || a[axis] > max) return false
-    } else {
-      const t1 = (min - a[axis]) / delta
-      const t2 = (max - a[axis]) / delta
-      lo = Math.max(lo, Math.min(t1, t2))
-      hi = Math.min(hi, Math.max(t1, t2))
-      if (lo > hi) return false
-    }
+    const from = a[axis], to = b[axis]
+    // Reject endpoints on the same outside edge before computing ratios,
+    // which can round a near miss into contact at an endpoint.
+    if ((from < min && to < min) || (from > max && to > max)) return false
+    const delta = to - from
+    if (delta === 0) continue
+    const t1 = (min - from) / delta
+    const t2 = (max - from) / delta
+    lo = Math.max(lo, Math.min(t1, t2))
+    hi = Math.min(hi, Math.max(t1, t2))
+    if (lo > hi) return false
   }
   return true
 }

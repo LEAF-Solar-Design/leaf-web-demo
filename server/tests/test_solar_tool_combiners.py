@@ -27,6 +27,7 @@ import jobs
 import product_capability_availability as availability
 import solar_combiner_graph as cg
 import solar_local_graph
+import solar_local_read
 import solar_tools
 import store
 from solar_design_graph import GraphValidationError, validate_graph
@@ -494,6 +495,54 @@ def dispatch(backend, params, *, source_version=1, job_id="combiners-job"):
             source_version=source_version, holder="fixture-owner", fence=fence, job_id=job_id)
 
 
+def test_compare_combiner_models_on_same_saved_roof(tmp_path, monkeypatch):
+    name = "solar-combiner-comparison"
+    g, intake, groups = i4()
+    backend = stored(tmp_path, monkeypatch, g, source(intake, groups))
+    version = store.resolve_version_entry(backend, TENANT, "solar", 1)
+    saved_before = backend.get(version[1])
+    options = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (20, 12, 9, 7)]
+    params = {"drawing_id": "solar", "expected_rev": 0, "options": options}
+    record = solar_tools.trusted_record(name)
+    Draft7Validator(record["params"]).validate(params)
+    result = solar_local_read.run_local_graph_read(
+        backend, TENANT, name, params, drawing_id="solar", source_version=1, job_id="comparison")
+    report = result["output"]
+    Draft7Validator(record["returns"]).validate(report)
+    assert (result["source_version"], result["graph_sha256"], result["drawing_changed"]) == (1, digest(g), False)
+    assert (report["basis"], report["string_count"]) == ("nominal_input_capacity", 173)
+    refs = {string["id"] for string in g["strings"]}
+    for variant, size, count in zip(report["options"], (20, 12, 9, 7), (0, 0, 38, 73), strict=True):
+        assert (variant["model"], variant["total_dc_inputs"]) == (f"fixture-{size}", size)
+        remainder = variant["unassigned_string_refs"]
+        assert len(remainder) == count and set(remainder) <= refs
+        if count:
+            adjusted = copy.deepcopy(intake)
+            adjusted["commandContext"]["combinerBoxConnections"] = size
+            with pytest.raises(cg.CombinerCapacityError) as error:
+                place(g, adjusted, groups)
+            assert remainder == list(error.value.unplaced_string_refs)
+    proof = solar_local_read.graph_read_provenance(
+        result, params, TENANT, "comparison", name, 1, backend=backend)
+    assert proof["output_sha256"] == result["output_sha256"]
+    assert latest(backend) == 1 and store.resolve_version_entry(backend, TENANT, "solar", 1) == version
+    assert backend.get(version[1]) == saved_before
+
+
+@pytest.mark.parametrize("change", [
+    {"options": [dict(HARDWARE, total_dc_inputs=7)]},
+    {"options": [dict(HARDWARE, total_dc_inputs=7), dict(HARDWARE, total_dc_inputs=20)]},
+    {"options": [dict(HARDWARE, total_dc_inputs=7), dict(HARDWARE, model="Other", total_dc_inputs=True)]},
+    {"source_intake": {}},
+])
+def test_comparison_refuses_invalid_options_or_client_intake(graph, change):
+    valid = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (7, 20)]
+    params = {"expected_rev": graph["rev"], "options": valid}
+    with pytest.raises(GraphValidationError) as error:
+        solar_local_read._load_builtin("solar-combiner-comparison").run(graph, dict(params, **change))
+    assert error.value.code == INVALID
+
+
 def test_combiners_rail_persists_proves_and_refuses_a_second_run(c5, tmp_path, monkeypatch):
     g, intake, groups, out = c5
     backend = stored(tmp_path, monkeypatch, g, source(intake, groups))
@@ -566,6 +615,24 @@ def jobs_now():
     return [jobs.get_job(row["job_id"]) for row in jobs._query("SELECT job_id FROM jobs")]
 
 
+def test_comparison_run_rail_reads_one_saved_version(api_c5, monkeypatch):
+    name = "solar-combiner-comparison"
+    api_c5[2][name] = solar_tools.trusted_record(name)
+    monkeypatch.setitem(jobs._executors, jobs.LANE_FAST, jobs._executors[jobs.LANE_SLOW])
+    backend = api_c5[1]
+    manifest = store.load_manifest(backend, TENANT, "solar")
+    options = [dict(HARDWARE, model=f"fixture-{size}", total_dc_inputs=size) for size in (20, 9, 7)]
+    response = api_c5[0].post("/api/run?wait=1", json=body(
+        api_c5, name, {"expected_rev": 0, "options": options}))
+    assert response.status_code == 200, response.text
+    env = response.json()
+    assert env["ok"] is True and env["execution_provenance"]["execution_mode"] == "local_graph_read"
+    assert env["result"]["source_version"] == 1
+    assert [len(row["unassigned_string_refs"]) for row in env["result"]["output"]["options"]] == [0, 38, 73]
+    assert store.load_manifest(backend, TENANT, "solar") == manifest
+    assert [job["status"] for job in jobs_now()] == ["complete"]
+
+
 def test_combiners_run_rail_commits_one_job(api_c5):
     response = post(api_c5, request())
     assert response.status_code == 200, response.text
@@ -602,3 +669,98 @@ def test_combiners_builtin_refusal_reaches_the_rail(api_no_intake):
     assert store.load_manifest(api_no_intake[1], TENANT, "solar")["head"] == 1
     records = jobs_now()
     assert len(records) == 1 and records[0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("inputs", [20, 12])
+def test_combiners_capacity_fit_assigns_all_strings(inputs):
+    g, intake, groups = i4()
+    intake["commandContext"]["combinerBoxConnections"] = inputs
+    result = place(g, intake, groups)
+    assert validate_graph(result)
+    assert len(result["strings"]) == len(g["strings"])
+    assigned = [slot["string_ref"] for device in result["inverters"]
+                if device["equipment_type"] == "combiner_box" for slot in device["input_assignments"]]
+    assert sorted(assigned) == sorted(string["id"] for string in g["strings"])
+
+
+@pytest.mark.parametrize("inputs,count,refs_digest", [
+    (9, 38, "465b38f0024c2ba9911785e03b3124eace240611e1b7e0fa1724529ab15f4aa0"),
+    (7, 73, "9ad702e77ecbe972f19da1fc4d76e03f8639a52b67840ad6ca288d0fc7f19393"),
+    (5, 109, "24e2cd28304d04a0c6fcb9397264e53f90481e862658888387acafc7b25409c1"),
+])
+def test_combiners_capacity_refusal_names_every_overflow_string(inputs, count, refs_digest):
+    g, intake, groups = i4()
+    intake["commandContext"]["combinerBoxConnections"] = inputs
+    original = copy.deepcopy((g, intake, groups))
+    with pytest.raises(cg.CombinerCapacityError) as error:
+        builtin().run(g, request(), source_intake=source(intake, groups))
+    refs = error.value.unplaced_string_refs
+    assert error.value.code == "L2_CAPACITY_EXCEEDED"
+    assert len(refs) == count
+    assert refs == tuple(sorted(set(refs)))
+    assert hashlib.sha256("\n".join(refs).encode()).hexdigest() == refs_digest
+    assert (g, intake, groups) == original
+
+
+def test_combiners_capacity_refusal_reaches_the_rail(isolated_jobs, no_network, tmp_path, monkeypatch):
+    g, intake, groups = i4()
+    intake["commandContext"]["combinerBoxConnections"] = 9
+    backend = stored(tmp_path, monkeypatch, g, source(intake, groups))
+    for api in _api(backend, tmp_path, monkeypatch):
+        response = post(api, request())
+        assert response.status_code == 400, response.text
+        env = response.json()
+        assert env["reason_code"] == env["error"]["reason_code"] == "L2_CAPACITY_EXCEEDED"
+        refs = env["error"]["unplaced_string_refs"]
+        assert len(refs) == 38
+        assert hashlib.sha256("\n".join(refs).encode()).hexdigest() == (
+            "465b38f0024c2ba9911785e03b3124eace240611e1b7e0fa1724529ab15f4aa0")
+        assert latest(backend) == 1 and head_graph(backend) == g
+        records = jobs_now()
+        assert len(records) == 1 and records[0]["status"] == "failed"
+        assert records[0]["error"]["unplaced_string_refs"] == refs
+
+
+def test_combiners_capacity_refusal_reaches_project_admission(monkeypatch):
+    from uuid import UUID
+
+    import deps
+    import entitlements
+    import platform_link
+    import solar_project_admission as admission
+    import solar_tools
+
+    graph, intake, groups = i4()
+    intake["commandContext"]["combinerBoxConnections"] = 7
+    org, project_id, drawing, version = (UUID(int=i) for i in range(1, 5))
+    original = copy.deepcopy((graph, intake, groups))
+    trusted = solar_tools.trusted_record(TOOL)
+
+    def submit(tenant, project, drawing_id, version_id, tool, params, **_):
+        assert (tenant, project, drawing_id, version_id, tool) == (
+            str(org), project_id, drawing, version, TOOL)
+        return builtin().run(graph, params, source_intake=source(intake, groups))
+
+    monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    monkeypatch.setattr(entitlements, "resolve_tier", lambda _: "hosted_pro")
+    monkeypatch.setattr(entitlements, "resolve_roles", lambda _: ((), False))
+    monkeypatch.setattr(entitlements, "entitlements_for", lambda *_: {"run_write": True})
+    monkeypatch.setattr(platform_link, "resolve_submission_context", lambda *_: {
+        "org_id": org, "project_id": project_id, "authority_mode": "postgres_canonical",
+    })
+    monkeypatch.setattr(platform_link, "submit_canonical_graph", submit)
+    response = admission.project_tool_admission(
+        trusted, str(org), org_header=str(org), project_header=str(project_id), authorization=None,
+        input_version_id=version, drawing_id=drawing, params=request(),
+        catalog_digest=deps.catalog_tool_digest(trusted), idempotency_key="combiner-capacity",
+        checkout_capability=None, preview=False,
+    )
+    assert response["status_code"] == 409
+    error = response["content"]["error"]
+    assert error["reason_code"] == "L2_CAPACITY_EXCEEDED"
+    refs = error["unplaced_string_refs"]
+    assert len(refs) == 73
+    assert hashlib.sha256("\n".join(refs).encode()).hexdigest() == (
+        "9ad702e77ecbe972f19da1fc4d76e03f8639a52b67840ad6ca288d0fc7f19393")
+    assert (graph, intake, groups) == original

@@ -412,7 +412,13 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
             except ImportError:
                 timed_out = False
             return _harness_unavailable_response(timed_out=timed_out)
-        tool, code, preview = fb.author_tool(req.description)
+        try:
+            tool, code, preview = fb.author_tool(req.description)
+        except fb.InvalidEdgeDistance as exc:
+            return JSONResponse(status_code=422, content=with_envelope_fields({
+                "error": error_obj("BAD_PARAMS", str(exc), retryable=False),
+                "reason_code": "invalid_edge_distance",
+            }))
         source = "template"
         if harness_url:
             preview = "[harness unreachable; templated fallback] " + preview

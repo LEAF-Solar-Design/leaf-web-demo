@@ -302,10 +302,10 @@ def _compact_frames(graph) -> list:
 
 
 def decode_graph_slots(graph) -> dict:
-    """{frame id: SlotTable} for every compact frame, in frame order. Admits the graph with
-    _bounded_json, checks every frame agreement and the graph slot bound before decoding any row,
-    then refuses a panel id repeated across blocks."""
-    _bounded_json(graph)
+    """{frame id: SlotTable} for every compact frame, in frame order. Applies the saved graph
+    budget, checks frame agreement and the graph slot bound before decoding any row, then
+    refuses a panel id repeated across blocks."""
+    _bounded_json(graph, max_nodes=_graph.MAX_GRAPH_NODES)
     if type(graph) is not dict:
         raise GraphValidationError("INVALID_GRAPH")
     tables, ids = {}, set()

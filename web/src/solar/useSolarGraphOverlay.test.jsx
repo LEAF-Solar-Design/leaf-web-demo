@@ -143,6 +143,31 @@ const engine = (result, input, index = 0) => {
 }
 
 describe('unmounted Solar graph overlay hook', () => {
+  it.each([
+    ['ordinary Rooftop', () => inputFor(roofAt(.0254)), { refreshPending: true }, 'refresh_pending'],
+    ['compact Ground', () => inputFor(ground()), { sceneCurrent: false }, 'drawing_mismatch'],
+    ['engine head', () => engineFor(), { engineDirty: true }, 'drawing_mismatch'],
+  ])('keeps the %s overlay while its drawing is unchanged', (_, fixture, blocked, reason) => {
+    const input = fixture()
+    const h = mount(input)
+    const first = h.result.current.solarOverlay
+    expect(first?.polylines.length).toBeGreaterThan(0)
+    h.rerender({ ...input, engineDocument: input.engineDocument && { ...input.engineDocument } })
+    expect(h.result.current.solarOverlay).toBe(first)
+
+    h.rerender({ ...input, ...blocked })
+    expect(h.result.current).toEqual(N(reason))
+    h.rerender(input)
+    expect(h.result.current.solarOverlay).toEqual(first)
+
+    const next = input.activeIntake
+      ? { ...engineFor(input, 'D-v8.dxf'), activeVersion: 8,
+        engineDocument: { ...input.engineDocument, documentId: 'D-v8.dxf', committedVersion: 8 } }
+      : { ...input, drawingKey: 'console:E', requestedDrawingId: 'E', shown: { ...input.shown } }
+    h.rerender(next)
+    expect(h.result.current.solarOverlay).not.toBe(first)
+    expect(h.result.current.solarOverlay.intake).toBe(next.activeIntake ?? next.shown)
+  })
   it('A1B1-H01 disabled skips projection', () => {
     const throwing = Object.defineProperty({}, 'solar_design_graph', {
       get() { throw new Error('private graph message') },

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import ResultPanel from './ResultPanel.jsx'
+import { recordToEnvelope } from '../api.js'
 import { humanizeError } from '../errorHumanize.js'
 import { SINGLE_KEY_SHORTCUTS_KEY, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import { act, waitFor } from '@testing-library/react'
@@ -85,6 +86,36 @@ describe('ResultPanel outcome fallbacks', () => {
   })
 })
 
+
+describe('ResultPanel combiner capacity detail', () => {
+  const refs = [
+    'leaf:string:9f32fc53-0172-4497-96c0-a4b5fd08d56e',
+    'leaf:string:bc46923f-e333-4a18-9997-f57fec62c295',
+  ]
+  const failed = {
+    status: 'failed', tool: 'solar-combiners', error: { error_code: 'BAD_PARAMS',
+      reason_code: 'L2_CAPACITY_EXCEEDED', message: 'Combiner placement exceeds inverter collector capacity.',
+      unplaced_string_refs: refs, retryable: false },
+  }
+
+  it('shows the complete list from the failed job response', () => {
+    render(<ResultPanel result={recordToEnvelope(failed)} />)
+    const summary = screen.getByText('2 strings could not be placed')
+    summary.parentElement.open = true
+    const list = screen.getByRole('list', { name: 'Unplaced strings' })
+    expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual(refs)
+  })
+
+  it.each([
+    ['solar-homerun', 'L2_CAPACITY_EXCEEDED', refs],
+    ['solar-combiners', 'BAD_PARAMS', refs],
+    ['solar-combiners', 'L2_CAPACITY_EXCEEDED', [refs[0], 'not-a-string-ref']],
+  ])('omits unrelated or invalid detail (%s, %s)', (tool, reason, reportedRefs) => {
+    const record = { ...failed, tool, error: { ...failed.error, reason_code: reason, unplaced_string_refs: reportedRefs } }
+    render(<ResultPanel result={recordToEnvelope(record)} />)
+    expect(screen.queryByText(/could not be placed/)).toBeNull()
+  })
+})
 
 describe('ResultPanel row arrays', () => {
   it('renders every layer and bound in supplied order alongside the scalar summary', () => {

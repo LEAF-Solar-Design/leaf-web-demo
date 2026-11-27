@@ -60,13 +60,19 @@ def _mleader_number(value, integer=False):
         raise DxfParseError("malformed MLEADER numeric value") from exc
 
 
-def parse_dxf_file(path: Path, *, source_name: str = "") -> Dict[str, Any]:
+def parse_dxf_file(
+    path: Path, *, source_name: str = "", include_model_entity_counts: bool = False,
+) -> Dict[str, Any]:
     raw = Path(path).read_bytes()
-    return parse_dxf_bytes(raw, source_name=source_name or Path(path).name)
+    return parse_dxf_bytes(
+        raw, source_name=source_name or Path(path).name,
+        include_model_entity_counts=include_model_entity_counts,
+    )
 
 
 def parse_dxf_bytes(
-    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True
+    raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True,
+    include_model_entity_counts: bool = False,
 ) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
@@ -126,7 +132,9 @@ def parse_dxf_bytes(
     objects = {}
     elevation_evidence = []
     model_records = {}
+    model_entity_counts: Dict[str, int] = {}
     textstyles = {}
+    text_style_catalogue = {}
     mleader_records = []
 
     i = 0
@@ -134,6 +142,9 @@ def parse_dxf_bytes(
     active_layer = None
     insunits = None
     declared_units = set()
+    format_header_codes = {"$ACADVER": 1, "$DWGCODEPAGE": 3}
+    format_declarations: dict[str, str] = {}
+    conflicting_format_fields: set[str] = set()
     section: Optional[str] = None
     while i < n:
         code, value = pairs[i]
@@ -150,6 +161,13 @@ def parse_dxf_bytes(
         if section == "HEADER" and code == 9 and value == "$CLAYER":
             if i + 1 < n and pairs[i + 1][0] == 8 and pairs[i + 1][1]:
                 active_layer = pairs[i + 1][1]
+        if section == "HEADER" and code == 9 and i + 1 < n:
+            field = value.upper()
+            value_code, declaration = pairs[i + 1]
+            if format_header_codes.get(field) == value_code and declaration:
+                declaration = declaration.upper()
+                if format_declarations.setdefault(field, declaration) != declaration:
+                    conflicting_format_fields.add(field)
         if section == "HEADER" and (code, value) == (9, "$INSUNITS"):
             if i + 1 < n and pairs[i + 1][0] == 70:
                 try:
@@ -171,8 +189,14 @@ def parse_dxf_bytes(
             continue
         if section == "TABLES" and code == 0 and value == "STYLE":
             groups, i = _entity_groups(pairs, i + 1)
+            name = groups.get(2, "")
             if groups.get(5):
-                textstyles[groups[5].upper()] = groups.get(2, "")
+                textstyles[groups[5].upper()] = name
+            if name and name.casefold() != "standard":
+                text_style_catalogue.setdefault(name.casefold(), {
+                    "name": name,
+                    **{field: groups[code] for code, field, _ in _TEXT_STYLE_FIELDS if code in groups},
+                })
             continue
         if section == "TABLES" and code == 0 and value == "LAYER":
             # the next code-2 before the next code-0 names the layer
@@ -253,6 +277,10 @@ def parse_dxf_bytes(
                 space_info["space"] = "paper"
             if not space_info.get("space"):
                 space_info.clear()
+                # Compound children belong to their INSERT or POLYLINE parent.
+                if include_model_entity_counts and value not in ("ATTRIB", "VERTEX", "SEQEND"):
+                    layer = next((v for c, v in record if c == 8), "0") or "0"
+                    model_entity_counts[layer] = model_entity_counts.get(layer, 0) + 1
             elif not layout or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout):
                 # Keep paper classification without exporting an invalid name or inventing a tab.
                 space_info.pop("layout", None)
@@ -366,6 +394,10 @@ def parse_dxf_bytes(
             continue
         i += 1
 
+    if conflicting_format_fields:
+        fields = ", ".join(sorted(conflicting_format_fields))
+        raise DxfParseError(f"conflicting DXF header declarations: {fields}")
+
     resolved_inserts = []
     beam_insert_placements = {}
     for entity in inserts:
@@ -382,6 +414,8 @@ def parse_dxf_bytes(
             if entity.get("handle") in insert_properties:
                 properties[entity["handle"]] = insert_properties[entity["handle"]]
     out: Dict[str, Any] = {"dwg": source_name, "layers": layers, "polylines": polylines}
+    if include_model_entity_counts:
+        out["model_entity_counts"] = model_entity_counts
     if beam_polyline3d_handles:
         out["beam_polyline3d_handles"] = beam_polyline3d_handles
     if beam_insert_placements:
@@ -477,6 +511,14 @@ def parse_dxf_bytes(
         # ADDITIVE Â§1 field (frontend ignores unknown keys): drawing labels for tools
         # that classify views by the text inside a frame.
         out["texts"] = texts
+    used_text_styles = {row["style"].casefold() for row in texts if "style" in row}
+    used_text_styles.update(child["style"].casefold()
+                            for block in blocks.values() for child in block["children"]
+                            if child["kind"] == "TEXT" and "style" in child)
+    captured_styles = {key: text_style_catalogue[key] for key in sorted(used_text_styles)
+                       if key in text_style_catalogue}
+    if captured_styles:
+        out["text_styles"] = captured_styles
     if circles:
         out["circles"] = circles
     if arcs:
@@ -746,26 +788,55 @@ def _parse_insert(pairs, i, dropped=None, include_measurement_evidence=False):
                 groups.get(62), groups.get(6), groups.get(370), groups.get(420), dropped)}, i
 
 
+class _DroppedBlockGeometry(ValueError):
+    """An invalid geometric primitive the legacy DXF parser already discarded."""
+
+
+def _block_polyline_edges(pairs, groups):
+    thickness = float(groups.get(39, "0"))
+    if not math.isfinite(thickness):
+        raise ValueError("LWPOLYLINE thickness must be finite")
+    bulges = []
+    bulge_seen = False
+    for code, value in pairs:
+        if code == 10:
+            bulges.append(0.0)
+            bulge_seen = False
+        elif code == 42:
+            bulge = float(value)
+            if not bulges or bulge_seen or not math.isfinite(bulge):
+                raise ValueError("LWPOLYLINE needs one finite bulge per vertex at most")
+            bulges[-1] = bulge
+            bulge_seen = True
+    return thickness, bulges
+
+
 def _parse_block_child(pairs, i, kind):
     groups, end = _entity_groups(pairs, i)
     child = {"kind": kind, "layer": groups.get(8, "0") or "0"}
     properties = _entity_properties(groups.get(62), groups.get(6), groups.get(370), groups.get(420))
     if properties is not None:
         child["properties"] = properties
+    if kind == "LWPOLYLINE":
+        thickness, bulges = _block_polyline_edges(pairs[i:end], groups)
     if kind in ("POINT", "LINE", "LWPOLYLINE", "CIRCLE", "ARC"):
         # These children must not inherit the legacy top-level parsers'
         # substitution of zero for unreadable coordinates.
         for code, value in pairs[i:end]:
             if code in (10, 20, 30, 11, 21, 31, 38, 40, 50, 51, 210, 220, 230):
-                if not math.isfinite(float(value)):
-                    raise ValueError("malformed block geometry")
+                try:
+                    numeric = float(value)
+                except ValueError as exc:
+                    raise _DroppedBlockGeometry(str(exc)) from exc
+                if not math.isfinite(numeric):
+                    raise _DroppedBlockGeometry("malformed block geometry")
     if kind == "POINT":
         if not all(code in groups for code in (10, 20)):
-            raise ValueError("POINT needs a complete position")
+            raise _DroppedBlockGeometry("POINT needs a complete position")
         child["pt"] = [round(v, 3) for v in _group_point(groups)]
     elif kind == "LINE":
         if not all(code in groups for code in (10, 20, 11, 21)):
-            raise ValueError("LINE needs two points")
+            raise _DroppedBlockGeometry("LINE needs two points")
         entity, end = _parse_line(pairs, i)
         child["pts"] = [[round(v, 3) for v in p] for p in entity["pts"]]
     elif kind == "LWPOLYLINE":
@@ -773,15 +844,19 @@ def _parse_block_child(pairs, i, kind):
         if (len(entity["pts"]) < 2 or
                 sum(code == 10 for code, _ in pairs[i:end]) !=
                 sum(code == 20 for code, _ in pairs[i:end])):
-            raise ValueError("LWPOLYLINE needs at least two complete points")
+            raise _DroppedBlockGeometry("LWPOLYLINE needs at least two complete points")
         child.update(closed=entity["closed"],
                      nrm=[round(v, 6) for v in _group_point(groups, 210, (0, 0, 1))],
                      elev=round(_float(groups.get(38, "0")), 3),
                      pts=[[round(v, 3) for v in p[:2]] for p in entity["pts"]])
+        if thickness:
+            child["thickness"] = thickness
+        if any(bulges):
+            child["bulges"] = bulges
     elif kind in ("CIRCLE", "ARC"):
         entity, end = _parse_circle_or_arc(pairs, i, kind)
         if entity is None or round(entity["r"], 3) <= 0:
-            raise ValueError(f"{kind} radius must be positive")
+            raise _DroppedBlockGeometry(f"{kind} radius must be positive")
         # BKE centres are block-local OCS points; the normal is the child's
         # own 210/220/230 (default +z), matching the top-level CI/AR shape.
         child.update(c=[round(v, 3) for v in _group_point(groups)], r=round(entity["r"], 3),
@@ -796,6 +871,8 @@ def _parse_block_child(pairs, i, kind):
                      height=round(_float(groups.get(40, "0")), 3),
                      rot=round(_float(groups.get(50, "0")), 6),
                      text=" ".join(value.split())[:_TEXT_MAX_CHARS])
+        if "style" in entity:
+            child["style"] = entity["style"]
     else:
         child = {"kind": "OTHER", "type": kind, "layer": ""}
         if kind == "POLYLINE":
@@ -1053,6 +1130,8 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     block["nested_inserts_incomplete"] = True
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
+            if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:
+                block["dropped_legacy_geometry"] = block.get("dropped_legacy_geometry", 0) + 1
             if include_measurement_evidence and kind in ("LINE", "LWPOLYLINE", "POLYLINE", "SPLINE", "ARC", "ELLIPSE"):
                 block["beam_paths_incomplete"] = True
             if kind == "INSERT":
@@ -1513,6 +1592,16 @@ def _parse_line(pairs: List[Tuple[int, str]], i: int, dropped=None):
 _MTEXT_FORMAT_CODES = ("\\p", "\\f", "\\F", "\\H", "\\W", "\\C", "\\c", "\\Q", "\\T", "\\A", "\\S")
 _MTEXT_TOGGLE_CODES = ("\\L", "\\l", "\\O", "\\o", "\\K", "\\k")
 _TEXT_MAX_CHARS = 512
+_TEXT_STYLE_FIELDS = (
+    (70, "flags", "0"),
+    (40, "height", "0.0"),
+    (41, "width", "1.0"),
+    (50, "oblique", "0.0"),
+    (71, "generation_flags", "0"),
+    (42, "last_height", "0.2"),
+    (3, "font", "arial.ttf"),
+    (4, "bigfont", ""),
+)
 
 
 def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
@@ -1531,6 +1620,7 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
     x = y = z = 0.0
     normal = [0.0, 0.0, 1.0]
     parts: List[str] = []
+    style = ""
     n = len(pairs)
     while i < n and pairs[i][0] != 0:
         code, value = pairs[i]
@@ -1550,6 +1640,8 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
             normal[1] = _float(value)
         elif code == 230:
             normal[2] = _float(value)
+        elif code == 7:
+            style = value
         elif code == 3:
             parts.append(value)
         elif code == 1:
@@ -1571,6 +1663,8 @@ def _parse_text(pairs: List[Tuple[int, str]], i: int, kind: str):
     entity: Dict[str, Any] = {"kind": kind, "layer": layer, "pt": pt, "text": text, "handle": handle}
     if not identity:
         entity["normal"] = [round(v, 6) for v in normal]
+    if style and style.casefold() != "standard":
+        entity["style"] = style
     return entity, i
 
 

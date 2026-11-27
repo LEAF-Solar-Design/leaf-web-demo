@@ -3,6 +3,7 @@ import { getAuthorStage, getAuthorStageSource, postReview, reviewContext, withdr
 import { postMessage } from '../../converse.js'
 import { track } from '../../telemetry.js'
 import { capabilityLabel } from './PlanCard.jsx'
+import DeployTarget from './DeployTarget.jsx'
 import './inlineAuthoring.css'
 
 const notReported = 'Not reported'
@@ -374,7 +375,8 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
               onClick={() => navigator.clipboard?.writeText(packageDigest)?.catch(() => {})}>Copy</button>
           </span>}</>
         : publishLabels[publicationState] || (['queued', 'running', 'staged'].includes(stage?.status) ? 'Not yet' : notReported)}</dd>
-      <dt>Branch</dt><dd>{branchSummary(stage?.branch) || 'Branch has not reported yet'}</dd>
+      <dt>AutoCAD</dt><dd>{branchSummary(stage?.branch) || (published ? 'Waiting for AutoCAD to pick it up' : 'Not deployed yet')}</dd>
+      {published && <DeployTarget />}
     </dl>
     {(readError || reviewError) && <p role="alert">{readError || reviewError} <button type="button" className="chip-neutral"
       onClick={refreshStage}>Check again</button></p>}

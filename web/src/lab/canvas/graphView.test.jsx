@@ -434,6 +434,68 @@ describe('project corpus evaluation flow', () => {
     expect(onRun).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { change: 'a warm account switch', subject: 'second', warm: true, crossTab: false },
+    { change: 'an account switch with a pending old response', subject: 'second', warm: false, crossTab: false },
+    { change: 'a cross-tab role change for the same account', subject: 'first', warm: true, crossTab: true },
+  ])('checks the current saved catalog after $change', async ({ subject, warm, crossTab }) => {
+    const previousToken = localStorage.getItem('leaf.jwt')
+    const token = (sub, role) => `e30.${btoa(JSON.stringify({ sub, role }))}.test`
+    const firstToken = token('first', 'editor')
+    const nextToken = token(subject, 'viewer')
+    const response = options()
+    const graph = addBlock(emptyGraph(), response.manifest)
+    graph.blocks[0].settings = { project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } }
+    const client = clientFor(graph, {})
+    const pending = []
+    vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+      if (!String(url).includes('/corpus-options?')) return { ok: true, json: async () => ({ runs: [] }) }
+      return new Promise(resolve => pending.push({
+        auth: new Headers(init.headers).get('Authorization'),
+        settle: status => resolve({ status, ok: status === 200, json: async () => response }),
+      }))
+    }))
+    localStorage.setItem('leaf.jwt', firstToken)
+    try {
+      render(<GraphView client={client} onRun={vi.fn()} />)
+      act(() => client.takeGraph(graph))
+      await waitFor(() => expect(pending).toHaveLength(1))
+      const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
+      const run = () => readiness.getByRole('button', { name: 'Run graph' })
+      if (warm) {
+        await act(async () => { pending[0].settle(200) })
+        await readiness.findByText('Ready', { exact: true })
+        expect(run()).toBeEnabled()
+      }
+
+      act(() => {
+        localStorage.setItem('leaf.jwt', nextToken)
+        if (crossTab) window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: nextToken }))
+        else authLifecycle.stored.forEach(listener => listener())
+      })
+      await waitFor(() => expect(pending).toHaveLength(2))
+      expect(pending.map(request => request.auth)).toEqual([`Bearer ${firstToken}`, `Bearer ${nextToken}`])
+      if (!warm) await act(async () => { pending[0].settle(200) })
+      expect(run()).toBeDisabled()
+      await act(async () => { pending[1].settle(403) })
+      expect(await readiness.findByRole('alert')).toHaveTextContent('Saved corpus controls are unavailable')
+      expect(run()).toBeDisabled()
+      fireEvent.click(readiness.getByRole('button', { name: 'Retry corpus controls' }))
+      await waitFor(() => expect(pending).toHaveLength(3))
+      expect(pending[2].auth).toBe(`Bearer ${nextToken}`)
+      await act(async () => { pending[2].settle(200) })
+      await readiness.findByText('Ready', { exact: true })
+      expect(run()).toBeEnabled()
+      expect(client.state.restoredGraph).toEqual(graph)
+    } finally {
+      cleanup()
+      if (previousToken === null) localStorage.removeItem('leaf.jwt')
+      else localStorage.setItem('leaf.jwt', previousToken)
+    }
+  })
+
   it('restores ordinary readiness when the last unresolved corpus block is removed from the draft', async () => {
     const { manifest } = options()
     const graph = addBlock(addBlock(emptyGraph(), registry['constant@1.0.0']), manifest)

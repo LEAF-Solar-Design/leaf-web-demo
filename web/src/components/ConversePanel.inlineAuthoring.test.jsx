@@ -73,10 +73,12 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
       branch: { synced: true, compile: { status: 'passed' }, ran: true, summary: 'Counted 12 panels' } },
   ]
   const requests = []
+  let statusCalls = 0
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const { pathname, search } = new URL(url, 'http://test')
     const path = pathname + search
     const body = init.body ? JSON.parse(init.body) : undefined
+    if (path === '/api/tool-envelopes/tenant/status') { statusCalls++; return response(404, {}) }
     requests.push([init.method || 'GET', path, body])
     if (path === '/api/sessions/session/messages') return response(202, { turn_id: body.answers ? 'answer' : 'build' })
     if (path === '/api/agent/approvals/p1') return response(200, { resolved: true })
@@ -111,7 +113,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     event('tool_result', 'build', built), event('turn_complete', 'build'))
   const build = screen.getByRole('region', { name: 'Tool authoring' })
   expect(build).toHaveTextContent('Waiting to start')
-  expect(build).toHaveTextContent('Branch has not reported yet')
+  expect(build).toHaveTextContent('Not deployed yet')
   await tick(1999)
   expect(build).toHaveTextContent('Waiting to start')
   await tick(1)
@@ -126,7 +128,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   expect(build).toHaveTextContent('Published to your plugin catalog')
   expect(requests.at(-1)).toEqual(['GET', stagePath, undefined])
   await tick(3199)
-  expect(build).toHaveTextContent('Branch has not reported yet')
+  expect(build).toHaveTextContent('Waiting for AutoCAD to pick it up')
   await tick(1)
   expect(build).toHaveTextContent('Synced · Compile · passed · Ran · Counted 12 panels')
   await tick(5000)
@@ -139,6 +141,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     ['POST', reviewPath, { change_set_id: id, staged_commit: commit, catalog_digest: digest, decision: 'approve' }],
     ['GET', stagePath, undefined], ['GET', stagePath, undefined],
   ])
+  expect(statusCalls).toBeGreaterThanOrEqual(1)
   expect(track).toHaveBeenCalledWith('plan.approved', { revision: 1 })
   expect(track).toHaveBeenCalledWith('review.decided', { decision: 'approve', approval_kind: 'independent' })
 })

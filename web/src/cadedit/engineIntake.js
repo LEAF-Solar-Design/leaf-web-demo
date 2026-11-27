@@ -782,15 +782,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     }
     if (entity?.type === 'DIMENSION') {
       if (entity.dimtype === 'LINEAR' || entity.dimtype === 'ALIGNED') {
-        const schematic = dimensionSchematic(entity)
-        if (!schematic.length) continue
-        const [a, b] = schematic[2].pts
-        const batch = [...schematic.slice(0, 5), ...textGlyphPolylines({
-          text: formatMeasurement(entity.measurement),
-          pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + DIM_TEXT_GAP, a[2]],
-          height: DIM_TEXT_HEIGHT, centered: true,
-          handle: schematic[2].handle, layer: schematic[2].layer,
-        })]
+        const batch = dimensionDrawPolylines(entity)
         const size = batch.reduce((sum, pl) => sum + pl.pts.length, 0)
         if (points + size > MAX_POINTS) { truncated += 1; continue }
         points += size
@@ -883,4 +875,49 @@ export function intakeRoundPolylines(intake) {
     out.push({ handle: String(a.handle ?? ''), layer: typeof a.layer === 'string' && a.layer ? a.layer : '0', pts: arcPoints(centre[0], centre[1], centre[2], a.r, a.start_deg, a.end_deg), closed: false })
   }
   return out
+}
+
+function dimensionDrawPolylines(entity) {
+  const schematic = dimensionSchematic(entity)
+  if (!schematic.length) return []
+  const { pts: [a, b], handle, layer } = schematic[2]
+  return [...schematic.slice(0, 5), ...textGlyphPolylines({
+    text: formatMeasurement(entity.measurement),
+    pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 + DIM_TEXT_GAP, a[2]],
+    height: DIM_TEXT_HEIGHT, centered: true, handle, layer,
+  })]
+}
+
+// The server intake carries DXF dimensions separately from its polylines.
+// Model-space records omit space metadata, including in older saved intakes.
+export function intakeDimensionPolylines(intake) {
+  const dimensions = intake?.dimensions
+  const polylines = []
+  let truncated = 0
+  if (!Array.isArray(dimensions) || intake.source === 'engine') return { polylines, truncated }
+  let points = 0
+  for (const dimension of dimensions) {
+    if (dimension?.type !== 'LINEAR' && dimension?.type !== 'ALIGNED') continue
+    if (dimension.space === 'paper') continue
+    if (typeof dimension.layout === 'string' && dimension.layout && dimension.layout.toLowerCase() !== 'model') continue
+    const { handle } = dimension
+    if (typeof handle !== 'string' || !handle.trim()) continue
+    const batch = dimensionDrawPolylines({
+      dimtype: dimension.type,
+      def1: dimension.p1,
+      def2: dimension.p2,
+      dimline: dimension.dimline,
+      rotationDeg: dimension.rotation_deg,
+      measurement: dimension.measurement,
+      layer: dimension.layer,
+    })
+    const size = batch.reduce((sum, polyline) => sum + polyline.pts.length, 0)
+    if (points + size > MAX_POINTS) {
+      truncated++
+      continue
+    }
+    for (const polyline of batch) polylines.push({ ...polyline, handle, strokeOnly: true })
+    points += size
+  }
+  return { polylines, truncated }
 }

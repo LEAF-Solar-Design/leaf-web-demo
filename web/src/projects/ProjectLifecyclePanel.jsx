@@ -25,6 +25,7 @@ import ExportDialog from './ExportDialog.jsx'
 import Membership from './Membership.jsx'
 import OrgInvitations from './OrgInvitations.jsx'
 import ReceiptPanel from './ReceiptPanel.jsx'
+import ProjectOptimizerCoverage from './ProjectOptimizerCoverage.jsx'
 import { ENV_LIFECYCLE_UI } from './flag.js'
 import useProjectLifecycle from './useProjectLifecycle.js'
 
@@ -242,6 +243,14 @@ export default function ProjectLifecyclePanel({
             <ExportDialog onExport={runExport} onDismiss={() => setOpenTool(null)} />
           )}
 
+          {lifecycle.project?.project_id === projectId && lifecycle.project.org_id && lifecycle.viewerId && (
+            <ProjectOptimizerCoverage
+              key={JSON.stringify([lifecycle.project.org_id, projectId, lifecycle.viewerId])}
+              orgId={lifecycle.project.org_id}
+              projectId={projectId}
+              viewerId={lifecycle.viewerId}
+            />
+          )}
           <ReceiptPanel receipts={receipts} />
 
           <DangerZone

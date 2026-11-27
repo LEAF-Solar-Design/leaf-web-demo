@@ -98,6 +98,20 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(setStoredOrgId).not.toHaveBeenCalled()
   })
 
+  it('offers Open in Studio above the legacy connect controls only when signed in (M3 S4)', async () => {
+    mountUnbound()
+    await act(async () => {})
+    const open = screen.getByRole('button', { name: 'Open in Studio' })
+    const heading = screen.getByRole('heading', { name: 'Or connect to a drawing version already in Studio' })
+    expect(open.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    cleanup()
+    isSignedIn.mockReturnValue(false)
+    mountUnbound()
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: 'Open in Studio' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy()
+  })
+
   it('does not rewrite a matching org or refetch identity on org storage events', async () => {
     const storedOrg = 'abcdef12-1111-4111-8111-111111111111'
     getStoredOrgId.mockReturnValue(storedOrg)

@@ -70,16 +70,36 @@ async function openProjectPanel(page) {
   return page.getByRole('region', { name: 'Project sidebar', exact: true })
 }
 
-async function openProjectUI(page) {
+async function openProjectUI(page, name = projectName) {
   await navigateProject(page)
-  const sidebar = await openProjectPanel(page)
-  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name: projectName, exact: true }).click()
-  await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
+  const switcher = page.getByRole('button', { name: /^Projects: change project\./ })
+  const selected = page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })
+  await expect(switcher).toBeVisible()
+  if (!(await selected.isVisible())) {
+    await switcher.click()
+    const projects = page.getByRole('group', { name: 'All projects', exact: true })
+    await projects.getByRole('menuitem').filter({ has: page.getByText(name, { exact: true }) }).click()
+  }
+  await expect(selected).toBeVisible()
+}
+
+async function ensureProjectSidebar(page) {
+  const toggle = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
+  await expect(toggle).toBeVisible()
+  if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click()
+  const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
+  await expect(sidebar).toBeVisible()
+  return sidebar
+}
+
+async function openProjectMaterial(page) {
+  const sidebar = await ensureProjectSidebar(page)
+  await sidebar.getByRole('button', { name: 'Material', exact: true }).click()
+  return sidebar.getByRole('region', { name: 'Material', exact: true })
 }
 
 async function openVersionUI(page, version) {
-  await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
-  const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
+  const sidebar = await ensureProjectSidebar(page)
   await sidebar.getByRole('combobox', { name: 'Canonical drawing version', exact: true }).selectOption(version)
   await sidebar.getByRole('button', { name: 'Close Project', exact: true }).click()
   await page.getByRole('combobox', { name: 'Workspace profile', exact: true }).selectOption({ label: 'Solar CAD' })
@@ -165,14 +185,11 @@ test('project_browser_create_import', async ({ browser }, info) => {
       check(stored.project_id === project.project_id && stored.organization_id === metadata.organization_id)
       await checkpoint(info, 'ui_project_created')
       await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
-      // The board's drawing tile opens the live Material pane; upload completion imports through useMaterialIntake.
-      await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
-      await page.getByRole('region', { name: 'Project sidebar', exact: true }).getByRole('region', { name: 'Drawing', exact: true }).getByRole('button').click()
+      const material = await openProjectMaterial(page)
       const attached = response(page, 'POST', `/api/projects/${project.project_id}/drawing-versions/import`, data => {
         const v = data.drawing_version
         return { project_id: v.project_id, drawing_id: v.drawing_id, input_version_id: v.version_id, organization_id: v.org_id }
       })
-      const material = page.getByRole('region', { name: 'Material', exact: true })
       await expect(material.getByText(`Material attaches to ${projectName}`, { exact: true })).toBeVisible()
       await expect(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
       await material.getByLabel('Drawing file', { exact: true }).setInputFiles(fixture)
@@ -286,9 +303,7 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
       stored.units.drawing_units === 'm' && stored.units.meters_per_unit === 1)
     await checkpoint(info, 'settings_readback')
     await releaseCheckout(page)
-    await page.reload()
-    await openProjectUI(page)
-    await openVersionUI(page, published.output_version_id)
+    await reopenProjectVersion(page, projectName, published.output_version_id)
     const reopenedForm = await openSettingsForm(page)
     await expect(reopenedForm.getByLabel('Panel layer contains', { exact: true })).toHaveValue('PP3B panels')
     const reopened = await readContext(page, published.output_version_id)
@@ -332,11 +347,8 @@ async function takeCheckout(page, binding) {
   return acquired.fence
 }
 
-async function reopenSizingProject(page, name, versionId) {
-  await navigateProject(page)
-  const sidebar = await openProjectPanel(page)
-  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name, exact: true }).click()
-  await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
+async function reopenProjectVersion(page, name, versionId) {
+  await openProjectUI(page, name)
   await openVersionUI(page, versionId)
 }
 
@@ -344,7 +356,7 @@ async function reopenSizingProject(page, name, versionId) {
 // first, then take again.
 async function moveToHead(page, name, binding, versionId) {
   await releaseCheckout(page)
-  await reopenSizingProject(page, name, versionId)
+  await reopenProjectVersion(page, name, versionId)
   return takeCheckout(page, binding)
 }
 
@@ -431,20 +443,18 @@ async function prepareSizingProject(page, name) {
   const project = await created
   check(publicId(project.project_id) && project.organization_id === metadata.organization_id)
   await expect(page.getByRole('button', { name: `Projects: change project. Project ${name}`, exact: true })).toBeVisible()
-  await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
-  await page.getByRole('region', { name: 'Project sidebar', exact: true }).getByRole('region', { name: 'Drawing', exact: true }).getByRole('button').click()
+  const material = await openProjectMaterial(page)
   const attached = response(page, 'POST', `/api/projects/${project.project_id}/drawing-versions/import`, data => ({
     project_id: data.drawing_version.project_id, drawing_id: data.drawing_version.drawing_id,
     input_version_id: data.drawing_version.version_id, organization_id: data.drawing_version.org_id,
   }))
-  const material = page.getByRole('region', { name: 'Material', exact: true })
   await expect(material.getByText(`Material attaches to ${name}`, { exact: true })).toBeVisible()
   await expect(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
   await material.getByLabel('Drawing file', { exact: true }).setInputFiles(sizingFixture)
   const binding = await attached
   check(binding.organization_id === metadata.organization_id && binding.project_id === project.project_id &&
     publicId(binding.drawing_id) && publicId(binding.input_version_id))
-  await reopenSizingProject(page, name, binding.input_version_id)
+  await reopenProjectVersion(page, name, binding.input_version_id)
   const fence = await takeCheckout(page, binding)
   const settings = await openSettingsForm(page)
   await expect(settings).toHaveAttribute('data-mode', 'initialize')
@@ -545,7 +555,7 @@ test('project_sizing_recovery_reopen', async ({ browser }, info) => {
     await checkpoint(info, 'recovery_values_read')
     await releaseCheckout(page)
     await page.reload()
-    await reopenSizingProject(page, sizingNames.recovery, job.output_version_id)
+    await reopenProjectVersion(page, sizingNames.recovery, job.output_version_id)
     await takeCheckout(page, binding)
     const reopened = await openSizingForm(page, { ...sizingInput(binding), input_version_id: job.output_version_id })
     await expect(reopened.getByText('Saved global string length: 27', { exact: true })).toBeVisible()
@@ -561,7 +571,7 @@ test('project_sizing_read_custody', async ({ browser }, info) => {
   await withIdentity(browser, async ({ page }) => {
     check(!!recovered)
     const { binding, job, values } = recovered
-    await reopenSizingProject(page, sizingNames.recovery, job.output_version_id)
+    await reopenProjectVersion(page, sizingNames.recovery, job.output_version_id)
     await takeCheckout(page, binding)
     const form = await openGraphForm(page, 'Panel groups', 'Panel groups')
     await form.getByLabel('Group 1 name', { exact: true }).fill('PP3B group 1')
@@ -663,7 +673,7 @@ test('project_sizing_service_unknown', async ({ browser }, info) => {
     await checkpoint(info, 'service_job_terminal')
     await releaseCheckout(page)
     await page.reload()
-    await reopenSizingProject(page, sizingNames.service, binding.panels_output_version_id)
+    await reopenProjectVersion(page, sizingNames.service, binding.panels_output_version_id)
     expect(await readSizingJob(page, sizingInput(binding), accepted.job_id)).toEqual(job)
     expect((await snapshot(page, binding.project_id)).versions).toEqual(before)
     await checkpoint(info, 'service_reobserved')

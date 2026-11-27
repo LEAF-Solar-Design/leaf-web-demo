@@ -147,6 +147,31 @@ export function applyViewPose(camera, target, pose) {
   return changed
 }
 
+/** Roll a head-on view in exact quarter turns around its unchanged target. */
+export function rollDrawingCamera(camera, target, direction) {
+  const offsetZ = camera.position.z - target.z
+  const lateralOffset = Math.hypot(camera.position.x - target.x, camera.position.y - target.y)
+  // OrbitControls' spherical conversion introduces tiny drift in a head-on view.
+  if (!(offsetZ > 0 && lateralOffset <= offsetZ * 1e-10)) return false
+  const { x, y } = camera.up
+  switch (direction) {
+    case 'clockwise':
+      camera.up.set(-y, x, 0)
+      break
+    case 'counterclockwise':
+      camera.up.set(y, -x, 0)
+      break
+    case 'reset':
+      camera.up.set(0, 1, 0)
+      break
+    default:
+      return false
+  }
+  camera.lookAt(target)
+  camera.updateMatrixWorld(true)
+  return true
+}
+
 /**
  * The camera pose as plain data for the status bar and view chips:
  * position/target arrays (4-decimal, matching the dataset test hook), zoom,
@@ -184,6 +209,7 @@ export function captureCameraCarry(camera, target, { key, fitted, width, height 
     zoom: camera.zoom,
     position: [camera.position.x, camera.position.y, camera.position.z],
     target: [target.x, target.y, target.z],
+    up: camera.up.toArray(),
   }
 }
 
@@ -199,6 +225,7 @@ function carryPoseUsable(pose) {
   return [left, right, top, bottom, zoom].every(Number.isFinite)
     && zoom > 0 && right > left && top > bottom
     && finiteTriple(pose.position) && finiteTriple(pose.target)
+    && (pose.up === undefined || (finiteTriple(pose.up) && pose.up.some(value => value !== 0)))
 }
 
 /** The pose to restore, or null when the next build must refit. */
@@ -213,6 +240,7 @@ export function cameraCarry(previous, { key, width, height }) {
     key: previous.key, fitted: previous.fitted, width: previous.width, height: previous.height,
     left: previous.left, right: previous.right, top: previous.top, bottom: previous.bottom,
     zoom: previous.zoom, position: [...previous.position], target: [...previous.target],
+    up: previous.up && [...previous.up],
   }
 }
 
@@ -224,6 +252,8 @@ export function applyCameraCarry(camera, target, pose) {
   camera.zoom = pose.zoom
   camera.position.set(...pose.position)
   target.set(...pose.target)
+  if (pose.up) camera.up.set(...pose.up)
+  camera.lookAt(target)
   camera.updateProjectionMatrix()
   return true
 }

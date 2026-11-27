@@ -182,17 +182,27 @@ function* rowFields(row, path = []) {
   }
 }
 
-function findRowArrays(data, path = [], ancestors = new Set()) {
+function isScalarList(data) {
+  return Array.isArray(data) && data.length > 0 &&
+    data.every(value => value === null || ['string', 'number', 'boolean'].includes(typeof value))
+}
+
+function findRowArrays(data, path = [], ancestors = new Set(), includeScalarLists = true) {
   if (data === null || typeof data !== 'object' || ancestors.has(data)) return []
   // A row array owns discovery of its visible children, after pagination.
   if (Array.isArray(data) && data.every(isRowObject)) return [{ path, rows: data, ancestors }]
+  if (isScalarList(data)) {
+    if (!includeScalarLists) return []
+    const rows = data.map(value => ({ value: value === null || value === '' ? JSON.stringify(value) : value }))
+    return [{ path, rows, ancestors }]
+  }
   if (path.length >= MAX_ROW_DEPTH) return [{ path, value: data }]
   const next = new Set(ancestors).add(data)
   return Object.entries(data).flatMap(([key, value]) => {
     // These fields have dedicated renderers; file bytes must not become table cells.
     if (path.length === 0 && ['table', 'counts', 'files', 'warnings'].includes(key)) return []
     const fieldPath = [...path, key]
-    return findRowArrays(value, fieldPath, next)
+    return findRowArrays(value, fieldPath, next, includeScalarLists)
   })
 }
 
@@ -235,8 +245,9 @@ function RowArrayTable({ path, rows, ancestors, density }) {
   const currentPage = Math.min(page, Math.max(0, Math.ceil(rows.length / pageSize) - 1))
   const start = currentPage * pageSize
   const visibleRows = rows.slice(start, start + pageSize)
+  // The parent row's cells already show scalar lists.
   const childArrays = path.length < MAX_ROW_DEPTH
-    ? visibleRows.flatMap((row, index) => findRowArrays(row, [...path, String(start + index)], new Set(ancestors).add(rows)))
+    ? visibleRows.flatMap((row, index) => findRowArrays(row, [...path, String(start + index)], new Set(ancestors).add(rows), false))
     : []
   const columns = new Map()
   const omittedColumns = new Set()
@@ -351,9 +362,10 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   }
   if (isSolarReadResult(data)) return <SolarReadResult data={data} />
   if (data.solver === 'arlo-design') return <ArloProposalReview key={`${result.job_context?.job_id || 'local'}:${data.result_sha256}`} envelope={data} context={result.job_context} />
-  if (Array.isArray(data.strings) || data.electrical) return <>
+  const hasStringRows = Array.isArray(data.strings) && !isScalarList(data.strings)
+  if (hasStringRows || data.electrical) return <>
     <StringSummary data={data} stale={stale} />
-    {Array.isArray(data.strings) && <StringTable data={data} density={density} navigation={navigation} />}
+    {hasStringRows && <StringTable data={data} density={density} navigation={navigation} />}
     <FileLinks files={data.files} />
   </>
   const rowArrays = findRowArrays(data)
@@ -361,7 +373,8 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
     <RowArrayResults entries={rowArrays} density={density} />
     {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
   </>
-  const scalars = Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
+  const scalars = isScalarList(data) ? {} :
+    Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
   if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
     return (
       <>
@@ -398,6 +411,24 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
       : result.overlay
       ? null
       : <p className="result-empty">Completed with no output.</p>
+}
+
+const SOLAR_STRING_REF = /^leaf:string:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+function CombinerCapacityDetails({ result }) {
+  const error = result.error
+  if (result.ok !== false || result.tool !== 'solar-combiners' || error?.reason_code !== 'L2_CAPACITY_EXCEEDED') return null
+  const refs = error.unplaced_string_refs
+  if (!Array.isArray(refs) || refs.length === 0 ||
+      !refs.every((ref) => typeof ref === 'string' && SOLAR_STRING_REF.test(ref)) || new Set(refs).size !== refs.length) return null
+  return (
+    <details>
+      <summary>{refs.length} {refs.length === 1 ? 'string' : 'strings'} could not be placed</summary>
+      <ul aria-label="Unplaced strings">
+        {refs.map((ref) => <li key={ref}><code>{ref}</code></li>)}
+      </ul>
+    </details>
+  )
 }
 
 // X1 failed-act row: plain sentence naming what failed (code demoted to a
@@ -590,6 +621,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
           {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
             projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} navigation={navigation} stale={stale} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
+          <CombinerCapacityDetails result={result} />
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
           {!result.overlay && <ResultObjectLinks result={result} navigation={navigation} announce={announce} />}
 
@@ -602,6 +634,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
                 </div>
               )}
               <ResultObjectLinks result={result} navigation={navigation} announce={announce} />
+              <ResultJsonDownload result={result} selection />
               {result.overlay.markers?.length > 0 && (
                 <div className="ov-row">
                   <span className="ov-dot mk" />

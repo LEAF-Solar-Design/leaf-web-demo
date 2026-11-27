@@ -870,6 +870,36 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     const nativeDownload = await nativeEvent
     expect((await readFile(await nativeDownload.path())).equals(backend.downloads[1].bytes)).toBe(true)
     expect(backend.downloads[1]).toMatchObject({ revision: 1, target: 'ios' })
+
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    const galleryTab = preview.getByRole('button', { name: 'Cakes', exact: true })
+    await galleryTab.focus()
+    await page.keyboard.press('Enter')
+    await expect(preview.getByRole('heading', { name: 'Cakes', exact: true })).toBeVisible()
+
+    for (const name of ['About / Contact', 'Resume']) {
+      await page.keyboard.press('Tab')
+      await expect(preview.getByRole('button', { name, exact: true })).toBeFocused()
+    }
+    for (const { name, openKey, closeKey } of [
+      { name: 'Bread.jpg', openKey: 'Enter', closeKey: 'Escape' },
+      { name: 'Cake.jpg', openKey: 'Space', closeKey: 'Enter' },
+    ]) {
+      await page.keyboard.press('Tab')
+      const thumbnail = preview.getByRole('button', { name: `View ${name}`, exact: true })
+      await expect(thumbnail).toBeFocused()
+      await page.keyboard.press(openKey)
+      const dialog = preview.getByRole('dialog', { name, exact: true })
+      await expect(dialog).toBeVisible()
+      await expect(dialog.getByRole('button', { name: 'Close image', exact: true })).toBeFocused()
+      const image = dialog.getByRole('img', { name, exact: true })
+      await expect.poll(() => image.evaluate(img => img.complete && img.naturalWidth > 0 && img.naturalHeight > 0)).toBe(true)
+      await page.screenshot({ path: testInfo.outputPath(`portfolio-keyboard-${size}-${name}.png`) })
+      await page.keyboard.press(closeKey)
+      await expect(dialog).toHaveCount(0)
+      await expect(thumbnail).toBeFocused()
+    }
+
     for (const call of backend.photoCalls) expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
     expect(backend.foreign).toEqual([])
     await page.evaluate(() => { localStorage.removeItem('leaf.jwt'); window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' })) })
@@ -959,3 +989,48 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     expect(backend.foreign).toEqual([])
   })
 }
+
+test('regional contact directory saves, reloads and stays reachable in View', async ({ page }, testInfo) => {
+  test.setTimeout(scaled(180_000))
+  page.setDefaultTimeout(scaled(15_000))
+  const contacts = Array.from({ length: 12 }, (_, index) => ({
+    label: 'Regional office ' + (index + 1),
+    href: 'mailto:office' + (index + 1) + '@example.test',
+  }))
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  const backend = await installBackend(page)
+  await page.goto('/app?surface=browser')
+  let editor = await openProject(page)
+  await editor.getByRole('button', { name: 'Create a page', exact: true }).click()
+  const toolbar = page.locator('.canvas-toolbar')
+  const preview = page.locator('[data-ground="browser-asset"] .project-page')
+  await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
+  await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
+  const addContact = editor.getByRole('button', { name: 'Add contact link', exact: true })
+  for (const [index, contact] of contacts.entries()) {
+    if (index > 0) await addContact.click()
+    const fields = editor.getByRole('group', { name: 'Contact link ' + (index + 1), exact: true })
+    await fields.getByRole('textbox', { name: 'Contact link label', exact: true }).fill(contact.label)
+    await fields.getByRole('textbox', { name: 'Contact link URL', exact: true }).fill(contact.href)
+  }
+  await expect(addContact).toHaveCount(0)
+  await editor.getByRole('button', { name: 'Save page', exact: true }).click()
+  await expect(editor.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible()
+  expect(backend.revisions.at(-1)).toMatchObject({ revision: 1, document: { actions: contacts } })
+
+  await page.reload()
+  editor = await openProject(page)
+  await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeHidden()
+  await page.setViewportSize({ width: 390, height: 844 })
+  const links = preview.getByRole('link')
+  await expect(links).toHaveText(contacts.map(contact => contact.label))
+  for (const [index, contact] of contacts.entries()) {
+    await expect(links.nth(index)).toHaveAttribute('href', contact.href)
+  }
+  const last = links.last()
+  await last.scrollIntoViewIfNeeded()
+  await expect(last).toBeInViewport({ ratio: 1 })
+  await page.screenshot({ path: testInfo.outputPath('regional-directory-final-contact.png') })
+  expect(backend.foreign).toEqual([])
+})

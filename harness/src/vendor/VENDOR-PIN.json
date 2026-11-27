@@ -2,8 +2,8 @@
   "contract": "leaf.vendor-pin.v1",
   "downstream_overlays": {
     "agent/authorLoop.ts": {
-      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior. SBT-A (sbt-a-compile-gate): Branch C# compile gate at submit with the vendored Branch2025 tool-check (V18 diagnostics, structured error.compile); downstream only, retire when upstream includes equivalent behavior. SIA-W2-BIND: Bind the Studio and Branch sessions to the approved tool name. Retire when upstream includes equivalent behavior. SIA-W2-STATUS: Report bounded Branch compile attempts when staging finishes. Retire when upstream includes equivalent behavior. SCD-2: Revalidate and recompile decoded operators before binding and disclosing the accepted source; downstream only, retire when upstream includes equivalent behavior.",
-      "sha256": "40f0481bc8d10a7bf00724d27782284b721eed7b6e4140989953d8f5c328e293"
+      "reason": "w22-d2b2: registered-base revision checks on every submission and final result; retire when upstream includes equivalent behavior. GTA: a terminal provider auth refusal (oauth_org_not_allowed, authentication_failed) makes the refused account ineligible until relink or admin activate; upstream candidate, retire when upstream includes equivalent behavior. SBT (#3553/#3554): Branch authoring target routing; downstream only, retire when upstream includes equivalent behavior. SBT-B (sbt-b-revision-base): Branch revision base seeded from the latest published version and typed branch-author failure reasons; downstream only, retire when upstream includes equivalent behavior. SBT-A (sbt-a-compile-gate): Branch C# compile gate at submit with the vendored Branch2025 tool-check (V18 diagnostics, structured error.compile); downstream only, retire when upstream includes equivalent behavior. SIA-W2-BIND: Bind the Studio and Branch sessions to the approved tool name. Retire when upstream includes equivalent behavior. SIA-W2-STATUS: Report bounded Branch compile attempts when staging finishes. Retire when upstream includes equivalent behavior. SCD-2: Revalidate and recompile decoded operators before binding and disclosing the accepted source; downstream only, retire when upstream includes equivalent behavior. SCD-3: report decoded-recheck diagnostics in the refusal message; downstream only, retire when upstream includes equivalent behavior.",
+      "sha256": "f685c1f0dde5921c18c56689b69ae43fcf057acadde8fe7b0c064ae72b92bd56"
     },
     "agent/tools/submitToolProposal.ts": {
       "reason": "w22-d2b1: lossless server revision classification and exact version production; retire when upstream includes equivalent behavior. SIA-W2-BIND: Reject a proposal that differs from the approved name. Retire when upstream includes equivalent behavior.",
@@ -99,7 +99,7 @@
     }
   },
   "files": {
-    "agent/authorLoop.ts": "40f0481bc8d10a7bf00724d27782284b721eed7b6e4140989953d8f5c328e293",
+    "agent/authorLoop.ts": "f685c1f0dde5921c18c56689b69ae43fcf057acadde8fe7b0c064ae72b92bd56",
     "agent/captureGuards.ts": "ae3e2e735196115235678411a942a5a99eeec0d6f8769b920e034b9d1a73e911",
     "agent/systemPrompt.ts": "f7ca7fd5451f144f5f86cfd88931b39dbd0684e6912f1f86998ccfed923e4805",
     "agent/tools/apsTestRun.ts": "4e4794a8ac035cff1a4237de827f3f6eee4d2540689a6ee9585fc24bd5031667",

@@ -43,10 +43,16 @@ def _centroid(pts: List[List[float]]) -> Tuple[float, float]:
     return (sx / len(pts), sy / len(pts))
 
 
-def _all_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+def _model_entities_by_layer(intake: Dict[str, Any]) -> Dict[str, int]:
+    census = intake.get("model_entity_counts")
+    if census is not None:
+        return census.copy()
+
     counts: Dict[str, int] = {}
     for key in ("polylines", "inserts", "faces3d"):
         for ent in intake.get(key) or []:
+            if ent.get("space") == "paper":
+                continue
             layer = ent.get("layer", "0")
             counts[layer] = counts.get(layer, 0) + 1
     return counts
@@ -69,7 +75,7 @@ def _bounds(polylines: List[Dict[str, Any]]) -> Tuple[float, float, float, float
 # --------------------------------------------------------------------------- #
 def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None] | dict:
     layer = params.get("layer")
-    counts = _all_entities_by_layer(intake)
+    counts = _model_entities_by_layer(intake)
     if layer:
         layers = intake.get("layers") or []
         if layer not in counts and not any(
@@ -463,7 +469,7 @@ __LAYER_BINDING__
                 {"highlight_handles": [], "markers": []})
     minx, miny, maxx, maxy = min(xs), min(ys), max(xs), max(ys)
     span = min(maxx - minx, maxy - miny) or 1.0
-    margin = float(params.get("margin", round(span * 0.05, 3)))
+__MARGIN_BINDING__
     handles = []
     markers = []
     for p in polys:
@@ -488,7 +494,40 @@ _BODIES = {
 }
 
 
-def _params_schema(engine_op: str, layer: str | None) -> Dict[str, Any]:
+class InvalidEdgeDistance(ValueError):
+    """An explicit roof-edge distance could not be saved by the template."""
+
+
+_EDGE_DISTANCE_REQUEST = re.compile(
+    r"\bwithin\s+((?:[^.;!?\r\n]|\.(?=\d))+?)\s+(?:of|from)\s+"
+    r"(?:(?:a|an|the)\s+)?(?:roof\s+)?(?:edges?|perimeter|boundary)\b",
+    re.IGNORECASE,
+)
+_EDGE_DISTANCE = re.compile(
+    r"(\d{1,12}(?:\.\d{1,9})?|\.\d{1,9})\s+"
+    r"(inch(?:es)?|feet|foot|mm|cm|m|meters?|metres?|drawing\s+units?)",
+    re.IGNORECASE,
+)
+_EDGE_UNIT_METRES = {
+    "inches": 0.0254, "inch": 0.0254, "feet": 0.3048, "foot": 0.3048,
+    "mm": 0.001, "cm": 0.01, "m": 1.0,
+    "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
+}
+_PHYSICAL_MARGIN_BINDING = """
+    if "margin" in params:
+        margin = float(params["margin"])
+    else:
+        unit = intake.get("insunits")
+        metres_per_unit = {1: 0.0254, 2: 0.3048, 3: 1609.344, 4: 0.001, 5: 0.01,
+                           6: 1.0, 7: 1000.0, 10: 0.9144, 14: 0.1}
+        if intake.get("insunits_error") or (unit not in (None, 0) and unit not in metres_per_unit):
+            raise ValueError("Set a supported drawing insertion unit or supply a margin in drawing units.")
+        # Legacy rooftop intakes have inch coordinates and no insertion-unit field.
+        margin = __AMOUNT__ * (__METRES_PER_REQUEST_UNIT__ / metres_per_unit.get(unit, 0.0254))
+"""
+
+
+def _params_schema(engine_op: str, layer: str | None, margin_description: str | None) -> Dict[str, Any]:
     if engine_op == "list_layers":
         return {
             "type": "object",
@@ -503,7 +542,7 @@ def _params_schema(engine_op: str, layer: str | None) -> Dict[str, Any]:
             "type": "object",
             "properties": {"layer": layer_schema,
                            "margin": {"type": "number",
-                                      "description": "drawing units; default 5% of span"}},
+                                      "description": margin_description or "drawing units; default 5% of span"}},
             "required": [],
         }
     return {
@@ -667,6 +706,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             drawing_body = authored_layer_subtotals.build_body(family)
             summary = f"counts supported drawing entities on each layer matching {family}"
 
+    margin_description = None
     relative_layer = drawing_body is None and engine_op != "list_layers" and _QUOTED_LAYER.search(description) is None and bool(_RELATIVE_LAYER.search(description))
     if drawing_body is not None:
         layer = ""
@@ -696,6 +736,28 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
             if relative_layer:
                 name = "count-panels-current-layer"
         body = body.replace("__LAYER_BINDING__", binding)
+        if engine_op == "highlight_near_edge":
+            margin_binding = '    margin = float(params.get("margin", round(span * 0.05, 3)))'
+            requests = _EDGE_DISTANCE_REQUEST.findall(description)
+            if requests:
+                distance = _EDGE_DISTANCE.fullmatch(requests[0].strip())
+                if len(requests) != 1 or distance is None:
+                    raise InvalidEdgeDistance(
+                        "Use one numeric roof-edge distance in inches, feet, mm, cm, metres, or drawing units."
+                    )
+                amount, unit = distance.groups()
+                unit = " ".join(unit.lower().split())
+                margin_description = f"Override in drawing units. Saved distance is {amount} {unit}."
+                if unit in _EDGE_UNIT_METRES:
+                    margin_binding = (
+                        _PHYSICAL_MARGIN_BINDING
+                        .replace("__AMOUNT__", repr(float(amount)))
+                        .replace("__METRES_PER_REQUEST_UNIT__", repr(_EDGE_UNIT_METRES[unit]))
+                        .strip("\n")
+                    )
+                else:
+                    margin_binding = f'    margin = float(params.get("margin", {float(amount)!r}))'
+            body = body.replace("__MARGIN_BINDING__", margin_binding)
 
     # The description is data inside the generated docstring. Preserve its
     # backslashes so JSON escape sequences are never interpreted as Python.
@@ -709,7 +771,7 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         "description": (description or f"{verb} on layer {layer}")[:200],
         "kind": "script",
         "engine_op": engine_op,
-        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer),
+        "params": drawing_params if drawing_body is not None else _params_schema(engine_op, layer, margin_description),
         "returns": {"type": "object"},
         "capabilities": ["drawing.read"],
         "provenance": {"author": "agent", "created": _iso_now()},

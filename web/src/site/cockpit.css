@@ -1556,3 +1556,12 @@
     width: min(720px, calc(100vw - var(--ck-pane) - 16px)); margin-left: 0;
   }
 }
+
+.sent-copy-line {
+  font-size: var(--leaf-size-caption);
+  color: var(--leaf-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}

@@ -703,13 +703,56 @@ describe("Branch submit compile gate", () => {
     }
   });
 
-  it.each(["refused", "unavailable", "throws"])("retains the original refusal if decoding recheck %s", async mode => {
+  it("reports decoded refusal diagnostics while retaining the original outcome and source", async () => {
+    const source = "return 1 &lt; 2 &gt; 0;";
+    const proposal = { ...fixture("good-label-writer"), main_csx: source };
+    const decodedRefusal: Extract<BranchCompileOutcome, { status: "refused" }> = {
+      ...parserRefusal,
+      diagnostics: ["main.csx(27,8): CS1503: cannot convert from int to short"],
+      structured: [{ file: "main.csx", line: 27, column: 8, code: "CS1503", message: "cannot convert from int to short" }],
+    };
+    const compile = vi.fn(async (_name: string, files: Record<string, string>) =>
+      files["main.csx"] === source ? parserRefusal : decodedRefusal);
+    setBranchCompileCheckForTests(compile);
+    const { base, loop, sdk, bare } = await setup([proposal]);
+    const failure = await loop.stage(TENANT, "decode refused", request(base)).catch((error: unknown) => error);
+    expect((failure as AuthorLoopError).compile).toEqual({ summary: parserRefusal.summary,
+      diagnostics: parserRefusal.structured, compile_attempts: [parserAttempt] });
+    expect(sdk.replies[0].content[0].text).toBe(originalMessage +
+      "; after Studio decoded 2 HTML escapes the source still fails: " + decodedRefusal.diagnostics[0]);
+    expect(compile).toHaveBeenCalledTimes(2);
+    expect(compile.mock.calls[1][1]["main.csx"]).toBe("return 1 < 2 > 0;");
+    expect(proposal.main_csx).toBe(source);
+    expect(git(bare.dir, ["rev-parse", "refs/leaf/changes/" + CHANGE])).toBe(base);
+  });
+
+  it.each(["original", "decoded", "short"])("bounds the refusal message with a %s diagnostic list", async mode => {
+    const source = "return 1 &lt; 2;";
+    const diagnostics = Array.from({ length: 20 }, (_, i) =>
+      `main.csx(${i + 1},8): CS1503: ${mode === "short" ? "conversion failed" : "x".repeat(500)}`);
+    const original = mode === "original" ? { ...parserRefusal, diagnostics } : parserRefusal;
+    setBranchCompileCheckForTests(async (_name, files) =>
+      files["main.csx"] === source ? original : { ...refusal, diagnostics });
+    const { base, loop, sdk } = await setup([{ ...fixture("good-label-writer"), main_csx: source }]);
+    await expect(loop.stage(TENANT, "bounded refusal", request(base))).rejects.toThrow();
+    const hint = " (source contains HTML entities; write C# operators such as && < > literally)";
+    const originalPart = ("compile failed: " + original.diagnostics.slice(0, 10).join("; ")).slice(0, 1500 - hint.length) + hint;
+    const suffix = "; after Studio decoded 1 HTML escapes the source still fails: " + diagnostics.slice(0, 5).join("; ");
+    const prefix = "V18: branch-tools/label-writer/main.csx: ";
+    const message = sdk.replies[0].content[0].text.slice(prefix.length);
+    expect(message).toBe(originalPart + suffix.slice(0, 1500 - originalPart.length));
+    expect(message.length).toBeLessThanOrEqual(1500);
+    expect(message).toContain(hint);
+    if (mode === "short") expect(message).not.toContain(diagnostics[5]);
+  });
+
+  it.each(["unavailable", "throws"])("retains the original refusal if decoding recheck %s", async mode => {
     const proposal = { ...fixture("good-label-writer"), main_csx: "return 1 &lt; 2;" };
     let calls = 0;
     const compile = vi.fn(async (): Promise<BranchCompileOutcome> => {
       if (++calls === 1) return parserRefusal;
       if (mode === "throws") throw new Error("retry checker error");
-      return mode === "refused" ? refusal : {
+      return {
         status: "unavailable", code: "timeout", ms: 1, summary: { pass: false, decision: "unavailable", errors: 0 },
       };
     });
