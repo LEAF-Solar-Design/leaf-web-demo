@@ -8,7 +8,8 @@ from math import dist, fsum, isfinite
 from solar_design_graph import GraphValidationError
 
 
-MAX_LEADS = 64
+MAX_DRAWING_LEADS = 512
+MAX_AISLE_LEADS = 64
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ def _constraints(value):
     for item in value["aisles"]:
         name = name_of(item, ("name", "points", "lead_capacity"))
         capacity, raw_points = item["lead_capacity"], item["points"]
-        if (type(capacity) is not int or not 0 <= capacity <= MAX_LEADS
+        if (type(capacity) is not int or not 0 <= capacity <= MAX_AISLE_LEADS
                 or type(raw_points) is not list or not 2 <= len(raw_points) <= 16):
             raise _invalid()
         points = tuple(_point(point, 3) for point in raw_points)
@@ -139,9 +140,10 @@ def _options(route, boxes, aisles, reserved):
         return (not reserved_overlap(segment)
                 and not any(_touches_box(segment, box) for box in boxes.values()))
 
-    paths = []
     if not blocked and not reserved_overlap(direct):
-        paths.append(_path(None, (start, end)))
+        # The straight segment is shortest and uses no shared capacity.
+        return [_path(None, (start, end))], blocked
+    paths = []
     for aisle in aisles:
         candidates = []
         for centerline in (aisle.points, aisle.points[::-1]):
@@ -219,12 +221,17 @@ def _allocate(options, capacities):
 
 def route_together(routes, constraints):
     """Apply a complete minimum-cost allocation or refuse the entire mutation."""
-    if len(routes) > MAX_LEADS:
+    if len(routes) > MAX_DRAWING_LEADS:
         raise GraphValidationError("JOINT_ROUTING_LEAD_LIMIT", "routing_constraints")
     boxes, aisles, reserved = _constraints(constraints)
     candidates = [_options(route, boxes, aisles, reserved) for route in routes]
-    capacities = {None: len(routes), **{aisle.name: aisle.capacity for aisle in aisles}}
-    allocation = _allocate([paths for paths, _ in candidates], capacities)
+    allocation = [paths[0] if paths and paths[0].aisle is None else None for paths, _ in candidates]
+    pending = [index for index, path in enumerate(allocation) if path is None]
+    if len(pending) > MAX_AISLE_LEADS:
+        raise GraphValidationError("JOINT_ROUTING_LEAD_LIMIT", "routing_constraints")
+    capacities = {aisle.name: aisle.capacity for aisle in aisles}
+    for index, selected in zip(pending, _allocate([candidates[i][0] for i in pending], capacities)):
+        allocation[index] = selected
     if None in allocation:
         affected = [f"{route['from_ref']}/{route['route_kind']}" for route, path in zip(routes, allocation)
                     if path is None]

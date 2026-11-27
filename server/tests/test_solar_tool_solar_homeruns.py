@@ -20,6 +20,7 @@ import store
 import write_loop
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
+from solar_joint_homerun_routing import route_together
 from solar_sizing_client import digest
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -371,6 +372,49 @@ def route_constraints():
             {"name": "South aisle", "points": [[3, -2, 0], [4.5, -2, 0]], "lead_capacity": 2},
         ],
     }
+
+
+@pytest.mark.parametrize("count,aisle_leads,capacity,refusal", [
+    (132, 0, 0, None),
+    (132, 2, 2, None),
+    (132, 64, 64, None),
+    (132, 2, 1, "JOINT_ROUTING_INFEASIBLE"),
+    (132, 65, 64, "JOINT_ROUTING_LEAD_LIMIT"),
+    (513, 0, 0, "JOINT_ROUTING_LEAD_LIMIT"),
+], ids=["clear-roof", "mixed-roof", "full-aisle", "capacity-refusal",
+       "solver-limit", "drawing-limit"])
+def test_large_homerun_batches_allocate_only_leads_that_need_aisles(count, aisle_leads, capacity, refusal):
+    constraints = route_constraints()
+    constraints["aisles"] = constraints["aisles"][:1]
+    constraints["aisles"][0]["lead_capacity"] = capacity
+    # Alternate the group order in the batch. Clear leads cross x=3.25 above
+    # both the pad and the aisle, so they should consume no shared capacity.
+    needs_aisle = {index * 2 for index in range(aisle_leads)}
+    routes = [{
+        "from_ref": app_id("string", index + 1), "route_kind": "start homerun",
+        "points": [[3, 0 if index in needs_aisle else 3, 0], [5, 0, 0]],
+        "extra": {},
+    } for index in range(count)]
+    original = copy.deepcopy(routes)
+    if refusal:
+        with pytest.raises(GraphValidationError) as error:
+            route_together(routes, constraints)
+        assert error.value.code == refusal
+        assert routes == original
+        if refusal == "JOINT_ROUTING_INFEASIBLE":
+            assert error.value.path == f"{routes[2]['from_ref']}/start homerun"
+        return
+
+    assert route_together(routes, constraints) is routes
+    for index, route in enumerate(routes):
+        info = route["extra"]["routing"]
+        if index in needs_aisle:
+            assert info == {"aisle": "North aisle", "direct_keep_outs": ["Equipment pad"],
+                            "aisle_leads": aisle_leads, "aisle_capacity": capacity}
+            assert route["points"] == [[3, 0, 0], [3, 1, 0], [4.5, 1, 0], [5, 0, 0]]
+        else:
+            assert info == {"aisle": None, "direct_keep_outs": []}
+            assert route["points"] == original[index]["points"]
 
 
 @pytest.mark.parametrize("variant", ["shared", "reversed", "direct"])
