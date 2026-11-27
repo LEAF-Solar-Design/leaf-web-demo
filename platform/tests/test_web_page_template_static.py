@@ -655,7 +655,7 @@ class ComingSoonActionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             template.validate_document(document(actions=[email, None]))
         with self.assertRaises(ValueError):
-            template.validate_document(document(actions=[email] * 4))
+            template.validate_document(document(actions=[email] * 13))
 
     def test_action_validates_and_round_trips_exactly(self):
         for href in ('https://example.com/updates', 'mailto:hello@example.com',
