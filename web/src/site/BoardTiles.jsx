@@ -13,6 +13,26 @@ function capabilityTotal(families) {
   return families.reduce((count, family) => count + listCount(family.capabilities), 0)
 }
 
+function coldVoltageEvaluated(report) {
+  if (!Array.isArray(report?.rows)) return false
+  if (report.schema === 'leaf.solar-string-voltage.v1') {
+    return report.rows.length > 0 && report.rows.every(row =>
+      ['pass', 'fail'].includes(row?.cold_dc_limit?.status))
+  }
+  const verdicts = report.rows.filter(row => row?.type === 'verdict' && row.rule_id === 'NEC-690.7-VOC-COLD')
+  return verdicts.length > 0 && verdicts.every(row => ['pass', 'warning', 'critical'].includes(row.status))
+}
+
+function currentElectricalReport(jobs, projectId, versionId) {
+  if (!projectId || !versionId) return null
+  const job = jobs.find(job => {
+    const schema = job.result?.result?.schema
+    return (schema === 'leaf.solar-guardrails.v1' || schema === 'leaf.solar-string-voltage.v1')
+      && savedReportBinding(job, projectId).version === versionId
+  })
+  return job?.result.result ?? null
+}
+
 // ---------------------------------------------------------------------------
 // Browser: the open-project board. Tiles are the project's real objects —
 // the mounted drawing, its versions, jobs, built tools, the live tenant
@@ -40,7 +60,12 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
     },
   } : {}
   const versions = workspace?.drawing_versions || []
-  const jobs = [...(workspace?.jobs || [])].reverse().slice(0, 5) // newest first
+  const savedJobs = [...(workspace?.jobs || [])].reverse() // newest first
+  const jobs = savedJobs.slice(0, 5)
+  const projectId = workspace?.project?.project_id
+  const electricalReport = currentElectricalReport(savedJobs, projectId, drawing?.version_id)
+  const electricalReviewIncomplete = projectId && drawing?.version_id && (drawing.solar || electricalReport)
+    && !coldVoltageEvaluated(electricalReport)
   const tools = workspace?.built_tools || []
   const families = catalog?.families || []
   const tiles = (
@@ -54,6 +79,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
                 {drawing.pending
                   ? <p className="ground-empty">This version's drawing facts are not available yet.</p>
                   : <p>{drawing.polylines} polylines · {drawing.layers} layers</p>}
+                {electricalReviewIncomplete && <p role="status">Electrical review incomplete. Cold-voltage check is missing or unverified for this drawing version.</p>}
               </>
             ) : <p className="ground-empty">No drawing mounted</p>}
             {canTransferVersion && typeof actions.transferStatus === 'string' && actions.transferStatus && <p role="status" data-testid="board-transfer-status">{actions.transferStatus}</p>}
@@ -90,7 +116,7 @@ export function BoardTiles({ workspace, drawing, catalog, renderTile, studioPres
             {jobs.length ? (
               <ul>
                 {jobs.map((job) => {
-                  const report = savedReportBinding(job, workspace?.project?.project_id)
+                  const report = savedReportBinding(job, projectId)
                   return (
                     <li key={job.job_id} data-element-id={formatElementId('job', job.job_id) || undefined}>
                       {action('job', job.job_id, actions?.onOpenJob, job, <>
