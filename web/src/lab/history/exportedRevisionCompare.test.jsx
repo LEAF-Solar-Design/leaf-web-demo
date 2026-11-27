@@ -23,7 +23,7 @@ function bundle(doc = 'example', revision = 1, value = 1) {
     identity, graph, layout: null,
     policy_reference: { graph_sha256: identity.sha256, blocks: [], compiled: [] },
     evaluations: [{ run, events: [], complete_results: {
-      ['job-' + revision]: { context, result_sha256: hash(value), result: { value } },
+      ['job-' + revision]: { context, result_sha256: sha256Hex(JSON.stringify({ value }) + '\n'), result: { value } },
     } }],
   }
   const digests = Object.fromEntries(Object.entries(parts).map(([key, entry]) => [key, hash(entry)]))
@@ -46,7 +46,7 @@ function mount(exportResponse) {
   return { client, fetchImpl }
 }
 function choose(side, value, spacing) {
-  const text = JSON.stringify(value, null, spacing)
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, spacing)
   const file = new File([text], 'revision.json', { type: 'application/json' })
   fireEvent.change(screen.getByLabelText(side + ' export'), { target: { files: [file] } })
   return text
@@ -67,9 +67,33 @@ it('compares byte hashes and canonical digests separately, with producer lineage
   expect(partRow('Graph').textContent).toMatch(/Same$/)
   const lineage = screen.getByRole('table', { name: 'Producer lineage' })
   expect(within(lineage).getAllByText('Matches server-verified result')).toHaveLength(2)
+  expect(within(lineage).getByText('Uploaded result bytes match declared digest')).toBeTruthy()
+  expect(within(lineage).getByText('Uploaded result bytes differ from declared digest')).toBeTruthy()
   expect(within(lineage).getByRole('rowheader', { name: 'evaluate / corpus / suite' })).toBeTruthy()
   expect(client.currentDocId()).toBe('strategy')
   expect(client.state.openedBundle).toBeNull()
+})
+
+it.each([
+  ['numeric spelling', 1, '{"value":1.0}'],
+  ['Unicode escapes', 'é🌱', '{"value":"\\u00e9\\ud83c\\udf31"}'],
+  ['escaped delimiters', { nested: ['result', '}],"result":\\'] }, '{"value": {"nested":["result","}],\\"result\\":\\\\"]}}'],
+])('keeps %s in original producer bytes', async (_, resultValue, producerText) => {
+  const value = bundle('example', 1, resultValue)
+  const evaluation = value.parts.evaluations[0]
+  evaluation.complete_results['job-1'].result_sha256 = sha256Hex(producerText + '\n')
+  value.manifest.parts.evaluations = hash(value.parts.evaluations)
+  const standard = JSON.stringify(value)
+  const original = standard.replace('"result":' + JSON.stringify({ value: resultValue }), '"result":' + producerText)
+  expect(JSON.parse(original)).toEqual(value)
+  mount(() => response(value))
+  choose('Before', original)
+  choose('After', standard)
+  await screen.findByText(/No canonical parts changed/)
+  const [, before, after] = within(screen.getByRole('table', { name: 'Producer lineage' })).getAllByRole('row')[1].cells
+  expect(before).toHaveTextContent('Uploaded result bytes match declared digest')
+  expect(after).toHaveTextContent('Uploaded result bytes differ from declared digest')
+  expect(screen.getAllByText('Matches server-verified result')).toHaveLength(2)
 })
 
 it('reports changed graph and evaluations without restoring the canvas', async () => {

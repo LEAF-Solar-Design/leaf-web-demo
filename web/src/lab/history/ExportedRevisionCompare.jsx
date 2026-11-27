@@ -23,7 +23,7 @@ function readBytes(file) {
 
 function producers(file) {
   const authorized = new Map(file.authorizedEvaluations.map(({ run, complete_results }) => [run.run_id, complete_results]))
-  return file.bundle.parts.evaluations.flatMap(({ run, complete_results: results }) =>
+  return file.bundle.parts.evaluations.flatMap(({ run, complete_results: results }, index) =>
     Object.entries(results).filter(([, producer]) => producer && typeof producer === 'object').map(([job, producer]) => {
       const { corpus, suite, policy } = producer.context ?? {}
       const pins = [policy?.block_id, corpus?.material_id, suite?.material_id]
@@ -32,7 +32,8 @@ function producers(file) {
       const savedProducer = saved && Object.hasOwn(saved, job) ? saved[job] : null
       const digest = producer.result_sha256
       const matches = typeof digest === 'string' && savedProducer && canonicalJSON(savedProducer) === canonicalJSON(producer)
-      return { job, run: run.run_id, digest, pins: pinned ? pins : null, matches }
+      return { job, run: run.run_id, digest, pins: pinned ? pins : null, matches,
+        uploadedMatch: file.uploadedMatches[index].get(job) }
     }))
 }
 
@@ -66,7 +67,7 @@ function Comparison({ before, after }) {
       </tr>)}</tbody>
     </table>
     {lineage.length ? <>
-      <p>Saved-result checks use the current server export. Lab bundle v1 normalizes reports, so these checks cannot establish the exact producer bytes in an upload.</p>
+      <p>The byte check hashes the exact report JSON plus a newline. Reformatting can change that check even when the report still matches the saved result.</p>
       <table>
         <caption>Producer lineage</caption>
         <thead><tr><th scope="col">Block / Corpus / Suite</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
@@ -76,6 +77,8 @@ function Comparison({ before, after }) {
             <div>Run {typeof row.run === 'string' ? row.run : 'ID unavailable'}</div>
             <div>Job {row.job}</div>
             <div><code>{typeof row.digest === 'string' ? row.digest : 'Digest unavailable'}</code></div>
+            <div>{row.uploadedMatch === undefined ? 'Uploaded result byte check unavailable'
+              : row.uploadedMatch ? 'Uploaded result bytes match declared digest' : 'Uploaded result bytes differ from declared digest'}</div>
             <div>{row.matches ? 'Matches server-verified result' : 'Saved result match unavailable'}</div>
           </> : 'No paired producer'}</td>)}
         </tr>)}</tbody>

@@ -50,6 +50,90 @@ export function verifyLabBundle(bundle) {
   return bundle
 }
 
+function uploadedResultSpans(source) {
+  // The source already passed JSON.parse. Walk only the producer result path,
+  // skipping other values iteratively so nested report data cannot grow the call stack.
+  const path = ['parts', 'evaluations', null, 'complete_results', null, 'result']
+  const token = /[ \t\r\n]*([{}\[\]:,"]|[^{}\[\]:," \t\r\n]+)/y
+  let offset = 0
+
+  function next() {
+    token.lastIndex = offset
+    const match = token.exec(source)
+    const symbol = match[1]
+    offset = token.lastIndex
+    const start = offset - symbol.length
+    if (symbol === '"') {
+      while (source[offset] !== '"') {
+        offset += source[offset] === '\\' ? 2 : 1
+      }
+      offset++
+    }
+    return { symbol, start }
+  }
+
+  function skip(symbol) {
+    let nesting = symbol === '{' || symbol === '[' ? 1 : 0
+    while (nesting) {
+      const { symbol: current } = next()
+      if (current === '{' || current === '[') nesting++
+      if (current === '}' || current === ']') nesting--
+    }
+  }
+
+  function read(depth) {
+    const { symbol, start } = next()
+    if (depth === path.length) {
+      skip(symbol)
+      return [start, offset]
+    }
+    const array = depth === 2
+    if (symbol !== (array ? '[' : '{')) {
+      skip(symbol)
+      return null
+    }
+    const fields = new Map()
+    let index = 0
+    let entry = next()
+    while (entry.symbol !== (array ? ']' : '}')) {
+      let key = index++
+      if (!array) {
+        key = JSON.parse(source.slice(entry.start, offset))
+        next() // Colon
+      } else {
+        offset = entry.start
+      }
+      if (path[depth] === null || key === path[depth]) {
+        fields.set(key, read(depth + 1))
+      } else {
+        skip(next().symbol)
+      }
+      entry = next()
+      if (entry.symbol === ',') entry = next()
+    }
+    return fields
+  }
+
+  return read(0)?.get('parts')?.get('evaluations')
+}
+
+function uploadedResultMatches(source, evaluations) {
+  const spans = uploadedResultSpans(source)
+  return evaluations.map(({ complete_results }, index) => {
+    const jobs = spans?.get(index)?.get('complete_results')
+    const matches = new Map()
+    for (const [job, producer] of Object.entries(complete_results)) {
+      const span = jobs?.get(job)?.get('result')
+      if (span && typeof producer?.result_sha256 === 'string' && /^[a-f0-9]{64}$/.test(producer.result_sha256)) {
+        const [start, end] = span
+        // The producer hashes its serialized result followed by a newline.
+        matches.set(job, sha256Hex(source.slice(start, end) + '\n') === producer.result_sha256)
+      }
+    }
+    return matches
+  })
+}
+
 export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now, storage = null } = {}) {
   let remembered = null
   if (storage) try {
@@ -187,9 +271,10 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       const stale = { ok: false, detail: 'Document or account changed. Choose the file again.' }
       if (!isCurrent()) return stale
       if (bytes.byteLength > 64 * 1024 * 1024) return { ok: false, detail: 'Bundle is too large.' }
-      let bundle
+      let bundle, source
       try {
-        bundle = verifyLabBundle(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)))
+        source = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        bundle = verifyLabBundle(JSON.parse(source))
       } catch { return { ok: false, detail: 'Bundle integrity check failed.' } }
       const identity = bundle.parts.identity
       const allowed = await readBundle(identity.doc_id, identity.revision, capture(docId))
@@ -201,7 +286,8 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       const digest = await crypto.subtle.digest('SHA-256', bytes)
       if (!isCurrent()) return stale
       const fileDigest = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
-      return { ok: true, bundle, fileDigest, authorizedEvaluations: allowed.bundle.parts.evaluations }
+      return { ok: true, bundle, fileDigest, authorizedEvaluations: allowed.bundle.parts.evaluations,
+        uploadedMatches: uploadedResultMatches(source, bundle.parts.evaluations) }
     },
     beginGraphOperation: () => ({ ...capture(docId), operation: ++operation }),
     isCurrentOperation: token => current(token) && token.operation === operation,
