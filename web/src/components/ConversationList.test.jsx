@@ -49,6 +49,56 @@ describe("ConversationList resume", () => {
     ).toBeNull();
   });
 
+  it.each([
+    ["legacy drawing", { kind: "drawing", handle: "roof-1" }, undefined, null, "roof-1"],
+    ["entity in the first drawing", { kind: "entity", handle: "1A" }, "roof-1", null, "roof-1"],
+    ["same entity in a second drawing", { kind: "entity", handle: "1A" }, "roof-2", null, "roof-2"],
+    ["drawing-bound project", { kind: "project", handle: "project-1" }, "roof-2", "project-1", "roof-2"],
+    ["entity in a project drawing", { kind: "entity", handle: "1A" }, "roof-2", "project-1", "roof-2"],
+  ])("reattaches the exact saved identity for %s", async (_, scope, drawingId, projectId, expectedDrawing) => {
+    const onResume = vi.fn();
+    listSessions.mockResolvedValue({
+      sessions: [{
+        id: "saved-session",
+        title: "Saved thread",
+        scope,
+        drawing_id: drawingId,
+        project_id: projectId,
+        last_seq: 9,
+      }],
+      nextCursor: null,
+    });
+    ensureSession.mockResolvedValue({ session_id: "saved-session" });
+
+    render(<ConversationList onResume={onResume} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Saved thread/ }));
+
+    await waitFor(() => {
+      expect(onResume).toHaveBeenCalledWith("saved-session", { scope, afterSeq: 9 });
+    });
+    expect(ensureSession).toHaveBeenCalledWith(expectedDrawing, projectId);
+  });
+
+  it("keeps a cursor attached to its listed session when the attach returns another ID", async () => {
+    const onResume = vi.fn();
+    listSessions.mockResolvedValue({
+      sessions: [{
+        id: "saved-session",
+        title: "Saved thread",
+        scope: { kind: "drawing", handle: "roof-1" },
+        drawing_id: "roof-1",
+        last_seq: 9,
+      }],
+      nextCursor: null,
+    });
+    ensureSession.mockResolvedValue({ session_id: "different-session" });
+
+    render(<ConversationList onResume={onResume} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Saved thread/ }));
+
+    await screen.findByText("Resume failed.");
+    expect(onResume).not.toHaveBeenCalled();
+  });
   it("gives the disabled row a visible reason while resume is in flight", async () => {
     let finish;
     const pending = new Promise((resolve) => {

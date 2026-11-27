@@ -9,7 +9,7 @@
 //   * rows read `scope · title · when`, exactly SessionPanel's compact row
 //     shape (`profile · environment · status`) with this lane's three fields;
 //   * the active row carries `aria-pressed`, exactly SessionPanel's affordance;
-//   * resume is `ensureSession(scope)` (the SAME idempotent attach cache the
+//   * resume is `ensureSession(drawingId, projectId)` (the SAME idempotent attach cache the
 //     composer uses, so resuming never opens a second session for a
 //     conversation already attached) followed by the caller's `onResume`,
 //     which hands the scene a `{sessionId, scope, afterSeq}` it feeds to the
@@ -171,15 +171,22 @@ export default function ConversationList({
       setResuming(row.id);
       const generation = generationRef.current;
       try {
-        const attached = await ensureSession(row.scope);
+        const scope = normalizeScope(row.scope);
+        const drawingId = row.drawing_id ?? (scope?.kind === "drawing" ? scope.handle : null);
+        if (!drawingId) {
+          setError("Resume failed.");
+          return;
+        }
+        // Attach by stored identity so reopening preserves the session's focus.
+        const attached = await ensureSession(drawingId, row.project_id ?? null);
         if (generation !== generationRef.current) return;
-        // The row's own id is the authority for WHICH conversation this is; the
-        // attach only proves it is reachable and warms the cache the composer
-        // reads. They agree by construction (the scope names one session), and
-        // if a server ever disagreed the row the user clicked still wins.
-        const sessionId = attached?.session_id || row.id;
+        // The listed cursor belongs to the listed session.
+        if (attached?.session_id !== row.id) {
+          setError("Resume failed.");
+          return;
+        }
         setError(null);
-        onResume?.(sessionId, {
+        onResume?.(row.id, {
           scope: row.scope,
           afterSeq: Number(row.last_seq) || 0,
         });
