@@ -147,13 +147,14 @@ def _run(tenant, operation, *, write=False):
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SQLITE_SCHEMA)
         conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-        # Upgrade explicit local databases created before the worker extension.
+        # Upgrade existing local databases to match the run migrations.
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(lab_runs)")}
         for name, definition in (
             ("claimed_build_revision", "TEXT"),
             ("claimed_color", "TEXT CHECK (claimed_color IN ('active','idle'))"),
             ("cancel_requested_at", "TEXT"), ("cancel_requested_by", "TEXT"),
             ("corpus_authority_json", "TEXT"),
+            ("attempt_wall_cap_seconds", "INTEGER CHECK (attempt_wall_cap_seconds > 0)"),
         ):
             if name not in columns:
                 conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
@@ -495,17 +496,20 @@ def heartbeat(tenant, run_id, owner, fence, ttl_s):
     return _run(tenant, operation, write=True)
 
 
-def finish(tenant, run_id, owner, fence, state="finished"):
+def finish(tenant, run_id, owner, fence, state="finished", *, attempt_wall_cap_seconds=None):
     if state not in {"finished", "failed", "cancelled"}:
         raise ValueError("invalid_lab_run_state")
+    if attempt_wall_cap_seconds is not None and (
+            type(attempt_wall_cap_seconds) is not int or not 0 < attempt_wall_cap_seconds <= 2_147_483_647):
+        raise ValueError("invalid_lab_attempt_wall_cap")
 
     def operation(sql):
         now = _now()
         if _holder(sql, tenant, run_id, owner, fence, now) is None:
             return False
-        sql.execute("UPDATE lab_runs SET state=?,finished_at=?,updated_at=?,lease_expires_at=NULL"
-                    " WHERE tenant_id=? AND run_id=?",
-                    (state, now.isoformat(), now.isoformat(), tenant, run_id))
+        sql.execute("UPDATE lab_runs SET state=?,finished_at=?,updated_at=?,lease_expires_at=NULL,"
+                    "attempt_wall_cap_seconds=? WHERE tenant_id=? AND run_id=?",
+                    (state, now.isoformat(), now.isoformat(), attempt_wall_cap_seconds, tenant, run_id))
         return True
 
     return _run(tenant, operation, write=True)

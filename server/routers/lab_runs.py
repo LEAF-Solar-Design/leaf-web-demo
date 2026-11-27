@@ -187,7 +187,7 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
             _receipt_table(sql)
             return [dict(row) for row in sql.execute(
                 'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id,'
-                'r.created_at,r.finished_at '
+                'r.created_at,r.finished_at,r.attempt_wall_cap_seconds '
                 'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
                 'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
                 "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"

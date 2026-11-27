@@ -748,7 +748,7 @@ def durable_history(rig, monkeypatch):
     now = store._now()
     monkeypatch.setattr(store, "_now", lambda: now)
 
-    def seed(age, state, *, context=None, project_id="", doc_id="doc"):
+    def seed(age, state, *, context=None, project_id="", doc_id="doc", attempt_wall_cap_seconds=None):
         context = rig.context if context is None else context
         tenant, actor = str(context), lab_runs._actor(context)
         created_at = now - age
@@ -763,11 +763,12 @@ def durable_history(rig, monkeypatch):
                                submission_id=body["submission_id"], authority=actor)
             # Inert saved metadata only: no worker, evaluator or creating HTTP call.
             store._run(tenant, lambda sql: sql.execute(
-                "UPDATE lab_runs SET state=?,finished_at=? WHERE tenant_id=? AND run_id=?",
-                (state, finished_at, tenant, row["run_id"])), write=True)
+                "UPDATE lab_runs SET state=?,finished_at=?,attempt_wall_cap_seconds=? WHERE tenant_id=? AND run_id=?",
+                (state, finished_at, attempt_wall_cap_seconds, tenant, row["run_id"])), write=True)
         return {"run_id": row["run_id"], "state": state, "graph_revision": 1,
                 "doc_id": doc_id, "project_id": project_id, "submission_id": body["submission_id"],
-                "created_at": created_at.isoformat(), "finished_at": finished_at}
+                "created_at": created_at.isoformat(), "finished_at": finished_at,
+                "attempt_wall_cap_seconds": attempt_wall_cap_seconds}
 
     return SimpleNamespace(seed=seed, now=now)
 
@@ -778,7 +779,7 @@ def durable_history(rig, monkeypatch):
 ])
 def test_durable_history_retains_terminal_identity(rig, durable_history, state, age):
     saved = durable_history.seed(age, state)
-    recent = durable_history.seed(timedelta(hours=1), "finished")
+    recent = durable_history.seed(timedelta(hours=1), "finished", attempt_wall_cap_seconds=600)
     active = durable_history.seed(timedelta(days=31), "queued")
     response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
     assert response.status_code == 200, response.text

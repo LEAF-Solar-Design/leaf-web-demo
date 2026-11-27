@@ -228,9 +228,12 @@ def test_stale_fence_cannot_write_anything(authority, monkeypatch):
     before = store.get(authority, "run")
     assert store.append_events(authority, "run", "worker", old["fence"], [event(0)]) is False
     assert store.heartbeat(authority, "run", "worker", old["fence"], 120) is False
-    assert store.finish(authority, "run", "worker", old["fence"]) is False
+    assert store.finish(authority, "run", "worker", old["fence"], attempt_wall_cap_seconds=300) is False
     assert store.get(authority, "run") == before
+    assert before["attempt_wall_cap_seconds"] is None
     assert [row["kind"] for row in all_events(authority, "run")] == ["lease_takeover"]
+    assert store.finish(authority, "run", "worker", new["fence"], attempt_wall_cap_seconds=600)
+    assert store.get(authority, "run")["attempt_wall_cap_seconds"] == 600
 
 
 def test_heartbeat_extends_only_holder(authority, monkeypatch):
@@ -584,11 +587,13 @@ def test_cancel_running_queued_and_terminal(authority):
     assert store.request_cancel(authority, "queued", "actor") is True
     row = store.get(authority, "queued")
     assert row["state"] == "cancelled" and row["finished_at"] is not None
+    assert row["attempt_wall_cap_seconds"] is None
     assert [row["kind"] for row in all_events(authority, "queued")] == ["cancelled"]
     assert claim(authority, "queued", "worker", 60) is False
     create(authority, "finished")
     lease = claim(authority, "finished", "worker", 60)
     assert store.finish(authority, "finished", "worker", lease["fence"])
+    assert store.get(authority, "finished")["attempt_wall_cap_seconds"] is None
     assert store.request_cancel(authority, "finished", "actor") is False
     assert store.cancel_requested(authority, "finished") is False
 
