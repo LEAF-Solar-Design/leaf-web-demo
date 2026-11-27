@@ -2,6 +2,7 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 import os
 from types import SimpleNamespace
 from uuid import uuid4
@@ -985,3 +986,116 @@ def test_retry_admission_binds_materials_and_live_writers(corpus_join, scenario)
             'successor_policy_digest': next_policy['digest'],
             'evaluated_suite_sha256': hashlib.sha256(corpus.compiled_suite(raw, policy)).hexdigest()}}
     assert not lane.jobs.list_jobs(tenant, 200)
+
+
+@pytest.mark.skipif(not (canonical_ci_pg() or (
+    os.environ.get('LEAF_E364B_PG_PARENT') and os.environ.get('DATABASE_URL'))),
+    reason='requires selected PostgreSQL authority')
+@pytest.mark.parametrize('scenario', ['concurrent_replay', 'enqueue_rollback', 'successor_retention'])
+def test_durable_recovery_confirmation(corpus_join, monkeypatch, scenario):
+    from test_lab_runs import corpus_admit, corpus_adapter
+
+    lane = corpus_join
+    tenant, project = lane.context['tenant_id'], lane.context['project_id']
+    graph = copy.deepcopy(lane.graph)
+    for block_id in ('completed-pass', 'completed-fail'):
+        graph['blocks'].append(dict(copy.deepcopy(graph['blocks'][0]), id=block_id))
+        graph['outputs'][block_id] = {'node': block_id, 'port': 'result'}
+    lane.doc_id += '-recovery'
+    ledger.save(tenant, lane.doc_id, graph, None, lane.tenant.subject)
+    artifact = ledger.get(tenant, lane.doc_id)
+    source_id, _ = corpus_admit(lane)
+    source, lease, _ = corpus_adapter(lane, source_id)
+    assert store.finish(tenant, source_id, 'corpus-worker', lease['fence'], 'failed')
+    authority = store.corpus_authority(source)
+    for block, verdict in zip(graph['blocks'], (None, 'pass', 'fail')):
+        policy = corpus.compile_policy(authority, block['id'], block['settings'])
+        context = corpus.validate_context(dict(lane.context, policy=policy))
+        intent = f'lab:{source_id}:{block["id"]}:corpus:v1'
+        with monkeypatch.context() as scoped:
+            # Seed terminal producer states without dispatching another worker.
+            scoped.setitem(lane.jobs._executors, lane.jobs.LANE_SLOW, SimpleNamespace(submit=lambda *_: None))
+            job_id = lane.jobs._submit_job(tenant, {}, {}, '', False, tenant, project,
+                idempotency_key=intent, lab_corpus=context)
+        result = None if verdict is None else json.dumps({'result': {
+            'schema': corpus.RESULT_SCHEMA, 'job_id': job_id, 'context': context, 'attempt': 1,
+            'verdict': verdict, 'result_sha256': 'a' * 64, 'evaluated_suite_sha256': 'b' * 64}})
+        error = json.dumps({'error_code': 'TIMEOUT'}) if verdict is None else None
+        with lane.db.transaction() as conn:
+            conn.execute('UPDATE async_jobs SET status=%s, attempt=1, result_json=%s::jsonb, '
+                         'error_json=%s::jsonb WHERE job_id=%s',
+                         ('failed' if verdict is None else 'complete', result, error, job_id))
+
+    base = f'/api/lab/runs/{source_id}'
+    response = lane.http.get(base + '/recovery-plan',
+        params={'include_cleanup': 'true', 'include_confirmation': 'true'})
+    assert response.status_code == 200, response.text
+    assert response.headers['Cache-Control'] == 'no-store'
+    review = response.json()
+    assert review['confirmation_available'] is True
+    plan = review['plan']
+    selected = graph['blocks'][0]['id']
+    assert plan['selected_failed_block_ids'] == [selected]
+    assert plan['retained_completed_block_ids'] == ['completed-pass', 'completed-fail']
+    original = store.get(tenant, source_id)
+
+    def confirm(digest=plan['digest']):
+        return lane.http.post(base + '/recovery-confirmation', json={'plan_digest': digest})
+
+    assert confirm('0' * 64).status_code == 409
+    pending = None
+    if scenario == 'enqueue_rollback':
+        enqueue = store._enqueue
+
+        def fail_after_enqueue(*args, **kwargs):
+            enqueue(*args, **kwargs)
+            raise RuntimeError('interrupted before receipt finalization')
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(store, '_enqueue', fail_after_enqueue)
+            assert confirm().status_code == 503
+        pending = store.get_recovery_receipt(tenant, source_id, project, plan['digest'])
+        assert pending['admitted_at'] is None
+        assert ledger.get(tenant, pending['successor_doc_id'])['revision'] == 1
+        with pytest.raises(store.NotFound):
+            store.get(tenant, pending['successor_run_id'])
+
+    if scenario == 'concurrent_replay':
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = list(pool.map(lambda _: confirm(), range(2)))
+        assert second.status_code == 200, second.text
+        assert second.json() == first.json()
+    else:
+        first = confirm()
+    assert first.status_code == 200, first.text
+    assert first.headers['Cache-Control'] == 'no-store'
+    receipt = store.get_recovery_receipt(tenant, source_id, project, plan['digest'])
+    successor_id = receipt['successor_run_id']
+    assert first.json() == {'schema': 'leaf.lab-corpus-recovery-confirmation.v1',
+        'source_run_id': source_id, 'plan_digest': plan['digest'], 'successor_run_id': successor_id}
+    assert receipt['admitted_at'] is not None
+    assert list(receipt['admission_json']) == [selected]
+    assert len(receipt['lineage_json']['retained']) == 2
+    if pending is not None:
+        assert successor_id == pending['successor_run_id']
+    assert store.get(tenant, successor_id)['state'] == 'queued'
+    assert ledger.get(tenant, receipt['successor_doc_id'])['graph'] == plan['draft_graph']
+    assert store.get(tenant, source_id) == original
+    assert ledger.get(tenant, lane.doc_id) == artifact
+
+    monkeypatch.setenv('LEAF_BUILD_REVISION', 'corpus-join-redeployed')
+    assert confirm().json() == first.json()
+    if scenario == 'successor_retention':
+        with lane.db.transaction() as conn:
+            conn.execute('INSERT INTO lab_runs (tenant_id,doc_id,run_id,graph_revision,graph_sha256, '
+                'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,state, '
+                'created_at,updated_at) SELECT tenant_id,doc_id,run_id || n,graph_revision,graph_sha256, '
+                'registry_digest,ops_revision,input_digest,adapter_revision,build_revision,\'finished\', '
+                'created_at + interval \'1 second\',updated_at FROM lab_runs,generate_series(1,50) n '
+                'WHERE tenant_id=%s AND run_id=%s', (tenant, successor_id))
+        store.sweep(store._now())
+        response = confirm()
+        assert response.status_code == 409, response.text
+        assert response.json() == {'detail': 'lab_recovery_successor_unavailable'}
+        with pytest.raises(store.NotFound):
+            store.get(tenant, successor_id)

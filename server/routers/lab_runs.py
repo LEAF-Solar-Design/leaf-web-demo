@@ -109,6 +109,8 @@ def corpus_options(project_id: uuid.UUID | None = None, manifest_only: bool = Fa
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
+    except HTTPException:
+        raise
     except ledger.NotFound:
         raise HTTPException(404, detail="lab_run_not_found") from None
     except store.SubmissionConflict as error:
@@ -327,15 +329,97 @@ def corpus_jobs(run_id: str, response: Response, tenant=Depends(deps.require_ten
 
 @router.get("/{run_id}/recovery-plan")
 def recovery_plan(run_id: str, response: Response, include_cleanup: bool = Query(False),
-                  tenant=Depends(deps.require_tenant)):
+                  include_confirmation: bool = Query(False), tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
+
     def operation():
         import lab_corpus_recovery
-        return lab_corpus_recovery.prepare(str(tenant), run_id,
+        plan = lab_corpus_recovery.prepare(str(tenant), run_id,
             authorize=lambda row: _authorize_corpus_run(tenant, row), include_cleanup=include_cleanup)
+        if not include_confirmation:
+            return plan
+        available = False
+        if include_cleanup and plan["draft_graph"] is not None and store.store_mode() == "postgres":
+            try:
+                _authorize_corpus_run(tenant, store.get(str(tenant), run_id), write=True)
+                available = True
+            except GraphRefused:
+                # The initial planning call established read access. Check it
+                # again before returning the plan if write authority was refused.
+                _authorize_corpus_run(tenant, store.get(str(tenant), run_id))
+        return {"plan": plan, "confirmation_available": available}
+
     result = _call(operation)
-    if include_cleanup:
-        response.headers['Cache-Control'] = 'no-store'
+    if include_cleanup or include_confirmation:
+        response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+def _confirm_recovery(tenant, run_id, reviewed_digest):
+    import lab_corpus_recovery as recovery
+
+    tenant_id = str(tenant)
+    if (not isinstance(reviewed_digest, str) or len(reviewed_digest) != 64
+            or any(char not in "0123456789abcdef" for char in reviewed_digest)):
+        raise InvalidGraph("lab_recovery_confirmation_digest_invalid")
+    source = store.get(tenant_id, run_id)
+    if store.store_mode() != "postgres" or not lab_tool_nodes.enabled():
+        raise GraphRefused("lab_corpus_unavailable")
+    authority = store.corpus_authority(source)
+    if authority is None:
+        raise GraphRefused("lab_recovery_corpus_authority_required")
+    _authorize_corpus_run(tenant, source)
+    receipt = store.get_recovery_receipt(tenant_id, run_id, authority["project_id"], reviewed_digest)
+    if receipt is None or receipt["admitted_at"] is None:
+        actor = _corpus_actor(tenant)
+
+        def authorize_write(row):
+            _authorize_corpus_run(tenant, row, write=True)
+
+        confirmation = recovery.confirmation_lineage(tenant_id, run_id, reviewed_digest,
+            authorize_write=authorize_write, include_cleanup=True)
+        receipt = store.reserve_recovery(
+            tenant_id, confirmation, actor, graph_digest(confirmation["draft_graph"]))
+        if receipt["admitted_at"] is None:
+            _require_corpus_project_role(tenant, receipt["project_id"], actor, write=True)
+            if receipt["actor"] != actor:
+                _require_corpus_project_role(tenant, receipt["project_id"], receipt["actor"], write=True)
+            doc_id = receipt["successor_doc_id"]
+            artifact = recovery.persist_successor_graph(tenant_id, doc_id, confirmation, receipt["actor"])
+            successor, evidence = _admit_run_graph(
+                tenant, artifact, doc_id, 1, recovery_confirmation=confirmation,
+                reserved_actor=receipt["actor"])
+            store.admit_recovery(tenant_id, receipt, successor, evidence, OPS_REVISION,
+                                 _source_revision(os.environ) or "unknown")
+
+    _authorize_corpus_run(tenant, store.get(tenant_id, run_id))
+    admitted = store.get_recovery_receipt(tenant_id, run_id, authority["project_id"], reviewed_digest)
+    if admitted is None or admitted["admitted_at"] is None:
+        raise store.SubmissionConflict("lab_recovery_successor_unavailable")
+    return {"schema": "leaf.lab-corpus-recovery-confirmation.v1", "source_run_id": run_id,
+            "plan_digest": reviewed_digest, "successor_run_id": admitted["successor_run_id"]}
+
+
+def _confirm_recovery_response(tenant, run_id, reviewed_digest):
+    try:
+        return _confirm_recovery(tenant, run_id, reviewed_digest)
+    except GraphRefused as error:
+        if error.code in {"lab_corpus_authority_required", "lab_corpus_project_refused"}:
+            raise HTTPException(403, detail=error.code) from None
+        if error.code in {"lab_recovery_plan_changed", "lab_recovery_plan_ineligible",
+                          "lab_recovery_successor_document_conflict", "lab_recovery_successor_inputs_changed"}:
+            raise store.SubmissionConflict(error.code) from None
+        raise
+
+
+@router.post("/{run_id}/recovery-confirmation")
+async def recovery_confirmation(run_id: str, request: Request, response: Response,
+                                tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    body = await _body(request, ("plan_digest",))
+    result = await run_in_threadpool(
+        _call, _confirm_recovery_response, tenant, run_id, body["plan_digest"])
+    response.headers["Cache-Control"] = "no-store"
     return result
 
 

@@ -287,6 +287,106 @@ def _enqueue(sql, tenant, doc_id, run_id, graph_revision, graph_sha256, digest,
     return dict(_row(sql, tenant, run_id))
 
 
+def _recovery_receipt(sql, tenant, source_run_id, project_id, reviewed_digest):
+    return sql.execute(
+        "SELECT * FROM lab_recovery_confirmations "
+        "WHERE tenant_id=? AND source_run_id=? AND project_id=? AND reviewed_digest=?",
+        (tenant, source_run_id, project_id, reviewed_digest)).fetchone()
+
+
+def _confirmed_successor(sql, tenant, receipt):
+    successor = _row(sql, tenant, receipt["successor_run_id"])
+    if (successor is None or successor["doc_id"] != receipt["successor_doc_id"]
+            or successor["graph_revision"] != 1
+            or successor["graph_sha256"] != receipt["successor_graph_sha256"]):
+        raise SubmissionConflict("lab_recovery_successor_unavailable")
+    return receipt["successor_run_id"]
+
+
+def get_recovery_receipt(tenant, source_run_id, project_id, reviewed_digest):
+    def operation(sql):
+        receipt = _recovery_receipt(sql, tenant, source_run_id, project_id, reviewed_digest)
+        if receipt is not None and receipt["admitted_at"] is not None:
+            _confirmed_successor(sql, tenant, receipt)
+        return dict(receipt) if receipt is not None else None
+
+    return _run(tenant, operation, write=True)
+
+
+def reserve_recovery(tenant, confirmation, actor, graph_sha256):
+    source = confirmation["source"]
+    source_run_id, project_id, reviewed_digest = (
+        source["run_id"], confirmation["project_id"], confirmation["reviewed_digest"])
+    lineage = {key: confirmation[key] for key in ("source", "selected", "retained")}
+    identity = json.dumps([tenant, project_id, source_run_id, reviewed_digest], separators=(",", ":"))
+    doc_id = hashlib.sha256(("lab-recovery-doc:" + identity).encode()).hexdigest()[:32]
+    run_id = hashlib.sha256(("lab-recovery-run:" + identity).encode()).hexdigest()[:32]
+
+    def operation(sql):
+        original = _row(sql, tenant, source_run_id)
+        if original is None:
+            raise NotFound("lab_run_not_found")
+        if any(original[key] != value for key, value in source.items()):
+            raise SubmissionConflict("lab_recovery_plan_changed")
+        existing = _recovery_receipt(sql, tenant, source_run_id, project_id, reviewed_digest)
+        if existing is not None:
+            if (existing["successor_graph_sha256"] != graph_sha256
+                    or existing["lineage_json"] != lineage):
+                raise SubmissionConflict("lab_recovery_plan_changed")
+            if existing["admitted_at"] is not None:
+                _confirmed_successor(sql, tenant, existing)
+            return dict(existing)
+        sql.execute(
+            "INSERT INTO lab_recovery_confirmations "
+            "(tenant_id,source_run_id,project_id,reviewed_digest,actor,successor_doc_id,"
+            "successor_run_id,successor_graph_sha256,lineage_json) VALUES (?,?,?,?,?,?,?,?,?::jsonb)",
+            (tenant, source_run_id, project_id, reviewed_digest, actor, doc_id,
+             run_id, graph_sha256, json.dumps(lineage, sort_keys=True)))
+        return dict(_recovery_receipt(sql, tenant, source_run_id, project_id, reviewed_digest))
+
+    return _run(tenant, operation, write=True)
+
+
+def admit_recovery(tenant, reservation, authority, evidence, ops_revision, build_revision):
+    from lab_canonical import graph_digest
+
+    authority = validate_corpus_authority(authority)
+    source_run_id, project_id, reviewed_digest = (
+        reservation["source_run_id"], reservation["project_id"], reservation["reviewed_digest"])
+    doc_id, run_id, graph_sha256 = (
+        reservation["successor_doc_id"], reservation["successor_run_id"],
+        reservation["successor_graph_sha256"])
+    if any(authority[key] != value for key, value in {
+            "tenant_id": tenant, "project_id": project_id, "actor_id": reservation["actor"],
+            "doc_id": doc_id, "graph_revision": 1, "graph_sha256": graph_sha256}.items()):
+        raise SubmissionConflict("lab_recovery_successor_inputs_changed")
+    if set(evidence) != {item["block_id"] for item in reservation["lineage_json"]["selected"]}:
+        raise SubmissionConflict("lab_recovery_successor_inputs_changed")
+
+    def operation(sql):
+        receipt = _recovery_receipt(sql, tenant, source_run_id, project_id, reviewed_digest)
+        if receipt is None or _row(sql, tenant, source_run_id) is None:
+            raise NotFound("lab_run_not_found")
+        if any(receipt[key] != reservation[key] for key in (
+                "actor", "successor_doc_id", "successor_run_id", "successor_graph_sha256",
+                "lineage_json")):
+            raise SubmissionConflict("lab_recovery_plan_changed")
+        if receipt["admitted_at"] is not None:
+            return _confirmed_successor(sql, tenant, receipt)
+        if _row(sql, tenant, run_id) is not None:
+            raise SubmissionConflict("lab_recovery_successor_unavailable")
+        _enqueue(sql, tenant, doc_id, run_id, 1, graph_sha256, registry_digest(),
+                 _pin(ops_revision), graph_digest(authority), "lab-worker.v1", _pin(build_revision),
+                 corpus_authority=authority)
+        sql.execute(
+            "UPDATE lab_recovery_confirmations SET admitted_at=now(), admission_json=?::jsonb "
+            "WHERE tenant_id=? AND source_run_id=? AND project_id=? AND reviewed_digest=?",
+            (json.dumps(evidence, sort_keys=True), tenant, source_run_id, project_id, reviewed_digest))
+        return run_id
+
+    return _run(tenant, operation, write=True)
+
+
 def validate_corpus_authority(value):
     import uuid
     fields = {'schema', 'tenant_id', 'project_id', 'actor_id', 'doc_id',
