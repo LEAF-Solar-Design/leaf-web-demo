@@ -10,6 +10,7 @@ from solar_design_graph import GraphValidationError
 
 MAX_DRAWING_LEADS = 512
 MAX_AISLE_LEADS = 64
+MAX_KEEP_OUTS = 16
 
 
 class JointRoutingInfeasible(GraphValidationError):
@@ -22,6 +23,7 @@ class JointRoutingInfeasible(GraphValidationError):
             f"{lead['string_ref']}/{lead['route_kind']}" for lead in self.unassigned_leads
         )
         super().__init__("JOINT_ROUTING_INFEASIBLE", labels)
+        self.user_message = f"Route these homerun leads manually. {labels}"
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,7 @@ def _touches_box(segment, box):
 
 def _constraints(value):
     if (type(value) is not dict or set(value) != {"keep_outs", "aisles"}
-            or type(value["keep_outs"]) is not list or len(value["keep_outs"]) > 16
+            or type(value["keep_outs"]) is not list or len(value["keep_outs"]) > MAX_KEEP_OUTS
             or type(value["aisles"]) is not list or len(value["aisles"]) > 8):
         raise _invalid()
     names = set()
