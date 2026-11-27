@@ -1,5 +1,5 @@
 """In-process Lab executor: 2 runs per process, 4 active per tenant, queue 16
-per tenant, 600 s per run, per-block budgets from lab_evaluate; host graphs are
+per tenant, 600 s per worker attempt, per-block budgets from lab_evaluate; host graphs are
 refused, and tool nodes require explicit admission; claims only on the adopted revision unless idle
 claims are explicitly enabled and labelled.
 """
@@ -27,6 +27,7 @@ from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
 from routers.lab_surface import lab_surface_enabled
 
 OPS_REVISION = "lab-ops.v1"
+ATTEMPT_WALL_CAP_SECONDS = 600
 _LOG = logging.getLogger(__name__)
 
 
@@ -232,7 +233,7 @@ class LabWorker:
                         {"reason": reason} if reason else {},
                         **({"cleanup_confirmed": False} if not cleanup_confirmed else {}))}]):
                 return
-            if self.store.finish(*self._args(run), state):
+            if self.store.finish(*self._args(run), state, attempt_wall_cap_seconds=ATTEMPT_WALL_CAP_SECONDS):
                 run.terminal = True
                 self.emit.emit_lab_run_terminal(state)
             else:
@@ -263,7 +264,7 @@ class LabWorker:
                 self._terminal(run, "cancelled", "activation_inactive")
                 return
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
-            if self.clock() - started >= 600:
+            if self.clock() - started >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
             if artifact["sha256"] != row["graph_sha256"]:
                 self._terminal(run, "failed", "graph_pin_mismatch")
@@ -283,7 +284,7 @@ class LabWorker:
                     cursor = batch[-1]["seq"]
 
             elapsed = max(0, self.clock() - started)
-            if elapsed >= 600:
+            if elapsed >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
             if self._activation_inactive(run):
                 self._terminal(run, "cancelled", "activation_inactive")
@@ -293,7 +294,7 @@ class LabWorker:
                 with run.lock:
                     if self._cancelled(run):
                         raise RunCancelled()
-                    if self.clock() - started > 600:
+                    if self.clock() - started > ATTEMPT_WALL_CAP_SECONDS:
                         raise RunBudgetExceeded()
                     if block_id not in committed:
                         if not self._append(run, [{"kind": "value", "block_id": block_id,
@@ -329,11 +330,11 @@ class LabWorker:
             registry = lab_tool_manifests.registry_for(str(row['tenant_id']))
             if adapter is not None and corpus_options:
                 corpus_adapter = adapter
-                adapter.prime_corpus(artifact['graph'], registry, deadline=started + 600)
+                adapter.prime_corpus(artifact['graph'], registry, deadline=started + ATTEMPT_WALL_CAP_SECONDS)
             elapsed = max(0, self.clock() - started)
-            if elapsed >= 600:
+            if elapsed >= ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
-            evaluate_graph(artifact["graph"], registry, budget=Budget(run_wall_s=600 - elapsed),
+            evaluate_graph(artifact["graph"], registry, budget=Budget(run_wall_s=ATTEMPT_WALL_CAP_SECONDS - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
                            trusted_lookup=functools.partial(lab_tool_manifests.trusted_for, str(row["tenant_id"])),
                            **tool_options)
@@ -342,7 +343,7 @@ class LabWorker:
                 run.checked_at = float("-inf")
                 if self._cancelled(run):
                     raise RunCancelled()
-            if self.clock() - started > 600:
+            if self.clock() - started > ATTEMPT_WALL_CAP_SECONDS:
                 raise RunBudgetExceeded()
             finish("finished")
         except RunCancelled:
