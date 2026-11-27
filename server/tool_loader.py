@@ -92,13 +92,10 @@ def _platform_builtin_package_ids() -> frozenset[Tuple[str, str, str]]:
     return frozenset(trusted)
 
 
-def _load_module(path: Path, *, source: Optional[bytes] = None):
-    """Load verified source directly, or cache the usual import by file metadata."""
-    if source is None:
-        st = path.stat()
-        key = f"{path}:{st.st_mtime_ns}:{st.st_size}"
-    else:
-        key = f"{path}:{hashlib.sha256(source).hexdigest()}"
+def _load_module(path: Path):
+    """Import a tool once per source revision, retaining the built-in Count digest."""
+    st = path.stat()
+    key = f"{path}:{st.st_mtime_ns}:{st.st_size}"
     cached = _MOD_CACHE.get(key)
     if cached is not None:
         return cached
@@ -107,10 +104,14 @@ def _load_module(path: Path, *, source: Optional[bytes] = None):
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load spec for {path}")
     mod = importlib.util.module_from_spec(spec)
-    if source is None:
-        spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    else:
+    if path.name == "count_modules.py" and path.is_relative_to(BUILTIN_DIR.resolve()):
+        # Hash the bytes we execute on a cache miss. A warm saved replay only
+        # needs metadata and shares the same module as every other caller.
+        source = path.read_bytes()
         exec(compile(source, str(path), "exec", dont_inherit=True), mod.__dict__)
+        mod._leaf_count_entry_sha256 = hashlib.sha256(source).hexdigest()
+    else:
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
     _MOD_CACHE[key] = mod
     return mod
 
@@ -1419,18 +1420,15 @@ def run_tool_dynamic(tool: Dict[str, Any], intake: Dict[str, Any], params: Dict[
     else:
         assert local is not None
         try:
+            mod = _load_module(local)
             if trusted_read_builtin and local.name == "count_modules.py":
                 from dxf_intake import _ocs_to_wcs
 
-                source = local.read_bytes()
-                mod = _load_module(local, source=source)
                 rule_reference = {
                     "schema": "leaf.count-rule.v1",
-                    "entry_sha256": hashlib.sha256(source).hexdigest(),
+                    "entry_sha256": mod._leaf_count_entry_sha256,
                     "geometry_sha256": _count_geometry_sha256(_ocs_to_wcs.__code__),
                 }
-            else:
-                mod = _load_module(local)
         except Exception as exc:  # noqa: BLE001
             return err_envelope(ErrorCode.INTERNAL,
                                 f"failed to load tool file {local.name}: {type(exc).__name__}: {exc}",
