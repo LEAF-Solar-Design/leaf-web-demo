@@ -768,7 +768,7 @@ def durable_history(rig, monkeypatch):
         return {"run_id": row["run_id"], "state": state, "graph_revision": 1,
                 "doc_id": doc_id, "project_id": project_id, "submission_id": body["submission_id"],
                 "created_at": created_at.isoformat(), "finished_at": finished_at,
-                "attempt_wall_cap_seconds": attempt_wall_cap_seconds}
+                "attempt_wall_cap_seconds": attempt_wall_cap_seconds, "wall_cap_hit": False}
 
     return SimpleNamespace(seed=seed, now=now)
 
@@ -812,6 +812,35 @@ def test_durable_history_scope_isolation(rig, durable_history):
     assert response.json() == {"runs": [controls[0]], "has_more": False}
     rig.app.dependency_overrides[deps.require_tenant] = lambda: foreign_tenant
     assert rig.http.get("/api/lab/runs", params={"doc_id": "doc"}).status_code == 404
+
+
+@pytest.mark.parametrize("block_id, reason, expected", [
+    (None, "run_wall_cap", True),
+    (None, "worker_error", False),
+    ("fixture", "run_wall_cap", False),
+])
+def test_durable_history_identifies_only_attempt_wall_failure(rig, block_id, reason, expected):
+    from test_lab_run_store import intent_id
+
+    created = rig.http.post("/api/lab/runs", json={
+        "doc_id": "doc", "graph_revision": 1, "submission_id": intent_id(),
+    })
+    assert created.status_code == 202, created.text
+    run_id = created.json()["run_id"]
+    lease = store.claim(rig.tenant, run_id, "runner", 60, build_revision="abc1234", color="active")
+    assert lease
+    owner = (rig.tenant, run_id, "runner", lease["fence"])
+    assert store.append_events(*owner, [
+        {"kind": "failed", "block_id": block_id, "payload": {"reason": reason}},
+        {"kind": "coalesced", "payload": {"count": 1}},
+    ])
+    assert store.finish(*owner, "failed", attempt_wall_cap_seconds=600)
+    response = rig.http.get("/api/lab/runs", params={"doc_id": "doc"})
+    assert response.status_code == 200, response.text
+    run, = response.json()["runs"]
+    assert run["run_id"] == run_id
+    assert run["wall_cap_hit"] is expected
+    assert "terminal_payload" not in run
 
 
 @pytest.mark.parametrize("terminal_count,has_more", [(18, False), (19, True), (24, True)])

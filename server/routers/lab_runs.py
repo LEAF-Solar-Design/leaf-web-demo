@@ -1,6 +1,7 @@
 """Tenant-bound admission and control of pinned Lab runs."""
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -187,8 +188,13 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
             _receipt_table(sql)
             return [dict(row) for row in sql.execute(
                 'SELECT r.run_id,r.state,r.graph_revision,r.doc_id,s.project_id,s.submission_id,'
-                'r.created_at,r.finished_at,r.attempt_wall_cap_seconds '
+                'r.created_at,r.finished_at,r.attempt_wall_cap_seconds,'
+                'e.payload AS terminal_payload '
                 'FROM lab_run_receipts s JOIN lab_runs r ON r.tenant_id=s.tenant_id AND r.run_id=s.run_id '
+                "LEFT JOIN lab_run_events e ON r.state='failed' AND e.tenant_id=r.tenant_id "
+                "AND e.run_id=r.run_id AND e.kind='failed' AND e.block_id IS NULL "
+                "AND e.seq=(SELECT MAX(last.seq) FROM lab_run_events last "
+                "WHERE last.tenant_id=r.tenant_id AND last.run_id=r.run_id AND last.kind<>'coalesced') "
                 'WHERE s.tenant_id=? AND s.authority=? AND s.project_id=? AND s.doc_id=? '
                 "ORDER BY CASE WHEN r.state IN ('queued','running') THEN 0 ELSE 1 END,"
                 'r.created_at DESC,r.run_id DESC LIMIT ?',
@@ -197,6 +203,13 @@ def recent(doc_id: str = Query(..., min_length=1, max_length=200),
         runs = rows[:RECENT_RUN_LIMIT]
         for row in runs:
             _authorize_corpus_run(tenant, store.get(str(tenant), row['run_id']))
+            payload = row.pop('terminal_payload')
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    payload = None
+            row['wall_cap_hit'] = isinstance(payload, dict) and payload.get('reason') == 'run_wall_cap'
         return {'runs': runs, 'has_more': len(rows) > RECENT_RUN_LIMIT}
     return _call(operation)
 
