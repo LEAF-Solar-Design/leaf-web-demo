@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 
 import jobs
@@ -216,6 +217,33 @@ def confirmation_lineage(tenant, run_id, reviewed_digest, *, authorize_write, in
     return {'source': {**plan['source'], 'input_digest': source['input_digest']},
             'project_id': authority['project_id'], 'reviewed_digest': reviewed_digest,
             'draft_graph': plan['draft_graph'], 'selected': selected, 'retained': retained}
+
+
+def verify_retry_inputs(confirmation, authority, block, suite_raw):
+    """Bind a selected successor block to the reviewed effective suite bytes."""
+    producer = next((item for item in confirmation['selected'] if item['block_id'] == block['id']), None)
+    settings = block['settings']
+    if (producer is None or producer['settings_sha256'] != graph_digest(settings)
+            or producer['corpus_sha256'] != settings['corpus']['sha256']):
+        raise GraphRefused('lab_recovery_successor_inputs_changed')
+
+    old_policy = producer['source_policy']
+    try:
+        new_policy = corpus.compile_policy(authority, block['id'], settings)
+        old_suite = corpus.compiled_suite(suite_raw, old_policy)
+        new_suite = corpus.compiled_suite(suite_raw, new_policy)
+    except ValueError:
+        raise GraphRefused('lab_recovery_successor_inputs_changed') from None
+
+    old_scope, new_scope = old_policy['lineage'], new_policy['lineage']
+    if (old_policy['block_id'] != new_policy['block_id']
+            or old_policy['parameters'] != new_policy['parameters']
+            or any(old_scope[key] != new_scope[key] for key in ('tenant_id', 'project_id'))
+            or old_scope['doc_id'] == new_scope['doc_id']
+            or old_policy['digest'] == new_policy['digest'] or old_suite != new_suite):
+        raise GraphRefused('lab_recovery_successor_inputs_changed')
+    return {'source_policy_digest': old_policy['digest'], 'successor_policy_digest': new_policy['digest'],
+            'evaluated_suite_sha256': hashlib.sha256(new_suite).hexdigest()}
 
 
 def _is_digest(value):

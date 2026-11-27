@@ -763,3 +763,69 @@ def test_corpus_jobs_include_piped_corpus_blocks_in_mixed_graphs(rig):
     reply = rig.http.get(JOBS_URL)
     assert reply.status_code == 200, reply.text
     assert [item['block_id'] for item in reply.json()['blocks']] == ['oak-volatility']
+
+@pytest.fixture
+def saved_retry_inputs(monkeypatch, tmp_path):
+    import hashlib
+    import json
+
+    monkeypatch.setenv('LEAF_LAB_STORE', 'sqlite')
+    monkeypatch.setenv('LEAF_LAB_DB', str(tmp_path / 'lab.db'))
+    monkeypatch.setenv('LEAF_RUNTIME_ENV', 'test')
+    monkeypatch.setenv('LEAF_PLATFORM_POSTGRES_REQUIRED', '0')
+    monkeypatch.setenv('LEAF_LAB_TOOL_NODES', '1')
+    manifest, _ = lab_tool_manifests.corpus_capability()
+    raw = json.dumps({'parent_policy': {'min_k': 2, 'edge_threshold_cents': 5.0},
+                      'child_min_k': [1], 'blocks': {'null.identity': [{}]}}).encode()
+    material = {'material_id': '44444444-4444-4444-8444-000000000001',
+                'sha256': hashlib.sha256(raw).hexdigest(), 'byte_size': len(raw)}
+    block = {'id': 'failed-evaluation', 'registry': {
+        'id': manifest['id'], 'version': manifest['version']['semver'],
+        'code_sha256': manifest['version']['code_sha256']},
+        'settings': {'project_id': PROJECT, 'corpus': material, 'suite': material,
+                     'parameters': {'child_min_k': [0], 'min_select_tickets': 0}}}
+
+    def save(doc_id, saved_block):
+        graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [saved_block], 'pipes': [], 'outputs': {}}
+        artifact = ledger.save(TENANT, doc_id, graph, None, ACTOR)
+        return {'tenant_id': TENANT, 'project_id': PROJECT, 'doc_id': doc_id,
+                'graph_revision': artifact['revision'], 'graph_sha256': artifact['sha256']}
+
+    source = save('original', block)
+    old_policy = corpus.compile_policy(source, block['id'], block['settings'])
+    selected = {'block_id': block['id'], 'settings_sha256': graph_digest(block['settings']),
+                'corpus_sha256': material['sha256'], 'source_policy': old_policy}
+    return SimpleNamespace(raw=raw, block=block, source=source, save=save,
+                           confirmation={'selected': [selected]})
+
+
+def test_retry_inputs_preserve_effective_bytes_under_distinct_policy(saved_retry_inputs):
+    import hashlib
+
+    row = saved_retry_inputs
+    successor = row.save('successor', row.block)
+    digest = recovery.verify_retry_inputs(row.confirmation, successor, row.block, row.raw)
+    original = row.confirmation['selected'][0]['source_policy']
+    candidate = corpus.compile_policy(successor, row.block['id'], row.block['settings'])
+    effective = corpus.compiled_suite(row.raw, original)
+    assert effective == corpus.compiled_suite(row.raw, candidate)
+    assert digest == {'source_policy_digest': original['digest'],
+                      'successor_policy_digest': candidate['digest'],
+                      'evaluated_suite_sha256': hashlib.sha256(effective).hexdigest()}
+    assert digest['source_policy_digest'] != digest['successor_policy_digest']
+
+
+@pytest.mark.parametrize('changed', ['settings', 'suite_bytes', 'source_policy', 'source_document', 'selection'])
+def test_retry_inputs_refuse_scope_or_effective_input_drift(saved_retry_inputs, changed):
+    row = saved_retry_inputs
+    if changed == 'settings':
+        row.block['settings']['parameters']['min_select_tickets'] = 1
+    successor = row.source if changed == 'source_document' else row.save('successor', row.block)
+    if changed == 'suite_bytes':
+        row.raw += b' '
+    if changed == 'source_policy':
+        row.confirmation['selected'][0]['source_policy']['parameters']['min_select_tickets'] = 1
+    if changed == 'selection':
+        row.confirmation['selected'].clear()
+    with pytest.raises(recovery.GraphRefused, match='^lab_recovery_successor_inputs_changed$'):
+        recovery.verify_retry_inputs(row.confirmation, successor, row.block, row.raw)
