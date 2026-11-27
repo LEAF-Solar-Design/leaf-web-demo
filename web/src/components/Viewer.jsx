@@ -7,7 +7,7 @@ import { vertexZ, vertexSegments } from './viewerVertexZ.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
-import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeDimensionPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, marqueeMapping, marqueeHandles } from '../lib/marqueeSelection.js'
@@ -382,11 +382,12 @@ const Viewer = forwardRef(function Viewer(
     // additive lists) draw as sampled polylines; an intake without them
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
+    const { polylines: dimensionPolylines, truncated: truncatedDimensions } = intakeDimensionPolylines(activeIntake)
     const validPolyline = pl => Array.isArray(pl?.pts) && pl.pts.length >= 2 && Array.from(pl.pts).every(finiteXY)
     const intakePolylines = expandBulgedPolylines((activeIntake.polylines || []).filter(validPolyline))
     const blocks = projectServerBlocks(activeIntake)
-    const polylines = (roundPolylines.length || blocks.polylines.length
-      ? [...intakePolylines, ...roundPolylines, ...blocks.polylines]
+    const polylines = (roundPolylines.length || dimensionPolylines.length || blocks.polylines.length
+      ? [...intakePolylines, ...roundPolylines, ...dimensionPolylines, ...blocks.polylines]
       : intakePolylines).filter(validPolyline)
     const inserts = blocks.inserts.filter(ins => finiteXY(ins?.pt))
     const faces3d = (activeIntake.faces3d || []).filter(f => f && [f.p1, f.p2, f.p3].every(finiteXY)
@@ -1083,7 +1084,7 @@ const Viewer = forwardRef(function Viewer(
         layers: Array.isArray(activeIntake.layers) ? activeIntake.layers.length
           : new Set([...layerGroups.keys(), ...insertLayerGroups.keys(), ...faceLayerGroups.keys()]).size,
         markerReferences: nInserts,
-        omitted: blocks.truncated + (activeIntake.truncated || 0),
+        omitted: blocks.truncated + truncatedDimensions + (activeIntake.truncated || 0),
       },
       scene, root, origin, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
@@ -1108,7 +1109,7 @@ const Viewer = forwardRef(function Viewer(
         }
         return { drawingKey: observationDrawingKey(sceneDrawingKey, activeIntake,
           observationBindingRef.current.binding, observationBindingRef.current.parentDrawingKey), handles: [...rows.values()],
-          omitted: { blocks: blocks.truncated, activeIntake: activeIntake.truncated || 0 },
+          omitted: { blocks: blocks.truncated, activeIntake: truncatedDimensions + (activeIntake.truncated || 0) },
           selections: observation.history.map(record => ({ ...record,
             selected_handles: [...record.selected_handles], requested_handles: [...record.requested_handles] })) }
       },
