@@ -9,7 +9,7 @@ import { modChord } from '../lib/keys.js'
 import { readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 import SolarReadResult from '../solar/SolarReadResult.jsx'
-import ResultJsonDownload, { ResultTableCsvDownload } from './ResultJsonDownload.jsx'
+import ResultJsonDownload, { RedactedPooledSharesDownload, ResultTableCsvDownload } from './ResultJsonDownload.jsx'
 import { isSolarProjectReadResult, isSolarReadResult } from '../solar/solarReadResultModel.js'
 import { stringResultSummary } from '../solar/stringResultOverlay.js'
 
@@ -407,6 +407,7 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   const rowArrays = findRowArrays(data)
   const rowTables = <>
     <RowArrayResults entries={rowArrays} density={density} csvExport={result.tool === 'count-modules'} />
+    {result.tool === 'count-modules' && <RedactedPooledSharesDownload layers={data.pooled_cumulative_shares?.layers} />}
     {rowArrays.some((entry) => Object.hasOwn(entry, 'rows')) && <ResultJsonDownload result={result} />}
   </>
   const scalars = isScalarList(data) ? {} :

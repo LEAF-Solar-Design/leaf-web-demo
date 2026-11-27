@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { deepRedact } from '../projects/ReceiptPanel.jsx'
 
 function csvCell(value) {
@@ -34,6 +34,20 @@ export function ResultTableCsvDownload({ rows, label }) {
   if (download.error) return <p>{label} CSV download is unavailable.</p>
   const filename = label.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'result'
   return <a className="btn ghost" href={download.href} download={filename + '.csv'}>Download {label} CSV</a>
+}
+
+export function RedactedPooledSharesDownload({ layers }) {
+  const rows = useMemo(() => {
+    if (!Array.isArray(layers) || !layers.length) return null
+    const fields = ['increment_numerator', 'numerator', 'denominator', 'percentage']
+    if (!layers.every(row => row && fields.every(field => Number.isFinite(row[field])))) return null
+    // Allowlist the measured columns so free-form result fields cannot enter this download.
+    return layers.map((row, index) => ({
+      rank: index + 1,
+      ...Object.fromEntries(fields.map(field => [field, row[field]])),
+    }))
+  }, [layers])
+  return rows && <ResultTableCsvDownload rows={rows} label="Pooled shares with layer names redacted" />
 }
 
 // Use returned data so paging, formatting, and viewer state cannot change the export.
