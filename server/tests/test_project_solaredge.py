@@ -1154,6 +1154,40 @@ def test_compare_frame_history_counts_both_saved_intervals(last_frame, moves, re
     assert result["page"] == {"offset": 1, "total": 2, "returned": 1, "next_offset": None}
 
 
+def test_compare_frame_history_distinguishes_presence_from_frame_moves():
+    def present(frame):
+        return {"present": True, "frame_ref": frame}
+
+    missing = {"present": False, "frame_ref": None}
+    cases = [
+        ("absent-in-middle", [present("a"), missing, present("a")], 0, False),
+        ("missing-to-unframed", [missing, present(None), present(None)], 0, False),
+        ("return", [present("a"), present("b"), present("a")], 2, True),
+        ("stable", [present("a"), present("a"), present("a")], 0, False),
+        ("stay-on-new-frame", [present("a"), present("b"), present("b")], 1, False),
+        ("two-moves", [present("a"), present("b"), present("c")], 2, False),
+        ("unframed-in-middle", [present("a"), present(None), present("b")], 0, False),
+    ]
+    record = {
+        "strings": [{"panel_refs": [panel for panel, *_ in cases[:-1]]}],
+        "unassigned_panel_refs": ["unframed-in-middle"],
+    }
+    snapshots = [
+        {"panels": [{"id": panel, "frame_ref": states[index]["frame_ref"]}
+                    for panel, states, *_ in cases if states[index]["present"]]}
+        for index in range(3)
+    ]
+
+    result = compare_frame_history(record, *snapshots, 0)
+
+    assert result["counts"] == dict(changed_panels=6, moved_once=1, moved_twice=2, returned_to_original_frame=1)
+    assert result["items"] == [
+        {"panel_ref": panel, "states": states, "move_count": moves, "returned_to_original_frame": returned}
+        for panel, states, moves, returned in cases if panel != "stable"
+    ]
+    assert result["page"] == {"offset": 0, "total": 6, "returned": 6, "next_offset": None}
+
+
 def test_compare_two_pinned_saved_versions_with_independent_report_downloads(http):
     s = http.s
     first_report = report(s)
