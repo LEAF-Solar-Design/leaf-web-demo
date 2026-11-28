@@ -131,6 +131,43 @@ def test_multileader_uses_the_same_layout_classification(layout, in_model):
     assert [leader["handle"] for leader in reopened.get("mleaders", [])] == (["B"] if in_model else [])
 
 
+def test_block_multileader_rebinds_definition_and_keeps_exact_placement():
+    landing = [5.001231, 4.009842, 0.0]
+    line = [[0.123456, 0.654321, 0.0]]
+    content = {"name": "Survey", "extrusion": [0.0, 0.0, 1.0],
+               "insert": [5.451234, 4.091234, 0.0], "scale": [2.0, 2.0, 1.0],
+               "rotation": 0.642315, "color": -1056964608, "connection": 1,
+               "scale_override": [1.0, 1.0, 1.0], "rotation_override": 0.0,
+               "color_override": -1056964608, "override_flags": 2147483647, "matrix": []}
+    leader = {"handle": "B", "layer": "0", "style": "Standard",
+              "pts": line + [landing], "landing": landing, "dogleg_dir": [1.0, 0.0, 0.0],
+              "height": 0.18, "arrow": 0.18, "dogleg": 0.3600123,
+              "block_content": content}
+    leader["leader_geometry"] = {
+        "base": [5.3612433, 4.009842, 0.0],
+        "roots": [{**{key: leader[key] for key in ("landing", "dogleg_dir", "dogleg")},
+                   "has_landing": 1, "has_dogleg": 1, "attachment_direction": 0, "lines": [line]}],
+    }
+    intake = {"layers": ["0"], "polylines": [], "mleaders": [leader],
+              "mlstyles": [{"name": "Standard", "textstyle": "Standard", "segments": 1,
+                            "height": 0.18, "arrow": 0.18, "dogleg": 0.36, "gap": 0.09}],
+              "blocks": {"Survey": {"base": [0, 0, 0], "children": [], "complete": True}}}
+    reopened, data = _roundtrip(intake)
+    assert reopened["mleaders"] == [leader]
+    assert not reopened.get("inserts")
+    assert "Survey" in reopened["blocks"]
+    entity = _entity_bytes(data)
+    handle = entity.split(b"\n344\n", 1)[1].split(b"\n", 1)[0]
+    assert b"\n296\n1\n341\n" + handle + b"\n" in entity
+    unresolved = data.replace(b"\n344\n" + handle + b"\n", b"\n344\nFFFF\n", 1)
+    rejected = dxf_intake.parse_dxf_bytes(unresolved)
+    assert not rejected.get("mleaders")
+    assert rejected["mleaders_unsupported_handles"] == ["B"]
+    content["name"] = "Missing"
+    with pytest.raises(intake_dxf.IntakeDxfError, match="unresolved or incomplete callout block"):
+        intake_dxf.intake_to_dxf(intake)
+
+
 def _bulged_square(bulges):
     return {"layers": ["A"], "polylines": [
         {"layer": "A", "closed": True, "handle": "10", "xdata": None,
