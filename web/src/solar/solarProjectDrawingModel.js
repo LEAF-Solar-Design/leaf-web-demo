@@ -116,3 +116,40 @@ export function projectSolarDrawingView(options) {
     return refused(failure)
   }
 }
+
+export function focusProjectSolarStrings(view, ids) {
+  const { overlay } = view
+  if (!ids?.size) return { overlay, unavailable: false }
+  const unavailable = { overlay, unavailable: true }
+  if (!overlay) return unavailable
+
+  try {
+    const graph = own(view.intake, 'solar_design_graph')
+    const strings = []
+    const savedStrings = own(graph, 'strings')
+    const length = savedStrings.length
+    if (!Array.isArray(savedStrings) || !Number.isSafeInteger(length) || length < 0 || length > 100_000) return unavailable
+    for (let index = 0; index < length; index += 1) {
+      const string = savedStrings[index]
+      const id = own(string, 'id')
+      if (ids.has(id)) {
+        // Project membership through the same unit and frame-slot rules as the base overlay.
+        strings.push({ id, ordered_panel_refs: own(string, 'ordered_panel_refs'), route: [] })
+      }
+    }
+    const project = own(graph, 'project')
+    const { polylines, refusal } = solarGraphOverlay({
+      graph_schema_version: 1, project, strings,
+      frames: own(graph, 'frames'), panels: own(graph, 'panels'), inverters: [], routes: [],
+    }, { metersPerUnit: own(own(project, 'units'), 'meters_per_unit') })
+    if (refusal || !polylines.length) return unavailable
+
+    const focusedLines = overlay.polylines.concat(polylines.map(line => ({ ...line, color: '#facc15' })))
+    if (focusedLines.length > 4_096 || focusedLines.reduce((count, line) => count + line.pts.length, 0) > 100_000) {
+      return unavailable
+    }
+    return { overlay: { ...overlay, polylines: focusedLines }, unavailable: polylines.length !== ids.size }
+  } catch {
+    return unavailable
+  }
+}
