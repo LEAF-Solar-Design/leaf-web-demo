@@ -44,6 +44,8 @@ import { serviceState, serviceHeaders, serviceRequestAuthority, authorityStorage
 // a `node --test` unit test.
 const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const STARTUP_FETCH_TIMEOUT_MS = Number(import.meta.env?.VITE_STARTUP_FETCH_TIMEOUT_MS || 5000)
+// Drawing-scoped Catalog reads evaluate readiness against the saved graph.
+const DRAWING_CAPABILITIES_TIMEOUT_MS = Number(import.meta.env?.VITE_STARTUP_FETCH_TIMEOUT_MS || 15_000)
 // Default to mock unless explicitly disabled (VITE_MOCK=0).
 const MOCK_DEFAULT = import.meta.env?.VITE_MOCK !== '0'
 // Tenant stub (X-Tenant-Id header) until real auth lands — matches the
@@ -817,10 +819,12 @@ export async function getCapabilities(mock, context, options = {}) {
     return { families: normalizeFamilies(groupToolsByFamily(tools)), source: 'mock' }
   }
   try {
-    const path = typeof context?.drawing_id === 'string' && context.drawing_id.length > 0
+    const hasDrawing = typeof context?.drawing_id === 'string' && context.drawing_id.length > 0
+    const path = hasDrawing
       ? `/api/capabilities?drawing_id=${encodeURIComponent(context.drawing_id)}&drawing_version=${encodeURIComponent(context.drawing_version ?? 'head')}`
       : '/api/capabilities'
-    const data = await http(path, undefined, STARTUP_FETCH_TIMEOUT_MS)
+    const timeout = hasDrawing ? DRAWING_CAPABILITIES_TIMEOUT_MS : STARTUP_FETCH_TIMEOUT_MS
+    const data = await http(path, undefined, timeout)
     return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
   } catch (error) {
     if (error?.status !== 404) throw error
