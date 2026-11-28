@@ -644,6 +644,20 @@ def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
         hashlib.sha256(canonical).hexdigest(), hashlib.sha256(payload_bytes).hexdigest())
 
 
+def read_bound_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
+                             payload_bytes: bytes, payload: Dict[str, Any]) -> Optional[bytes]:
+    """Read only the full-fidelity edited sidecar bound to this JSON payload."""
+    key = edited_source_key(tenant_id, drawing_id, version)
+    if not backend.exists(key):
+        return None
+    raw = backend.get(key)
+    if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(
+            raw, payload, payload_bytes, backend=backend,
+            proof_key=edited_source_proof_key(tenant_id, drawing_id, version)):
+        return raw
+    return None
+
+
 def read_dxf(backend, tenant_id: str, drawing_id: str,
              version="head", *, source_binding=None) -> Tuple[int, bytes, str]:
     """Resolve `version` and return (version_int, dxf_bytes, source), where
@@ -676,13 +690,9 @@ def read_dxf(backend, tenant_id: str, drawing_id: str,
         raise DxfUnavailable("BAD_PARAMS", "the pinned drawing source bytes do not match their binding", 409, False)
     payload = _json_object_or_none(source)
     if payload is not None:
-        skey = edited_source_key(tenant_id, drawing_id, v)
-        if backend.exists(skey):
-            raw = backend.get(skey)
-            if len(raw) <= MAX_DXF_BYTES and _sidecar_bound(
-                    raw, payload, source, backend=backend,
-                    proof_key=edited_source_proof_key(tenant_id, drawing_id, v)):
-                return v, raw, "edited-sidecar"
+        raw = read_bound_edited_source(backend, tenant_id, drawing_id, v, source, payload)
+        if raw is not None:
+            return v, raw, "edited-sidecar"
         import intake_dxf
         try:
             data = intake_dxf.intake_to_dxf(payload)

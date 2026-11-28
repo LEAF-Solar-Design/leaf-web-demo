@@ -82,6 +82,8 @@ class RestoredDrawingVersion:
     # whose receipt produced them is a fact about the payload, not a guess
     # about the restore. `None` whenever the source carried none.
     source_ref: Optional[str] = None
+    # None when the selected version has no bound edited DXF to preserve.
+    restored_edited_source: Optional[bool] = None
 
 
 class RestoreSourceUnavailable(Exception):
@@ -1432,7 +1434,7 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
     Both drawing-version and checkpoint restores use this service so every
     restore validates intake, holds the cutover guard, uses the store's
     parent-head compare-and-set, enforces the checkout fence, and publishes the
-    new version's intake cache.
+    new version's intake cache and any bound edited DXF.
     """
     import store
 
@@ -1467,11 +1469,16 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
     except (KeyError, ValueError) as exc:
         raise RestoreSourceUnreadable(str(exc)) from exc
 
-    try:
-        blob_is_intake = isinstance(json.loads(source_bytes.decode("utf-8")), dict)
-    except (UnicodeDecodeError, ValueError):
-        blob_is_intake = False
+    source_payload = write_loop._json_object_or_none(source_bytes)
+    edited_source = None
+    if source_payload is not None:
+        try:
+            edited_source = write_loop.read_bound_edited_source(
+                backend, tenant_id, drawing_id, source_v, source_bytes, source_payload)
+        except (KeyError, OSError, ValueError) as exc:
+            raise RestoreSourceUnreadable(str(exc)) from exc
 
+    restored_edited_source = None
     with _RESTORE_LOCK:
         try:
             with write_loop.drawing_mutation_refusal_guard() as refusal:
@@ -1514,6 +1521,14 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                     )
                 except ValueError as exc:
                     raise RestoreCommitRejected(str(exc)) from exc
+                if edited_source is not None:
+                    try:
+                        write_loop.publish_edited_source(
+                            backend, tenant_id, drawing_id, new_version, edited_source, source_bytes)
+                        restored_edited_source = edited_source == write_loop.read_bound_edited_source(
+                            backend, tenant_id, drawing_id, new_version, source_bytes, source_payload)
+                    except Exception:  # noqa: BLE001 - the immutable head committed
+                        restored_edited_source = False
                 restored_head_readable = True
                 try:
                     if source_bundle is None:
@@ -1521,7 +1536,7 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
                             backend, tenant_id, drawing_id, new_version,
                             source_bytes, source_intake)
                 except Exception:  # noqa: BLE001 - the immutable head committed
-                    restored_head_readable = blob_is_intake
+                    restored_head_readable = source_payload is not None
         except store.CheckoutDenied as exc:
             raise RestoreCheckoutDenied(str(exc)) from exc
 
@@ -1530,6 +1545,7 @@ def restore_drawing_version(tenant_id: str, drawing_id: str, target_version: int
         parent_version=parent_version,
         restored_head_readable=restored_head_readable,
         source_ref=source_ref,
+        restored_edited_source=restored_edited_source,
     )
 
 
@@ -1617,6 +1633,8 @@ def restore_version(drawing_id: str, version: int,
         # written, so viewers cannot read it until the cache is repaired.
         "restored_head_readable": restored.restored_head_readable,
     }, tenant_id)
+    if restored.restored_edited_source is not None:
+        view["restored_edited_source"] = restored.restored_edited_source
     return with_envelope_fields(view)
 
 

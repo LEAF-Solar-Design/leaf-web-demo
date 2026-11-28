@@ -133,6 +133,61 @@ def _seed_chain(tmp_path):
     return backend
 
 
+@pytest.mark.parametrize("failure", ["source-proof-mismatch", "target-sidecar-write",
+                                     "target-proof-write"])
+def test_restore_edited_source_binding_and_partial_commit(client, tmp_path, monkeypatch, failure):
+    from test_drawing_dxf_route import EDITED_DXF
+
+    backend = _seed_chain(tmp_path)
+    base = f"/api/drawings/{DRAWING}"
+    headers = _h(TENANT)
+    saved = client.post(
+        f"{base}/versions/edited", headers=headers,
+        data={"parent_version": "3", "source_digest": hashlib.sha256(EDITED_DXF).hexdigest()},
+        files={"file": ("edited.dxf", EDITED_DXF, "application/dxf")},
+    )
+    assert saved.status_code == 201, saved.text
+    assert saved.json()["head"] == 4
+
+    if failure == "source-proof-mismatch":
+        proof_key = write_loop.edited_source_proof_key(TENANT, DRAWING, 4)
+        proof = json.loads(backend.get(proof_key))
+        proof["sidecar_sha256"] = "0" * 64
+        backend.put(proof_key, json.dumps(proof).encode("utf-8"))
+    else:
+        key_for = (write_loop.edited_source_key if failure == "target-sidecar-write"
+                   else write_loop.edited_source_proof_key)
+        failed_key = key_for(TENANT, DRAWING, 5)
+        put = type(backend).put
+
+        def put_with_edited_source_failure(self, key, data):
+            if key == failed_key:
+                raise OSError("edited source storage unavailable")
+            return put(self, key, data)
+
+        monkeypatch.setattr(type(backend), "put", put_with_edited_source_failure)
+
+    restored = client.post(f"{base}/versions/4/restore", headers=headers)
+    assert restored.status_code == 200, restored.text
+    body = restored.json()
+    assert body["head"] == 5
+    assert body["restored_head_readable"] is True
+    if failure == "source-proof-mismatch":
+        assert "restored_edited_source" not in body
+    else:
+        assert body["restored_edited_source"] is (failure == "target-proof-write")
+        historical = client.get(f"{base}/dxf", params={"version": "4"}, headers=headers)
+        assert historical.content == EDITED_DXF
+        assert historical.headers["x-leaf-dxf-source"] == "edited-sidecar"
+
+    if failure == "target-proof-write":
+        head = client.get(f"{base}/dxf", headers=headers)
+        assert head.content == EDITED_DXF
+        assert head.headers["x-leaf-dxf-source"] == "edited-sidecar"
+    else:
+        assert not backend.exists(write_loop.edited_source_key(TENANT, DRAWING, 5))
+
+
 # --------------------------------------------------------------------------- #
 # delta chips
 # --------------------------------------------------------------------------- #
