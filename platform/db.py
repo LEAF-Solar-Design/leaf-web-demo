@@ -521,6 +521,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
                      "next_seq", "event_count", "created_at", "updated_at", "finished_at",
                      "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
                      "corpus_authority_json", "attempt_wall_cap_seconds"},
+        "lab_recovery_confirmations": {
+            "tenant_id", "project_id", "source_run_id", "reviewed_digest", "actor",
+            "successor_doc_id", "successor_run_id", "successor_graph_sha256",
+            "lineage_json", "admission_json", "created_at", "admitted_at",
+        },
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
         "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
