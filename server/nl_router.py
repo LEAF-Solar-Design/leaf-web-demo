@@ -439,6 +439,15 @@ _GROUPED_PANELS = re.compile(
 )
 
 
+_VISIBLE_PANEL_LAYERS = re.compile(
+    r"(?:please\s+)?(?:count|tally|how many|give me the number of)\s+"
+    r"(?:(?:only|just)\s+)?(?:the\s+)?(?:solar\s+|pv\s+|photovoltaic\s+)?"
+    r"(?:panels?|modules?)\s+(?:are\s+)?(?:on|in|from)\s+"
+    r"(?:(?:only|just)\s+)?(?:the\s+)?visible\s+layers?(?:\s+only)?[.!?]?",
+    re.I,
+)
+
+
 _COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
 _COVERAGE_EXCLUSION = re.compile(
     r"\b(?:excluding|exclude|without|omitting|omit|leaving out|leave out|ignoring|ignore)"
@@ -737,6 +746,15 @@ def _decide(
     if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):
         return Classification(lane=LANE_RUN, tool="count-modules", params=ranking_params,
                               confidence=0.95, rationale="Rank selected physical module counts by layer.")
+
+    if _VISIBLE_PANEL_LAYERS.fullmatch(text.strip()) and any(
+        doc.tool.get("name") == "count-modules" for doc in docs
+    ):
+        return Classification(
+            lane=LANE_RUN, tool="count-modules",
+            params={"group_by": "layer", "panel_scope": "all_layers", "visible_layers_only": True},
+            confidence=0.95, rationale="Count panel sets on layers that are on and thawed.",
+        )
 
     grouped = _GROUPED_PANELS.fullmatch(text.strip())
     if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):

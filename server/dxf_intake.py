@@ -830,6 +830,13 @@ def _parse_insert(pairs, i, dropped=None, include_measurement_evidence=False):
                  "row_spacing": _float(groups.get(45, "0"))}
     rotation = math.radians(_float(groups.get(50, "0")))
     if include_measurement_evidence:
+        try:
+            valid = all(math.isfinite(float(groups[code]))
+                        for code in (10, 20, 30, 41, 42, 43, 50, 210, 220, 230) if code in groups)
+        except ValueError:
+            valid = False
+        if not valid:
+            array["measurement_placement_invalid"] = True
         source = dict(x=point[0], y=point[1], z=point[2], rot=rotation, nrm=normal)
         if point != [round(v, 3) for v in point] or rotation != round(rotation, 6) or normal != [round(v, 6) for v in normal]:
             array["measurement_placement"] = source
@@ -1166,6 +1173,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             continue
         block["count"] += 1
         try:
+            path = None
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
@@ -1186,6 +1194,20 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     refs.append(insert)
                 else:
                     block["nested_inserts_incomplete"] = True
+            if include_measurement_evidence and block["count"] <= 60 and kind in ("HELIX", "SPLINE"):
+                if kind == "HELIX":
+                    record = pairs[i + 1:end]
+                    # The helix subclass reuses spline group codes for its own
+                    # parameters. The saved spline subclass is the curve.
+                    try:
+                        first = record.index((100, "AcDbSpline"))
+                        last = record.index((100, "AcDbHelix"), first + 1)
+                    except ValueError:
+                        first = last = 0
+                    path = _spline_measurement_path(record[first:last])
+                controls = path.get("control_points") if path else None
+                if controls and len(controls) <= 10000:
+                    block.setdefault("region_curve_controls", {})[str(block["count"] - 1)] = controls
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
             if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:
