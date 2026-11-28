@@ -32,19 +32,19 @@ def _selection_region(params):
     bounds = params.get("region")
     legacy = params.get("selection_window")
     if bounds is not None and legacy is not None and bounds != legacy:
-        raise ValueError("Conflicting region and legacy design window. Supply one selection region.")
+        raise InputValidationError("Conflicting region and legacy design window. Supply one selection region.")
     if bounds is None:
         bounds = legacy
     if bounds is None:
         return None
     if not isinstance(bounds, list) or len(bounds) != 4:
-        raise ValueError("Design window region requires [minimum X, minimum Y, maximum X, maximum Y].")
+        raise InputValidationError("Design window region requires [minimum X, minimum Y, maximum X, maximum Y].")
     try:
         valid = all(type(value) in (int, float) and math.isfinite(value) for value in bounds)
     except OverflowError:
         valid = False
     if not valid or bounds[0] >= bounds[2] or bounds[1] >= bounds[3]:
-        raise ValueError("Design window region coordinates must be finite with minimums below maximums.")
+        raise InputValidationError("Design window region coordinates must be finite with minimums below maximums.")
     return bounds
 
 
@@ -500,7 +500,7 @@ def _run(intake, params, *, allow_absent_in_window=False):
         if not selected_ids:
             return listing, None
     if window is not None and not selected_ids:
-        raise ValueError("Select module sets before applying a design window region.")
+        raise InputValidationError("Select module sets before applying a design window region.")
     definitions = intake.get("blocks", {})
     source_placements = intake.get("beam_insert_placements", {})
     if window is not None and not isinstance(definitions, dict):
@@ -549,8 +549,8 @@ def _run(intake, params, *, allow_absent_in_window=False):
     if (len(selected_sets) != len(selected_ids) and not allow_absent_in_window
             and not (auto_shares and window is not None)):
         if window is not None:
-            raise ValueError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
-        raise ValueError("Selected module set is absent from this drawing; list the sets again.")
+            raise InputValidationError("A selected module set has no candidates in this design window. Check the window and list the sets again.")
+        raise InputValidationError("Selected module set is absent from this drawing. List the sets again.")
     selected = selected_sets[0] if len(selected_sets) == 1 else None
     visible_selection_empty = visible_only and not sets and not selected_ids
     breakdown = {}
