@@ -1,8 +1,8 @@
 {
   "contract": "leaf.branch-compile-pin.v1",
   "upstream": "LEAF-Solar-Design/Branch2025",
-  "upstream_commit": "2721963a201719b7cede6cc7caee5eb7ffaf43fd",
-  "note": "Byte copies of Branch2025 ScriptHost compile sources at upstream_commit. Do not edit; re-vendor from upstream. upstream_commit is Branch2025 PR #746 head (feat/r2-11-pick-inputs); re-pin to the master merge commit after #746 squashes.",
+  "upstream_commit": "22cda4fbf180a52579d118fd62ad43c5911fc95a",
+  "note": "Byte copies of Branch2025 ScriptHost compile sources at upstream_commit. Do not edit; re-vendor from upstream. upstream_commit is the Branch2025 master merge of #746 (R2-11 pick inputs).",
   "files": {
     "LeafSolarDesign.ScriptHost/Abstractions/HostApi.cs": "2bb828c2c5de424fd5ec193876e22b6c63f3a802938536d8033940424bb40c01",
     "LeafSolarDesign.ScriptHost/Abstractions/IToolContext.cs": "1928e328daf93221992b4a23f35fce05bee165b5f6d89bcf7d45974b9fe107dd",
