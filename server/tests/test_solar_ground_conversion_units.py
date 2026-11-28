@@ -151,7 +151,7 @@ def test_ground_units_string_lengths_agree(graph, service, pinned):
                 assert list(point) == near(expected)
 
 
-@pytest.mark.parametrize("name, mpu", [("mm", 0.001), ("in", 0.0254)])
+@pytest.mark.parametrize("name, mpu", [("mm", 0.001)])  # inches are supported since #3687
 def test_ground_units_unsupported_units_still_refused(graph, name, mpu):
     with pytest.raises(Exception) as refused:
         tc.small_doc(site(mpu), units=name)
