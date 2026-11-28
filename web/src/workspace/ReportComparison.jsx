@@ -5,14 +5,14 @@ import { savedReportBinding } from '../lib/savedReport.js'
 import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 import SelectionComparison, { SelectionExports } from './SelectionComparison.jsx'
 
-function ReportPicker({ label, value, exclude, reports, onChange }) {
+function ReportPicker({ label, value, exclude = [], reports, onChange }) {
   return (
     <p>
       <label>
         {label}{' '}
         <select value={value || ''} onChange={event => onChange(event.target.value)} style={{ maxWidth: '100%' }}>
           <option value="">Select a saved report</option>
-          {[...reports.values()].filter(report => report.id !== exclude).map(report => (
+          {[...reports.values()].filter(report => !exclude.includes(report.id)).map(report => (
             <option key={report.id} value={report.id}>
               {report.tool || 'Report'} · {report.toolVersion || 'Version not recorded'} · {report.id}
             </option>
@@ -159,6 +159,96 @@ function LayerAreaComparison({ first, second }) {
           </tbody>
         </table>
       )}
+    </>
+  )
+}
+
+const REPORT_LABELS = ['First report', 'Second report', 'Third report']
+
+function rankSeries(reports) {
+  const areas = reports.map(report => layerAreaReport(report.job))
+  if (!reports.some(report => savedLayerOptions(report.job))) return {}
+  if (!reports.slice(1).every(report => sameToolVersion(reports[0], report))) {
+    return { reason: 'Area ranking requires three reports from the same known tool version.' }
+  }
+  if (areas.some(area => !area)) {
+    return { reason: 'Area ranking requires complete layer area data in all three reports.' }
+  }
+  if (!areas.every(area => area.drawing === areas[0].drawing)) {
+    return { reason: 'Area ranking requires three reports for the same drawing.' }
+  }
+  if (!areas.every(area => area.filter === areas[0].filter && area.exactMatch === areas[0].exactMatch)) {
+    return { reason: 'Area ranking requires the same layer filter and exact-match setting in all three reports.' }
+  }
+  const ranks = areas.map(area => rankAreas(area.areas))
+  const layers = new Set(ranks.flatMap(rank => [...rank.keys()]))
+  return { rows: [...layers].map(layer => ({ layer, ranks: ranks.map(rank => rank.get(layer)) })) }
+}
+
+function rankChange(before, after) {
+  if (before === after) return before === undefined ? 'Absent' : 'Unchanged'
+  if (before === undefined) return 'Added'
+  if (after === undefined) return 'Removed'
+  return after < before ? `Up ${before - after}` : `Down ${after - before}`
+}
+
+function SavedReportSeries({ reports }) {
+  const tables = useRef(null)
+  const { rows, reason } = rankSeries(reports)
+
+  function download() {
+    const html = '<!doctype html><meta charset="utf-8"><title>Saved report ranking changes</title>'
+    const blob = new Blob([html, tables.current.innerHTML], { type: 'text/html' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'saved-report-ranking-changes.html'
+    try {
+      link.click()
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(url), 0)
+    }
+  }
+
+  return (
+    <>
+      <div ref={tables}>
+        <table>
+          <caption>Saved report versions in selected order</caption>
+          <thead>
+            <tr><th scope="col">Report</th><th scope="col">Saved job</th><th scope="col">Drawing</th>
+              <th scope="col">Drawing version</th><th scope="col">Tool</th><th scope="col">Tool version</th></tr>
+          </thead>
+          <tbody>
+            {reports.map(({ id, drawing, drawingVersion, tool, toolVersion }, index) => (
+              <tr key={id}>
+                <th scope="row">{REPORT_LABELS[index]}</th><td>{id}</td>
+                <td>{drawing ?? 'Not recorded'}</td><td>{drawingVersion}</td>
+                <td>{tool ?? 'Not recorded'}</td><td>{toolVersion ?? 'Not recorded'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {rows && (
+          <table>
+            <caption>Area rank changes across saved reports</caption>
+            <thead>
+              <tr><th scope="col">Layer</th><th scope="col">First rank</th><th scope="col">First to second</th>
+                <th scope="col">Second rank</th><th scope="col">Second to third</th><th scope="col">Third rank</th></tr>
+            </thead>
+            <tbody>
+              {rows.map(({ layer, ranks: [first, second, third] }) => (
+                <tr key={layer}>
+                  <th scope="row">{layer}</th><td>{first ?? 'Absent'}</td><td>{rankChange(first, second)}</td>
+                  <td>{second ?? 'Absent'}</td><td>{rankChange(second, third)}</td><td>{third ?? 'Absent'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {reason && <p>{reason}</p>}
+      {rows && <button type="button" onClick={download}>Download area rank table</button>}
     </>
   )
 }
@@ -322,8 +412,6 @@ function ImportedReportComparison({ projectId, reports, scope }) {
 
 export default function ReportComparison({ jobs, projectId }) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
-  const [firstId, setFirstId] = useState('')
-  const [secondId, setSecondId] = useState('')
   const reports = new Map()
   const seenJobIds = new Set()
   for (const job of jobs) {
@@ -336,50 +424,63 @@ export default function ReportComparison({ jobs, projectId }) {
     seenJobIds.add(id)
     const { version } = savedReportBinding(job, projectId)
     if (!version) continue
-    const { tool, version: toolVersion } = job.result
+    const { tool, version: toolVersion, project_context: { drawing_id: drawing } } = job.result
     reports.set(id, {
       id,
       job,
+      drawing: typeof drawing === 'string' && drawing.trim() ? drawing : null,
       drawingVersion: version,
       tool: typeof tool === 'string' && tool.trim() ? tool : null,
       toolVersion: typeof toolVersion === 'string' && toolVersion.trim() ? toolVersion : null,
     })
   }
-  const first = reports.get(firstId)
-  const second = reports.get(secondId)
-  const clearFirst = Boolean(firstId && !first)
-  const clearSecond = Boolean(secondId && !second)
-  useEffect(() => {
-    if (clearFirst) setFirstId(current => current === firstId ? '' : current)
-    if (clearSecond) setSecondId(current => current === secondId ? '' : current)
-  }, [clearFirst, clearSecond, firstId, secondId])
   return (
     <>
-      {reports.size >= 2 && (
-        <section className="ground-job-detail" aria-label="Compare saved reports">
-          <h3>Compare saved reports</h3>
-          <ReportPicker label="First report" value={first?.id} exclude={second?.id} reports={reports} onChange={setFirstId} />
-          <ReportPicker label="Second report" value={second?.id} exclude={first?.id} reports={reports} onChange={setSecondId} />
-          <div aria-live="polite">
-            {first && second && (
-              <>
-                <dl>
-                  <dt>Drawing version</dt>
-                  <dd>{first.drawingVersion === second.drawingVersion ? 'Same drawing version' : 'Different drawing versions'}</dd>
-                  <dt>Tool version</dt>
-                  <dd>{toolVersionResult(first, second)}</dd>
-                </dl>
-                <LayerOptionsComparison first={first} second={second} />
-                <LayerAreaComparison first={first} second={second} />
-                <SelectionComparison first={first} second={second} />
-              </>
-            )}
-          </div>
-        </section>
-      )}
+      <LocalReportComparison key={JSON.stringify([scope, projectId])} reports={reports} />
       {scope && projectId && <ImportedReportComparison key={JSON.stringify([scope, projectId])}
         projectId={projectId} reports={reports} scope={scope} />}
       <SelectionExports reports={reports} projectId={projectId} key={projectId} />
     </>
+  )
+}
+
+function LocalReportComparison({ reports }) {
+  const [ids, setIds] = useState(['', '', ''])
+  const selected = ids.map(id => reports.get(id))
+  const [first, second, third] = selected
+  const missing = ids.map((id, index) => id && !selected[index] ? id : '')
+  const [missingFirst, missingSecond, missingThird] = missing
+  useEffect(() => {
+    if (!missingFirst && !missingSecond && !missingThird) return
+    const removed = [missingFirst, missingSecond, missingThird]
+    setIds(current => current.map((id, index) => id === removed[index] ? '' : id))
+  }, [missingFirst, missingSecond, missingThird])
+
+  if (reports.size < 2) return null
+  return (
+    <section className="ground-job-detail" aria-label="Compare saved reports">
+      <h3>Compare saved reports</h3>
+      {REPORT_LABELS.slice(0, reports.size).map((label, index) => (
+        <ReportPicker key={label} label={label} value={selected[index]?.id} reports={reports}
+          exclude={ids.filter((_, slot) => slot !== index)}
+          onChange={value => setIds(current => current.includes(value) && value ? current :
+            current.map((id, slot) => slot === index ? value : id))} />
+      ))}
+      <div aria-live="polite">
+        {first && second && (third ? <SavedReportSeries reports={selected} /> : (
+          <>
+            <dl>
+              <dt>Drawing version</dt>
+              <dd>{first.drawingVersion === second.drawingVersion ? 'Same drawing version' : 'Different drawing versions'}</dd>
+              <dt>Tool version</dt>
+              <dd>{toolVersionResult(first, second)}</dd>
+            </dl>
+            <LayerOptionsComparison first={first} second={second} />
+            <LayerAreaComparison first={first} second={second} />
+            <SelectionComparison first={first} second={second} />
+          </>
+        ))}
+      </div>
+    </section>
   )
 }

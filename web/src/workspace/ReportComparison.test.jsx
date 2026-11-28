@@ -92,6 +92,81 @@ function compare(left, right) {
   fireEvent.change(picker('Second report'), { target: { value: right.job_id } })
 }
 
+function selectSeries(jobs) {
+  for (const [index, label] of ['First report', 'Second report', 'Third report'].entries()) {
+    fireEvent.change(picker(label), { target: { value: jobs[index].job_id } })
+  }
+}
+
+const series = [
+  areaReport(first, [['Roof', 10], ['Canopy', 10], ['Garage', 5]]),
+  areaReport(report('job-middle', 'drawing-v2'), [['Roof', 10], ['Canopy', 10], ['Garage', 15]]),
+  areaReport(report('job-last', 'drawing-v3'), [['Roof', 20], ['Garage', 15], ['Patio', 5]]),
+]
+
+it.each([
+  ['forward', series, {
+    Roof: ['1', 'Down 1', '2', 'Up 1', '1'],
+    Canopy: ['1', 'Down 1', '2', 'Removed', 'Absent'],
+    Garage: ['3', 'Up 2', '1', 'Down 1', '2'],
+    Patio: ['Absent', 'Absent', 'Absent', 'Added', '3'],
+  }],
+  ['reverse', [...series].reverse(), {
+    Roof: ['1', 'Down 1', '2', 'Up 1', '1'],
+    Canopy: ['Absent', 'Added', '2', 'Up 1', '1'],
+    Garage: ['2', 'Up 1', '1', 'Down 2', '3'],
+    Patio: ['3', 'Removed', 'Absent', 'Absent', 'Absent'],
+  }],
+])('compares and exports three saved drawing versions in %s order', async (_label, order, ranks) => {
+  render(<ReportComparison jobs={series} projectId={projectId} />)
+  selectSeries(order)
+
+  const versions = screen.getByRole('table', { name: 'Saved report versions in selected order' })
+  expect(within(versions).getAllByRole('cell').map(cell => cell.textContent)).toEqual(
+    order.flatMap(job => [job.job_id, 'site-a', job.input_version_id, 'Layer report', 'v1']),
+  )
+  expect(within(picker('Third report')).getAllByRole('option').map(option => option.value))
+    .toEqual(['', order[2].job_id])
+
+  const table = screen.getByRole('table', { name: 'Area rank changes across saved reports' })
+  expect(Object.fromEntries(within(table).getAllByRole('rowheader').map(header => [
+    header.textContent,
+    within(header.closest('tr')).getAllByRole('cell').map(cell => cell.textContent),
+  ]))).toEqual(ranks)
+
+  const blob = await downloadReport('Download area rank table', 'saved-report-ranking-changes.html')
+  expect(blob.type).toBe('text/html')
+  const html = new DOMParser().parseFromString(await readText(blob), 'text/html')
+  expect([...html.querySelectorAll('table')].map(element => element.outerHTML))
+    .toEqual([versions.outerHTML, table.outerHTML])
+})
+
+it('shows three saved versions without ranking incompatible or incomplete layer reports', () => {
+  const malformed = areaReport(series[2], [['Roof', 20]], { drawing: { name: 'site-a' } })
+  const { rerender } = render(<ReportComparison jobs={[series[0], series[1], malformed]} projectId={projectId} />)
+  selectSeries(series)
+  expect(screen.getByText('Area ranking requires complete layer area data in all three reports.')).toBeVisible()
+  expect(screen.getByText('Not recorded')).toBeVisible()
+
+  const revisedTool = { ...series[2], result: { ...series[2].result, version: 'v2' } }
+  rerender(<ReportComparison jobs={[series[0], series[1], revisedTool]} projectId={projectId} />)
+  expect(screen.getByText('Area ranking requires three reports from the same known tool version.')).toBeVisible()
+  expect(screen.getByRole('table', { name: 'Saved report versions in selected order' })).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Download area rank table' })).toBeNull()
+})
+
+it('resets all three selections when changing project even if the new project has the same job IDs', () => {
+  const { rerender } = render(<ReportComparison jobs={series} projectId={projectId} />)
+  selectSeries(series)
+  const otherProject = 'project-two'
+  const otherJobs = series.map(job => ({
+    ...job, result: { ...job.result, project_context: { ...job.result.project_context, project_id: otherProject } },
+  }))
+  rerender(<ReportComparison jobs={otherJobs} projectId={otherProject} />)
+  for (const label of ['First report', 'Second report', 'Third report']) expect(picker(label)).toHaveValue('')
+  expect(screen.queryByRole('table', { name: 'Saved report versions in selected order' })).toBeNull()
+})
+
 it.each([
   ['filter only', { filter: null, exact: false }, { filter: 'Panels', exact: false },
     ['All layers', 'Panels', 'Changed'], ['Off', 'Off', 'Same']],
@@ -262,19 +337,23 @@ it('exports a drawing revision change and a changed count with the same rule', a
 })
 
 async function downloadSelectionComparison() {
-  return readJson(await downloadJson('Download selection comparison', 'selection-comparison.json'))
+  return readJson(await downloadReport('Download selection comparison', 'selection-comparison.json'))
 }
 
-function readJson(blob) {
+async function readJson(blob) {
+  return JSON.parse(await readText(blob))
+}
+
+function readText(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = () => resolve(JSON.parse(reader.result))
+    reader.onload = () => resolve(reader.result)
     reader.onerror = reject
     reader.readAsText(blob)
   })
 }
 
-async function downloadJson(button, filename) {
+async function downloadReport(button, filename) {
   const createUrl = vi.fn(() => 'blob:selection-comparison')
   const revokeUrl = vi.fn()
   const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
@@ -297,7 +376,7 @@ async function downloadCountSelection(job) {
   const view = render(<ReportComparison jobs={[job]} projectId={projectId} />)
   fireEvent.click(screen.getByText('Export or compare Count selections'))
   fireEvent.change(picker('Selection to export'), { target: { value: job.job_id } })
-  const blob = await downloadJson('Download Count selection', 'count-selection.json')
+  const blob = await downloadReport('Download Count selection', 'count-selection.json')
   view.unmount()
   return new File([blob], 'count-selection.json', { type: blob.type })
 }
@@ -415,7 +494,7 @@ it.each([
     expect(within(history).getByText(edited.job_id)).toBeVisible()
     expect(within(history).getByText('d'.repeat(64))).toBeVisible()
     expect(within(history).queryAllByRole('row').slice(1)).toHaveLength(expectedChanges.length)
-    const result = await readJson(await downloadJson('Download selection history', 'selection-history.json'))
+    const result = await readJson(await downloadReport('Download selection history', 'selection-history.json'))
     expect(result).toMatchObject({
       schema: 'leaf.saved-selection-history.v1', source: 'unverified_files', matches_original: matchesOriginal,
       selections: {
