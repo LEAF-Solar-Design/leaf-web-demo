@@ -17,6 +17,8 @@ Frozen decisions (sf-w2-combiners-tool):
     combiners) and refuses any disagreement before the kernel runs.
   - Hardware. The new combiner boxes take model, max_dc_voltage and max_ac_power_kw from the request's
     "hardware" object only. The builtin never invents hardware.
+  - Optional routing constraints apply to the two DC terminal leads per string after placement. The
+    shared allocator must route every lead before the placed graph can be published.
   - Ids and time. New inverter and route ids are minted deterministically from the before graph's digest
     (sha256 of "solar-combiners|<digest>|<kind>|<n>", formatted as a version-4 UUID), skipping every id the
     graph already holds; created_at is the project's provenance created_at. The commit rail re-runs the
@@ -43,8 +45,10 @@ import uuid
 
 import solar_combiner_graph as cg
 from solar_design_graph import GraphValidationError, _bounded_json, entities
+from solar_joint_homerun_routing import route_together
 from solar_sizing_client import checked_graph, digest
-from solar_solve_results import finish_mutation
+from solar_solve_results import HOMERUN_KINDS, finish_mutation
+from solar_wiring_client import point
 
 TOOL = "solar-combiners"
 INVALID = "INVALID_COMBINER_REQUEST"
@@ -83,7 +87,9 @@ def _rating(value):
 
 def _request(params):
     _bounded_json(params)
-    if type(params) is not dict or set(params) != REQUEST_KEYS or type(params["expected_rev"]) is not int:
+    if (type(params) is not dict or params.keys() - {"routing_constraints"} != REQUEST_KEYS
+            or type(params["expected_rev"]) is not int
+            or ("routing_constraints" in params and type(params["routing_constraints"]) is not dict)):
         _refuse(INVALID)
     hardware = params["hardware"]
     if (type(hardware) is not dict or set(hardware) != HARDWARE_KEYS
@@ -154,6 +160,11 @@ def run(graph, params, *, source_intake=None):
         _refuse(CODE_MAP[str(exc)], str(exc))
     except cg.rb.ElectricalBridgeError as exc:
         _refuse("CAPABILITY_NOT_READY", str(exc)[:64])
+    if "routing_constraints" in params:
+        leads = [route for route in result["routes"] if route["route_kind"] in HOMERUN_KINDS]
+        for lead in leads:
+            lead["points"] = [point(vertex) for vertex in lead["points"]]
+        route_together(leads, params["routing_constraints"])
     for schedule in result["schedules"]:
         schedule["validity"] = {"state": "stale", "reasons": [STALE_REASON]}
     return finish_mutation(before, result, TOOL)

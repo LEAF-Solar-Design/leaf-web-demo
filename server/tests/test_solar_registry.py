@@ -151,6 +151,7 @@ def _assert_shipped_declarations(registry):
         assert row["trusted_inputs"] == {
             "solar-commit-solve": ["proposal_candidate"],
             "solar-panel-groups": ["source_intake"],
+            "solar-homeruns": ["source_intake"],
         }.get(name, [])
         assert row["record"] is None
         assert row["wave"] == 1

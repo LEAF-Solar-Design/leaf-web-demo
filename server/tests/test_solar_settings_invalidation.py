@@ -26,7 +26,7 @@ import solar_local_read
 import solar_settings_invalidation as invalidation
 from solar_dependencies import affected_entities
 from solar_design_graph import GraphValidationError, entities
-from solar_sizing_client import digest, require_sizing, sizing_basis
+from solar_sizing_client import digest, manual_sizing_evidence, manual_voltage, require_sizing, sizing_basis
 from solar_solve_results import HOMERUN_KINDS, SETTINGS_FIELDS, require_current_export
 from test_solar_tool_electrical_schedules import i7  # noqa: F401
 from test_solar_w2_registration import dispatch, head_graph, latest
@@ -168,6 +168,60 @@ def test_settings_invalidation_edit_stales_homeruns_and_schedule(graph):
         assert after[key] == graph[key]
     assert export_code(after) == NOT_CURRENT
     assert digest(after) == FIELD_EDITS["panels_in_sequence"][1]
+
+
+def manual_roof(graph, *, zoned=False):
+    if not zoned:
+        graph["electrical_zones"] = []
+        for frame in graph["frames"]:
+            frame["electrical_zone_ref"] = None
+    settings = graph["settings"]
+    settings["voc_cold"] = manual_voltage()
+    settings["global_string_sizing_confirmed"] = True
+    settings["extra"]["string_sizing"] = manual_sizing_evidence(graph)
+    return graph
+
+
+@pytest.mark.parametrize("maxima", [(3,), (1,), (3, 2)], ids=["increase", "decrease", "restore"])
+def test_settings_refreshes_confirmed_manual_roof_maximum(graph, maxima):
+    current = manual_roof(graph)
+    for maximum in maxima:
+        expected = require_sizing(current)
+        after = edit(current, {"panels_in_sequence": maximum})
+        assert (after["rev"], after["parent_rev"]) == (current["rev"] + 1, current["rev"])
+        assert require_sizing(after) == {**expected, "panels_in_sequence": maximum}
+        assert after["settings"]["voc_cold"] == manual_voltage()
+        assert after["strings"] == current["strings"]
+        assert after["project"] == current["project"]
+        assert after["routes"][0]["validity"] == after["schedules"][0]["validity"] == STALE
+        current = after
+
+
+@pytest.mark.parametrize("case", ["stale", "missing", "mixed", "project", "electrical", "zoned", "equal"])
+def test_settings_does_not_refresh_ineligible_manual_sizing(graph, passing, service, case):
+    value = manual_roof(graph, zoned=case == "zoned")
+    changes = {"panels_in_sequence": 3}
+    extra = {}
+    if case == "stale":
+        value["settings"]["extra"]["string_sizing"]["basis_sha256"] = "0" * 64
+    elif case == "missing":
+        del value["settings"]["extra"]["string_sizing"]
+    elif case == "mixed":
+        changes["num_mppt"] = 2
+    elif case == "project":
+        extra["project_changes"] = {"name": "Renamed"}
+    elif case == "electrical":
+        value["project"]["zip_code"] = passing["request"]["zip_code"]
+        value = confirm(value, sizing_params(value, passing))["graph"]
+        assert require_sizing(value)["mode"] == "global"
+    elif case == "equal":
+        changes["panels_in_sequence"] = value["settings"]["panels_in_sequence"]
+
+    after = edit(value, changes, **extra)
+    assert after["settings"]["global_string_sizing_confirmed"] is False
+    assert "string_sizing" not in after["settings"]["extra"]
+    with pytest.raises(GraphValidationError, match="SIZING_CONFIRMATION_REQUIRED"):
+        require_sizing(after)
 
 
 @pytest.mark.parametrize("field", sorted(FIELD_EDITS))

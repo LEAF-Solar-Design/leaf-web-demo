@@ -209,7 +209,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           setCurrent({ state, reason: null }, pending.generation)
         } else {
           const feedback = projectSolarGraphFeedback({ tool: name,
-            submission: { ok: false, status: 409, reason: exact.reasonCode } })
+            submission: { ok: false, status: 409, reason: exact.reasonCode,
+              ...(exact.affectedLeads ? { envelope: { error: {
+                reason_code: exact.reasonCode, affected_leads: exact.affectedLeads } } } : {}) } })
           setCurrent({ state, reason: 'preview_refused', feedback }, pending.generation)
         }
       } catch {

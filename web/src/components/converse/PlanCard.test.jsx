@@ -23,6 +23,8 @@ it('renders the plan contract as plain text and reports the replaced revision', 
     expect(screen.getByText(text)).toBeVisible()
   }
   expect(screen.getByText('Find roof panels').parentElement.tagName).toBe('OL')
+  expect(screen.getByText('What to check after you run it')).toBeVisible()
+  expect(screen.getByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeVisible()
   expect(screen.getByRole('table')).toHaveTextContent('thresholdnumber0Minimum area')
   expect(document.querySelector('img')).toBeNull()
   expect(screen.queryByText(/q[12] · /)).toBeNull()
@@ -34,6 +36,8 @@ it('renders the plan contract as plain text and reports the replaced revision', 
 it('shows the Studio target and omits an empty answers section', () => {
   render(<PlanCard {...props} proposal={{ ...props.proposal, plan: { ...plan, target: 'studio', answers: {} } }} />)
   expect(screen.getByText('Runs in Studio')).toBeVisible()
+  expect(screen.getByText('Acceptance checks')).toBeVisible()
+  expect(screen.queryByText('Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.')).toBeNull()
   expect(screen.queryByRole('heading', { name: 'Your answers' })).toBeNull()
 })
 

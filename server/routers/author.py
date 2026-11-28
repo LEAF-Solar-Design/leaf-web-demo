@@ -71,6 +71,7 @@ ANONYMOUS_QUOTA_PRINCIPAL = "_anonymous"
 # the validation layer before any harness/template work runs.
 MAX_AUTHOR_DESCRIPTION = 8_000
 DEFAULT_AUTHOR_TIMEOUT_S = 120.0
+AUTHOR_STATUS_GUIDANCE = "Progress shows live on the build card. Do not state build, compile or publish status, and do not promise to check later."
 
 
 class _AuthorFields(BaseModel):
@@ -504,55 +505,7 @@ def _legacy_author(req: AuthorRequest, tenant) -> Dict[str, Any]:
     )
 
 
-_CUSTOMIZATION_ERROR_MESSAGES = {
-    "customization_stage_queue_full": "Tool builds are busy right now. This request was not queued and was not counted against your daily builds. Try again in a few minutes.",
-    "customization_stage_queue_unavailable": "Tool builds are temporarily unavailable. This request was not queued and was not counted against your daily builds.",
-    "revision_target_missing": "This Branch tool has no published version to revise. Publish a version first, or create a new tool.",
-    "invalid_stage_source_request": "Invalid staged source request.",
-    "stage_source_not_available": "Staged source is not available.",
-    "stage_source_failed": "Staged source could not be read.",
-    "customization_stage_disabled": (
-        "Tool authoring is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "customization_publish_disabled": (
-        "Tool publication is not enabled for this workspace in this environment. "
-        "The approved request was not executed."
-    ),
-    "invalid_stage_request": (
-        "The requested authoring mode is not supported by the protected authoring path. "
-        "Use build mode."
-    ),
-    "builder_entitlement_missing": (
-        "This workspace does not have the builder entitlement required for tool authoring."
-    ),
-    "customization_harness_unavailable": (
-        "Protected tool authoring is temporarily unavailable. "
-        "The approved request was not executed."
-    ),
-    "idempotency_key_required": (
-        "Tool authoring requires a request identity. The approved request was not executed."
-    ),
-    "tenant_identity_binding_unavailable": (
-        "Tool authoring requires a verified workspace identity for the requester. "
-        "The approved request was not executed."
-    ),
-    "stage_authority_invalid": (
-        "Tool authoring requires the requester's active app turn. "
-        "The approved request was not executed."
-    ),
-    "stage_grant_expired": "This build waited too long and was not started. Ask for it again.",
-    "stage_grant_exhausted": (
-        "This build was tried twice and could not be finished. Ask for it again. "
-        "This build waited in line, so it ran without connected services. "
-        "If it needs one, ask again when the line is short."
-    ),
-    "stage_grant_turn_open": "The conversation that asked for this build was stopped, so it was not started. Ask for it again.",
-    "stage_grant_refused": "Your access changed while this request waited. It was not started.",
-    "stage_grant_unavailable": "This build could not be checked and was not started. Ask for it again.",
-    "stage_grant_withdrawn": "This build was withdrawn before it started.",
-    "stage_grant_cancelled": "This build was stopped from the conversation before it started.",
-}
+_CUSTOMIZATION_ERROR_MESSAGES = customization_service.CUSTOMIZATION_ERROR_MESSAGES
 
 
 def _stage_authority_refusal_detail(
@@ -925,7 +878,7 @@ def author(req: AuthorRequest, tenant=Depends(deps.require_tenant),
             **({"graph_input": req.graph_input} if req.graph_input is not None else {}),
         )
         if result.get("contract") == "leaf.customization-stage-job.v1":
-            return JSONResponse(status_code=202, content=result)
+            return JSONResponse(status_code=202, content={**result, "guidance": AUTHOR_STATUS_GUIDANCE})
         return result
     # The daily authoring cap is charged inside stage(), immediately before the
     # harness call, so everything it refuses first costs nothing.

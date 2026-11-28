@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -584,6 +585,14 @@ def test_saved_inverter_comparison_is_saved_mode_only(graph):
         assignment_report(graph, inverter_refs=refs)
 
 
+def test_saved_assignment_report_rejects_preview_balance_option(graph):
+    name = "solar-assignment-report"
+    request = {"mode": "saved", "expected_rev": graph["rev"], "balance_whole_strings": True}
+    assert not Draft7Validator(solar_tools.trusted_record(name)["params"]).is_valid(request)
+    with pytest.raises(GraphValidationError, match="INVALID_STRING_ASSIGNMENT_REQUEST"):
+        solar_local_read._read_output(name, graph, request)
+
+
 @pytest.mark.parametrize("patch", [{"unexpected": 1}, {"accept_excess_capacity": "Yes"},
                                    {"expected_rev": True}])
 def test_assignment_report_closed_request(graph, patch):
@@ -837,6 +846,89 @@ def test_assign_strings_repeat_has_nothing_to_assign(graph):
         call(once)
 
 
+@pytest.mark.parametrize(("name", "positions", "capacity", "expected"), [
+    ("all-routes-near-first", (0, 10, 20, 30, 40, 45), 4, [3, 3]),
+    ("routes-split-between-collectors", (0, 10, 20, 80, 90, 100), 4, [3, 3]),
+    ("exact-three-slots-per-collector", (0, 10, 20, 80, 90, 100), 3, [3, 3]),
+    ("four-slots-for-six-strings", (0, 10, 20, 80, 90, 100), 2, []),
+])
+def test_saved_whole_string_assignment(graph, monkeypatch, tmp_path, name, positions, capacity, expected):
+    drawing = variant(graph, "L2")
+    template = copy.deepcopy(graph["panels"][0])
+    frame = copy.deepcopy(graph["frames"][0])
+    frame.update(electrical_zone_ref=None, panel_refs=[], sequences=[], panel_assignments=[],
+                 matrix=[[]], module_columns=9, module_slots=9)
+    drawing["frames"] = [frame]
+    for index, (string, x) in enumerate(zip(drawing["strings"], positions, strict=True)):
+        string["route"] = [du(x, 20), du(x, 25)]
+        for sequence in range(1 + index % 2):
+            column = len(drawing["panels"])
+            panel = copy.deepcopy(template)
+            panel.update(id=app_id("panel", column + 1), centre=du(x, 20 + sequence),
+                         matrix_cell={"row": 0, "col": column})
+            panel["assignment"] = {"string_ref": string["id"], "seq": sequence}
+            drawing["panels"].append(panel)
+            frame["panel_refs"].append(panel["id"])
+            frame["matrix"][0].append({
+                "code": "panel", "panel_ref": panel["id"], "x": panel["centre"][0],
+                "y": panel["centre"][1], "angle": 0, "seq": sequence,
+                "inverter_id": None, "string_input_number": None,
+            })
+            frame["panel_assignments"].append({
+                "panel_ref": panel["id"], **panel["assignment"],
+                "inverter_id": None, "string_input_number": None,
+            })
+            string["ordered_panel_refs"].append(panel["id"])
+        string["module_count"] = len(string["ordered_panel_refs"])
+        string["from_ref"] = string["ordered_panel_refs"][0]
+        frame["sequences"].append({
+            "string_ref": string["id"], "ordered_panel_refs": string["ordered_panel_refs"][:],
+        })
+    for inverter in drawing["inverters"]:
+        inverter.update(total_dc_inputs=capacity, mppt_count=1)
+    sync_assignments(drawing)
+    drawing = validate_graph(drawing)
+    membership = {string["id"]: string["ordered_panel_refs"] for string in drawing["strings"]}
+    backend, _ = seed(tmp_path, monkeypatch, drawing)
+    response = solar_local_read.run_local_graph_read(
+        backend, TENANT, "solar-assignment-report",
+        {"expected_rev": 0, "accept_excess_capacity": True, "balance_whole_strings": True},
+        drawing_id="solar", source_version=1, job_id=f"ask14-{name}",
+    )
+    assert response["drawing_changed"] is False
+    assert latest(backend) == 1
+    assert head_graph(backend) == drawing
+
+    report = response["output"]
+    assert all(group["total_dc_inputs"] == capacity for group in report["saved_state"]["collector_capacity"])
+    assert bool(report["balance_lines"]) == bool(expected)
+    assignments = report["candidate_assignments"]
+    loads = Counter(item["inverter_ref"] for item in assignments)
+    assert sorted(loads.values()) == expected
+    assigned = [item["string_ref"] for item in assignments]
+    remaining = report["remaining_string_refs"]
+    assert Counter(assigned + remaining) == Counter(membership.keys())
+    assert len({(a["inverter_ref"], a["mppt_letter"], a["input_number"]) for a in assignments}) == len(assigned)
+
+    with held(backend) as fence:
+        if remaining:
+            assert len(remaining) == len(membership)
+            assert report["status"] == "unassigned"
+            assert report["commit_refusal_code"] == "STRING_CAPACITY_INSUFFICIENT"
+            with pytest.raises(GraphValidationError, match=report["commit_refusal_code"]):
+                dispatch(backend, fence, TOOL, dict(ASSIGN, expected_rev=0, balance_whole_strings=True))
+        else:
+            assert report["commit_refusal_code"] is None
+            dispatch(backend, fence, TOOL, dict(ASSIGN, expected_rev=0, balance_whole_strings=True))
+    assert latest(backend) == (1 if remaining else 2)
+    saved = head_graph(backend)
+    assert {string["id"]: string["ordered_panel_refs"] for string in saved["strings"]} == membership
+    if not remaining:
+        assert Counter((item["string_ref"], inverter["id"], item["mppt_letter"], item["input_number"])
+                       for inverter in saved["inverters"] for item in inverter["input_assignments"]) == Counter(
+            (a["string_ref"], a["inverter_ref"], a["mppt_letter"], a["input_number"]) for a in assignments)
+
+
 def test_assign_strings_kernel_refusals_are_named(graph, monkeypatch):
     module = builtin()
     for error, code in ((module.kernel.InverterStringNotPortedError("manual"), "STRING_ASSIGNMENT_NOT_PORTED"),
@@ -849,7 +941,7 @@ def test_assign_strings_kernel_refusals_are_named(graph, monkeypatch):
                 call(variant(graph, "U"))
             assert raised.value.code == code
     with monkeypatch.context() as patch:
-        patch.setattr(module.kernel, "assign_strings", lambda state, host, forms: (state, ["surprise"]))
+        patch.setattr(module.kernel, "assign_strings", lambda state, host, forms, **options: (state, ["surprise"]))
         with pytest.raises(GraphValidationError, match="STRING_ASSIGNMENT_MAPPING_FAILED"):
             call(variant(graph, "U"))
 
@@ -859,9 +951,10 @@ def test_assign_strings_host_inputs(graph, monkeypatch):
     seen = []
     real = module.kernel.assign_strings
 
-    def spy(state, host, forms):
+    def spy(state, host, forms, *, balance_whole_strings):
+        assert balance_whole_strings is False
         seen.append((host, forms))
-        return real(state, host, forms)
+        return real(state, host, forms, balance_whole_strings=balance_whole_strings)
 
     with monkeypatch.context() as patch:
         patch.setattr(module.kernel, "assign_strings", spy)
@@ -896,6 +989,7 @@ def test_assign_strings_host_inputs(graph, monkeypatch):
     dict(ASSIGN, expected_rev=0, accept_excess_capacity="Yes"),
     dict(ASSIGN, expected_rev=0, accept_excess_capacity=1),
     dict(ASSIGN, expected_rev=0, accept_excess_capacity=None),
+    dict(ASSIGN, expected_rev=0, balance_whole_strings="Yes"),
     dict(ASSIGN, expected_rev="0"), dict(ASSIGN, expected_rev=0.0), dict(ASSIGN, expected_rev=True),
     dict(ASSIGN, expected_rev=0, mode="Manual"), dict(ASSIGN, expected_rev=0, drawing_id="solar"),
 ])
@@ -925,6 +1019,7 @@ DECLARATION = {
                 "operation": {"type": "string", "enum": ["assign-strings"]},
                 "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                 "accept_excess_capacity": {"type": "boolean"},
+                "balance_whole_strings": {"type": "boolean"},
             },
             "required": ["operation", "expected_rev", "accept_excess_capacity"],
             "additionalProperties": False,

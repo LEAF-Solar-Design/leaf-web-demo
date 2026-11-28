@@ -280,7 +280,14 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         # Import lazily because the producer also uses this admission module.
         from solar_project_solaredge import SolarEdgeGridRefusal
         from solar_combiner_graph import CombinerCapacityError
+        from solar_joint_homerun_routing import JointRoutingInfeasible
 
+        if isinstance(exc, JointRoutingInfeasible):
+            response = _refusal(exc.code, message=exc.user_message)
+            response["content"]["error"]["affected_leads"] = [
+                f"{lead['string_ref']}/{lead['route_kind']}" for lead in exc.unassigned_leads
+            ]
+            return response
         if isinstance(exc, CombinerCapacityError):
             response = _refusal(exc.code, message="Combiner placement exceeds inverter collector capacity.")
             response["content"]["error"]["unplaced_string_refs"] = list(exc.unplaced_string_refs)

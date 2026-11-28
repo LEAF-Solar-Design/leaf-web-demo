@@ -95,6 +95,7 @@ export default function SolarEdgeImportPanel({
 
   const sourceValue = source?.drawingId === drawingId ? source.value : null
   const reportValue = pending === null && report?.drawingId === drawingId ? report.value : null
+  const reportPdf = reportValue ? report.pdf : null
   const reportRef = useRef(report)
   reportRef.current = report
   const parsed = parseTolerance(tolerance)
@@ -118,7 +119,7 @@ export default function SolarEdgeImportPanel({
     if (step === 'report' && !sourceValue) { setOutcome({ step, drawingId, message: SOLAREDGE_PANEL_REASONS.source_required }); return }
     if (step === 'report' && !parsed.ok) { setOutcome({ step, drawingId, message: parsed.reason }); return }
     if (step === 'upload' && file.size > SOLAREDGE_PDF_MAX_BYTES) {
-      setOutcome({ step, drawingId, message: `Upload failed. ${solarEdgeReason('IMPORT_PDF_TOO_LARGE')}` })
+      setOutcome({ step, drawingId, message: `Upload failed. Selected file “${file.name}”. ${solarEdgeReason('IMPORT_PDF_TOO_LARGE')}.` })
       return
     }
     const controller = new AbortController()
@@ -147,14 +148,21 @@ export default function SolarEdgeImportPanel({
       const reason = step === 'report' && result.code === 'REPORT_ASSOCIATIONS_INVALID'
         ? 'The PDF choices do not match these groups. Review or clear association choices, then build the report again'
         : solarEdgeReason(result.code)
-      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${reason}.` })
+      const message = step === 'upload'
+        ? `Upload failed. Selected file “${file.name}”. ${reason}.`
+        : `Report failed. ${reason}.`
+      setOutcome({ step, drawingId, message })
       return
     }
     if (step === 'upload') {
-      setSource({ drawingId, value: result.value })
+      setSource({ drawingId, value: result.value, filename: file.name })
       setOutcome({ step, drawingId, message: 'Upload succeeded. The PDF is ready for a report.' })
     } else {
-      setReport({ drawingId, projectId, version: drawingVersion, eligible: true, value: result.value })
+      const sourceRef = sourceValue.source
+      const pdf = result.value.source_artifact_id === sourceRef.artifact_id
+        ? { filename: source.filename, sha256: sourceRef.content_sha256 }
+        : null
+      setReport({ drawingId, projectId, version: drawingVersion, eligible: true, value: result.value, pdf })
       setOutcome({ step, drawingId, message: 'Report succeeded. Review the tracking labels before accepting.' })
       onReportReady?.(result.value)
     }
@@ -263,6 +271,12 @@ export default function SolarEdgeImportPanel({
         <h3>3. Review the tracking labels</h3>
         <p>The report labels which panels belong to which SolarEdge string. Accepting records those labels on the design.</p>
         <p>Report source version: {reportValue.input_version_id ?? reportValue.source_version}.</p>
+        {reportPdf && <dl>
+          <dt>PDF used for this report</dt>
+          <dd style={{ overflowWrap: 'anywhere' }}>{reportPdf.filename}</dd>
+          <dt>PDF SHA-256</dt>
+          <dd style={{ overflowWrap: 'anywhere' }}><code>{reportPdf.sha256}</code></dd>
+        </dl>}
         <table aria-label="SolarEdge report counts"><thead><tr><th scope="col">Count</th><th scope="col">Total</th></tr></thead>
           <tbody>{reportSummary(reportValue).map((row) => <tr key={row.key}><th scope="row">{row.label}</th><td>{row.value}</td></tr>)}</tbody>
         </table>

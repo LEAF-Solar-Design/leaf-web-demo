@@ -1343,6 +1343,10 @@ def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
         lines.pop()  # A terminal newline ends the preceding line.
     pairs: List[Tuple[int, str]] = []
     inline_record = False
+    in_tables = False
+    expect_layer_name = False
+    padded_layer_names: set[str] = set()
+    padded_layer_refs: list[tuple[int, str]] = []
     for k in range(0, len(lines) - 1, 2):
         code_raw = lines[k].strip()
         try:
@@ -1353,15 +1357,32 @@ def _group_pairs(text: str, *, literal_text=None) -> List[Tuple[int, str]]:
             # with a stray blank line â€” real writers do not produce these, but
             # a hand-edited demo file might.)
             continue
-        value = lines[k + 1].strip()
-        if literal_text is not None:
-            if code == 0:
-                inline_record = value.upper() in {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
-            elif inline_record and code in (1, 3, 304) and lines[k + 1] != value:
+        raw_value = lines[k + 1]
+        value = raw_value.strip()
+        if code == 0:
+            if value in {"SECTION", "ENDSEC"}:
+                in_tables = False
+            expect_layer_name = in_tables and value == "LAYER"
+            inline_record = value.upper() in {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
+        elif code == 2 and pairs and pairs[-1] == (0, "SECTION"):
+            in_tables = value.upper() == "TABLES"
+        elif code == 2 and expect_layer_name:
+            expect_layer_name = False
+            if value and raw_value != value:
+                padded_layer_names.add(raw_value)
+                value = raw_value
+        elif raw_value != value:
+            if code == 8 and value:
+                padded_layer_refs.append((len(pairs), raw_value))
+            elif literal_text is not None and inline_record and code in (1, 3, 304):
                 # Dependency identity needs the exact text at chunk edges.
-                # Retain only differing inline values, indexed by pair position.
-                literal_text[len(pairs)] = lines[k + 1]
+                literal_text[len(pairs)] = raw_value
         pairs.append((code, value))
+    # Header and entity references bind to exact declared names. Undeclared
+    # padded references retain the legacy trimmed spelling.
+    for index, raw_value in padded_layer_refs:
+        if raw_value in padded_layer_names:
+            pairs[index] = (8, raw_value)
     if not pairs:
         raise DxfParseError("no DXF group-code pairs found")
     return pairs

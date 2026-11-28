@@ -89,6 +89,7 @@ import { requiresReconciliation } from './errorPresentation.js'
 import DrawingDependencyReport from './components/DrawingDependencyReport.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
 import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
+import { BUILD_TOOL_STARTER } from './lib/starterPrompts.js'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -550,6 +551,7 @@ export function boardDrawingFacts({ projectMode, shown, standaloneName, selected
     || binding.drawing_id !== selectedVersion.drawing_id) return null
   const facts = { project: true, version_id: selectedVersion.version_id, drawing_id: selectedVersion.drawing_id,
     name: (typeof projectIntake?.dwg === 'string' && projectIntake.dwg) || selectedVersion.name || 'Project drawing' }
+  if (projectIntake?.solar_design_graph) facts.solar = true
   return Array.isArray(projectIntake?.polylines) && Array.isArray(projectIntake?.layers)
     ? { ...facts, polylines: projectIntake.polylines.length, layers: projectIntake.layers.length }
     : { ...facts, pending: true }
@@ -2611,6 +2613,7 @@ export default function App() {
   const projectScene = viewerRef.current?.getDrawingScene?.()
   const projectDrawingBinding = projectSolar.scope.binding
   const projectContextView = projectSolarRuntime.contextView
+  const projectSolvePreview = projectSolarRuntime.solvePreview
   const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
   const projectSceneIntake = projectScene?.intake
   const projectSceneKey = projectScene?.drawingKey
@@ -2618,9 +2621,10 @@ export default function App() {
   const projectDrawing = useMemo(() => projectSolarDrawingView({
     solarBinding: projectDrawingBinding,
     contextView: projectContextView,
+    solvePreview: projectSolvePreview,
     current: projectContextCurrent,
     scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
-  }), [projectDrawingBinding, projectContextView, projectContextCurrent,
+  }), [projectDrawingBinding, projectContextView, projectSolvePreview, projectContextCurrent,
     projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
@@ -4538,6 +4542,7 @@ export default function App() {
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
   const [browserPanel, setBrowserPanel] = useState('none')
+  const [browserHeaderActionsOpen, setBrowserHeaderActionsOpen] = useState(false)
   const transcriptDestination = resolveConversationDestination({
     hasDockHost: Boolean(commandTranscriptHost), agentMode, sessionId: agentSessionId,
   })
@@ -5539,6 +5544,7 @@ export default function App() {
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
           liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          starter={signedIn && !mock && !knownGuest && !signedOut ? BUILD_TOOL_STARTER : null}
           mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
@@ -5688,66 +5694,70 @@ export default function App() {
         <ProjectWorkspaceControls {...projectLayout} active={!studioShell && projectLayout.active} />
         <div className="spacer" />
         <div className="who">
-          {/* Header metadata (org · tenant · tier · spend · API base) is demoted
-              behind Details -> the DT2 session drawer, per the standard. */}
-          {canOpenCustomize && (
-            <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
-          )}
-          {!mock && agentSessionId && (
-            <button
-              type="button"
-              className="chip-act"
-              onClick={openAgentMode}
-              aria-label={`Pending approvals ${pendingApprovalCount}`}
-              title={pendingApprovalsUnavailable
-                ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
-                : 'Open pending approvals'}
-            >
-              Approvals
-              {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
-                  items wait; the count lives in the aria-label above. */}
-              {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
-              {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
+          {browserAssetActive && (
+            <button type="button" className="chip-act browser-header-actions-toggle"
+              aria-expanded={browserHeaderActionsOpen} aria-controls="studio-header-actions"
+              onClick={() => setBrowserHeaderActionsOpen(open => !open)}>
+              Workspace actions
             </button>
           )}
-          <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
-          {/* Persistent identity control: before this, sign-out lived only
-              behind Details -> the session drawer, so the header carried no
-              reachable exit for a signed-in operator (2026-09-02
-              reconciliation, row B11). Same signOut path the drawer's action
-              already calls -- never raw logout(). */}
-          <AccountSignOut signedIn={isSignedIn()} onSignOut={sessionActions.signOut} />
-          {devControls && (
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={mock}
-                disabled={tourOn}
-                onChange={(e) => setMock(e.target.checked)}
-                aria-label="Use mock data (off = live backend)"
+          <div id="studio-header-actions" className="studio-header-actions">
+            {/* Header metadata (org · tenant · tier · spend · API base) is demoted
+                behind Details -> the DT2 session drawer, per the standard. */}
+            {canOpenCustomize && (
+              <button type="button" className="chip-act" onClick={() => setCustomizeOpen(true)}>Customize</button>
+            )}
+            {!mock && agentSessionId && (
+              <button
+                type="button"
+                className="chip-act"
+                onClick={openAgentMode}
+                aria-label={`Pending approvals ${pendingApprovalCount}`}
+                title={pendingApprovalsUnavailable
+                  ? 'Pending approvals could not be refreshed. Open the inbox to retry.'
+                  : 'Open pending approvals'}
+              >
+                Approvals
+                {/* S20 (F-studio-nt2-count): a dot, never a visible number, while
+                    items wait; the count lives in the aria-label above. */}
+                {pendingApprovalCount > 0 && !pendingApprovalsUnavailable && <span className="dot approvals-dot" aria-hidden="true" />}
+                {pendingApprovalsUnavailable && <span className="dot red approvals-dot" aria-hidden="true" />}
+              </button>
+            )}
+            <button type="button" className="chip-act" onClick={openSessionDetails} title={`Session details · build ${__BUILD_HASH__}`}>Details</button>
+            {devControls && (
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={mock}
+                  disabled={tourOn}
+                  onChange={(e) => setMock(e.target.checked)}
+                  aria-label="Use mock data (off = live backend)"
+                />
+                <span>Mock</span>
+              </label>
+            )}
+            {/* Live-only chrome (Claude-account terminal panel) is hidden in the
+                demo — it can't work signed-out. Guarded on !mock. */}
+            {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
+            {!mock && headerChrome.accounts && (
+              <ClaudeAccountPanel
+                mock={mock}
+                signedOut={signedOut}
+                grant={grant}
+                loading={grantLoading}
+                busy={grantBusy}
+                error={grantErr}
+                open={claudeOpen}
+                onToggle={setClaudeOpen}
+                onLink={onLinkClaude}
+                onRefresh={platformActions.loadGrant}
+                onUnlink={onUnlinkClaude}
               />
-              <span>Mock</span>
-            </label>
-          )}
-          {/* Live-only chrome (Claude-account terminal panel) is hidden in the
-              demo — it can't work signed-out. Guarded on !mock. */}
-          {headerChrome.cost && <CostTransparencyPanel mock={mock} readsPaused={knownGuest} />}
-          {!mock && headerChrome.accounts && (
-            <ClaudeAccountPanel
-              mock={mock}
-              signedOut={signedOut}
-              grant={grant}
-              loading={grantLoading}
-              busy={grantBusy}
-              error={grantErr}
-              open={claudeOpen}
-              onToggle={setClaudeOpen}
-              onLink={onLinkClaude}
-              onRefresh={platformActions.loadGrant}
-              onUnlink={onUnlinkClaude}
-            />
-          )}
-          {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+            )}
+            {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+          </div>
         </div>
       </header>
 

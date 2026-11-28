@@ -223,7 +223,9 @@ export default function ClaudeAccountPanel({
                       {account.auth_refused_code && <p className="ca-refused-why">{account.auth_refused_code === 'authentication_failed'
                         ? 'Claude no longer accepts this account. It expired or was revoked.'
                         : account.auth_refused_code === 'oauth_org_not_allowed'
-                          ? "This account's organization does not allow it here." : 'Claude refused this account.'}</p>}
+                          ? "This account's organization does not allow it here."
+                          : account.auth_refused_code === 'billing_error'
+                            ? 'This API key has no credit. Add credit in Claude Console, then resend.' : 'Claude refused this account.'}</p>}
                       <div className="ca-account-meta">
                         {typeof account.usage_tokens === 'number' && <span>{account.usage_tokens.toLocaleString()} tokens used</span>}
                         {account.cooldown_until && <span title={absoluteWithZone(Date.parse(account.cooldown_until))}>cooldown until {relativeTime(Date.parse(account.cooldown_until), now)}</span>}

@@ -25,6 +25,7 @@ export type BranchCompileOutcome = (
 ) & { ms: number; summary: BranchCompileSummary };
 
 export interface BranchCompileOptions {
+  target?: "net8" | "net48";
   bin?: string;
   refs?: string;
   timeoutMs?: number;
@@ -36,8 +37,19 @@ export function branchCompileDisabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 
 let testCheck: typeof branchCompileCheck | null = null;
+let testNet48Check: typeof branchCompileCheck | null = null;
 export function setBranchCompileCheckForTests(fn: typeof branchCompileCheck | null): void {
   testCheck = fn;
+}
+
+export function setBranchCompileNet48CheckForTests(fn: typeof branchCompileCheck | null): void {
+  testNet48Check = fn;
+}
+
+export function branchHostFloor(outcome: BranchCompileOutcome): 2023 | 2025 | null {
+  if (outcome.status === "accept") return 2023;
+  if (outcome.status === "unavailable" && outcome.code === "not_configured") return null;
+  return 2025;
 }
 
 export function branchCompileDecision(outcome: BranchCompileOutcome): string {
@@ -188,10 +200,17 @@ async function runChecker(command: string[], dir: string, refs: string, start: n
 }
 
 export async function branchCompileCheck(packageName: string, files: Record<string, string>, opts: BranchCompileOptions = {}): Promise<BranchCompileOutcome> {
-  if (testCheck) return testCheck(packageName, files, opts);
+  const check = opts.target === "net48" ? testNet48Check : testCheck;
+  if (check) {
+    try { return await check(packageName, files, opts); }
+    catch (error) {
+      if (opts.target !== "net48") throw error;
+      return unavailable("spawn_failed", 0);
+    }
+  }
   const start = performance.now();
   const deadline = start + (opts.timeoutMs ?? 30_000);
-  const bin = opts.bin ?? process.env.LEAF_BRANCH_COMPILE_BIN;
+  const bin = opts.bin ?? (opts.target === "net48" ? process.env.LEAF_BRANCH_COMPILE_NET48_BIN : process.env.LEAF_BRANCH_COMPILE_BIN);
   const refs = opts.refs ?? process.env.LEAF_BRANCH_COMPILE_REFS;
   if (!bin || !refs) return unavailable("not_configured", 0);
   if (!await acquire(deadline)) return unavailable("busy", Math.round(performance.now() - start));

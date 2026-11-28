@@ -3,6 +3,10 @@
   "upstream": "LEAF-Solar-Design/Branch2025",
   "upstream_commit": "59c812993a168403a6f5d31722c46af1e5ef6b4f",
   "note": "Byte copies of Branch2025 ScriptHost compile sources at upstream_commit. Do not edit; re-vendor from upstream.",
+  "downstream_overlays": {
+    "LeafSolarDesign.ScriptHost/Compile/ApiAllowlist.cs": "SEC-2 (ultracode review 2026-11-27): TextStyleTableRecord.FileName and BigFontFileName removed so a generated tool cannot point a font path at a network share; retire when Branch2025 removes them upstream.",
+    "LeafSolarDesign.ScriptHost/Compile/api-allowlist.v2.json": "SEC-2 (ultracode review 2026-11-27): TextStyleTableRecord.FileName and BigFontFileName removed so a generated tool cannot point a font path at a network share; retire when Branch2025 removes them upstream."
+  },
   "files": {
     "LeafSolarDesign.ScriptHost/Abstractions/HostApi.cs": "83c77f3a34a8222f3b36885bef81a0da085cb08fc59bd763cc83cbed0cb27664",
     "LeafSolarDesign.ScriptHost/Abstractions/IToolContext.cs": "1928e328daf93221992b4a23f35fce05bee165b5f6d89bcf7d45974b9fe107dd",
@@ -12,7 +16,7 @@
     "LeafSolarDesign.ScriptHost/Abstractions/ToolDecision.cs": "abb485f49545f0f0427c176e2da34cdce666951983ab043774060aec1396e800",
     "LeafSolarDesign.ScriptHost/Abstractions/ToolGlobals.cs": "cb5e4c638a2f4d2963db428ae0d4ba3ab0e72a9f718a4cce7c3c2e4ba9c3c239",
     "LeafSolarDesign.ScriptHost/Abstractions/ToolResult.cs": "67ec6a23c01f8bcccefb1bb9bc2ac3553e985986efc42a791360216616978665",
-    "LeafSolarDesign.ScriptHost/Compile/ApiAllowlist.cs": "63d2d72b50e8daed3229f482735bb2015327b844f46b78bf776969ce356254f1",
+    "LeafSolarDesign.ScriptHost/Compile/ApiAllowlist.cs": "d73298d6618b649d14a4b7b327af0d56a8d561fba35c2736764361702b74840f",
     "LeafSolarDesign.ScriptHost/Compile/ApiScanner.cs": "e4c0509dd984fc25234d0553bc4ff6a6a23f380492e5d96e76d729990d09a190",
     "LeafSolarDesign.ScriptHost/Compile/AssemblyInfo.Compile.cs": "5df283c93db1cc8149874ca414b7993e356d22c618f93d66e68f44e6b3d51f53",
     "LeafSolarDesign.ScriptHost/Compile/BudgetRewriter.cs": "59e077a3a8f1e95680274ec2bdb87c391ecc78c87e7d82a6ec325ec5183f5547",
@@ -24,7 +28,7 @@
     "LeafSolarDesign.ScriptHost/Compile/RoslynBootstrap.cs": "4260d12a73e57d9f69ef84ef7b42d51b01f172ea933566aa7b0f797b658506e8",
     "LeafSolarDesign.ScriptHost/Compile/ScriptCompiler.cs": "4d781bd27ef7697c3dd25acbfb74a8f29035bf5ebd4f7fa0c69b72147b466902",
     "LeafSolarDesign.ScriptHost/Compile/ScriptLoadContext.cs": "70c6dc003de901156dabcfff88216545e71774dc041847d06450742de270a5c6",
-    "LeafSolarDesign.ScriptHost/Compile/api-allowlist.v2.json": "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd",
+    "LeafSolarDesign.ScriptHost/Compile/api-allowlist.v2.json": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285",
     "LeafSolarDesign.ScriptHost/Package/CanonicalJson.cs": "b4c4ed37d4ef51b7ff5771f86462508f1f19f02ac0a5671323aa380a649656ca",
     "LeafSolarDesign.ScriptHost/Package/PackageFormatException.cs": "9b320cc13a21d5621dea91a40fc2d258ce6666bbf93d371ef9dd2c0560c250fc",
     "LeafSolarDesign.ScriptHost/Package/PackageIdentity.cs": "f76c17188c6c966d7096e3f79cb86067366aedd3dc0d89a64918c8457fe83861",

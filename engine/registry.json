@@ -112,14 +112,31 @@
     {
       "name": "measure-panel-area",
       "version": "1.0.0",
-      "description": "Sums closed-polyline area (total + per layer) in square feet; assumes 1 drawing unit = 1 inch.",
+      "description": "Measures closed-polyline area on a layer. Use area_mode=net to subtract nested holes. Use output_units=ft2 for square feet with DXF insertion-unit provenance.",
       "kind": "script",
       "engine_op": "measure_panel_area",
       "script": "engine/tools/measure_panel_area.lsp",
-      "params": { "type": "object", "properties": {}, "required": [] },
+      "params": {
+        "type": "object",
+        "properties": {
+          "layer": { "type": "string", "default": "Panels" },
+          "output_units": { "type": "string", "enum": ["drawing", "ft2"], "default": "drawing" },
+          "area_mode": { "type": "string", "enum": ["gross", "net"], "default": "gross" },
+          "include_contributors": { "type": "boolean", "description": "Report each polyline handle and signed area in the requested unit, plus handles excluded from the total." }
+        },
+        "required": []
+      },
       "returns": {
         "type": "object",
         "properties": {
+          "total_area": { "type": "number" },
+          "avg_area": { "type": "number" },
+          "units": { "enum": ["drawing", "ft2"] },
+          "unit_conversion": { "type": "object" },
+          "area_mode": { "enum": ["net"] },
+          "hole_count": { "type": "integer" },
+          "contributors": { "type": "array", "items": { "type": "object" } },
+          "excluded": { "type": "array", "items": { "type": "object" } },
           "area_sqft": { "type": "number" },
           "by_layer_sqft": { "type": "object", "additionalProperties": { "type": "number" } },
           "units_assumption": { "type": "string" }

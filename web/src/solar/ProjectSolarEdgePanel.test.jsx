@@ -33,12 +33,13 @@ function edge(selected, report = false) {
 }
 const clients = []
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.dispose()); vi.restoreAllMocks(); vi.unstubAllGlobals() })
-function setup({ isHead = true, reportBytes, downloadResponse, reportCounts } = {}) {
+function setup({ isHead = true, reportBytes, downloadResponse, reportCounts, frames } = {}) {
   let client
   const fetchImpl = vi.fn(async (url) => {
     const selected = client.getSnapshot().binding
     if (url.includes('/context?')) return reply({ context: { ...selected, head_version_id: isHead ? selected.input_version_id : NEXT,
-      is_head: isHead, intake_sha256: 'd'.repeat(64) }, intake: { solar_design_graph: { rev: 7 }, solar_design_graph_sha256: 'e'.repeat(64) } })
+      is_head: isHead, intake_sha256: 'd'.repeat(64) },
+      intake: { solar_design_graph: { rev: 7, ...(frames && { frames }) }, solar_design_graph_sha256: 'e'.repeat(64) } })
     if (url.endsWith('/solaredge-pdf')) return reply(edge(selected))
     if (url.endsWith('/report')) {
       const value = edge(selected, true)
@@ -389,6 +390,28 @@ it('S02 review shows matched, unmatched and ambiguous groups from verified repor
   expect(table.textContent).toContain('roof-southAmbiguousPDF grid 1, PDF grid 2')
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
   expect(save.createObjectURL).not.toHaveBeenCalled()
+})
+
+it('shows saved drawing names for matched, unmatched and ambiguous roofs while submitting stable IDs', async () => {
+  downloads()
+  const { fetchImpl } = setup({ reportBytes: matchReport(), frames: [
+    { id: 'roof-south', name: 'Loading Dock' },
+    { id: 'roof-east', name: 'Office Annex' },
+    { id: 'roof-west', name: 'Warehouse' },
+  ] })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  for (const [name, status] of [['Office Annex', 'Matched'], ['Warehouse', 'Unmatched'], ['Loading Dock', 'Ambiguous']]) {
+    const heading = within(table).getByRole('rowheader', { name })
+    expect(within(heading.closest('tr')).getByRole('cell', { name: status })).toBeTruthy()
+  }
+  fireEvent.change(screen.getByLabelText('PDF choice for Loading Dock (roof-south)'), { target: { value: '1' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Build report' }))
+  await waitFor(() => {
+    const [, request] = fetchImpl.mock.calls.filter(([url]) => url.endsWith('/report')).at(-1)
+    expect(JSON.parse(request.body).associations).toEqual({ 'roof-south': 1 })
+  })
 })
 
 it('S02 review inspects a bounded matched list with the chosen tail candidate', async () => {

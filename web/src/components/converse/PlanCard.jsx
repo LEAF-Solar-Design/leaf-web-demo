@@ -6,9 +6,9 @@ import './inlineAuthoring.css'
 export const capabilityLabel = (value) => value === 'drawing.write' ? 'Changes your drawing'
   : value === 'drawing.read' ? 'Reads your drawing' : value
 
-function Items({ title, items, ordered }) {
+function Items({ title, items, ordered, note }) {
   const List = ordered ? 'ol' : 'ul'
-  return <div><h5>{title}</h5>{items?.length
+  return <div><h5>{title}</h5>{note && <p>{note}</p>}{items?.length
     ? <List>{items.map((item, i) => <li key={i}>{item}</li>)}</List> : <p>None</p>}</div>
 }
 
@@ -80,7 +80,8 @@ export default function PlanCard({ sessionId, proposal, replacedBy, expiresAt, r
     <Items title="Capabilities" items={plan.capabilities?.map(capabilityLabel)} />
     <div><h5>Undo</h5><p>{plan.undo || 'None specified'}</p></div>
     <Items title="Assumptions" items={plan.assumptions} />
-    <Items title="Acceptance checks" items={plan.acceptance} />
+    <Items title={plan.target === 'branch' ? 'What to check after you run it' : 'Acceptance checks'} items={plan.acceptance}
+      note={plan.target === 'branch' ? 'Studio compiles this tool but does not run it. Its first run is in AutoCAD, on your drawing.' : undefined} />
     {Object.keys(plan.answers || {}).length > 0 && <Items title="Your answers" items={Object.values(plan.answers).map(answer =>
       answer.other ?? answer.labels?.join(', '))} />}
     {state ? <p role="status">{state}</p> : resume

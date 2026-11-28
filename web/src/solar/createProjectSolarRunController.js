@@ -10,6 +10,8 @@ const UUID = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 const CODE = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}$')
 const TOOL = new RegExp('^[a-z0-9][a-z0-9-]{0,127}$')
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')
+const HASH = /^[0-9a-f]{64}$/
+const SOURCE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const assert = (value) => { if (!value) throw new TypeError('Invalid run request') }
 const plain = (value) => value !== null && typeof value === 'object' &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value))
@@ -85,12 +87,39 @@ function transport(value, submitting, tool) {
   } catch { return { kind: submitting || definiteFailure ? 'unknown' : 'unreadable' } }
 }
 
+function completedPreview(value, run, completed, attempt) {
+  if (!plain(value) || value.schema !== 'leaf.solar-completed-group-preview.v1' ||
+    typeof value.source_sha !== 'string' || !SOURCE.test(value.source_sha) ||
+    value.job_id !== run.jobId || value.input_version_id !== run.binding.input_version_id ||
+    !run.solveContext || value.graph_revision !== run.solveContext.expected_rev ||
+    value.frame_id !== run.solveContext.frame_ref || typeof value.graph_sha256 !== 'string' ||
+    !HASH.test(value.graph_sha256) || !Number.isSafeInteger(attempt) || attempt < 1 || value.attempt !== attempt ||
+    !Number.isSafeInteger(value.completed_pieces) || value.completed_pieces < 1 ||
+    value.completed_pieces > completed || !Array.isArray(value.groups) ||
+    value.groups.length < 1 || value.groups.length > 256) return null
+  const ids = new Set()
+  const groups = []
+  for (const group of value.groups) {
+    if (!Array.isArray(group) || !group.length || ids.size + group.length > 4096) return null
+    const refs = []
+    for (const ref of group) {
+      if (typeof ref !== 'string' || !ref.length || ref.length > 200 || ids.has(ref)) return null
+      ids.add(ref)
+      refs.push(ref)
+    }
+    groups.push(Object.freeze(refs))
+  }
+  return Object.freeze({ attempt: value.attempt, source_sha: value.source_sha,
+    graph_revision: value.graph_revision, graph_sha256: value.graph_sha256, frame_id: value.frame_id,
+    completed_pieces: value.completed_pieces, groups: Object.freeze(groups) })
+}
+
 export function createProjectSolarRunController({
-  projectClient, onOutcome = () => {}, onProgress = () => {},
+  projectClient, onOutcome = () => {}, onProgress = () => {}, onPreview = () => {},
 } = {}) {
   if (!projectClient || !['submitRun', 'readJob', 'getSnapshot', 'subscribe'].every((key) =>
     typeof projectClient[key] === 'function') ||
-      typeof onOutcome !== 'function' || typeof onProgress !== 'function') {
+      typeof onOutcome !== 'function' || typeof onProgress !== 'function' || typeof onPreview !== 'function') {
     throw new TypeError('A project run client and outcome observer are required')
   }
   let disposed = false
@@ -138,6 +167,7 @@ export function createProjectSolarRunController({
   function interrupt(run, state) {
     if (run.done || run.interruption) return
     run.interruption = state
+    showPreview(run, null)
     if (state === 'stale') {
       run.stale = true
       if (association === run) association = null
@@ -165,6 +195,7 @@ export function createProjectSolarRunController({
     const finalStopped = check(run)
     if (finalStopped) result = finalStopped === 'outcome_unknown' ? unknown(run.jobId) : outcome(finalStopped, run.jobId)
     run.done = true
+    showPreview(run, null)
     run.settlement.resolve(result)
     // Release every pending race so no raw envelope outlives the settlement.
     run.cancel.resolve('settled')
@@ -205,22 +236,43 @@ export function createProjectSolarRunController({
     }
     return parsed
   }
+  function showPreview(run, preview) {
+    if ((run.visiblePreview ?? null) === preview) return
+    run.visiblePreview = preview
+    try {
+      onPreview(preview, Object.freeze({ jobId: run.jobId, binding: run.binding, authorityKey: run.authorityKey,
+        isCurrent: () => !run.done && !run.interruption && scoped(run) }))
+    } catch { /* Optional progress never changes the job outcome. */ }
+  }
   function notifyProgress(run, job) {
     if (run.tool !== 'solar-solve-proposal') return
     try {
-      if (field(job, 'status') !== 'running') return
+      if (field(job, 'status') !== 'running') { showPreview(run, null); return }
       const progress = field(job, 'solve_progress', false)
-      if (progress === undefined) return
+      if (progress === undefined) { showPreview(run, null); return }
       const completed = field(progress, 'completed_pieces')
       const total = field(progress, 'total_pieces')
       if (!Number.isSafeInteger(total) || !Number.isSafeInteger(completed) ||
-          completed < 1 || completed > total || total > 64 ||
-          (run.progress && (total !== run.progress.total || completed <= run.progress.completed))) return
+          completed < 1 || completed > total || total > 64) { showPreview(run, null); return }
+      const next = completedPreview(field(progress, 'completed_group_preview', false), run, completed,
+        field(job, 'attempt', false))
+      const prior = run.preview
+      if (!next) showPreview(run, null)
+      else if (!prior || next.attempt > prior.attempt || (
+        next.attempt === prior.attempt && next.source_sha === prior.source_sha &&
+        next.graph_sha256 === prior.graph_sha256 && next.completed_pieces > prior.completed_pieces &&
+        next.groups.length > prior.groups.length && prior.groups.every((group, index) =>
+          group.length === next.groups[index].length && group.every((ref, at) => ref === next.groups[index][at]))
+      )) {
+        run.preview = next
+        showPreview(run, next)
+      }
+      if (run.progress && (total !== run.progress.total || completed <= run.progress.completed)) return
       run.progress = { completed, total }
       const result = outcome('pending', run.jobId, null, `Solved ${completed} of ${total} pieces.`)
       onProgress(result, Object.freeze({ binding: run.binding, authorityKey: run.authorityKey,
         tool: run.tool, signal: run.controller.signal, isCurrent: () => !run.done && scoped(run) }))
-    } catch { /* Optional progress never changes the job outcome. */ }
+    } catch { showPreview(run, null) }
   }
   async function follow(run) {
     for (;;) {
@@ -280,7 +332,7 @@ export function createProjectSolarRunController({
     }
   }
   function onProjectSubmit(preparedIntent, options) {
-    let binding, authorityKey, tool, signal, isCurrent
+    let binding, authorityKey, tool, signal, isCurrent, solveContext
     try {
       binding = createSolarDrawingBinding(field(options, 'binding'))
       authorityKey = field(options, 'authorityKey')
@@ -292,6 +344,7 @@ export function createProjectSolarRunController({
         typeof signal.addEventListener === 'function' && typeof signal.removeEventListener === 'function'))
       assert(plain(preparedIntent))
       const extras = projectSolarIntentExtras(field(preparedIntent, 'tool'), preparedIntent)
+      solveContext = extras.solveContext
       assert(Reflect.ownKeys(preparedIntent).length === 6 + Object.keys(extras).length)
       for (const key of ['binding', 'authorityKey', 'tool', 'params', 'catalogDigest', 'idempotencyKey']) field(preparedIntent, key)
       assert(sameSolarDrawingBinding(field(preparedIntent, 'binding'), binding) &&
@@ -311,7 +364,7 @@ export function createProjectSolarRunController({
     for (const run of active) {
       if (!run.interruption && matches(run, binding, authorityKey)) return Promise.resolve(local('SIP_R13B_RUN_IN_PROGRESS'))
     }
-    const run = { ...probe, tool, preparedIntent, callerSignal: signal, jobId: null,
+    const run = { ...probe, tool, preparedIntent, solveContext, callerSignal: signal, jobId: null,
       deadline: Date.now() + PROJECT_SOLAR_RUN_BUDGET_MS, recovered: false, sent: false, done: false,
       interruption: null, cancel: deferred(), submission: deferred(), settlement: deferred() }
     active.add(run)

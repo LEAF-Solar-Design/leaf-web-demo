@@ -30,7 +30,10 @@ No #r directives, BOM or bidi controls. #load must be a whole line naming an
 existing lib/<file>.csx. No other paths, subdirectories, Python files or registry edits.
 Inspect with fs_tenant_repo; it is read-only. Fix rule diagnostics before resubmitting.
 Every submission is compiled with Branch's ScriptHost compiler against AutoCAD 2025
-reference assemblies. Fix compile and API-allowlist errors reported as V18 diagnostics and resubmit.
+(.NET 8), which must pass, and also against AutoCAD 2023 (.NET Framework 4.8).
+Studio sets hosts.min_release to 2023 when both compile and to 2025 otherwise, keeping a higher declared value.
+Prefer APIs available on .NET Framework 4.8 (no MaxBy, MinBy, Chunk, DistinctBy, index-from-end, ranges or records) to reach AutoCAD 2023 and 2024 users.
+Fix compile and API-allowlist errors reported as V18 diagnostics and resubmit.
 Write C# operators literally (&&, <, >); never HTML entities.
 After a successful submission, end the turn at once with the single word Done: no summary, no more tool calls. Success still does not prove CAD execution. Do not call an APS Python test.
 

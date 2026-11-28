@@ -11,6 +11,7 @@ so the demo runs before Lane B lands, and it also backs authored tools.
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -93,19 +94,153 @@ def op_count_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[d
     return ({"counts": counts, "total": sum(counts.values())}, None)
 
 
+class AreaMeasurementInputError(ValueError):
+    """The drawing cannot support the requested area measurement."""
+
+
+_DXF_AREA_SOURCE_UNITS = {
+    1: ("in", 0.0254),
+    2: ("ft", 0.3048),
+    3: ("mi", 1609.344),
+    4: ("mm", 0.001),
+    5: ("cm", 0.01),
+    6: ("m", 1.0),
+    7: ("km", 1000.0),
+    10: ("yd", 0.9144),
+    14: ("dm", 0.1),
+}
+
+
+def _boundaries_touch(edges, other_edges):
+    def turn(a, b, p):
+        return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+
+    for a, b in edges:
+        for c, d in other_edges:
+            if any(max(a[i], b[i]) < min(c[i], d[i]) or max(c[i], d[i]) < min(a[i], b[i])
+                   for i in (0, 1)):
+                continue
+            left, right = turn(a, b, c), turn(a, b, d)
+            near, far = turn(c, d, a), turn(c, d, b)
+            if min(left, right) <= 0 <= max(left, right) and min(near, far) <= 0 <= max(near, far):
+                return True
+    return False
+
+
+def _net_panel_areas(rings):
+    from dxf_spatial_clips import _polygon
+    from solar_ground_analysis import is_inside_polygon
+
+    if sum(len(p.get("pts", [])) for p in rings) > 2048:
+        raise AreaMeasurementInputError("Net area supports at most 2048 boundary vertices per selection.")
+
+    boundaries = []
+    elevations = set()
+    for poly in rings:
+        points = poly.get("pts", [])
+        if poly.get("width") or any(poly.get("bulges", ())) or any(
+            len(p) not in (2, 3) or not all(math.isfinite(v) for v in p) for p in points
+        ):
+            raise AreaMeasurementInputError("Net area requires straight finite boundaries without width.")
+        elevations.update(p[2] if len(p) == 3 else 0 for p in points)
+        if len(points) < 3 or len(elevations) > 1:
+            raise AreaMeasurementInputError("Net area requires closed boundaries on the same XY plane.")
+        try:
+            outline = _polygon([(p[0], p[1]) for p in points], (1, 0, 0, 0, 0, 1, 0, 0))
+        except ValueError as exc:
+            raise AreaMeasurementInputError("Net area requires simple polygon boundaries.") from exc
+        x, y = outline[0]
+        area = _shoelace_area([(px - x, py - y) for px, py in outline])
+        if not math.isfinite(area) or area == 0:
+            raise AreaMeasurementInputError("Net area requires finite, nonzero boundary areas.")
+        boundaries.append((outline, list(zip(outline, outline[1:] + outline[:1])), area))
+
+    depths = [0] * len(boundaries)
+    for i, (outline, edges, _) in enumerate(boundaries):
+        for j in range(i):
+            other, other_edges, _ = boundaries[j]
+            if _boundaries_touch(edges, other_edges):
+                raise AreaMeasurementInputError("Net area cannot decide boundaries that touch or cross.")
+            x, y = outline[0]
+            u, v = other[0]
+            depths[i] += int(is_inside_polygon(other, x, y))
+            depths[j] += int(is_inside_polygon(outline, u, v))
+
+    return [record[2] * (-1 if depth % 2 else 1) for record, depth in zip(boundaries, depths)]
+
+
 def op_measure_area_by_layer(intake: Dict[str, Any], params: Dict[str, Any]) -> Tuple[dict, dict | None]:
     layer = params.get("layer", DEFAULT_LAYER)
+    net = params.get("area_mode") == "net"
+    report = params.get("include_contributors") is True
     polys = [p for p in (intake.get("polylines") or []) if p.get("layer") == layer]
-    areas = [_shoelace_area(p.get("pts", [])) for p in polys if p.get("closed")]
-    total = sum(areas)
-    count = len(areas)
+    if report:
+        if len(polys) > 2048:
+            raise AreaMeasurementInputError("Area reporting supports at most 2048 polylines per layer.")
+        handles = [p.get("handle") for p in polys]
+        if any(not isinstance(h, str) or not h.strip() or len(h) > 64 for h in handles) or (
+            len({h.upper() for h in handles}) != len(handles)
+        ):
+            raise AreaMeasurementInputError("Area reporting requires distinct intake polyline handles.")
+
+    eligible = []
+    excluded = []
+    for poly in polys:
+        reason = None
+        if not poly.get("closed"):
+            reason = "open"
+        elif net and poly.get("space") == "paper":
+            reason = "paper_space"
+        if reason is None:
+            eligible.append(poly)
+        elif report:
+            excluded.append({"handle": poly["handle"], "reason": reason})
+
+    details = {}
+    if net:
+        areas = _net_panel_areas(eligible)
+        holes = sum(area < 0 for area in areas)
+        total = math.fsum(areas)
+        count = len(areas) - holes
+        details.update(area_mode="net", hole_count=holes)
+    else:
+        areas = [_shoelace_area(p.get("pts", [])) for p in eligible]
+        total = sum(areas)
+        count = len(areas)
+
+    units = params.get("output_units", "drawing")
+    area_factor = 1.0
+    if units == "ft2":
+        code = intake.get("insunits")
+        if intake.get("insunits_error") or type(code) is not int or code not in _DXF_AREA_SOURCE_UNITS:
+            raise AreaMeasurementInputError("Square feet requires a supported, unambiguous $INSUNITS value.")
+        source_unit, metres_per_unit = _DXF_AREA_SOURCE_UNITS[code]
+        area_factor = (metres_per_unit / _DXF_AREA_SOURCE_UNITS[2][1]) ** 2
+        total *= area_factor
+        details["unit_conversion"] = {
+            "source": "$INSUNITS",
+            "source_code": code,
+            "source_unit": source_unit,
+            "area_factor": area_factor,
+        }
+
+    if report:
+        if not all(math.isfinite(amount * area_factor) for amount in areas):
+            raise AreaMeasurementInputError("Area reporting requires finite contributor areas.")
+        details.update(
+            contributors=[{"handle": poly["handle"], "signed_area": amount * area_factor}
+                          for poly, amount in zip(eligible, areas)],
+            excluded=excluded,
+        )
+
     return (
         {
             "layer": layer,
             "count": count,
             "total_area": round(total, 3),
             "avg_area": round(total / count, 3) if count else 0.0,
-            "units": "drawing",
+            "units": units,
+            **details,
         },
         None,
     )
@@ -208,13 +343,18 @@ DEFAULT_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "measure-panel-area",
         "version": "1.0.0",
-        "description": "Measures total and average closed-polyline area on a layer.",
+        "description": "Measures gross or net closed-polyline area on a layer. Net area subtracts nested holes.",
         "kind": "script",
         "engine_op": "measure_area_by_layer",
         "entry": "builtins/measure_area_by_layer.py",
         "params": {
             "type": "object",
-            "properties": {"layer": {"type": "string", "default": DEFAULT_LAYER}},
+            "properties": {
+                "layer": {"type": "string", "default": DEFAULT_LAYER},
+                "output_units": {"type": "string", "enum": ["drawing", "ft2"], "default": "drawing"},
+                "area_mode": {"type": "string", "enum": ["gross", "net"], "default": "gross"},
+                "include_contributors": {"type": "boolean"},
+            },
             "required": [],
         },
         "returns": {"type": "object"},

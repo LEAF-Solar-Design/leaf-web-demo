@@ -862,6 +862,54 @@ def test_running_split_progress_counts_only_exact_durable_pieces(world):
     assert read() == {"completed_pieces": 2, "total_pieces": 2}
 
 
+def test_completed_group_preview_requires_completed_prefix_and_current_lease(world):
+    parent = world()
+    _prepare(parent)
+    first, second, third = [_piece(parent, index) for index in range(3)]
+    for piece in (first, second, third):
+        _prepare(piece)
+    source = "a" * 40
+
+    def read(**overrides):
+        args = dict(tenant_id=str(parent.org), input_version_id=parent.parent,
+                    graph_revision=parent.context.graph["rev"],
+                    graph_sha256=pg.local.digest(parent.context.graph), source_sha=source)
+        with pg.db.connection() as conn:
+            return exchanges.read_running_split_progress(parent.scope, conn=conn, **{**args, **overrides})
+
+    def publish(count, groups):
+        exchanges.publish_completed_group_preview(parent.scope, parent.attempt,
+            source_sha=source, piece_count=count, groups=groups)
+
+    def finish(piece):
+        assert exchanges.begin_send(piece.scope, piece.attempt)
+        assert _capture(piece) == "stored"
+        _complete(piece)
+
+    finish(second)
+    publish(1, [["b"]])
+    assert read() == {"completed_pieces": 1, "total_pieces": 3}
+    finish(first)
+    publish(1, [["a"]])
+    expected = dict(schema="leaf.solar-completed-group-preview.v1", source_sha=source,
+        job_id=str(parent.job), input_version_id=str(parent.parent), attempt=parent.attempt.attempt,
+        graph_revision=parent.context.graph["rev"], graph_sha256=pg.local.digest(parent.context.graph),
+        frame_id="world", completed_pieces=1, groups=[["a"]])
+    assert read()["completed_group_preview"] == expected
+    assert read(tenant_id=str(uuid4())) is None
+    assert read(graph_sha256="0" * 64) is None
+    assert "completed_group_preview" not in read(source_sha="b" * 40)
+    publish(2, [["b"], ["a"]])
+    assert read()["completed_group_preview"] == expected
+    publish(2, [["a"], ["b"]])
+    assert read()["completed_group_preview"] == {**expected, "completed_pieces": 2, "groups": [["a"], ["b"]]}
+    with pg.db.transaction() as conn:
+        conn.execute("UPDATE jobs SET lease_expires_at=clock_timestamp() WHERE job_id=%s", (parent.job,))
+    assert "completed_group_preview" not in read()
+    with pytest.raises(exchanges.ExchangeLeaseLost):
+        publish(3, [["a"], ["b"], ["c"]])
+
+
 def test_piece_custody_is_additive_and_replays_independent_pieces(world):
     parent = world()
     legacy = _prepare(parent)

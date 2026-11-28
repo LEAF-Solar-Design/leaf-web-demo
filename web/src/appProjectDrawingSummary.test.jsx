@@ -15,7 +15,8 @@ const facts = (changes = {}) => boardDrawingFacts({ projectMode: true, shown: st
   selectedVersion: version, binding, projectIntake, ...changes })
 
 function board(drawing) {
-  const view = render(<BoardTiles workspace={{ drawing_versions: [version] }} drawing={drawing} catalog={null} />)
+  const view = render(<BoardTiles workspace={{ project: { project_id: version.project_id }, drawing_versions: [version] }}
+    drawing={drawing} catalog={null} />)
   return within(view.container.querySelector('[data-tile="drawing"]'))
 }
 
@@ -25,8 +26,20 @@ describe('project board drawing facts', () => {
     expect(tile.getByText('distinctive-panel.dxf')).toBeTruthy()
     expect(tile.getByText('1 polylines · 1 layers')).toBeTruthy()
     expect(tile.getByText(VERSION)).toBeTruthy()
+    expect(tile.queryByText(/Electrical review incomplete/)).toBeNull()
     expect(tile.queryByText('rooftop_demo')).toBeNull()
     expect(tile.queryByText('2345 polylines · 4 layers')).toBeNull()
+  })
+
+  it('reports a missing cold-voltage check for the selected solar revision', () => {
+    const solarIntake = { ...projectIntake, solar_design_graph_sha256: 'a'.repeat(64), solar_design_graph: {
+      graph_schema_version: 1, project: { units: { compute_units: 'm', meters_per_unit: 1 } },
+      frames: [], panels: [], strings: [], inverters: [], routes: [],
+    } }
+    const tile = board(facts({ projectIntake: solarIntake }))
+    expect(tile.getByRole('status').textContent).toMatch(/Cold-voltage check is missing or unverified/)
+    const staleTile = board(facts({ projectIntake: solarIntake, binding: { ...binding, input_version_id: DRAWING } }))
+    expect(staleTile.queryByText(/Electrical review incomplete/)).toBeNull()
   })
 
   it('says so when the selected version has no projection yet', () => {
