@@ -684,9 +684,10 @@ def _parse_mleader(record, styles, textstyles):
     """Walk the nested contexts before resolving the top-level style handles."""
     state = 0
     closed = False
-    roots = []
+    roots, arrow_tips = [], []
     context, top = {}, {}
     has_breaks = False
+    has_subgrid_tip = False
     try:
         for i, (code, value) in enumerate(record):
             if (code, value) == (300, "CONTEXT_DATA{"):
@@ -727,7 +728,11 @@ def _parse_mleader(record, styles, textstyles):
                     point = record[i:i + 3]
                     if [c for c, _ in point] != [code, code + 10, code + 20]:
                         return None
-                    value = [round(_mleader_number(v), 3) for _, v in point]
+                    coordinates = [_mleader_number(v) for _, v in point]
+                    value = [round(v, 3) for v in coordinates]
+                    if state == 3 and not vertices:
+                        arrow_tips.append(coordinates)
+                        has_subgrid_tip |= coordinates != value
                 if state == 1:
                     context[code] = value
                 elif state == 2:
@@ -761,6 +766,8 @@ def _parse_mleader(record, styles, textstyles):
                   "pts": first["lines"][0] + [first["landing"]],
                   "landing": first["landing"], "dogleg_dir": first["dogleg_dir"],
                   "textpt": context[12], "text": context[304]}
+        if has_subgrid_tip:
+            result["arrow_tips"] = arrow_tips
         if len(roots) > 1 or len(first["lines"]) > 1:
             point_count = len(roots) + sum(len(line) for root in roots for line in root["lines"])
             if has_breaks or point_count > MAX_POINTS_PER_ENTITY:

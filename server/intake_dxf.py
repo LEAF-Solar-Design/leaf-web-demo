@@ -495,6 +495,18 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             record["leader_geometry"] = geometry
         else:
             point_count = len(pts)
+        if "arrow_tips" in ent:
+            line_tips = [record["pts"][0]]
+            if "leader_geometry" in record:
+                line_tips = [line[0] for root in geometry["roots"] for line in root["lines"]]
+            tips = ent["arrow_tips"]
+            if not isinstance(tips, list) or len(tips) != len(line_tips):
+                _fail(f"{where}: expected one arrow tip per leader line")
+            tips = [_vector(tip, f"{where}.arrow_tips") for tip in tips]
+            if any([round(value, 3) for value in tip] != line_tip
+                   for tip, line_tip in zip(tips, line_tips)):
+                _fail(f"{where}: arrow tip does not match its leader line")
+            record["arrow_tips"] = tips
         total_points += point_count
         if total_points > MAX_POINTS:
             _fail(f"more than {MAX_POINTS} points in total")
@@ -1046,6 +1058,7 @@ def _emit_mleader(e, handle, owner, styles, textstyles, catalogue, linetype):
         (92, 0), (291, 0), (292, 0), (173, 0), (293, 0), (142, 0.0),
         (143, 0.0), (294, 0), (295, 0), (296, 0), (110, [0.0, 0.0, 0.0]),
         (111, [1.0, 0.0, 0.0]), (112, [0.0, 1.0, 0.0]), (297, 0)])
+    arrow_tips = e.get("arrow_tips")
     line_index = 0
     for root_index, root in enumerate(roots):
         out += _ml_pairs([
@@ -1055,7 +1068,9 @@ def _emit_mleader(e, handle, owner, styles, textstyles, catalogue, linetype):
         ])
         for line in root["lines"]:
             out += _ml_pairs([(304, "LEADER_LINE{")])
-            for vertex in line:
+            tip = line[0] if arrow_tips is None else arrow_tips[line_index]
+            out += _point_groups(tip)
+            for vertex in line[1:]:
                 out += _point_groups(vertex)
             out += _ml_pairs([
                 (91, line_index), (170, 1), (92, -1056964608), (340, "0"), (171, -2),

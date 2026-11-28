@@ -378,7 +378,7 @@ def test_mleader_dxf_probe_group_sequence_and_references():
 @pytest.mark.parametrize("root_sizes", [(2,), (1, 1), (2, 1)])
 def test_mleader_dxf_round_trips_nested_bilingual_leader_geometry(root_sizes):
     from dxf_intake import parse_dxf_bytes
-    from intake_dxf import intake_to_dxf
+    from intake_dxf import IntakeDxfError, intake_to_dxf
 
     intake = _mleader_dxf_fixture()
     record, = intake["mleaders"]
@@ -400,6 +400,21 @@ def test_mleader_dxf_round_trips_nested_bilingual_leader_geometry(root_sizes):
     parsed = parse_dxf_bytes(raw)
     assert "mleaders_unsupported" not in parsed
     assert parsed["mleaders"] == [record]
+
+    tips = [[line[0][0] + 0.000125, -0.00025, 0]
+            for root in roots for line in root["lines"]]
+    precise = {**record, "arrow_tips": tips}
+    reopened = parse_dxf_bytes(intake_to_dxf({**intake, "mleaders": [precise]}))
+    assert reopened["mleaders"] == [precise]
+    write_loop._verify_mleader_effects(intake, reopened, {}, {})
+    with pytest.raises(ValueError, match="unchanged MLEADER"):
+        write_loop._verify_mleader_effects(reopened, intake, {}, {})
+
+    for invalid, reason in ((tips[:-1], "one arrow tip per leader line"),
+                            (tips[::-1], "does not match its leader line"),
+                            ([[float("inf"), 0, 0], *tips[1:]], "not finite")):
+        with pytest.raises(IntakeDxfError, match=reason):
+            intake_to_dxf({**intake, "mleaders": [{**precise, "arrow_tips": invalid}]})
 
 
 @pytest.mark.parametrize("change", ["block", "absent_style", "missing_text", "empty_second_line"])
