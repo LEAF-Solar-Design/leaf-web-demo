@@ -1342,7 +1342,11 @@ def test_9_regression_legacy_shapes(stack):
     names = {t["name"] for t in tools["tools"]}
     assert {"count-by-layer", "measure-panel-area", "highlight-panels-near-edge"} <= names
     for t in tools["tools"]:
-        assert {"name", "version", "engine_op", "params"} <= set(t.keys())
+        assert {"name", "version", "params"} <= set(t.keys())
+        # Entry-only tools (e.g. compare-layer-counts, #3830) run their own builtins/ file
+        # through `entry` and have no built-in engine op, so only entry-less tools need one.
+        if not t.get("entry"):
+            assert "engine_op" in t, t["name"]
 
     author = requests.post(f"{a}/api/author",
                            json={"description": "measure area on layer Panels"},
