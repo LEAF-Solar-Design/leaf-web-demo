@@ -340,6 +340,22 @@ def run(intake, params):
     return ({"status": "reported", "scope": "drawing_schedule_styles", "schedules": links}, None)
 """
 
+_TOLERANCE_FONT_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:tolerance|feature\s+control)\s+frames?\b",
+        r"\b(?:fonts?|glyphs?|style\s+references?)\b",
+    )
+]
+_TOLERANCE_FONT_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("tolerance_font_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check tolerance-frame fonts."}, None)
+    return ({"status": "reported", "scope": "drawing_tolerance_fonts", "frames": links}, None)
+"""
+
 _NOTE_STYLE_REQUEST = [
     re.compile(pattern, re.IGNORECASE) for pattern in (
         r"\b(?:list|show|report|identify|check|flag|which)\b",
@@ -811,6 +827,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _TOLERANCE_FONT_REQUEST):
+        verb, engine_op = "report", "tolerance_font_dependencies"
+        drawing_body = _TOLERANCE_FONT_BODY
+        summary = "reports inherited fonts and glyph overrides for saved tolerance frames"
 
     if drawing_body is None and all(pattern.search(description) for pattern in _NOTE_STYLE_REQUEST):
         verb, engine_op = "report", "note_styles"

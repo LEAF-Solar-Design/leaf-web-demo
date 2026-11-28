@@ -705,3 +705,40 @@ def test_authored_schedule_styles_distinguish_missing_cycles_and_competing_defin
     assert rows["A1"]["style_handles"] == ["B1"]
     assert [item["description"] for item in rows["A4"]["definitions"]] == ["Field", "Office"]
     assert intake["dependency_report"]["external_files_opened"] is False
+
+
+def test_authored_tolerance_fonts_resolve_only_a_unique_text_style():
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    pairs = [(0, "SECTION"), (2, "TABLES")]
+    for handle, font in [("B1", "main.shx"), ("B2", "first.shx"), ("B2", "second.shx")]:
+        pairs += [(0, "STYLE"), (5, handle), (2, font), (3, font)]
+    for frame, pointer in [("A1", "B1"), ("A2", "B1"), ("A3", "B1"), ("A4", "FF"),
+                           ("A5", "C1"), ("A6", "B2")]:
+        pairs += [(0, "DIMSTYLE"), (100, "AcDbDimStyleTableRecord"), (2, frame), (340, pointer)]
+    pairs += [(0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES"), (0, "INSERT"), (5, "C1")]
+    for frame, glyph in [("A1", ""), ("A2", r"\Fglyph.ttf;"), ("A3", r"\FMAIN.SHX;"),
+                         ("A4", ""), ("A5", ""), ("A6", "")]:
+        pairs += [(0, "TOLERANCE"), (5, frame), (100, "AcDbFcf"), (3, frame.lower()), (1, glyph + "C7")]
+    pairs += [(0, "ENDSEC"), (0, "EOF")]
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode())
+    manifest, source, _ = author_tool("Check each feature control frame for an inherited font or a glyph override.")
+    assert manifest["engine_op"] == "tolerance_font_dependencies"
+    assert manifest["capabilities"] == ["drawing.read"]
+    status, payload = _run_source_in_sandbox(source, "authored.py", intake, {})
+    assert status == "ok", payload
+    report, overlay = payload
+    assert overlay is None
+    assert [(row["frame_handle"], row["status"], row["font"], row["uses_second_font"])
+            for row in report["frames"]] == [
+        ("A1", "resolved", "main.shx", False),
+        ("A2", "resolved", "main.shx", True),
+        ("A3", "resolved", "main.shx", False),
+        ("A4", "missing_style", None, None),
+        ("A5", "wrong_type", None, None),
+        ("A6", "ambiguous", None, None),
+    ]
+    status, payload = _run_source_in_sandbox(source, "authored.py", {"dependency_report": {}}, {})
+    assert status == "ok" and payload[0]["status"] == "unavailable"

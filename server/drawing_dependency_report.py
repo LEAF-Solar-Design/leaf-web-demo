@@ -220,6 +220,35 @@ def _resolve_table_styles(tables, styles):
         table.update(status=status, definitions=definitions)
 
 
+def _resolve_tolerance_font(frame, dimension_styles, styles, handle_types):
+    name = frame["dimension_style"] or ""
+    definitions = dimension_styles.get(name.casefold(), [])
+    handles = list(dict.fromkeys(handle for definition in definitions for handle in definition))
+    font = None
+    if len(definitions) > 1 or len(handles) > 1:
+        status = "ambiguous"
+    elif not handles:
+        status = "missing_style"
+    else:
+        handle = handles[0]
+        targets = styles.get(handle, [])
+        kinds = handle_types.get(handle, [])
+        if len(kinds) > 1 or len(targets) > 1:
+            status = "ambiguous"
+        elif not targets:
+            status = "wrong_type" if kinds else "missing_style"
+        elif targets[0]["shape_file"]:
+            status = "wrong_type"
+        else:
+            font = targets[0]["font"]
+            status = "resolved" if font else "missing_font"
+    return {
+        **frame, "style_handles": handles, "status": status, "font": font,
+        "uses_second_font": (any(glyph.casefold() != font.casefold() for glyph in frame["glyph_fonts"])
+                             if font else None),
+    }
+
+
 def from_pairs(pairs, *, literal_text=None):
     dependencies = {}
     texture_maps = {}
@@ -232,6 +261,10 @@ def from_pairs(pairs, *, literal_text=None):
     linetype_names = set()
     line_linetypes = {}
     styles = {}
+    dimension_styles = {}
+    tolerance_frames = []
+    handle_types = {}
+    has_tolerances = any(code == 0 and value.upper() == "TOLERANCE" for code, value in pairs)
     note_style_links = []
     table_style_links = []
     table_styles = {}
@@ -240,7 +273,7 @@ def from_pairs(pairs, *, literal_text=None):
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
     section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
-    owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"}, "LTYPE": {"TABLES"},
+    owners = {"BLOCK": {"BLOCKS"}, "STYLE": {"TABLES"}, "LTYPE": {"TABLES"}, "DIMSTYLE": {"TABLES"},
               "IMAGEDEF": {"OBJECTS"}, "MATERIAL": {"OBJECTS"}, "PDFDEFINITION": {"OBJECTS"},
               "DWFDEFINITION": {"OBJECTS"}, "DGNDEFINITION": {"OBJECTS"},
               "TABLESTYLE": {"OBJECTS"}, "PLOTSETTINGS": {"OBJECTS"}, "LAYOUT": {"OBJECTS"},
@@ -274,7 +307,8 @@ def from_pairs(pairs, *, literal_text=None):
         subclasses = {}
         subclass = None
         text_parts = []
-        capture_subclasses = kind in {"LAYOUT", "PLOTSETTINGS", "MATERIAL", "TABLESTYLE"} | _PANEL_OUTLINES
+        font_pointers = []
+        capture_subclasses = kind in {"LAYOUT", "PLOTSETTINGS", "MATERIAL", "TABLESTYLE", "DIMSTYLE", "TOLERANCE"} | _PANEL_OUTLINES
         inline_record = kind in inline_entities
         while end < len(pairs) and pairs[end][0] != 0:
             tag, value = pairs[end]
@@ -284,6 +318,8 @@ def from_pairs(pairs, *, literal_text=None):
                     subclass = subclasses.setdefault(value, {})
                 elif subclass is not None:
                     subclass.setdefault(tag, value)
+                    if kind == "DIMSTYLE" and tag == 340 and value and subclass is subclasses.get("AcDbDimStyleTableRecord"):
+                        font_pointers.append(value.upper())
             if inline_record and tag in (1, 3, 304):
                 text_parts.append(value if literal_text is None else literal_text.get(end, value))
             end += 1
@@ -297,6 +333,10 @@ def from_pairs(pairs, *, literal_text=None):
             section = None
             i = end
             continue
+        if has_tolerances and section in {"TABLES", "ENTITIES", "BLOCKS", "OBJECTS"}:
+            record_handle = groups.get(105 if kind == "DIMSTYLE" else 5)
+            if record_handle:
+                handle_types.setdefault(record_handle.upper(), []).append(kind)
         if section != "__FRAGMENT__" and section not in owners.get(kind, set()):
             i = end
             continue
@@ -321,6 +361,10 @@ def from_pairs(pairs, *, literal_text=None):
                 name = groups.get(code, "")
                 font_kind = "shape_font" if shape or code == 4 else "font"
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
+        elif kind == "DIMSTYLE" and section == "TABLES":
+            fields = subclasses.get("AcDbDimStyleTableRecord", {})
+            if name := fields.get(2):
+                dimension_styles.setdefault(name.casefold(), []).append(font_pointers)
         elif kind == "TABLESTYLE" and section == "OBJECTS":
             fields = subclasses.get("AcDbTableStyle")
             if fields is not None and (handle := groups.get(5)):
@@ -410,8 +454,16 @@ def from_pairs(pairs, *, literal_text=None):
             # record order; a first-value map would lose split font names.
             # A tolerance frame stores its content in group 1 and its dimension style in group 3.
             text = groups.get(1, "") if kind == "TOLERANCE" else "".join(text_parts)
-            for name in _inline_fonts(text):
+            inline_fonts = list(dict.fromkeys(_inline_fonts(text)))
+            for name in inline_fonts:
                 add("font", name, "font remapped", remapped_to="sans-serif")
+            if kind == "TOLERANCE" and section in {"ENTITIES", "BLOCKS"} and groups.get(5):
+                fields = subclasses.get("AcDbFcf")
+                if fields is not None:
+                    tolerance_frames.append({
+                        "frame_handle": groups[5].upper(), "dimension_style": fields.get(3) or None,
+                        "glyph_fonts": list(dict.fromkeys(_inline_fonts(fields.get(1, "")))),
+                    })
         i = end
     for name, references in line_linetypes.items():
         normalized = name.casefold()
@@ -452,6 +504,8 @@ def from_pairs(pairs, *, literal_text=None):
             "explicit_panel_material_links": panel_material_links,
             "note_style_links": notes,
             "table_style_links": schedules,
+            "tolerance_font_links": [_resolve_tolerance_font(frame, dimension_styles, styles, handle_types)
+                                     for frame in tolerance_frames],
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}
