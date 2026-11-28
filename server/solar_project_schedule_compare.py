@@ -55,7 +55,9 @@ def _cable_rows(graph, *, include_labels=False):
         kind = route["route_kind"]
         if kind not in _CABLE_KINDS:
             continue
-        points = [(x / _METRES_PER_INCH, y / _METRES_PER_INCH) for x, y in route["points"]]
+        # Saved routes can include elevation, while the schedule uses plan-view length.
+        points = [(point[0] / _METRES_PER_INCH, point[1] / _METRES_PER_INCH)
+                  for point in route["points"]]
         feet = polyline_length(points) / 12
         # Use the precision that users see in the feeder schedule and homerun workbook.
         length = cs_round(feet, 1) if kind == "feeder" else float(cs_fixed(feet, 2))
