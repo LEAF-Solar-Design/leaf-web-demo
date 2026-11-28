@@ -87,9 +87,15 @@ export function projectSolarDrawingView(options) {
       const project = own(graph, 'project')
       const units = plain(project) ? own(project, 'units') : MISSING
       const scale = plain(units) ? own(units, 'meters_per_unit') : undefined
-      projection = solarGraphOverlay(graph, {
-        metersPerUnit: scale === MISSING ? undefined : scale,
-      })
+      const overlayOptions = { metersPerUnit: scale === MISSING ? undefined : scale }
+      try {
+        const preview = own(options, 'solvePreview')
+        if (plain(preview) && own(preview, 'graph_sha256') === digest &&
+            own(preview, 'graph_revision') === own(graph, 'rev')) {
+          projection = solarGraphOverlay(graph, { ...overlayOptions, completedPreview: preview })
+        }
+      } catch { /* An unreadable preview leaves the stored overlay available. */ }
+      if (!projection || projection.refusal !== null) projection = solarGraphOverlay(graph, overlayOptions)
     } catch {
       return ready('GRAPH_UNREADABLE')
     }

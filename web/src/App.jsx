@@ -2613,6 +2613,7 @@ export default function App() {
   const projectScene = viewerRef.current?.getDrawingScene?.()
   const projectDrawingBinding = projectSolar.scope.binding
   const projectContextView = projectSolarRuntime.contextView
+  const projectSolvePreview = projectSolarRuntime.solvePreview
   const projectContextCurrent = projectMode && projectSolarRuntime.contextCurrent()
   const projectSceneIntake = projectScene?.intake
   const projectSceneKey = projectScene?.drawingKey
@@ -2620,9 +2621,10 @@ export default function App() {
   const projectDrawing = useMemo(() => projectSolarDrawingView({
     solarBinding: projectDrawingBinding,
     contextView: projectContextView,
+    solvePreview: projectSolvePreview,
     current: projectContextCurrent,
     scene: { intake: projectSceneIntake, drawingKey: projectSceneKey, current: projectSceneReady },
-  }), [projectDrawingBinding, projectContextView, projectContextCurrent,
+  }), [projectDrawingBinding, projectContextView, projectSolvePreview, projectContextCurrent,
     projectSceneIntake, projectSceneKey, projectSceneReady])
   const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
   const engineObservationBinding = useMemo(() => projectEngineObservationBinding({
