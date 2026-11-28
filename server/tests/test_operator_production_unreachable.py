@@ -170,6 +170,10 @@ _EXPECTED_ENDPOINTS = frozenset({
     # the route walk (fixed in this same change, with a non-vacuity floor so
     # a blind walk can never read as a pass again).
     ("POST", "/api/operator/worker/cancel"),
+    # Read-only tenant tool run receipts for support (PR #3841, merged 2026-11-28):
+    # operator-authed GET in server/routers/ops.py, covered by test_branch_run_receipts.py.
+    # #3841 mounted the route without amending this pin.
+    ("GET", "/api/operator/tenants/{tenant_id}/tool-receipts"),
 })
 
 

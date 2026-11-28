@@ -229,10 +229,10 @@ READ_ROWS = [
      {"sheets": ["Homeruns", "Inverter Schedule", "String Schedule"], "rows": [3, 7, 8],
       "strings": 2, "modules": 5},
      "425c685ea39d17250a3c0aa9bceeec88370bd3e63347230040e8c070a9b72728"),
-    ("solar-electrical-schedules", "ElectricalSchedules.json", 943,
+    ("solar-electrical-schedules", "ElectricalSchedules.json", 961,
      {"tables": ["INVERTER SCHEDULE", "STRING SCHEDULE"], "strings": 2, "modules": 5,
       "label_mismatches": 0},
-     "79514c2e7d924b1b1dd8a2b26d99c240a3765ef2ac259360f1ba93711361736a"),
+     "ecdeb8526accaa33079e0edd8178d2417ad7a5989340baa0d6748c60d5191e49"),
 ]
 
 
@@ -270,7 +270,7 @@ ADAPTER_ROWS = [
     ("solar-cable-export", None,
      "a955506ad3a105700d27b945c085df130276e7260a5e1e9c33288f8971586e1b"),
     ("solar-electrical-schedules", None,
-     "e1b1c9b166ade476ccc5be280ee9abcc5d9ce1a6afa826c9e522f691ee11f2c6"),
+     "a1d61227cdbe4c1fb8d39cdf525efc4a75c96dee3d1c86e319f22ed0a02bc7a0"),
 ] + [(suffix, pin, None) for suffix, pin in NEC_ROWS]
 
 
