@@ -256,6 +256,8 @@ def restore_checkpoint(session_id: str, checkpoint_id: str,
             "event_seq": event_seq,
             "event_recorded": event_recorded,
         }
+        if restored.restored_edited_source is not None:
+            body["restored_edited_source"] = restored.restored_edited_source
         tenant_id, tenant_kind = skills._tenant_identity(tenant)
         skills.record_checkpoint_restored(
             tenant_id=tenant_id, tenant_kind=tenant_kind, session_id=session_id,
