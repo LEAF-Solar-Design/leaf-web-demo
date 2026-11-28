@@ -76,6 +76,45 @@ function branchSummary(report) {
   return lines.join(' · ')
 }
 
+function ReceiptTime({ at }) {
+  const date = new Date(at)
+  return at && Number.isFinite(date.getTime()) ? <time dateTime={at}>
+    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time> : null
+}
+
+function ReceiptError({ error }) {
+  return error ? <><code>{string(error.code)}</code>, {string(error.message)}</> : null
+}
+
+function AutoCADStatus({ report, published, publishedAt }) {
+  if (report?.arrived_at || report?.verify_failed || report?.last_run) {
+    if (report.last_event === 'verify_failed' && report.verify_failed) return <>
+      AutoCAD could not load it (<ReceiptTime at={report.verify_failed.at} />): <ReceiptError error={report.verify_failed.error} />
+    </>
+    const run = report.last_run
+    if (run) {
+      const drawing = string(run.drawing)
+      const file = drawing.split(' | ')[0]
+      const duration = Number.isInteger(run.duration_ms)
+        ? run.duration_ms < 1000 ? `${run.duration_ms} ms` : `${(run.duration_ms / 1000).toFixed(1)} s` : ''
+      return <>
+        {run.outcome === 'ok' && report.arrived_at && <>Arrived in AutoCAD <ReceiptTime at={report.arrived_at} />. </>}
+        Ran{file && <> on <span title={drawing}>{file}</span></>}: {string(run.outcome)}
+        {run.outcome === 'ok' && duration && <> in {duration}</>} (<ReceiptTime at={run.at} />)
+        {run.outcome === 'failed' && run.error && <>: <ReceiptError error={run.error} /></>}
+      </>
+    }
+    if (report.arrived_at) return <>Arrived in AutoCAD <ReceiptTime at={report.arrived_at} />. Not run yet.</>
+  }
+  const legacy = branchSummary(report)
+  if (legacy) return legacy
+  if (!published) return 'Not deployed yet'
+  const stamp = new Date(publishedAt).getTime()
+  return !report && Number.isFinite(stamp) && Date.now() - stamp > 10 * 60 * 1000
+    ? 'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.'
+    : 'Deployed. AutoCAD picks it up within a minute.'
+}
+
 function DecisionTime({ at }) {
   const date = new Date(at)
   return at && Number.isFinite(date.getTime()) ? <>, <time dateTime={date.toISOString()}>
@@ -140,6 +179,7 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const [withdrawClosed, setWithdrawClosed] = useState(false)
   const pollAfter = useRef(0)
   const pollUntil = useRef(Infinity)
+  const publishedPollUntil = useRef(null)
   const pollStopped = useRef(false)
   const forceStageRead = useRef(false)
   const refreshStage = () => {
@@ -178,17 +218,25 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
           return [...merged.values()].sort((a, b) => a.attempt - b.attempt)
         })
         const published = [next.status, next.publication?.state, decision?.status].includes('published')
+        const awaitingRun = published && next.target === 'branch' && !next.branch?.last_run
         pollStopped.current = next.status === 'failed' || denied || next.review?.decision === 'request_changes'
           || ['denied', 'superseded', 'rolled_back'].includes(next.publication?.state)
           || [next.status, decision?.status].includes('denied')
-          || published
+          || (published && !awaitingRun)
         if (pollStopped.current) return
-        if (next.status === 'staged' || published) {
+        if (awaitingRun) {
+          if (publishedPollUntil.current == null) {
+            const publishedAt = new Date(next.publication?.published_at ?? next.updated_at ?? Date.now()).getTime()
+            const since = Number.isFinite(publishedAt) ? Math.min(Date.now(), publishedAt) : Date.now()
+            publishedPollUntil.current = since + stagedPollWindow
+          }
+          pollUntil.current = publishedPollUntil.current
+        } else if (next.status === 'staged') {
           const stagedAt = new Date(next.staged_at ?? next.updated_at ?? Date.now()).getTime()
           const since = Number.isFinite(stagedAt) ? Math.min(Date.now(), stagedAt) : Date.now()
           pollUntil.current = Math.min(pollUntil.current, since + stagedPollWindow)
         }
-        delay = Math.max(2000, Number(next.retry_after_ms) || 0)
+        delay = awaitingRun ? 15000 : Math.max(2000, Number(next.retry_after_ms) || 0)
       } catch (e) {
         if (signal.aborted) return
         setReadError('Could not read build status.')
@@ -379,7 +427,8 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
               onClick={() => navigator.clipboard?.writeText(packageDigest)?.catch(() => {})}>Copy</button>
           </span>}</>
         : publishLabels[publicationState] || (['queued', 'running', 'staged'].includes(stage?.status) ? 'Not yet' : notReported)}</dd>
-      <dt>AutoCAD</dt><dd>{branchSummary(stage?.branch) || (published ? 'Deployed. AutoCAD picks it up within a minute.' : 'Not deployed yet')}</dd>
+      <dt>AutoCAD</dt><dd><AutoCADStatus report={stage?.branch} published={published}
+        publishedAt={publication?.published_at ?? stage?.updated_at} /></dd>
       {published && <DeployTarget />}
     </dl>
     {branchBuild && ['staged', 'published'].includes(stage?.status) && Array.isArray(plan?.acceptance) && plan.acceptance.length > 0

@@ -74,11 +74,12 @@ def test_feeder_graph_bare_kernel_adopts_everything(c5):
     assert "0 nearest-lane comb feeder(s) drawn." in lines
 
 
-def test_feeder_graph_redraws_a_moved_combiner(c5):
+@pytest.mark.parametrize("offset", [0.001, 0.002, 0.003])
+def test_feeder_graph_redraws_a_moved_combiner(c5, offset):
     baseline, _ = fg.route_feeders(c5[3], c5[2])
     l1 = next(i for i in baseline["inverters"] if not i["is_l2"])
     mpu = baseline["project"]["units"]["meters_per_unit"]
-    point = [l1["position"][0] / mpu + 0.001, l1["position"][1] / mpu - 0.001]
+    point = [l1["position"][0] / mpu + offset, l1["position"][1] / mpu - offset]
     moved = move(baseline, l1["id"], point)["graph"]
     result, receipt = fg.route_feeders(moved, c5[2])
     old = {r["id"]: r for r in feeders(moved)}
@@ -86,9 +87,37 @@ def test_feeder_graph_redraws_a_moved_combiner(c5):
     assert changed["id"] in old and changed["points"] != old[changed["id"]]["points"]
     source = next(i for i in result["inverters"] if i["id"] == l1["id"])
     assert changed["points"][0] == source["position"]
+    assert old[changed["id"]]["validity"] == {"state": "stale", "reasons": ["equipment_moved"]}
+    assert changed["validity"] == {"state": "valid", "reasons": []}
     assert receipt["redrawn"] == [changed["id"]]
     assert receipt["unchanged"] == len(old) - 1
     assert all(r == old[r["id"]] for r in feeders(result) if r["id"] != changed["id"])
+
+
+@pytest.mark.parametrize("redraw", [False, True], ids=["unchanged", "redrawn"])
+def test_feeder_graph_preserves_unresolved_stale_reasons(c5, redraw):
+    graph, _ = fg.route_feeders(c5[3], c5[2])
+    mixed, unrelated = feeders(graph)[:2]
+    if redraw:
+        source = next(i for i in graph["inverters"] if i["id"] == mixed["from_ref"])
+        mpu = graph["project"]["units"]["meters_per_unit"]
+        x, y = source["position"]
+        graph = move(graph, source["id"], [x / mpu + 0.001, y / mpu - 0.001])["graph"]
+        mixed, unrelated = feeders(graph)[:2]
+    mixed["validity"] = {"state": "stale", "reasons": ["equipment_moved", "upstream_corrected"]}
+    unrelated["validity"] = {"state": "stale", "reasons": ["upstream_corrected"]}
+    snapshot = deepcopy(graph)
+
+    result, receipt = fg.route_feeders(graph, c5[2])
+    routes = {route["id"]: route for route in feeders(result)}
+    if redraw:
+        assert routes[mixed["id"]]["validity"] == unrelated["validity"]
+        assert receipt["redrawn"] == [mixed["id"]]
+    else:
+        assert routes[mixed["id"]] == mixed
+        assert receipt["redrawn"] == []
+    assert routes[unrelated["id"]] == unrelated
+    assert graph == snapshot
 
 
 def test_feeder_graph_is_deterministic(c5):

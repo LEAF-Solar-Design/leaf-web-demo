@@ -28,10 +28,12 @@ class Receipt(TypedDict):
 
 
 class ReceiptLimiter:
-    """A subject can burst to 60 events and earns one token per second."""
+    """Bounded token buckets with configurable burst and refill rates."""
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, capacity=60, refill_per_second=1.0):
         self._clock = clock
+        self._capacity = capacity
+        self._refill_per_second = refill_per_second
         self._lock = Lock()
         self._buckets = OrderedDict()
 
@@ -42,11 +44,11 @@ class ReceiptLimiter:
                 # Evict only a fully replenished bucket. Churning identities
                 # must not give an exhausted subject a fresh burst.
                 oldest_tokens, oldest_at = next(iter(self._buckets.values()))
-                if oldest_tokens + (now - oldest_at) < 60:
+                if oldest_tokens + (now - oldest_at) * self._refill_per_second < self._capacity:
                     return False
                 self._buckets.popitem(last=False)
-            tokens, last = self._buckets.get(subject, (60, now))
-            available = min(60, tokens + (now - last))
+            tokens, last = self._buckets.get(subject, (self._capacity, now))
+            available = min(self._capacity, tokens + (now - last) * self._refill_per_second)
             if available < 1:
                 return False
             self._buckets[subject] = (available - 1, now)

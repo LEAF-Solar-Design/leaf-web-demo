@@ -19,7 +19,9 @@ namespace LeafSolarDesign.ScriptHost
         Timeout,
         CompileFailed,
         ScriptError,
-        RevocationInvalid
+        RevocationInvalid,
+        WrongTenant,
+        ConfirmationDeclined
     }
 
     public static class ToolDecisions
@@ -44,6 +46,8 @@ namespace LeafSolarDesign.ScriptHost
                 case ToolDecision.CompileFailed: return "compile_failed";
                 case ToolDecision.ScriptError: return "script_error";
                 case ToolDecision.RevocationInvalid: return "revocation_invalid";
+                case ToolDecision.WrongTenant: return "wrong_tenant";
+                case ToolDecision.ConfirmationDeclined: return "confirmation_declined";
                 default: throw new ArgumentOutOfRangeException(nameof(decision), decision, "Unknown tool decision.");
             }
         }

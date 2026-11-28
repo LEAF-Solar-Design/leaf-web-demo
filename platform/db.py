@@ -801,6 +801,11 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "receipt_id", "tenant_id", "subject", "name", "version", "package_digest",
             "event", "plugin_version", "duration_ms", "diagnostics_json", "received_at",
         },
+        "branch_tool_run_receipts": {
+            "receipt_id", "tenant_id", "subject", "idempotency_key", "request_sha256", "name",
+            "version", "package_digest", "kind", "outcome", "plugin_version", "duration_ms",
+            "drawing_line", "error_code", "error_message", "occurred_at", "received_at",
+        },
         "customization_deployment_snapshots": {
             "snapshot_id", "payload_json", "effective_catalog_digest",
             "platform_release", "idempotency_key", "created_at",

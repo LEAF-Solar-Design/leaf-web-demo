@@ -50,6 +50,59 @@ def _layout_block_name(name: str) -> bool:
     return re.fullmatch(r"\*(?:Model_Space|Paper_Space[0-9]*)", name, re.IGNORECASE) is not None
 
 
+_PAPER_ENTITY_KINDS = {
+    "LINE": "polylines", "LWPOLYLINE": "polylines", "POLYLINE": "polylines",
+    "INSERT": "inserts", "TEXT": "texts", "MTEXT": "texts", "CIRCLE": "circles",
+    "ARC": "arcs", "DIMENSION": "dimensions", "3DFACE": "faces3d",
+    "SPLINE": "splines", "MULTILEADER": "mleaders",
+}
+
+
+def _paper_entity_locations(pairs):
+    """Project reciprocal sheet ownership without adding layout geometry to intake."""
+    from authored_dynamic_visibility import _records
+    from authored_viewport_panels import _paper_layouts_by_owner, _record_owner
+
+    owners = _paper_layouts_by_owner(pairs)
+    if not owners:
+        return {}
+    section = block_owner = ""
+    locations = {}
+    seen_handles = set()
+    for kind, record in _records(pairs):
+        if kind in ("SECTION", "ENDSEC"):
+            section = dict(record).get(2, "") if kind == "SECTION" else ""
+            block_owner = ""
+        elif section == "BLOCKS" and kind == "BLOCK":
+            owner = _record_owner(record)
+            block_name = dict(record).get(2, "").casefold()
+            block_owner = owner if owner in owners and owners[owner][0] == block_name else ""
+        elif kind == "ENDBLK":
+            block_owner = ""
+        elif kind in _PAPER_ENTITY_KINDS and (section == "ENTITIES" or block_owner):
+            fields = dict(record)
+            handle = fields.get(5, "")
+            if not handle:
+                continue
+            handle_key = handle.casefold()
+            if handle_key in seen_handles:
+                locations.pop(handle_key, None)
+                continue
+            seen_handles.add(handle_key)
+            owner = _record_owner(record)
+            if owner not in owners or (block_owner and owner != block_owner):
+                continue
+            layout = owners[owner][1]
+            explicit = fields.get(410, "")
+            if ((explicit and explicit.casefold() != layout.casefold())
+                    or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout)):
+                continue
+            locations[handle_key] = {
+                "kind": _PAPER_ENTITY_KINDS[kind], "handle": handle, "layout": layout,
+            }
+    return locations
+
+
 def _mleader_number(value, integer=False):
     try:
         number = float(value)
@@ -73,6 +126,7 @@ def parse_dxf_file(
 def parse_dxf_bytes(
     raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True,
     include_model_entity_counts: bool = False,
+    include_paper_entity_locations: bool = False,
 ) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
@@ -618,6 +672,10 @@ def parse_dxf_bytes(
         attach_clips(pairs, out)
         attach_footprints(pairs, out)
         attach_visibility(pairs, out)
+    if include_paper_entity_locations:
+        locations = _paper_entity_locations(pairs)
+        if locations:
+            out["paper_entity_locations"] = list(locations.values())
     return out
 
 
@@ -772,6 +830,13 @@ def _parse_insert(pairs, i, dropped=None, include_measurement_evidence=False):
                  "row_spacing": _float(groups.get(45, "0"))}
     rotation = math.radians(_float(groups.get(50, "0")))
     if include_measurement_evidence:
+        try:
+            valid = all(math.isfinite(float(groups[code]))
+                        for code in (10, 20, 30, 41, 42, 43, 50, 210, 220, 230) if code in groups)
+        except ValueError:
+            valid = False
+        if not valid:
+            array["measurement_placement_invalid"] = True
         source = dict(x=point[0], y=point[1], z=point[2], rot=rotation, nrm=normal)
         if point != [round(v, 3) for v in point] or rotation != round(rotation, 6) or normal != [round(v, 6) for v in normal]:
             array["measurement_placement"] = source
@@ -1108,6 +1173,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             continue
         block["count"] += 1
         try:
+            path = None
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
@@ -1128,6 +1194,20 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     refs.append(insert)
                 else:
                     block["nested_inserts_incomplete"] = True
+            if include_measurement_evidence and block["count"] <= 60 and kind in ("HELIX", "SPLINE"):
+                if kind == "HELIX":
+                    record = pairs[i + 1:end]
+                    # The helix subclass reuses spline group codes for its own
+                    # parameters. The saved spline subclass is the curve.
+                    try:
+                        first = record.index((100, "AcDbSpline"))
+                        last = record.index((100, "AcDbHelix"), first + 1)
+                    except ValueError:
+                        first = last = 0
+                    path = _spline_measurement_path(record[first:last])
+                controls = path.get("control_points") if path else None
+                if controls and len(controls) <= 10000:
+                    block.setdefault("region_curve_controls", {})[str(block["count"] - 1)] = controls
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
             if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:

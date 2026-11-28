@@ -9,13 +9,17 @@ import json
 import uuid
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+import deps
 import jobs
 import lab_artifacts as ledger
 import lab_corpus_executor as corpus
 import lab_run_store as runs
 import lab_tool_manifests
 from lab_canonical import graph_digest
+from routers import lab_artifacts
 
 
 @pytest.fixture
@@ -66,7 +70,7 @@ def exported_run(monkeypatch, tmp_path):
         return {'suite': raw_suite, 'corpus': raw_rows}
     monkeypatch.setattr(corpus, 'read_sources', sources)
 
-    def persist(*, compiled=True, corrupt=None, submission_id=None):
+    def persist(*, compiled=True, corrupt=None, submission_id=None, confirm_report=None):
         current = copy.deepcopy(context)
         if not compiled:
             current.pop('policy')
@@ -74,7 +78,7 @@ def exported_run(monkeypatch, tmp_path):
                      if compiled else descriptor['sha256'])
         report = {'schema': 'leafhft.block-suite-result.v1', 'suite_sha256': effective,
                   'rows_sha256': hashlib.sha256(rows).hexdigest(), 'candidates': [], 'chosen': None,
-                  'confirm_report': {}, 'verdict': 'insufficient',
+                  'confirm_report': confirm_report or {}, 'verdict': 'insufficient',
                   'reasons': ['Synthetic export fixture, no evaluator executed.']}
         if compiled:
             report['policy_digest'] = policy['digest']
@@ -130,6 +134,37 @@ def test_export_preserves_the_producer_suite_and_policy(exported_run, compiled):
         assert exported['result']['suite_sha256'] != exported['context']['suite']['sha256']
     for name, part in parts.items():
         assert bundle['manifest']['parts'][name] == graph_digest(part)
+
+
+@pytest.mark.parametrize('confirm_report', [
+    {'z': {'z': 0, 'a': 1}, 'a': True},
+    {'café': '雪'},
+    {'score': [1.0, -0.0, 1e-7]},
+], ids=['nested-order', 'unicode', 'numeric-spelling'])
+def test_http_export_preserves_literal_report_bytes(exported_run, monkeypatch, confirm_report):
+    tenant, _, _, persist = exported_run
+    value = persist(confirm_report=confirm_report)
+    app = FastAPI()
+    app.include_router(lab_artifacts.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        tenant, tier='hosted_pro', subject='member')
+    monkeypatch.setattr(lab_artifacts, '_authorize_export', lambda tenant, graph, run: None)
+    with TestClient(app) as client:
+        response = client.get('/api/lab/docs/export-policy/revisions/1/export')
+
+    assert response.status_code == 200
+    assert response.headers['content-type'] == 'application/json'
+    assert response.headers['content-disposition'] == 'attachment; filename="lab-export-policy-r1.json"'
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    bundle = response.json()
+    exported = bundle['parts']['evaluations'][0]['complete_results']['synthetic-job']
+    assert exported == value
+    for name, part in bundle['parts'].items():
+        assert bundle['manifest']['parts'][name] == graph_digest(part)
+    report_bytes = corpus._json_bytes(value['result'])
+    assert hashlib.sha256(report_bytes + b'\n').hexdigest() == exported['result_sha256']
+    assert b'"result":' + report_bytes + b',' in response.content
 
 
 @pytest.mark.parametrize('corrupt', ['parent_suite', 'policy_digest'])

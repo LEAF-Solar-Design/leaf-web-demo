@@ -413,6 +413,25 @@ def test_parse_deadline_real_parse_is_cut(monkeypatch, children):
     assert len(children) == 1 and children[0].returncode is not None
 
 
+@pytest.mark.parametrize("mode, include_placements", [("--schedule-audit", False),
+                                                       ("--schedule-placements", True)])
+def test_schedule_audit_timeout_reaps_child_before_releasing_slot(tmp_path, monkeypatch, children,
+                                                                  mode, include_placements):
+    backend, source = seed_small(tmp_path, monkeypatch)
+    use(monkeypatch, [sys.executable, "-c", HANG], deadline=0.1, slots=1)
+    before = written(backend)
+    request = {"source_artifact_id": source["artifact_id"], "approved_pages": [[]],
+               "include_placements": include_placements}
+    refusal("REPORT_PARSE_TIMEOUT", report.audit_solaredge_schedule, backend, TENANT, "solar", request)
+    assert len(children) == 1
+    assert children[0].args[-1] == mode
+    assert children[0].poll() is not None
+    assert children[0].slot_free_at_kill is False
+    assert children[0].slot_free_at_reap is False
+    assert slot_free()
+    assert written(backend) == before
+
+
 def test_parse_deadline_unread_stdin(tmp_path, monkeypatch, children):
     backend, source = seed_small(tmp_path, monkeypatch)
     monkeypatch.setattr(report.solar_import_sources, "load_import_source",

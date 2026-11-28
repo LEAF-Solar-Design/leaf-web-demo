@@ -82,7 +82,7 @@
       "sha256": "54917bcb9e8623634bbb4dc95b7ad494a3772afe662dd2118cbbb3950aa5ac3f"
     },
     "registry/api-allowlist.json": {
-      "reason": "SBT (#3553/#3554): Branch package API allowlist; downstream-only file, retire when upstream includes equivalent behavior. SEC-2: TextStyleTableRecord.FileName and BigFontFileName removed (font path network beacon); downstream only.",
+      "reason": "SBT (#3553/#3554): Branch package API allowlist; downstream-only file, retire when upstream includes equivalent behavior. SEC-2: TextStyleTableRecord.FileName and BigFontFileName removed (font path network beacon); matches Branch2025 upstream since #741.",
       "sha256": "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285"
     },
     "registry/branchPackageSchema.ts": {

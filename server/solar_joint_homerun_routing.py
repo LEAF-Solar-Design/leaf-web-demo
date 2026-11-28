@@ -57,10 +57,15 @@ def _xy(point):
     return tuple(Fraction(str(value)) for value in point[:2])
 
 
+def _xyz(point):
+    # Use the same elevation precision as the saved aisle network after unit conversion.
+    return (*_xy(point), Fraction(str(round(point[2], 9))))
+
+
 def _overlaps(first, second):
     """Whether two projected segments share a positive-length collinear portion."""
-    a, b = first
-    c, d = second
+    a, b = (point[:2] for point in first)
+    c, d = (point[:2] for point in second)
     if a == b or c == d:
         return False
     dx, dy = b[0] - a[0], b[1] - a[1]
@@ -89,9 +94,12 @@ def _touches_box(segment, box):
     return True
 
 
-def _constraints(value):
+def _constraints(value, drawing_keepouts=()):
+    if value is None and drawing_keepouts:
+        value = {"keep_outs": [], "aisles": []}
     if (type(value) is not dict or set(value) != {"keep_outs", "aisles"}
-            or type(value["keep_outs"]) is not list or len(value["keep_outs"]) > MAX_KEEP_OUTS
+            or type(value["keep_outs"]) is not list
+            or len(value["keep_outs"]) + len(drawing_keepouts) > MAX_KEEP_OUTS
             or type(value["aisles"]) is not list or len(value["aisles"]) > 8):
         raise _invalid()
     names = set()
@@ -114,6 +122,26 @@ def _constraints(value):
             raise _invalid()
         boxes[name] = _xy(low), _xy(high)
 
+    # Saved geometry can carry elevation. Keep the public request schema XY-only.
+    reserved_names = names | {
+        item["name"] for item in value["aisles"]
+        if type(item) is dict and type(item.get("name")) is str
+    }
+    ordinal = 0
+    for low, high in drawing_keepouts:
+        dimensions = len(low)
+        if dimensions not in (2, 3):
+            raise _invalid()
+        low, high = _point(low, dimensions), _point(high, dimensions)
+        if (any(a >= b for a, b in zip(low[:2], high[:2]))
+                or dimensions == 3 and low[2] > high[2]):
+            raise _invalid()
+        coordinate = _xyz if dimensions == 3 else _xy
+        ordinal += 1
+        while f"Drawing keepout {ordinal}" in reserved_names:
+            ordinal += 1
+        boxes[f"Drawing keepout {ordinal}"] = coordinate(low), coordinate(high)
+
     aisles = []
     reserved = []
     for item in value["aisles"]:
@@ -131,7 +159,8 @@ def _constraints(value):
             # The same physical centerline must not supply two independent capacities.
             raise _invalid()
         reserved.extend(segments)
-        if not any(_touches_box(segment, box) for segment in segments for box in boxes.values()):
+        if not any(_touches_box(segment, box)
+                   for segment in pairwise(map(_xyz, points)) for box in boxes.values()):
             aisles.append(Aisle(name, points, capacity))
     return dict(sorted(boxes.items())), sorted(aisles, key=lambda aisle: aisle.name), reserved
 
@@ -143,8 +172,8 @@ def _path(name, points):
 
 def _options(route, boxes, aisles, reserved):
     start, end = map(tuple, route["points"])
-    source_xy, target_xy = _xy(start), _xy(end)
-    direct = source_xy, target_xy
+    source, target = _xyz(start), _xyz(end)
+    direct = source, target
     blocked = [name for name, box in boxes.items() if _touches_box(direct, box)]
 
     def reserved_overlap(segment):
@@ -161,8 +190,8 @@ def _options(route, boxes, aisles, reserved):
     for aisle in aisles:
         candidates = []
         for centerline in (aisle.points, aisle.points[::-1]):
-            if (accessible((source_xy, _xy(centerline[0])))
-                    and accessible((_xy(centerline[-1]), target_xy))):
+            if (accessible((source, _xyz(centerline[0])))
+                    and accessible((_xyz(centerline[-1]), target))):
                 points = ((start,) if start != centerline[0] else ()) + centerline
                 if end != centerline[-1]:
                     points += (end,)
@@ -233,11 +262,11 @@ def _allocate(options, capacities):
     return [next((path for path, edge in paths if edge.capacity == 0), None) for paths in choices]
 
 
-def route_together(routes, constraints):
+def route_together(routes, constraints, *, drawing_keepouts=()):
     """Apply a complete minimum-cost allocation or refuse the entire mutation."""
     if len(routes) > MAX_DRAWING_LEADS:
         raise GraphValidationError("JOINT_ROUTING_LEAD_LIMIT", "routing_constraints")
-    boxes, aisles, reserved = _constraints(constraints)
+    boxes, aisles, reserved = _constraints(constraints, drawing_keepouts)
     candidates = [_options(route, boxes, aisles, reserved) for route in routes]
     allocation = [paths[0] if paths and paths[0].aisle is None else None for paths, _ in candidates]
     pending = [index for index, path in enumerate(allocation) if path is None]

@@ -896,7 +896,7 @@ async function waitForMode(mode) {
 
 afterEach(cleanup);
 
-const consequence = 'Re-size strings after this change';
+const consequence = 'Some settings changes require string sizing again.';
 const blankZip = 'ZIP code is blank. You can save setup. Cloud string sizing needs a saved ZIP code.';
 const clearingZip = 'Changing the ZIP code clears saved coordinates unless you enter both coordinates again.';
 const changeInput = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -916,6 +916,19 @@ const refusedEnvelope = (code) => ({
 });
 
 describe('Solar project settings', () => {
+  it.each(['project', 'drawing'])('explains the manual Roof layout maximum in the %s form', async (form) => {
+    const supplied = form === 'project' ? projectHarness().props : props();
+    render(<SolarSettingsForm {...supplied} />);
+    await waitForMode('edit');
+    const field = screen.getByRole('textbox', {
+      name: 'Panels in sequence',
+      description: 'For manual Roof sizing, this is the maximum number of panels per string for layout. Electrical sizing is checked separately.',
+    });
+    expect(screen.queryByText(consequence)).toBeNull();
+    fireEvent.change(field, { target: { value: '9' } });
+    expect(screen.getByText(consequence)).toBeTruthy();
+  });
+
   it('PJ17 omits the ZIP clearing warning for an untouched normalized blank ZIP', async () => {
     const intake = { ...IE, intake: { ...IE.intake, solar_design_graph: { rev: 2, settings: S, project: { ...P, zip_code: '\u0085' } } } };
     const supplied = props({ readIntake: vi.fn().mockResolvedValue(intake) });

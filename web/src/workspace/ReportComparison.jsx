@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { savedReportBinding } from '../lib/savedReport.js'
+import SelectionComparison, { SelectionExports } from './SelectionComparison.jsx'
 
 function ReportPicker({ label, value, exclude, reports, onChange }) {
   return (
@@ -191,26 +192,31 @@ export default function ReportComparison({ jobs, projectId }) {
     if (clearFirst) setFirstId(current => current === firstId ? '' : current)
     if (clearSecond) setSecondId(current => current === secondId ? '' : current)
   }, [clearFirst, clearSecond, firstId, secondId])
-  if (reports.size < 2) return null
   return (
-    <section className="ground-job-detail" aria-label="Compare saved reports">
-      <h3>Compare saved reports</h3>
-      <ReportPicker label="First report" value={first?.id} exclude={second?.id} reports={reports} onChange={setFirstId} />
-      <ReportPicker label="Second report" value={second?.id} exclude={first?.id} reports={reports} onChange={setSecondId} />
-      <div aria-live="polite">
-        {first && second && (
-          <>
-            <dl>
-              <dt>Drawing version</dt>
-              <dd>{first.drawingVersion === second.drawingVersion ? 'Same drawing version' : 'Different drawing versions'}</dd>
-              <dt>Tool version</dt>
-              <dd>{toolVersionResult(first, second)}</dd>
-            </dl>
-            <LayerOptionsComparison first={first} second={second} />
-            <LayerAreaComparison first={first} second={second} />
-          </>
-        )}
-      </div>
-    </section>
+    <>
+      {reports.size >= 2 && (
+        <section className="ground-job-detail" aria-label="Compare saved reports">
+          <h3>Compare saved reports</h3>
+          <ReportPicker label="First report" value={first?.id} exclude={second?.id} reports={reports} onChange={setFirstId} />
+          <ReportPicker label="Second report" value={second?.id} exclude={first?.id} reports={reports} onChange={setSecondId} />
+          <div aria-live="polite">
+            {first && second && (
+              <>
+                <dl>
+                  <dt>Drawing version</dt>
+                  <dd>{first.drawingVersion === second.drawingVersion ? 'Same drawing version' : 'Different drawing versions'}</dd>
+                  <dt>Tool version</dt>
+                  <dd>{toolVersionResult(first, second)}</dd>
+                </dl>
+                <LayerOptionsComparison first={first} second={second} />
+                <LayerAreaComparison first={first} second={second} />
+                <SelectionComparison first={first} second={second} />
+              </>
+            )}
+          </div>
+        </section>
+      )}
+      <SelectionExports reports={reports} projectId={projectId} key={projectId} />
+    </>
   )
 }

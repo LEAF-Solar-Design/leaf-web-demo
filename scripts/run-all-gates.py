@@ -4403,6 +4403,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_branch_dev_catalog.py"), 13),
         Suite("server-branch-sync-receipts", "server tests/test_branch_sync_receipts.py", "pytest", SERVER,
               _py_pytest("tests/test_branch_sync_receipts.py"), 37),
+        Suite("server-branch-run-receipts", "server tests/test_branch_run_receipts.py", "pytest", SERVER,
+              _py_pytest("tests/test_branch_run_receipts.py"), 25),
         Suite("server-tenant-catalog", "server tests/test_tenant_catalog.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_catalog.py"), 25),
         Suite("server-workspace-identity-echo", "server tests/test_workspace_identity_echo.py", "pytest", SERVER,

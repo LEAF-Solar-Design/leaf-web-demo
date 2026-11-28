@@ -38,7 +38,7 @@ PINNED_BASE_DIGESTS = {
     "solar-commit-solve": "sha256:69b70748c4383c2503ed385a63942528a09719a9df69568c1c97524ef00421fa",
     "solar-correct-string": "sha256:7eafd72428523b7d36a0047cb56ab84625c7e42f285376726c4da8334db8a427",
     "solar-assign-equipment": "sha256:f6f53fc166c6247e0676f929fc7bfef6f0d46f198e8c1c8152ccb8fab26a8892",
-    "solar-homeruns": "sha256:6205d9b7429d9de81755761cff65befe0f53776cc25b2b443a6e3ce6485e50d2",
+    "solar-homeruns": "sha256:715ba5c397fa342d7b0b8a3be7115126741aa70f88d4bf0f966ae10612f8ce8d",
     "solar-schedule": "sha256:df46c4d27c872c9f00025999ab984ca48c4bf4e0dae830ab7a5b01de8461fea9",
 }
 

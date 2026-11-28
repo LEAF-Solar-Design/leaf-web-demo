@@ -2107,14 +2107,23 @@ class CustomizationService:
                 self._verified_record_fields(change, set())
                 result["package_path"] = receipt["package_path"]
                 if change.state is ChangeState.PUBLISHED:
-                    from branch_tools import sync_receipts
+                    from branch_tools import run_receipts, sync_receipts
                     from branch_tools.vendor.cad_tool_package.runner import package_digest
 
                     files, name = self._branch_package_files(change)
                     manifest = json.loads(files["tool.json"])
-                    branch = sync_receipts.latest(
-                        self.store, change.tenant_id, name, manifest["version"], package_digest(files),
-                    )
+                    digest = package_digest(files)
+                    try:
+                        branch = run_receipts.stage_view(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
+                    except Exception as exc:
+                        _LOG.warning("run_receipt_read_unavailable: exception=%s", type(exc).__name__)
+                        branch = None
+                    if branch is None:
+                        branch = sync_receipts.latest(
+                            self.store, change.tenant_id, name, manifest["version"], digest,
+                        )
                     if branch is not None:
                         result["branch"] = branch
                 else:
