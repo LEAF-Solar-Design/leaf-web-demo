@@ -26,7 +26,9 @@ import write_loop
 from solar_design_graph import GraphValidationError, validate_graph
 from solar_solve_results import require_current_export
 import test_solar_electrical_route_bridge as rbt
+import test_solar_ground_equipment as ground
 from test_solar_electrical_state_bridge import CREATED, DEFAULTS, minter
+from test_solar_ground_equipment import pinned, service as ground_service  # noqa: F401
 from test_solar_ground_topology import bare
 from test_solar_tool_guardrails_read import located
 from test_w1_design_graph import app_id, entity, graph  # noqa: F401
@@ -163,6 +165,45 @@ def test_electrical_schedules_kernel_replays_i8():
     assert cells[1][-1] == ["GRAND TOTAL", "", "173", "", "2345", "-", "-", "-"]
 
 
+@pytest.mark.parametrize(
+    "expanded,second_rating,expected",
+    [
+        (False, 595.0, ["1.79", "1.19", "2.98", "2.98"]),
+        (True, 595.0, ["1.79", "1.19", "2.98", "2.98"]),
+        (False, 333.0, ["1.79", "0.67", "2.45", "2.45"]),
+        (False, 0.0, None),
+    ],
+    ids=["compact", "expanded", "mixed-ratings", "unrated-peer"],
+)
+def test_electrical_schedules_report_saved_inverter_dc_load(
+    graph, ground_service, pinned, tmp_path, monkeypatch, expanded, second_rating, expected
+):
+    strung = ground.strung(ground.sized(ground.converted(graph)), pinned)
+    if expanded:
+        strung = ground.codec.expand_graph(strung)
+    strung["frames"][1]["module_power_watts"] = second_rating
+    params = ground.equipment_params(strung, mppt_count=2, mppt_inputs={"A": 1, "B": 1})
+    params["assignments"][1].update(mppt_letter="B", input_number=0)
+    backend = ground.stored(tmp_path, monkeypatch, strung)
+    ground.dispatch(backend, ground.EQUIPMENT, params, 1, "schedule-equip")
+    reopened = ground.head_graph(backend)
+    assert reopened["rev"] == strung["rev"] + 1
+
+    module = builtin()
+    _, powers = module._schedule_inputs(reopened, "topology")
+    assert sorted(powers.values()) == ([2 * second_rating, 1785.0] if second_rating else [1785.0])
+    if expected is None:
+        with pytest.raises(GraphValidationError, match="SOLAR_OUTPUT_NOT_CURRENT"):
+            module.run(reopened, {})
+        return
+    document = artifact(module.run(reopened, {}))
+    inverter = next(table["cells"] for table in document["tables"] if table["title"] == "INVERTER SCHEDULE")
+    assert [row[:2] for row in inverter[2:]] == [
+        ["INV-1", "A"], ["INV-1", "B"], ["INV-1 Total", ""], ["GRAND TOTAL", ""]
+    ]
+    assert [row[5] for row in inverter[2:]] == expected
+
+
 def test_electrical_schedules_i7_graph(i7):
     assert (len(i7["panels"]), len(i7["strings"]), len(i7["inverters"]), len(i7["routes"])) == (2345, 173, 22, 346)
     assert (sha(i7), i7["rev"], i7["parent_rev"]) == (I7_SHA, 1, 0)
@@ -184,10 +225,10 @@ OUTPUTS = [
      "07dce5dc7289d872acd257226d88842f696b4e5c3b86e8f8c3eca51a4af62ac0", SUMMARY),
     ("i7", {"circuit_source": "labels"}, TITLES[1:], 18880,
      "fc30dd7fbefb06f67c87b2a8682664ebecec67a0dae1e5bce502dd45ba24349b", dict(SUMMARY, circuit_source="labels")),
-    ("w1", {}, ["INVERTER SCHEDULE", "STRING SCHEDULE"], 902,
-     "70cd4354fbe564f57866f042698e8dc1e04ed29e6dd628d4e02a842675e2e64e", W1_SUMMARY),
-    ("w1", {"inverter_record": CAPTURE_RECORD}, ["EQUIPMENT SCHEDULE", "INVERTER SCHEDULE", "STRING SCHEDULE"], 1341,
-     "8a09b64b4737ca63e47f3db19b94cac48c3e80740e6d2c5bf353250b5558b9ba", dict(W1_SUMMARY, inverter_record="caller")),
+    ("w1", {}, ["INVERTER SCHEDULE", "STRING SCHEDULE"], 916,
+     "7fc482c59d6c99b1ca66a61a67b41aeb10b2cbf7a8cada137cde3bd30de1e4a8", W1_SUMMARY),
+    ("w1", {"inverter_record": CAPTURE_RECORD}, ["EQUIPMENT SCHEDULE", "INVERTER SCHEDULE", "STRING SCHEDULE"], 1355,
+     "0bb56fdb520ee1ae3848295f1cafe8d49143f36385543a1104dcbd3bf736d8e7", dict(W1_SUMMARY, inverter_record="caller")),
     ("w1", {"circuit_source": "labels", "inverter_record": CAPTURE_RECORD}, ["EQUIPMENT SCHEDULE"], 523,
      "dc20c73b71c7930d4e2d278724c38bcef2f5b8abba594214a776b14c4b4d0e9f",
      dict(W1_SUMMARY, circuit_source="labels", strings=0, modules=0, inverter_record="caller")),
@@ -253,14 +294,14 @@ def test_electrical_schedules_topology_follows_the_legs(i7):
 W1_INVERTER = [
     ["INVERTER SCHEDULE", "", "", "", "", "", "", ""],
     ["Inverter", "MPPT", "Strings", "Mod/String", "Total Modules", "DC Power (kW)", "AC Power (kW)", "DC/AC Ratio"],
-    ["INV-1", "A", "2", "2, 1", "3", "-", "-", "-"],
-    ["INV-1 Total", "", "2", "", "3", "-", "-", "-"],
-    ["GRAND TOTAL", "", "2", "", "3", "-", "-", "-"],
+    ["INV-1", "A", "2", "2, 1", "3", "1.20", "-", "-"],
+    ["INV-1 Total", "", "2", "", "3", "1.2", "-", "-"],
+    ["GRAND TOTAL", "", "2", "", "3", "1.2", "-", "-"],
 ]
 W1_STRING_ROWS = [
-    ["1", "A", "1", "-", "2", "-", "-", "-", "-", "-", "-", "-", "-", "19.7", "-", "-", "-", "-"],
-    ["1", "A", "2", "-", "1", "-", "-", "-", "-", "-", "-", "-", "-", "3.3", "-", "-", "-", "-"],
-    ["TOTAL", "", "2", "", "3", "", "", "", "", "", "", "", "-", "", "", "", "", ""],
+    ["1", "A", "1", "-", "2", "-", "-", "-", "-", "-", "-", "-", "800", "19.7", "-", "-", "-", "-"],
+    ["1", "A", "2", "-", "1", "-", "-", "-", "-", "-", "-", "-", "400", "3.3", "-", "-", "-", "-"],
+    ["TOTAL", "", "2", "", "3", "", "", "", "", "", "", "", "1200", "", "", "", "", ""],
 ]
 
 
@@ -299,11 +340,11 @@ def test_electrical_schedules_sized_w1(graph, passing, service):
     assert out.summary == {"status": "written", "tables": ["INVERTER SCHEDULE", "STRING SCHEDULE"],
                            **dict(W1_SUMMARY, sizing="global")}
     assert (len(out.content), hashlib.sha256(out.content).hexdigest()) == (
-        941, "c4b5a3d0bc1addd8938c0de423a2dd4238328f30f99c845c777e7c1ba5f521c6")
+        958, "747750b8531c9d0e22ac17d6cfe298246e6ed8e2008dc19d66dd9ce6c279e108")
     assert artifact(out)["tables"][1]["cells"][2:] == [
-        ["1", "A", "1", "-", "2", "-", "102.5", "1500", "1397.5", "-", "-", "-", "-", "19.7", "-", "-", "-", "P99.5 Voc"],
-        ["1", "A", "2", "-", "1", "-", "51.3", "1500", "1448.7", "-", "-", "-", "-", "3.3", "-", "-", "-", "P99.5 Voc"],
-        W1_STRING_ROWS[2]]
+        ["1", "A", "1", "-", "2", "-", "102.5", "1500", "1397.5", "-", "-", "-", "1190", "19.7", "-", "-", "-", "P99.5 Voc"],
+        ["1", "A", "2", "-", "1", "-", "51.3", "1500", "1448.7", "-", "-", "-", "595", "3.3", "-", "-", "-", "P99.5 Voc"],
+        [*W1_STRING_ROWS[2][:12], "1785", *W1_STRING_ROWS[2][13:]]]
 
 
 def test_electrical_schedules_no_schedules(graph):
@@ -730,10 +771,10 @@ def test_electrical_schedules_api_writes_one_artifact(api, graph):
     ref = output["artifact"]
     assert (ref["schema"], ref["media_type"], ref["filename"], ref["byte_length"], ref["content_sha256"],
             ref["source_version"]) == ("leaf.solar-artifact-ref.v1", "application/json", "ElectricalSchedules.json",
-                                       1341, "8a09b64b4737ca63e47f3db19b94cac48c3e80740e6d2c5bf353250b5558b9ba", 1)
+                                       1355, "0bb56fdb520ee1ae3848295f1cafe8d49143f36385543a1104dcbd3bf736d8e7", 1)
     assert ref["download"] == "/api/drawings/solar/artifacts/" + ref["artifact_id"]
     assert (result["output_sha256"], result["output_bytes"]) == (
-        "6364b7eeb6df490d1857c4ece20b03e14bd2ec7302548f0bc367f53b328939d5", 682)
+        "c585c26e2335d4945570ac8439fbc53c3501271773286c64d4eeecc591029549", 682)
     meta, content = solar_artifacts.read_artifact(api[1], TENANT, "solar", ref["artifact_id"])
     assert meta["tool"] == TOOL and content == builtin().run(graph, {"inverter_record": CAPTURE_RECORD}).content
     added = keys(api[1]) - before
