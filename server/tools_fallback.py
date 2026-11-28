@@ -302,6 +302,29 @@ def run(intake, params):
     }, None)
 """
 
+_PANEL_MATERIAL_LINK_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"^(?:show|list|report|identify|flag|tell me)\b",
+        r"\b(?:panels?|outlines?)\b",
+        r"\bmaterials?\b",
+        r"\b(?:ambiguous|missing|unresolved|shared|shares?|sharing|conflicting)\b",
+        r"\b(?:definitions?|links?|handles?|shares?|sharing)\b",
+    )
+]
+_PANEL_MATERIAL_LINKS_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("explicit_panel_material_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check explicit material links."}, None)
+    return ({
+        "status": "reported",
+        "scope": "direct_material_links_on_closed_model_space_outlines",
+        "links": links,
+    }, None)
+"""
+
+
 _PANEL_COUNT_TARGET = re.compile(
     r"\b(?:count(?:s|ing)?|tally|how many|number of)\s+(?:the\s+)?(?:nested\s+)?(?:(?:pv|solar)\s+)?(?:panels?|modules?)\b",
     re.IGNORECASE,
@@ -725,6 +748,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _PANEL_MATERIAL_LINK_REQUEST):
+        verb, engine_op = "report", "panel_material_links"
+        drawing_body = _PANEL_MATERIAL_LINKS_BODY
+        summary = "reports explicit material links on closed model-space outlines"
 
     if (drawing_body is None and _LINE_PATTERN_REFERENCE.search(description)
             and _MISSING_PATTERN_DEFINITION.search(description)):

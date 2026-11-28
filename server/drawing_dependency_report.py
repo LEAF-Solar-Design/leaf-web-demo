@@ -6,11 +6,13 @@ not claim that a DWG converter preserved every original metadata record.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 
 _INLINE_FONT = re.compile(r"\\[fF]")
 _FONT_DELIMITER = re.compile(r"[|;]")
 _LINE_ENTITIES = {"LINE", "LWPOLYLINE", "POLYLINE"}
+_PANEL_OUTLINES = {"LWPOLYLINE", "POLYLINE"}
 _DEFAULT_LINETYPES = {"bylayer", "byblock", "continuous"}
 _MATERIAL_MAPS = {
     3: ("diffuse", 72),
@@ -134,6 +136,8 @@ def from_pairs(pairs, *, literal_text=None):
     linetype_names = set()
     line_linetypes = {}
     styles = {}
+    material_definitions = {}
+    panel_material_links = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
     section = None if any(c == 0 and v.upper() == "SECTION" for c, v in pairs) else "__FRAGMENT__"
@@ -171,12 +175,12 @@ def from_pairs(pairs, *, literal_text=None):
         subclasses = {}
         subclass = None
         text_parts = []
-        plot_record = kind in {"LAYOUT", "PLOTSETTINGS"}
+        capture_subclasses = kind in {"LAYOUT", "PLOTSETTINGS", "MATERIAL"} | _PANEL_OUTLINES
         inline_record = kind in inline_entities
         while end < len(pairs) and pairs[end][0] != 0:
             tag, value = pairs[end]
             groups.setdefault(tag, value)
-            if plot_record:
+            if capture_subclasses:
                 if tag == 100:
                     subclass = subclasses.setdefault(value, {})
                 elif subclass is not None:
@@ -225,10 +229,25 @@ def from_pairs(pairs, *, literal_text=None):
                 line_linetypes.setdefault(name, []).append({
                     "entity_type": kind, "handle": groups.get(5) or None,
                 })
+            # Restrict the report to explicitly linked, closed 2D outlines.
+            if kind in _PANEL_OUTLINES and section == "ENTITIES" and groups.get(5):
+                entity = subclasses.get("AcDbEntity", {})
+                material = entity.get(347)
+                polyline = subclasses.get("AcDbPolyline") or subclasses.get("AcDb2dPolyline", {})
+                flags = _dxf_int(polyline.get(70, "0")) or 0
+                model_space = entity.get(67, "0") == "0" and entity.get(410, "Model").casefold() == "model"
+                if material and flags & 1 and model_space:
+                    panel_material_links.append({
+                        "entity_handle": groups[5], "layer": entity.get(8),
+                        "material_handle": material.upper(),
+                    })
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
         elif kind == "MATERIAL":
             handle = groups.get(5) or ""
+            if section == "OBJECTS" and handle:
+                material = subclasses.get("AcDbMaterial", {})
+                material_definitions.setdefault(handle.upper(), []).append(material.get(1) or None)
             for channel, path in _material_texture_maps(pairs, i + 1, end):
                 add("material_texture", path, "texture omitted")
                 texture_maps.setdefault(path, set()).add((handle, channel))
@@ -278,8 +297,22 @@ def from_pairs(pairs, *, literal_text=None):
         dependencies["photometric_web", path]["light_handles"] = sorted(handles)
     for key, setup_names in plot_resource_setups.items():
         dependencies[key]["page_setups"] = sorted(setup_names)
+    material_usage = Counter(link["material_handle"] for link in panel_material_links)
+    for link in panel_material_links:
+        handle = link["material_handle"]
+        definitions = material_definitions.get(handle, [])
+        if len(definitions) > 1:
+            status = "ambiguous"
+        elif not definitions:
+            status = "missing"
+        elif not definitions[0]:
+            status = "invalid_definition"
+        else:
+            status = "shared" if material_usage[handle] > 1 else "resolved"
+        link.update(status=status, definitions=definitions)
     report = {"schema": "leaf.drawing-dependencies.v1",
             "explicit_line_linetypes_checked": True,
+            "explicit_panel_material_links": panel_material_links,
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}

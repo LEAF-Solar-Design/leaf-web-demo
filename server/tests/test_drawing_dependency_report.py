@@ -485,3 +485,63 @@ def test_authored_export_linetype_check_uses_real_intake(elements, request_text)
     original["dependency_report"].pop("explicit_line_linetypes_checked")
     assert run(original)["status"] == "unavailable"
     assert author_tool("Flag panels near the roof edge.")[0]["engine_op"] == "highlight_near_edge"
+
+
+@pytest.mark.parametrize(("case", "prompt", "status", "definitions"), [
+    ("valid", "Show which panel shares a valid material and which panel points to an ambiguous material definition.",
+     "resolved", ["Edge"]),
+    ("missing", "Identify missing material links on panel outlines.", "missing", []),
+    ("ambiguous", "List conflicting material definitions referenced by panels.", "ambiguous", ["Edge", "Other"]),
+])
+def test_authored_panel_material_report_on_saved_dxf(case, prompt, status, definitions):
+    from io import StringIO
+
+    import ezdxf
+
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    doc = ezdxf.new("R2018")
+    doc.layers.new("Panels")
+    shared = doc.materials.new("Shared").dxf.handle
+    edge = doc.materials.new("Edge").dxf.handle
+    target = "FFFF" if case == "missing" else edge
+    points = [(0, 0), (2, 0), (2, 1), (0, 1)]
+    model = doc.modelspace()
+    first = model.add_lwpolyline(points, close=True, dxfattribs={"layer": "Panels", "material_handle": shared})
+    second = model.add_polyline2d(points, close=True, dxfattribs={"layer": "Panels", "material_handle": shared})
+    third = model.add_lwpolyline(points, close=True, dxfattribs={"layer": "Panels", "material_handle": target})
+    model.add_lwpolyline(points, dxfattribs={"material_handle": shared})
+    doc.layout().add_lwpolyline(points, close=True, dxfattribs={"material_handle": shared})
+    duplicate = doc.materials.new("Other").dxf.handle if case == "ambiguous" else None
+    payload = StringIO()
+    doc.write(payload)
+    raw = payload.getvalue()
+    if duplicate:
+        record = f"  0\nMATERIAL\n  5\n{duplicate}\n"
+        assert raw.count(record) == 1
+        raw = raw.replace(record, f"  0\nMATERIAL\n  5\n{edge}\n")
+    intake = parse_dxf_bytes(raw.encode("utf-8"))
+    assert intake["dependency_report"]["external_files_opened"] is False
+
+    manifest, code, _ = author_tool(prompt)
+    assert manifest["engine_op"] == "panel_material_links"
+    assert manifest["capabilities"] == ["drawing.read"]
+    sandbox_status, payload = _run_source_in_sandbox(code, "authored.py", intake, {})
+    assert sandbox_status == "ok", payload
+    result, overlay = payload
+    assert overlay is None
+    assert result == {
+        "status": "reported",
+        "scope": "direct_material_links_on_closed_model_space_outlines",
+        "links": [
+            {"entity_handle": first.dxf.handle, "layer": "Panels", "material_handle": shared,
+             "status": "shared", "definitions": ["Shared"]},
+            {"entity_handle": second.dxf.handle, "layer": "Panels", "material_handle": shared,
+             "status": "shared", "definitions": ["Shared"]},
+            {"entity_handle": third.dxf.handle, "layer": "Panels", "material_handle": target,
+             "status": status, "definitions": definitions},
+        ],
+    }
+    sandbox_status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
+    assert sandbox_status == "ok" and payload[0]["status"] == "unavailable"
