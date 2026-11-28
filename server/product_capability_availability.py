@@ -348,7 +348,7 @@ def w1_local_commit_inputs(graph):
 
 
 def w1_homeruns_current(graph, expected):
-    """True when the graph's homerun subset is exactly the regenerated terminal leads.
+    """True when saved homeruns cover the current terminal leads with consistent geometry.
 
     Only routes whose route_kind is a homerun kind (solar_solve_results.HOMERUN_KINDS) take part;
     feeders and trenches are other contracts and never make routing incomplete. The key count is
@@ -365,10 +365,25 @@ def w1_homeruns_current(graph, expected):
         found = actual.get((route["from_ref"], route["route_kind"]))
         if (found is None or found["validity"]["state"] != "valid"
                 or any(found[key] != route[key] for key in
-                       ("to_ref", "points", "wire_gauge", "point_units", "length_units"))
-                or not math.isclose(found["length_ft"], route["length_ft"], rel_tol=1e-9)
+                       ("to_ref", "wire_gauge", "point_units", "length_units"))
                 or any(found["extra"].get(key) != route["extra"][key]
                        for key in ("terminal_panel_ref", "mppt_letter", "input_number"))):
+            return False
+        points = found["points"]
+        length_ft = route["length_ft"]
+        if points != route["points"]:
+            routing = found["extra"].get("routing")
+            aisle = routing.get("aisle") if isinstance(routing, dict) else None
+            if (found["extra"].get("routing_policy") != "shared-aisle-terminal-lead-v1"
+                    or not isinstance(aisle, str) or not aisle.strip()
+                    or len(points) < 2
+                    or points[0] != route["points"][0] or points[-1] != route["points"][-1]):
+                return False
+            segments = [math.dist(a, b) for a, b in zip(points, points[1:])]
+            if 0 in segments:
+                return False
+            length_ft = math.fsum(segments) / .3048
+        if not math.isclose(found["length_ft"], length_ft, rel_tol=1e-9):
             return False
     return True
 

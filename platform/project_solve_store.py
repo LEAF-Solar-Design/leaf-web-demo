@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import timedelta
 import hashlib
+import json
 import re
 import unicodedata
 from typing import Literal
@@ -16,8 +17,12 @@ MAX_REQUEST_BYTES = 262144
 MAX_RESPONSE_BYTES = 1048576
 MAX_CANDIDATE_BYTES = 1048576
 MAX_PROOF_BYTES = 262144
+MAX_PREVIEW_BYTES = 131072
+MAX_PREVIEW_GROUPS = 256
+MAX_PREVIEW_PANELS = 4096
 
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
+_SOURCE_RE = re.compile(r"[0-9a-f]{40}")
 _GRANT_RE = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _REFUSALS = frozenset({
     "cloud_request_invalid", "cloud_auth_missing", "cloud_tenant_unauthorized",
@@ -577,10 +582,58 @@ def read_completed_piece_exchange(scope: PieceExchangeScope, *, conn) -> dict:
     return exchange
 
 
+def publish_completed_group_preview(scope: ExchangeScope, lease: JobAttempt, *,
+                                    source_sha: str, piece_count: int, groups: list[list[str]]) -> None:
+    """Keep one bounded snapshot for the current fenced, completed child prefix."""
+    if (type(scope) is not ExchangeScope or not isinstance(source_sha, str)
+            or _SOURCE_RE.fullmatch(source_sha) is None or type(piece_count) is not int
+            or not 1 <= piece_count <= 64 or type(groups) is not list
+            or not 1 <= len(groups) <= MAX_PREVIEW_GROUPS
+            or any(type(group) is not list or not group for group in groups)
+            or sum(map(len, groups)) > MAX_PREVIEW_PANELS):
+        raise ExchangeInputError()
+    refs = [ref for group in groups for ref in group]
+    if any(not _bounded_text(ref, 200) for ref in refs) or len(set(refs)) != len(refs):
+        raise ExchangeInputError()
+    args = _parameters(scope, lease)
+    args.update(piece_count=piece_count)
+
+    def operation(conn):
+        job, parent = _lock(conn, args)
+        if parent["state"] != "prepared" or job["input_version_id"] != parent["input_version_id"]:
+            raise ExchangeStateError()
+        snapshot = {"schema": "leaf.solar-completed-group-preview.v1", "source_sha": source_sha,
+                    "job_id": str(scope.job_id), "attempt": lease.attempt,
+                    "input_version_id": str(parent["input_version_id"]),
+                    "graph_revision": parent["graph_revision"], "graph_sha256": parent["graph_sha256"],
+                    "frame_id": parent["frame_id"], "completed_pieces": piece_count, "groups": groups}
+        encoded = json.dumps(snapshot, allow_nan=False, ensure_ascii=False)
+        if len(encoded.encode("utf-8")) > MAX_PREVIEW_BYTES:
+            raise ExchangeInputError()
+        old = parent["completed_group_preview"]
+        if old and old["attempt"] == lease.attempt:
+            prior = old["groups"]
+            if (old["source_sha"] != source_sha or old["completed_pieces"] >= piece_count
+                    or len(prior) >= len(groups) or groups[:len(prior)] != prior):
+                return
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE project_solve_exchanges e SET completed_group_preview=%(preview)s::jsonb "
+                "WHERE " + SCOPE_SQL + " AND " + LIVE_EXISTS_SQL +
+                " AND %(piece_count)s=(SELECT count(*) FROM project_solve_piece_exchanges c"
+                " WHERE c.org_id=e.org_id AND c.project_id=e.project_id AND c.drawing_id=e.drawing_id"
+                " AND c.job_id=e.job_id AND c.state='completed' AND c.piece_index<%(piece_count)s"
+                " AND c.input_version_id=e.input_version_id AND c.graph_revision=e.graph_revision"
+                " AND c.graph_sha256=e.graph_sha256 AND c.parent_intake_sha256=e.parent_intake_sha256)",
+                {**args, "preview": encoded})
+
+    db.run_transaction(operation, max_attempts=1)
+
+
 def read_running_split_progress(scope: ExchangeScope, *, tenant_id: str,
                                 input_version_id: UUID, graph_revision: int,
-                                graph_sha256: str, conn) -> dict | None:
-    """Counts only for one running canonical solve on its saved input."""
+                                graph_sha256: str, conn, source_sha: str | None = None) -> dict | None:
+    """Read counts and an optional same-source preview for a running canonical Solve."""
     if (type(scope) is not ExchangeScope or not isinstance(input_version_id, UUID)
             or type(tenant_id) is not str or not tenant_id
             or type(graph_revision) is not int or not 0 <= graph_revision <= 2147483647
@@ -607,7 +660,23 @@ def read_running_split_progress(scope: ExchangeScope, *, tenant_id: str,
     # for a completed piece before treating the reservation count as a total.
     if not 0 < completed <= reserved <= 64:
         return None
-    return {"completed_pieces": completed, "total_pieces": reserved}
+    progress = {"completed_pieces": completed, "total_pieces": reserved}
+    if isinstance(source_sha, str) and _SOURCE_RE.fullmatch(source_sha):
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT e.completed_group_preview AS preview FROM project_solve_exchanges e"
+                " JOIN jobs j ON j.job_id=e.job_id WHERE " + SCOPE_SQL + " AND " + JOB_SQL +
+                " AND j.status='running' AND j.lease_expires_at>clock_timestamp() AND e.state='prepared'"
+                " AND j.input_version_id=%(input_version_id)s AND e.input_version_id=%(input_version_id)s"
+                " AND e.graph_revision=%(graph_revision)s AND e.graph_sha256=%(graph_sha256)s"
+                " AND e.completed_group_preview->'attempt'=to_jsonb(j.attempt)"
+                " AND e.completed_group_preview->>'source_sha'=%(source_sha)s"
+                " AND e.completed_group_preview->'completed_pieces'<=to_jsonb(%(completed)s::bigint)",
+                {**args, "source_sha": source_sha, "completed": completed})
+            row = cur.fetchone()
+        if row:
+            progress["completed_group_preview"] = row["preview"]
+    return progress
 
 
 def read_assembly_inputs(scope: ExchangeScope, input_version_id: UUID, piece_count: int, *, conn):

@@ -7,11 +7,15 @@ import { pull, publish } from './drawingSync.js'
 import { isSignedIn, login, subscribeTokenStored } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import LeafPlatformScene from './LeafPlatformScene.jsx'
+import { studioFeature, studioFeatureAvailable } from '../site/studioAvailability.js'
 
 vi.mock('../api.js', () => ({ getSessionIdentity: vi.fn(), getStoredOrgId: vi.fn(), setStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
 vi.mock('./drawingSync.js', async (importOriginal) => ({ ...await importOriginal(), pull: vi.fn(), publish: vi.fn() }))
 vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn(), subscribeTokenStored: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
+vi.mock('../site/studioAvailability.js', async (importOriginal) => ({
+  ...await importOriginal(), studioFeatureAvailable: vi.fn(),
+}))
 
 const FAKE_ACCESS_TOKEN = 'test-bearer'
 const orgId = '11111111-1111-4111-8111-111111111111'
@@ -29,6 +33,7 @@ function setBridgeState(next) {
 
 beforeEach(() => {
   vi.resetAllMocks()
+  studioFeatureAvailable.mockImplementation((id, env) => studioFeature(id, env).available)
   state = { status: 'unavailable', ready: null, selectedObjectId: null, selectedHandles: null, lastCommand: null, helloSentAt: null }
   bridge = {
     subscribe: vi.fn((fn) => { listener = fn; fn(state); return vi.fn() }),
@@ -191,6 +196,20 @@ describe('AutoCAD palette scene in Studio', () => {
       expect(screen.queryByRole('region', { name: 'Branch tools' })).toBeNull()
       expect(bridge.listTools).not.toHaveBeenCalled()
     }
+  })
+
+  it('shows the production sync notice without controls or a version request', async () => {
+    studioFeatureAvailable.mockImplementation((id, env) => id === 'cad.drawing-sync' ? false : studioFeature(id, env).available)
+    state = { status: 'connected', ready, selectedObjectId: null }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    render(<LeafPlatformScene />)
+    expect(await screen.findByText('Sync back to AutoCAD is coming soon.')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Drawing sync' }).parentElement).toHaveAttribute('aria-label', 'Drawing sync')
+    expect(screen.queryByRole('button', { name: 'Pull' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Publish/ })).not.toBeInTheDocument()
+    expect(getDrawingVersions).not.toHaveBeenCalled()
+    expect(pull).not.toHaveBeenCalled()
+    expect(publish).not.toHaveBeenCalled()
   })
 
   it('shows the drawing sync row and publishes the first version', async () => {

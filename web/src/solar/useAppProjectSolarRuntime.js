@@ -15,7 +15,7 @@ const deferred = () => {
   return { promise, resolve }
 }
 const empty = () => ({ context: null, openTool: null, toolOwner: null, projectRunMemory: null,
-  projectPending: null, projectOutcome: null, busy: false, notice: null,
+  projectPending: null, projectOutcome: null, solvePreview: null, busy: false, notice: null,
   publishedVersionId: null, visibleLayers: {} })
 function identity(inputs) {
   const ws = inputs.workspaceController.getSnapshot()
@@ -221,6 +221,18 @@ export function useAppProjectSolarRuntime(props) {
             !sameSolarDrawingBinding(run.binding, meta.binding)) return
         publish(() => m.run === run && !run.terminal && run.current() && current(meta.isCurrent),
           { projectOutcome: { outcome, meta } })
+      },
+      onPreview: (preview, meta) => {
+        if (!preview) {
+          publish(() => m.alive, previous => previous.solvePreview?.owner === owner &&
+            previous.solvePreview.meta.jobId === meta.jobId ? { solvePreview: null } : {})
+          return
+        }
+        const run = m.run
+        if (run?.owner !== owner || run.authorityKey !== meta.authorityKey ||
+            !sameSolarDrawingBinding(run.binding, meta.binding)) return
+        publish(() => m.run === run && !run.terminal && run.current() && current(meta.isCurrent),
+          { solvePreview: { preview, meta, owner, run } })
       } })
     m.owner = owner
     if (m.transition && !transitionCurrent(m.transition)) retire()
@@ -449,7 +461,10 @@ export function useAppProjectSolarRuntime(props) {
     publish(contextCurrent, previous => ({ visibleLayers: typeof value === 'function' ? value(previous.visibleLayers) : value }))
   }
   const contextView = contextCurrent() ? state.context.data : null
+  const preview = state.solvePreview
   return { onProjectSubmit, complete, retryReadback, contextView,
+    solvePreview: contextView && preview?.run === m.run && current(preview?.meta.isCurrent)
+      ? preview.preview : null,
     contextCurrent, openTool: selectionCurrent(state)
       ? catalogRows(inputs).find(row => row.name === state.openTool?.name) ?? state.openTool : null,
     onOpenTool, onClose, projectRunMemory: state.projectRunMemory,

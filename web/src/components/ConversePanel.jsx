@@ -8,7 +8,7 @@
 // Approve = §7 split turn: record the approval, then post the confirm message
 // that starts the resume turn — the deterministic dispatch happens server-side.
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   openStream,
   postMessage,
@@ -46,6 +46,7 @@ import EngineChangesTab from './EngineChangesTab.jsx'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
+import { BUILD_TOOL_STARTER } from '../lib/starterPrompts.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { deliverProjectPageProposal } from '../site/projectPageProposalDelivery.js'
@@ -296,6 +297,14 @@ export default function ConversePanel({
   const [endedTurns, setEndedTurns] = useState(new Set())
   const streamRef = useRef(null)
   const composerRef = useRef(null)
+  const starterSelectionRef = useRef(false)
+  useLayoutEffect(() => {
+    if (starterSelectionRef.current && input === BUILD_TOOL_STARTER.text) {
+      starterSelectionRef.current = false
+      composerRef.current?.focus()
+      composerRef.current?.setSelectionRange(...BUILD_TOOL_STARTER.select)
+    }
+  }, [input])
   const composerActionRef = useRef(null)
   const wasBusyRef = useRef(false)
   const restoreComposerFocus = () => {
@@ -851,7 +860,7 @@ export default function ConversePanel({
             ? { seconds, at: Number.isFinite(retryTime) && Math.abs(retryTime) <= 8640000000000000
               ? new Date(retryTime).toISOString() : null }
             : null
-        } else if (code === 'authentication_failed' || code === 'oauth_org_not_allowed') {
+        } else if (code === 'authentication_failed' || code === 'oauth_org_not_allowed' || code === 'billing_error') {
           grantRefused = { code, text: t.userText || null }
           t.refused = true
         } else if (code === 'grant_required') grant = true
@@ -1497,8 +1506,12 @@ export default function ConversePanel({
         <div className="banner" role="status">
           <span>{model.grantRefused.code === 'authentication_failed'
             ? 'Claude no longer accepts the linked account. Add a working API key, then resend your message.'
-            : "The linked account's organization does not allow it here. Add a different API key, then resend your message."}</span>
-          <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>
+            : model.grantRefused.code === 'billing_error'
+              ? 'Your Anthropic API key has no credit. Add credit in Claude Console, then resend.'
+              : "The linked account's organization does not allow it here. Add a different API key, then resend your message."}</span>
+          {model.grantRefused.code === 'billing_error'
+            ? <a href="https://platform.claude.com/settings/billing" target="_blank" rel="noreferrer">Add credit in Claude Console</a>
+            : <button type="button" className="chip-act" onClick={onLinkClaude}>Link account</button>}
           {typeof model.grantRefused.text === 'string' && model.grantRefused.text.trim() && !input && !busy && (
             <button type="button" className="chip-act" onClick={() => { setSecretNotice(null); setInput(model.grantRefused.text); composerRef.current?.focus() }}>Use my message again</button>
           )}
@@ -1546,6 +1559,13 @@ export default function ConversePanel({
           <div className="converse-note">
             <span className="dot hollow" aria-hidden="true" />
             <span className="dim">Starting the conversation…</span>
+            {!input.trim() && !busy && (
+              <button type="button" className="chip-neutral" data-testid="converse-starter" onClick={() => {
+                starterSelectionRef.current = true
+                setSecretNotice(null)
+                setInput(BUILD_TOOL_STARTER.text)
+              }}>{BUILD_TOOL_STARTER.label}</button>
+            )}
           </div>
         )}
         {model.turns.map((t) => (
