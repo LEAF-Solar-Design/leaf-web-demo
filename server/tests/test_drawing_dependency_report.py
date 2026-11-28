@@ -395,3 +395,38 @@ def test_sequential_intakes_have_drawing_local_reports_without_mutating_prior_ou
     assert empty["dependencies"] == []
     assert {row["name"] for row in first["dependencies"]} == {"first.shx", "first.png"}
     assert {row["name"] for row in second["dependencies"]} == {"second.shx", "second.pdf"}
+
+@pytest.mark.parametrize("elements", [2, 8, 32])
+def test_missing_explicit_line_linetypes_are_reported_with_references(elements):
+    from io import StringIO
+
+    import ezdxf
+
+    doc = ezdxf.new("R2018")
+    pattern = f"Project_Dash_{elements}"
+    doc.linetypes.new(pattern, dxfattribs={
+        "pattern": [3.0 * (elements // 2), *([2.0, -1.0] * (elements // 2))],
+    })
+    model = doc.modelspace()
+    line = model.add_line((0, 0), (10, 0), dxfattribs={"linetype": pattern.lower()})
+    polyline = model.add_lwpolyline([(0, 2), (10, 2)], dxfattribs={"linetype": pattern.lower()})
+    model.add_line((0, 4), (10, 4), dxfattribs={"linetype": "Continuous"})
+    model.add_line((0, 6), (10, 6), dxfattribs={"linetype": "BYBLOCK"})
+    model.add_line((0, 8), (10, 8))
+
+    def missing_linetypes():
+        payload = StringIO()
+        doc.write(payload)
+        report = parse_dxf_bytes(payload.getvalue().encode("utf-8"))["dependency_report"]
+        assert report["external_files_opened"] is False
+        return [row for row in report["dependencies"] if row["kind"] == "linetype"]
+
+    assert missing_linetypes() == []
+    doc.linetypes.remove(pattern)
+    assert missing_linetypes() == [{
+        "kind": "linetype", "name": pattern.lower(), "disposition": "missing definition",
+        "references": [
+            {"entity_type": "LINE", "handle": line.dxf.handle},
+            {"entity_type": "LWPOLYLINE", "handle": polyline.dxf.handle},
+        ],
+    }]

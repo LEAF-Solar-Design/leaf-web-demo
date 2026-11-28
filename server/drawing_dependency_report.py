@@ -10,6 +10,8 @@ import re
 
 _INLINE_FONT = re.compile(r"\\[fF]")
 _FONT_DELIMITER = re.compile(r"[|;]")
+_LINE_ENTITIES = {"LINE", "LWPOLYLINE", "POLYLINE"}
+_DEFAULT_LINETYPES = {"bylayer", "byblock", "continuous"}
 _MATERIAL_MAPS = {
     3: ("diffuse", 72),
     4: ("specular", 77),
@@ -129,6 +131,8 @@ def from_pairs(pairs, *, literal_text=None):
     plot_resource_setups = {}
     plot_layouts = []
     linetype_shape_links = []
+    linetype_names = set()
+    line_linetypes = {}
     styles = {}
     # Full drawings require owning sections. Bare decoded-record fragments keep
     # their existing API behavior, but ENDSEC/EOF still close their scope.
@@ -140,7 +144,7 @@ def from_pairs(pairs, *, literal_text=None):
               "ACAD_PROXY_ENTITY": {"ENTITIES", "BLOCKS"}, "PROXY_ENTITY": {"ENTITIES", "BLOCKS"},
               "ACAD_PROXY_OBJECT": {"OBJECTS"}, "PROXY_OBJECT": {"OBJECTS"}}
     inline_entities = {"MTEXT", "MULTILEADER", "TABLE", "ACAD_TABLE"}
-    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities | {"TOLERANCE", "LIGHT"}})
+    owners.update({kind: {"ENTITIES", "BLOCKS"} for kind in inline_entities | _LINE_ENTITIES | {"TOLERANCE", "LIGHT"}})
 
     def add(kind, name, disposition, **details):
         if name:
@@ -210,10 +214,17 @@ def from_pairs(pairs, *, literal_text=None):
                 font_kind = "shape_font" if shape or code == 4 else "font"
                 add(font_kind, name, "font remapped", remapped_to="sans-serif")
         elif kind == "LTYPE":
+            if name := groups.get(2):
+                linetype_names.add(name.casefold())
             for element in _linetype_shape_elements(pairs, i + 1, end):
                 linetype_shape_links.append({"linetype": groups.get(2) or None,
                                              "linetype_handle": groups.get(5) or None,
                                              **element})
+        elif kind in _LINE_ENTITIES:
+            if name := groups.get(6):
+                line_linetypes.setdefault(name, []).append({
+                    "entity_type": kind, "handle": groups.get(5) or None,
+                })
         elif kind == "IMAGEDEF":
             add("image", groups.get(1) or groups.get(5), "image omitted")
         elif kind == "MATERIAL":
@@ -254,6 +265,10 @@ def from_pairs(pairs, *, literal_text=None):
             for name in _inline_fonts(text):
                 add("font", name, "font remapped", remapped_to="sans-serif")
         i = end
+    for name, references in line_linetypes.items():
+        normalized = name.casefold()
+        if normalized not in linetype_names and normalized not in _DEFAULT_LINETYPES:
+            add("linetype", name, "missing definition", references=references)
     for path, references in texture_maps.items():
         dependencies["material_texture", path]["material_maps"] = [
             {"material_handle": handle or None, "channel": channel}
