@@ -118,7 +118,7 @@ def nec_max_modules(voc: float, temp_coeff_pct_per_c: float,
     )
     if worst_voc <= 0:
         raise InputValidationError(
-            f"NEC 690.7 check degenerate: worst-case Voc {worst_voc:.3f} V <= 0 "
+            f"NEC 690.7 check degenerate: worst-case Voc {worst_voc:.3f} V is zero or below "
             "(check voc / temp_coeff_pct_per_c / design_min_temp_c)",
             "Correct the module voltage or temperature inputs using the module data sheet.")
     max_modules = int(math.floor(float(max_system_voltage) / worst_voc))
@@ -359,7 +359,7 @@ def run(intake: Dict[str, Any], params: Dict[str, Any]):
                 or type(requested_maximum) is not int or requested_maximum < 1
                 or ("max_modules_per_string" in params and requested_maximum < minimum)):
             raise InputValidationError(
-                f"Layer {layer!r}: string module bounds must be positive integers with minimum <= maximum",
+                f"Layer {layer!r}: string module bounds must be positive integers, and the minimum must not exceed the maximum.",
                 "Set min_modules_per_string and max_modules_per_string to an ordered positive range.")
         effective_maximum = min(max_modules, requested_maximum)
 

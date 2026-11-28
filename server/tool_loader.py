@@ -1092,14 +1092,25 @@ def resolve_local_file(tool: Dict[str, Any], tenant_id: Optional[str] = None) ->
 
 def _is_trusted_builtin_path(tool: Dict[str, Any], local: Path) -> bool:
     try:
-        local.resolve().relative_to(BUILTIN_DIR.resolve())
+        builtin_path = local.resolve().relative_to(BUILTIN_DIR.resolve())
     except (OSError, ValueError):
         return False
     name = tool.get("name")
     engine_op = tool.get("engine_op")
     if not isinstance(name, str) or not isinstance(engine_op, str):
         return False
-    return (name, engine_op, local.name) in _platform_builtin_package_ids()
+    platform_ids = _platform_builtin_package_ids()
+    if (name, engine_op, local.name) in platform_ids:
+        return True
+    # This catalog registration is a read-only alias of the shipped String
+    # Panels package. Require its exact entry and resolved platform file.
+    return (
+        (name, engine_op) == ("autofill-string-targets", "autofill_string_targets")
+        and tool.get("entry") == "builtins/string_panels.py"
+        and "drawing.write" not in (tool.get("capabilities") or [])
+        and builtin_path == Path("string_panels.py")
+        and ("string-panels", "string_panels", "string_panels.py") in platform_ids
+    )
 
 
 def is_trusted_builtin_tool(tool: Dict[str, Any],
@@ -1109,7 +1120,8 @@ def is_trusted_builtin_tool(tool: Dict[str, Any],
     A tool with no local Python implementation uses APS or fails normally, so it
     does not execute a file in this process. A local implementation is trusted only
     when resolution lands inside ``server/builtins`` AND its execution identity is
-    declared by the platform-owned engine registry. Path location alone is not
+    declared by the platform-owned engine registry or is its authorized
+    read-only catalog alias. Path location alone is not
     package provenance: agent-authored or seed packages can point at that directory
     without becoming platform builtins. Resolution checks the requesting tenant
     first, so a tenant file that shadows a builtin-looking path remains untrusted.
