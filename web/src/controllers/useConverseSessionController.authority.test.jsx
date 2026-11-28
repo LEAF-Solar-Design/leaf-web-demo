@@ -61,6 +61,67 @@ it('retains captured selected version and request identity across a not-found re
   expect(ensureSession).toHaveBeenCalledTimes(2)
 })
 
+describe('existing-session-only authority', () => {
+  const options = { existingSessionOnly: true, requireImmediateTurn: true }
+
+  it('does not attach or send without an existing session', async () => {
+    const { result } = projectController()
+    await act(async () => {
+      await expect(result.current.startTurn('stage native source', {}, options)).rejects.toThrow('Open the project conversation')
+    })
+    expect(ensureSession).not.toHaveBeenCalled()
+    expect(postMessage).not.toHaveBeenCalled()
+  })
+
+  it('does not join a pending session attachment to start authority', async () => {
+    const { result } = projectController()
+    let finishAttachment
+    ensureSession.mockImplementationOnce(() => new Promise((resolve) => { finishAttachment = resolve }))
+    let pending
+    await act(async () => { pending = result.current.attach() })
+    await act(async () => {
+      await expect(result.current.startTurn('stage native source', {}, options)).rejects.toThrow('Open the project conversation')
+      finishAttachment({ session_id: 'session-a' })
+      await pending
+    })
+    expect(ensureSession).toHaveBeenCalledTimes(1)
+    expect(postMessage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['attached', 202, { status: 'started', turn_id: 'native-turn' }],
+    ['stale', 404, { error: { error_code: 'session_not_found' } }],
+    ['redirect', 307, null],
+  ])('sends at most one authority POST in the %s case', async (scenario, status, response) => {
+    const transport = await vi.importActual('../converse.js')
+    const fetch = vi.fn(async (_url, init) => {
+      if (status === 307 && init.redirect === 'error') throw new TypeError('Redirect refused')
+      return { status, ok: status < 300, json: async () => response }
+    })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      postMessage.mockImplementationOnce(transport.postMessage)
+      classifyAgentError.mockReturnValue('not_found')
+      const { result } = projectController()
+      await act(async () => { await result.current.attach() })
+      await act(async () => {
+        const turn = result.current.startTurn('stage native source', { purpose: 'stage_authority' }, options)
+        if (scenario === 'attached') await expect(turn).resolves.toMatchObject({ session_id: 'session-a', turn_id: 'native-turn' })
+        else await expect(turn).rejects.toThrow(scenario === 'redirect' ? 'Redirect refused' : 'session_not_found')
+      })
+      expect(ensureSession).toHaveBeenCalledTimes(1)
+      expect(postMessage).toHaveBeenCalledTimes(1)
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/\/sessions\/session-a\/messages$/),
+        expect.objectContaining({ method: 'POST', redirect: 'error' }))
+      expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+        text: 'stage native source', classifier_hint: { purpose: 'stage_authority' }, request_id: expect.any(String),
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 it('keeps unselected ordinary conversation available without a request pin', async () => {
   postMessage.mockResolvedValue({ status: 'started', turn_id: 'ordinary' })
   const { result } = projectController()
