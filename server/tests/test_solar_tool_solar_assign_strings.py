@@ -480,6 +480,50 @@ def test_assignment_report_separates_saved_capacity_from_candidate_plan(graph, c
     assert report["committed"] is False and g == before
 
 
+@pytest.mark.parametrize(
+    ("case", "occupied", "spare", "least_used_numbers"),
+    [("L2", 6, 2, {2}), ("rooftop", 173, 115, {3, 4, 8}), ("P", 2, 0, {1})],
+)
+def test_saved_report_explains_utilization_after_assign_strings(
+    graph, tmp_path, monkeypatch, case, occupied, spare, least_used_numbers,
+):
+    drawing = i2_graph(graph) if case == "rooftop" else variant(graph, case)
+    backend, _ = seed(tmp_path, monkeypatch, drawing)
+
+    def read(version):
+        return solar_local_read.run_local_graph_read(
+            backend, TENANT, "solar-assignment-report",
+            {"mode": "saved", "expected_rev": version - 1},
+            drawing_id="solar", source_version=version, job_id=f"saved-utilization-{case}-{version}",
+        )
+
+    original = read(1)
+    assert original["output"]["utilization"]["status"] == "unassigned_strings_remain"
+    assert original["output"]["utilization"]["unassigned_strings"] > 0
+    with held(backend) as fence:
+        dispatch(backend, fence, TOOL, dict(ASSIGN, expected_rev=0))
+    saved = head_graph(backend)
+    saved_manifest = store.load_manifest(backend, TENANT, "solar")
+    receipt = read(2)
+    report = receipt["output"]
+    Draft7Validator(solar_tools.trusted_record("solar-assignment-report")["returns"]).validate(report)
+    assert receipt["drawing_changed"] is False and receipt["graph_sha256"] == sha(saved)
+    assert report["committed"] is False
+    assert report["utilization"] == {
+        "status": "spare_inputs_after_assignment" if spare else "all_inputs_occupied",
+        "occupied_inputs": occupied,
+        "spare_inputs": spare,
+        "unassigned_strings": 0,
+        "least_utilized_collector_refs": sorted(
+            row["id"] for row in saved["inverters"] if row["number"] in least_used_numbers
+        ),
+    }
+    assert report["electrical_suitability"]["status"] == "unknown"
+    assert read(1)["output"] == original["output"]
+    assert head_graph(backend) == saved
+    assert store.load_manifest(backend, TENANT, "solar") == saved_manifest
+
+
 def test_assignment_report_preserves_occupied_inputs_and_names_declined_remainder(graph):
     g = variant(graph, "P")
     before = copy.deepcopy(g)
