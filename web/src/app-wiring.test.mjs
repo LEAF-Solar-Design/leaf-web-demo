@@ -949,7 +949,7 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
       // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-      engineSaveTarget: 'd557e9ae099c5816c75cf2c1ac579d52dcbdb4a3846a05eb6eb5caa8852166e9',
+      engineSaveTarget: '555dbbd7a4b15d31c36ba4b69a19b1fbf9c88d0039066999f383d4bf6caaf523',
       onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -5528,7 +5528,7 @@ describe('App.jsx wiring', () => {
       assert.notEqual(sidecarCall, -1)
       assert.doesNotMatch(body, /save(?:DrawingVersionPlan|EditedDrawingVersion)\([^)]*chain\.head/)
       assert.match(body, /saveDrawingVersionPlan\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*plan\.mutations,\s*cap,\s*\{\s*onStatus,\s*fileName\s*\}\s*\)/)
-      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap,\s*fileName\s*\)/)
+      assert.match(body, /saveEditedDrawingVersion\(\s*REQUESTED_DRAWING_ID,\s*bytes,\s*parent,\s*digest,\s*cap,\s*\{\s*fileName\s*\}\s*\)/)
       assert.ok(planCall < sidecarCall, 'the plan route is tried first, behind the plan check')
       assert.match(body.slice(0, planCall), /if \(plan && plan\.mutations\)/)
       // Both calls sit inside the acquire -> save -> release try block.
@@ -6074,7 +6074,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
     onRedo: 'da27b4a464e6fc6a0d9fb8ffd0355ac87bab162d47906a73e3a8824ba051e8d2',
     // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-    engineSaveTarget: 'd557e9ae099c5816c75cf2c1ac579d52dcbdb4a3846a05eb6eb5caa8852166e9',
+    engineSaveTarget: '555dbbd7a4b15d31c36ba4b69a19b1fbf9c88d0039066999f383d4bf6caaf523',
     onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
