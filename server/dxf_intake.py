@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
+MAX_POINTS_PER_ENTITY = 10_000
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # Group 410 uses the same name bound as the DXF writer's MAX_LAYER_CHARS.
 _LAYOUT_NAME_MAX_CHARS = 255
@@ -48,6 +49,59 @@ class DxfParseError(ValueError):
 def _layout_block_name(name: str) -> bool:
     """Layout records are containers, unlike renderable anonymous definitions."""
     return re.fullmatch(r"\*(?:Model_Space|Paper_Space[0-9]*)", name, re.IGNORECASE) is not None
+
+
+_PAPER_ENTITY_KINDS = {
+    "LINE": "polylines", "LWPOLYLINE": "polylines", "POLYLINE": "polylines",
+    "INSERT": "inserts", "TEXT": "texts", "MTEXT": "texts", "CIRCLE": "circles",
+    "ARC": "arcs", "DIMENSION": "dimensions", "3DFACE": "faces3d",
+    "SPLINE": "splines", "MULTILEADER": "mleaders",
+}
+
+
+def _paper_entity_locations(pairs):
+    """Project reciprocal sheet ownership without adding layout geometry to intake."""
+    from authored_dynamic_visibility import _records
+    from authored_viewport_panels import _paper_layouts_by_owner, _record_owner
+
+    owners = _paper_layouts_by_owner(pairs)
+    if not owners:
+        return {}
+    section = block_owner = ""
+    locations = {}
+    seen_handles = set()
+    for kind, record in _records(pairs):
+        if kind in ("SECTION", "ENDSEC"):
+            section = dict(record).get(2, "") if kind == "SECTION" else ""
+            block_owner = ""
+        elif section == "BLOCKS" and kind == "BLOCK":
+            owner = _record_owner(record)
+            block_name = dict(record).get(2, "").casefold()
+            block_owner = owner if owner in owners and owners[owner][0] == block_name else ""
+        elif kind == "ENDBLK":
+            block_owner = ""
+        elif kind in _PAPER_ENTITY_KINDS and (section == "ENTITIES" or block_owner):
+            fields = dict(record)
+            handle = fields.get(5, "")
+            if not handle:
+                continue
+            handle_key = handle.casefold()
+            if handle_key in seen_handles:
+                locations.pop(handle_key, None)
+                continue
+            seen_handles.add(handle_key)
+            owner = _record_owner(record)
+            if owner not in owners or (block_owner and owner != block_owner):
+                continue
+            layout = owners[owner][1]
+            explicit = fields.get(410, "")
+            if ((explicit and explicit.casefold() != layout.casefold())
+                    or len(layout) > _LAYOUT_NAME_MAX_CHARS or _CONTROL_RE.search(layout)):
+                continue
+            locations[handle_key] = {
+                "kind": _PAPER_ENTITY_KINDS[kind], "handle": handle, "layout": layout,
+            }
+    return locations
 
 
 def _mleader_number(value, integer=False):
@@ -73,6 +127,7 @@ def parse_dxf_file(
 def parse_dxf_bytes(
     raw: bytes, *, source_name: str = "upload.dxf", include_measurement_evidence: bool = True,
     include_model_entity_counts: bool = False,
+    include_paper_entity_locations: bool = False,
 ) -> Dict[str, Any]:
     if raw.startswith(BINARY_SENTINEL):
         raise DxfParseError(
@@ -109,6 +164,7 @@ def parse_dxf_bytes(
     inserts: List[Dict[str, Any]] = []
     blocks: Dict[str, Any] = {}
     block_names: Dict[str, str] = {}
+    block_record_names: Dict[str, str] = {}
     parse_errors: List[str] = []
     block_count = 0
     has_blocks = False
@@ -186,6 +242,12 @@ def parse_dxf_bytes(
             if handle:
                 objects[handle] = (value.upper(), record)
             i = j
+            continue
+        if section == "TABLES" and code == 0 and value == "BLOCK_RECORD":
+            groups, i = _entity_groups(pairs, i + 1)
+            handle, name = groups.get(5, "").upper(), groups.get(2, "").casefold()
+            if handle and name and block_record_names.setdefault(handle, name) != name:
+                block_record_names[handle] = ""
             continue
         if section == "TABLES" and code == 0 and value == "STYLE":
             groups, i = _entity_groups(pairs, i + 1)
@@ -446,8 +508,10 @@ def parse_dxf_bytes(
                      "segments": _mleader_number(groups.get(173, "0"), integer=True)}
             mlstyles[handle] = style
             out.setdefault("mlstyles", []).append(style)
+    callout_blocks = {handle: block_names[key] for handle, key in block_record_names.items()
+                      if key in block_names and blocks[block_names[key]]["complete"]}
     for record in mleader_records:
-        entity = _parse_mleader(record, mlstyles, textstyles)
+        entity = _parse_mleader(record, mlstyles, textstyles, callout_blocks)
         if entity is None:
             out["mleaders_unsupported"] = out.get("mleaders_unsupported", 0) + 1
             handle = next((value for code, value in record if code == 5), "")
@@ -618,50 +682,115 @@ def parse_dxf_bytes(
         attach_clips(pairs, out)
         attach_footprints(pairs, out)
         attach_visibility(pairs, out)
+    if include_paper_entity_locations:
+        locations = _paper_entity_locations(pairs)
+        if locations:
+            out["paper_entity_locations"] = list(locations.values())
     return out
 
 
-def _parse_mleader(record, styles, textstyles):
+def _mleader_block_content(context, top, matrix, callout_blocks):
+    if context.get(290) != "0" or context.get(296) != "1" or 177 in top:
+        raise ValueError("unsupported block callout content")
+    name = callout_blocks[context[341].upper()]
+    if callout_blocks[top[344].upper()] != name:
+        raise ValueError("conflicting block callout references")
+    connection = _mleader_number(top.get(176, "0"), integer=True)
+    if connection not in (0, 1) or not any(context[14]) or len(matrix) not in (0, 16):
+        raise ValueError("invalid block callout transform")
+    integers = {"color": context[93], "color_override": top.get(93, context[93]),
+                "override_flags": top.get(90, "0")}
+    integers = {key: _mleader_number(value, integer=True) for key, value in integers.items()}
+    if any(not -(2**31) <= value < 2**31 for value in integers.values()):
+        raise ValueError("invalid block callout integer")
+    return {
+        "name": name, "connection": connection, **integers,
+        "extrusion": context[14], "insert": context[15], "scale": context[16],
+        "rotation": _mleader_number(context[46]),
+        "scale_override": [_mleader_number(top.get(code, "1")) for code in (10, 20, 30)],
+        "rotation_override": _mleader_number(top.get(43, "0")),
+        "matrix": matrix,
+    }
+
+
+def _parse_mleader(record, styles, textstyles, callout_blocks):
     """Walk the nested contexts before resolving the top-level style handles."""
     state = 0
     closed = False
-    branches = 0
-    vertices = []
-    context, leader, top = {}, {}, {}
+    roots, arrow_tips, matrix = [], [], []
+    context, top = {}, {}
+    is_block = False
+    has_breaks = False
+    has_subgrid_tip = False
     try:
         for i, (code, value) in enumerate(record):
             if (code, value) == (300, "CONTEXT_DATA{"):
                 state = 1
             elif state == 1 and (code, value) == (302, "LEADER{"):
                 state = 2
+                leader, lines = {}, []
             elif state == 2 and (code, value) == (304, "LEADER_LINE{"):
                 state = 3
-                branches += 1
+                vertices = []
             elif state == 3 and (code, value) == (305, "}"):
+                if not vertices:
+                    return None
+                lines.append(vertices)
                 state = 2
             elif state == 2 and (code, value) == (303, "}"):
+                if not lines:
+                    return None
+                roots.append({
+                    "landing": leader[10], "dogleg_dir": leader[11],
+                    "dogleg": (_mleader_number(leader[40]) if is_block
+                               else round(_mleader_number(leader[40]), 5)),
+                    "has_landing": leader.get(290, "1"),
+                    "has_dogleg": leader.get(291, "1"),
+                    "attachment_direction": leader.get(271, "0"),
+                    "lines": lines,
+                })
                 state = 1
             elif state == 1 and (code, value) == (301, "}"):
                 state, closed = 0, True
             elif state:
-                point_code = ((state == 1 and code == 12) or
+                if state == 1 and (code, value) == (296, "1"):
+                    is_block = True
+                if state == 1 and is_block and code == 47:
+                    if len(matrix) == 16:
+                        return None
+                    matrix.append(_mleader_number(value))
+                    continue
+                if state == 1 and code == 10:
+                    context[10] = record[i:i + 3]
+                    continue
+                point_code = ((state == 1 and (code == 12 or (is_block and code in (14, 15, 16)))) or
                               (state == 2 and code in (10, 11)) or
                               (state == 3 and code == 10))
                 if point_code:
                     point = record[i:i + 3]
                     if [c for c, _ in point] != [code, code + 10, code + 20]:
                         return None
-                    value = [round(_mleader_number(v), 3) for _, v in point]
+                    coordinates = [_mleader_number(v) for _, v in point]
+                    value = coordinates if is_block else [round(v, 3) for v in coordinates]
+                    if state == 3 and not is_block and not vertices:
+                        arrow_tips.append(coordinates)
+                        has_subgrid_tip |= coordinates != value
                 if state == 1:
                     context[code] = value
                 elif state == 2:
                     leader[code] = value
+                    has_breaks |= code in (12, 13)
                 elif code == 10:
                     vertices.append(value)
+                elif code in (11, 12, 90):
+                    has_breaks = True
             elif closed:
                 top.setdefault(code, value)
-        if (branches != 1 or _mleader_number(top.get(172, "0"), integer=True) != 2
-                or 304 not in context or not vertices):
+        if not closed or state or not roots:
+            return None
+        content_type = _mleader_number(top.get(172, "0"), integer=True)
+        if (is_block and content_type != 1
+                or not is_block and (content_type != 2 or 304 not in context)):
             return None
         style = styles.get(top.get(340, "").upper())
         if style is None:
@@ -670,15 +799,44 @@ def _parse_mleader(record, styles, textstyles):
         handle = groups.get(5, "")
         if not re.fullmatch(r"[0-9A-Fa-f]+", handle):
             return None
-        return {"handle": handle, "layer": groups.get(8, "0") or "0",
-                "style": style["name"],
-                "textstyle": textstyles.get(top.get(343, "").upper(), ""),
-                "height": round(_mleader_number(context[41]), 5),
-                "arrow": round(_mleader_number(context[140]), 5),
-                "dogleg": round(_mleader_number(leader[40]), 5),
-                "attachment": _mleader_number(context[171], integer=True), "pts": vertices + [leader[10]],
-                "landing": leader[10], "dogleg_dir": leader[11],
-                "textpt": context[12], "text": context[304]}
+        first = roots[0]
+        result = {"handle": handle, "layer": groups.get(8, "0") or "0",
+                  "style": style["name"],
+                  "height": round(_mleader_number(context[41]), 5),
+                  "arrow": round(_mleader_number(context[140]), 5),
+                  "dogleg": first["dogleg"],
+                  "pts": first["lines"][0] + [first["landing"]],
+                  "landing": first["landing"], "dogleg_dir": first["dogleg_dir"]}
+        if is_block:
+            result["block_content"] = _mleader_block_content(context, top, matrix, callout_blocks)
+        else:
+            result.update(textstyle=textstyles.get(top.get(343, "").upper(), ""),
+                          attachment=_mleader_number(context[171], integer=True),
+                          textpt=context[12], text=context[304])
+        if has_subgrid_tip:
+            result["arrow_tips"] = arrow_tips
+        if is_block or len(roots) > 1 or len(first["lines"]) > 1:
+            point_count = len(roots) + sum(len(line) for root in roots for line in root["lines"])
+            if has_breaks or point_count > MAX_POINTS_PER_ENTITY:
+                return None
+            base = context[10]
+            if [code for code, _ in base] != [10, 20, 30]:
+                return None
+            if _mleader_number(top.get(271, "0"), integer=True) != 0:
+                return None
+            for root in roots:
+                for field, allowed in (("has_landing", (0, 1)), ("has_dogleg", (0, 1)),
+                                       ("attachment_direction", (0,))):
+                    flag = _mleader_number(root[field], integer=True)
+                    if flag not in allowed:
+                        return None
+                    root[field] = flag
+            result["leader_geometry"] = {
+                "base": [_mleader_number(value) if is_block else round(_mleader_number(value), 3)
+                         for _, value in base],
+                "roots": roots,
+            }
+        return result
     except DxfParseError:
         raise
     except (KeyError, ValueError, TypeError, OverflowError):
@@ -772,6 +930,13 @@ def _parse_insert(pairs, i, dropped=None, include_measurement_evidence=False):
                  "row_spacing": _float(groups.get(45, "0"))}
     rotation = math.radians(_float(groups.get(50, "0")))
     if include_measurement_evidence:
+        try:
+            valid = all(math.isfinite(float(groups[code]))
+                        for code in (10, 20, 30, 41, 42, 43, 50, 210, 220, 230) if code in groups)
+        except ValueError:
+            valid = False
+        if not valid:
+            array["measurement_placement_invalid"] = True
         source = dict(x=point[0], y=point[1], z=point[2], rot=rotation, nrm=normal)
         if point != [round(v, 3) for v in point] or rotation != round(rotation, 6) or normal != [round(v, 6) for v in normal]:
             array["measurement_placement"] = source
@@ -1108,6 +1273,7 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
             continue
         block["count"] += 1
         try:
+            path = None
             child, end = _parse_block_child(pairs, i + 1, kind)
             # The inverse writer still treats nested INSERTs as unsupported.
             # Preserve their identities separately for read-only instance traversal.
@@ -1128,6 +1294,20 @@ def _parse_block(pairs, i, parse_errors, include_measurement_evidence):
                     refs.append(insert)
                 else:
                     block["nested_inserts_incomplete"] = True
+            if include_measurement_evidence and block["count"] <= 60 and kind in ("HELIX", "SPLINE"):
+                if kind == "HELIX":
+                    record = pairs[i + 1:end]
+                    # The helix subclass reuses spline group codes for its own
+                    # parameters. The saved spline subclass is the curve.
+                    try:
+                        first = record.index((100, "AcDbSpline"))
+                        last = record.index((100, "AcDbHelix"), first + 1)
+                    except ValueError:
+                        first = last = 0
+                    path = _spline_measurement_path(record[first:last])
+                controls = path.get("control_points") if path else None
+                if controls and len(controls) <= 10000:
+                    block.setdefault("region_curve_controls", {})[str(block["count"] - 1)] = controls
         except (ValueError, OverflowError, TypeError) as exc:
             block["complete"] = False
             if isinstance(exc, _DroppedBlockGeometry) and block["count"] <= 60:

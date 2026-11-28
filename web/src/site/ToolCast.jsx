@@ -947,12 +947,18 @@ export default function ToolCast({
   })
 
   const composerProjectScopeRef = useRef(null)
+  const standaloneCatalogDrawingId = workspace.openProjectId || !(MODE_DRAWING_ID || drawingId)
+    ? null : catalogRunContext?.drawingId ?? null
+  const standaloneCatalogDrawingVersion = standaloneCatalogDrawingId
+    ? catalogRunContext.drawingVersion : null
   useLayoutEffect(() => {
     const projectScope = `${workspace.orgId || ''}:${workspace.openProjectId || ''}`
     const projectChanged = composerProjectScopeRef.current !== null && composerProjectScopeRef.current !== projectScope
     composerProjectScopeRef.current = projectScope
     catalog.controller.setContext({
       projectId: workspace.openProjectId || null,
+      drawingId: standaloneCatalogDrawingId,
+      drawingVersion: standaloneCatalogDrawingVersion,
       projectConversationScope,
       surfaceFamilyIds: PRODUCT_SURFACES.find(surface => surface.id === activeSurface)?.familyIds ?? null,
     })
@@ -960,7 +966,8 @@ export default function ToolCast({
       catalog.actions.setPrompt('')
       setPrompt('')
     }
-  }, [activeSurface, catalog.actions, catalog.controller, projectConversationScope, workspace.openProjectId, workspace.orgId])
+  }, [activeSurface, catalog.actions, catalog.controller, projectConversationScope, standaloneCatalogDrawingId,
+    standaloneCatalogDrawingVersion, workspace.openProjectId, workspace.orgId])
 
   useLayoutEffect(() => {
     if (!activeDrawingId) return

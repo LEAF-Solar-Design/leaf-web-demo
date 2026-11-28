@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assignment-report",
     "version": "1.1.0",
-    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Supply inverter_refs to compare selected inverters by occupied input share and review per-string voltage evidence. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing.",
+    "description": "Read saved string assignments and nominal spare DC inputs by collector in saved mode. Supply inverter_refs to compare selected inverters by occupied input share and review per-string voltage evidence. Saved mode can also suggest minimum direct moves from overloaded inverters to spare inputs using stored cold DC voltage and nameplate power. The search examines up to 64 probes and reports search_limit if a search bound prevents a conclusion. The default mode previews tentative assignments without committing. Enable balance_whole_strings in preview mode to distribute intact unassigned strings and report collector limits.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assignment_report",
@@ -26,12 +26,14 @@
         "drawing_id": {"type": "string", "maxLength": 128},
         "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
         "accept_excess_capacity": {"type": "boolean"},
+        "balance_whole_strings": {"type": "boolean"},
         "mode": {"type": "string", "enum": ["saved"]},
         "suggest_minimum_moves": {"type": "boolean"},
         "inverter_refs": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
       },
       "required": ["expected_rev"],
       "if": {"required": ["mode"]},
+      "then": {"not": {"required": ["balance_whole_strings"]}},
       "else": {
         "required": ["accept_excess_capacity"],
         "not": {"anyOf": [{"required": ["suggest_minimum_moves"]}, {"required": ["inverter_refs"]}]}
@@ -50,6 +52,22 @@
         "status": {"enum": ["complete", "partial", "unassigned", "saved"]},
         "committed": {"const": false},
         "commit_refusal_code": {"type": ["string", "null"]},
+        "balance_lines": {"type": "array", "items": {"type": "string"}},
+        "utilization": {
+          "description": "Saved occupancy of collectors with countable inputs. Least-used collectors are ranked by occupied input share.",
+          "type": "object",
+          "required": ["status", "occupied_inputs", "spare_inputs", "unassigned_strings", "least_utilized_collector_refs"],
+          "properties": {
+            "status": {
+              "enum": ["no_countable_inputs", "unassigned_strings_remain", "spare_inputs_after_assignment", "all_inputs_occupied"]
+            },
+            "occupied_inputs": {"type": "integer", "minimum": 0},
+            "spare_inputs": {"type": "integer", "minimum": 0},
+            "unassigned_strings": {"type": "integer", "minimum": 0},
+            "least_utilized_collector_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          },
+          "additionalProperties": false
+        },
         "electrical_suitability": {
           "type": "object",
           "required": ["status", "reason"],

@@ -893,6 +893,41 @@ def test_verify_speculative_cli_round_trip(tmp_path: Path):
     assert not (tmp_path / "rejected.json").exists()
 
 
+@pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "1e999", "NaN"])
+def test_verify_speculative_cli_identifies_nonfinite_candidate(
+    tmp_path: Path, literal: str
+):
+    manifest = build_speculative_manifest(
+        TREE, PREVIEW_SHA, "87654321", "30983842725", DIGESTS,
+        SOLVER_REVISION, SOLVER_HASH,
+    )
+    manifest["workflow_run_id"] = "numeric-placeholder"
+    path = tmp_path / "speculative-candidate.json"
+    path.write_text(
+        json.dumps(manifest).replace('"numeric-placeholder"', literal),
+        encoding="utf-8",
+    )
+    output = tmp_path / "verified.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("platform_release_manifest.py")),
+            "verify-speculative",
+            "--manifest",
+            str(path),
+            "--expect-tree",
+            TREE,
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert f"{path.name} contains nonfinite JSON number {literal}" in result.stderr
+    assert not output.exists()
+
+
 def test_v3_manifest_preserves_mixed_component_producer_identity():
     services = {name: _v3_entry(name) for name in SERVICES}
     manifest = build_v3_manifest(
@@ -957,19 +992,24 @@ def test_speculative_v3_re_envelope_preserves_producer_owned_entries():
     assert main != speculative
 
 
-def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
+@pytest.mark.parametrize("literal", [None, "Infinity", "-Infinity", "1e999", "NaN"])
+def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path, literal: str | None):
     script = str(Path(__file__).with_name("platform_release_manifest.py"))
     speculative_path = tmp_path / "spec-v3-supply-set.json"
     receipt_path = tmp_path / "web-restamp.json"
     output = tmp_path / "main-v3-supply-set.json"
-    speculative_path.write_text(
-        json.dumps(_speculative_v3_manifest()), encoding="utf-8", newline="\n"
-    )
+    manifest = _speculative_v3_manifest()
+    if literal is not None:
+        manifest["services"]["web"]["artifact_sha256"] = "numeric-placeholder"
+    payload = json.dumps(manifest)
+    if literal is not None:
+        payload = payload.replace('"numeric-placeholder"', literal)
+    speculative_path.write_text(payload, encoding="utf-8", newline="\n")
     receipt_path.write_text(
         json.dumps(_web_restamp_receipt()), encoding="utf-8", newline="\n"
     )
 
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             script,
@@ -997,9 +1037,20 @@ def test_speculative_v3_re_envelope_cli_round_trip(tmp_path: Path):
             "--output",
             str(output),
         ],
-        check=True,
+        capture_output=True,
+        text=True,
     )
 
+    if literal is not None:
+        assert result.returncode == 2
+        assert (
+            f"{speculative_path.name} contains nonfinite JSON number {literal}"
+            in result.stderr
+        )
+        assert not output.exists()
+        return
+
+    assert result.returncode == 0, result.stderr
     value = json.loads(output.read_text(encoding="utf-8"))
     assert value["schema"] == "leaf.staging-supply-set.v3"
     assert value["release_source_revision"] == "1" * 40

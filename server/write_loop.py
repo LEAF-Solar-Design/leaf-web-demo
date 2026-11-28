@@ -631,6 +631,7 @@ def _sidecar_bound(raw: bytes, payload: Dict[str, Any], payload_bytes: bytes,
         intake = dxf_intake.parse_dxf_bytes(
             raw, source_name=str(payload.get("dwg") or "edited.dxf"),
             include_model_entity_counts="model_entity_counts" in payload,
+            include_paper_entity_locations="paper_entity_locations" in payload,
         )
     except dxf_intake.DxfParseError:
         return False
@@ -2749,8 +2750,12 @@ def _verify_mleader_effects(base, actual, canonical, matched_handles):
         if handle in removed:
             if handle in by_handle:
                 raise ValueError(f"removed MLEADER {handle!r} remains in output")
-        elif entity != by_handle.get(handle):
-            raise ValueError(f"unchanged MLEADER {handle!r} differs in output")
+        else:
+            candidate = by_handle.get(handle)
+            if candidate is not None and "arrow_tips" not in entity:
+                candidate = {key: value for key, value in candidate.items() if key != "arrow_tips"}
+            if entity != candidate:
+                raise ValueError(f"unchanged MLEADER {handle!r} differs in output")
     unmatched = [e for e in rows if e["handle"] not in base_handles]
     for entity in canonical.get("added", []):
         if entity.get("kind") != "MLEADER":
@@ -3397,6 +3402,9 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
     output_intake["dwg"] = drawing_id
     normalized_base = copy.deepcopy(base_intake)
     normalized_base["dwg"] = drawing_id
+    # The console inspection reports vertices at the intake quantum.
+    for entity in normalized_base.get("mleaders", []):
+        entity.pop("arrow_tips", None)
     try:
         properties_note = verify_live_mutation_effects(normalized_base, output_intake, canonical)
     except ValueError as exc:

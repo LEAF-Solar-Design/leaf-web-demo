@@ -3,7 +3,12 @@ import { createSolarDrawingBinding, sameSolarDrawingBinding, solarDrawingBinding
 
 const current = (predicate) => { try { return predicate?.() === true } catch { return false } }
 const DIGEST = /^sha256:[0-9a-f]{64}$/
+const GRAPH_SHA256 = /^[0-9a-f]{64}$/
 const MAX_DECIMAL = 40
+const READ_REFUSALS = new Map([
+  ['GRAPH_NOT_EMBEDDED', 'This drawing version has no solar graph. Open a version with a solar graph or start a design in Solar settings.'],
+  ['SIP_R6_STALE_CURRENT', 'This is an older drawing version. Open the latest saved version and read project quantities again.'],
+])
 
 function decimal(token) {
   if (typeof token !== 'string' || token.length > MAX_DECIMAL || !/^\d+(\.\d+)?$/.test(token)) return null
@@ -67,7 +72,15 @@ function same(left, right) {
     .every((key) => left[key] === right[key])
 }
 
-function linesFrom(outcome, owner) {
+function takeoffSource(summary, binding, graphSha256) {
+  const source = summary?.source
+  if (!source || source.project_id !== binding.project_id || source.drawing_id !== binding.drawing_id ||
+      !Number.isSafeInteger(source.drawing_version) || source.drawing_version < 1 ||
+      typeof graphSha256 !== 'string' || !GRAPH_SHA256.test(graphSha256) || source.graph_sha256 !== graphSha256) return null
+  return { drawingVersion: source.drawing_version, graphSha256 }
+}
+
+function previewFrom(outcome, owner) {
   const result = outcome?.ok === true ? outcome.data?.result : null
   const summary = result?.output?.summary
   if (!result || result.tool !== 'solar-takeoff' || result.tool_manifest_sha256 !== owner.digest ||
@@ -76,7 +89,7 @@ function linesFrom(outcome, owner) {
     throw new TypeError('Invalid takeoff output')
   }
   const ids = new Set()
-  return summary.lines.map((line) => {
+  const lines = summary.lines.map((line) => {
     if (!line || typeof line.line_id !== 'string' || line.line_id.length > 96 || ids.has(line.line_id) ||
         typeof line.description !== 'string' || line.description.length > 200 ||
         typeof line.unit !== 'string' || line.unit.length > 40) throw new TypeError('Invalid takeoff line')
@@ -84,6 +97,7 @@ function linesFrom(outcome, owner) {
     return { line_id: line.line_id, description: line.description, unit: line.unit,
       quantity: decimal(line.quantity) ? line.quantity : null, status: line.status, priceable: line.priceable }
   })
+  return { lines, takeoffSource: takeoffSource(summary, owner.binding, result.graph_sha256) }
 }
 
 export default function ProjectGroundEstimatePanel(props) {
@@ -183,6 +197,7 @@ export default function ProjectGroundEstimatePanel(props) {
         presented.current = () => mounted.current && draftSource.current === key &&
           same(latest.current, admitted) && same(admitted, describe(admitted))
         setState({ phase: 'presented', generation: generation.current, lines: estimate.takeoff.lines,
+          takeoffSource: takeoffSource(estimate.takeoff, admitted.binding, estimate.source_binding?.graph_sha256),
           savedDigest: estimate.content_sha256 })
         setNotice('Saved estimate reopened.')
       } else if (kind === 'save') {
@@ -254,10 +269,14 @@ export default function ProjectGroundEstimatePanel(props) {
         params: { drawing_id: admitted.binding.drawing_id }, catalogDigest: admitted.digest,
         current: true, signal: controller.signal })
       if (!active.check()) return
-      const lines = linesFrom(outcome, admitted)
+      if (outcome?.ok === false) {
+        setState({ phase: 'refused', generation: token, message: READ_REFUSALS.get(outcome.reason) })
+        return
+      }
+      const preview = previewFrom(outcome, admitted)
       if (!active.check()) return
       presented.current = scopeCurrent
-      setState({ phase: 'presented', generation: token, lines })
+      setState({ phase: 'presented', generation: token, ...preview })
     } catch {
       if (active.check()) setState({ phase: 'refused', generation: token })
     } finally {
@@ -294,9 +313,14 @@ export default function ProjectGroundEstimatePanel(props) {
     {!owner.projectClient?.getSnapshot()?.ownsCheckout && <p>Check out drawing before saving. Saved estimates can be reopened and exported without checkout.</p>}
     {saved && <p>Saved content hash: {saved.content_sha256}. Saved subtotal: {saved.estimate.priced_subtotal ?? 'Unpriced'} USD.</p>}
     <p role="status">{!owner.valid ? 'The drawing or catalog changed. Reopen this preview.' :
-      visible.phase === 'reading' ? 'Reading project quantities…' : visible.phase === 'refused' ? 'The project quantity read was refused.' :
+      visible.phase === 'reading' ? 'Reading project quantities…' : visible.phase === 'refused' ?
+        (visible.message ?? 'The project quantity read was refused.') :
         !sourceChanged ? notice : ''}</p>
     {visible.phase === 'presented' && <>
+      {visible.takeoffSource && <p>
+        Source drawing version {visible.takeoffSource.drawingVersion}. Graph SHA-256{' '}
+        <code style={{ overflowWrap: 'anywhere' }}>{visible.takeoffSource.graphSha256}</code>
+      </p>}
       <label>TEST rate card version<input disabled={working || !!retry.current} maxLength={120} value={rateVersion} onChange={(event) => { edit(); setRateVersion(event.target.value.slice(0, 120)) }} /></label>
       <table><thead><tr>{['Description', 'Unit', 'Quantity', 'TEST rate USD', 'Amount USD'].map((label) => <th key={label}>{label}</th>)}</tr></thead>
         <tbody>{visible.lines.map((line, index) => <tr key={line.line_id}>

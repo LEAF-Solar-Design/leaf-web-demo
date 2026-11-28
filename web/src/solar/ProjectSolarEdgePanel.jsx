@@ -22,7 +22,7 @@ function admittedPreview(outcome, digest) {
 
 // Read-only review of the same immutable artifact used for download and acceptance.
 // Older matched rows omit status; unresolved rows from the review producer name it.
-function groupMatches(bytes, report, binding) {
+function groupMatches(bytes, report, binding, frameNames) {
   const data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   if (data?.schema !== 'leaf.solar-project-solaredge-report.v1' ||
       !['organization_id', 'project_id', 'drawing_id'].every((key) => data[key] === binding[key]) ||
@@ -50,7 +50,8 @@ function groupMatches(bytes, report, binding) {
         (status === 'unmatched' && (match.pdf_grid !== null || match.candidates.length !== 0)) ||
         (status === 'ambiguous' && (match.pdf_grid !== null || match.candidates.length < 1)) ||
         !['matched', 'unmatched', 'ambiguous'].includes(status)) throw new Error('Invalid match status')
-    return { ref: match.frame_ref, status, grid: match.pdf_grid, candidates: match.candidates }
+    return { ref: match.frame_ref, name: frameNames.get(match.frame_ref) || match.frame_ref,
+      status, grid: match.pdf_grid, candidates: match.candidates }
   })
   return { rows, matchingPolicy }
 }
@@ -97,8 +98,17 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         const valid = outcome?.ok === true && identity(data?.context, binding) &&
           typeof data.context.is_head === 'boolean' && Number.isInteger(graph?.rev) && graph.rev >= 0 && graph.rev <= 2147483647 &&
           HEX.test(data.context.intake_sha256) && HEX.test(data.intake.solar_design_graph_sha256)
+        const frameNames = new Map()
+        if (valid && Array.isArray(graph.frames)) {
+          for (const frame of graph.frames) {
+            if (typeof frame?.id === 'string' && typeof frame.name === 'string') {
+              frameNames.set(frame.id, frame.name.trim())
+            }
+          }
+        }
         setContext({ scope, valid, rev: valid ? graph.rev : null, isHead: valid && data.context.is_head,
-          intake: valid ? data.context.intake_sha256 : null, graph: valid ? data.intake.solar_design_graph_sha256 : null })
+          intake: valid ? data.context.intake_sha256 : null, graph: valid ? data.intake.solar_design_graph_sha256 : null,
+          frameNames })
       }).catch(() => { if (current() && !controller.signal.aborted) setContext({ scope, valid: false }) })
     }
     let unsubscribe
@@ -179,7 +189,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       if (!active()) return { ok: false }
       const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
       if (hash !== ref.content_sha256) return { ok: false, code: 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH' }
-      if (inspect) return { ok: true, ...groupMatches(bytes, report, binding) }
+      if (inspect) return { ok: true, ...groupMatches(bytes, report, binding, saved.frameNames) }
       url = URL.createObjectURL(new Blob([bytes], { type: ref.media_type }))
       const link = document.createElement('a')
       link.href = url
@@ -271,11 +281,12 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         <table aria-label="SolarEdge group matches"><thead><tr>
           <th scope="col">Panel group</th><th scope="col">Match status</th><th scope="col">PDF association</th><th scope="col">Correction</th>
         </tr></thead><tbody>{inspection.rows.map((row) => <tr key={row.ref}>
-          <th scope="row">{row.ref}</th>
+          <th scope="row" title={row.ref}>{row.name}</th>
           <td>{row.status === 'matched' ? 'Matched' : row.status === 'unmatched' ? 'Unmatched' : 'Ambiguous'}</td>
           <td>{row.status === 'matched' ? `PDF grid ${row.grid}` : row.candidates.length
             ? row.candidates.map((grid) => `PDF grid ${grid}`).join(', ') : 'No PDF grid matches'}</td>
-          <td><select aria-label={`PDF choice for ${row.ref}`} value={scope.choices[row.ref] ?? ''}
+          <td><select aria-label={`PDF choice for ${row.name === row.ref ? row.ref : `${row.name} (${row.ref})`}`}
+            value={scope.choices[row.ref] ?? ''}
             disabled={busy || scope.accepting || inspection.pending || row.candidates.length === 0}
             onChange={(event) => {
               if (!current() || scope.accepting || scope.report !== inspection.report || latest.current.busy) return

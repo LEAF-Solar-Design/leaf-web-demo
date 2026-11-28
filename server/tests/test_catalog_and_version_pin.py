@@ -750,3 +750,130 @@ def test_restart_recovery_fails_closed_on_row_predating_pin_persistence(monkeypa
     assert dispatched["called"] is False
     assert jobs.get_job(job_id)["status"] == "failed"
     jobs.reset_connection()
+
+
+@pytest.mark.parametrize("insunits, side, source_unit, squared_scale", [
+    (2, 1.0, "ft", 1.0),
+    (1, 12.0, "in", 1.0 / 144),
+    (4, 304.8, "mm", (1.0 / 304.8) ** 2),
+])
+def test_panel_area_square_feet_uses_dxf_insertion_units(insunits, side, source_unit, squared_scale):
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import run_tool_dynamic
+
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    pairs = [
+        (0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, insunits), (0, "ENDSEC"),
+        (0, "SECTION"), (2, "ENTITIES"), (0, "LWPOLYLINE"), (8, "Roof"), (90, 4), (70, 1),
+        (10, 0), (20, 0), (10, side), (20, 0), (10, side), (20, side), (10, 0), (20, side),
+        (0, "ENDSEC"), (0, "EOF"),
+    ]
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode("ascii"))
+    result = run_tool_dynamic(tool, intake, {"layer": "Roof", "output_units": "ft2"}, aps_live=False)
+    assert result["ok"], result
+    value = result["result"]
+    assert value["total_area"] == value["avg_area"] == 1.0
+    assert value["units"] == "ft2"
+    assert value["unit_conversion"] == {
+        "source": "$INSUNITS", "source_code": insunits, "source_unit": source_unit,
+        "area_factor": pytest.approx(squared_scale),
+    }
+
+    legacy = run_tool_dynamic(tool, intake, {"layer": "Roof"}, aps_live=False)
+    assert legacy["result"] == {
+        "layer": "Roof", "count": 1, "total_area": round(side * side, 3),
+        "avg_area": round(side * side, 3), "units": "drawing",
+    }
+
+
+@pytest.mark.parametrize("intake", [{}, {"insunits": 0}, {"insunits": 2, "insunits_error": "conflict"}])
+def test_panel_area_square_feet_refuses_unknown_drawing_units(intake):
+    from tool_loader import run_tool_dynamic
+
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    result = run_tool_dynamic(tool, intake, {"output_units": "ft2"}, aps_live=False)
+    assert not result["ok"]
+    assert result["error"]["error_code"] == "BAD_PARAMS"
+    assert "$INSUNITS" in result["error"]["message"]
+
+
+def _panel_ring(x, y, size):
+    return [(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
+
+
+def _run_panel_area_rings(rings, *, net, unit=2, scale=1, open_index=None, contributors=False):
+    from dxf_intake import parse_dxf_bytes
+    from tool_loader import run_tool_dynamic
+
+    pairs = [(0, "SECTION"), (2, "HEADER"), (9, "$INSUNITS"), (70, unit), (0, "ENDSEC"),
+             (0, "SECTION"), (2, "ENTITIES")]
+    for handle, ring in enumerate(rings, 16):
+        pairs.extend([(0, "LWPOLYLINE"), (5, f"{handle:X}"), (8, "Roof"), (90, len(ring)), (70, int(handle - 16 != open_index))])
+        for x, y in ring:
+            pairs.extend([(10, x * scale), (20, y * scale)])
+    pairs.extend([(0, "ENDSEC"), (0, "EOF")])
+    intake = parse_dxf_bytes("".join(f"{code}\n{value}\n" for code, value in pairs).encode("ascii"))
+    tool = next(tool for tool in deps.load_engine_registry_tools() if tool["name"] == "measure-panel-area")
+    params = {"layer": "Roof", "output_units": "ft2"}
+    if net:
+        params["area_mode"] = "net"
+    if contributors:
+        params["include_contributors"] = True
+    return run_tool_dynamic(tool, intake, params, aps_live=False)
+
+
+@pytest.mark.parametrize("holes, reverse, expected", [(1, False, 96), (2, False, 92), (1, True, 96)])
+def test_panel_area_net_subtracts_holes_independent_of_winding(holes, reverse, expected):
+    rings = [_panel_ring(0, 0, 10)] + [_panel_ring(x, 1, 2) for x in (1, 5)[:holes]]
+    if reverse:
+        rings = [ring[::-1] for ring in rings[::-1]]
+    net = _run_panel_area_rings(rings, net=True)
+    assert net["ok"], net
+    assert net["result"]["total_area"] == expected
+    assert net["result"]["avg_area"] == expected
+    assert net["result"]["count"] == 1
+    assert net["result"]["hole_count"] == holes
+    assert net["result"]["unit_conversion"]["source_code"] == 2
+    gross = _run_panel_area_rings(rings, net=False)
+    assert gross["result"]["total_area"] == 100 + holes * 4
+
+
+def test_panel_area_net_adds_island_and_separate_region():
+    rings = [_panel_ring(0, 0, 10), _panel_ring(1, 1, 6), _panel_ring(2, 2, 2), _panel_ring(20, 0, 3)]
+    result = _run_panel_area_rings(rings, net=True)["result"]
+    assert result["total_area"] == 100 - 36 + 4 + 9
+    assert result["count"] == 3 and result["hole_count"] == 1
+
+
+@pytest.mark.parametrize("other", [_panel_ring(9, 1, 2), _panel_ring(0, 1, 2)])
+def test_panel_area_net_refuses_touching_or_crossing_contours(other):
+    result = _run_panel_area_rings([_panel_ring(0, 0, 10), other], net=True)
+    assert not result["ok"]
+    assert result["error"]["error_code"] == "BAD_PARAMS"
+    assert "touch or cross" in result["error"]["message"]
+
+
+def test_panel_area_net_keeps_nearby_disjoint_regions_separate():
+    rings = [_panel_ring(0, 0, 10), _panel_ring(10 + 1e-10, 1, 2)]
+    result = _run_panel_area_rings(rings, net=True)["result"]
+    assert result["total_area"] == 104
+    assert result["count"] == 2 and result["hole_count"] == 0
+
+
+@pytest.mark.parametrize("unit,scale,net,rings,expected,open_index", [
+    (2, 1, False, [_panel_ring(0, 0, 3), _panel_ring(5, 0, 2)], [("10", 9), ("11", 4)], None),
+    (1, 12, True, [_panel_ring(0, 0, 10), _panel_ring(1, 1, 2)], [("10", 100), ("11", -4)], None),
+    (4, 304.8, False, [_panel_ring(0, 0, 2), _panel_ring(9, 9, 8)], [("10", 4)], 1),
+])
+def test_panel_area_reports_contributors_and_exclusions(unit, scale, net, rings, expected, open_index):
+    response = _run_panel_area_rings(rings, net=net, unit=unit, scale=scale,
+                                     open_index=open_index, contributors=True)
+    assert response["ok"], response
+    result = response["result"]
+    assert [row["handle"] for row in result["contributors"]] == [handle for handle, _ in expected]
+    assert [row["signed_area"] for row in result["contributors"]] == pytest.approx([area for _, area in expected])
+    assert result["excluded"] == ([] if open_index is None else [{"handle": "11", "reason": "open"}])
+    assert result["total_area"] == sum(area for _, area in expected)
+    assert result["units"] == "ft2" and result["unit_conversion"]["source_code"] == unit
+    default = _run_panel_area_rings(rings, net=net, unit=unit, scale=scale, open_index=open_index)["result"]
+    assert "contributors" not in default and "excluded" not in default

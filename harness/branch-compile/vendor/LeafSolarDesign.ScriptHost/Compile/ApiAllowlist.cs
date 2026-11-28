@@ -28,7 +28,7 @@ namespace LeafSolarDesign.ScriptHost.Compile
             Files, Http,
             "LeafSolarDesign.ScriptHost.HostApi"
         };
-        internal const string Digest = "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd";
+        internal const string Digest = "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285";
         internal const string ResourceName = "LeafSolarDesign.ScriptHost.api-allowlist.v2.json";
         private static readonly Lazy<ApiPolicy> policy = new Lazy<ApiPolicy>(Load);
         internal static ApiPolicy Policy => policy.Value;

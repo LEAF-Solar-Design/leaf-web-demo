@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { BuildPlan, PLAN_CONFIRMATION_TTL_S, planModeEnabled } from "../src/agent/buildPlan.js";
-import { ConverseLoop, type ConverseMessageInput } from "../src/agent/converseLoop.js";
+import { AUTHOR_STAGE_MODEL_GUIDANCE, ConverseLoop, authorStageModelView, type ConverseMessageInput } from "../src/agent/converseLoop.js";
+import { SPINE_SYSTEM_PROMPT } from "../src/agent/spineSystemPrompt.js";
 import type { AppRunClient, ConverseEvent, ConverseRunInput, ConverseTurnInput, GateClient, SpineConverseRunner } from "../src/ports/index.js";
 import { FakeAppRunClient } from "../src/ports/fakes/fakeAppRunClient.js";
 import { FakeSessionStore } from "../src/ports/fakes/fakeSessionStore.js";
@@ -71,9 +72,9 @@ describe("converse inline authoring", () => {
     await turn({ text: "Build a tool", contextPacket: {} }, async input => {
       expect(createHash("sha256").update(JSON.stringify(input.tools.list())).digest("hex"))
         .toBe("b3d8b2fd552a673bf12c70e3988f39ab4d8d2ee7b91295acf3f4b5f85a0ebb1a");
-      // Pin moved with the drawing_source data rule (M3 S2) and the publish-refused rule (M3 S2b).
+      // Pin moved with the drawing_source data rule (M3 S2), the publish-refused rule (M3 S2b) and the build card narration rule (F3b).
       expect(createHash("sha256").update(input.systemPrompt).digest("hex"))
-        .toBe("8e172b76937a4e82429c8bd92e20d1248ff2b774c78e77d7bef8cbc9d3dd7322");
+        .toBe("91f725600f84f687953c0b7be6951681085ba022b24a3510dc9bede4002f094b");
       const off = await input.tools.execute("propose_plan", { plan });
       expect(off).toMatchObject({ isError: true, content: expect.stringContaining("plan mode is off") });
       expect(check).not.toHaveBeenCalled();
@@ -156,8 +157,9 @@ describe("converse inline authoring", () => {
       contract: "leaf.customization-stage-job.v1", change_set_id: "f88b5f37-653a-492b-a217-299ad5d5320b",
       plan_confirmation_id: "plan-1", status: "queued",
     });
+    let seen = "";
     const events = await turn({ confirm: { confirmationId: "plan-1", approved: true } }, async input => {
-      await input.tools.execute("author_tool", { plan_confirmation_id: "plan-1", mode: "build" });
+      seen = (await input.tools.execute("author_tool", { plan_confirmation_id: "plan-1", mode: "build" })).content;
     });
     const authored = events.find(e => e.type === "tool_result" && e.data.tool === "author_tool");
     expect(authored?.data.result).toEqual({
@@ -165,6 +167,49 @@ describe("converse inline authoring", () => {
       change_set_id: "f88b5f37-653a-492b-a217-299ad5d5320b",
       plan_confirmation_id: "plan-1",
     });
+    expect(JSON.parse(seen)).toEqual({
+      contract: "leaf.customization-stage-job.v1",
+      change_set_id: "f88b5f37-653a-492b-a217-299ad5d5320b",
+      plan_confirmation_id: "plan-1",
+      guidance: AUTHOR_STAGE_MODEL_GUIDANCE,
+    });
+  });
+
+  // F3b: staging Nov 27 2026 narrated "queued at position 1 ... hasn't been built" after the card showed it published.
+  it("never hands the model a stale queue position or in-progress status from author_tool", async () => {
+    const job = {
+      contract: "leaf.customization-stage-job.v1", change_set_id: "3c649086-653a-492b-a217-299ad5d5320b",
+      status: "queued", phase: "queued", change_kind: "create", attempt: 0, updated_at: "2026-11-28T04:24:00Z",
+      poll_url: "/api/author/stages/3c649086-653a-492b-a217-299ad5d5320b", retry_after_ms: 1000,
+      queue: { ahead: 0, position: 1, estimated_wait_s: 60 }, guidance: "server text",
+    };
+    for (const status of ["queued", "running"]) {
+      const view = authorStageModelView({ ...job, status });
+      expect(view).toEqual({ contract: job.contract, change_set_id: job.change_set_id, change_kind: "create",
+        guidance: AUTHOR_STAGE_MODEL_GUIDANCE });
+      expect(JSON.stringify({ ...view, guidance: undefined })).not.toMatch(/position|ahead|queued|running|poll_url/);
+    }
+    const failed = { reason_code: "compile_failed", retryable: true };
+    expect(authorStageModelView({ ...job, status: "failed", error: failed })).toMatchObject({ status: "failed", error: failed });
+    expect(authorStageModelView({ ...job, status: "staged" })).toMatchObject({ status: "staged" });
+    const legacy = { contract: "leaf.customization.v1", change_set_id: "x", status: "staged" };
+    expect(authorStageModelView(legacy)).toBe(legacy);
+    expect(SPINE_SYSTEM_PROMPT).toContain("say only that progress shows on the build card");
+    expect(SPINE_SYSTEM_PROMPT).toContain("Never state queue position, wait time");
+  });
+
+  it("refuses a second plan card in the same turn", async () => {
+    const { turn, check } = await setup();
+    const results: Array<{ isError?: boolean; content: string }> = [];
+    const events = await turn({ text: "Plan" }, async ({ tools }) => {
+      results.push(await tools.execute("propose_plan", { plan }));
+      results.push(await tools.execute("propose_plan", { plan }));
+    });
+    expect(results[0]?.isError).toBeFalsy();
+    expect(results[1]?.isError).toBe(true);
+    expect(results[1]?.content).toContain("A plan was already proposed this turn");
+    expect(events.filter(e => e.type === "plan_proposed")).toHaveLength(1);
+    expect(check.mock.calls.filter(call => call[0] === "propose_build_plan")).toHaveLength(1);
   });
 
   it("asks before proposing when a short request leaves out a choice that changes the build", async () => {

@@ -109,7 +109,7 @@ def _camera(fields):
             "eye_distance": eye_distance}
 
 
-def _crop(fields, boundaries, camera):
+def _crop(fields, boundaries, camera, layout_owner):
     """Read the depth planes and paper crop for a resolved camera."""
     flags = int(fields.get(90, 0))
     eye_distance = camera["eye_distance"]
@@ -121,12 +121,15 @@ def _crop(fields, boundaries, camera):
             or (flags & 4 and not math.isfinite(back)) or front < back):
         raise ValueError("Invalid viewport depth planes.")
     clip_handle = fields.get(340, "").upper()
+    if clip_handle == "0":
+        clip_handle = ""
     if clip_handle or flags & 65536:
         matches = boundaries.get(clip_handle, ())
         if len(matches) != 1 or not clip_handle:
             raise ValueError("Missing or ambiguous viewport crop boundary.")
-        boundary = matches[0]
-        if dict(boundary).get(410, "").casefold() != fields.get(410, "").casefold():
+        boundary, boundary_layout, boundary_owner = matches[0]
+        if (boundary_layout.casefold() != fields[410].casefold()
+                or layout_owner and boundary_owner and layout_owner != boundary_owner):
             raise ValueError("Viewport crop boundary belongs to a different layout.")
         if not 3 <= int(dict(boundary).get(90, 0)) <= 512:
             raise ValueError("Invalid or oversized viewport crop boundary.")
@@ -150,10 +153,68 @@ def _activation_value(fields, code, default):
         raise ValueError(f"Unreadable viewport activation field (DXF group {code}).") from exc
 
 
+def _paper_layouts_by_owner(pairs):
+    """Resolve standard paper space via reciprocal BLOCK_RECORD and LAYOUT links."""
+    section = table = ""
+    block_records, layouts = {}, {}
+    for kind, record in _records(pairs):
+        if kind not in ("SECTION", "ENDSEC", "TABLE", "ENDTAB", "BLOCK_RECORD", "LAYOUT"):
+            continue
+        fields = dict(record)
+        if kind == "SECTION":
+            section = fields.get(2, "")
+        elif kind == "ENDSEC":
+            section = table = ""
+        elif kind == "TABLE":
+            table = fields.get(2, "")
+        elif kind == "ENDTAB":
+            table = ""
+        elif kind == "BLOCK_RECORD" and section == "TABLES" and table == "BLOCK_RECORD":
+            handle = fields.get(5, "").upper()
+            name = fields.get(2, "").casefold()
+            layout = fields.get(340, "").upper()
+            if handle and re.fullmatch(r"\*paper_space\d*", name) and layout:
+                block_records.setdefault(handle, []).append((name, layout))
+        elif kind == "LAYOUT" and section == "OBJECTS" and (100, "AcDbLayout") in record:
+            handle = fields.get(5, "").upper()
+            layout_fields = record[record.index((100, "AcDbLayout")) + 1:]
+            name = next((value for code, value in layout_fields if code == 1), "")
+            owner = next((value.upper() for code, value in layout_fields if code == 330), "")
+            if handle and owner and name and name.casefold() != "model":
+                layouts.setdefault(handle, []).append((owner, name))
+
+    resolved = {}
+    for owner, records in block_records.items():
+        if len(records) != 1:
+            continue
+        block_name, layout_handle = records[0]
+        linked_layouts = layouts.get(layout_handle, ())
+        if len(linked_layouts) == 1 and linked_layouts[0][0] == owner:
+            resolved[owner] = (block_name, linked_layouts[0][1])
+    return resolved
+
+
+def _record_owner(record):
+    """Read the entity owner outside extension groups and subclass fields."""
+    depth = 0
+    for code, value in record:
+        if code == 100:
+            break
+        if code == 102 and value.startswith("{"):
+            depth += 1
+        elif code == 102 and value == "}":
+            depth = max(depth - 1, 0)
+        elif code == 330 and not depth:
+            return value.upper()
+    return ""
+
+
 def attach_viewports(pairs, out):
     if (0, "VIEWPORT") not in pairs:
         return
     section = table = ""
+    paper_blocks = _paper_layouts_by_owner(pairs)
+    paper_owner = paper_layout = ""
     layers, viewports = {}, {}
     crop_inputs, boundaries = {}, {}
     hidden = set()
@@ -165,7 +226,7 @@ def attach_viewports(pairs, out):
             if kind == "SECTION":
                 section = fields.get(2, "")
             elif kind == "ENDSEC":
-                section = table = ""
+                section = table = paper_owner = paper_layout = ""
             elif kind == "TABLE":
                 table = fields.get(2, "")
             elif kind == "ENDTAB":
@@ -179,13 +240,37 @@ def attach_viewports(pairs, out):
                 names.add(name)
                 if int(fields.get(70, 0)) & 1 or int(fields.get(62, 7)) < 0:
                     hidden.add(name)
-            elif kind == "VIEWPORT" and section == "ENTITIES":
-                if fields.get(67) != "1" and fields.get(410, "Model").casefold() == "model":
+            elif kind == "BLOCK" and section == "BLOCKS":
+                owner = _record_owner(record)
+                block = paper_blocks.get(owner)
+                if block and block[0] == fields.get(2, "").casefold():
+                    paper_owner, paper_layout = owner, block[1]
+                else:
+                    paper_owner = paper_layout = ""
+            elif kind == "ENDBLK":
+                paper_owner = paper_layout = ""
+            elif kind in ("VIEWPORT", "LWPOLYLINE"):
+                owner = _record_owner(record)
+                layout_tag = fields.get(410, "")
+                if section == "BLOCKS" and paper_owner and owner == paper_owner:
+                    if layout_tag and layout_tag.casefold() != paper_layout.casefold():
+                        continue
+                    layout = paper_layout
+                elif section == "ENTITIES" and (
+                    fields.get(67) == "1" or layout_tag and layout_tag.casefold() != "model"
+                ):
+                    layout = layout_tag or paper_blocks.get(owner, ("", ""))[1]
+                else:
                     continue
+                fields[410] = layout
                 handle = fields.get(5, "").upper()
+                if kind == "LWPOLYLINE":
+                    boundaries.setdefault(handle, []).append(
+                        (record, layout, owner if owner in paper_blocks else ""))
+                    continue
                 if not re.fullmatch("[A-F0-9]+", handle) or handle in viewports:
                     raise ValueError("Missing or duplicate viewport identity.")
-                view = {"layout": fields.get(410, ""),
+                view = {"layout": layout,
                         "layers": [v.upper() for c, v in record if c == 331]}
                 viewports[handle] = view
                 try:
@@ -197,11 +282,8 @@ def attach_viewports(pairs, out):
                     activation_error = activation_error or str(exc.__cause__)
                     continue
                 if view["enabled"]:
-                    crop_inputs[handle] = fields
-            elif (kind == "LWPOLYLINE" and section == "ENTITIES"
-                  and (fields.get(67) == "1" or fields.get(410, "Model").casefold() != "model")):
-                boundaries.setdefault(fields.get(5, "").upper(), []).append(record)
-        for handle, fields in crop_inputs.items():
+                    crop_inputs[handle] = (fields, owner if owner in paper_blocks else "")
+        for handle, (fields, layout_owner) in crop_inputs.items():
             view = viewports[handle]
             try:
                 camera = _camera(fields)
@@ -210,7 +292,7 @@ def attach_viewports(pairs, out):
                 view["crop_error"] = "Unresolved viewport crop: " + str(exc)
                 continue
             try:
-                view["crop"] = _crop(fields, boundaries, camera)
+                view["crop"] = _crop(fields, boundaries, camera, layout_owner)
             except (KeyError, TypeError, ValueError) as exc:
                 view["crop_error"] = "Unresolved viewport crop: " + str(exc)
         out["viewport_layers"] = {"layers": layers, "globally_hidden": sorted(hidden), "views": viewports}

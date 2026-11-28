@@ -65,6 +65,7 @@
   "mandatory_suite_ids": [
     "server-upload-extraction-concurrency",
     "server-x07-offline",
+    "tools-x12-offline",
     "web-stage-source-contracts",
     "web-page-service-smoke",
     "ci-process-capture-core",
@@ -704,6 +705,7 @@
     "server-branch-package-check",
     "server-branch-dev-catalog",
     "server-branch-sync-receipts",
+    "server-branch-run-receipts",
     "server-tenant-catalog",
     "server-workspace-identity-echo",
     "server-tenant-plugin-check",

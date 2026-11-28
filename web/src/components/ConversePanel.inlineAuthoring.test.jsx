@@ -128,9 +128,9 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
   expect(build).toHaveTextContent('Published to your plugin catalog')
   expect(requests.at(-1)).toEqual(['GET', stagePath, undefined])
   await tick(3199)
-  expect(build).toHaveTextContent('Waiting for AutoCAD to pick it up')
+  expect(build).toHaveTextContent('Deployed. AutoCAD picks it up within a minute.')
   await tick(1)
-  expect(build).toHaveTextContent('Synced · Compile · passed · Ran · Counted 12 panels')
+  expect(build).toHaveTextContent('Deployed. AutoCAD picks it up within a minute.')
   await tick(5000)
   expect(requests).toEqual([
     ['POST', '/api/sessions/session/messages', { answers }],
@@ -139,7 +139,7 @@ it('takes a short prompt through questions, plan approval, two compile attempts 
     ['GET', stagePath, undefined], ['GET', stagePath, undefined], ['GET', stagePath, undefined],
     ['GET', reviewPath + '/context?change_set_id=' + id, undefined], ['GET', stagePath + '?view=source', undefined],
     ['POST', reviewPath, { change_set_id: id, staged_commit: commit, catalog_digest: digest, decision: 'approve' }],
-    ['GET', stagePath, undefined], ['GET', stagePath, undefined],
+    ['GET', stagePath, undefined],
   ])
   expect(statusCalls).toBeGreaterThanOrEqual(1)
   expect(track).toHaveBeenCalledWith('plan.approved', { revision: 1 })
@@ -217,7 +217,7 @@ it('settles the step on a foreign result and mounts the failed build only for th
   const build = screen.getByRole('region', { name: 'Tool authoring' })
   expect(build).toHaveTextContent('Review the missing delimiter')
   expect(build).toHaveTextContent('Attempt 1: refused, CS1026 main.csx:50')
-  expect(within(build).getByRole('button', { name: 'Fix with these errors' })).toBeEnabled()
+  expect(within(build).getByRole('button', { name: 'Try the build again' })).toBeEnabled()
   expect(fetch).toHaveBeenCalledTimes(1)
 })
 

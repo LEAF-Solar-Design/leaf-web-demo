@@ -36,7 +36,7 @@ def test_known_packages(relative, digest):
     assert result.ok and result.failures == []
     assert result.package_digest == digest
     assert result.manifest == json.loads(files["tool.json"])
-    assert result.allowlist_sha256 == "03830bbe9eb579e291a0e588556b2597497892de92a0485d15d269013b8c11dd"
+    assert result.allowlist_sha256 == "716d548887ce792f4f9950d0ba8b0e531b3d7f9b80b7399cf3fcd59d622a3285"
     with pytest.raises(FrozenInstanceError):
         result.ok = False
 

@@ -57,7 +57,8 @@ captured build):
                    label all exist is recoloured (polyline and both blocks; the label keeps its colour)
     :11207-11209   the printed count. No drawing-properties save.
 
-Declared divergence: none. Both capabilities are zero-diff under G35.
+The default assignment and colouring paths preserve G35. Studio also offers an
+opt-in assignment objective that balances counts of whole strings across collectors.
 
 HOST INPUTS. Values the commands read from the capture host's per-user settings, the session, or a
 block definition, never from the drawing state, arrive as the `host` argument, named by the plugin
@@ -74,7 +75,9 @@ never a guess.
 """
 from __future__ import annotations
 
+from collections import Counter
 import copy
+import heapq
 import importlib.util
 import math
 from pathlib import Path
@@ -466,11 +469,40 @@ def _slug(label):
 
 # ------------------------------------------------------------------ assign --
 
-def assign_strings(state, host, form_values):
+def _balanced_quotas(remaining, loads, order, total):
+    """Give each new string to the least-loaded collector with space left."""
+    quotas = dict.fromkeys(remaining, 0)
+    available = [(loads.get(number, 0), index, number)
+                 for index, number in enumerate(order) if remaining[number]]
+    heapq.heapify(available)
+    for _ in range(total):
+        load, index, number = heapq.heappop(available)
+        quotas[number] += 1
+        if quotas[number] < remaining[number]:
+            heapq.heappush(available, (load + 1, index, number))
+    return quotas
+
+
+def _balance_limits(quotas, loads, space):
+    final = {number: loads.get(number, 0) + quota for number, quota in quotas.items()}
+    lowest, highest = min(final.values()), max(final.values())
+    if highest - lowest <= 1:
+        return []
+    limits = []
+    for number, count in final.items():
+        if highest - count > 1 and quotas[number] == space[number]:
+            limits.append(f"Collector {number} has no free inputs (assigned: {count}).")
+        if count - lowest > 1 and loads.get(number, 0) > lowest + 1:
+            limits.append(f"Collector {number} already has {loads[number]} assigned strings.")
+    return limits
+
+
+def assign_strings(state, host, form_values, *, balance_whole_strings=False):
     """AssignStrings on the Studio state, Auto mode by the pattern matcher. `form_values`:
     {"assign_strings_to_<label>s": "OK" | "Cancel", "assign_strings_to_<label>s_mode": "Auto" |
     "Manual", "excess_capacity": "Yes" | "No"} (each read only when its dialog fires). Returns
-    (new state, printed lines)."""
+    (new state, printed lines). The optional Studio objective keeps each string intact
+    and assigns new strings without moving saved ones."""
     host = _host(host)
     form_values = form_values or {}
     new = copy.deepcopy(state)
@@ -510,11 +542,17 @@ def assign_strings(state, host, form_values):
     for collector in targets:
         if collector["number"] is None:
             raise InverterStringError("a target collector's number is unknown (no _number, no DeviceNumbers entry)")
-    loads = {}
+    loads = Counter()
+    occupied = Counter()
     for item, _ in all_strings:
-        number = parse_circuit(_circuit(item))
-        if number > 0:
-            loads[number] = loads.get(number, 0) + 1
+        if balance_whole_strings:
+            if _circuit(item) != UNASSIGNED_CIRCUIT:
+                loads[item["device"]] += 1
+                occupied[item["device"], item["input"]] += 1
+        else:
+            number = parse_circuit(_circuit(item))
+            if number > 0:
+                loads[number] += 1
     if not unassigned:
         lines.append("No unassigned strings found in the drawing.")
         return new, lines
@@ -522,7 +560,20 @@ def assign_strings(state, host, form_values):
         lines.append(f"No {label}s found in the drawing. Place {label}s first using AddInverter.")
         return new, lines
     capacity_of = {id(c): _collector_capacity(new, host, c, use_l2, l1) for c in targets}
-    total_capacity = sum(max(0, capacity_of[id(c)] - loads.get(c["number"], 0)) for c in targets)
+    if balance_whole_strings and len({c["number"] for c in targets}) != len(targets):
+        raise InverterStringError("whole-string balancing needs distinct collector numbers")
+    space_by_target = {}
+    for collector in targets:
+        number = collector["number"]
+        space = max(0, capacity_of[id(collector)] - loads[number])
+        if balance_whole_strings and collector["row"]["role"] != "combiner":
+            mppts, inputs = _collector_topology(new, host, collector, use_l2)
+            # Circuit tags represent MPPTs A to Z.
+            free_inputs = sum(max(0, inputs - occupied[number, slot])
+                              for slot in range(1, min(mppts, 26) + 1))
+            space = min(space, free_inputs)
+        space_by_target[id(collector)] = space
+    total_capacity = sum(space_by_target.values())
     total = len(unassigned)
     if total_capacity < total:
         # The "Not Enough Capacity" message box; nothing is assigned.
@@ -545,12 +596,16 @@ def assign_strings(state, host, form_values):
     remaining = {}
     for collector in targets:
         if collector["number"] not in remaining:
-            remaining[collector["number"]] = max(0, capacity_of[id(collector)] - loads.get(collector["number"], 0))
+            remaining[collector["number"]] = space_by_target[id(collector)]
     numbers = [d.get("string_number") for d in (_detail(item) for item, _ in all_strings)]
     next_string = max([n for n in numbers if type(n) is int] + [0]) + 1
     rows = _row_groups(ordered)
     order = sorted((c for c in targets if remaining.get(c["number"], 0) > 0),
                    key=lambda c: (c["x"], c["y"], c["number"]))
+    if balance_whole_strings:
+        space = remaining
+        remaining = _balanced_quotas(space, loads, [c["number"] for c in order], total)
+        lines.extend(_balance_limits(remaining, loads, space))
     assignments = []
     for collector in order:
         while remaining.get(collector["number"], 0) > 0:
@@ -604,8 +659,19 @@ def assign_strings(state, host, form_values):
             raise InverterStringNotPortedError("a string without its start block, end block or label "
                                                "(the annotation hydration)")
         num_mppt, strings_per_mppt = _collector_topology(new, host, collector, use_l2)
-        letter = mppt_letter(string_number, num_mppt, strings_per_mppt)
-        tag = tag_text(number, string_number, num_mppt, strings_per_mppt)
+        if balance_whole_strings:
+            if collector["row"]["role"] == "combiner":
+                slot = 1
+            else:
+                slot = next((slot for slot in range(1, min(num_mppt, 26) + 1)
+                             if occupied[number, slot] < strings_per_mppt), None)
+                if slot is None:
+                    raise InverterStringError(f"collector {number} has no supported free MPPT input")
+            occupied[number, slot] += 1
+            letter = chr(ord("a") + slot - 1)
+        else:
+            letter = mppt_letter(string_number, num_mppt, strings_per_mppt)
+        tag = f"+{string_number}/{number}{letter}"
         detail = dict(_detail(item))
         detail.update({"circuit": tag, "num_mppt": num_mppt, "strings_per_mppt": strings_per_mppt,
                        "string_number": string_number, "mppt": letter,
@@ -615,7 +681,8 @@ def assign_strings(state, host, form_values):
                      "colour": colours[number], "_detail": detail})
 
     # :14316-14346; elapsed is at least one second in the plugin's own rounding.
-    lines.append(f"Pattern assignment complete. {len(assignments):,} strings assigned to "
+    name = "Whole-string balance" if balance_whole_strings else "Pattern assignment"
+    lines.append(f"{name} complete. {len(assignments):,} strings assigned to "
                  f"{len(targets):,} collectors in 1 seconds.")
     st.sort_rows(new)
     return new, lines

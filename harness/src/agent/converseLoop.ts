@@ -813,6 +813,7 @@ export class ConverseLoop {
       sessionId: instant.authoritySessionId ?? "", turnId: instant.authorityTurnId ?? "" });
     let proposedPhotoIds: string[] = [];
     let proposingPlan = false;
+    let planProposed = false;
 
     /** A tool we cannot find in the catalog is treated as a WRITE (never fast-waited). */
     const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write" | "solve"> => {
@@ -1210,6 +1211,9 @@ export class ConverseLoop {
           consult = await gateConsultFor(tool, args);
           if (tool === "propose_plan") {
             if (proposingPlan) throw new Error("A plan is already being proposed. End your turn.");
+            // One plan card per turn: a second call in the same turn rendered a
+            // second card for the same plan (F3b, staging Nov 27 2026).
+            if (planProposed) throw new Error("A plan was already proposed this turn. End your turn and wait for approval.");
             proposingPlan = true;
             ownsProposal = true;
           }
@@ -1267,6 +1271,7 @@ export class ConverseLoop {
             const previous = history.findLast(event => event.type === "plan_proposed");
             const prior = previous ? await store.getConfirmation(String(previous.data.confirmation_id)) : null;
             const revision = Number(previous?.data.revision ?? 0) + 1;
+            planProposed = true;
             await emit("plan_proposed", { confirmation_id: confirmationId, plan, plan_digest: planDigest(plan), revision,
               ...(prior?.status === "pending" && prior.confirmation_id !== confirmationId && Date.parse(prior.expires_at) > Date.now()
                 ? { supersedes: prior.confirmation_id } : {}) });
@@ -1706,7 +1711,7 @@ export class ConverseLoop {
           })).digest("hex");
           const authored = await appRun.authorToolFromPlan(tenantId, binding, key,
             { sessionId: ctx.authoritySessionId, turnId: ctx.authorityTurnId });
-          return ok(JSON.stringify(authored));
+          return ok(JSON.stringify(authorStageModelView(authored)));
         }
         const description = String(args.description ?? "").trim();
         if (!description) return err("author_tool requires args.description");
@@ -1737,7 +1742,7 @@ export class ConverseLoop {
           targetToolName,
           target,
         );
-        return ok(JSON.stringify(authored));
+        return ok(JSON.stringify(authorStageModelView(authored)));
       }
 
       case "request_publication": {
@@ -2439,6 +2444,29 @@ function validatePageProposal(value: unknown, source: PageProposalSource): Recor
     }
     return result;
   } catch { return undefined; }
+}
+
+/** What the model reads after author_tool returns an async stage job (F3b). */
+export const AUTHOR_STAGE_MODEL_GUIDANCE =
+  "The build card in this conversation shows build, compile and publish progress live. " +
+  "Do not state queue position, wait time, or build, compile or publish status, and do not promise to check later.";
+
+/**
+ * The job answer is a snapshot taken at enqueue time. Queue position and a
+ * queued or running status go stale within seconds while the build card keeps
+ * updating, so the model never sees them: it would write them into chat once
+ * and leave them there after the card shows the build published. Staged and
+ * failed are terminal answers the model can act on, so they stay.
+ */
+export function authorStageModelView(authored: Record<string, unknown>): Record<string, unknown> {
+  if (authored?.contract !== "leaf.customization-stage-job.v1") return authored;
+  const terminal = authored.status === "staged" || authored.status === "failed";
+  const keep = ["contract", "change_set_id", "plan_confirmation_id", "change_kind", "target_tool_name",
+    ...(terminal ? ["status", "error"] : [])];
+  const view: Record<string, unknown> = {};
+  for (const key of keep) if (authored[key] !== undefined) view[key] = authored[key];
+  view.guidance = AUTHOR_STAGE_MODEL_GUIDANCE;
+  return view;
 }
 
 /** Project only the validated service fields, never the human-facing summary. */

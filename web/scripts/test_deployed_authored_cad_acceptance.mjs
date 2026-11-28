@@ -20,6 +20,7 @@ import {
   provePinnedWriteRejections,
   provisionAcceptanceDrawing,
   provisionAcceptanceDrawings,
+  requestJson,
   requireCameraMotion,
   requireDistinctStagedResults,
   runApiPreflight,
@@ -526,6 +527,136 @@ describe('deployed authored CAD acceptance checks', () => {
 
     finishSecond('drawing-b')
     assert.deepEqual(await pending, ['drawing-a', 'drawing-b'])
+  })
+
+  for (const [name, body] of [
+    ['status', '{"status":"complete","status":"complete"}'],
+    ['result', '{"status":"complete","result":{"ok":true,"ok":true}}'],
+    ['version in an array entry', '{"status":"complete","result":[{"new_version":{"version":2,"version":2}}]}'],
+    ['escaped key', String.raw`{"status":"complete","raw-marker":1,"raw-\u006darker":2}`],
+  ]) {
+    it(`rejects duplicate job JSON keys in ${name}`, async () => {
+      const config = validateConfig(environment(), true)
+      const jobId = '11111111-1111-4111-8111-111111111111'
+      const fetchImpl = async () => new Response(body)
+      for (const poll of [waitForTerminalJob, waitForJobOutcome]) {
+        await assert.rejects(
+          () => poll(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+          (error) => {
+            const record = safeFailureRecord(error)
+            assert.deepEqual(record.details, {
+              job_id: jobId,
+              terminal_status: 'http_error',
+              error_code: 'DUPLICATE_JSON_KEY',
+            })
+            assert.doesNotMatch(JSON.stringify(record), /raw-marker/)
+            return true
+          },
+        )
+      }
+    })
+  }
+
+  for (const [name, body] of [
+    ['result version', '{"status":"complete","result":{"ok":true,"result":{"new_version":{"version":1e999}}}}'],
+    ['nested array entry', '{"status":"complete","result":{"ok":true,"rows":[{"raw-marker":-1e999}]}}'],
+    ['top-level metadata', '{"status":"complete","raw-marker":1.8e308}'],
+  ]) {
+    it(`refuses numeric overflow in job JSON ${name}`, async () => {
+      const config = validateConfig(environment(), true)
+      const tenant = config.tenants[0]
+      const jobId = '11111111-1111-4111-8111-111111111111'
+      const fetchImpl = async () => new Response(body)
+      const errorCode = 'NON_FINITE_JSON_NUMBER'
+      await assert.rejects(
+        () => requestJson(config, tenant, `/api/jobs/${jobId}`, { fetchImpl }),
+        (error) => {
+          const record = safeFailureRecord(error)
+          assert.deepEqual(record.details, { error_code: errorCode })
+          assert.doesNotMatch(JSON.stringify(record), /raw-marker|1e999|1\.8e308/)
+          return true
+        },
+      )
+      for (const poll of [waitForTerminalJob, waitForJobOutcome]) {
+        await assert.rejects(
+          () => poll(config, tenant, jobId, { fetchImpl, maxPolls: 1 }),
+          (error) => {
+            const record = safeFailureRecord(error)
+            assert.deepEqual(record.details, {
+              job_id: jobId,
+              terminal_status: 'http_error',
+              error_code: errorCode,
+            })
+            assert.doesNotMatch(JSON.stringify(record), /raw-marker|1e999|1\.8e308/)
+            return true
+          },
+        )
+      }
+    })
+  }
+
+  it('preserves finite numbers and quoted numeric text in response JSON', async () => {
+    const config = validateConfig(environment(), true)
+    const fetchImpl = async () => new Response('{"values":[1.79e308,5e-324,"1e999",null]}')
+    const { body } = await requestJson(config, config.tenants[0], '/api/drawings', { fetchImpl })
+    assert.deepEqual(body.values, [1.79e308, Number.MIN_VALUE, '1e999', null])
+  })
+
+  it('rejects a deep duplicate key containing punctuation through requestJson', async () => {
+    const config = validateConfig(environment(), true)
+    const tenant = config.tenants[0]
+    const path = '/api/drawings'
+    const body = String.raw`{"drawings":[{"layout":{"groups":[[{"sheet:{a}":1,"sheet:\u007ba\u007d":2}]]}}]}`
+    const fetchImpl = async () => new Response(body)
+
+    await assert.rejects(
+      () => requestJson(config, tenant, path, { fetchImpl }),
+      (error) => {
+        const record = safeFailureRecord(error)
+        assert.equal(record.check, path)
+        assert.deepEqual(record.details, { error_code: 'DUPLICATE_JSON_KEY' })
+        assert.doesNotMatch(JSON.stringify(record), /sheet:/)
+        return true
+      },
+    )
+  })
+
+  it('accepts punctuated keys in distinct objects through requestJson', async () => {
+    const config = validateConfig(environment(), true)
+    const body = { drawings: [{ 'sheet:{a}': 1 }, { 'sheet:{a}': 2 }] }
+    const fetchImpl = async () => new Response(JSON.stringify(body))
+    const response = await requestJson(config, config.tenants[0], '/api/drawings', { fetchImpl })
+    assert.deepEqual(response.body, body)
+  })
+
+  it('accepts repeated job JSON keys across distinct objects', async () => {
+    const config = validateConfig(environment(), true)
+    const jobId = '11111111-1111-4111-8111-111111111111'
+    const body = {
+      status: 'complete',
+      result: [{ status: 'brace { and quote "' }, { status: 'brace } and slash \\' }],
+    }
+    const fetchImpl = async () => new Response(JSON.stringify(body))
+    assert.deepEqual(
+      await waitForTerminalJob(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+      body,
+    )
+  })
+
+  it('keeps literal NaN on the malformed job JSON path', async () => {
+    const config = validateConfig(environment(), true)
+    const jobId = '11111111-1111-4111-8111-111111111111'
+    const fetchImpl = async () => new Response('{"status":"complete","version":NaN}')
+    await assert.rejects(
+      () => waitForTerminalJob(config, config.tenants[0], jobId, { fetchImpl, maxPolls: 1 }),
+      (error) => {
+        assert.deepEqual(safeFailureRecord(error).details, {
+          job_id: jobId,
+          terminal_status: 'http_error',
+        })
+        return true
+      },
+    )
   })
 
   it('reports a terminal broker failure before waiting for browser version state', async () => {

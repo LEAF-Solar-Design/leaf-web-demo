@@ -281,7 +281,12 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         from solar_project_solaredge import SolarEdgeGridRefusal
         from solar_combiner_graph import CombinerCapacityError
         from solar_joint_homerun_routing import JointRoutingInfeasible
+        from product_capability_availability import IncompleteHomerunRouting
 
+        if isinstance(exc, IncompleteHomerunRouting):
+            response = _refusal(exc.code, message="The schedule requires complete current homeruns.")
+            response["content"]["error"].update(exc.diagnostics)
+            return response
         if isinstance(exc, JointRoutingInfeasible):
             response = _refusal(exc.code, message=exc.user_message)
             response["content"]["error"]["affected_leads"] = [

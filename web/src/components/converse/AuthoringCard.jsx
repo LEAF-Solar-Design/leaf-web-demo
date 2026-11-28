@@ -76,6 +76,45 @@ function branchSummary(report) {
   return lines.join(' · ')
 }
 
+function ReceiptTime({ at }) {
+  const date = new Date(at)
+  return at && Number.isFinite(date.getTime()) ? <time dateTime={at}>
+    {date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</time> : null
+}
+
+function ReceiptError({ error }) {
+  return error ? <><code>{string(error.code)}</code>, {string(error.message)}</> : null
+}
+
+function AutoCADStatus({ report, published, publishedAt }) {
+  if (report?.arrived_at || report?.verify_failed || report?.last_run) {
+    if (report.last_event === 'verify_failed' && report.verify_failed) return <>
+      AutoCAD could not load it (<ReceiptTime at={report.verify_failed.at} />): <ReceiptError error={report.verify_failed.error} />
+    </>
+    const run = report.last_run
+    if (run) {
+      const drawing = string(run.drawing)
+      const file = drawing.split(' | ')[0]
+      const duration = Number.isInteger(run.duration_ms)
+        ? run.duration_ms < 1000 ? `${run.duration_ms} ms` : `${(run.duration_ms / 1000).toFixed(1)} s` : ''
+      return <>
+        {run.outcome === 'ok' && report.arrived_at && <>Arrived in AutoCAD <ReceiptTime at={report.arrived_at} />. </>}
+        Ran{file && <> on <span title={drawing}>{file}</span></>}: {string(run.outcome)}
+        {run.outcome === 'ok' && duration && <> in {duration}</>} (<ReceiptTime at={run.at} />)
+        {run.outcome === 'failed' && run.error && <>: <ReceiptError error={run.error} /></>}
+      </>
+    }
+    if (report.arrived_at) return <>Arrived in AutoCAD <ReceiptTime at={report.arrived_at} />. Not run yet.</>
+  }
+  const legacy = branchSummary(report)
+  if (legacy) return legacy
+  if (!published) return 'Not deployed yet'
+  const stamp = new Date(publishedAt).getTime()
+  return !report && Number.isFinite(stamp) && Date.now() - stamp > 10 * 60 * 1000
+    ? 'Not seen in AutoCAD yet. Check that the plugin is signed in to this workspace.'
+    : 'Deployed. AutoCAD picks it up within a minute.'
+}
+
 function DecisionTime({ at }) {
   const date = new Date(at)
   return at && Number.isFinite(date.getTime()) ? <>, <time dateTime={date.toISOString()}>
@@ -140,6 +179,7 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const [withdrawClosed, setWithdrawClosed] = useState(false)
   const pollAfter = useRef(0)
   const pollUntil = useRef(Infinity)
+  const publishedPollUntil = useRef(null)
   const pollStopped = useRef(false)
   const forceStageRead = useRef(false)
   const refreshStage = () => {
@@ -178,17 +218,25 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
           return [...merged.values()].sort((a, b) => a.attempt - b.attempt)
         })
         const published = [next.status, next.publication?.state, decision?.status].includes('published')
+        const awaitingRun = published && next.target === 'branch' && !next.branch?.last_run
         pollStopped.current = next.status === 'failed' || denied || next.review?.decision === 'request_changes'
           || ['denied', 'superseded', 'rolled_back'].includes(next.publication?.state)
           || [next.status, decision?.status].includes('denied')
-          || (published && !!branchSummary(next.branch))
+          || (published && !awaitingRun)
         if (pollStopped.current) return
-        if (next.status === 'staged' || published) {
+        if (awaitingRun) {
+          if (publishedPollUntil.current == null) {
+            const publishedAt = new Date(next.publication?.published_at ?? next.updated_at ?? Date.now()).getTime()
+            const since = Number.isFinite(publishedAt) ? Math.min(Date.now(), publishedAt) : Date.now()
+            publishedPollUntil.current = since + stagedPollWindow
+          }
+          pollUntil.current = publishedPollUntil.current
+        } else if (next.status === 'staged') {
           const stagedAt = new Date(next.staged_at ?? next.updated_at ?? Date.now()).getTime()
           const since = Number.isFinite(stagedAt) ? Math.min(Date.now(), stagedAt) : Date.now()
           pollUntil.current = Math.min(pollUntil.current, since + stagedPollWindow)
         }
-        delay = Math.max(2000, Number(next.retry_after_ms) || 0)
+        delay = awaitingRun ? 15000 : Math.max(2000, Number(next.retry_after_ms) || 0)
       } catch (e) {
         if (signal.aborted) return
         setReadError('Could not read build status.')
@@ -236,6 +284,12 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   }, [changeSetId, receipt?.staged_commit, visible, decision, refresh, reportedReview, reportedPublication])
 
   const plan = reviewPlan(stage, proposal)
+  const branchBuild = plan?.target === 'branch' || stage?.target === 'branch'
+  const startedAt = Date.parse(stage?.stage_started_at)
+  const elapsed = Date.now() - startedAt
+  const runningLabel = Number.isFinite(startedAt) && elapsed >= 0
+    ? `Building, ${elapsed < 60000 ? 'under 1' : Math.floor(elapsed / 60000)} min so far (usually 6 to 10)`
+    : 'Building (usually 6 to 10 min)'
   const review = decision || (reportedReview ? stage.review : context?.review)
   const mayApprove = context?.viewer_may_approve === true && context.commit === receipt?.staged_commit
     && !review && !!receipt?.catalog_digest && !closedPublicationStates.includes(reportedPublication)
@@ -244,8 +298,7 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   const approvalReady = Boolean(plan && sourceReady)
   const self = context?.approval_kind_if_approved === 'self'
   const latest = attempts.at(-1)
-  const studioTest = stage?.test_run || stage?.result?.test_run
-  const compile = latest ? attemptLabel(latest) : resultLabel(studioTest)
+  const compile = latest ? attemptLabel(latest) : ''
   const files = receipt?.package_files || stage?.result?.package_files || [stage?.result?.tool?.entry].filter(Boolean)
   const publicationState = terminalPublicationStates.includes(reportedPublication) ? reportedPublication
     : decision?.status === 'published' ? 'published' : reportedPublication || decision?.status || stage?.status
@@ -291,8 +344,7 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
       // Plan approvals are single use. A retry requires the same plan digest
       // and a fresh confirmation, even though it names the failed change set.
       const retryTarget = JSON.stringify({ retry_of_change_set_id: changeSetId })
-      const report = JSON.stringify(compile || string(stage?.error?.message) || notReported)
-      const result = await postMessage(sessionId, { text: `Fix these compile errors. Re-propose the same build plan for approval, then retry author_tool with the new plan_confirmation_id and ${retryTarget}. Compiler report: ${report}` })
+      const result = await postMessage(sessionId, { text: `Try the same build again. Re-propose the same build plan unchanged for approval, then retry author_tool with the new plan_confirmation_id and ${retryTarget}.` })
       setRetried(true)
       if (result?.turn_id) onRetry?.(result.turn_id)
     } catch (e) {
@@ -327,21 +379,20 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
   return <section ref={card} className="inline-authoring" aria-label="Tool authoring" data-converse-role="authoring">
     <h4>{plan?.title || 'Tool build'}</h4>
     <dl className="inline-build-rows">
-      <dt>Build</dt><dd>{stage?.status === 'running' ? <><span className="dot live pulse" aria-hidden="true" /> Building
-        <p>Claude is writing the C# and Studio is compiling it. This usually takes a few minutes.</p></>
+      <dt>Build</dt><dd>{stage?.status === 'running' ? <><span className="dot live pulse" aria-hidden="true" /> {runningLabel}
+        <p>Claude is writing the C# and Studio is compiling it.</p></>
         : stage?.status === 'queued' ? 'Waiting to start' : ['staged', 'published'].includes(stage?.status) ? 'Built'
           : stage?.status === 'failed' ? 'Failed' : string(stage?.status) || notReported}
         {waiting && <p>{waiting}</p>}
         {stage?.status === 'queued' && stage.withdrawable === true && !withdrawClosed
           && <button type="button" className="chip-neutral" disabled={withdrawing} onClick={withdraw}>Withdraw</button>}
         {withdrawMessage && <p>{withdrawMessage}</p>}
-        {stage?.status === 'failed' && <p>{string(stage.error?.message) || string(stage.error?.reason_code)}</p>}</dd>
+        {stage?.status === 'failed' && <p>{string(stage.error?.message) || `This build did not finish${string(stage.error?.reason_code) ? ` (${stage.error.reason_code})` : ''}.`}</p>}</dd>
       <dt>Compile</dt><dd>{attempts.length > 0 && <ul>{attempts.map(row => <li key={row.attempt} title={attemptLabel(row)}>{attemptLabel(row, { limit: 3 })}</li>)}</ul>}
-        {studioTest && <p>Test run · {resultLabel(studioTest) || notReported}{studioTest.summary && ` · ${studioTest.summary}`}</p>}
-        {!attempts.length && !studioTest && (['queued', 'running'].includes(stage?.status) ? 'Not yet' : notReported)}
-        {stage?.status === 'failed' && failedCompile && <div><p>Fixing these errors uses one author run.</p>
+        {!attempts.length && (['queued', 'running'].includes(stage?.status) ? 'Not yet' : notReported)}
+        {stage?.status === 'failed' && (failedCompile || stage.error?.retryable === true) && <div><p>Trying again uses one of your daily builds. Claude starts again from the same plan.</p>
           <button type="button" className="chip-neutral" disabled={busy || retried || disabled} onClick={retry}>
-            {retried ? 'Retry requested' : 'Fix with these errors'}</button></div>}</dd>
+            {retried ? 'Retry requested' : 'Try the build again'}</button></div>}</dd>
       <dt>{selfDeploy ? 'Deploy' : 'Review'}</dt><dd>{selfDeploy ? review ? <p>
         {published ? <>Deployed to AutoCAD<DecisionTime at={publication?.published_at ?? review.decided_at} /></>
           : publicationState === 'rolled_back' ? 'Rolled back'
@@ -349,7 +400,8 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
         {checksPassed ? <div className="inline-actions">
           <button type="button" className="chip-act" disabled={busy || !visible}
             onClick={() => { track('deploy.clicked'); void decide('approve') }}>{busy ? 'Deploying...' : 'Deploy to AutoCAD'}</button>
-        </div> : <p>Deploy is available once the checks pass.</p>}
+          {branchBuild && <p>It compiled. It has not run on a drawing yet. Its first run is in AutoCAD.</p>}
+        </div> : <p>{branchBuild ? 'Deploy is available once it compiles. It has not run on a drawing yet.' : 'Deploy is available once the checks pass.'}</p>}
         <details><summary>What will be deployed</summary>
           <ReviewDetails plan={plan} files={files} source={sourceReady && source.file} loadingSource={!sourceReady} compile={compile} />
         </details></> : review ? <p>
@@ -375,9 +427,13 @@ export default function AuthoringCard({ sessionId, changeSetId, proposal, disabl
               onClick={() => navigator.clipboard?.writeText(packageDigest)?.catch(() => {})}>Copy</button>
           </span>}</>
         : publishLabels[publicationState] || (['queued', 'running', 'staged'].includes(stage?.status) ? 'Not yet' : notReported)}</dd>
-      <dt>AutoCAD</dt><dd>{branchSummary(stage?.branch) || (published ? 'Waiting for AutoCAD to pick it up' : 'Not deployed yet')}</dd>
+      <dt>AutoCAD</dt><dd><AutoCADStatus report={stage?.branch} published={published}
+        publishedAt={publication?.published_at ?? stage?.updated_at} /></dd>
       {published && <DeployTarget />}
     </dl>
+    {branchBuild && ['staged', 'published'].includes(stage?.status) && Array.isArray(plan?.acceptance) && plan.acceptance.length > 0
+      && <details className="inline-review-details"><summary>What to check after you run it</summary>
+        <ul>{plan.acceptance.map((check, i) => <li key={i}>{check}</li>)}</ul></details>}
     {(readError || reviewError) && <p role="alert">{readError || reviewError} <button type="button" className="chip-neutral"
       onClick={refreshStage}>Check again</button></p>}
     {actionError && <p role="alert">{actionError}</p>}

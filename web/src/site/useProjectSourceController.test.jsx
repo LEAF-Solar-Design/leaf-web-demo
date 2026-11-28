@@ -278,6 +278,15 @@ describe('Native source through the real API', () => {
   const transcript = (overrides = {}) => material({ byte_size: 1048576, name: 'Authentic transcript.txt', ...overrides })
   const nativeSetup = (options = {}) => setup({ ...options, props: { sourceContext: 'native', ...options.props } })
 
+  it.each(['missing session', 'stale session', 'redirect'])('does not submit native source after %s authority failure', async (failure) => {
+    const h = nativeSetup({ materials: [transcript()], mint: async () => { throw new Error(failure) } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(0)
+    expect(h.result.current.error).toMatch(/check the project conversation/i)
+  })
+
   it('native_export_single_confirmation creates from the selected transcript and exports the confirmed source', async () => {
     const { create } = downloadEnvironment()
     const h = nativeSetup({ materials: [transcript(), material({ material_id: REQUEST, name: 'Teacher.mov', media_type: 'video/quicktime', byte_size: 55000000 })],
@@ -293,11 +302,12 @@ describe('Native source through the real API', () => {
       material_refs: [{ material_id: OTHER, sha256: 'e'.repeat(64) }] })
     expect(h.startAgentTurn.mock.calls[0]).toEqual([brief, { source: 'author_panel', purpose: 'stage_authority',
       browser_action: 'create', source_request_id: body.source_request_id, material_refs: body.material_refs,
-      source_profile: 'ios-swiftui-xcodegen-v1' }, { allowSecretOnce: false, requireImmediateTurn: true }])
+      source_profile: 'ios-swiftui-xcodegen-v1' }, { allowSecretOnce: false, requireImmediateTurn: true, existingSessionOnly: true }])
     const witness = h.result.current.candidate
     await act(async () => { await Promise.all([h.result.current.confirm(witness), h.result.current.confirm(witness)]) })
     const confirmation = JSON.parse(h.calls.find((call) => call.url.endsWith('/confirm')).body)
     expect(confirmation).toEqual({ receipt_digest: witness.receipt_digest, expected_version: witness.version, confirmation_id: expect.any(String) })
+    expect(h.startAgentTurn.mock.calls[1][2]).toEqual({ allowSecretOnce: false, requireImmediateTurn: true })
     expect(h.startAgentTurn.mock.calls[1][1]).toEqual({ source: 'author_panel', purpose: 'stage_authority', browser_action: 'confirm',
       source_request_id: witness.source_request_id, ...confirmation, source_profile: 'ios-swiftui-xcodegen-v1' })
     expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(2)
@@ -435,7 +445,7 @@ describe('Native source through the real API', () => {
     expect(h.startAgentTurn).toHaveBeenCalledWith(brief, { source: 'author_panel', purpose: 'stage_authority',
       browser_action: 'edit', source_request_id: body.source_request_id, material_refs: body.material_refs,
       expected_base_commit: body.expected_base_commit, source_profile: 'ios-swiftui-xcodegen-v1' },
-    { allowSecretOnce: false, requireImmediateTurn: true })
+    { allowSecretOnce: false, requireImmediateTurn: true, existingSessionOnly: true })
     const witness = h.result.current.candidate
     await act(async () => { await h.result.current.confirm({ ...witness, version: witness.version + 1 }) })
     expect(h.startAgentTurn).toHaveBeenCalledTimes(1)

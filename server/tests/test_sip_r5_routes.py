@@ -121,9 +121,9 @@ def states(response):
 
 
 @pytest.mark.parametrize(("layer", "padding"), [
-    ("PV_KEEP_OUT", 0.25), ("Keepout-Access", 1), ("ROOF KEEPOUT", 2),
+    ("PV_KEEP_OUT", 0.25), ("Keepout-Access", 1), ("ROOF KEEPOUT", 2), ("Roof Aisles", None),
 ])
-def test_homerun_keepout_refusal_names_leads_in_preview_and_submit(lane, case, monkeypatch, layer, padding):
+def test_homerun_routing_refusal_names_leads_in_preview_and_submit(lane, case, monkeypatch, layer, padding):
     r3b = policy_cases.r3b
     ctx = r3b.assigned_parent(lane.s, case)
     ctx = r3b.canonical_custody(lane.s, monkeypatch, ctx.graph)
@@ -133,11 +133,17 @@ def test_homerun_keepout_refusal_names_leads_in_preview_and_submit(lane, case, m
     assert leads
     scale = ctx.graph["project"]["units"]["meters_per_unit"]
     xs, ys = zip(*(point[:2] for route in leads for point in route["points"]))
-    left, right = min(xs) / scale - padding, max(xs) / scale + padding
-    bottom, top = min(ys) / scale - padding, max(ys) / scale + padding
+    if padding is None:
+        params["saved_aisle_layer"] = layer
+        top = max(ys) / scale + 1
+        points = [[min(xs) / scale, top], [max(xs) / scale, top]]
+    else:
+        left, right = min(xs) / scale - padding, max(xs) / scale + padding
+        bottom, top = min(ys) / scale - padding, max(ys) / scale + padding
+        points = [[left, bottom], [right, bottom], [right, top], [left, top]]
     lane.s.set_parent({**ctx.intake, "polylines": [{
-        "handle": "A8", "layer": layer, "closed": True, "space": "model",
-        "pts": [[left, bottom], [right, bottom], [right, top], [left, top]],
+        "handle": "A8", "layer": layer, "closed": padding is not None, "space": "model",
+        "pts": points,
     }]})
     pinned = graph_adapter.resolve_project_graph_context(lane.s.context())
     policy_cases.r4.at(lane.a, monkeypatch, pinned, "solar-homeruns")

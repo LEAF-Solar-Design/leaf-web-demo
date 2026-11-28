@@ -120,7 +120,9 @@
       "0117",
       "0118",
       "0119",
-      "0120"
+      "0120",
+      "0121",
+      "0122"
     ],
     "migration_files": [
       "0001_project_job.sql",
@@ -242,7 +244,9 @@
       "0117_customization_stage_grants.sql",
       "0118_sizing_exchange_check_security_definer.sql",
       "0119_browser_static_build_admission.sql",
-      "0120_lab_attempt_wall_cap.sql"
+      "0120_lab_attempt_wall_cap.sql",
+      "0121_solve_completed_group_preview.sql",
+      "0122_branch_tool_run_receipts.sql"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -1176,6 +1180,7 @@
         "customization_publication_requests",
         "customization_review_decisions",
         "branch_tool_receipts",
+        "branch_tool_run_receipts",
         "customization_deployment_snapshots",
         "customization_deployment_audit"
       ],
@@ -1235,6 +1240,7 @@
         "customization_publication_requests",
         "customization_review_decisions",
         "branch_tool_receipts",
+        "branch_tool_run_receipts",
         "customization_deployment_snapshots",
         "customization_deployment_audit"
       ],

@@ -141,8 +141,9 @@ def _authorized(tenant, project_id, drawing_id, version_id, capability):
         return None, entitlements.policy_unavailable_response(capability, tier)
     if not allowed:
         return None, entitlements.entitlement_denied_response(capability, tier)
+    # The account capability is separate from permission to publish a project artifact.
     verified = project.resolve_context(tenant, project_id, version_id,
-        drawing_id=drawing_id, write=capability == "upload")
+        drawing_id=drawing_id, write=True)
     context = graphs.resolve_project_graph_context(verified)
     if context.graph is None:
         _fail("GRAPH_NOT_EMBEDDED")
@@ -151,9 +152,9 @@ def _authorized(tenant, project_id, drawing_id, version_id, capability):
     return context, denial
 
 
-def _recheck(tenant, context, *, write=False):
+def _recheck(tenant, context):
     verified = project.resolve_context(tenant, context.project_id, context.parent_version_id,
-        drawing_id=context.drawing_id, write=write)
+        drawing_id=context.drawing_id, write=True)
     final = graphs.resolve_project_graph_context(verified)
     if _identity(final) != _identity(context):
         _fail("SIP_R6_ARTIFACT_SOURCE_MISMATCH")
@@ -282,7 +283,7 @@ def import_source(tenant, project_id, drawing_id, input_version_id, data):
         prepared = sink.prepare(solar_artifacts.ArtifactOutput(
             {"page_count": page_count}, sources.SOURCE_MEDIA_TYPE, sources.SOURCE_FILENAME, data))
     with _import_phase(attempt_id, "authority_recheck"):
-        _recheck(tenant, context, write=True)
+        _recheck(tenant, context)
     # Conditional reservations survive store failures. Same bytes reuse the slot.
     with _import_phase(attempt_id, "slot_reservation"):
         _reserve(context, content_sha)

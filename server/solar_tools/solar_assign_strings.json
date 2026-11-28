@@ -15,7 +15,7 @@
   "record": {
     "name": "solar-assign-strings",
     "version": "1.0.0",
-    "description": "Assign every unassigned string to the drawing's inverters or L1 collectors by the plugin's pattern matcher, numbering and tagging each circuit.",
+    "description": "Assign every unassigned string to the drawing's inverters or L1 collectors, numbering and tagging each circuit. Enable balance_whole_strings to distribute intact strings across the available inputs while retaining existing assignments.",
     "kind": "script",
     "family_id": "stringing",
     "engine_op": "solar_assign_strings",
@@ -26,7 +26,8 @@
         "drawing_id": {"type": "string", "maxLength": 128},
         "operation": {"type": "string", "enum": ["assign-strings"]},
         "expected_rev": {"type": "integer", "minimum": 0, "maximum": 2147483647},
-        "accept_excess_capacity": {"type": "boolean"}
+        "accept_excess_capacity": {"type": "boolean"},
+        "balance_whole_strings": {"type": "boolean"}
       },
       "required": ["operation", "expected_rev", "accept_excess_capacity"],
       "additionalProperties": false

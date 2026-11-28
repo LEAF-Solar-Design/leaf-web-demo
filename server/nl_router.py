@@ -439,6 +439,15 @@ _GROUPED_PANELS = re.compile(
 )
 
 
+_VISIBLE_PANEL_LAYERS = re.compile(
+    r"(?:please\s+)?(?:count|tally|how many|give me the number of)\s+"
+    r"(?:(?:only|just)\s+)?(?:the\s+)?(?:solar\s+|pv\s+|photovoltaic\s+)?"
+    r"(?:panels?|modules?)\s+(?:are\s+)?(?:on|in|from)\s+"
+    r"(?:(?:only|just)\s+)?(?:the\s+)?visible\s+layers?(?:\s+only)?[.!?]?",
+    re.I,
+)
+
+
 _COORDINATE = r"([+-]?(?:\d+(?:\.\d*)?|\.\d+))"
 _COVERAGE_EXCLUSION = re.compile(
     r"\b(?:excluding|exclude|without|omitting|omit|leaving out|leave out|ignoring|ignore)"
@@ -587,6 +596,15 @@ def _layer_ranking_params(text):
             **({"highlight_ranked_layers": True} if highlights else {})}
 
 
+_LAYER_COMPARISON = re.compile(
+    r"""(?:\bcounts?\b[^"'\r\n]{0,40}\blayers?\b\s*(?:for\s+)?"""
+    r"""|\bcompare\s+(?:exact\s+)?(?:saved\s+)?layer\s+counts?\s+(?:for\s+)?"""
+    r"""|\bcount\s+(?:the\s+)?entities\s+on\s+)"""
+    r"""(["'])([^"'\r\n]+)\1\s+(?:and|versus|vs\.?)\s+(["'])([^"'\r\n]+)\3""",
+    re.I,
+)
+
+
 def _decide(
     text: str,
     q_seq: List[str],
@@ -698,6 +716,16 @@ def _decide(
             return Classification(lane=LANE_RUN, tool="count-modules", params=options, confidence=0.95,
                                   rationale="Compare physical module counts by layer across the drawing windows.")
 
+    layer_comparison = _LAYER_COMPARISON.search(text)
+    if (layer_comparison and re.search(r"\b(?:merg(?:e|ed|ing)|combined)\b", text, re.I)
+            and any(doc.tool.get("name") == "compare-layer-counts" for doc in docs)):
+        first, second = layer_comparison[2], layer_comparison[4]
+        if first != second:
+            return Classification(
+                lane=LANE_RUN, tool="compare-layer-counts", params={"layers": [first, second]},
+                confidence=0.95, rationale="Compare the two exact saved layer names.",
+            )
+
     comparison = _share_change_params(text)
     if comparison and any(doc.tool.get("name") == "count-modules" for doc in docs):
         options = {"compare_selections": comparison}
@@ -718,6 +746,15 @@ def _decide(
     if ranking_params and any(doc.tool.get("name") == "count-modules" for doc in docs):
         return Classification(lane=LANE_RUN, tool="count-modules", params=ranking_params,
                               confidence=0.95, rationale="Rank selected physical module counts by layer.")
+
+    if _VISIBLE_PANEL_LAYERS.fullmatch(text.strip()) and any(
+        doc.tool.get("name") == "count-modules" for doc in docs
+    ):
+        return Classification(
+            lane=LANE_RUN, tool="count-modules",
+            params={"group_by": "layer", "panel_scope": "all_layers", "visible_layers_only": True},
+            confidence=0.95, rationale="Count panel sets on layers that are on and thawed.",
+        )
 
     grouped = _GROUPED_PANELS.fullmatch(text.strip())
     if grouped and (grouped["only"] or grouped["exclude"] or grouped["roof"]):

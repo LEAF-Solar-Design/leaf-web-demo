@@ -214,6 +214,51 @@ def test_sip_r6_compares_saved_cables_without_artifacts(http):
     assert (s.blobs, s.head, s.writes) == custody
 
 
+@pytest.mark.parametrize(
+    ("before_detour", "after_detour", "before_z", "after_z", "expected"),
+    [
+        (None, None, None, 0, ()),
+        (None, None, 0, 8, ()),
+        (12, -12, 0, 0, ()),
+        (None, 12, 0, 0, (16.40, 82.02)),
+    ],
+    ids=["xy-to-xyz", "elevation-only", "mirrored-detour", "longer-detour"],
+)
+def test_saved_cable_lengths_use_plan_coordinates(
+    http, before_detour, after_detour, before_z, after_z, expected,
+):
+    graph = files.schedules_cases.solaredge_layout(files.design_cases.graph.__wrapped__(), "direct")
+    before, after = deepcopy(graph), deepcopy(graph)
+    for revision, detour, elevation in ((before, before_detour, before_z), (after, after_detour, after_z)):
+        points = revision["routes"][0]["points"]
+        if detour is not None:
+            points.insert(1, [0, detour])
+        if elevation is not None:
+            for point in points:
+                point.append(elevation)
+
+    before_id = save_schedule_graph(http, before)
+    after_id = save_schedule_graph(http, after)
+    state = http.s
+    custody = dict(state.blobs), state.head, list(state.writes)
+    response = compare_saved_cables(http, before_id, after_id)
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    result = response.json()["result"]
+    assert result["total_changes"] == (1 if expected else 0)
+    assert result["before"]["source_version_id"] == str(before_id)
+    assert result["after"]["source_version_id"] == str(after_id)
+    assert (state.blobs, state.head, state.writes) == custody
+    if expected:
+        change, = result["changes"]
+        assert change["route_id"] == graph["routes"][0]["id"]
+        assert change["change"] == "changed"
+        assert (change["before"]["length_ft"], change["after"]["length_ft"]) == expected
+    else:
+        assert result["changes"] == []
+
+
 @pytest.mark.parametrize("variant", ["relabel", "unassign", "input-swap"])
 def test_sip_r6_schedule_comparison_direct(http, variant):
     make_graph = files.design_cases.graph.__wrapped__

@@ -7,6 +7,7 @@ import uuid
 
 from solar_design_graph import GraphValidationError, _bounded_json, entities
 from solar_joint_homerun_routing import MAX_KEEP_OUTS
+from solar_saved_aisle_routing import route_saved_aisles
 from solar_sizing_client import advance, checked_graph
 from solar_solve_results import HOMERUN_KINDS
 from solar_wiring_client import licensed_preview, local_routes
@@ -44,15 +45,21 @@ def _replace_homeruns(graph, routes):
 
 def _validate_request(params):
     _bounded_json(params)
-    if (type(params) is not dict or set(params) - {"expected_rev", "cancel", "routing_constraints"}
+    if (type(params) is not dict
+            or set(params) - {"expected_rev", "cancel", "routing_constraints", "saved_aisle_layer"}
             or type(params.get("cancel", False)) is not bool
             or ("routing_constraints" in params and type(params["routing_constraints"]) is not dict)):
         raise GraphValidationError("INVALID_ROUTING_REQUEST")
+    if "saved_aisle_layer" in params:
+        layer = params["saved_aisle_layer"]
+        if (type(layer) is not str or not layer.strip() or len(layer) > 128
+                or "routing_constraints" in params):
+            raise GraphValidationError("INVALID_ROUTING_REQUEST", "saved_aisle_layer")
 
 
-def _routing_constraints(intake, graph, requested):
+def _drawing_keepouts(intake, graph):
     if type(intake) is not dict:
-        return requested
+        return []
     saved = []
     scale = graph["project"]["units"]["meters_per_unit"]
     for polyline in intake.get("polylines", []):
@@ -68,32 +75,27 @@ def _routing_constraints(intake, graph, requested):
         if (polyline.get("closed") is not True or polyline.get("width")
                 or type(bulges) is not list or any(bulges)
                 or type(points) is not list or len(points) < 3
-                or any(type(point) is not list or len(point) < 2 or any(
+                or any(type(point) is not list or len(point) not in (2, 3) or any(
                     type(value) not in (int, float) or abs(value) > 1e15 or not math.isfinite(value)
-                    for value in point[:2]) for point in points)):
+                    for value in point) for point in points)
+                or any(len(point) != len(points[0]) for point in points)):
             raise invalid
-        # The router accepts planar boxes. The envelope of a straight outline
-        # keeps every segment outside the drawn area, including rotated outlines.
-        x_coords, y_coords = zip(*(point[:2] for point in points))
-        saved.append({"min_xy": [min(x_coords) * scale, min(y_coords) * scale],
-                      "max_xy": [max(x_coords) * scale, max(y_coords) * scale]})
+        # Use the enclosing bounds of the outline, including its elevation range
+        # when the saved points carry Z. Legacy XY outlines span all elevations.
+        axes = list(zip(*points))
+        saved.append(([min(axis) * scale for axis in axes],
+                      [max(axis) * scale for axis in axes]))
         if len(saved) > MAX_KEEP_OUTS:
             raise invalid
-    if not saved:
-        return requested
-    constraints = {"keep_outs": [], "aisles": []} if requested is None else requested
-    if (set(constraints) != {"keep_outs", "aisles"}
-            or any(type(items) is not list for items in constraints.values())):
-        raise GraphValidationError("INVALID_ROUTING_CONSTRAINTS", "routing_constraints")
-    names = {item["name"] for items in constraints.values() for item in items
-             if type(item) is dict and type(item.get("name")) is str}
-    ordinal = 0
-    for box in saved:
-        ordinal += 1
-        while f"Drawing keepout {ordinal}" in names:
-            ordinal += 1
-        box["name"] = f"Drawing keepout {ordinal}"
-    return {**constraints, "keep_outs": [*constraints["keep_outs"], *saved]}
+    return saved
+
+
+def _routes(graph, source, params):
+    keepouts = _drawing_keepouts(source, graph)
+    if "saved_aisle_layer" not in params:
+        return local_routes(graph, params.get("routing_constraints"), drawing_keepouts=keepouts)
+    return route_saved_aisles(local_routes(graph), source, params["saved_aisle_layer"],
+                             graph["project"]["units"]["meters_per_unit"], keepouts)
 
 
 def create_homeruns(intake, params, *, licensed_write=None):
@@ -101,7 +103,7 @@ def create_homeruns(intake, params, *, licensed_write=None):
     graph = checked_graph(intake, params.get("expected_rev"))
     if params.get("cancel", False):
         return {"graph": graph, "cancelled": True}
-    routes = local_routes(graph, _routing_constraints(intake, graph, params.get("routing_constraints")))
+    routes = _routes(graph, intake, params)
     # Replace only the terminal leads (feeders and trenches stay) and invalidate derived tables.
     dropped = _replace_homeruns(graph, routes)
     changed = list(routes)
@@ -129,7 +131,7 @@ def run(intake, params, *, source_intake=None):
     if not readiness["input_ready"]:
         raise GraphValidationError(readiness["input_reason"].upper())
 
-    routes = local_routes(graph, _routing_constraints(source_intake, graph, params.get("routing_constraints")))
+    routes = _routes(graph, source_intake, params)
     prior = {}
     for route in graph["routes"]:
         if route["route_kind"] in HOMERUN_KINDS:

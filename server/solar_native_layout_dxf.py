@@ -284,6 +284,10 @@ class _Drawing:
             if name in ("HEADER", "THUMBNAILIMAGE"):
                 continue
             indexes = [j for j in range(start, end) if p[j].code == 0]
+            # AutoCAD writes two section-level groups before the ACDSDATA records.
+            if (name == "ACDSDATA" and indexes and indexes[0] == start + 2
+                    and (p[start].code, p[start + 1].code) == (70, 71)):
+                start += 2
             if start != end and (not indexes or indexes[0] != start):
                 _fail("SOURCE_INVALID")
             records = [_Record(a, b, tuple(p[a:b]))

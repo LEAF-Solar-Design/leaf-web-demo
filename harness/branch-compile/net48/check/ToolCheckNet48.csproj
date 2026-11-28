@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>tool-check-net48</AssemblyName>
+    <RootNamespace>LeafSolarDesign.ScriptHost</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+    <EnableDefaultNoneItems>false</EnableDefaultNoneItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Compile/*.cs" />
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Package/*.cs" />
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Abstractions/*.cs" />
+    <Compile Include="../../vendor/LeafSolarDesign.ScriptHost/Run/ToolBudget.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="Net48Compiler.cs" />
+    <EmbeddedResource Include="../../vendor/LeafSolarDesign.ScriptHost/Compile/api-allowlist.v2.json" LogicalName="LeafSolarDesign.ScriptHost.api-allowlist.v2.json" />
+    <None Include="../../vendor/tools/ci/acad-refs.lock.json" Link="acad-refs.lock.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
+    <PackageReference Include="System.Reflection.MetadataLoadContext" Version="8.0.1" />
+    <PackageReference Include="autocad.net" Version="25.0.1" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+    <PackageReference Include="autocad.net.core" Version="25.0.0" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+    <PackageReference Include="autocad.net.model" Version="25.0.0" ExcludeAssets="runtime;native;contentfiles;build;buildTransitive" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

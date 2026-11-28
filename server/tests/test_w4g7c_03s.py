@@ -375,7 +375,49 @@ def test_mleader_dxf_probe_group_sequence_and_references():
     assert catalogue[3] == "Standard" and catalogue[350] == dict(ms)[5]
 
 
-@pytest.mark.parametrize("change", ["block", "absent_style", "missing_text", "two_lines"])
+@pytest.mark.parametrize("root_sizes", [(2,), (1, 1), (2, 1)])
+def test_mleader_dxf_round_trips_nested_bilingual_leader_geometry(root_sizes):
+    from dxf_intake import parse_dxf_bytes
+    from intake_dxf import IntakeDxfError, intake_to_dxf
+
+    intake = _mleader_dxf_fixture()
+    record, = intake["mleaders"]
+    record["text"] = "Panneau d\u00e9j\u00e0 pos\u00e9\\PPanel already installed"
+    roots = []
+    for index, size in enumerate(root_sizes):
+        roots.append({
+            "landing": [5 + index, 4, 0], "dogleg_dir": [1 - 2 * index, 0, 0],
+            "dogleg": round(0.36 + index, 2), "has_landing": 1, "has_dogleg": 1,
+            "attachment_direction": 0, "lines": [
+                [[index * 10 + line, 0, 0]] for line in range(size)
+            ],
+        })
+    record["leader_geometry"] = {"base": [5.36, 4, 0], "roots": roots}
+    raw = intake_to_dxf(intake)
+    pairs, = _dxf_records(raw, "MULTILEADER")
+    assert pairs.count((302, "LEADER{")) == len(root_sizes)
+    assert pairs.count((304, "LEADER_LINE{")) == sum(root_sizes)
+    parsed = parse_dxf_bytes(raw)
+    assert "mleaders_unsupported" not in parsed
+    assert parsed["mleaders"] == [record]
+
+    tips = [[line[0][0] + 0.000125, -0.00025, 0]
+            for root in roots for line in root["lines"]]
+    precise = {**record, "arrow_tips": tips}
+    reopened = parse_dxf_bytes(intake_to_dxf({**intake, "mleaders": [precise]}))
+    assert reopened["mleaders"] == [precise]
+    write_loop._verify_mleader_effects(intake, reopened, {}, {})
+    with pytest.raises(ValueError, match="unchanged MLEADER"):
+        write_loop._verify_mleader_effects(reopened, intake, {}, {})
+
+    for invalid, reason in ((tips[:-1], "one arrow tip per leader line"),
+                            (tips[::-1], "does not match its leader line"),
+                            ([[float("inf"), 0, 0], *tips[1:]], "not finite")):
+        with pytest.raises(IntakeDxfError, match=reason):
+            intake_to_dxf({**intake, "mleaders": [{**precise, "arrow_tips": invalid}]})
+
+
+@pytest.mark.parametrize("change", ["block", "absent_style", "missing_text", "empty_second_line"])
 def test_mleader_dxf_unsupported_shapes_counted(change):
     from dxf_intake import parse_dxf_bytes
     from intake_dxf import intake_to_dxf

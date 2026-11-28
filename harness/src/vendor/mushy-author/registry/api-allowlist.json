@@ -33,8 +33,6 @@
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTable.GetEnumerator",
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTable.Has",
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTable.Item",
-    "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.BigFontFileName",
-    "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.FileName",
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.FlagBits",
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.Name",
     "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.ObliquingAngle",

@@ -14,6 +14,46 @@ ASKS = [
 ]
 
 
+@pytest.mark.parametrize("clip_owner, expected_status", [("20", "ok"), ("30", "tool_error")])
+def test_inactive_paper_viewport_resolves_its_own_clip_boundary(clip_owner, expected_status):
+    tables = [(0, "TABLE"), (2, "LAYER"),
+              (0, "LAYER"), (5, "10"), (2, "0"), (70, 0), (62, 7),
+              (0, "ENDTAB"), (0, "TABLE"), (2, "BLOCK_RECORD"),
+              (0, "BLOCK_RECORD"), (5, "20"), (2, "*Paper_Space0"), (340, "21"),
+              (0, "BLOCK_RECORD"), (5, "30"), (2, "*Paper_Space1"), (340, "31"),
+              (0, "ENDTAB")]
+    layouts = [(0, "LAYOUT"), (5, "21"), (330, "A"), (100, "AcDbPlotSettings"),
+               (1, ""), (100, "AcDbLayout"), (1, "Roof"), (330, "20"),
+               (0, "LAYOUT"), (5, "31"), (330, "A"), (100, "AcDbLayout"),
+               (1, "Detail"), (330, "30")]
+    viewport = [(0, "VIEWPORT"), (5, "A1"), (102, "{ACAD_REACTORS"), (330, "A"),
+                (102, "}"), (330, "20"), (100, "AcDbEntity"), (67, 1),
+                (100, "AcDbViewport"), (10, 0), (20, 0), (40, 20), (41, 20),
+                (45, 20), (68, 1), (69, 2), (90, 65536), (340, "A2")]
+    boundary = [(0, "LWPOLYLINE"), (5, "A2"), (330, clip_owner),
+                (100, "AcDbEntity"), (67, 1), (100, "AcDbPolyline"),
+                (90, 4), (70, 1), (10, -4), (20, -4), (10, 4), (20, -4),
+                (10, 4), (20, 4), (10, -4), (20, 4)]
+    blocks = [(0, "BLOCK"), (330, "20"), (2, "*Paper_Space0"), *viewport,
+              *(boundary if clip_owner == "20" else []), (0, "ENDBLK"),
+              (0, "BLOCK"), (330, "30"), (2, "*Paper_Space1"),
+              *(boundary if clip_owner == "30" else []), (0, "ENDBLK"),
+              (0, "BLOCK"), (330, "50"), (2, "PV Module"),
+              (0, "POINT"), (10, 0), (20, 0), (0, "ENDBLK")]
+    entities = [(0, "INSERT"), (5, "C1"), (2, "PV Module"), (8, "0"), (10, 0), (20, 0),
+                (0, "INSERT"), (5, "C2"), (2, "PV Module"), (8, "0"), (10, 8), (20, 0)]
+    tags = (section("TABLES", tables) + section("BLOCKS", blocks)
+            + section("ENTITIES", entities) + section("OBJECTS", layouts) + [(0, "EOF")])
+    raw = "".join(f"{code}\n{value}\n" for code, value in tags).encode()
+    _, source, _ = tools_fallback.author_tool("Count visible panels by layer and crop in viewport A1.")
+    status, result = invoke(source, raw)
+    assert status == expected_status, result
+    if status == "ok":
+        assert result[0]["total"] == 1
+    else:
+        assert "different layout" in str(result)
+
+
 def drawing(frozen="12"):
     tables = [(0,"TABLE"), (2,"LAYER"), (70,5)]
     for handle, name, flags in [("10","0",0), ("11","Roof",0), ("12","Shade",0),
@@ -92,6 +132,9 @@ def crop_drawing(service_x, viewport_tags=(), boundary=()):
     ("Count only thawed panels that also lie inside the viewport crop polygon.",
      crop_drawing(1000, boundary=((-10, -10), (10, -10), (10, 10), (-10, 10))),
      ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
+    ("Count only thawed panels that also lie inside the viewport crop polygon.",
+     crop_drawing(1000, ((340, "0"),)),
+     ["C1[0,0]/B1[0,0]", "C1[0,0]/B1[0,1]"]),
     ("Which PV modules on unfrozen layers are inside the viewport A1 clipping boundary?",
      crop_drawing(3, boundary=((-1, -1), (4, -1), (4, -.5), (1, -.5), (1, 1), (-1, 1))),
      ["C1[0,0]/B1[0,0]"]),
@@ -109,6 +152,7 @@ def test_crop_and_thaw_composition(ask, raw, expected):
 
 @pytest.mark.parametrize("tags,expected", [
     (((340, "FF"),), "missing or ambiguous"),
+    (((340, "0"), (90, 65536)), "missing or ambiguous"),
     (((90, 1),), "unsupported perspective viewport calibration"),
     (((36, 0),), "finite view direction"),
     (((90, 22), (43, -2), (44, 2)), "invalid viewport depth planes"),

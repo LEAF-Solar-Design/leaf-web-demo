@@ -42,6 +42,35 @@ def _fully_assigned(graph):
     return bool(graph["strings"]) and all(string["inverter_ref"] is not None for string in graph["strings"])
 
 
+def _input_utilization(row):
+    return Fraction(row["occupied_inputs"], row["total_dc_inputs"])
+
+
+def _saved_utilization(saved):
+    capacities = [row for row in saved["collector_capacity"] if row["total_dc_inputs"] > 0]
+    occupied = sum(row["occupied_inputs"] for row in capacities)
+    spare = sum(row["spare_inputs"] for row in capacities)
+    unassigned = len(saved["unassigned_string_refs"])
+    lowest = min(map(_input_utilization, capacities), default=None)
+    if not capacities:
+        status = "no_countable_inputs"
+    elif unassigned:
+        status = "unassigned_strings_remain"
+    elif spare:
+        status = "spare_inputs_after_assignment"
+    else:
+        status = "all_inputs_occupied"
+    return {
+        "status": status,
+        "occupied_inputs": occupied,
+        "spare_inputs": spare,
+        "unassigned_strings": unassigned,
+        "least_utilized_collector_refs": [
+            row["inverter_ref"] for row in capacities if _input_utilization(row) == lowest
+        ],
+    }
+
+
 def _inverter_comparison(graph, saved, refs):
     if (type(refs) is not list or len(refs) < 2
             or any(type(ref) is not str or not ref for ref in refs) or len(set(refs)) != len(refs)):
@@ -59,11 +88,8 @@ def _inverter_comparison(graph, saved, refs):
     if len(capacities) != len(selected):
         raise GraphValidationError("INVALID_STRING_ASSIGNMENT_REQUEST")
 
-    def utilization(row):
-        return Fraction(row["occupied_inputs"], row["total_dc_inputs"])
-
-    capacities.sort(key=lambda row: (utilization(row), row["inverter_ref"]))
-    lowest = utilization(capacities[0])
+    capacities.sort(key=lambda row: (_input_utilization(row), row["inverter_ref"]))
+    lowest = _input_utilization(capacities[0])
     string_tags = {row["string_ref"]: row["circuit_tag"] for row in saved["assignments"]}
     by_inverter = {ref: [] for ref in selected}
     voltage = string_voltage_report(graph, None)
@@ -73,13 +99,15 @@ def _inverter_comparison(graph, saved, refs):
 
     return {
         "design_min_temp_c": voltage["design_min_temp_c"],
-        "least_utilized_inverter_refs": [row["inverter_ref"] for row in capacities if utilization(row) == lowest],
+        "least_utilized_inverter_refs": [
+            row["inverter_ref"] for row in capacities if _input_utilization(row) == lowest
+        ],
         "groups": [{"capacity": row, "strings": by_inverter[row["inverter_ref"]]} for row in capacities],
     }
 
 
 def _candidate_rows(assignment, before, params):
-    binding, state, rows, assigned, remaining, reason, _ = assignment._assignment_plan(before, params)
+    binding, state, rows, assigned, remaining, reason, lines = assignment._assignment_plan(before, params)
     if reason == "STRING_ASSIGNMENT_MAPPING_FAILED":
         assignment._refuse(reason)
     candidate = (assignment._assignment_candidate(before, binding, state, rows, assigned)
@@ -94,7 +122,7 @@ def _candidate_rows(assignment, before, params):
          "circuit_tag": strings[ref]["circuit_tag"], "mppt_letter": inputs[ref]["mppt_letter"],
          "input_number": inputs[ref]["input_number"]} for ref in assigned_ids
     ]
-    return candidates, remaining_ids, reason
+    return candidates, remaining_ids, reason, lines
 
 
 def run(graph, params):
@@ -109,26 +137,28 @@ def run(graph, params):
         targets = assignment._targets(before)
         if not targets:
             raise GraphValidationError("NO_STRING_COLLECTORS")
+        saved = _saved_state(before, targets)
         result = {
             "schema": "leaf.solar-assignment-report.v1",
             "expected_rev": before["rev"],
             "status": "saved",
             "committed": False,
-            "saved_state": _saved_state(before, targets),
+            "saved_state": saved,
+            "utilization": _saved_utilization(saved),
             "electrical_suitability": {"status": "unknown", "reason": "mppt_voltage_current_limits_not_verified"},
         }
         if "inverter_refs" in params:
-            result["inverter_comparison"] = _inverter_comparison(before, result["saved_state"], params["inverter_refs"])
+            result["inverter_comparison"] = _inverter_comparison(before, saved, params["inverter_refs"])
         if params.get("suggest_minimum_moves", False):
             result["rebalance"] = minimum_direct_moves(before)
         return result
     before = assignment._assignment_source(graph, params)
     if _fully_assigned(before) and not before["electrical_zones"]:
-        candidates, remaining, reason = [], [], "NO_UNASSIGNED_STRINGS"
+        candidates, remaining, reason, lines = [], [], "NO_UNASSIGNED_STRINGS", []
     else:
-        candidates, remaining, reason = _candidate_rows(assignment, before, params)
+        candidates, remaining, reason, lines = _candidate_rows(assignment, before, params)
     eligible = sorted([row["string_ref"] for row in candidates] + remaining)
-    return {
+    result = {
         "schema": "leaf.solar-assignment-report.v1",
         "expected_rev": before["rev"],
         "status": ("partial" if candidates else "unassigned") if remaining else "complete",
@@ -140,6 +170,9 @@ def run(graph, params):
         "remaining_string_refs": remaining,
         "counts": {"eligible": len(eligible), "candidate_assigned": len(candidates), "remaining": len(remaining)},
     }
+    if params.get("balance_whole_strings", False):
+        result["balance_lines"] = lines
+    return result
 
 
 def input_readiness(graph):

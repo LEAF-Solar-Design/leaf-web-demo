@@ -2,13 +2,39 @@
 import re
 
 
+_ROUTE = r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b"
+_ROUTE_SUBJECT = rf"{_ROUTE}(?:\s+(?:paths?|runs?|segments?))?"
+_POSITION = r"(?:inside|within|outside|contained)\b"
+_AISLE_INTENT = re.compile(
+    r"\baisle\s+(?:compliance|violations?)\b"
+    r"|\bcompliant\s+with\b"
+    rf"|{_ROUTE_SUBJECT}\s+(?:stay(?:s|ing)?|remain(?:s|ing)?|follow(?:s|ing)?|leav(?:e|es|ing))\b"
+    rf"|{_ROUTE_SUBJECT}\s+(?:are|is|lie|lies)\s+(?:(?:fully|entirely)\s+)?{_POSITION}"
+    rf"|\b(?:find|show|flag|identify|report|which)\s+(?:(?:the|all)\s+)?"
+    rf"(?:cable\s+)?{_ROUTE_SUBJECT}\s+{_POSITION}"
+)
+_DEPARTURE_MEASUREMENT = re.compile(
+    r"\b(?:measure|calculate|quantify)\b[^.!?]*\b(?:outside|beyond)\s+"
+    r"(?:(?:the|allowed|marked|access|designated)\s+)*aisles?\b"
+)
+
+
 def is_route_crossing_request(description):
     words = description.casefold()
-    return all(re.search(pattern, words) for pattern in (
-        r"\b(?:cables?|wires?|wiring|conduits?|routes?)\b",
+    if not re.search(_ROUTE, words):
+        return False
+    if all(re.search(pattern, words) for pattern in (
         r"\b(?:arrays?|panels?|modules?)\b",
-        r"\b(?:cross(?:es|ing)?|intersect(?:s|ing)?|enter(?:s|ing)?|cut(?:s|ting)? through)\b",
-    ))
+        r"\b(?:cross(?:es|ings?)?|intersect(?:s|ing|ions?)?|enter(?:s|ing)?|cut(?:s|ting)? through)\b",
+    )):
+        return True
+    if _DEPARTURE_MEASUREMENT.search(words):
+        return True
+    return bool(
+        re.search(r"\baisles?\b", words)
+        and re.search(r"\b(?:check|verify|validate|audit|confirm|whether|which|flag|find|identify|report|show)\b", words)
+        and _AISLE_INTENT.search(words)
+    )
 
 
 PLANAR_GEOMETRY_BODY = r"""
@@ -70,9 +96,17 @@ def location(point, edges):
 
 
 ROUTE_CROSSINGS_BODY = PLANAR_GEOMETRY_BODY + r"""
-def classify(points, polygons):
-    in_aisles = True
-    for a, b in zip(points, points[1:]):
+from math import hypot
+
+
+def point_at(start, direction, t):
+    return start[0] + t * direction[0], start[1] + t * direction[1]
+
+
+def analyze_route(handle, points, polygons):
+    crosses_array = False
+    departures = []
+    for segment_index, (a, b) in enumerate(zip(points, points[1:])):
         extent = bounds((a, b))
         nearby = [(role, edges) for role, box, edges in polygons if overlaps(extent, box)]
         direction = difference(b, a)
@@ -80,11 +114,12 @@ def classify(points, polygons):
         for _, edges in nearby:
             split_at_edges(a, direction, edges, cuts)
         ordered = sorted(cuts)
+        outside = []
         # Location is constant between consecutive edge intersections. The union
         # of the closed aisles covers a segment iff it covers every interval.
         for start, end in zip(ordered, ordered[1:]):
             t = (start + end)/2
-            sample = (a[0] + t*direction[0], a[1] + t*direction[1])
+            sample = point_at(a, direction, t)
             covered = False
             inside_array = False
             for role, edges in nearby:
@@ -93,10 +128,26 @@ def classify(points, polygons):
                     inside_array = True
                 if role == "aisle" and relation >= 0:
                     covered = True
-            if inside_array and not covered:
-                return "crosses_array"
-            in_aisles = in_aisles and covered
-    return "stays_in_aisle" if in_aisles else "outside_aisle"
+            if covered:
+                continue
+            crosses_array = crosses_array or inside_array
+            # An array edge can split one aisle departure into adjacent intervals.
+            if outside and outside[-1][1] == start:
+                outside[-1] = (outside[-1][0], end)
+            else:
+                outside.append((start, end))
+        for start, end in outside:
+            span = end - start
+            departures.append({
+                "handle": handle,
+                "segment_index": segment_index,
+                "from": [float(value) for value in point_at(a, direction, start)],
+                "to": [float(value) for value in point_at(a, direction, end)],
+                "length": hypot(span * direction[0], span * direction[1]),
+            })
+    if crosses_array:
+        return "crosses_array", departures
+    return ("outside_aisle" if departures else "stays_in_aisle"), departures
 
 
 def run(intake, params):
@@ -130,8 +181,11 @@ def run(intake, params):
             polygons.append((role, bounds(points), list(zip(points, points[1:] + points[:1]))))
         else:
             raise ValueError(f"The {role} footprint on {handle} must be closed.")
-    result = {"crosses_array": [], "stays_in_aisle": [], "outside_aisle": []}
+    result = {"crosses_array": [], "stays_in_aisle": [], "outside_aisle": [],
+              "outside_aisle_intervals": []}
     for handle, points in routes:
-        result[classify(points, polygons)].append(handle)
+        category, departures = analyze_route(handle, points, polygons)
+        result[category].append(handle)
+        result["outside_aisle_intervals"].extend(departures)
     return result, {"highlight_handles": result["crosses_array"], "markers": []}
 """

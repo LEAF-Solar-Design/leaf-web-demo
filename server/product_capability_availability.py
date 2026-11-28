@@ -101,6 +101,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from solar_design_graph import GraphValidationError
+
 CONTRACT_VERSION = "leaf.platform.v1alpha1"
 
 # W1 uses the ordinary tool catalog, independently of the platform lease catalog.
@@ -254,7 +256,7 @@ def w1_input_readiness(tenant, drawing_id=None, *, project_id=None, version="hea
         graph = context["graph"]
         readiness = unavailable("persisted_graph_unavailable")
         try:
-            readiness.update(w1_graph_readiness(graph))
+            readiness.update(w1_graph_readiness(graph, routing_diagnostics=True))
         except (KeyError, ValueError, TypeError):
             readiness = unavailable("persisted_graph_unavailable")
         readiness.update(w1_local_commit_inputs(graph))
@@ -347,33 +349,68 @@ def w1_local_commit_inputs(graph):
     return result
 
 
-def w1_homeruns_current(graph, expected):
-    """True when the graph's homerun subset is exactly the regenerated terminal leads.
-
-    Only routes whose route_kind is a homerun kind (solar_solve_results.HOMERUN_KINDS) take part;
-    feeders and trenches are other contracts and never make routing incomplete. The key count is
-    checked against the subset's length, so a duplicate homerun (two routes with one key) refuses.
-    `expected` is local_routes(graph); the caller computes it once. Pure: never mutates.
-    """
+def w1_homerun_issues(graph, expected):
+    """Return the persisted string and route IDs for each incomplete terminal lead."""
     from solar_solve_results import HOMERUN_KINDS
 
-    homeruns = [route for route in graph["routes"] if route["route_kind"] in HOMERUN_KINDS]
-    actual = {(route["from_ref"], route["route_kind"]): route for route in homeruns}
-    if not len(actual) == len(expected) == len(homeruns):
-        return False
+    actual = {}
+    for route in graph["routes"]:
+        if route["route_kind"] in HOMERUN_KINDS:
+            actual.setdefault((route["from_ref"], route["route_kind"]), []).append(route)
+
+    issues = {}
     for route in expected:
-        found = actual.get((route["from_ref"], route["route_kind"]))
-        if (found is None or found["validity"]["state"] != "valid"
-                or any(found[key] != route[key] for key in
-                       ("to_ref", "points", "wire_gauge", "point_units", "length_units"))
-                or not math.isclose(found["length_ft"], route["length_ft"], rel_tol=1e-9)
-                or any(found["extra"].get(key) != route["extra"][key]
-                       for key in ("terminal_panel_ref", "mppt_letter", "input_number"))):
+        key = route["from_ref"], route["route_kind"]
+        saved = actual.pop(key, [])
+        if len(saved) != 1 or not _current_homerun(saved[0], route):
+            issues[key] = sorted(item["id"] for item in saved)
+    for key, saved in actual.items():
+        issues[key] = sorted(item["id"] for item in saved)
+    return issues
+
+
+def _current_homerun(found, route):
+    if (found["validity"]["state"] != "valid"
+            or any(found[key] != route[key] for key in
+                   ("to_ref", "wire_gauge", "point_units", "length_units"))
+            or any(found["extra"].get(key) != route["extra"][key]
+                   for key in ("terminal_panel_ref", "mppt_letter", "input_number"))):
+        return False
+    points = found["points"]
+    length_ft = route["length_ft"]
+    if points != route["points"]:
+        routing = found["extra"].get("routing")
+        aisle = routing.get("aisle") if isinstance(routing, dict) else None
+        if (found["extra"].get("routing_policy") != "shared-aisle-terminal-lead-v1"
+                or not isinstance(aisle, str) or not aisle.strip()
+                or len(points) < 2
+                or points[0] != route["points"][0] or points[-1] != route["points"][-1]):
             return False
-    return True
+        segments = [math.dist(a, b) for a, b in zip(points, points[1:])]
+        if 0 in segments:
+            return False
+        length_ft = math.fsum(segments) / .3048
+    return math.isclose(found["length_ft"], length_ft, rel_tol=1e-9)
 
 
-def w1_graph_readiness(graph):
+def w1_homerun_diagnostics(issues):
+    return {
+        "affected_leads": [f"{string.rsplit(':', 1)[-1]}/{kind}" for string, kind in sorted(issues)],
+        "affected_route_ids": sorted(route_id for ids in issues.values() for route_id in ids),
+    }
+
+
+class IncompleteHomerunRouting(GraphValidationError):
+    def __init__(self, issues):
+        super().__init__("COMPLETE_ROUTING_REQUIRED")
+        self.diagnostics = w1_homerun_diagnostics(issues)
+
+
+def w1_homeruns_current(graph, expected):
+    return not w1_homerun_issues(graph, expected)
+
+
+def w1_graph_readiness(graph, *, routing_diagnostics=False):
     """Project persisted producer contracts without making a mutation or a call."""
     from solar_design_graph import GraphValidationError, validate_graph
     from solar_sizing_client import require_sizing
@@ -479,13 +516,16 @@ def w1_graph_readiness(graph):
         except (KeyError, TypeError, ValueError):
             mark(["solar-homeruns"], False, "routing_topology_required")
     routed = False
+    issues = None
     if expected is not None:
         try:
-            # The schedule builtin refuses exactly when this is False (same function).
-            routed = w1_homeruns_current(graph, expected)
+            issues = w1_homerun_issues(graph, expected)
+            routed = not issues
         except (KeyError, ValueError, TypeError):
-            routed = False
+            pass
     mark(["solar-schedule"], routed, "complete_routing_required")
+    if issues and routing_diagnostics:
+        result["solar-schedule"].update(w1_homerun_diagnostics(issues))
     return result
 
 
@@ -516,6 +556,9 @@ def w1_availability(name, *, entitled, inputs):
         "engine_reason": None if engine_ready else "broker_adapter_unavailable",
         "implementation_reason": None,
     }
+    if not entitled:
+        state.pop("affected_leads", None)
+        state.pop("affected_route_ids", None)
     state["refusal_reasons"] = [reason for reason in (
         state["entitlement_reason"], state["implementation_reason"],
         state["engine_reason"], state["input_reason"],

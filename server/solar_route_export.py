@@ -50,7 +50,7 @@ def build(graph, workbook):
         polylines.append({
             "layer": layer,
             "handle": handle,
-            "pts": [[x / meters_per_unit, y / meters_per_unit] for x, y in route["points"]],
+            "pts": [[axis / meters_per_unit for axis in point] for point in route["points"]],
         })
         index.append({
             "route_id": route["id"],
