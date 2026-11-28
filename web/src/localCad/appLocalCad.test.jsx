@@ -86,7 +86,8 @@ const saveObject = declaration('engineSaveTarget').node.init.consequent
 const saveCallback = saveObject.properties.find(property => property.key.name === 'save').value
 const productionSave = Function('env', `
   const { localCadSnapshotRef, getDrawingVersions, checkout, pendingSavesRef, takeCheckout,
-    releaseCheckout, saveDrawingVersionPlan, saveEditedDrawingVersion } = env;
+    releaseCheckout, saveDrawingVersionPlan, saveEditedDrawingVersion, editedDrawingFileName,
+    mountedDrawingRef } = env;
   const REQUESTED_DRAWING_ID = 'prior';
   const LOCAL_CAD_EDIT_REASON = 'AutoCAD is connected. Disconnect to edit this drawing.';
   return (${text(saveCallback)});
@@ -388,6 +389,7 @@ it.each(['retained callback', 'head read', 'checkout'])('refuses an old save aft
     pendingSavesRef: { current: new Map() },
     takeCheckout: vi.fn(() => pending), releaseCheckout: vi.fn().mockResolvedValue(null),
     saveDrawingVersionPlan: vi.fn(), saveEditedDrawingVersion: vi.fn(),
+    editedDrawingFileName: () => 'prior.dxf', mountedDrawingRef: { current: null },
   }
   const saving = productionSave(env)(new Uint8Array([1]), stage === 'head read' ? null : 3, 'digest')
   const rejected = expect(saving).rejects.toThrow('AutoCAD is connected. Disconnect to edit this drawing.')
