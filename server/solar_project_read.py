@@ -113,6 +113,26 @@ def assignment_report_catalog_availability(tool, tenant, *, project_id, drawing_
     return state
 
 
+def _cable_comparison(tenant, verified):
+    from solar_cable_revision_lengths import compare_saved_circuit_lengths
+
+    binding = verified.binding
+    provenance = binding.version.provenance
+    parent_id = provenance.get("parent_version_id") if isinstance(provenance, dict) else None
+    if parent_id is None:
+        return {"status": "no_previous_version"}
+    try:
+        if not isinstance(parent_id, str):
+            raise ValueError("Invalid saved parent ID")
+        parent = project.resolve_context(tenant, binding.project_id, UUID(parent_id),
+                                         drawing_id=binding.drawing_id, write=False)
+        comparison = compare_saved_circuit_lengths(parent, verified)
+        _bounded_json(comparison)
+    except (HTTPException, project.ProjectContextError, ValueError):
+        return {"status": "unavailable"}
+    return {"status": "ready", **comparison}
+
+
 def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name, params, *,
                      catalog_digest, current=False):
     if not policy.project_runs_enabled():
@@ -188,6 +208,8 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
     # Use the actual HTTP serializer too: canonical output size alone is insufficient.
     if len(JSONResponse(content=body).body) > MAX_OUTPUT_BYTES:
         _fail("READ_OUTPUT_LIMIT_EXCEEDED")
+    if tool_name == "solar-cable-export":
+        result["circuit_comparison"] = _cable_comparison(tenant, verified)
     final = project.resolve_context(tenant, project_id, input_version_id,
                                     drawing_id=drawing_id, write=False)
     final_graph = graph_adapter.resolve_project_graph_context(final)
@@ -200,7 +222,17 @@ def run_project_read(tenant, project_id, drawing_id, input_version_id, tool_name
     if current and not final.binding.is_head:
         _fail("SIP_R6_STALE_CURRENT")
     result.update(head_version_id=str(final.binding.head_version_id), is_head=final.binding.is_head)
+    if ("circuit_comparison" in result
+            and final.binding.version.provenance != verified.binding.version.provenance):
+        result["circuit_comparison"] = {"status": "unavailable"}
     body = with_envelope_fields({"result": result})
+    if "circuit_comparison" in result and len(JSONResponse(content=body).body) > MAX_OUTPUT_BYTES:
+        # The optional comparison must not block the workbook if it exceeds the response budget.
+        result["circuit_comparison"] = {"status": "response_limit"}
+        body = with_envelope_fields({"result": result})
+        if len(JSONResponse(content=body).body) > MAX_OUTPUT_BYTES:
+            del result["circuit_comparison"]
+            body = with_envelope_fields({"result": result})
     if len(JSONResponse(content=body).body) > MAX_OUTPUT_BYTES:
         _fail("READ_OUTPUT_LIMIT_EXCEEDED")
     sink.commit()

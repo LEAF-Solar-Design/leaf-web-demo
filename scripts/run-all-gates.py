@@ -918,8 +918,11 @@ def build_suites() -> List[Suite]:
         # as a graph with its feeders reproduces the four sheets of the plugin's i9 workbook. Inputs are authored in
         # the file or read from committed evidence, so the floor is the exact count on every runner. COUNTED: 24
         # tests + 70 more parametrizations = 94; sf-xlsx-xml-chars adds 6 cases = 100.
-        Suite("server-solar-tool-cable-export", "server tests/test_solar_tool_cable_export.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py"), 100),
+        # Saved circuit revision comparison adds 19 cases, including the project read.
+        Suite("server-solar-tool-cable-export", "Cable Export and saved circuit revision comparison",
+              "pytest", SERVER, _py_pytest("tests/test_solar_tool_cable_export.py",
+                                            "tests/test_solar_cable_revision_lengths.py",
+                                            "tests/test_solar_cable_export_project_read.py"), 119),
         # LEAFCOMBINERAUTO as a tool (2026-10-01, sf-w2-combiners-tool): the drawing's recorded combiner intake
         # carried by source_intake, bound and placed by solar_combiner_graph, persisted in one commit (C5: 14
         # combiners, 346 homeruns, 14 feeders) with the rail's replay proof. Inputs are authored in the file and

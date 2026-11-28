@@ -124,6 +124,38 @@ export default function SolarReadResult(props) {
     ? <ProjectReadResult {...props} /> : <StandaloneReadResult {...props} />
 }
 
+function CableCircuitComparison({ comparison, inputVersionId }) {
+  const title = 'Circuit changes since the previous saved version'
+  const ready = comparison?.status === 'ready' && comparison.after_version_id === inputVersionId &&
+    Array.isArray(comparison.changed_circuits) &&
+    comparison.changed_circuits.every((row) => typeof row?.string_id === 'string')
+  const rows = ready ? comparison.changed_circuits : []
+  function length(value) {
+    return typeof value === 'string' && /^-?\d+\.\d{2}$/.test(value) ? value : '\u2014'
+  }
+  function circuit(row) {
+    const before = typeof row.before?.label === 'string' ? row.before.label : ''
+    const after = typeof row.after?.label === 'string' ? row.after.label : ''
+    return before && after && before !== after ? `${before} \u2192 ${after}` : after || before || 'Unlabeled circuit'
+  }
+  return <section className="solar-read-table" aria-label={title}>
+    <h4>{title}</h4>
+    {comparison?.status === 'no_previous_version' ? <p className="dim">This drawing has no previous saved version.</p>
+      : comparison?.status === 'response_limit' ? <p className="dim">Too many circuit changes to display.</p>
+      : !ready ? <p className="dim">Circuit comparison is unavailable for these saved versions.</p>
+      : rows.length === 0 ? <p className="dim">No circuit changes.</p>
+      : <table className="counts grid">
+        <thead><tr><th scope="col">Circuit</th><th scope="col">Before (ft)</th><th scope="col">After (ft)</th>
+          <th scope="col">Change (ft)</th><th scope="col">Route</th></tr></thead>
+        <tbody>{rows.map((row) => <tr key={row.string_id}>
+          <th scope="row" title={row.string_id}>{circuit(row)}</th>
+          <td>{length(row.before?.length_ft)}</td><td>{length(row.after?.length_ft)}</td><td>{length(row.delta_ft)}</td>
+          <td>{row.before === null ? 'Added' : row.after === null ? 'Removed' : row.geometry_changed ? 'Rerouted' : 'Unchanged'}</td>
+        </tr>)}</tbody>
+      </table>}
+  </section>
+}
+
 function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, catalogDigest,
   projectCurrent = true, save = saveArtifact }) {
   let bindingKey
@@ -251,6 +283,9 @@ function ProjectReadResult({ data, solarBinding, authorityKey, projectClient, ca
       <h4>{section.label}</h4><Fields fields={section.fields} />
       {section.tables.map((table) => <ReadTable key={table.key} table={table} />)}
     </section>)}
+    {view.tool === 'solar-cable-export' && <CableCircuitComparison
+      comparison={Object.getOwnPropertyDescriptor(data, 'circuit_comparison')?.value}
+      inputVersionId={state.binding.input_version_id} />}
     {view.artifact?.state === 'unverified' && <p className="dim" data-testid="solar-read-download-status">{projectReadReason('SIP_R12_ARTIFACT_REF_INVALID')}</p>}
     {view.artifact?.state === 'ready' &&
       <button type="button" className="btn ghost" data-testid="solar-read-download" disabled={running} onClick={() => startDownload(view.artifact)}>
