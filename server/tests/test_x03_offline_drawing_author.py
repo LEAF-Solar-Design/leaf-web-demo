@@ -133,10 +133,8 @@ def test_authored_route_aisle_compliance(ask, aisles, route, expected):
     _, source, _ = tools_fallback.author_tool(ask)
     status, payload = invoke(source, raw)
     assert status == "ok", payload
-    assert payload[0] == {
-        category: ["B1"] if category == expected else []
-        for category in ("crosses_array", "stays_in_aisle", "outside_aisle")
-    }
+    for category in ("crosses_array", "stays_in_aisle", "outside_aisle"):
+        assert payload[0][category] == (["B1"] if category == expected else [])
 
 
 @pytest.mark.parametrize("ask,expected_op", [
@@ -168,4 +166,12 @@ def test_authored_route_compliance_classifies_each_route_at_a_rotated_aisle(ask)
     assert manifest["engine_op"] == "check_route_crossings"
     status, payload = invoke(source, raw)
     assert status == "ok", payload
-    assert payload[0] == {"crosses_array": [], "stays_in_aisle": ["B1", "B3"], "outside_aisle": ["B2"]}
+    assert payload[0] == {
+        "crosses_array": [],
+        "stays_in_aisle": ["B1", "B3"],
+        "outside_aisle": ["B2"],
+        "outside_aisle_intervals": [{
+            "handle": "B2", "segment_index": 0, "from": [3.0, 3.0], "to": [3.75, 3.75],
+            "length": pytest.approx(1.0606601717798212),
+        }],
+    }
