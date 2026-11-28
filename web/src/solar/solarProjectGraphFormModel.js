@@ -486,12 +486,15 @@ function previewList(value, limit) {
   return copy
 }
 
-function manualHomerunLeads(tool, status, error) {
-  if (tool !== 'solar-homeruns' || status !== 409
-      || previewField(error, 'reason_code') !== 'JOINT_ROUTING_INFEASIBLE') return null
+function affectedHomerunLeads(tool, status, error) {
+  const reason = previewField(error, 'reason_code')
+  const schedule = tool === 'solar-schedule' && boundedCode(reason)?.toLowerCase() === 'complete_routing_required'
+  const manual = tool === 'solar-homeruns' && reason === 'JOINT_ROUTING_INFEASIBLE'
+  if (status !== 409 || (!schedule && !manual)) return null
+  const limit = schedule ? 8192 : 64
   const value = previewField(error, 'affected_leads')
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null
-  const leads = previewList(value, 64)
+  if (!Array.isArray(value) || value.length === 0 || value.length > limit) return null
+  const leads = previewList(value, limit)
   return leads.every((lead) => {
     if (typeof lead !== 'string' || lead.length > 50 || lead[36] !== '/') return false
     return validUuid(lead.slice(0, 36)) && ['start homerun', 'end homerun'].includes(lead.slice(37))
@@ -541,7 +544,7 @@ export function exactProjectSolarGraphPreview(input) {
       const admissionCode = boundedCode(previewField(error, 'reason_code'))
       if (rows.length === 1 && previewField(row, 'catalog_digest') === catalogDigest
           && previewField(view, 'admission_checked') === true && previewField(view, 'runnable') === false) {
-        affectedLeads = manualHomerunLeads(tool, previewField(admission, 'status_code'), error)
+        affectedLeads = affectedHomerunLeads(tool, previewField(admission, 'status_code'), error)
       }
       if (admissionCode) codes.add(admissionCode)
       else if (listed) {
@@ -645,8 +648,10 @@ export function projectSolarGraphFeedback(input) {
         if ((submission.status >= 400 && submission.status < 500) || (submission.status == null && code)) {
           const feedback = result('refused', code)
           const leads = submission.reason == null || submission.reason === code
-            ? manualHomerunLeads(tool, submission.status, submission.envelope?.error) : null
-          return leads ? { ...feedback, text: `Route these homerun leads manually. ${leads.join(', ')}` } : feedback
+            ? affectedHomerunLeads(tool, submission.status, submission.envelope?.error) : null
+          if (!leads) return feedback
+          const message = tool === 'solar-schedule' ? 'Check these homerun leads.' : 'Route these homerun leads manually.'
+          return { ...feedback, text: `${message} ${leads.join(', ')}` }
         }
       }
       return result('outcome_unknown')

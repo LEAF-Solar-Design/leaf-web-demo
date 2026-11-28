@@ -20,8 +20,9 @@ def _schedule(intake, params):
     from solar_solve_results import HOMERUN_KINDS
 
     # Readiness and this refusal share one check over the homerun subset only.
-    if not availability.w1_homeruns_current(graph, local_routes(graph)):
-        raise GraphValidationError("COMPLETE_ROUTING_REQUIRED")
+    issues = availability.w1_homerun_issues(graph, local_routes(graph))
+    if issues:
+        raise availability.IncompleteHomerunRouting(issues)
     actual = {(r["from_ref"], r["route_kind"]): r for r in graph["routes"]
               if r["route_kind"] in HOMERUN_KINDS}
     rows, sources = [], []
