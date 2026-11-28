@@ -383,6 +383,15 @@ function FileLinks({ files }) {
   )
 }
 
+function layerLengthTable(data) {
+  if (!isRowObject(data.lengths_by_layer)) return null
+  const rows = Object.entries(data.lengths_by_layer).filter(([, length]) => Number.isFinite(length))
+  if (!rows.length) return null
+  const unit = typeof data.units === 'string' ? data.units.trim() : ''
+  const length = unit === 'drawing_units' ? 'Length (drawing units)' : unit ? `Length (${unit})` : 'Length'
+  return { columns: ['Layer', length], rows }
+}
+
 function ResultBody({ result, density, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save, navigation, stale }) {
   const data = result?.result
   if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
@@ -413,10 +422,13 @@ function ResultBody({ result, density, solarBinding, authorityKey, projectClient
   </>
   const scalars = isScalarList(data) ? {} :
     Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || typeof value !== 'object'))
-  if (Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object') {
+  const table = Object.hasOwn(data, 'table') && data.table && typeof data.table === 'object'
+    ? data.table
+    : layerLengthTable(data)
+  if (table) {
     return (
       <>
-        <div className="table-scroll"><GridTable table={data.table} density={density} navigation={navigation} /></div>
+        <div className="table-scroll"><GridTable table={table} density={density} navigation={navigation} /></div>
         {rowTables}
         {Array.isArray(data.warnings) && data.warnings.length > 0 && (
           <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>

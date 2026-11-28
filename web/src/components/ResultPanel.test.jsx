@@ -87,6 +87,37 @@ describe('ResultPanel outcome fallbacks', () => {
 })
 
 
+describe('ResultPanel saved layer lengths', () => {
+  it.each([
+    ['m', 'Length (m)', { 'Reference-Beam': 1 }, [['Reference-Beam', '1']]],
+    ['ft', 'Length (ft)', { Roof: 125, Canopy: 8 }, [['Roof', '125'], ['Canopy', '8']]],
+    ['drawing_units', 'Length (drawing units)', { Datum: 0, Bad: null }, [['Datum', '0']]],
+  ])('displays layer lengths in %s', (units, heading, lengths, expected) => {
+    const job = {
+      tool: 'beam-lengths-by-layer',
+      status: 'complete',
+      result: { ok: true, tool: 'beam-lengths-by-layer', result: { units, lengths_by_layer: lengths } },
+    }
+    render(<ResultPanel result={recordToEnvelope(job)} />)
+
+    const table = screen.getByRole('columnheader', { name: heading }).closest('table')
+    expect(within(table).getAllByRole('row').slice(1).map((row) =>
+      within(row).getAllByRole('cell').map((cell) => cell.textContent))).toEqual(expected)
+  })
+
+  it('keeps an explicit tool table in preference to a layer length map', () => {
+    render(<ResultPanel result={{ ok: true, result: {
+      units: 'm',
+      lengths_by_layer: { Beam: 1 },
+      table: { columns: ['Measured object'], rows: [['Beam-42']] },
+    } }} />)
+
+    expect(screen.getByRole('cell', { name: 'Beam-42' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Length (m)' })).toBeNull()
+  })
+})
+
+
 describe('ResultPanel combiner capacity detail', () => {
   const refs = [
     'leaf:string:9f32fc53-0172-4497-96c0-a4b5fd08d56e',
