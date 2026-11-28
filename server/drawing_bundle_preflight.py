@@ -7,14 +7,15 @@ import zlib
 from pathlib import PurePosixPath
 from zipfile import BadZipFile, ZIP_DEFLATED, ZIP_STORED, ZipFile, ZipInfo
 
-from guest_uploads import validate_upload
 from dxf_intake import DxfParseError, parse_dxf_bytes
+from guest_uploads import max_upload_bytes, validate_upload
 
 MAX_ARCHIVE_BYTES = 8 * 1024 * 1024
 _MAX_EXPANDED_BYTES = 128 * 1024 * 1024
 _MAX_DRAWING_BYTES = 4 * 1024 * 1024
 _MAX_TOTAL_DRAWING_BYTES = 12 * 1024 * 1024
 _MAX_MEMBERS = 1024
+_MAX_MEMBER_PATH = 512
 _MAX_DRAWINGS = 64
 _MAX_DEPENDENCIES = 10000
 _FILE_KINDS = {"xref", "image", "underlay", "font", "shape_font"}
@@ -43,24 +44,34 @@ def _archive_path(name: str, *, parent: tuple[str, ...] = ()) -> str | None:
 
 def _inventory(archive: ZipFile) -> dict[str, tuple[str, ZipInfo]]:
     entries = archive.infolist()
-    if len(entries) > _MAX_MEMBERS or sum(item.file_size for item in entries) > _MAX_EXPANDED_BYTES:
-        raise BundlePreflightError("ZIP exceeds the preflight inventory limits")
+    if len(entries) > _MAX_MEMBERS:
+        raise BundlePreflightError("ZIP exceeds the preflight member count limit")
     files = {}
-    seen = set()
+    seen = {}
+    member_cap = max_upload_bytes()
     for item in entries:
         name = item.orig_filename.replace("\\", "/")
         path = _archive_path(name)
-        if path is None or ".." in name.split("/") or len(path) > 512:
-            raise BundlePreflightError("ZIP contains an unsafe member name")
+        if path is None or ".." in name.split("/") or len(path) > _MAX_MEMBER_PATH:
+            label = name[:_MAX_MEMBER_PATH]
+            raise BundlePreflightError(f"ZIP contains an unsafe member name {label!r}")
         key = path.casefold()
         if key in seen:
-            raise BundlePreflightError("ZIP contains ambiguous member names")
-        seen.add(key)
+            raise BundlePreflightError(f"ZIP contains ambiguous member names {seen[key]!r} and {name!r}")
+        seen[key] = name
         mode = stat.S_IFMT(item.external_attr >> 16)
         if mode not in (0, stat.S_IFREG, stat.S_IFDIR) or item.flag_bits & 1:
             raise BundlePreflightError("ZIP contains a linked, special or encrypted member")
-        if not name.endswith("/") and mode != stat.S_IFDIR and not item.external_attr & 0x10:
-            files[key] = path, item
+        if name.endswith("/") or mode == stat.S_IFDIR or item.external_attr & 0x10:
+            continue
+        cap = member_cap
+        if PurePosixPath(path).suffix.lower() == ".dxf":
+            cap = min(cap, _MAX_DRAWING_BYTES)
+        if item.file_size > cap:
+            raise BundlePreflightError(f"ZIP member {path!r} exceeds the {cap} byte expanded size limit")
+        files[key] = path, item
+    if sum(item.file_size for item in entries) > _MAX_EXPANDED_BYTES:
+        raise BundlePreflightError(f"ZIP exceeds the {_MAX_EXPANDED_BYTES} byte expanded size limit")
     return files
 
 
@@ -127,7 +138,7 @@ def _resolve(archive: ZipFile, primary_member: str) -> dict:
     for key in pending:
         path, item = files[key]
         drawing_bytes += item.file_size
-        if item.file_size > _MAX_DRAWING_BYTES or drawing_bytes > _MAX_TOTAL_DRAWING_BYTES:
+        if drawing_bytes > _MAX_TOTAL_DRAWING_BYTES:
             raise BundlePreflightError("ZIP exceeds the preflight drawing size limits")
         drawings.append(path)
         parent = tuple(path.split("/")[:-1])

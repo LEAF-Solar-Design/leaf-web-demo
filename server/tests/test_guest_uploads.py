@@ -126,8 +126,8 @@ def test_bundle_preflight_keeps_unresolved_references_visible(client, target, re
 
 
 @pytest.mark.parametrize("members, message", [
-    ({"../outside.dxf": DXF_BYTES}, "unsafe member"),
-    ({"A101.dxf": DXF_BYTES, "a101.DXF": DXF_BYTES}, "ambiguous member"),
+    ({"../outside.dxf": DXF_BYTES}, "unsafe member name '../outside.dxf'"),
+    ({"A101.dxf": DXF_BYTES, "a101.DXF": DXF_BYTES}, "ambiguous member names 'A101.dxf' and 'a101.DXF'"),
     ({"A101.dxf": DXF_BYTES.replace(b"0\nENDSEC\n0\nEOF\n", b"")}, "invalid ASCII DXF"),
     ({"A101.dxf": _with_external_block("roof.dxf"), "roof.dxf": b"not a drawing"}, "invalid drawing roof.dxf"),
 ])
@@ -135,6 +135,19 @@ def test_bundle_preflight_rejects_unsafe_or_incomplete_inventory(client, members
     response = _bundle_request(client, members)
     assert response.status_code == 400, response.text
     assert message in response.json()["error"]["message"]
+
+
+def test_bundle_preflight_flags_large_unreferenced_drawing(client, monkeypatch):
+    size_limit = len(DXF_BYTES) * 2
+    monkeypatch.setattr("drawing_bundle_preflight._MAX_DRAWING_BYTES", size_limit)
+    response = _bundle_request(client, {
+        "A101.dxf": DXF_BYTES,
+        "unattached.dxf": DXF_BYTES + b" " * size_limit,
+    })
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == (
+        f"ZIP member 'unattached.dxf' exceeds the {size_limit} byte expanded size limit"
+    )
 
 
 def test_bundle_preflight_requires_account_and_explicit_primary(client):
