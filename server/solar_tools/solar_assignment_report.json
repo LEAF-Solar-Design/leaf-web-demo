@@ -53,6 +53,21 @@
         "committed": {"const": false},
         "commit_refusal_code": {"type": ["string", "null"]},
         "balance_lines": {"type": "array", "items": {"type": "string"}},
+        "utilization": {
+          "description": "Saved occupancy of collectors with countable inputs. Least-used collectors are ranked by occupied input share.",
+          "type": "object",
+          "required": ["status", "occupied_inputs", "spare_inputs", "unassigned_strings", "least_utilized_collector_refs"],
+          "properties": {
+            "status": {
+              "enum": ["no_countable_inputs", "unassigned_strings_remain", "spare_inputs_after_assignment", "all_inputs_occupied"]
+            },
+            "occupied_inputs": {"type": "integer", "minimum": 0},
+            "spare_inputs": {"type": "integer", "minimum": 0},
+            "unassigned_strings": {"type": "integer", "minimum": 0},
+            "least_utilized_collector_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          },
+          "additionalProperties": false
+        },
         "electrical_suitability": {
           "type": "object",
           "required": ["status", "reason"],
