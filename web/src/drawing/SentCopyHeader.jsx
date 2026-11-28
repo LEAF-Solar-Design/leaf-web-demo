@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { getDrawingUploadStatus } from '../api.js'
 import { useDrawingIdentity } from './DrawingIdentityProvider.jsx'
-import { queryDrawingVersionId, sentCopyHeaderLine } from './sentCopyHeader.js'
+import { defaultDrawingVersionId, queryDrawingVersionId, sentCopyHeaderLine } from './sentCopyHeader.js'
 
 export function useLandOnQueryDrawing({ mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion }) {
   const { origin, source } = useDrawingIdentity()
@@ -13,6 +13,26 @@ export function useLandOnQueryDrawing({ mock, openProjectId, workspace, canonica
     const versionId = queryDrawingVersionId({ workspace, openProjectId, drawingId: source })
     if (versionId == null) return
     landed.current.add(key)
+    selectCanonicalVersion(versionId)
+  }, [origin, source, mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion])
+}
+
+// R2-14: a project that opens with no version selected lands on its default
+// version once per open, so the drawing loads without a click. It never
+// replaces a selection (the user's, a revision binding's or the ?drawing=
+// landing's), defers while the ?drawing= query resolves to a version here, and
+// stays quiet after the user clears a selection in the same open.
+export function useLandOnDefaultDrawingVersion({ mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion }) {
+  const { origin, source } = useDrawingIdentity()
+  const settled = useRef({ projectId: null, done: false })
+  useEffect(() => {
+    if (settled.current.projectId !== openProjectId) settled.current = { projectId: openProjectId, done: false }
+    if (mock || openProjectId == null || settled.current.done) return
+    if (canonicalVersionId != null) { settled.current.done = true; return }
+    if (origin === 'query' && queryDrawingVersionId({ workspace, openProjectId, drawingId: source }) != null) return
+    const versionId = defaultDrawingVersionId({ workspace, openProjectId })
+    if (versionId == null) return
+    settled.current.done = true
     selectCanonicalVersion(versionId)
   }, [origin, source, mock, openProjectId, workspace, canonicalVersionId, selectCanonicalVersion])
 }

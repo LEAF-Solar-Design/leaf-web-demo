@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import golden from '../leafPlatform/__fixtures__/leaf.send-copy.v1.golden.json'
 import { fingerprintLine } from '../leafPlatform/sendCopy.js'
 import { DrawingIdentityProvider } from './DrawingIdentityProvider.jsx'
-import SentCopyLine, { useLandOnQueryDrawing } from './SentCopyHeader.jsx'
-import { queryDrawingVersionId, sentCopyHeaderLine } from './sentCopyHeader.js'
+import SentCopyLine, { useLandOnDefaultDrawingVersion, useLandOnQueryDrawing } from './SentCopyHeader.jsx'
+import { defaultDrawingVersionId, queryDrawingVersionId, sentCopyHeaderLine } from './sentCopyHeader.js'
 
 const DRAWING = '0c0c0c0c-0000-4000-8000-000000000003'
 const OTHER = '0d0d0d0d-0000-4000-8000-000000000004'
@@ -250,5 +250,121 @@ describe('queryDrawingVersionId', () => {
     ['only deleted versions', { workspace: { project: { id: PROJECT }, drawing_versions: [workspace.drawing_versions[3]] } }],
   ])('returns null for %s', (_label, overrides) => {
     expect(version(overrides)).toBeNull()
+  })
+})
+
+// R2-14: AutoCAD "Open in Studio" created a one-version project that opened
+// with no version selected and no drawing loaded.
+const SINGLE = { project: { project_id: PROJECT }, drawing_versions: [
+  { version_id: '726d86e7', drawing_id: 'e83aa42b', seq: 1, created_at: '2026-11-28T07:30:00Z' },
+] }
+
+function DefaultProbe(props) {
+  useLandOnQueryDrawing(props)
+  useLandOnDefaultDrawingVersion(props)
+  return null
+}
+
+function mountDefault(overrides = {}, search = '') {
+  const select = vi.fn()
+  const props = { mock: false, openProjectId: PROJECT, workspace: SINGLE, canonicalVersionId: null,
+    selectCanonicalVersion: select, ...overrides }
+  const tree = (next) => <Identity search={search}><DefaultProbe {...props} {...next} /></Identity>
+  const view = render(tree())
+  return { ...view, select, update: (next) => view.rerender(tree(next)) }
+}
+
+describe('useLandOnDefaultDrawingVersion', () => {
+  it('selects the only drawing version once when nothing is selected', () => {
+    const view = mountDefault()
+    expect(view.select).toHaveBeenCalledExactlyOnceWith('726d86e7')
+    view.update({ canonicalVersionId: '726d86e7' })
+    view.update({ canonicalVersionId: null, workspace: { ...SINGLE } })
+    expect(view.select).toHaveBeenCalledOnce()
+  })
+
+  it('leaves an existing selection untouched', () => {
+    const view = mountDefault({ canonicalVersionId: 'chosen' })
+    expect(view.select).not.toHaveBeenCalled()
+    view.update({ canonicalVersionId: null, workspace: { ...SINGLE } })
+    expect(view.select).not.toHaveBeenCalled()
+  })
+
+  it('keeps a project with zero versions empty, then lands when its first version arrives', () => {
+    const empty = { project: { project_id: PROJECT }, drawing_versions: [] }
+    const view = mountDefault({ workspace: empty })
+    expect(view.select).not.toHaveBeenCalled()
+    view.update({ workspace: { project: { project_id: PROJECT } } })
+    expect(view.select).not.toHaveBeenCalled()
+    view.update({ workspace: SINGLE })
+    expect(view.select).toHaveBeenCalledExactlyOnceWith('726d86e7')
+  })
+
+  it('defers to the ?drawing= landing, which picks that drawing over the newest version', () => {
+    const view = mountDefault({ workspace }, `?drawing=${DRAWING}`)
+    expect(view.select).toHaveBeenCalledExactlyOnceWith('v2')
+  })
+
+  it('falls back to the default when the ?drawing= query names no version in this project', () => {
+    const view = mountDefault({}, '?drawing=absent')
+    expect(view.select).toHaveBeenCalledExactlyOnceWith('726d86e7')
+  })
+
+  it.each([
+    ['mock mode', { mock: true }],
+    ['no open project', { openProjectId: null }],
+    ['a workspace still hydrating', { workspace: null }],
+    ['a workspace for another project', { openProjectId: 'another-project' }],
+  ])('does not select for %s', (_label, overrides) => {
+    expect(mountDefault(overrides).select).not.toHaveBeenCalled()
+  })
+
+  it('lands again after the project closes and reopens', () => {
+    const view = mountDefault()
+    view.update({ canonicalVersionId: '726d86e7' })
+    view.update({ openProjectId: null, workspace: null, canonicalVersionId: null })
+    view.update({ openProjectId: PROJECT, workspace: SINGLE, canonicalVersionId: null })
+    expect(view.select.mock.calls).toEqual([['726d86e7'], ['726d86e7']])
+  })
+
+  it('selects once under StrictMode effect replay', () => {
+    const select = vi.fn()
+    render(<React.StrictMode><Identity search=""><DefaultProbe mock={false} openProjectId={PROJECT}
+      workspace={SINGLE} canonicalVersionId={null} selectCanonicalVersion={select} /></Identity></React.StrictMode>)
+    expect(select).toHaveBeenCalledExactlyOnceWith('726d86e7')
+  })
+})
+
+describe('defaultDrawingVersionId', () => {
+  const pick = (versions, openProjectId = PROJECT) =>
+    defaultDrawingVersionId({ workspace: { project: { id: PROJECT }, drawing_versions: versions }, openProjectId })
+
+  it('picks the only live version, ignoring deleted ones', () => {
+    expect(pick([{ version_id: 'a', seq: 1 }, { version_id: 'gone', seq: 2, deleted_at: '2026-11-01T00:00:00Z' }])).toBe('a')
+  })
+
+  it('picks the newest by created_at, then by seq', () => {
+    expect(pick([
+      { version_id: 'old', drawing_id: 'd1', seq: 5, created_at: '2026-11-01T00:00:00Z' },
+      { version_id: 'new', drawing_id: 'd2', seq: 1, created_at: '2026-11-02T00:00:00Z' },
+    ])).toBe('new')
+    expect(pick([{ version_id: 'v1', seq: 1 }, { version_id: 'v3', seq: '3' }, { version_id: 'v2', seq: 2 }])).toBe('v3')
+  })
+
+  it('selects nothing on a tie for newest rather than guess', () => {
+    expect(pick([{ version_id: 'a', drawing_id: 'd1', seq: 1 }, { version_id: 'b', drawing_id: 'd2', seq: 1 }])).toBeNull()
+  })
+
+  it.each([
+    ['no versions', []],
+    ['only deleted versions', [{ version_id: 'gone', seq: 1, deleted_at: '2026-11-01T00:00:00Z' }]],
+    ['non-string version ids', [{ version_id: 7, seq: 1 }, null]],
+  ])('returns null for %s', (_label, versions) => {
+    expect(pick(versions)).toBeNull()
+  })
+
+  it('returns null for a different or missing project', () => {
+    expect(pick([{ version_id: 'a', seq: 1 }], 'another-project')).toBeNull()
+    expect(defaultDrawingVersionId({ workspace: null, openProjectId: PROJECT })).toBeNull()
   })
 })

@@ -32,3 +32,30 @@ export function queryDrawingVersionId({ workspace, openProjectId, drawingId }) {
   }
   return selected
 }
+
+const compareRank = (a, b) => (a < b ? -1 : a > b ? 1 : 0)
+
+// R2-14: the version a project opens on when nothing selected one. Exactly one
+// live version wins outright; otherwise the newest (created_at, then seq) wins,
+// and a tie for newest selects nothing rather than guess. Pure and O(n).
+export function defaultDrawingVersionId({ workspace, openProjectId }) {
+  const projectId = workspace?.project?.project_id ?? workspace?.project?.id
+  if (projectId == null || projectId !== openProjectId) return null
+
+  let selected = null
+  let best = null
+  let tied = false
+  for (const row of workspace?.drawing_versions ?? []) {
+    if (row == null || row.deleted_at != null || typeof row.version_id !== 'string' || !row.version_id) continue
+    const created = Date.parse(row.created_at)
+    const seq = Number(row.seq)
+    const rank = [Number.isFinite(created) ? created : -Infinity, Number.isFinite(seq) ? seq : -Infinity]
+    const order = best == null ? 1 : compareRank(rank[0], best[0]) || compareRank(rank[1], best[1])
+    if (order > 0) {
+      selected = row.version_id
+      best = rank
+      tied = false
+    } else if (order === 0) tied = true
+  }
+  return tied ? null : selected
+}
