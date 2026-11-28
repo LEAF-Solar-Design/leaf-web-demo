@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 BINARY_SENTINEL = b"AutoCAD Binary DXF"
+MAX_POINTS_PER_ENTITY = 10_000
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # Group 410 uses the same name bound as the DXF writer's MAX_LAYER_CHARS.
 _LAYOUT_NAME_MAX_CHARS = 255
@@ -683,25 +684,42 @@ def _parse_mleader(record, styles, textstyles):
     """Walk the nested contexts before resolving the top-level style handles."""
     state = 0
     closed = False
-    branches = 0
-    vertices = []
-    context, leader, top = {}, {}, {}
+    roots = []
+    context, top = {}, {}
+    has_breaks = False
     try:
         for i, (code, value) in enumerate(record):
             if (code, value) == (300, "CONTEXT_DATA{"):
                 state = 1
             elif state == 1 and (code, value) == (302, "LEADER{"):
                 state = 2
+                leader, lines = {}, []
             elif state == 2 and (code, value) == (304, "LEADER_LINE{"):
                 state = 3
-                branches += 1
+                vertices = []
             elif state == 3 and (code, value) == (305, "}"):
+                if not vertices:
+                    return None
+                lines.append(vertices)
                 state = 2
             elif state == 2 and (code, value) == (303, "}"):
+                if not lines:
+                    return None
+                roots.append({
+                    "landing": leader[10], "dogleg_dir": leader[11],
+                    "dogleg": round(_mleader_number(leader[40]), 5),
+                    "has_landing": leader.get(290, "1"),
+                    "has_dogleg": leader.get(291, "1"),
+                    "attachment_direction": leader.get(271, "0"),
+                    "lines": lines,
+                })
                 state = 1
             elif state == 1 and (code, value) == (301, "}"):
                 state, closed = 0, True
             elif state:
+                if state == 1 and code == 10:
+                    context[10] = record[i:i + 3]
+                    continue
                 point_code = ((state == 1 and code == 12) or
                               (state == 2 and code in (10, 11)) or
                               (state == 3 and code == 10))
@@ -714,12 +732,16 @@ def _parse_mleader(record, styles, textstyles):
                     context[code] = value
                 elif state == 2:
                     leader[code] = value
+                    has_breaks |= code in (12, 13)
                 elif code == 10:
                     vertices.append(value)
+                elif code in (11, 12, 90):
+                    has_breaks = True
             elif closed:
                 top.setdefault(code, value)
-        if (branches != 1 or _mleader_number(top.get(172, "0"), integer=True) != 2
-                or 304 not in context or not vertices):
+        if (not closed or state or not roots
+                or _mleader_number(top.get(172, "0"), integer=True) != 2
+                or 304 not in context):
             return None
         style = styles.get(top.get(340, "").upper())
         if style is None:
@@ -728,15 +750,38 @@ def _parse_mleader(record, styles, textstyles):
         handle = groups.get(5, "")
         if not re.fullmatch(r"[0-9A-Fa-f]+", handle):
             return None
-        return {"handle": handle, "layer": groups.get(8, "0") or "0",
-                "style": style["name"],
-                "textstyle": textstyles.get(top.get(343, "").upper(), ""),
-                "height": round(_mleader_number(context[41]), 5),
-                "arrow": round(_mleader_number(context[140]), 5),
-                "dogleg": round(_mleader_number(leader[40]), 5),
-                "attachment": _mleader_number(context[171], integer=True), "pts": vertices + [leader[10]],
-                "landing": leader[10], "dogleg_dir": leader[11],
-                "textpt": context[12], "text": context[304]}
+        first = roots[0]
+        result = {"handle": handle, "layer": groups.get(8, "0") or "0",
+                  "style": style["name"],
+                  "textstyle": textstyles.get(top.get(343, "").upper(), ""),
+                  "height": round(_mleader_number(context[41]), 5),
+                  "arrow": round(_mleader_number(context[140]), 5),
+                  "dogleg": first["dogleg"],
+                  "attachment": _mleader_number(context[171], integer=True),
+                  "pts": first["lines"][0] + [first["landing"]],
+                  "landing": first["landing"], "dogleg_dir": first["dogleg_dir"],
+                  "textpt": context[12], "text": context[304]}
+        if len(roots) > 1 or len(first["lines"]) > 1:
+            point_count = len(roots) + sum(len(line) for root in roots for line in root["lines"])
+            if has_breaks or point_count > MAX_POINTS_PER_ENTITY:
+                return None
+            base = context[10]
+            if [code for code, _ in base] != [10, 20, 30]:
+                return None
+            if _mleader_number(top.get(271, "0"), integer=True) != 0:
+                return None
+            for root in roots:
+                for field, allowed in (("has_landing", (0, 1)), ("has_dogleg", (0, 1)),
+                                       ("attachment_direction", (0,))):
+                    flag = _mleader_number(root[field], integer=True)
+                    if flag not in allowed:
+                        return None
+                    root[field] = flag
+            result["leader_geometry"] = {
+                "base": [round(_mleader_number(value), 3) for _, value in base],
+                "roots": roots,
+            }
+        return result
     except DxfParseError:
         raise
     except (KeyError, ValueError, TypeError, OverflowError):
