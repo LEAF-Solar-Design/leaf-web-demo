@@ -416,7 +416,7 @@ export function validatePanelGroupDiscovery(graph, numbers) {
 }
 
 export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups, discover,
-  catalogDigest, idempotencyKey, geometryOnly = false }) {
+  catalogDigest, idempotencyKey, geometryOnly = false, savedAisleLayer = '' }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
     state = state == null ? state : { mode: state.mode, reason: state.reason, binding: state.binding,
@@ -458,6 +458,9 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
     if (!parsed.ok) return parsed
     params.insertion_point = parsed.point
   } else if (insertionPointText !== undefined && insertionPointText !== '') return fail('request_invalid')
+  if (typeof savedAisleLayer !== 'string' || [...savedAisleLayer].length > 128
+      || (savedAisleLayer && tool !== 'solar-homeruns')) return fail('request_invalid')
+  if (savedAisleLayer) params.saved_aisle_layer = savedAisleLayer
   return { ok: true, request: { tool, params, catalogDigest, idempotencyKey } }
 }
 
@@ -576,6 +579,12 @@ export function exactProjectSolarGraphPreview(input) {
 
 function refusalText(code, tool) {
   switch (code?.toLowerCase()) {
+    case 'saved_aisle_layer_empty':
+      return tool === 'solar-homeruns'
+        ? 'The selected layer has no saved aisle centerlines.' : PROJECT_SOLAR_GRAPH_REASONS.request_refused
+    case 'invalid_saved_aisle_geometry':
+      return tool === 'solar-homeruns'
+        ? 'Use straight, open aisle centerlines on the selected layer.' : PROJECT_SOLAR_GRAPH_REASONS.request_refused
     case 'submitted':
     case 'pending':
     case 'succeeded':
