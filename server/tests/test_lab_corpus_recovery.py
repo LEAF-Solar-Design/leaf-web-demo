@@ -846,9 +846,8 @@ def successor_ledger(request, monkeypatch, tmp_path):
     monkeypatch.setenv('LEAF_RUNTIME_ENV', 'test')
     monkeypatch.setenv('LEAF_LAB_STORE', mode)
     if mode == 'postgres':
-        import os
-
-        if not os.environ.get('LEAF_E364B_PG_PARENT') or not os.environ.get('DATABASE_URL'):
+        managed = os.environ.get('LEAF_E364B_PG_PARENT') and os.environ.get('DATABASE_URL')
+        if not managed and not canonical_ci_pg():
             pytest.skip('requires a disposable local PostgreSQL cluster')
         ledger.platform_link.platform_db().apply_migration()
     else:
