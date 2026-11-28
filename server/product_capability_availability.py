@@ -379,10 +379,15 @@ def _current_homerun(found, route):
     points = found["points"]
     length_ft = route["length_ft"]
     if points != route["points"]:
-        routing = found["extra"].get("routing")
-        aisle = routing.get("aisle") if isinstance(routing, dict) else None
-        if (found["extra"].get("routing_policy") != "shared-aisle-terminal-lead-v1"
-                or not isinstance(aisle, str) or not aisle.strip()
+        extra = found["extra"]
+        policy = extra.get("routing_policy")
+        aisle = None
+        if policy == "shared-aisle-terminal-lead-v1":
+            routing = extra.get("routing")
+            aisle = routing.get("aisle") if isinstance(routing, dict) else None
+        elif policy == "saved-aisle-centerline-v1":
+            aisle = extra.get("saved_aisle_layer")
+        if (not isinstance(aisle, str) or not aisle.strip()
                 or len(points) < 2
                 or points[0] != route["points"][0] or points[-1] != route["points"][-1]):
             return False

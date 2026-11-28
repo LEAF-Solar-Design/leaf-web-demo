@@ -1,8 +1,10 @@
 """Terminal leads on the intake graph, committed through the Studio job rail."""
 import copy
 import importlib.util
+import io
 import json
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,7 @@ sys.path.insert(0, str(SERVER / "tests"))
 import deps
 import jobs
 import product_capability_availability as availability
+import solar_artifacts
 import solar_local_graph
 import solar_tools
 import store
@@ -21,13 +24,14 @@ import write_loop
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
 from solar_joint_homerun_routing import route_together
-from solar_sizing_client import digest
+from solar_sizing_client import SizingRequest, digest, parse_response_bytes, sizing_basis, sizing_record
 from test_w1_design_graph import app_id, graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
 from test_w1_graph_versions import drawing, commit, request_for, TENANT as BUNDLE_TENANT, DRAWING  # noqa: F401
 from test_w1_local_graph_adapter import seed, held
 from test_w1_local_graph_jobs import isolated_jobs, no_network  # noqa: F401
 from test_w1_local_graph_rail import api, _api, body  # noqa: F401
+from test_w1_sizing_groups import plugin  # noqa: F401
 
 TOOL = "solar-homeruns"
 TENANT = "fixture-tenant"
@@ -831,15 +835,46 @@ def _aisles(assigned, lines, layer="Roof Aisles", **properties):
      [[1, 0, 0], [2, 0, 0], [3, 0, 0], [3, -1, 0], [5, -1, 0], [5, 0, 0]], 2),
 ], ids=["offset-crossing-and-tee", "aligned-midsegment-and-overlap", "reversed-endpoint-elbows"])
 def test_selected_saved_aisles_persist_exact_terminal_routes(
-        assigned, isolated_jobs, no_network, monkeypatch, tmp_path, lines, first_points, detour):
+        case, isolated_jobs, no_network, monkeypatch, tmp_path, plugin, lines, first_points, detour):
+    source, equipment_params, intake = case
+    settings = source["settings"]
+    # Cable export reads the standard scenario from the sizing adapter response.
+    request = SizingRequest.model_validate(plugin["request"])
+    response = parse_response_bytes(json.dumps(plugin["response"]).encode())
+    record = sizing_record(request, response, TENANT, "saved-aisle-sizing", accepted_string_length=2)
+    settings["voc_cold"] = record["sizing"]["voc_cold"]
+    sizing = settings["extra"]["string_sizing"]
+    sizing["records"][settings["id"]] = record
+    sizing["basis_sha256"] = sizing_basis(source)
+    assigned = equipment.assign_equipment(
+        source, equipment_params, drawing_intake=intake, licensed_equipment=licensed)["graph"]
     polylines = _aisles(assigned, lines)
     polylines += _aisles(assigned, [[(1, 0), (5, 0)]], space="paper", bulges=[1])
     polylines += _aisles(assigned, [[(1, 0), (5, 0)]], layer="Other Aisles")
     backend = _save(assigned, monkeypatch, tmp_path, polylines)
     for api in _api(backend, tmp_path, monkeypatch):
+        export_tool = solar_tools.trusted_record("solar-cable-export")
+        api[2]["solar-cable-export"] = export_tool
+        jobs._executors.setdefault(jobs.lane_for(export_tool, False), next(iter(jobs._executors.values())))
         response = api[0].post("/api/run?wait=1", json=body(
             api, TOOL, {"expected_rev": 1, "saved_aisle_layer": "roof aisles"}))
         assert response.status_code == 200, response.text
+        schedule = body(api, "solar-schedule", {"expected_rev": 2, "insertion_point": [10, 20]})
+        schedule["dwg_version"] = 2
+        response = api[0].post("/api/run?wait=1", json=schedule)
+        assert response.status_code == 200, response.text
+        export = body(api, "solar-cable-export", {"export_format": "route_bundle"})
+        export["dwg_version"] = 3
+        response = api[0].post("/api/run?wait=1", json=export)
+        assert response.status_code == 200, response.text
+        artifact = response.json()["result"]["output"]["artifact"]
+        assert artifact["source_version"] == 3
+        _, content = solar_artifacts.read_artifact(
+            backend, TENANT, "solar", artifact["artifact_id"], require_head=True)
+        with zipfile.ZipFile(io.BytesIO(content)) as bundle:
+            assert {"CableExport.xlsx", "CableRoutes.dxf", "RouteIndex.json"} <= set(bundle.namelist())
+            index = json.loads(bundle.read("RouteIndex.json"))
+        assert sorted(row["route_id"] for row in index["routes"]) == sorted(ROUTE_IDS)
     _, key, _ = store.resolve_version_entry(backend, TENANT, "solar", 2)
     saved = json.loads(backend.get(key))
     assert saved["polylines"] == polylines
