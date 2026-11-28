@@ -68,6 +68,26 @@ def test_unitless_beams_request_units_before_reporting_metres():
     assert "unit" in str(payload).lower()
 
 
+@pytest.mark.parametrize("ask, layer, units, length, member_count", [
+    ('Sum beam lengths on layer "roof_beams" only.', "Roof_Beams", "drawing_units", 8, 0),
+    ('List beam lengths by layer, restricted to "S-BEAM-L1", in feet.',
+     "S-BEAM-L1", "ft", 20 / 0.3048, 2),
+    ('List each beam and sum beam lengths on "WALL" only in millimeters.',
+     "WALL", "mm", 99000, 1),
+    ('Sum beam lengths on layer "ft spline limits" only.', None, "drawing_units", 0, 0),
+])
+def test_beam_lengths_on_explicit_layer(ask, layer, units, length, member_count):
+    status, payload = invoke(ask, 6, 1)
+    assert status == "ok", payload
+    result, _ = payload
+    totals = {layer: length} if layer else {}
+    assert result["lengths_by_layer"] == pytest.approx(totals)
+    assert result["units"] == units
+    members = result.get("lengths_by_handle", {})
+    assert len(members) == member_count
+    assert all(row["layer"] == layer for row in members.values())
+
+
 def test_original_beam_list_in_drawing_units():
     import intake_dxf
 

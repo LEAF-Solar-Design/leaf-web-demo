@@ -6,6 +6,11 @@ from authored_spline_length import SPLINE_LENGTH_SOURCE
 
 
 _GROUPED = re.compile(r"\b(?:by|per|each|every)\s+(?:drawing\s+)?layer\b|\blayer[- ]by[- ]layer\b")
+_EXPLICIT_LAYER = re.compile(
+    r"""\b(?:on\s+(?:the\s+)?(?:drawing\s+)?layer\s+|restricted\s+to\s+(?:layer\s+)?|(?P<bare_on>on\s+))"""
+    r"""(?P<name>"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`)(?(bare_on)\s+only\b)""",
+    re.IGNORECASE,
+)
 _UNITS = (
     (r"\b(?:millimet(?:er|re)s?|mm)\b", "mm", 0.001),
     (r"\b(?:centimet(?:er|re)s?|cm)\b", "cm", 0.01),
@@ -15,8 +20,17 @@ _UNITS = (
 )
 
 
+def _beam_scope(description):
+    layer = _EXPLICIT_LAYER.search(description)
+    if layer is None:
+        return description, None
+    start, end = layer.span("name")
+    return description[:start] + " " + description[end:], layer["name"][1:-1].casefold()
+
+
 def matches(description):
-    prompt = description.casefold()
+    prompt, explicit_layer = _beam_scope(description)
+    prompt = prompt.casefold()
     # Aggregate linear takeoffs do not require an explicit grouping instruction.
     if re.search(r"\b(?:total|combined|aggregate|sum)\s+beam\s+lengths?\b"
                  r"|\b(?:total|combined|aggregate)\s+lengths?\s+of\s+"
@@ -31,13 +45,14 @@ def matches(description):
         return True
     return bool(re.search(r"\bbeams?\b", prompt)
                 and re.search(r"\blengths?\b", prompt)
-                and (_GROUPED.search(prompt)
+                and (explicit_layer is not None or _GROUPED.search(prompt)
                      or re.search(r"\b(?:curved|spatial)\s+beams?\b|\b(?:3d|polylines?|vertices)\b|\bellip(?:ses?|tical)\b", prompt)))
 
 
 def build_body(description, *, entry_point="run"):
     if entry_point not in ("run", "measure_gross_beams", "collect_spline_segments"):
         raise ValueError("Unsupported beam measurement entry point.")
+    description, explicit_layer = _beam_scope(description) if entry_point == "run" else (description, None)
     for pattern, label, factor in _UNITS:
         if re.search(pattern, description, re.IGNORECASE):
             break
@@ -70,7 +85,8 @@ def build_body(description, *, entry_point="run"):
             .replace("__EVALUATION_LIMIT__", str(evaluation_limit))
             .replace("__ENDPOINTS__", repr(endpoints))
             .replace("__SPAN_DETAIL__", repr(span_detail))
-            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or endpoints or bool(list_members))))
+            .replace("__LIST_MEMBERS__", repr(collect_segments or span_detail or endpoints or bool(list_members)))
+            .replace("__EXPLICIT_LAYER__", repr(explicit_layer)))
 
 
 _BODY = """
@@ -198,6 +214,7 @@ def __ENTRY_POINT__(intake, params):
     members = {}
     span_reports = {}
     identity = identity_frame()
+    explicit_layer = __EXPLICIT_LAYER__
 
     def distinct_entities(records):
         # Handles identify siblings within a definition. Each INSERT placement
@@ -224,7 +241,11 @@ def __ENTRY_POINT__(intake, params):
             return
         if path.get("space") == "paper":
             return
-        if not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer.casefold()):
+        layer_key = layer.casefold()
+        if explicit_layer is not None:
+            if layer_key != explicit_layer:
+                return
+        elif not re.search(r"(?:^|[^a-z0-9])beams?(?:$|[^a-z0-9])", layer_key):
             return
         if __PERIODIC__ and not path.get("periodic"):
             return
