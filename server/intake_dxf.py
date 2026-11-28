@@ -33,12 +33,12 @@ import math
 import re
 from typing import Any, Dict, List
 
-from dxf_intake import _TEXT_MAX_CHARS as MAX_TEXT_CHARS, _TEXT_STYLE_FIELDS, _layout_block_name
+from dxf_intake import MAX_POINTS_PER_ENTITY, _TEXT_MAX_CHARS as MAX_TEXT_CHARS
+from dxf_intake import _TEXT_STYLE_FIELDS, _layout_block_name
 
 # Bounds shared with the write contract (server/mutation_plan.py) so a document
 # the plan could never describe is refused at the same size here.
 MAX_ENTITIES = 200_000
-MAX_POINTS_PER_ENTITY = 10_000
 MAX_POINTS = 1_000_000
 MAX_LAYERS = 10_000
 MAX_LAYER_CHARS = 255
@@ -481,25 +481,48 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         pts = ent.get("pts")
         if not isinstance(pts, list) or not 2 <= len(pts) <= MAX_POINTS_PER_ENTITY:
             _fail(f"{where}: invalid point count")
-        total_points += len(pts)
-        if total_points > MAX_POINTS:
-            _fail(f"more than {MAX_POINTS} points in total")
         record = {"layer": layer, "style": style,
-                  "textstyle": _layer_name(ent.get("textstyle"), where),
                   "pts": [_vector(p, where) for p in pts],
                   **{field: _vector(ent.get(field), where)
-                     for field in ("landing", "dogleg_dir", "textpt")},
+                     for field in ("landing", "dogleg_dir")},
                   **{field: _number(ent.get(field), where)
                      for field in ("height", "arrow", "dogleg")}}
+        if "block_content" in ent:
+            record["block_content"] = _validated_mleader_block(ent["block_content"], known_blocks, where)
+            if "leader_geometry" not in ent or "arrow_tips" in ent:
+                _fail(f"{where}: block callout requires exact leader geometry")
+        else:
+            attachment = ent.get("attachment")
+            if type(attachment) is not int:
+                _fail(f"{where}: attachment must be an integer")
+            text = ent.get("text")
+            if not isinstance(text, str) or _CONTROL_RE.search(text):
+                _fail(f"{where}: text must be a string without control characters")
+            record.update(attachment=attachment, text=text,
+                          textpt=_vector(ent.get("textpt"), where),
+                          textstyle=_layer_name(ent.get("textstyle"), where))
         if record["pts"][-1] != record["landing"]:
             _fail(f"{where}: last point must be the landing")
-        attachment = ent.get("attachment")
-        if isinstance(attachment, bool) or not isinstance(attachment, int):
-            _fail(f"{where}: attachment must be an integer")
-        text = ent.get("text")
-        if not isinstance(text, str) or _CONTROL_RE.search(text):
-            _fail(f"{where}: text must be a string without control characters")
-        record.update(attachment=attachment, text=text)
+        if "leader_geometry" in ent:
+            geometry, point_count = _validated_mleader_geometry(ent["leader_geometry"], record, where)
+            record["leader_geometry"] = geometry
+        else:
+            point_count = len(pts)
+        if "arrow_tips" in ent:
+            line_tips = [record["pts"][0]]
+            if "leader_geometry" in record:
+                line_tips = [line[0] for root in geometry["roots"] for line in root["lines"]]
+            tips = ent["arrow_tips"]
+            if not isinstance(tips, list) or len(tips) != len(line_tips):
+                _fail(f"{where}: expected one arrow tip per leader line")
+            tips = [_vector(tip, f"{where}.arrow_tips") for tip in tips]
+            if any([round(value, 3) for value in tip] != line_tip
+                   for tip, line_tip in zip(tips, line_tips)):
+                _fail(f"{where}: arrow tip does not match its leader line")
+            record["arrow_tips"] = tips
+        total_points += point_count
+        if total_points > MAX_POINTS:
+            _fail(f"more than {MAX_POINTS} points in total")
         h = _real_handle(ent.get("handle"), where, real)
         if h is not None:
             highest = max(highest, int(h, 16))
@@ -546,7 +569,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
         ml_linetype = fresh_handle()
         textstyle_handles = {name: fresh_handle() for name in dict.fromkeys(
             ["Standard"] + [s["textstyle"] for s in mlstyles.values()] +
-            [row[1]["textstyle"] for row in kinds if row[0] == "mleader"])}
+            [row[1]["textstyle"] for row in kinds if row[0] == "mleader" and "textstyle" in row[1]])}
         mlstyle_handles = {name: fresh_handle() for name in mlstyles}
 
     # Pass 2: emit. One flat list of lines, joined once.
@@ -676,7 +699,7 @@ def intake_to_dxf(intake: Dict[str, Any]) -> bytes:
             if field == "arcs":
                 out += ["100", "AcDbArc", "50", _num(angles[0]), "51", _num(angles[1])]
         elif row[0] == "mleader":
-            out += _emit_mleader(row[1], h, block_records["*Model_Space"],
+            out += _emit_mleader(row[1], h, block_records,
                                  mlstyle_handles, textstyle_handles, mlstyles, ml_linetype)
         elif row[0] == "dim":
             _, dimtype, layer, p1, p2, dimline, rotation, style, normal, measurement, _ = row
@@ -976,36 +999,139 @@ def _ml_pairs(pairs):
     return out
 
 
-def _emit_mleader(e, handle, owner, styles, textstyles, catalogue, linetype):
+def _validated_mleader_block(content, blocks, where):
+    if not isinstance(content, dict):
+        _fail(f"{where}: invalid block content")
+    name = _layer_name(content.get("name"), where)
+    if (name not in blocks or _layout_block_name(name)
+            or not isinstance(blocks[name], dict) or blocks[name].get("complete") is not True):
+        _fail(f"{where}: unresolved or incomplete callout block {name}")
+    fields = {key: content.get(key) for key in ("color", "color_override", "override_flags", "connection")}
+    if (any(type(value) is not int or not -(2**31) <= value < 2**31 for value in fields.values())
+            or fields["connection"] not in (0, 1)):
+        _fail(f"{where}: invalid block callout flags")
+    transform = {key: _vector(content.get(key), where)
+                 for key in ("extrusion", "insert", "scale", "scale_override")}
+    if not any(transform["extrusion"]):
+        _fail(f"{where}: block extrusion must not be zero")
+    matrix = content.get("matrix", [])
+    if not isinstance(matrix, list) or len(matrix) not in (0, 16):
+        _fail(f"{where}: invalid block callout matrix")
+    return {"name": name, **fields, **transform,
+            "rotation": _number(content.get("rotation"), where),
+            "rotation_override": _number(content.get("rotation_override"), where),
+            "matrix": [_number(value, where) for value in matrix]}
+
+
+def _validated_mleader_geometry(geometry, primary, where):
+    if not isinstance(geometry, dict) or not isinstance(geometry.get("roots"), list):
+        _fail(f"{where}: invalid leader geometry")
+    roots = geometry["roots"]
+    if not 1 <= len(roots) <= MAX_POINTS_PER_ENTITY:
+        _fail(f"{where}: invalid leader root count")
+    normalized = []
+    point_count = len(roots)
+    for root in roots:
+        if not isinstance(root, dict) or not isinstance(root.get("lines"), list):
+            _fail(f"{where}: invalid leader root")
+        if not 1 <= len(root["lines"]) <= MAX_POINTS_PER_ENTITY:
+            _fail(f"{where}: invalid leader line count")
+        fields = {key: root.get(key) for key in ("has_landing", "has_dogleg", "attachment_direction")}
+        if any(type(value) is not int or value not in (0, 1) for value in fields.values()):
+            _fail(f"{where}: invalid leader root flags")
+        if fields["attachment_direction"] != 0:
+            _fail(f"{where}: vertical leader attachment is unsupported")
+        lines = []
+        for line in root["lines"]:
+            if not isinstance(line, list) or not line:
+                _fail(f"{where}: empty or invalid leader line")
+            point_count += len(line)
+            if point_count > MAX_POINTS_PER_ENTITY:
+                _fail(f"{where}: invalid point count")
+            lines.append([_vector(vertex, where) for vertex in line])
+        normalized.append({
+            **fields, "lines": lines,
+            "landing": _vector(root.get("landing"), where),
+            "dogleg_dir": _vector(root.get("dogleg_dir"), where),
+            "dogleg": _number(root.get("dogleg"), where),
+        })
+    first = normalized[0]
+    if "block_content" not in primary and len(normalized) == 1 and len(first["lines"]) == 1:
+        _fail(f"{where}: leader geometry must contain multiple lines")
+    if (any(first[key] != primary[key] for key in ("landing", "dogleg_dir", "dogleg"))
+            or first["lines"][0] + [first["landing"]] != primary["pts"]):
+        _fail(f"{where}: first line must match the primary leader")
+    return {"base": _vector(geometry.get("base"), where), "roots": normalized}, point_count
+
+
+def _emit_mleader(e, handle, block_records, styles, textstyles, catalogue, linetype):
     """probe6.txt MULTILEADER sequence, including the null leader-line handles."""
     gap = catalogue[e["style"]]["gap"]
-    base = [_number(p + d * e["dogleg"], "mleader content base")
-            for p, d in zip(e["landing"], e["dogleg_dir"])]
-    textstyle = textstyles[e["textstyle"]]
+    geometry = e.get("leader_geometry")
+    if geometry is None:
+        base = [_number(p + d * e["dogleg"], "mleader content base")
+                for p, d in zip(e["landing"], e["dogleg_dir"])]
+        roots = [{**e, "has_landing": 1, "has_dogleg": 1,
+                  "attachment_direction": 0, "lines": [e["pts"][:-1]]}]
+    else:
+        base, roots = geometry["base"], geometry["roots"]
+    block = e.get("block_content")
+    textstyle = textstyles[e.get("textstyle", catalogue[e["style"]]["textstyle"])]
+    if block is None:
+        context_content = [
+            (290, 1), (304, e["text"]), (11, [0.0, 0.0, 1.0]), (340, textstyle),
+            (12, e["textpt"]), (13, [1.0, 0.0, 0.0]), (42, 0.0), (43, 0.0),
+            (44, 0.0), (45, 1.0), (170, 1), (90, -1073741824),
+            (171, e["attachment"]), (172, 5), (91, -1073741824), (141, 0.0),
+            (92, 0), (291, 0), (292, 0), (173, 0), (293, 0), (142, 0.0),
+            (143, 0.0), (294, 0), (295, 0), (296, 0),
+        ]
+        block_reference = []
+        block_overrides = [(93, -1056964608), (10, [1.0, 1.0, 1.0]), (43, 0.0), (176, 0)]
+    else:
+        block_handle = block_records[block["name"]]
+        context_content = [
+            (290, 0), (296, 1), (341, block_handle), (14, block["extrusion"]),
+            (15, block["insert"]), (16, block["scale"]), (46, block["rotation"]),
+            (93, block["color"]), *((47, value) for value in block["matrix"]),
+        ]
+        block_reference = [(344, block_handle)]
+        block_overrides = [(93, block["color_override"]), (10, block["scale_override"]),
+                           (43, block["rotation_override"]), (176, block["connection"])]
     out = _ml_pairs([
-        (0, "MULTILEADER"), (330, owner), (5, handle), (100, "AcDbEntity"),
+        (0, "MULTILEADER"), (330, block_records["*Model_Space"]), (5, handle), (100, "AcDbEntity"),
         (67, 0), (410, "Model"), (8, e["layer"]), (100, "AcDbMLeader"), (270, 2),
         (300, "CONTEXT_DATA{"), (40, 1.0), (10, base), (41, e["height"]),
         (140, e["arrow"]), (145, gap), (174, 1), (175, 1), (176, 0), (177, 0),
-        (290, 1), (304, e["text"]), (11, [0.0, 0.0, 1.0]), (340, textstyle),
-        (12, e["textpt"]), (13, [1.0, 0.0, 0.0]), (42, 0.0), (43, 0.0),
-        (44, 0.0), (45, 1.0), (170, 1), (90, -1073741824),
-        (171, e["attachment"]), (172, 5), (91, -1073741824), (141, 0.0),
-        (92, 0), (291, 0), (292, 0), (173, 0), (293, 0), (142, 0.0),
-        (143, 0.0), (294, 0), (295, 0), (296, 0), (110, [0.0, 0.0, 0.0]),
-        (111, [1.0, 0.0, 0.0]), (112, [0.0, 1.0, 0.0]), (297, 0),
-        (302, "LEADER{"), (290, 1), (291, 1), (10, e["landing"]),
-        (11, e["dogleg_dir"]), (90, 0), (40, e["dogleg"]), (304, "LEADER_LINE{")])
-    for vertex in e["pts"][:-1]:
-        out += _point_groups(vertex)
+        *context_content, (110, [0.0, 0.0, 0.0]),
+        (111, [1.0, 0.0, 0.0]), (112, [0.0, 1.0, 0.0]), (297, 0)])
+    arrow_tips = e.get("arrow_tips")
+    line_index = 0
+    for root_index, root in enumerate(roots):
+        out += _ml_pairs([
+            (302, "LEADER{"), (290, root["has_landing"]), (291, root["has_dogleg"]),
+            (10, root["landing"]), (11, root["dogleg_dir"]),
+            (90, root_index), (40, root["dogleg"]),
+        ])
+        for line in root["lines"]:
+            out += _ml_pairs([(304, "LEADER_LINE{")])
+            tip = line[0] if arrow_tips is None else arrow_tips[line_index]
+            out += _point_groups(tip)
+            for vertex in line[1:]:
+                out += _point_groups(vertex)
+            out += _ml_pairs([
+                (91, line_index), (170, 1), (92, -1056964608), (340, "0"), (171, -2),
+                (40, 0.0), (341, "0"), (93, 0), (305, "}"),
+            ])
+            line_index += 1
+        out += _ml_pairs([(271, root["attachment_direction"]), (303, "}")])
     out += _ml_pairs([
-        (91, 0), (170, 1), (92, -1056964608), (340, "0"), (171, -2),
-        (40, 0.0), (341, "0"), (93, 0), (305, "}"), (271, 0), (303, "}"),
-        (272, 9), (273, 9), (301, "}"), (340, styles[e["style"]]), (90, 279552),
+        (272, 9), (273, 9), (301, "}"), (340, styles[e["style"]]),
+        (90, 279552 if block is None else block["override_flags"]),
         (170, 1), (91, -1056964608), (341, linetype), (171, -2), (290, 1),
-        (291, 1), (41, e["dogleg"]), (42, e["arrow"]), (172, 2), (343, textstyle),
+        (291, 1), (41, e["dogleg"]), (42, e["arrow"]), (172, 2 if block is None else 1), (343, textstyle),
         (173, 1), (95, 1), (174, 1), (175, 0), (92, -1056964608), (292, 0),
-        (93, -1056964608), (10, [1.0, 1.0, 1.0]), (43, 0.0), (176, 0),
+        *block_reference, *block_overrides,
         (293, 0), (294, 0), (178, 0), (179, 1), (45, 1.0), (271, 0),
         (272, 9), (273, 9), (295, 0)])
     return out
