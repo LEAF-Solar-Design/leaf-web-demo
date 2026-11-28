@@ -60,22 +60,26 @@ function snapshot(selection) {
   }
 }
 
-function selectionChanges(first, second) {
-  const changes = []
-  for (const id of new Set([...first.sets.keys(), ...second.sets.keys()])) {
-    const before = first.sets.get(id) ?? null
-    const after = second.sets.get(id) ?? null
-    if (before !== after) changes.push({ kind: 'selected_set', id, before, after })
+function selectionRows(...selections) {
+  const rows = []
+  for (const id of new Set(selections.flatMap(selection => [...selection.sets.keys()]))) {
+    rows.push({ kind: 'selected_set', id, values: selections.map(selection => selection.sets.get(id) ?? null) })
   }
-  for (const id of new Set([...first.handles, ...second.handles])) {
-    const before = first.handles.has(id)
-    const after = second.handles.has(id)
-    if (before !== after) changes.push({ kind: 'highlighted_handle', id, before, after })
+  for (const id of new Set(selections.flatMap(selection => [...selection.handles]))) {
+    rows.push({ kind: 'highlighted_handle', id, values: selections.map(selection => selection.handles.has(id)) })
   }
-  if (first.count !== second.count) {
-    changes.push({ kind: 'total_count', id: null, before: first.count, after: second.count })
-  }
-  return changes.map(change => ({ ...change, before_selection: first.jobId, after_selection: second.jobId }))
+  rows.push({ kind: 'total_count', id: null, values: selections.map(selection => selection.count) })
+  return rows.filter(({ values }) => values.some(value => value !== values[0]))
+}
+
+function sameDrawing(a, b) {
+  return a.scope.project_id === b.scope.project_id && a.scope.organization_id === b.scope.organization_id &&
+    a.scope.drawing_id === b.scope.drawing_id
+}
+
+function conflictingIntake(a, b) {
+  return a.drawingRevision.input_version_id === b.drawingRevision.input_version_id &&
+    a.drawingRevision.intake_sha256 !== b.drawingRevision.intake_sha256
 }
 
 function downloadJson(value, filename) {
@@ -91,9 +95,10 @@ function downloadJson(value, filename) {
   }
 }
 
-function Reference({ id, selection, label }) {
+function Reference({ id, selection, label, showJob = false }) {
   return (
     <dl id={id} aria-label={label} tabIndex={-1} style={{ overflowWrap: 'anywhere' }}>
+      {showJob && <><dt>{label} saved job</dt><dd>{selection.jobId}</dd></>}
       <dt>{label} drawing revision</dt>
       <dd>{selection.drawingRevision.input_version_id}</dd>
       <dt>Drawing intake SHA-256</dt>
@@ -129,17 +134,18 @@ export default function SelectionComparison({ first, second }) {
 
 function SelectionChanges({ a, b, fromFiles = false }) {
   const referenceId = useId()
-  if (a.scope.project_id !== b.scope.project_id || a.scope.organization_id !== b.scope.organization_id ||
-      a.scope.drawing_id !== b.scope.drawing_id) {
+  if (!sameDrawing(a, b)) {
     return <p>Selection comparison requires two reports for the same drawing.</p>
   }
   if (a.jobId === b.jobId) return <p>Choose exports from two different saved selections.</p>
   const revisionChanged = a.drawingRevision.input_version_id !== b.drawingRevision.input_version_id
-  if (!revisionChanged && a.drawingRevision.intake_sha256 !== b.drawingRevision.intake_sha256) {
+  if (conflictingIntake(a, b)) {
     return <p>Selection comparison found conflicting intake fingerprints for the same drawing revision.</p>
   }
   const ruleChanged = a.rule.entry_sha256 !== b.rule.entry_sha256 || a.rule.geometry_sha256 !== b.rule.geometry_sha256
-  const changes = selectionChanges(a, b)
+  const changes = selectionRows(a, b).map(({ kind, id, values: [before, after] }) => ({
+    kind, id, before, after, before_selection: a.jobId, after_selection: b.jobId,
+  }))
   const firstRef = `${referenceId}-first`
   const secondRef = `${referenceId}-second`
   const comparison = {
@@ -175,6 +181,77 @@ function SelectionChanges({ a, b, fromFiles = false }) {
       <Reference id={secondRef} selection={b} label="Second report" />
       <button type="button" onClick={() => downloadJson(comparison, 'selection-comparison.json')}>
         Download selection comparison
+      </button>
+    </section>
+  )
+}
+
+const historyOutcomes = {
+  restored: 'Restored',
+  still_present: 'Edit still present',
+  changed_during_revert: 'Changed during revert',
+}
+
+function historyOutcome(original, edited, reverted) {
+  if (original === reverted) return 'restored'
+  if (edited === reverted) return 'still_present'
+  return 'changed_during_revert'
+}
+
+function SelectionHistory({ original, edited, reverted }) {
+  const selections = [original, edited, reverted]
+  if (!sameDrawing(original, edited) || !sameDrawing(original, reverted)) {
+    return <p>Selection history requires three exports for the same drawing.</p>
+  }
+  if (new Set(selections.map(selection => selection.jobId)).size !== selections.length) {
+    return <p>Choose exports from three different saved selections.</p>
+  }
+  if (conflictingIntake(original, edited) || conflictingIntake(original, reverted) || conflictingIntake(edited, reverted)) {
+    return <p>Selection history found conflicting intake fingerprints for the same drawing revision.</p>
+  }
+
+  const changes = selectionRows(...selections).map(({ kind, id, values: [before, during, after] }) => ({
+    kind, id, original: before, edited: during, reverted: after, outcome: historyOutcome(before, during, after),
+  }))
+  const history = {
+    schema: 'leaf.saved-selection-history.v1',
+    source: 'unverified_files',
+    selections: { original: snapshot(original), edited: snapshot(edited), reverted: snapshot(reverted) },
+    matches_original: changes.every(change => change.outcome === 'restored'),
+    changes,
+  }
+  return (
+    <section aria-label="Exported selection history">
+      <p>{history.matches_original ? 'Reverted selection matches the original' : 'Reverted selection differs from the original'}</p>
+      {changes.length ? (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ overflowWrap: 'anywhere' }}>
+            <caption>Saved selection history</caption>
+            <thead>
+              <tr>
+                <th scope="col">Change</th><th scope="col">Original</th><th scope="col">Edited</th>
+                <th scope="col">Reverted</th><th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {changes.map(change => (
+                <tr key={JSON.stringify([change.kind, change.id])}>
+                  <th scope="row">{labels[change.kind]}{change.id && <> <code>{change.id}</code></>}</th>
+                  <td>{cellValue(change.original)}</td>
+                  <td>{cellValue(change.edited)}</td>
+                  <td>{cellValue(change.reverted)}</td>
+                  <td>{historyOutcomes[change.outcome]}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : <p>No saved selection changes</p>}
+      <Reference selection={original} label="Original" showJob />
+      <Reference selection={edited} label="Edited" showJob />
+      <Reference selection={reverted} label="Reverted" showJob />
+      <button type="button" onClick={() => downloadJson(history, 'selection-history.json')}>
+        Download selection history
       </button>
     </section>
   )
@@ -224,6 +301,7 @@ export function SelectionExports({ reports, projectId }) {
   const [exportId, setExportId] = useState('')
   const [first, setFirst] = useState(null)
   const [second, setSecond] = useState(null)
+  const [reverted, setReverted] = useState(null)
   const selections = [...reports.values()].filter(report => report.tool === countTool)
     .map(savedSelection).filter(Boolean)
   const selected = selections.find(selection => selection.jobId === exportId)
@@ -249,7 +327,13 @@ export function SelectionExports({ reports, projectId }) {
       <p>Files are compared locally. Their rule and drawing references come from the files and are unverified.</p>
       <SelectionFile label="First selection file" projectId={projectId} onSelection={setFirst} />
       <SelectionFile label="Second selection file" projectId={projectId} onSelection={setSecond} />
-      <div aria-live="polite">{first && second && <SelectionChanges a={first} b={second} fromFiles />}</div>
+      <p>To compare a revert, use the first file for the original selection and the second for the edited selection.</p>
+      <SelectionFile label="Reverted selection file (optional)" projectId={projectId} onSelection={setReverted} />
+      <div aria-live="polite">
+        {first && second && (reverted
+          ? <SelectionHistory original={first} edited={second} reverted={reverted} />
+          : <SelectionChanges a={first} b={second} fromFiles />)}
+      </div>
     </details>
   )
 }

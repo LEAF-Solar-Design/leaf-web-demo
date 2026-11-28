@@ -262,7 +262,10 @@ it('exports a drawing revision change and a changed count with the same rule', a
 })
 
 async function downloadSelectionComparison() {
-  const blob = await downloadJson('Download selection comparison', 'selection-comparison.json')
+  return readJson(await downloadJson('Download selection comparison', 'selection-comparison.json'))
+}
+
+function readJson(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(JSON.parse(reader.result))
@@ -363,6 +366,84 @@ it('clears an offline comparison when a file is replaced by invalid JSON or a di
   importCountSelection('Second selection file', new File([JSON.stringify(foreign)], 'different-project.json'))
   expect(await screen.findByText(/Choose a Count selection export for this project/)).toBeVisible()
   expect(screen.queryByRole('region', { name: 'Exported selection comparison' })).toBeNull()
+})
+
+it.each([
+  ['full restore', ['A', 'C'], ['A', 'B'], true, [
+    ['highlighted_handle', 'B', true, false, true, 'restored'],
+    ['highlighted_handle', 'C', false, true, false, 'restored'],
+  ]],
+  ['partial restore', ['A', 'C', 'D'], ['A', 'B', 'D'], false, [
+    ['selected_set', 'roof', 2, 3, 3, 'still_present'],
+    ['highlighted_handle', 'B', true, false, true, 'restored'],
+    ['highlighted_handle', 'C', false, true, false, 'restored'],
+    ['highlighted_handle', 'D', false, true, true, 'still_present'],
+    ['total_count', null, 2, 3, 3, 'still_present'],
+  ]],
+  ['order-only edit', ['B', 'A'], ['A', 'B'], true, []],
+  ['a new change during revert', ['A', 'C'], ['A', 'B', 'E'], false, [
+    ['selected_set', 'roof', 2, 2, 3, 'changed_during_revert'],
+    ['highlighted_handle', 'B', true, false, true, 'restored'],
+    ['highlighted_handle', 'C', false, true, false, 'restored'],
+    ['highlighted_handle', 'E', false, false, true, 'changed_during_revert'],
+    ['total_count', null, 2, 2, 3, 'changed_during_revert'],
+  ]],
+])('compares three real Count exports for %s without saved jobs loaded',
+  async (_variant, editedHandles, revertedHandles, matchesOriginal, expectedChanges) => {
+    const edited = report('job-edited', 'drawing-v2')
+    const reverted = report('job-reverted', 'drawing-v1')
+    const originalFile = await downloadCountSelection(countReport(first, {
+      handles: ['A', 'B'], sets: [['roof', 2]], count: 2,
+    }))
+    const editedFile = await downloadCountSelection(countReport(edited, {
+      handles: editedHandles, sets: [['roof', editedHandles.length]], count: editedHandles.length, intake: 'f', entry: 'd',
+    }))
+    const revertedFile = await downloadCountSelection(countReport(reverted, {
+      handles: revertedHandles, sets: [['roof', revertedHandles.length]], count: revertedHandles.length,
+    }))
+
+    render(<ReportComparison jobs={[]} projectId={projectId} />)
+    fireEvent.click(screen.getByText('Export or compare Count selections'))
+    importCountSelection('First selection file', originalFile)
+    importCountSelection('Second selection file', editedFile)
+    await screen.findByRole('region', { name: 'Exported selection comparison' })
+    importCountSelection('Reverted selection file (optional)', revertedFile)
+
+    const history = await screen.findByRole('region', { name: 'Exported selection history' })
+    expect(within(history).getByText(matchesOriginal
+      ? 'Reverted selection matches the original' : 'Reverted selection differs from the original')).toBeVisible()
+    expect(within(history).getByText(edited.job_id)).toBeVisible()
+    expect(within(history).getByText('d'.repeat(64))).toBeVisible()
+    expect(within(history).queryAllByRole('row').slice(1)).toHaveLength(expectedChanges.length)
+    const result = await readJson(await downloadJson('Download selection history', 'selection-history.json'))
+    expect(result).toMatchObject({
+      schema: 'leaf.saved-selection-history.v1', source: 'unverified_files', matches_original: matchesOriginal,
+      selections: {
+        original: { job_id: first.job_id, drawing_revision: { input_version_id: 'drawing-v1' } },
+        edited: { job_id: edited.job_id, drawing_revision: { input_version_id: 'drawing-v2', intake_sha256: 'f'.repeat(64) },
+          rule: { entry_sha256: 'd'.repeat(64) } },
+        reverted: { job_id: reverted.job_id, drawing_revision: { input_version_id: 'drawing-v1' } },
+      },
+    })
+    expect(result.changes.map(({ kind, id, original, edited, reverted, outcome }) =>
+      [kind, id, original, edited, reverted, outcome])).toEqual(expectedChanges)
+  },
+)
+
+it('blocks three-file history when edited and reverted fingerprints conflict and recovers the pair when cleared', async () => {
+  const original = await downloadCountSelection(countReport(first))
+  const edited = await downloadCountSelection(countReport(second, { intake: 'f' }))
+  const reverted = await downloadCountSelection(countReport(report('job-reverted', 'drawing-v2'), { intake: 'e' }))
+  render(<ReportComparison jobs={[]} projectId={projectId} />)
+  fireEvent.click(screen.getByText('Export or compare Count selections'))
+  importCountSelection('Reverted selection file (optional)', reverted)
+  importCountSelection('First selection file', original)
+  importCountSelection('Second selection file', edited)
+  expect(await screen.findByText(/Selection history found conflicting intake fingerprints/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Download selection history' })).toBeNull()
+
+  fireEvent.change(screen.getByLabelText('Reverted selection file (optional)'), { target: { files: [] } })
+  expect(await screen.findByRole('region', { name: 'Exported selection comparison' })).toBeVisible()
 })
 
 it('exports mixed selection changes with references to both saved snapshots', async () => {
