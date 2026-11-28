@@ -1192,12 +1192,27 @@ def _entity_location(entity: Dict[str, Any]) -> Tuple[str, Optional[str]]:
 
 
 def _layout_entities(intake: Dict[str, Any]) -> Iterator[Tuple[str, Dict[str, Any]]]:
+    ownership = {}
+    records = intake.get("paper_entity_locations")
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            kind, handle, layout = (record.get(key) for key in ("kind", "handle", "layout"))
+            if (kind in _HISTORY_LAYOUT_KINDS and isinstance(handle, str) and handle
+                    and isinstance(layout, str) and layout):
+                ownership[kind, handle.casefold()] = {**record, "space": "paper"}
     for kind in _HISTORY_LAYOUT_KINDS:
         entities = intake.get(kind)
         if isinstance(entities, list):
             for entity in entities:
                 if isinstance(entity, dict):
+                    handle = entity.get("handle")
+                    if isinstance(handle, str) and (kind, handle.casefold()) in ownership:
+                        continue
                     yield kind, entity
+    for (kind, _), entity in ownership.items():
+        yield kind, entity
 
 
 def _paper_layouts(intake: Dict[str, Any]) -> List[Optional[str]]:
@@ -1225,6 +1240,11 @@ def _layout_changes(parent: Dict[str, Any], child: Dict[str, Any]) -> List[Dict[
         prior = prior_locations.get((kind, handle))
         if prior is not None and prior != (to_space, to_layout):
             from_space, from_layout = prior
+            if (from_space == to_space == "paper"
+                    and bool(parent.get("paper_entity_locations")) != bool(child.get("paper_entity_locations"))
+                    and (from_layout is None or to_layout is None)):
+                # Resolving a previously unnamed sheet does not establish a move.
+                continue
             changes.append({
                 "kind": kind, "handle": handle,
                 "from_space": from_space, "from_layout": from_layout,
@@ -1744,7 +1764,8 @@ def _receive_edited_dxf(file: UploadFile, source_digest: str):
             retryable=False, status_code=400)
     try:
         intake = dxf_intake.parse_dxf_bytes(
-            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True
+            data, source_name=file.filename or "edited.dxf", include_model_entity_counts=True,
+            include_paper_entity_locations=True,
         )
         # Intake recovers partial drawings for viewing. A save must not make
         # recovered geometry the active revision when the upload is incomplete.
