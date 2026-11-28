@@ -323,6 +323,22 @@ def run(intake, params):
         "links": links,
     }, None)
 """
+_NOTE_STYLE_REQUEST = [
+    re.compile(pattern, re.IGNORECASE) for pattern in (
+        r"\b(?:list|show|report|identify|check|flag|which)\b",
+        r"\b(?:notes?|multileaders?|text\s+leaders?)\b",
+        r"\b(?:styles?|fonts?)\b",
+        r"\b(?:missing|competing|conflicting|ambiguous|dangling|unresolved|links?|bindings?)\b",
+    )
+]
+_NOTE_STYLE_BODY = """
+def run(intake, params):
+    report = intake.get("dependency_report") or {}
+    links = report.get("note_style_links")
+    if links is None:
+        return ({"status": "unavailable", "message": "Reopen the DXF to check note styles."}, None)
+    return ({"status": "reported", "scope": "drawing_text_multileader_styles", "notes": links}, None)
+"""
 _SHEET_PLOT_SETUP_REQUEST = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -778,6 +794,11 @@ def author_tool(description: str) -> Tuple[dict, str, str]:
         verb, engine_op = "check", "check_route_crossings"
         drawing_body = authored_route_crossings.ROUTE_CROSSINGS_BODY
         summary = "checks cable routes against array and aisle boundaries"
+
+    if drawing_body is None and all(pattern.search(description) for pattern in _NOTE_STYLE_REQUEST):
+        verb, engine_op = "report", "note_styles"
+        drawing_body = _NOTE_STYLE_BODY
+        summary = "reports saved text multileader styles and their font definitions"
 
     if drawing_body is None and all(pattern.search(description) for pattern in _SHEET_PLOT_SETUP_REQUEST):
         verb, engine_op = "report", "sheet_plot_setups"

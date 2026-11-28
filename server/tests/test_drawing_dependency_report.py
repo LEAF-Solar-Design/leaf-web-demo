@@ -594,3 +594,74 @@ def test_authored_sheet_plot_setup_report_on_saved_dxf(prompt, devices, expected
 
     status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
     assert status == "ok" and payload[0]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(("case", "prompt", "expected_status", "fonts"), [
+    ("resolved", "Report text leader font bindings.", "resolved", ["notes.shx"]),
+    ("missing", "Which multileaders have a dangling style?", "missing_style", []),
+    ("ambiguous", "List which notes have a missing style and which have two competing font definitions.",
+     "ambiguous", ["notes.shx", "other.shx"]),
+    ("blank", "Check notes for missing font definitions.", "missing_font", [None]),
+])
+def test_authored_note_style_report_on_saved_dxf(case, prompt, expected_status, fonts):
+    from io import StringIO
+
+    import ezdxf
+    from ezdxf.math import Vec2
+    from ezdxf.render.mleader import ConnectionSide
+
+    from tool_loader import _run_source_in_sandbox
+    from tools_fallback import author_tool
+
+    doc = ezdxf.new("R2018")
+    style = doc.styles.new("Notes", {"font": "notes.shx"})
+    other = doc.styles.new("Other", {"font": "other.shx"})
+    layout = doc.modelspace() if case == "resolved" else doc.layouts.new("East")
+    builder = layout.add_multileader_mtext(dxfattribs={"layer": "Notes-East"})
+    builder.set_content("Service disconnect", char_height=1, style="Notes")
+    builder.add_leader_line(ConnectionSide.left, [Vec2(0, 0), Vec2(2, 0)])
+    builder.build(Vec2(10, 5))
+    note, = layout.query("MULTILEADER")
+    block = doc.blocks.new("NoteTemplate")
+    block_note = block.add_multileader_mtext()
+    block_note.set_content("Template note", char_height=1, style="Other")
+    block_note.add_leader_line(ConnectionSide.left, [Vec2(0, 0), Vec2(2, 0)])
+    block_note.build(Vec2(10, 5))
+    output = StringIO()
+    doc.write(output)
+    source = output.getvalue()
+    style_handle = style.dxf.handle
+    if case == "missing":
+        marker = f"343\n{style_handle}\n"
+        assert source.count(marker) == 1
+        style_handle = "BADF00D"
+        source = source.replace(marker, f"343\n{style_handle}\n")
+    if case == "ambiguous":
+        marker = f"  5\n{other.dxf.handle}\n"
+        assert source.count(marker) == 1
+        source = source.replace(marker, f"  5\n{style_handle}\n")
+    if case == "blank":
+        marker = "  3\nnotes.shx\n"
+        assert source.count(marker) == 1
+        source = source.replace(marker, "  3\n\n")
+    intake = parse_dxf_bytes(source.encode())
+    assert intake["dependency_report"]["external_files_opened"] is False
+
+    manifest, code, _ = author_tool(prompt)
+    assert manifest["engine_op"] == "note_styles"
+    assert manifest["capabilities"] == ["drawing.read"]
+    status, payload = _run_source_in_sandbox(code, "authored.py", intake, {})
+    assert status == "ok", payload
+    result, overlay = payload
+    assert result["scope"] == "drawing_text_multileader_styles"
+    assert overlay is None
+    row, = result["notes"]
+    assert row["note_handle"] == note.dxf.handle
+    assert row["layer"] == "Notes-East"
+    assert row["layout"] == ("Model" if case == "resolved" else "East")
+    assert row["style_handles"] == [style_handle]
+    assert row["status"] == expected_status
+    assert [candidate["font"] for candidate in row["definitions"]] == fonts
+
+    status, payload = _run_source_in_sandbox(code, "authored.py", {"dependency_report": {}}, {})
+    assert status == "ok" and payload[0]["status"] == "unavailable"

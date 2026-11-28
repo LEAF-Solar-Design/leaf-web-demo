@@ -120,9 +120,50 @@ def _resolve_shape_link(link, styles):
         return "dangling", None
     if len(matches) > 1:
         return "ambiguous", None
-    if not matches[0]:
+    match = matches[0]
+    if not match["shape_file"] or not match["font"]:
         return "invalid_style", None
-    return "resolved", matches[0]
+    return "resolved", match["font"]
+
+
+def _note_style_link(pairs, start, end, groups):
+    # The entity-level text style follows the nested MULTILEADER context.
+    after_context = False
+    content = None
+    handles = {}
+    for index in range(start, end):
+        code, value = pairs[index]
+        if (code, value) == (301, "}"):
+            after_context = True
+        elif after_context and code == 172 and content is None:
+            content = _dxf_int(value)
+        elif after_context and code == 343 and value and value != "0":
+            handles[value.upper()] = None
+    if content != 2 or not groups.get(5):
+        return None
+    layout = groups.get(410)
+    if not layout and groups.get(67, "0") == "0":
+        layout = "Model"
+    return {
+        "note_handle": groups[5],
+        "layer": groups.get(8) or "0",
+        "layout": layout,
+        "style_handles": list(handles),
+    }
+
+
+def _resolve_note_style(link, styles):
+    handles = link["style_handles"]
+    matches = [row for handle in handles for row in styles.get(handle, [])]
+    if len(handles) > 1 or len(matches) > 1:
+        status = "ambiguous"
+    elif not matches:
+        status = "missing_style"
+    elif matches[0]["shape_file"] or not matches[0]["font"]:
+        status = "missing_font"
+    else:
+        status = "resolved"
+    return {"status": status, "definitions": matches}
 
 
 def from_pairs(pairs, *, literal_text=None):
@@ -132,10 +173,12 @@ def from_pairs(pairs, *, literal_text=None):
     plot_setups = {}
     plot_resource_setups = {}
     plot_layouts = []
+    layout_names = {}
     linetype_shape_links = []
     linetype_names = set()
     line_linetypes = {}
     styles = {}
+    note_style_links = []
     material_definitions = {}
     panel_material_links = []
     # Full drawings require owning sections. Bare decoded-record fragments keep
@@ -212,7 +255,12 @@ def from_pairs(pairs, *, literal_text=None):
         elif kind == "STYLE":
             shape = bool((_dxf_int(groups.get(70, "0")) or 0) & 1)
             if handle := groups.get(5):
-                styles.setdefault(handle.upper(), []).append(groups.get(3) if shape else None)
+                handle = handle.upper()
+                styles.setdefault(handle, []).append({
+                    "style_handle": handle, "name": groups.get(2) or None,
+                    "font": groups.get(3) or None, "big_font": groups.get(4) or None,
+                    "shape_file": shape,
+                })
             for code in (3, 4):
                 name = groups.get(code, "")
                 font_kind = "shape_font" if shape or code == 4 else "font"
@@ -267,7 +315,10 @@ def from_pairs(pairs, *, literal_text=None):
                     if name:
                         plot_resource_setups.setdefault((resource_kind, name), set()).add(settings[1])
         elif kind == "LAYOUT" and section == "OBJECTS":
-            layout = subclasses.get("AcDbLayout", {}).get(1)
+            layout_fields = subclasses.get("AcDbLayout", {})
+            layout = layout_fields.get(1)
+            if layout and layout_fields.get(330):
+                layout_names[layout_fields[330].upper()] = layout
             settings = subclasses.get("AcDbPlotSettings")
             if layout and layout.casefold() != "model" and settings is not None:
                 plot_layouts.append({"layout": layout, "page_setup": settings.get(1) or None,
@@ -277,6 +328,10 @@ def from_pairs(pairs, *, literal_text=None):
         elif kind in ("ACAD_PROXY_ENTITY", "ACAD_PROXY_OBJECT", "PROXY_ENTITY", "PROXY_OBJECT"):
             add("proxy", groups.get(5) or groups.get(1) or kind, "proxy omitted")
         elif kind in inline_entities or kind == "TOLERANCE":
+            if kind == "MULTILEADER" and section in {"ENTITIES", "BLOCKS"}:
+                link = _note_style_link(pairs, i + 1, end, groups)
+                if link is not None:
+                    note_style_links.append((link, groups.get(330, "").upper(), section))
             # Font controls can span repeated DXF text chunks. Read them in
             # record order; a first-value map would lose split font names.
             # A tolerance frame stores its content in group 1 and its dimension style in group 3.
@@ -310,9 +365,15 @@ def from_pairs(pairs, *, literal_text=None):
         else:
             status = "shared" if material_usage[handle] > 1 else "resolved"
         link.update(status=status, definitions=definitions)
+    notes = []
+    for link, owner, note_section in note_style_links:
+        layout = layout_names.get(owner)
+        if layout is not None or note_section == "ENTITIES":
+            notes.append({**link, "layout": layout or link["layout"], **_resolve_note_style(link, styles)})
     report = {"schema": "leaf.drawing-dependencies.v1",
             "explicit_line_linetypes_checked": True,
             "explicit_panel_material_links": panel_material_links,
+            "note_style_links": notes,
             "scope": "local_dxf_records", "external_files_opened": False,
             "dependencies": [dependencies[key] for key in sorted(dependencies)],
             "coverage_note": "Lists dependency records preserved in the local DXF conversion; raw DWG metadata coverage requires an independent inventory."}
