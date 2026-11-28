@@ -226,13 +226,12 @@ describe("branch package proposals", () => {
     expect(() => prepareBranchPackage(bad, "pick-test", NOW)).toThrow("V7: params.properties.handle.x-leaf-pick:");
   });
 
-  it.skipIf(!COMPILE_CONFIGURED)("compiles corner-marks", async () => {
-    const proposal = fixture("good-corner-marks");
-    const good = prepareBranchPackage(proposal, "compile-test", NOW);
-    expect((await branchCompileCheck(proposal.name, good.files)).status).toBe("accept");
-  }, 60_000);
-
-  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and refuses HTML-encoded operators", async () => {
+  // One real-compiler case (allowlisted as the single skip in run-all-gates): area-marks, its HTML-entity
+  // repair, and the corner-marks pick example the author prompt teaches.
+  it.skipIf(!COMPILE_CONFIGURED)("compiles area-marks and corner-marks, and refuses HTML-encoded operators", async () => {
+    const corner = fixture("good-corner-marks");
+    const cornerPackage = prepareBranchPackage(corner, "compile-test", NOW);
+    expect((await branchCompileCheck(corner.name, cornerPackage.files)).status).toBe("accept");
     const proposal = fixture("good-area-marks");
     const good = prepareBranchPackage(proposal, "compile-test", NOW);
     expect((await branchCompileCheck(proposal.name, good.files)).status).toBe("accept");
