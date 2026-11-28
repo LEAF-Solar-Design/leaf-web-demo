@@ -172,11 +172,17 @@ const hasLine = (text, line) => new RegExp(`^${escapeRegExp(line)}\\r?$`, 'm').t
 function routeMapUnion() {
   const text = readServer('routers/drawings.py')
   const union = new Set()
-  for (const marker of ['async def import_solaredge_pdf(', 'async def solaredge_pdf_report(', 'def get_artifact(']) {
-    const start = text.indexOf(marker)
+  const mapOwners = [
+    'async def import_solaredge_pdf(',
+    'async def _solaredge_pdf_request(',
+    'def get_artifact(',
+  ]
+  for (const marker of mapOwners) {
+    const start = text.indexOf('\n' + marker)
     expect(start).toBeGreaterThanOrEqual(0)
-    const end = text.indexOf('\n@router.', start)
-    const section = text.slice(start, end === -1 ? text.length : end)
+    const body = text.slice(start + 1)
+    const end = body.slice(marker.length).search(/\n(?=@router\.|(?:async )?def )/)
+    const section = end === -1 ? body : body.slice(0, marker.length + end)
     const codes = [...section.matchAll(/"([A-Z][A-Z0-9_]{0,63})":\s*\((\d{3}),\s*ErrorCode\.[A-Z_]+,\s*(True|False)\)/g)]
       .map((match) => match[1])
     expect(codes.length).toBeGreaterThanOrEqual(5)
@@ -276,18 +282,7 @@ describe('solar import client', () => {
   })
 
   it('SI2 route codes follow the server route maps', () => {
-    const text = readServer('routers/drawings.py')
-    const union = new Set()
-    for (const marker of ['async def import_solaredge_pdf(', 'async def solaredge_pdf_report(', 'def get_artifact(']) {
-      const start = text.indexOf(marker)
-      expect(start).toBeGreaterThanOrEqual(0)
-      const end = text.indexOf('\n@router.', start)
-      const section = text.slice(start, end === -1 ? text.length : end)
-      const codes = [...section.matchAll(/"([A-Z][A-Z0-9_]{0,63})":\s*\((\d{3}),\s*ErrorCode\.[A-Z_]+,\s*(True|False)\)/g)]
-        .map((match) => match[1])
-      expect(codes.length).toBeGreaterThanOrEqual(5)
-      for (const code of codes) union.add(code)
-    }
+    const union = routeMapUnion()
     for (const code of ROUTE_CODES_TODAY) expect(union.has(code)).toBe(true)
     const routeKeys = Object.keys(SOLAREDGE_IMPORT_REASONS)
       .filter((code) => /^(IMPORT_|REPORT_|ARTIFACT_)/.test(code))
