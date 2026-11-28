@@ -275,7 +275,8 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
       {inspection.error && <p role="status">Group matches could not be verified. Try inspecting the report again.</p>}
       {inspection.rows && <>
         <p>These are report associations, not electrical design verification. Unmatched and ambiguous groups need correction before acceptance.</p>
-        <p>Choose a PDF candidate, then use Build report to review the correction. Clear choices and build again to restore automatic matching.</p>
+        {inspection.rows.some((row) => row.candidates.length > 0) &&
+          <p>Choose a PDF candidate, then use Build report to review the correction. Clear choices and build again to restore automatic matching.</p>}
         <button type="button" disabled={busy || scope.accepting || inspection.pending || Object.keys(scope.choices).length === 0}
           onClick={() => { if (current() && !scope.accepting) { scope.choices = {}; setInspection({ ...inspection }) } }}>Clear association choices</button>
         <table aria-label="SolarEdge group matches"><thead><tr>
@@ -300,7 +301,10 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
               scope.choices = choices
               setInspection({ ...inspection })
             }}><option value="">Automatic review</option>{row.candidates.map((grid) =>
-              <option key={grid} value={grid} disabled={Object.entries(scope.choices).some(([ref, chosen]) => ref !== row.ref && chosen === grid)}>Candidate grid {grid}</option>)}</select></td>
+              <option key={grid} value={grid} disabled={Object.entries(scope.choices).some(([ref, chosen]) => ref !== row.ref && chosen === grid)}>Candidate grid {grid}</option>)}</select>
+            {row.status === 'unmatched' &&
+              <p>Compare this panel group with the PDF. Correct the drawing or upload a matching PDF, then build the report again.</p>}
+          </td>
         </tr>)}</tbody></table>
       </>}
     </section>}

@@ -392,6 +392,38 @@ it('S02 review shows matched, unmatched and ambiguous groups from verified repor
   expect(save.createObjectURL).not.toHaveBeenCalled()
 })
 
+it.each([
+  ['all unmatched', [{ frame_ref: 'roof-east', pdf_grid: null, candidates: [], candidate_count: 0, status: 'unmatched' }]],
+  ['with a matched group', [{ frame_ref: 'roof-east', pdf_grid: 0, candidates: [0], candidate_count: 1 }]],
+  ['with an ambiguous group', [{ frame_ref: 'roof-east', pdf_grid: null, candidates: [0, 1], candidate_count: 2, status: 'ambiguous' }]],
+])('gives unmatched rows drawing or PDF recovery guidance %s', async (variant, otherMatches) => {
+  downloads()
+  const { props } = setup({ reportBytes: matchReport({ matches: [
+    { frame_ref: 'roof-west', pdf_grid: null, candidates: [], candidate_count: 0, status: 'unmatched' },
+    ...otherMatches,
+  ] }) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect group matches' }))
+  const table = await screen.findByRole('table', { name: 'SolarEdge group matches' })
+  const guidance = 'Compare this panel group with the PDF. Correct the drawing or upload a matching PDF, then build the report again.'
+  const unmatched = within(table).getAllByText('Unmatched').map((cell) => cell.closest('tr'))
+  expect(unmatched).toHaveLength(variant === 'all unmatched' ? 2 : 1)
+  for (const row of unmatched) {
+    expect(within(row).getByText(guidance)).toBeTruthy()
+    expect(within(row).getByRole('combobox').disabled).toBe(true)
+  }
+  const candidateGuidance = screen.queryByText(/^Choose a PDF candidate/)
+  if (variant === 'all unmatched') {
+    expect(candidateGuidance).toBeNull()
+  } else {
+    const other = within(table).getByRole('rowheader', { name: 'roof-east' }).closest('tr')
+    expect(candidateGuidance).toBeTruthy()
+    expect(within(other).queryByText(guidance)).toBeNull()
+    expect(within(other).getByRole('combobox').disabled).toBe(false)
+  }
+  expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
 it('shows saved drawing names for matched, unmatched and ambiguous roofs while submitting stable IDs', async () => {
   downloads()
   const { fetchImpl } = setup({ reportBytes: matchReport(), frames: [
