@@ -1608,6 +1608,17 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
   return body
 }
 
+// The upload name for an edited drawing version: the drawing's own stem as a .dxf, or edited.dxf when
+// the supplied name is missing or unsafe (path, control or reserved characters, Windows device names).
+// One rule for every save route, so a plan save and a plain save name the version the same way.
+export function editedUploadName(fileName) {
+  const basename = typeof fileName === 'string' ? fileName.split(/[\\/]/).pop().trim() : ''
+  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
+  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
+  return safe ? stem + '.dxf' : 'edited.dxf'
+}
+
 // Card F-3 (persistence leg): save a browser-edited DXF as a NEW VERSION of
 // the drawing. `digest` is the sha256 the CLIENT computed over the exact
 // bytes it edited — the server recomputes and refuses a mismatch, so a
@@ -1616,11 +1627,7 @@ export async function uploadDrawing(file, guestSession = null, engine = null) {
 // checkout capability travels the same header undo/redo use.
 export async function saveEditedDrawingVersion(drawingId, bytes, parentVersion, digest, capability = null, opts = {}) {
   const form = new FormData()
-  const basename = typeof opts.fileName === 'string' ? opts.fileName.split(/[\\/]/).pop().trim() : ''
-  const stem = basename.replace(/\.[^.]*$/, '').slice(0, 116).replace(/[. ]+$/, '')
-  const safe = stem && !/^[.]|[<>:"|?*\x00-\x1f\x7f]/.test(basename)
-    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), safe ? stem + '.dxf' : 'edited.dxf')
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), editedUploadName(opts.fileName))
   if (opts.origin === 'autocad') form.append('origin', 'autocad')
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
@@ -1700,7 +1707,7 @@ export async function saveDrawingVersionPlan(drawingId, bytes, parentVersion, di
     }
   }
   const form = new FormData()
-  form.append('file', new Blob([bytes], { type: 'application/dxf' }), 'edited.dxf')
+  form.append('file', new Blob([bytes], { type: 'application/dxf' }), editedUploadName(opts.fileName))
   form.append('parent_version', String(parentVersion))
   form.append('source_digest', digest)
   form.append('plan', JSON.stringify({ mutations: mutations || {} }))
