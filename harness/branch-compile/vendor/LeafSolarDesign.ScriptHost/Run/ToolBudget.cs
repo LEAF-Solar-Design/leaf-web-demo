@@ -14,6 +14,11 @@ namespace LeafSolarDesign.ScriptHost.Run
         internal ToolBudgetExceededException() : base("execution budget exceeded") { }
     }
 
+    internal sealed class ToolCancelledException : Exception
+    {
+        internal ToolCancelledException() : base("stopped with Esc") { }
+    }
+
     internal static class ToolBudget
     {
         // Contract: at most 100,000,000 instrumented steps per run, independent of
@@ -24,9 +29,9 @@ namespace LeafSolarDesign.ScriptHost.Run
         internal const long StepCeiling = 100000000;
         private static readonly AsyncLocal<Scope> current = new AsyncLocal<Scope>();
 
-        internal static Scope Begin(Stopwatch stopwatch, TimeSpan deadline)
+        internal static Scope Begin(Stopwatch stopwatch, TimeSpan deadline, Func<bool> userBreak = null)
         {
-            var scope = new Scope(current.Value, stopwatch, deadline);
+            var scope = new Scope(current.Value, stopwatch, deadline, userBreak);
             current.Value = scope;
             return scope;
         }
@@ -36,10 +41,11 @@ namespace LeafSolarDesign.ScriptHost.Run
             var scope = current.Value;
             if (scope == null) return;
             scope.ThrowIfExceeded();
-            if ((++scope.Steps & 255) == 0 &&
-                (scope.Steps >= StepCeiling || scope.Stopwatch.Elapsed >= scope.Deadline))
+            if ((++scope.Steps & 255) == 0)
             {
-                Interlocked.CompareExchange(ref scope.Failure, new ToolBudgetExceededException(), null);
+                scope.PollUserBreak();
+                if (scope.Steps >= StepCeiling || scope.Stopwatch.Elapsed >= scope.Deadline)
+                    Interlocked.CompareExchange(ref scope.Failure, new ToolBudgetExceededException(), null);
                 scope.ThrowIfExceeded();
             }
         }
@@ -62,22 +68,42 @@ namespace LeafSolarDesign.ScriptHost.Run
         {
             private readonly Scope previous;
             private readonly Timer timer;
+            private readonly int owner = Environment.CurrentManagedThreadId;
+            private Func<bool> userBreak;
+            private TimeSpan nextPoll;
             internal readonly Stopwatch Stopwatch;
             internal readonly TimeSpan Deadline;
             internal long Steps;
             internal Exception Failure;
 
-            internal Scope(Scope previous, Stopwatch stopwatch, TimeSpan deadline)
+            internal Scope(Scope previous, Stopwatch stopwatch, TimeSpan deadline, Func<bool> userBreak)
             {
                 this.previous = previous;
                 Stopwatch = stopwatch;
                 Deadline = deadline;
+                this.userBreak = userBreak;
+                nextPoll = stopwatch.Elapsed + TimeSpan.FromMilliseconds(100);
                 var remaining = deadline - stopwatch.Elapsed;
                 timer = new Timer(state =>
                 {
                     var scope = (Scope)state;
                     Interlocked.CompareExchange(ref scope.Failure, new ToolBudgetExceededException(), null);
                 }, this, remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, Timeout.InfiniteTimeSpan);
+            }
+
+            internal bool PollUserBreak()
+            {
+                if (Volatile.Read(ref Failure) is ToolCancelledException) return true;
+                if (userBreak == null || Environment.CurrentManagedThreadId != owner || Stopwatch.Elapsed < nextPoll)
+                    return false;
+                nextPoll = Stopwatch.Elapsed + TimeSpan.FromMilliseconds(100);
+                try
+                {
+                    if (!userBreak()) return false;
+                    Interlocked.CompareExchange(ref Failure, new ToolCancelledException(), null);
+                    return Volatile.Read(ref Failure) is ToolCancelledException;
+                }
+                catch { userBreak = null; return false; }
             }
 
             internal void ThrowIfExceeded()

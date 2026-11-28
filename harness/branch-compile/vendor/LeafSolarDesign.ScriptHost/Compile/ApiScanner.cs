@@ -5,12 +5,22 @@ using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Operations;
 
 namespace LeafSolarDesign.ScriptHost.Compile
 {
     /// <summary>Static capability policy plus trust, not a sandbox. Runtime mediation remains necessary.</summary>
     public static class ApiScanner
     {
+        private static readonly HashSet<string> PathSetters = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.FileName",
+            "Autodesk.AutoCAD.DatabaseServices.TextStyleTableRecord.BigFontFileName",
+            "Autodesk.AutoCAD.DatabaseServices.BlockTableRecord.PathName",
+            "Autodesk.AutoCAD.DatabaseServices.RasterImageDef.SourceFileName",
+            "Autodesk.AutoCAD.DatabaseServices.UnderlayDefinition.SourceFileName"
+        };
+
         public static IReadOnlyList<string> Scan(Compilation compilation, IReadOnlyList<string> capabilities,
             CancellationToken cancellationToken = default)
             => Scan(compilation, capabilities, ApiAllowlist.Policy, cancellationToken);
@@ -87,6 +97,12 @@ namespace LeafSolarDesign.ScriptHost.Compile
                     }
                     if (!(node is ExpressionSyntax) && !(node is AttributeSyntax)) continue;
                     var info = model.GetSymbolInfo(node, cancellationToken);
+                    if (node is ExpressionSyntax && info.Symbol is IPropertySymbol property)
+                    {
+                        var member = state.Canonical(property.OriginalDefinition);
+                        if (PathSetters.Contains(member) && IsPropertyWrite(model.GetOperation(node, cancellationToken)))
+                            Add(findings, node.GetLocation(), "path setter denied", member);
+                    }
                     if (info.Symbol == null || info.Symbol is IErrorTypeSymbol)
                     {
                         // A restricted reference set may omit a denied API's assembly. Resolve
@@ -115,6 +131,24 @@ namespace LeafSolarDesign.ScriptHost.Compile
                 }
             }
             return findings.ToArray();
+        }
+
+        private static bool IsPropertyWrite(IOperation operation)
+        {
+            if (!(operation is IPropertyReferenceOperation)) return false;
+            for (;;)
+            {
+                var parent = operation.Parent;
+                if (parent is IConversionOperation conversion && conversion.Operand == operation ||
+                    parent is IParenthesizedOperation parentheses && parentheses.Operand == operation ||
+                    parent is ITupleOperation)
+                {
+                    operation = parent;
+                    continue;
+                }
+                if (parent is IAssignmentOperation assignment) return assignment.Target == operation;
+                return parent is IIncrementOrDecrementOperation increment && increment.Target == operation;
+            }
         }
 
         private static void CheckDeconstruction(DeconstructionInfo info, Action<ISymbol> check)
@@ -164,7 +198,7 @@ namespace LeafSolarDesign.ScriptHost.Compile
             internal ScanState(Compilation compilation, IReadOnlyList<string> capabilities, ApiPolicy policy)
             { this.compilation = compilation; this.capabilities = capabilities; this.policy = policy; }
 
-            private string Canonical(ISymbol symbol)
+            internal string Canonical(ISymbol symbol)
             {
                 if (names.TryGetValue(symbol, out var name)) return name;
                 ISymbol definition = symbol is IMethodSymbol method && method.ReducedFrom != null ? method.ReducedFrom : symbol;
