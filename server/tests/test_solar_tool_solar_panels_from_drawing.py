@@ -260,7 +260,7 @@ def test_registry_refuses_source_intake_on_seed_or_non_local_tools(package, adap
     (package[1] / "solar_panels_from_drawing.json").write_text(
         json.dumps(declaration), encoding="utf-8")
     with pytest.raises(solar_tools.SolarRegistryError,
-                       match="^source_intake requires a non-seed local graph commit$"):
+                       match="^source_intake requires a non-seed local graph commit or combiner comparison read$"):
         load_package(package)
 
 
