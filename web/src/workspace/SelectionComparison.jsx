@@ -132,17 +132,26 @@ export default function SelectionComparison({ first, second }) {
   return <SelectionChanges a={a} b={b} />
 }
 
+function countInputChanges(before, after) {
+  return {
+    rule_entry_changed: before.rule.entry_sha256 !== after.rule.entry_sha256,
+    geometry_dependency_changed: before.rule.geometry_sha256 !== after.rule.geometry_sha256,
+    drawing_revision_changed: before.drawingRevision.input_version_id !== after.drawingRevision.input_version_id,
+  }
+}
+
 function SelectionChanges({ a, b, fromFiles = false }) {
   const referenceId = useId()
   if (!sameDrawing(a, b)) {
     return <p>Selection comparison requires two reports for the same drawing.</p>
   }
   if (a.jobId === b.jobId) return <p>Choose exports from two different saved selections.</p>
-  const revisionChanged = a.drawingRevision.input_version_id !== b.drawingRevision.input_version_id
   if (conflictingIntake(a, b)) {
     return <p>Selection comparison found conflicting intake fingerprints for the same drawing revision.</p>
   }
-  const ruleChanged = a.rule.entry_sha256 !== b.rule.entry_sha256 || a.rule.geometry_sha256 !== b.rule.geometry_sha256
+  const inputs = countInputChanges(a, b)
+  const ruleChanged = inputs.rule_entry_changed || inputs.geometry_dependency_changed
+  const revisionChanged = inputs.drawing_revision_changed
   const changes = selectionRows(a, b).map(({ kind, id, values: [before, after] }) => ({
     kind, id, before, after, before_selection: a.jobId, after_selection: b.jobId,
   }))
@@ -198,6 +207,19 @@ function historyOutcome(original, edited, reverted) {
   return 'changed_during_revert'
 }
 
+function CountInputStep({ label, changes }) {
+  return (
+    <div role="group" aria-label={label}>
+      <p><strong>{label}</strong></p>
+      <ul>
+        <li>Count rule: {changes.rule_entry_changed ? 'Changed' : 'Same'}</li>
+        <li>Geometry dependency: {changes.geometry_dependency_changed ? 'Changed' : 'Same'}</li>
+        <li>Drawing revision: {changes.drawing_revision_changed ? 'Changed' : 'Same'}</li>
+      </ul>
+    </div>
+  )
+}
+
 function SelectionHistory({ original, edited, reverted }) {
   const selections = [original, edited, reverted]
   if (!sameDrawing(original, edited) || !sameDrawing(original, reverted)) {
@@ -219,6 +241,10 @@ function SelectionHistory({ original, edited, reverted }) {
     selections: { original: snapshot(original), edited: snapshot(edited), reverted: snapshot(reverted) },
     matches_original: changes.every(change => change.outcome === 'restored'),
     changes,
+    provenance_changes: {
+      original_to_edited: countInputChanges(original, edited),
+      edited_to_reverted: countInputChanges(edited, reverted),
+    },
   }
   return (
     <section aria-label="Exported selection history">
@@ -247,6 +273,8 @@ function SelectionHistory({ original, edited, reverted }) {
           </table>
         </div>
       ) : <p>No saved selection changes</p>}
+      <CountInputStep label="Original to edited" changes={history.provenance_changes.original_to_edited} />
+      <CountInputStep label="Edited to reverted" changes={history.provenance_changes.edited_to_reverted} />
       <Reference selection={original} label="Original" showJob />
       <Reference selection={edited} label="Edited" showJob />
       <Reference selection={reverted} label="Reverted" showJob />
