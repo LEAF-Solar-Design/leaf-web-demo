@@ -293,6 +293,75 @@ class StrokeInk:
 
 
 @dataclass(frozen=True)
+class PlotPenBand:
+    role: str
+    rgb: tuple[float, float, float]
+    minimum_mm: float
+    maximum_mm: float
+
+
+@dataclass(frozen=True)
+class PlotPenStroke:
+    role: str
+    page: int
+    bounds: tuple[float, float, float, float]
+    width_mm: float | None
+    outcome: str
+
+
+@dataclass(frozen=True)
+class PlotPenAudit:
+    strokes: tuple[PlotPenStroke, ...]
+    missing_roles: tuple[str, ...]
+
+
+class _PlotPenCollector:
+    def __init__(self, bands):
+        self.by_rgb = {}
+        self.strokes: list[PlotPenStroke] = []
+        self.roles: set[str] = set()
+        for band in bands:
+            if (not band.role or band.role in self.roles or band.rgb in self.by_rgb
+                    or len(band.rgb) != 3 or not all(0 <= value <= 1 for value in band.rgb)
+                    or not 0 < band.minimum_mm <= band.maximum_mm < math.inf):
+                raise ValueError("Expected distinct roles and RGB colors with positive finite pen limits")
+            self.roles.add(band.role)
+            self.by_rgb[band.rgb] = band
+        if not self.by_rgb:
+            raise ValueError("At least one pen role is required")
+
+    def record(self, rgb, page, bounds, linewidth, ctm):
+        band = self.by_rgb.get(rgb)
+        if band is None:
+            return
+        a, b, c, d, _, _ = ctm
+        sx, sy = math.hypot(a, b), math.hypot(c, d)
+        width_mm = None
+        if linewidth == 0:
+            outcome = "device_hairline"
+        elif (not 0 < sx < math.inf or not 0 < sy < math.inf
+                or not math.isclose(sx, sy, rel_tol=1e-9)
+                or abs((a / sx) * (c / sy) + (b / sx) * (d / sy)) > 1e-9):
+            outcome = "nonuniform_transform"
+        else:
+            width_mm = linewidth * (25.4 / 72) * sx
+            if not math.isfinite(width_mm) or width_mm == 0:
+                raise SolarEdgePdfError("BAD_OPERAND", "plot pen width outside finite positive range")
+            # PDF producers round the point operand before storage. Allow 0.1 nm in the comparison.
+            if width_mm < band.minimum_mm - 1e-7:
+                outcome = "below_minimum"
+            elif width_mm > band.maximum_mm + 1e-7:
+                outcome = "above_maximum"
+            else:
+                outcome = "within_band"
+        self.strokes.append(PlotPenStroke(band.role, page, bounds, width_mm, outcome))
+
+    def report(self):
+        observed = {stroke.role for stroke in self.strokes}
+        return PlotPenAudit(tuple(self.strokes), tuple(sorted(self.roles - observed)))
+
+
+@dataclass(frozen=True)
 class _Separation:
     colorant: str
 
@@ -449,7 +518,7 @@ def _cid_truetype_metrics(font):
 class _PrimitiveDevice(PDFTextDevice):
     """Collects painted paths (feed B) and letters (feed C)."""
 
-    def __init__(self, rsrcmgr, out, *, page=1, stroke_inks=None):
+    def __init__(self, rsrcmgr, out, *, page=1, stroke_inks=None, plot_pens=None):
         super().__init__(rsrcmgr)
         self.out = out
         self.segments = 0
@@ -457,6 +526,8 @@ class _PrimitiveDevice(PDFTextDevice):
         self.page = page
         self.stroke_inks = stroke_inks
         self.stroke_color = None
+        self.stroke_alpha = 1.0
+        self.plot_pens = plot_pens
         self.visible = True
         self._cid_metrics = {}
         self.text_characters = 0
@@ -522,6 +593,8 @@ class _PrimitiveDevice(PDFTextDevice):
             else:
                 ink = StrokeInk(self.page, bbox, space, None, components)
             self.stroke_inks.append(ink)
+        if stroke and bbox is not None and self.plot_pens is not None and self.stroke_alpha > 0:
+            self.plot_pens.record(stroke_rgb, self.page, bbox, graphicstate.linewidth, self.ctm)
 
     def render_char(self, matrix, font, fontsize, scaling, rise, cid, ncs, graphicstate):
         letters = self.out.letters
@@ -723,6 +796,7 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         self.color = ("DeviceGray", (0.0,), "DeviceGray", (0.0,))
         self.text_alpha = (1.0, 1.0)  # fill, stroke
         self.paint_stack = []
+        self.inherited_plot_width = None
         # Feed A state: never reset by q/Q, S or BT, exactly as the converter keeps it.
         self.raw_stroke = BLACK
         self.raw_point = None
@@ -736,7 +810,16 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
         child.color = self.color
         child.text_alpha = self.text_alpha
         child.replacement_span = self.replacement_span
+        if self.device.plot_pens is not None:
+            child.inherited_plot_width = self.graphicstate.linewidth
         return child
+
+    def init_state(self, ctm):
+        super().init_state(ctm)
+        if self.device.plot_pens is not None:
+            # pdfminer's default PDFGraphicState initializes line width to zero.
+            self.graphicstate.linewidth = (1.0 if self.inherited_plot_width is None
+                                           else self.inherited_plot_width)
 
     # ---- execution with bounds and strict operands ----
     def execute(self, streams):
@@ -843,6 +926,8 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
                                     s_comp if s_space == "DeviceRGB" else None)
         if self.device.stroke_inks is not None:
             self.device.stroke_color = (s_space, s_comp)
+        if self.device.plot_pens is not None:
+            self.device.stroke_alpha = self.text_alpha[1]
 
     def do_q(self):
         super().do_q()
@@ -854,18 +939,26 @@ class _PrimitiveInterpreter(PDFPageInterpreter):
             self.color, self.text_alpha = self.paint_stack.pop()
 
     def do_gs(self, name):
-        if (self.copy_audit is None and self.schedule_audit is None) or not isinstance(name, PSLiteral):
+        if ((self.copy_audit is None and self.schedule_audit is None and self.device.plot_pens is None)
+                or not isinstance(name, PSLiteral)):
             return
         states = resolve1(self.resources.get("ExtGState"))
         state = resolve1(states.get(literal_name(name))) if isinstance(states, dict) else None
         if not isinstance(state, dict):
             return
+        if self.device.plot_pens is not None and "LW" in state:
+            self.do_w(resolve1(state["LW"]))
         fill, stroke = self.text_alpha
         fill = _num(resolve1(state.get("ca", fill)))
         stroke = _num(resolve1(state.get("CA", stroke)))
         if not (0 <= fill <= 1 and 0 <= stroke <= 1):
             raise SolarEdgePdfError("BAD_OPERAND", "text opacity outside [0, 1]")
         self.text_alpha = (fill, stroke)
+
+    def do_w(self, width):
+        if self.device.plot_pens is not None and _num(width) < 0:
+            raise SolarEdgePdfError("BAD_OPERAND", "negative plot pen width")
+        super().do_w(width)
 
     def do_RG(self, r, g, b):
         rgb = (_num(r), _num(g), _num(b))
@@ -1237,7 +1330,23 @@ def audit_stroke_inks(pdf_bytes):
     return inks
 
 
-def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None, schedule_audit=None):
+def audit_plot_pen_widths(pdf_bytes, bands):
+    """Compare plotted vector strokes with the caller's explicit DeviceRGB pen key.
+
+    Widths are in physical millimeters for PDF pages with default user units.
+    Bounds locate path centerlines in page points. The audit follows default layers
+    and excludes zero-opacity strokes. It does not resolve clipping, overpaint,
+    raster marks, or DXF handles. Hairlines and direction-dependent widths have no
+    single reported millimeter value.
+    """
+    collector = _PlotPenCollector(bands)
+    for _ in _iter_primitives(pdf_bytes, first_only=False, plot_pens=collector):
+        pass
+    return collector.report()
+
+
+def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None, schedule_audit=None,
+                     plot_pens=None):
     if not isinstance(pdf_bytes, (bytes, bytearray)):
         raise SolarEdgePdfError("NOT_BYTES")
     if len(pdf_bytes) > MAX_PDF_BYTES:
@@ -1270,7 +1379,8 @@ def _iter_primitives(pdf_bytes, *, first_only, copy_audit=None, stroke_inks=None
             if page.rotate % 360 != 0:
                 raise SolarEdgePdfError("PAGE_ROTATION_UNSUPPORTED", str(page.rotate))
             out = PagePrimitives(page_width=x1 - x0, page_height=y1 - y0)
-            device = _PrimitiveDevice(rsrcmgr, out, page=page_number, stroke_inks=stroke_inks)
+            device = _PrimitiveDevice(rsrcmgr, out, page=page_number, stroke_inks=stroke_inks,
+                                      plot_pens=plot_pens)
             if copy_audit is not None:
                 copy_audit.page = page_number
             interpreter = _PrimitiveInterpreter(rsrcmgr, device, out, counter, layers,

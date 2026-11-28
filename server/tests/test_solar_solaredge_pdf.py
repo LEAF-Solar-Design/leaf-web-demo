@@ -92,6 +92,41 @@ def _pdf(content, page_extra=b"", resources=b"", mediabox=b"0 0 200 100", indire
 HELVETICA = b"/Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
 
 
+def test_plot_pen_widths_use_physical_scale_and_restore_graphics_state():
+    data = _pdf(
+        b"1 0 0 RG 0.5 w 5 5 m 25 5 l S "
+        b"q 0 2 -2 0 100 0 cm /Heavy gs 5 10 m 25 10 l S Q "
+        b"5 15 m 25 15 l S "
+        b"q /Invisible gs 5 20 m 25 20 l S Q",
+        resources=b"/ExtGState << /Heavy << /LW 0.75 >> /Invisible << /CA 0 >> >>",
+    )
+    result = pdf.audit_plot_pen_widths(data, [
+        pdf.PlotPenBand("module", (1, 0, 0), 0.17, 0.18),
+        pdf.PlotPenBand("tag", (0, 0, 1), 0.13, 0.18),
+    ])
+    assert result.missing_roles == ("tag",)
+    assert [(s.role, s.page, s.bounds, s.outcome) for s in result.strokes] == [
+        ("module", 1, (5, 5, 25, 5), "within_band"),
+        ("module", 1, (80, 10, 80, 50), "above_maximum"),
+        ("module", 1, (5, 15, 25, 15), "within_band"),
+    ]
+    assert [s.width_mm for s in result.strokes] == pytest.approx(
+        [points * 25.4 / 72 for points in (0.5, 1.5, 0.5)]
+    )
+
+
+def test_plot_pen_widths_report_nonscalar_width_and_reject_ambiguous_roles():
+    data = _pdf(b"1 0 0 RG 0 w 5 5 m 25 5 l S 0.5 w 2 0 0 1 0 0 cm 5 10 m 25 10 l S")
+    band = pdf.PlotPenBand("module", (1, 0, 0), 0.17, 0.18)
+    report = pdf.audit_plot_pen_widths(data, [band])
+    assert [(s.width_mm, s.outcome) for s in report.strokes] == [
+        (None, "device_hairline"),
+        (None, "nonuniform_transform"),
+    ]
+    with pytest.raises(ValueError, match="distinct roles and RGB colors"):
+        pdf.audit_plot_pen_widths(data, [band, pdf.PlotPenBand("tag", band.rgb, 0.13, 0.18)])
+
+
 def test_page_schedule_uses_painted_glyph_order_and_preserves_repeats():
     data = _pdf(
         b"BT /F1 10 Tf "
